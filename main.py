@@ -150,7 +150,7 @@ class NohomoApp:
                                 ft.Column(
                                     [
                                         ft.Text("nohomo", size=14, weight=ft.FontWeight.BOLD, color=COLORS["text_primary"]),
-                                        ft.Text("API MANAGER", size=9, color=COLORS["text_secondary"], letter_spacing=1),
+                                        ft.Text("API MANAGER", size=9, color=COLORS["text_secondary"]),
                                     ],
                                     spacing=0,
                                 ),
