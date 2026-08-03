@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -41,7 +41,7 @@ interface MessageBubbleProps {
   onRegenerate?: (assistantId: string) => void;
 }
 
-export function MessageBubble({
+function MessageBubbleImpl({
   message,
   isLast,
   onRegenerate,
@@ -403,3 +403,29 @@ export function MessageBubble({
     </div>
   );
 }
+
+/**
+ * Memoised so typing in the composer doesn't re-render the whole transcript.
+ *
+ * Re-parsing markdown for every message on each keystroke cost ~240ms at 70
+ * messages, which is what made typing feel laggy in long chats. Only the
+ * fields that affect rendering are compared; the streaming message still
+ * updates because its content changes on every frame.
+ */
+export const MessageBubble = memo(MessageBubbleImpl, (prev, next) => {
+  const a = prev.message;
+  const b = next.message;
+  return (
+    a.id === b.id &&
+    a.content === b.content &&
+    a.reasoningContent === b.reasoningContent &&
+    a.isStreaming === b.isStreaming &&
+    a.isError === b.isError &&
+    a.incomplete === b.incomplete &&
+    a.tokenCount === b.tokenCount &&
+    a.thinkingEffort === b.thinkingEffort &&
+    a.searchResults === b.searchResults &&
+    prev.isLast === next.isLast &&
+    prev.onRegenerate === next.onRegenerate
+  );
+});

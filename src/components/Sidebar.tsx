@@ -55,20 +55,33 @@ export function Sidebar({
   const visible = showArchived ? archived : active;
 
   // Close any open popover on outside click or Escape.
+  //
+  // This listens for `click`, not `mousedown`. With mousedown the menu closed
+  // during the press, so the button unmounted before its click event could
+  // fire — Rename and Download appeared to do nothing but dismiss the menu.
+  // The `[data-menu-root]` guard keeps clicks inside the menu from closing it.
   useEffect(() => {
     if (!menuFor && !exportFor) return;
-    const close = () => {
+
+    const onDocClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest("[data-menu-root]")) return;
       setMenuFor(null);
       setExportFor(null);
       setConfirmDelete(null);
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") close();
+      if (e.key === "Escape") {
+        setMenuFor(null);
+        setExportFor(null);
+        setConfirmDelete(null);
+      }
     };
-    document.addEventListener("mousedown", close);
+
+    document.addEventListener("click", onDocClick);
     document.addEventListener("keydown", onKey);
     return () => {
-      document.removeEventListener("mousedown", close);
+      document.removeEventListener("click", onDocClick);
       document.removeEventListener("keydown", onKey);
     };
   }, [menuFor, exportFor]);
@@ -172,6 +185,7 @@ export function Sidebar({
                 {editingId === conv.id ? (
                   <input
                     ref={inputRef}
+                    data-menu-root
                     value={draft}
                     onChange={(e) => setDraft(e.target.value)}
                     onBlur={commitRename}
@@ -194,6 +208,7 @@ export function Sidebar({
 
                 {editingId !== conv.id && (
                   <button
+                    data-menu-root
                     onClick={(e) => {
                       e.stopPropagation();
                       setMenuFor(menuOpen ? null : conv.id);
@@ -214,7 +229,7 @@ export function Sidebar({
 
                 {menuOpen && (
                   <div
-                    onMouseDown={(e) => e.stopPropagation()}
+                    data-menu-root
                     className="absolute right-1 top-full z-30 mt-1 w-48 origin-top-right overflow-hidden rounded-xl border border-border-light bg-bg-elevated p-1 shadow-[0_18px_48px_rgba(0,0,0,0.5)] animate-fade-in"
                   >
                     <MenuItem
