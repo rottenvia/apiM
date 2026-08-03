@@ -388,6 +388,103 @@ input:focus-visible {
 }
 
 /* ---------------------------------------------------------------------------
+   Code blocks — header bar with language label + copy button.
+   The bar and the <pre> share one border/radius so they read as a single
+   surface, matching the sources/thinking panels.
+--------------------------------------------------------------------------- */
+.code-block {
+  margin: 0.75em 0;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--color-bg-secondary);
+}
+
+.code-block-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.375rem 0.375rem 0.375rem 0.875rem;
+  background: var(--color-bg-tertiary);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.code-block-lang {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  user-select: none;
+}
+
+/* The button stays mounted so layout never shifts; it just fades up on hover
+   or keyboard focus, and stays visible while showing its result. */
+.code-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  height: 1.75rem;
+  padding: 0 0.625rem;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 0.75rem;
+  font-weight: 500;
+  line-height: 1;
+  opacity: 0;
+  transition:
+    opacity 0.15s ease,
+    color 0.15s ease,
+    background-color 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.code-block:hover .code-copy-btn,
+.code-copy-btn:focus-visible,
+.code-copy-btn[data-state="copied"],
+.code-copy-btn[data-state="failed"] {
+  opacity: 1;
+}
+
+.code-copy-btn:hover {
+  background: var(--color-bg-hover);
+  border-color: var(--color-border-light);
+  color: var(--color-text-primary);
+}
+
+.code-copy-btn[data-state="copied"] {
+  color: var(--color-success);
+}
+
+.code-copy-btn[data-state="failed"] {
+  color: var(--color-danger);
+}
+
+.code-copy-btn svg {
+  width: 0.875rem;
+  height: 0.875rem;
+  flex-shrink: 0;
+}
+
+/* Touch devices have no hover, so keep the control permanently visible. */
+@media (hover: none) {
+  .code-copy-btn {
+    opacity: 1;
+  }
+}
+
+/* The wrapper now owns the frame — reset the inner <pre>. */
+.code-block pre {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+/* ---------------------------------------------------------------------------
    Animations
 --------------------------------------------------------------------------- */
 @keyframes fadeIn {
