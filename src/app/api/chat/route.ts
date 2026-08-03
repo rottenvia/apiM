@@ -3,14 +3,27 @@ import { db, isDatabaseConfigured } from "@/db";
 import { messages, conversations } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
-import {
-  smartSearch,
-  autoThinkingEffort,
-  shouldAutoSearch,
-} from "@/lib/smart-search";
+import { smartSearch, autoThinkingEffort } from "@/lib/smart-search";
+import type { SearchResultItem } from "@/lib/smart-search";
 import { AVAILABLE_PLUGINS, buildSystemPrompt } from "@/lib/plugins";
 
-export const maxDuration = 120;
+export const maxDuration = 300;
+
+/**
+ * Overridable for local testing / proxies. Defaults to DeepSeek directly.
+ */
+const DEEPSEEK_BASE_URL =
+  process.env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com";
+
+/**
+ * Ceiling on generated tokens. The model supports up to 384K; 8192 was far too
+ * low and silently truncated long answers (a full HTML game hits it mid-line).
+ * This is only a cap — it costs nothing when responses are short.
+ */
+const MAX_OUTPUT_TOKENS = 65536;
+
+/** Effort levels the API accepts once thinking is enabled. */
+const VALID_EFFORTS = new Set(["low", "high", "max"]);
 
 interface ChatMessage {
   role: "user" | "assistant" | "system";
@@ -29,253 +42,380 @@ interface ChatRequestBody {
   conversationHistory?: ChatMessage[];
 }
 
+/** One frame of our own SSE protocol (deliberately simpler than DeepSeek's). */
+type StreamEvent =
+  | { type: "status"; stage: "searching" | "thinking" | "writing" }
+  | {
+      type: "meta";
+      conversationId: string | null;
+      resolvedEffort: string;
+      thinkingEnabled: boolean;
+      webSearchUsed: boolean;
+      searchResults: { title: string; url: string; domain: string }[] | null;
+      searchQueries: string[] | null;
+      searchesPerformed: number;
+    }
+  | { type: "reasoning"; delta: string }
+  | { type: "content"; delta: string }
+  | {
+      type: "done";
+      id: string;
+      conversationId: string | null;
+      persisted: boolean;
+      usage: unknown;
+    }
+  | { type: "error"; error: string };
+
 export async function POST(req: NextRequest) {
+  // ---------------------------------------------------------------------
+  // Validation happens before the stream opens, so these can still be real
+  // HTTP error codes with JSON bodies.
+  // ---------------------------------------------------------------------
+  let body: ChatRequestBody;
   try {
-    let body: ChatRequestBody;
-    try {
-      body = (await req.json()) as ChatRequestBody;
-    } catch {
-      return NextResponse.json(
-        { error: "Invalid JSON in request body" },
-        { status: 400 }
-      );
-    }
-
-    const {
-      message,
-      conversationId,
-      deepseekApiKey,
-      tavilyApiKey,
-      model = "deepseek-v4-pro",
-      thinkingEffort = "auto",
-      webSearchEnabled = false,
-      enabledPluginIds = [] as string[],
-      conversationHistory = [] as ChatMessage[],
-    } = body;
-
-    if (!message || !deepseekApiKey) {
-      return NextResponse.json(
-        { error: "Message and DeepSeek API key are required" },
-        { status: 400 }
-      );
-    }
-
-    // Resolve thinking effort
-    const resolvedEffort =
-      thinkingEffort === "auto" ? autoThinkingEffort(message) : thinkingEffort;
-
-    // Set up plugins
-    const plugins = AVAILABLE_PLUGINS.map((p) => ({
-      ...p,
-      enabled: enabledPluginIds.includes(p.id),
-    }));
-    const systemPrompt = buildSystemPrompt(plugins);
-
-    // Determine if we should search
-    const doSearch =
-      webSearchEnabled && tavilyApiKey && (shouldAutoSearch(message) || webSearchEnabled);
-
-    let searchContext = null;
-    let searchSummary = "";
-
-    if (doSearch && tavilyApiKey) {
-      // Build conversation context for search planning
-      const recentContext = conversationHistory
-        .slice(-4)
-        .map((m: ChatMessage) => `${m.role}: ${m.content}`)
-        .join("\n");
-
-      searchContext = await smartSearch(
-        message,
-        recentContext,
-        deepseekApiKey,
-        tavilyApiKey
-      );
-
-      if (searchContext.results.length > 0) {
-        searchSummary = `\n\n<web_search_results>\nI performed ${searchContext.searchesPerformed} targeted search(es) using queries: ${searchContext.queries.map((q: string) => `"${q}"`).join(", ")}\n\nFound ${searchContext.sourcesUsed} relevant sources:\n\n${searchContext.summary}\n</web_search_results>\n\nIMPORTANT: Use the search results above to provide accurate, up-to-date information. Cite sources with their URLs. If the search results contain links to GitHub repos, documentation, or solutions, include those EXACT URLs. Never make up URLs.`;
-      }
-    }
-
-    // Build messages array
-    const apiMessages: { role: string; content: string }[] = [
-      {
-        role: "system",
-        content: systemPrompt + searchSummary,
-      },
-    ];
-
-    // Add conversation history
-    for (const msg of conversationHistory.slice(-20)) {
-      apiMessages.push({
-        role: msg.role,
-        content: msg.content,
-      });
-    }
-
-    // Add current user message
-    apiMessages.push({
-      role: "user",
-      content: message,
-    });
-
-    // Build DeepSeek request
-    const dsRequestBody: Record<string, unknown> = {
-      model,
-      messages: apiMessages,
-      stream: false,
-      max_tokens: 8192,
-    };
-
-    if (resolvedEffort !== "none") {
-      dsRequestBody.reasoning_effort = resolvedEffort;
-      dsRequestBody.extra_body = { thinking: { type: "enabled" } };
-    } else {
-      dsRequestBody.extra_body = { thinking: { type: "disabled" } };
-    }
-
-    // Call DeepSeek API. Network faults here are upstream problems, so report
-    // them as 502s with a readable reason instead of a generic 500.
-    let dsResponse: Response;
-    try {
-      dsResponse = await fetch("https://api.deepseek.com/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${deepseekApiKey}`,
-        },
-        body: JSON.stringify(dsRequestBody),
-        signal: AbortSignal.timeout(110_000),
-      });
-    } catch (networkError) {
-      console.error("DeepSeek request failed:", networkError);
-      const timedOut =
-        networkError instanceof Error && networkError.name === "TimeoutError";
-      return NextResponse.json(
-        {
-          error: timedOut
-            ? "The DeepSeek API took too long to respond. Please try again."
-            : "Couldn't reach the DeepSeek API. Check the server's network connection and try again.",
-        },
-        { status: 504 }
-      );
-    }
-
-    if (!dsResponse.ok) {
-      const errText = await dsResponse.text();
-      console.error("DeepSeek error:", dsResponse.status, errText);
-
-      // Surface DeepSeek's own message when it sends one, so users can tell an
-      // invalid key from rate limiting instead of seeing a bare status code.
-      let detail = "";
-      try {
-        const parsed = JSON.parse(errText);
-        detail = parsed?.error?.message ?? parsed?.message ?? "";
-      } catch {
-        detail = errText.slice(0, 200);
-      }
-
-      const friendly =
-        dsResponse.status === 401
-          ? "Your DeepSeek API key was rejected. Check it in Settings."
-          : dsResponse.status === 402
-            ? "Your DeepSeek account has insufficient balance."
-            : dsResponse.status === 429
-              ? "Rate limited by DeepSeek. Please wait a moment and try again."
-              : `DeepSeek API error (${dsResponse.status})${detail ? `: ${detail}` : ""}`;
-
-      return NextResponse.json({ error: friendly }, { status: 502 });
-    }
-
-    const dsData = await dsResponse.json();
-    const choice = dsData.choices?.[0];
-    const assistantContent = choice?.message?.content || "";
-    const reasoningContent = choice?.message?.reasoning_content || null;
-    const usage = dsData.usage;
-
-    // Persist to the database. History is a convenience, not a prerequisite
-    // for answering — if the DB is unreachable or unconfigured we still return
-    // the model's reply rather than turning a good answer into an error.
-    let convId: string | null = conversationId ?? null;
-    const assistantMsgId = uuidv4();
-    let persisted = false;
-
-    if (isDatabaseConfigured) {
-      try {
-        if (!convId) {
-          convId = uuidv4();
-          // Generate a title from the first message
-          const title =
-            message.length > 60 ? message.substring(0, 57) + "..." : message;
-          await db.insert(conversations).values({
-            id: convId,
-            title,
-          });
-        } else {
-          await db
-            .update(conversations)
-            .set({ updatedAt: new Date() })
-            .where(eq(conversations.id, convId));
-        }
-
-        // Save user message
-        await db.insert(messages).values({
-          id: uuidv4(),
-          conversationId: convId,
-          role: "user",
-          content: message,
-          thinkingEffort: resolvedEffort,
-          webSearchUsed: !!doSearch,
-        });
-
-        // Save assistant message
-        await db.insert(messages).values({
-          id: assistantMsgId,
-          conversationId: convId,
-          role: "assistant",
-          content: assistantContent,
-          reasoningContent,
-          thinkingEffort: resolvedEffort,
-          webSearchUsed: !!doSearch,
-          searchResults: searchContext
-            ? JSON.stringify(searchContext.results.map((r) => ({ title: r.title, url: r.url, domain: r.domain })))
-            : null,
-          pluginsUsed: enabledPluginIds.length > 0 ? JSON.stringify(enabledPluginIds) : null,
-          tokenCount: usage?.total_tokens || null,
-        });
-
-        persisted = true;
-      } catch (dbError) {
-        console.error("Failed to persist chat message:", dbError);
-      }
-    }
-
-    return NextResponse.json({
-      id: assistantMsgId,
-      conversationId: convId,
-      persisted,
-      content: assistantContent,
-      reasoningContent,
-      resolvedEffort,
-      webSearchUsed: !!doSearch,
-      searchResults: searchContext?.results || null,
-      searchQueries: searchContext?.queries || null,
-      searchesPerformed: searchContext?.searchesPerformed || 0,
-      usage,
-      pluginsUsed: enabledPluginIds,
-    });
-  } catch (error) {
-    // Last-resort guard: always emit JSON so the client never has to parse an
-    // HTML error page.
-    console.error("Chat API error:", error);
+    body = (await req.json()) as ChatRequestBody;
+  } catch {
     return NextResponse.json(
-      {
-        error:
-          error instanceof Error
-            ? `Internal server error: ${error.message}`
-            : "Internal server error",
-      },
-      { status: 500 }
+      { error: "Invalid JSON in request body" },
+      { status: 400 }
     );
   }
+
+  const {
+    message,
+    conversationId,
+    deepseekApiKey,
+    tavilyApiKey,
+    model = "deepseek-v4-pro",
+    thinkingEffort = "auto",
+    webSearchEnabled = false,
+    enabledPluginIds = [],
+    conversationHistory = [],
+  } = body;
+
+  if (!message || !deepseekApiKey) {
+    return NextResponse.json(
+      { error: "Message and DeepSeek API key are required" },
+      { status: 400 }
+    );
+  }
+
+  // Resolve "auto" to a concrete level based on the message.
+  const resolvedEffort =
+    thinkingEffort === "auto" ? autoThinkingEffort(message) : thinkingEffort;
+
+  // "none" is our UI concept for "don't reason at all".
+  const thinkingEnabled = resolvedEffort !== "none";
+
+  // Search runs only when the user explicitly enabled it AND a Tavily key
+  // exists. No heuristic override — the toggle means exactly what it says.
+  const doSearch = Boolean(webSearchEnabled && tavilyApiKey);
+
+  const plugins = AVAILABLE_PLUGINS.map((p) => ({
+    ...p,
+    enabled: enabledPluginIds.includes(p.id),
+  }));
+  const systemPrompt = buildSystemPrompt(plugins);
+
+  const encoder = new TextEncoder();
+
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      let closed = false;
+      const send = (event: StreamEvent) => {
+        if (closed) return;
+        controller.enqueue(
+          encoder.encode(`data: ${JSON.stringify(event)}\n\n`)
+        );
+      };
+      const close = () => {
+        if (closed) return;
+        closed = true;
+        controller.close();
+      };
+
+      try {
+        // ---------------- Web search ----------------
+        let searchContext: {
+          results: SearchResultItem[];
+          queries: string[];
+          summary: string;
+          searchesPerformed: number;
+          sourcesUsed: number;
+        } | null = null;
+        let searchSummary = "";
+
+        if (doSearch) {
+          send({ type: "status", stage: "searching" });
+
+          const recentContext = conversationHistory
+            .slice(-4)
+            .map((m) => `${m.role}: ${m.content}`)
+            .join("\n");
+
+          try {
+            searchContext = await smartSearch(
+              message,
+              recentContext,
+              deepseekApiKey,
+              tavilyApiKey as string
+            );
+          } catch (searchError) {
+            // A failed search shouldn't kill the answer — carry on without it.
+            console.error("Search failed:", searchError);
+          }
+
+          if (searchContext && searchContext.results.length > 0) {
+            searchSummary = `\n\n<web_search_results>\nI performed ${searchContext.searchesPerformed} targeted search(es) using queries: ${searchContext.queries
+              .map((q) => `"${q}"`)
+              .join(", ")}\n\nFound ${searchContext.sourcesUsed} relevant sources:\n\n${searchContext.summary}\n</web_search_results>\n\nIMPORTANT: Use the search results above to provide accurate, up-to-date information. Cite sources with their URLs. If the search results contain links to GitHub repos, documentation, or solutions, include those EXACT URLs. Never make up URLs.`;
+          }
+        }
+
+        send({
+          type: "meta",
+          conversationId: conversationId ?? null,
+          resolvedEffort,
+          thinkingEnabled,
+          webSearchUsed: doSearch,
+          searchResults:
+            searchContext?.results.map((r) => ({
+              title: r.title,
+              url: r.url,
+              domain: r.domain,
+            })) ?? null,
+          searchQueries: searchContext?.queries ?? null,
+          searchesPerformed: searchContext?.searchesPerformed ?? 0,
+        });
+
+        // ---------------- Build the request ----------------
+        const apiMessages: { role: string; content: string }[] = [
+          { role: "system", content: systemPrompt + searchSummary },
+        ];
+        for (const msg of conversationHistory.slice(-20)) {
+          apiMessages.push({ role: msg.role, content: msg.content });
+        }
+        apiMessages.push({ role: "user", content: message });
+
+        const dsRequestBody: Record<string, unknown> = {
+          model,
+          messages: apiMessages,
+          stream: true,
+          stream_options: { include_usage: true },
+          max_tokens: MAX_OUTPUT_TOKENS,
+          // NOTE: `thinking` is a REAL top-level parameter of DeepSeek's REST
+          // API. It previously sat inside `extra_body`, which only exists as a
+          // passthrough convention in the *Python OpenAI SDK*. Sending it over
+          // plain fetch meant DeepSeek never saw it, silently defaulted to
+          // thinking-enabled/high, and the "None" option did nothing.
+          thinking: { type: thinkingEnabled ? "enabled" : "disabled" },
+        };
+
+        if (thinkingEnabled) {
+          dsRequestBody.reasoning_effort = VALID_EFFORTS.has(resolvedEffort)
+            ? resolvedEffort
+            : "high";
+        }
+
+        send({ type: "status", stage: thinkingEnabled ? "thinking" : "writing" });
+
+        // ---------------- Call DeepSeek ----------------
+        let dsResponse: Response;
+        try {
+          dsResponse = await fetch(`${DEEPSEEK_BASE_URL}/chat/completions`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${deepseekApiKey}`,
+            },
+            body: JSON.stringify(dsRequestBody),
+            signal: AbortSignal.timeout(280_000),
+          });
+        } catch (networkError) {
+          const timedOut =
+            networkError instanceof Error &&
+            networkError.name === "TimeoutError";
+          send({
+            type: "error",
+            error: timedOut
+              ? "The DeepSeek API took too long to respond. Please try again."
+              : "Couldn't reach the DeepSeek API. Check the network connection and try again.",
+          });
+          close();
+          return;
+        }
+
+        if (!dsResponse.ok || !dsResponse.body) {
+          const errText = await dsResponse.text().catch(() => "");
+          console.error("DeepSeek error:", dsResponse.status, errText);
+
+          let detail = "";
+          try {
+            const parsed = JSON.parse(errText);
+            detail = parsed?.error?.message ?? parsed?.message ?? "";
+          } catch {
+            detail = errText.slice(0, 200);
+          }
+
+          send({
+            type: "error",
+            error:
+              dsResponse.status === 401
+                ? "Your DeepSeek API key was rejected. Check it in Settings."
+                : dsResponse.status === 402
+                  ? "Your DeepSeek account has insufficient balance."
+                  : dsResponse.status === 429
+                    ? "Rate limited by DeepSeek. Please wait a moment and try again."
+                    : `DeepSeek API error (${dsResponse.status})${detail ? `: ${detail}` : ""}`,
+          });
+          close();
+          return;
+        }
+
+        // ---------------- Consume DeepSeek's SSE ----------------
+        const reader = dsResponse.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let assistantContent = "";
+        let reasoningContent = "";
+        let usage: unknown = null;
+        let announcedWriting = false;
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+
+          // SSE frames are newline-delimited; keep the trailing partial line.
+          const lines = buffer.split("\n");
+          buffer = lines.pop() ?? "";
+
+          for (const rawLine of lines) {
+            const line = rawLine.trim();
+            if (!line.startsWith("data:")) continue;
+
+            const payload = line.slice(5).trim();
+            if (!payload || payload === "[DONE]") continue;
+
+            let chunk: {
+              choices?: {
+                delta?: { content?: string; reasoning_content?: string };
+              }[];
+              usage?: unknown;
+            };
+            try {
+              chunk = JSON.parse(payload);
+            } catch {
+              continue; // ignore malformed frames rather than aborting
+            }
+
+            if (chunk.usage) usage = chunk.usage;
+
+            const delta = chunk.choices?.[0]?.delta;
+            if (!delta) continue;
+
+            if (delta.reasoning_content) {
+              reasoningContent += delta.reasoning_content;
+              send({ type: "reasoning", delta: delta.reasoning_content });
+            }
+            if (delta.content) {
+              if (!announcedWriting) {
+                announcedWriting = true;
+                send({ type: "status", stage: "writing" });
+              }
+              assistantContent += delta.content;
+              send({ type: "content", delta: delta.content });
+            }
+          }
+        }
+
+        // ---------------- Persist ----------------
+        let convId: string | null = conversationId ?? null;
+        const assistantMsgId = uuidv4();
+        let persisted = false;
+
+        if (isDatabaseConfigured) {
+          try {
+            if (!convId) {
+              convId = uuidv4();
+              const title =
+                message.length > 60 ? message.substring(0, 57) + "..." : message;
+              await db.insert(conversations).values({ id: convId, title });
+            } else {
+              await db
+                .update(conversations)
+                .set({ updatedAt: new Date() })
+                .where(eq(conversations.id, convId));
+            }
+
+            await db.insert(messages).values({
+              id: uuidv4(),
+              conversationId: convId,
+              role: "user",
+              content: message,
+              thinkingEffort: resolvedEffort,
+              webSearchUsed: doSearch,
+            });
+
+            await db.insert(messages).values({
+              id: assistantMsgId,
+              conversationId: convId,
+              role: "assistant",
+              content: assistantContent,
+              reasoningContent: reasoningContent || null,
+              thinkingEffort: resolvedEffort,
+              webSearchUsed: doSearch,
+              // jsonb columns take real objects — stringifying stored a quoted
+              // JSON string instead, which had to be double-parsed on read.
+              searchResults: searchContext
+                ? searchContext.results.map((r) => ({
+                    title: r.title,
+                    url: r.url,
+                    domain: r.domain,
+                  }))
+                : null,
+              pluginsUsed: enabledPluginIds.length > 0 ? enabledPluginIds : null,
+              tokenCount:
+                (usage as { total_tokens?: number } | null)?.total_tokens ??
+                null,
+            });
+
+            persisted = true;
+          } catch (dbError) {
+            console.error("Failed to persist chat message:", dbError);
+          }
+        }
+
+        send({
+          type: "done",
+          id: assistantMsgId,
+          conversationId: convId,
+          persisted,
+          usage,
+        });
+        close();
+      } catch (error) {
+        console.error("Chat API error:", error);
+        send({
+          type: "error",
+          error:
+            error instanceof Error
+              ? `Internal server error: ${error.message}`
+              : "Internal server error",
+        });
+        close();
+      }
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      // Stops nginx/proxies from buffering the stream into one lump.
+      "X-Accel-Buffering": "no",
+    },
+  });
 }

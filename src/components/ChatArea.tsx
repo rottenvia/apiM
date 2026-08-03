@@ -4,11 +4,13 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { MessageBubble } from "@/components/MessageBubble";
 import { ThinkingEffortSelector } from "@/components/ThinkingEffortSelector";
 import { ModelSelector } from "@/components/ModelSelector";
-import type { Message } from "@/app/page";
+import type { Message, StatusStage } from "@/app/page";
 
 interface ChatAreaProps {
   messages: Message[];
   isLoading: boolean;
+  statusStage: StatusStage | null;
+  onStop: () => void;
   hasKeys: boolean;
   model: string;
   thinkingEffort: string;
@@ -28,6 +30,8 @@ interface ChatAreaProps {
 export function ChatArea({
   messages,
   isLoading,
+  statusStage,
+  onStop,
   hasKeys,
   model,
   thinkingEffort,
@@ -65,9 +69,34 @@ export function ChatArea({
     }
   }, []);
 
+  // Auto-scroll, but only while the user is already near the bottom. During a
+  // long stream this lets them scroll up to read earlier output without the
+  // view yanking back down on every token.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [pinnedToBottom, setPinnedToBottom] = useState(true);
+
+  const handleScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const distanceFromBottom =
+      el.scrollHeight - el.scrollTop - el.clientHeight;
+    setPinnedToBottom(distanceFromBottom < 120);
+  }, []);
+
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+    if (!pinnedToBottom) return;
+    messagesEndRef.current?.scrollIntoView({
+      // Smooth scrolling can't keep up with a fast token stream, so only the
+      // final settle is animated.
+      behavior: isLoading ? "auto" : "smooth",
+      block: "end",
+    });
+  }, [messages, pinnedToBottom, isLoading]);
+
+  const scrollToBottom = useCallback(() => {
+    setPinnedToBottom(true);
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, []);
 
   useEffect(() => {
     if (textareaRef.current) {
@@ -91,6 +120,7 @@ export function ChatArea({
   };
 
   const canSend = Boolean(input.trim()) && !isLoading && hasKeys;
+  const hasStreamingMessage = messages.some((m) => m.isStreaming);
 
   // One shared column width for the messages and the composer, and it widens
   // in fullscreen so controls are placed optimally for the user's resolution.
@@ -192,7 +222,11 @@ export function ChatArea({
       </header>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto">
+      <div
+        ref={scrollRef}
+        onScroll={handleScroll}
+        className="relative flex-1 overflow-y-auto"
+      >
         {messages.length === 0 ? (
           <EmptyState hasKeys={hasKeys} onOpenSettings={onOpenSettings} />
         ) : (
@@ -204,13 +238,41 @@ export function ChatArea({
                 <MessageBubble key={msg.id} message={msg} />
               ))}
 
-              {isLoading && <LoadingIndicator />}
+              {/* Only shown before the first token lands; afterwards the
+                  streaming bubble itself is the feedback. */}
+              {isLoading && !hasStreamingMessage && (
+                <LoadingIndicator stage={statusStage} />
+              )}
 
               <div ref={messagesEndRef} />
             </div>
           </div>
         )}
       </div>
+
+      {/* Jump-to-latest — appears only when scrolled away during a stream */}
+      {!pinnedToBottom && messages.length > 0 && (
+        <div className="pointer-events-none relative z-10">
+          <button
+            onClick={scrollToBottom}
+            className="scroll-bottom-btn"
+            aria-label="Scroll to latest"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={2}
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M12 5v14M5 12l7 7 7-7"
+              />
+            </svg>
+          </button>
+        </div>
+      )}
 
       {/* Composer — the relative wrapper anchors the selector popovers so they
           open centered above the chat bar, never covering it */}
@@ -292,31 +354,28 @@ export function ChatArea({
                 </button>
               </div>
 
-              <button
-                onClick={handleSubmit}
-                disabled={!canSend}
-                data-enabled={canSend}
-                className="send-btn"
-                title="Send message"
-                aria-label="Send message"
-              >
-                {isLoading ? (
-                  <svg className="animate-spin" viewBox="0 0 24 24" fill="none">
-                    <circle
-                      className="opacity-25"
-                      cx="12"
-                      cy="12"
-                      r="10"
-                      stroke="currentColor"
-                      strokeWidth="3"
-                    />
-                    <path
-                      className="opacity-75"
-                      fill="currentColor"
-                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                    />
+              {/* While generating, this becomes a Stop control — you can
+                  interrupt a long answer and keep whatever arrived. */}
+              {isLoading ? (
+                <button
+                  onClick={onStop}
+                  className="send-btn stop-btn"
+                  title="Stop generating"
+                  aria-label="Stop generating"
+                >
+                  <svg viewBox="0 0 24 24" fill="currentColor">
+                    <rect x="7" y="7" width="10" height="10" rx="2" />
                   </svg>
-                ) : (
+                </button>
+              ) : (
+                <button
+                  onClick={handleSubmit}
+                  disabled={!canSend}
+                  data-enabled={canSend}
+                  className="send-btn"
+                  title="Send message"
+                  aria-label="Send message"
+                >
                   <svg
                     viewBox="0 0 24 24"
                     fill="none"
@@ -329,8 +388,8 @@ export function ChatArea({
                       d="M12 19V5M5 12l7-7 7 7"
                     />
                   </svg>
-                )}
-              </button>
+                </button>
+              )}
             </div>
           </div>
 
@@ -391,7 +450,13 @@ function EmptyState({
   );
 }
 
-function LoadingIndicator() {
+const STAGE_LABELS: Record<StatusStage, string> = {
+  searching: "Searching the web…",
+  thinking: "Thinking…",
+  writing: "Writing…",
+};
+
+function LoadingIndicator({ stage }: { stage: StatusStage | null }) {
   return (
     <div className="flex justify-start animate-fade-in">
       <div className="flex items-center gap-3 px-1 py-2">
@@ -410,7 +475,7 @@ function LoadingIndicator() {
           />
         </div>
         <span className="text-xs text-text-secondary animate-thinking">
-          Thinking…
+          {STAGE_LABELS[stage ?? "thinking"]}
         </span>
       </div>
     </div>

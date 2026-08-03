@@ -59,7 +59,11 @@ export function autoThinkingEffort(message: string): string {
 }
 
 /**
- * Determine if web search should be triggered by the message's content.
+ * Heuristic guess at whether a message would benefit from web search.
+ *
+ * NOT used by the chat route: the Search toggle is authoritative there, so
+ * turning search off never searches and turning it on always does. Kept for
+ * a possible future "auto search" mode.
  */
 export function shouldAutoSearch(message: string): boolean {
   const lower = message.toLowerCase();
@@ -128,6 +132,11 @@ Respond in JSON ONLY:
           response_format: { type: "json_object" },
           temperature: 0.3,
           max_tokens: 500,
+          // Query planning is a mechanical extraction task — reasoning adds
+          // seconds of latency before the real answer even starts. This is a
+          // top-level API parameter (not `extra_body`, which only the Python
+          // SDK understands and the REST API silently ignores).
+          thinking: { type: "disabled" },
         }),
         signal: AbortSignal.timeout(30_000),
       }
@@ -220,8 +229,12 @@ export async function smartSearch(
   const allResults: Omit<SearchResultItem, "domain">[] = [];
   let searchesPerformed = 0;
 
-  for (const query of queries) {
-    const results = await tavilySearch(query, tavilyKey);
+  // Run every query concurrently. Sequentially this cost one full round trip
+  // per query (up to 4) before the model could even start answering.
+  const settled = await Promise.all(
+    queries.map((query) => tavilySearch(query, tavilyKey))
+  );
+  for (const results of settled) {
     searchesPerformed += 1;
     allResults.push(...results);
   }
