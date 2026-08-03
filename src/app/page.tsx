@@ -131,6 +131,11 @@ export default function Home() {
   const initialLoadDone = useRef(false);
   /** Lets the Stop button cancel an in-flight stream. */
   const abortRef = useRef<AbortController | null>(null);
+  /** Latest messages + sender, so stable callbacks can read them. */
+  const messagesRef = useRef<Message[]>([]);
+  const sendMessageRef = useRef<
+    ((content: string, options?: { regenerateFromId?: string }) => void) | null
+  >(null);
 
   // Load settings from localStorage after mount (deferred to a microtask so
   // state updates don't cascade synchronously through the first commit)
@@ -574,21 +579,34 @@ export default function Home() {
     ]
   );
 
+  // Mirror the latest values into refs after each commit so the stable
+  // callbacks below can read them without taking them as dependencies.
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  useEffect(() => {
+    sendMessageRef.current = sendMessage;
+  }, [sendMessage]);
+
   const stopGeneration = useCallback(() => {
     abortRef.current?.abort();
   }, []);
 
   /** Re-run the user turn that produced `assistantId`. */
-  const regenerate = useCallback(
-    (assistantId: string) => {
-      const index = messages.findIndex((m) => m.id === assistantId);
-      if (index < 1) return;
-      const prompt = messages[index - 1];
-      if (prompt.role !== "user") return;
-      void sendMessage(prompt.content, { regenerateFromId: assistantId });
-    },
-    [messages, sendMessage]
-  );
+  // Read through refs so this callback keeps a stable identity. Depending on
+  // `messages` would give MessageBubble a new prop on every message and defeat
+  // its memoisation, which is what made typing slow in long conversations.
+  const regenerate = useCallback((assistantId: string) => {
+    const list = messagesRef.current;
+    const index = list.findIndex((m) => m.id === assistantId);
+    if (index < 1) return;
+    const prompt = list[index - 1];
+    if (prompt.role !== "user") return;
+    void sendMessageRef.current?.(prompt.content, {
+      regenerateFromId: assistantId,
+    });
+  }, []);
 
   return (
     <ArtifactProvider>
