@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { v4 as uuidv4 } from "uuid";
-import { appendMessages } from "@/lib/store";
+import { appendMessages, truncateFrom, upsertMessage } from "@/lib/store";
 import type { StoredMessage } from "@/lib/store";
 import { smartSearch, autoThinkingEffort } from "@/lib/smart-search";
 import type { SearchResultItem } from "@/lib/smart-search";
@@ -62,6 +62,8 @@ interface ChatRequestBody {
   webSearchEnabled?: boolean;
   enabledPluginIds?: string[];
   conversationHistory?: ChatMessage[];
+  /** When set, this message and everything after it is dropped first. */
+  regenerateFromId?: string;
 }
 
 /** One frame of our own SSE protocol (deliberately simpler than DeepSeek's). */
@@ -114,6 +116,7 @@ export async function POST(req: NextRequest) {
     webSearchEnabled = false,
     enabledPluginIds = [],
     conversationHistory = [],
+    regenerateFromId,
   } = body;
 
   if (!message || !deepseekApiKey) {
@@ -149,17 +152,66 @@ export async function POST(req: NextRequest) {
       let closed = false;
       const send = (event: StreamEvent) => {
         if (closed) return;
-        controller.enqueue(
-          encoder.encode(`data: ${JSON.stringify(event)}\n\n`)
-        );
+        try {
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify(event)}\n\n`)
+          );
+        } catch {
+          // The consumer went away between our check and this enqueue, so the
+          // controller is already closed. Mark it so later frames are dropped
+          // quietly instead of throwing into the catch-all as a fake error.
+          closed = true;
+        }
       };
       const close = () => {
         if (closed) return;
         closed = true;
-        controller.close();
+        try {
+          controller.close();
+        } catch {
+          // Already closed by an aborted client — nothing to do.
+        }
       };
 
+      // Ids are allocated up front so the same assistant message can be
+      // rewritten in place as it streams.
+      const convId: string = conversationId ?? uuidv4();
+      const assistantMsgId = uuidv4();
+      let persisted = false;
+
       try {
+        // Regenerate: drop the previous reply (and anything after it) so the
+        // new one replaces it rather than appending a duplicate.
+        if (regenerateFromId) {
+          try {
+            await truncateFrom(convId, regenerateFromId);
+          } catch (e) {
+            console.error("Failed to truncate for regenerate:", e);
+          }
+        }
+
+        // Save the user's message immediately. Previously nothing hit disk
+        // until the whole reply finished, so closing the tab mid-answer lost
+        // both the question and the partial answer.
+        //
+        // Skipped when regenerating: the question is already stored and
+        // truncateFrom only removed the reply, so re-appending would duplicate
+        // it.
+        if (!regenerateFromId) try {
+          await appendMessages(convId, title, [
+            {
+              id: uuidv4(),
+              role: "user",
+              content: message,
+              thinkingEffort: resolvedEffort,
+              webSearchUsed: doSearch,
+              createdAt: new Date().toISOString(),
+            },
+          ]);
+        } catch (e) {
+          console.error("Failed to persist user message:", e);
+        }
+
         // ---------------- Web search ----------------
         let searchContext: {
           results: SearchResultItem[];
@@ -199,7 +251,7 @@ export async function POST(req: NextRequest) {
 
         send({
           type: "meta",
-          conversationId: conversationId ?? null,
+          conversationId: convId,
           title,
           resolvedEffort,
           thinkingEnabled,
@@ -307,7 +359,57 @@ export async function POST(req: NextRequest) {
         let usage: unknown = null;
         let announcedWriting = false;
 
+        // Checkpoint the partial reply to disk at most once every few seconds.
+        // Without this, closing the tab mid-answer lost everything generated
+        // so far; with it, the text is recoverable and flagged `incomplete`.
+        let lastCheckpoint = 0;
+        let checkpointing = false;
+        const CHECKPOINT_MS = 2500;
+
+        const checkpoint = async (force = false) => {
+          const nowMs = Date.now();
+          if (!force && nowMs - lastCheckpoint < CHECKPOINT_MS) return;
+          if (checkpointing) return;
+          checkpointing = true;
+          lastCheckpoint = nowMs;
+          try {
+            await upsertMessage(convId, title, {
+              id: assistantMsgId,
+              role: "assistant",
+              content: assistantContent,
+              reasoningContent: reasoningContent || null,
+              thinkingEffort: resolvedEffort,
+              webSearchUsed: doSearch,
+              searchResults:
+                searchContext?.results.map((r) => ({
+                  title: r.title,
+                  url: r.url,
+                  domain: r.domain,
+                })) ?? null,
+              searchQueries: searchContext?.queries ?? null,
+              pluginsUsed: enabledPluginIds.length ? enabledPluginIds : null,
+              tokenCount: null,
+              createdAt: new Date().toISOString(),
+              incomplete: true,
+            });
+          } catch (e) {
+            console.error("Checkpoint failed:", e);
+          } finally {
+            checkpointing = false;
+          }
+        };
+
         while (true) {
+          // The client vanished (tab closed, navigation, network drop). Stop
+          // pulling tokens and keep the last checkpoint, which stays flagged
+          // incomplete so the UI can offer to continue.
+          if (req.signal.aborted) {
+            await checkpoint(true);
+            await reader.cancel().catch(() => {});
+            close();
+            return;
+          }
+
           const { done, value } = await reader.read();
           if (done) break;
 
@@ -352,54 +454,35 @@ export async function POST(req: NextRequest) {
               }
               assistantContent += delta.content;
               send({ type: "content", delta: delta.content });
+              void checkpoint();
             }
           }
         }
 
-        // ---------------- Persist ----------------
-        // Chats are stored as JSON under ./data/chats so they survive
-        // restarts without needing a database. Failure here must not discard
-        // a reply the user already watched arrive.
-        let convId: string | null = conversationId ?? null;
-        const assistantMsgId = uuidv4();
-        let persisted = false;
-        const now = new Date().toISOString();
-
+        // ---------------- Final save ----------------
+        // The assistant message has been checkpointed throughout the stream;
+        // this last write clears the `incomplete` flag and records usage.
         try {
-          if (!convId) convId = uuidv4();
-
-          const toStore: StoredMessage[] = [
-            {
-              id: uuidv4(),
-              role: "user",
-              content: message,
-              thinkingEffort: resolvedEffort,
-              webSearchUsed: doSearch,
-              createdAt: now,
-            },
-            {
-              id: assistantMsgId,
-              role: "assistant",
-              content: assistantContent,
-              reasoningContent: reasoningContent || null,
-              thinkingEffort: resolvedEffort,
-              webSearchUsed: doSearch,
-              searchResults:
-                searchContext?.results.map((r) => ({
-                  title: r.title,
-                  url: r.url,
-                  domain: r.domain,
-                })) ?? null,
-              searchQueries: searchContext?.queries ?? null,
-              pluginsUsed: enabledPluginIds.length ? enabledPluginIds : null,
-              tokenCount:
-                (usage as { total_tokens?: number } | null)?.total_tokens ??
-                null,
-              createdAt: new Date().toISOString(),
-            },
-          ];
-
-          await appendMessages(convId, title, toStore);
+          await upsertMessage(convId, title, {
+            id: assistantMsgId,
+            role: "assistant",
+            content: assistantContent,
+            reasoningContent: reasoningContent || null,
+            thinkingEffort: resolvedEffort,
+            webSearchUsed: doSearch,
+            searchResults:
+              searchContext?.results.map((r) => ({
+                title: r.title,
+                url: r.url,
+                domain: r.domain,
+              })) ?? null,
+            searchQueries: searchContext?.queries ?? null,
+            pluginsUsed: enabledPluginIds.length ? enabledPluginIds : null,
+            tokenCount:
+              (usage as { total_tokens?: number } | null)?.total_tokens ?? null,
+            createdAt: new Date().toISOString(),
+            incomplete: false,
+          });
           persisted = true;
         } catch (storeError) {
           console.error("Failed to persist conversation:", storeError);

@@ -18,6 +18,8 @@ interface ChatAreaProps {
   enabledPlugins: string[];
   sidebarOpen: boolean;
   onSend: (message: string) => void;
+  onRegenerate: (assistantId: string) => void;
+  onOpenSearch: () => void;
   onToggleSidebar: () => void;
   onNewChat: () => void;
   onToggleSearch: () => void;
@@ -39,6 +41,8 @@ export function ChatArea({
   enabledPlugins,
   sidebarOpen,
   onSend,
+  onRegenerate,
+  onOpenSearch,
   onToggleSidebar,
   onNewChat,
   onToggleSearch,
@@ -179,6 +183,17 @@ export function ChatArea({
         </div>
 
         <div className="flex items-center gap-1">
+          <button
+            onClick={onOpenSearch}
+            className="icon-btn"
+            title="Search chats (Ctrl+K)"
+            aria-label="Search chats"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
+              <circle cx="11" cy="11" r="8" />
+              <path strokeLinecap="round" d="M21 21l-4.35-4.35" />
+            </svg>
+          </button>
           {enabledPlugins.length > 0 && (
             <button
               onClick={onOpenPlugins}
@@ -241,7 +256,12 @@ export function ChatArea({
           >
             <div className="space-y-6">
               {messages.map((msg) => (
-                <MessageBubble key={msg.id} message={msg} />
+                <MessageBubble
+                  key={msg.id}
+                  message={msg}
+                  isLast={msg.id === messages[messages.length - 1]?.id}
+                  onRegenerate={onRegenerate}
+                />
               ))}
 
               {/* Only shown before the first token lands; afterwards the

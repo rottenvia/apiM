@@ -6,6 +6,7 @@ import { ChatArea } from "@/components/ChatArea";
 import { SettingsModal } from "@/components/SettingsModal";
 import { PluginsModal } from "@/components/PluginsModal";
 import { ArtifactProvider } from "@/components/ArtifactContext";
+import { SearchModal } from "@/components/SearchModal";
 
 export interface Message {
   id: string;
@@ -24,6 +25,8 @@ export interface Message {
   isStreaming?: boolean;
   /** Renders the bubble in the error style instead of as a normal reply. */
   isError?: boolean;
+  /** Reply was cut short (tab closed / connection dropped) and can be retried. */
+  incomplete?: boolean;
 }
 
 /** What the assistant is currently doing, for the live status indicator. */
@@ -110,6 +113,7 @@ export default function Home() {
   const [statusStage, setStatusStage] = useState<StatusStage | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [showPlugins, setShowPlugins] = useState(false);
+  const [showSearch, setShowSearch] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
   // Settings
@@ -185,6 +189,18 @@ export default function Home() {
     });
   }, [refreshConversations]);
 
+  // Ctrl/Cmd+K opens search from anywhere.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setShowSearch(true);
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
+
   const loadConversation = useCallback(async (id: string) => {
     setCurrentConvId(id);
     try {
@@ -209,6 +225,7 @@ export default function Home() {
               : undefined,
             tokenCount: m.tokenCount as number | undefined,
             createdAt: m.createdAt as string | undefined,
+            incomplete: m.incomplete === true,
           };
         })
       );
@@ -270,10 +287,11 @@ export default function Home() {
   );
 
   const sendMessage = useCallback(
-    async (content: string) => {
+    async (content: string, options?: { regenerateFromId?: string }) => {
       if (!content.trim() || isLoading || !hasKeys) return;
 
       const trimmed = content.trim();
+      const regenerateFromId = options?.regenerateFromId;
       const userMsg: Message = {
         id: `temp-${Date.now()}`,
         role: "user",
@@ -294,14 +312,32 @@ export default function Home() {
         isStreaming: true,
       };
 
-      setMessages((prev) => [...prev, userMsg, assistantMsg]);
+      setMessages((prev) => {
+        // Regenerate replaces the previous reply rather than appending after
+        // it, so the user's original question is not duplicated either.
+        const base = regenerateFromId
+          ? prev.slice(
+              0,
+              Math.max(0, prev.findIndex((m) => m.id === regenerateFromId))
+            )
+          : prev;
+        return regenerateFromId
+          ? [...base, assistantMsg]
+          : [...base, userMsg, assistantMsg];
+      });
       setIsLoading(true);
       setStatusStage(webSearchEnabled ? "searching" : "thinking");
 
-      const historyForApi = messages.map((m) => ({
-        role: m.role,
-        content: m.content,
-      }));
+      // For a regenerate, history must stop before the reply being replaced.
+      const sourceHistory = regenerateFromId
+        ? messages.slice(
+            0,
+            Math.max(0, messages.findIndex((m) => m.id === regenerateFromId))
+          )
+        : messages;
+      const historyForApi = sourceHistory
+        .filter((m) => m.content && !m.isError)
+        .map((m) => ({ role: m.role, content: m.content }));
 
       const controller = new AbortController();
       abortRef.current = controller;
@@ -360,6 +396,7 @@ export default function Home() {
             webSearchEnabled,
             enabledPluginIds: enabledPlugins,
             conversationHistory: historyForApi,
+            regenerateFromId,
           }),
         });
 
@@ -536,6 +573,18 @@ export default function Home() {
     abortRef.current?.abort();
   }, []);
 
+  /** Re-run the user turn that produced `assistantId`. */
+  const regenerate = useCallback(
+    (assistantId: string) => {
+      const index = messages.findIndex((m) => m.id === assistantId);
+      if (index < 1) return;
+      const prompt = messages[index - 1];
+      if (prompt.role !== "user") return;
+      void sendMessage(prompt.content, { regenerateFromId: assistantId });
+    },
+    [messages, sendMessage]
+  );
+
   return (
     <ArtifactProvider>
     <div className="flex h-dvh w-full overflow-hidden bg-bg-primary">
@@ -546,6 +595,7 @@ export default function Home() {
         isOpen={sidebarOpen}
         onToggle={() => setSidebarOpen(!sidebarOpen)}
         onSelect={loadConversation}
+        onOpenSearch={() => setShowSearch(true)}
         onNew={startNewChat}
         onDelete={deleteConversation}
         onRename={renameConversation}
@@ -566,6 +616,8 @@ export default function Home() {
         enabledPlugins={enabledPlugins}
         sidebarOpen={sidebarOpen}
         onSend={sendMessage}
+        onRegenerate={regenerate}
+        onOpenSearch={() => setShowSearch(true)}
         onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}
         onNewChat={startNewChat}
         onToggleSearch={() => setWebSearchEnabled(!webSearchEnabled)}
@@ -587,6 +639,13 @@ export default function Home() {
           onModelChange={setModel}
           onDefaultEffortChange={setThinkingEffort}
           onClose={() => setShowSettings(false)}
+        />
+      )}
+
+      {showSearch && (
+        <SearchModal
+          onSelect={loadConversation}
+          onClose={() => setShowSearch(false)}
         />
       )}
 
