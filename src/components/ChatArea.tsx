@@ -24,7 +24,6 @@ interface ChatAreaProps {
   sidebarOpen: boolean;
   onSend: (message: string) => void;
   onRegenerate: (assistantId: string) => void;
-  onOpenSearch: () => void;
   onToggleSidebar: () => void;
   onNewChat: () => void;
   onSetSearchMode: (mode: "off" | "auto" | "always") => void;
@@ -47,7 +46,6 @@ export function ChatArea({
   sidebarOpen,
   onSend,
   onRegenerate,
-  onOpenSearch,
   onToggleSidebar,
   onNewChat,
   onSetSearchMode,
@@ -206,7 +204,7 @@ export function ChatArea({
   return (
     <div className="flex-1 flex flex-col min-w-0">
       {/* Minimal top bar — no branding, just quiet controls */}
-      <header className="flex flex-shrink-0 items-center justify-between gap-2 px-3 py-2">
+      <header className="flex h-[60px] flex-shrink-0 items-center justify-between gap-2 px-3">
         <div className="flex items-center gap-1">
           <button
             onClick={onToggleSidebar}
@@ -262,17 +260,6 @@ export function ChatArea({
             </svg>
           </button>
 
-          <button
-            onClick={onOpenSearch}
-            className="icon-btn"
-            title="Search all chats (Ctrl+K)"
-            aria-label="Search chats"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
-              <circle cx="11" cy="11" r="8" />
-              <path strokeLinecap="round" d="M21 21l-4.35-4.35" />
-            </svg>
-          </button>
           {enabledPlugins.length > 0 && (
             <button
               onClick={onOpenPlugins}
@@ -321,27 +308,30 @@ export function ChatArea({
         </div>
       </header>
 
-      {findOpen && (
-        <ChatSearchBar
-          query={findQuery}
-          onQueryChange={(v) => {
-            setFindQuery(v);
-            setActiveMatch(0);
-          }}
-          wholeWord={findWholeWord}
-          onWholeWordChange={(v) => {
-            setFindWholeWord(v);
-            setActiveMatch(0);
-          }}
-          total={searchIndex.total}
-          current={activeMatch}
-          onNext={gotoNext}
-          onPrev={gotoPrev}
-          onClose={closeFind}
-        />
-      )}
-
       {/* Messages */}
+      <div className="relative flex min-h-0 flex-1 flex-col">
+        {findOpen && (
+          <div className={`pointer-events-none absolute inset-x-0 top-0 z-20 mx-auto w-full px-4 sm:px-6 ${columnWidth}`}>
+            <ChatSearchBar
+              query={findQuery}
+              onQueryChange={(v) => {
+                setFindQuery(v);
+                setActiveMatch(0);
+              }}
+              wholeWord={findWholeWord}
+              onWholeWordChange={(v) => {
+                setFindWholeWord(v);
+                setActiveMatch(0);
+              }}
+              total={searchIndex.total}
+              current={activeMatch}
+              onNext={gotoNext}
+              onPrev={gotoPrev}
+              onClose={closeFind}
+            />
+          </div>
+        )}
+
       <div
         ref={scrollRef}
         onScroll={handleScroll}
@@ -399,6 +389,7 @@ export function ChatArea({
           </button>
         </div>
       )}
+      </div>
 
       {/* Composer — the relative wrapper anchors the selector popovers so they
           open centered above the chat bar, never covering it */}

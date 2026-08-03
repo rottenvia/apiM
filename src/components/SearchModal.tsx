@@ -53,9 +53,12 @@ function timeAgo(iso: string): string {
 export function SearchModal({
   onSelect,
   onClose,
+  sidebarOpen,
 }: {
   onSelect: (id: string) => void;
   onClose: () => void;
+  /** Offsets the panel so it centres over the chat area, not the window. */
+  sidebarOpen: boolean;
 }) {
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<SearchHit[]>([]);
@@ -135,10 +138,13 @@ export function SearchModal({
   };
 
   return (
-    <div className="fixed inset-0 z-[70] flex items-start justify-center px-4 pt-[12vh]">
+    <div
+      className="fixed inset-y-0 right-0 z-[70] flex items-start justify-center px-4 pt-[12vh] transition-[left] duration-300 ease-in-out"
+      style={{ left: sidebarOpen ? "18rem" : 0 }}
+    >
       <div
         onClick={close}
-        className={`absolute inset-0 bg-black/60 backdrop-blur-[3px] transition-opacity duration-200 ${
+        className={`fixed inset-0 bg-black/60 backdrop-blur-[3px] transition-opacity duration-200 ${
           visible ? "opacity-100" : "opacity-0"
         }`}
       />
