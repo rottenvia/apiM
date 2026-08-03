@@ -3,6 +3,14 @@
  * TypeScript port of smart_search.py.
  */
 
+/**
+ * Overridable so the whole search path can be pointed at a local stub in
+ * tests, matching the chat route. Previously hardcoded, which meant these
+ * calls silently escaped to the real API during testing.
+ */
+const DEEPSEEK_BASE_URL =
+  process.env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com";
+
 export interface SearchResultItem {
   title: string;
   url: string;
@@ -59,31 +67,102 @@ export function autoThinkingEffort(message: string): string {
 }
 
 /**
- * Heuristic guess at whether a message would benefit from web search.
+ * Fast keyword pre-filter for auto-search mode.
  *
- * NOT used by the chat route: the Search toggle is authoritative there, so
- * turning search off never searches and turning it on always does. Kept for
- * a possible future "auto search" mode.
+ * Only used to skip the classifier call entirely for messages that obviously
+ * need no web access ("hi", "rewrite this function"). Anything ambiguous falls
+ * through to the model, which decides properly.
  */
-export function shouldAutoSearch(message: string): boolean {
-  const lower = message.toLowerCase();
+export function obviouslyNoSearch(message: string): boolean {
+  const trimmed = message.trim();
+  const lower = trimmed.toLowerCase();
 
-  const searchTriggers = [
-    /search\s+(for|about|the)/,
-    /find\s+(me|the|a|information|info)/,
-    /look\s+up/,
-    /what\s+is\s+the\s+(latest|current|newest|recent)/,
-    /how\s+to\s+fix/,
-    /error.*\d+/,
-    /github\.com|stackoverflow/,
-    /latest\s+version/,
-    /documentation\s+for/,
-    /any\s+(updates|news|changes)/,
-    /\b(2024|2025|2026)\b/,
-    /release\s+(date|notes)/,
-  ];
+  // Very short greetings and acknowledgements.
+  if (trimmed.length <= 12 && /^(hi|hello|hey|yo|sup|thanks|thank you|thx|ok|okay|got it|sure|nice|cool|great)\b/.test(lower)) {
+    return true;
+  }
 
-  return searchTriggers.some((p) => p.test(lower));
+  // Contains a code block — almost always "work on this", not "look this up".
+  if (/```/.test(trimmed)) return true;
+
+  return false;
+}
+
+/**
+ * Ask the model whether a web search is actually needed.
+ *
+ * Runs on Flash with thinking disabled and a tiny token budget, so the check
+ * costs a fraction of a cent and adds well under a second. This replaces a
+ * regex heuristic that both missed real cases and fired on false positives
+ * (any message containing "2026", for instance).
+ */
+export async function decideSearch(
+  message: string,
+  context: string,
+  deepseekKey: string
+): Promise<{ needed: boolean; reason: string }> {
+  if (obviouslyNoSearch(message)) {
+    return { needed: false, reason: "no external information required" };
+  }
+
+  try {
+    const response = await fetch(
+      `${DEEPSEEK_BASE_URL}/chat/completions`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${deepseekKey}`,
+        },
+        body: JSON.stringify({
+          model: "deepseek-v4-flash",
+          messages: [
+            {
+              role: "system",
+              content: `Decide whether answering the user's message requires a live web search.
+
+Answer NO when the model can answer from its own knowledge: general programming,
+explanations, maths, writing, refactoring, opinions, or anything about code the
+user already provided.
+
+Answer YES only when the answer depends on information the model cannot know:
+current events, today's prices or weather, release notes for something recent,
+a specific library's latest version, a niche error message, or the user
+explicitly asks to search or cite sources.
+
+Respond with JSON only: {"search": true|false, "reason": "under 8 words"}`,
+            },
+            {
+              role: "user",
+              content: `Conversation so far:\n${context || "(none)"}\n\nNew message:\n${message}`,
+            },
+          ],
+          response_format: { type: "json_object" },
+          temperature: 0,
+          max_tokens: 60,
+          thinking: { type: "disabled" },
+        }),
+        signal: AbortSignal.timeout(12_000),
+      }
+    );
+
+    if (response.ok) {
+      const data = await response.json();
+      const parsed = JSON.parse(
+        data?.choices?.[0]?.message?.content ?? "{}"
+      ) as { search?: boolean; reason?: string };
+      return {
+        needed: parsed.search === true,
+        reason: parsed.reason ?? "",
+      };
+    }
+  } catch (error) {
+    console.error("Search decision failed:", error);
+  }
+
+  // On any failure, skip the search rather than spending tokens on one that
+  // may not be needed — the model still answers from its own knowledge.
+  return { needed: false, reason: "classifier unavailable" };
 }
 
 interface QueryPlan {
@@ -102,7 +181,7 @@ async function generateSearchQueries(
 ): Promise<QueryPlan> {
   try {
     const response = await fetch(
-      "https://api.deepseek.com/chat/completions",
+      `${DEEPSEEK_BASE_URL}/chat/completions`,
       {
         method: "POST",
         headers: {

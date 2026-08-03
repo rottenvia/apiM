@@ -4,6 +4,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { Dots, MessageBubble } from "@/components/MessageBubble";
 import { ThinkingEffortSelector } from "@/components/ThinkingEffortSelector";
 import { ModelSelector } from "@/components/ModelSelector";
+import { SearchModeSelector } from "@/components/SearchModeSelector";
 import type { Message, StatusStage } from "@/app/page";
 
 interface ChatAreaProps {
@@ -14,7 +15,7 @@ interface ChatAreaProps {
   hasKeys: boolean;
   model: string;
   thinkingEffort: string;
-  webSearchEnabled: boolean;
+  webSearchMode: "off" | "auto" | "always";
   enabledPlugins: string[];
   sidebarOpen: boolean;
   onSend: (message: string) => void;
@@ -22,7 +23,7 @@ interface ChatAreaProps {
   onOpenSearch: () => void;
   onToggleSidebar: () => void;
   onNewChat: () => void;
-  onToggleSearch: () => void;
+  onSetSearchMode: (mode: "off" | "auto" | "always") => void;
   onSetThinkingEffort: (effort: string) => void;
   onSetModel: (model: string) => void;
   onOpenSettings: () => void;
@@ -37,7 +38,7 @@ export function ChatArea({
   hasKeys,
   model,
   thinkingEffort,
-  webSearchEnabled,
+  webSearchMode,
   enabledPlugins,
   sidebarOpen,
   onSend,
@@ -45,7 +46,7 @@ export function ChatArea({
   onOpenSearch,
   onToggleSidebar,
   onNewChat,
-  onToggleSearch,
+  onSetSearchMode,
   onSetThinkingEffort,
   onSetModel,
   onOpenSettings,
@@ -333,25 +334,10 @@ export function ChatArea({
                   onChange={onSetThinkingEffort}
                 />
 
-                <button
-                  onClick={onToggleSearch}
-                  className="chip"
-                  data-active={webSearchEnabled}
-                  aria-pressed={webSearchEnabled}
-                  title="Toggle web search"
-                >
-                  <svg
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth={1.6}
-                  >
-                    <circle cx="12" cy="12" r="9" />
-                    <path d="M3 12h18" />
-                    <path d="M12 3a15.3 15.3 0 014 9 15.3 15.3 0 01-4 9 15.3 15.3 0 01-4-9 15.3 15.3 0 014-9z" />
-                  </svg>
-                  <span>Search</span>
-                </button>
+                <SearchModeSelector
+                  value={webSearchMode}
+                  onChange={onSetSearchMode}
+                />
 
                 <button
                   onClick={onOpenPlugins}
@@ -477,6 +463,7 @@ function EmptyState({
 }
 
 const STAGE_LABELS: Record<StatusStage, string> = {
+  deciding: "Checking if I need the web",
   searching: "Searching the web",
   thinking: "Thinking",
   writing: "Writing",
