@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { db } from "@/db";
+import { db, isDatabaseConfigured } from "@/db";
 import { conversations, messages } from "@/db/schema";
 import { eq, asc } from "drizzle-orm";
 
@@ -7,6 +7,8 @@ export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  if (!isDatabaseConfigured) return NextResponse.json([]);
+
   try {
     const { id } = await params;
     const msgs = await db
@@ -25,6 +27,13 @@ export async function DELETE(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  if (!isDatabaseConfigured) {
+    return NextResponse.json(
+      { error: "Database is not configured" },
+      { status: 503 }
+    );
+  }
+
   try {
     const { id } = await params;
     await db.delete(conversations).where(eq(conversations.id, id));

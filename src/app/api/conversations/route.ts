@@ -1,9 +1,13 @@
 import { NextResponse } from "next/server";
-import { db } from "@/db";
+import { db, isDatabaseConfigured } from "@/db";
 import { conversations } from "@/db/schema";
 import { desc } from "drizzle-orm";
 
 export async function GET() {
+  // Without a database there is simply no history to show; an empty list keeps
+  // the UI working instead of surfacing an error.
+  if (!isDatabaseConfigured) return NextResponse.json([]);
+
   try {
     const convs = await db
       .select()
