@@ -9,10 +9,10 @@ interface PluginsModalProps {
 }
 
 const CATEGORY_LABELS: Record<string, { label: string; color: string }> = {
-  "token-saving": { label: "Token Saving", color: "text-green-400" },
-  enhancement: { label: "Enhancement", color: "text-blue-400" },
-  formatting: { label: "Formatting", color: "text-purple-400" },
-  safety: { label: "Safety", color: "text-amber-400" },
+  "token-saving": { label: "Token Saving", color: "text-success" },
+  enhancement: { label: "Enhancement", color: "text-info" },
+  formatting: { label: "Formatting", color: "text-accent-light" },
+  safety: { label: "Safety", color: "text-warning" },
 };
 
 export function PluginsModal({
@@ -35,9 +35,7 @@ export function PluginsModal({
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-5 border-b border-border">
           <div>
-            <h2 className="text-lg font-bold text-text-primary flex items-center gap-2">
-              🧩 Plugins
-            </h2>
+            <h2 className="text-lg font-bold text-text-primary">Plugins</h2>
             <p className="text-xs text-text-secondary mt-0.5">
               Customize AI behavior with plugins inspired by Claude Code
             </p>
@@ -144,8 +142,8 @@ export function PluginsModal({
           {/* Info box */}
           <div className="px-4 py-3 rounded-xl bg-info/10 border border-info/20">
             <p className="text-xs text-info leading-relaxed">
-              💡 Plugins modify the system prompt and/or user messages sent to
-              the AI. They apply to every message in every conversation while
+              Plugins modify the system prompt and/or user messages sent to the
+              AI. They apply to every message in every conversation while
               active. Combine multiple plugins for powerful customization.
             </p>
           </div>
@@ -153,10 +151,7 @@ export function PluginsModal({
 
         {/* Footer */}
         <div className="px-6 py-4 border-t border-border flex justify-end">
-          <button
-            onClick={onClose}
-            className="px-5 py-2 rounded-xl bg-accent text-white text-sm font-medium shadow-lg shadow-accent/25 hover:bg-accent-light hover:shadow-accent/35 transition-all duration-200 active:scale-95"
-          >
+          <button onClick={onClose} className="btn-primary">
             Done
           </button>
         </div>

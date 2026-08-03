@@ -3,9 +3,9 @@ import type { ReactNode } from "react";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "nohomo — API MANAGER",
+  title: "API Manager",
   description:
-    "The smartest API manager with intelligent web search, thinking effort control, and plugins. Your gateway to DeepSeek V4.",
+    "A refined chat console for DeepSeek V4 — intelligent web search, thinking effort control, and a plugin system.",
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

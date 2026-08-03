@@ -48,24 +48,27 @@ export default function Home() {
   const hasKeys = deepseekKey.length > 0;
   const initialLoadDone = useRef(false);
 
-  // Load settings from localStorage
+  // Load settings from localStorage after mount (deferred to a microtask so
+  // state updates don't cascade synchronously through the first commit)
   useEffect(() => {
-    if (typeof window !== "undefined") {
-      const saved = localStorage.getItem("nexusai-settings");
-      if (saved) {
-        try {
-          const s = JSON.parse(saved);
-          if (s.deepseekKey) setDeepseekKey(s.deepseekKey);
-          if (s.tavilyKey) setTavilyKey(s.tavilyKey);
-          if (s.model) setModel(s.model);
-          if (s.thinkingEffort) setThinkingEffort(s.thinkingEffort);
-          if (s.enabledPlugins) setEnabledPlugins(s.enabledPlugins);
-        } catch {
-          /* ignore */
+    queueMicrotask(() => {
+      if (typeof window !== "undefined") {
+        const saved = localStorage.getItem("nexusai-settings");
+        if (saved) {
+          try {
+            const s = JSON.parse(saved);
+            if (s.deepseekKey) setDeepseekKey(s.deepseekKey);
+            if (s.tavilyKey) setTavilyKey(s.tavilyKey);
+            if (s.model) setModel(s.model);
+            if (s.thinkingEffort) setThinkingEffort(s.thinkingEffort);
+            if (s.enabledPlugins) setEnabledPlugins(s.enabledPlugins);
+          } catch {
+            /* ignore */
+          }
         }
+        initialLoadDone.current = true;
       }
-      initialLoadDone.current = true;
-    }
+    });
   }, []);
 
   // Save settings
@@ -244,7 +247,7 @@ export default function Home() {
   );
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-bg-primary">
+    <div className="flex h-dvh w-full overflow-hidden bg-bg-primary">
       {/* Sidebar */}
       <Sidebar
         conversations={conversations}
@@ -269,6 +272,7 @@ export default function Home() {
         sidebarOpen={sidebarOpen}
         onSend={sendMessage}
         onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}
+        onNewChat={startNewChat}
         onToggleSearch={() => setWebSearchEnabled(!webSearchEnabled)}
         onSetThinkingEffort={setThinkingEffort}
         onSetModel={setModel}
