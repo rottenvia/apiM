@@ -644,7 +644,6 @@ export default function Home() {
         sidebarOpen={sidebarOpen}
         onSend={sendMessage}
         onRegenerate={regenerate}
-        onOpenSearch={() => setShowSearch(true)}
         onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}
         onNewChat={startNewChat}
         onSetSearchMode={setWebSearchMode}
@@ -673,6 +672,7 @@ export default function Home() {
         <SearchModal
           onSelect={loadConversation}
           onClose={() => setShowSearch(false)}
+          sidebarOpen={sidebarOpen}
         />
       )}
 

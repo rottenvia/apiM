@@ -125,7 +125,7 @@ export function Sidebar({
     >
       <div className="flex h-full min-w-[288px] flex-col">
         {/* New chat */}
-        <div className="flex items-center gap-1.5 px-3 pb-2 pt-3">
+        <div className="flex items-center gap-2 px-3 pb-2.5 pt-2">
           <button onClick={onNew} className="new-chat-btn">
             <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 5v14M5 12h14" />
@@ -149,18 +149,18 @@ export function Sidebar({
 
         {/* Active / Archived switch */}
         {(active.length > 0 || archived.length > 0) && (
-          <div className="flex items-center gap-1 px-3 pb-1 pt-2">
+          <div className="flex items-center gap-1 px-3 pb-1.5 pt-1">
             <button
               onClick={() => setShowArchived(false)}
               data-active={!showArchived}
-              className="flex-1 rounded-lg px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-text-muted transition-colors hover:text-text-secondary data-[active=true]:bg-bg-tertiary data-[active=true]:text-text-primary"
+              className="flex-1 rounded-lg px-2 py-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-text-muted transition-colors hover:bg-bg-tertiary/50 hover:text-text-secondary data-[active=true]:bg-bg-tertiary data-[active=true]:text-text-primary"
             >
               Chats{active.length ? ` · ${active.length}` : ""}
             </button>
             <button
               onClick={() => setShowArchived(true)}
               data-active={showArchived}
-              className="flex-1 rounded-lg px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-text-muted transition-colors hover:text-text-secondary data-[active=true]:bg-bg-tertiary data-[active=true]:text-text-primary"
+              className="flex-1 rounded-lg px-2 py-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-text-muted transition-colors hover:bg-bg-tertiary/50 hover:text-text-secondary data-[active=true]:bg-bg-tertiary data-[active=true]:text-text-primary"
             >
               Archive{archived.length ? ` · ${archived.length}` : ""}
             </button>
