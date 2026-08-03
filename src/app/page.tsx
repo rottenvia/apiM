@@ -27,10 +27,12 @@ export interface Message {
   isError?: boolean;
   /** Reply was cut short (tab closed / connection dropped) and can be retried. */
   incomplete?: boolean;
+  /** Why auto-search did or didn't run, shown as a tooltip. */
+  searchReason?: string;
 }
 
 /** What the assistant is currently doing, for the live status indicator. */
-export type StatusStage = "searching" | "thinking" | "writing";
+export type StatusStage = "deciding" | "searching" | "thinking" | "writing";
 
 /**
  * Normalise a stored `search_results` value. Newer rows hold real jsonb
@@ -65,6 +67,7 @@ type StreamEvent =
       resolvedEffort: string;
       thinkingEnabled: boolean;
       webSearchUsed: boolean;
+      searchReason: string;
       searchResults: { title: string; url: string; domain: string }[] | null;
       searchQueries: string[] | null;
       searchesPerformed: number;
@@ -121,7 +124,7 @@ export default function Home() {
   const [tavilyKey, setTavilyKey] = useState("");
   const [model, setModel] = useState("deepseek-v4-pro");
   const [thinkingEffort, setThinkingEffort] = useState("auto");
-  const [webSearchEnabled, setWebSearchEnabled] = useState(false);
+  const [webSearchMode, setWebSearchMode] = useState<"off" | "auto" | "always">("auto");
   const [enabledPlugins, setEnabledPlugins] = useState<string[]>([]);
 
   const hasKeys = deepseekKey.length > 0;
@@ -143,6 +146,7 @@ export default function Home() {
             if (s.model) setModel(s.model);
             if (s.thinkingEffort) setThinkingEffort(s.thinkingEffort);
             if (s.enabledPlugins) setEnabledPlugins(s.enabledPlugins);
+            if (s.webSearchMode) setWebSearchMode(s.webSearchMode);
           } catch {
             /* ignore */
           }
@@ -163,10 +167,11 @@ export default function Home() {
           model,
           thinkingEffort,
           enabledPlugins,
+          webSearchMode,
         })
       );
     }
-  }, [deepseekKey, tavilyKey, model, thinkingEffort, enabledPlugins]);
+  }, [deepseekKey, tavilyKey, model, thinkingEffort, enabledPlugins, webSearchMode]);
 
   // Load the conversation list. Guarded against non-JSON responses so a
   // backend problem degrades to "no history" instead of throwing.
@@ -297,7 +302,6 @@ export default function Home() {
         role: "user",
         content: trimmed,
         thinkingEffort,
-        webSearchUsed: webSearchEnabled,
       };
 
       // The assistant bubble is created immediately and filled in as deltas
@@ -326,7 +330,7 @@ export default function Home() {
           : [...base, userMsg, assistantMsg];
       });
       setIsLoading(true);
-      setStatusStage(webSearchEnabled ? "searching" : "thinking");
+      setStatusStage(webSearchMode === "off" ? "thinking" : "deciding");
 
       // For a regenerate, history must stop before the reply being replaced.
       const sourceHistory = regenerateFromId
@@ -393,7 +397,7 @@ export default function Home() {
             tavilyApiKey: tavilyKey,
             model,
             thinkingEffort,
-            webSearchEnabled,
+            webSearchMode,
             enabledPluginIds: enabledPlugins,
             conversationHistory: historyForApi,
             regenerateFromId,
@@ -461,6 +465,7 @@ export default function Home() {
                   ...finalMeta,
                   thinkingEffort: evt.resolvedEffort,
                   webSearchUsed: evt.webSearchUsed,
+                  searchReason: evt.searchReason,
                   searchResults: evt.searchResults,
                   searchQueries: evt.searchQueries ?? undefined,
                   searchesPerformed: evt.searchesPerformed,
@@ -562,7 +567,7 @@ export default function Home() {
       tavilyKey,
       model,
       thinkingEffort,
-      webSearchEnabled,
+      webSearchMode,
       enabledPlugins,
       messages,
       refreshConversations,
@@ -612,7 +617,7 @@ export default function Home() {
         hasKeys={hasKeys}
         model={model}
         thinkingEffort={thinkingEffort}
-        webSearchEnabled={webSearchEnabled}
+        webSearchMode={webSearchMode}
         enabledPlugins={enabledPlugins}
         sidebarOpen={sidebarOpen}
         onSend={sendMessage}
@@ -620,7 +625,7 @@ export default function Home() {
         onOpenSearch={() => setShowSearch(true)}
         onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}
         onNewChat={startNewChat}
-        onToggleSearch={() => setWebSearchEnabled(!webSearchEnabled)}
+        onSetSearchMode={setWebSearchMode}
         onSetThinkingEffort={setThinkingEffort}
         onSetModel={setModel}
         onOpenSettings={() => setShowSettings(true)}

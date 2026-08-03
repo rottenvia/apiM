@@ -112,7 +112,7 @@ export function Sidebar({
     >
       <div className="flex h-full min-w-[288px] flex-col">
         {/* New chat */}
-        <div className="px-3 pb-2 pt-3">
+        <div className="flex items-center gap-1.5 px-3 pb-2 pt-3">
           <button onClick={onNew} className="new-chat-btn">
             <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 5v14M5 12h14" />
@@ -122,17 +122,16 @@ export function Sidebar({
 
           <button
             onClick={onOpenSearch}
-            className="mt-1.5 flex w-full items-center gap-2 rounded-xl px-3 py-2 text-[13px] text-text-secondary transition-colors hover:bg-bg-tertiary hover:text-text-primary"
+            title="Search chats  (Ctrl+K)"
+            aria-label="Search chats"
+            className="flex h-10 w-10 flex-none items-center justify-center rounded-xl border border-border text-text-secondary transition-colors hover:border-border-light hover:bg-bg-hover hover:text-text-primary"
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true" className="flex-none">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
               <circle cx="11" cy="11" r="8" />
               <path strokeLinecap="round" d="M21 21l-4.35-4.35" />
             </svg>
-            Search chats
-            <kbd className="ml-auto rounded border border-border px-1 py-px font-mono text-[9px] text-text-muted">
-              ⌘K
-            </kbd>
           </button>
+
         </div>
 
         {/* Active / Archived switch */}

@@ -1,6 +1,12 @@
 "use client";
 
+import { useCallback, useEffect, useState } from "react";
 import { AVAILABLE_PLUGINS } from "@/lib/plugins";
+import type { Plugin } from "@/lib/plugins";
+
+interface CustomPlugin extends Plugin {
+  custom: true;
+}
 
 interface PluginsModalProps {
   enabledPlugins: string[];
@@ -8,11 +14,30 @@ interface PluginsModalProps {
   onClose: () => void;
 }
 
-const CATEGORY_LABELS: Record<string, { label: string; color: string }> = {
-  "token-saving": { label: "Token Saving", color: "text-success" },
-  enhancement: { label: "Enhancement", color: "text-info" },
-  formatting: { label: "Formatting", color: "text-accent-light" },
-  safety: { label: "Safety", color: "text-warning" },
+const CATEGORIES = [
+  { id: "token-saving", label: "Token saving" },
+  { id: "enhancement", label: "Enhancement" },
+  { id: "formatting", label: "Formatting" },
+  { id: "safety", label: "Safety" },
+];
+
+const SUGGESTED_ICONS = ["✨", "🎯", "🧠", "⚡", "🔧", "📐", "🎨", "🧪", "📚", "🛠️", "🚀", "🦉"];
+
+interface Draft {
+  id?: string;
+  name: string;
+  icon: string;
+  description: string;
+  category: string;
+  prompt: string;
+}
+
+const EMPTY_DRAFT: Draft = {
+  name: "",
+  icon: "✨",
+  description: "",
+  category: "enhancement",
+  prompt: "",
 };
 
 export function PluginsModal({
@@ -20,140 +45,365 @@ export function PluginsModal({
   onTogglePlugin,
   onClose,
 }: PluginsModalProps) {
-  const categories = [...new Set(AVAILABLE_PLUGINS.map((p) => p.category))];
+  const [custom, setCustom] = useState<CustomPlugin[]>([]);
+  const [draft, setDraft] = useState<Draft | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const res = await fetch("/api/plugins");
+      if (!res.ok) return;
+      const data = (await res.json()) as CustomPlugin[];
+      if (Array.isArray(data)) setCustom(data);
+    } catch {
+      /* offline — built-ins still work */
+    }
+  }, []);
+
+  useEffect(() => {
+    queueMicrotask(() => void load());
+  }, [load]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        if (draft) setDraft(null);
+        else onClose();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [draft, onClose]);
+
+  const save = async () => {
+    if (!draft) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await fetch(
+        draft.id ? `/api/plugins/${draft.id}` : "/api/plugins",
+        {
+          method: draft.id ? "PATCH" : "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(draft),
+        }
+      );
+      const body = (await res.json()) as { error?: string };
+      if (!res.ok) {
+        setError(body.error ?? "Could not save");
+        return;
+      }
+      await load();
+      setDraft(null);
+    } catch {
+      setError("Could not reach the server");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const remove = async (id: string) => {
+    try {
+      await fetch(`/api/plugins/${id}`, { method: "DELETE" });
+      if (enabledPlugins.includes(id)) onTogglePlugin(id);
+      await load();
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const renderCard = (plugin: Plugin, isCustom: boolean) => {
+    const enabled = enabledPlugins.includes(plugin.id);
+    return (
+      <div
+        key={plugin.id}
+        data-enabled={enabled}
+        className="group flex items-start gap-3 rounded-xl border border-border bg-bg-tertiary/40 p-3 transition-colors data-[enabled=true]:border-accent/40 data-[enabled=true]:bg-accent/[0.07]"
+      >
+        <span className="mt-0.5 flex-none text-lg leading-none">{plugin.icon}</span>
+
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="truncate text-sm font-medium text-text-primary">
+              {plugin.name}
+            </span>
+            {isCustom && (
+              <span className="flex-none rounded border border-border px-1 py-px text-[9px] uppercase tracking-wide text-text-muted">
+                yours
+              </span>
+            )}
+          </div>
+          {plugin.description && (
+            <p className="mt-0.5 text-xs leading-5 text-text-secondary">
+              {plugin.description}
+            </p>
+          )}
+        </div>
+
+        <div className="flex flex-none items-center gap-1">
+          {isCustom && (
+            <>
+              <button
+                onClick={() =>
+                  setDraft({
+                    id: plugin.id,
+                    name: plugin.name,
+                    icon: plugin.icon,
+                    description: plugin.description,
+                    category: plugin.category,
+                    prompt: plugin.prompt,
+                  })
+                }
+                title="Edit"
+                aria-label="Edit plugin"
+                className="flex h-7 w-7 items-center justify-center rounded-lg text-text-muted opacity-0 transition-all hover:bg-bg-hover hover:text-text-primary focus-visible:opacity-100 group-hover:opacity-100"
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                </svg>
+              </button>
+              <button
+                onClick={() => remove(plugin.id)}
+                title="Delete"
+                aria-label="Delete plugin"
+                className="flex h-7 w-7 items-center justify-center rounded-lg text-text-muted opacity-0 transition-all hover:bg-danger/15 hover:text-danger focus-visible:opacity-100 group-hover:opacity-100"
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                </svg>
+              </button>
+            </>
+          )}
+
+          {!isCustom && (
+            <button
+              onClick={() =>
+                setDraft({
+                  name: `${plugin.name} (copy)`,
+                  icon: plugin.icon,
+                  description: plugin.description,
+                  category: plugin.category,
+                  prompt: plugin.prompt,
+                })
+              }
+              title="Duplicate as your own"
+              aria-label="Duplicate plugin"
+              className="flex h-7 w-7 items-center justify-center rounded-lg text-text-muted opacity-0 transition-all hover:bg-bg-hover hover:text-text-primary focus-visible:opacity-100 group-hover:opacity-100"
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+                <rect x="9" y="9" width="11" height="11" rx="2" />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M5 15H4a1 1 0 01-1-1V4a1 1 0 011-1h10a1 1 0 011 1v1" />
+              </svg>
+            </button>
+          )}
+
+          {/* Toggle */}
+          <button
+            onClick={() => onTogglePlugin(plugin.id)}
+            role="switch"
+            aria-checked={enabled}
+            aria-label={`${enabled ? "Disable" : "Enable"} ${plugin.name}`}
+            data-on={enabled}
+            className="relative h-5 w-9 flex-none rounded-full border border-border bg-bg-elevated transition-colors data-[on=true]:border-accent data-[on=true]:bg-accent"
+          >
+            <span
+              data-on={enabled}
+              className="absolute top-1/2 left-0.5 h-3.5 w-3.5 -translate-y-1/2 rounded-full bg-text-muted transition-all data-[on=true]:left-[1.125rem] data-[on=true]:bg-white"
+            />
+          </button>
+        </div>
+      </div>
+    );
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      {/* Backdrop */}
-      <div
-        className="absolute inset-0 bg-black/60 backdrop-blur-sm"
-        onClick={onClose}
-      />
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
 
-      {/* Modal */}
-      <div className="relative w-full max-w-2xl bg-bg-secondary border border-border-light rounded-3xl shadow-2xl shadow-black/50 animate-fade-in overflow-hidden">
+      <div className="relative flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-3xl border border-border-light bg-bg-secondary shadow-2xl shadow-black/50 animate-fade-in">
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-5 border-b border-border">
+        <div className="flex flex-none items-center justify-between border-b border-border px-6 py-4">
           <div>
-            <h2 className="text-lg font-bold text-text-primary">Plugins</h2>
-            <p className="text-xs text-text-secondary mt-0.5">
-              Customize AI behavior with plugins inspired by Claude Code
+            <h2 className="text-lg font-bold text-text-primary">
+              {draft ? (draft.id ? "Edit plugin" : "New plugin") : "Plugins"}
+            </h2>
+            <p className="mt-0.5 text-xs text-text-secondary">
+              {draft
+                ? "Instructions added to the system prompt when enabled"
+                : "Styles and preprompts that shape how the assistant replies"}
             </p>
           </div>
           <button
-            onClick={onClose}
-            className="p-2 rounded-xl hover:bg-bg-hover transition-colors text-text-secondary"
+            onClick={draft ? () => setDraft(null) : onClose}
+            className="rounded-xl p-2 text-text-secondary transition-colors hover:bg-bg-hover"
+            aria-label="Close"
           >
-            <svg
-              className="w-5 h-5"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M6 18L18 6M6 6l12 12"
-              />
+            <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
             </svg>
           </button>
         </div>
 
-        {/* Content */}
-        <div className="px-6 py-5 max-h-[70vh] overflow-y-auto space-y-6">
-          {/* Active count */}
-          {enabledPlugins.length > 0 && (
-            <div className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-accent/10 border border-accent/20">
-              <div className="w-2 h-2 rounded-full bg-accent animate-pulse" />
-              <span className="text-sm text-accent-light font-medium">
-                {enabledPlugins.length} plugin
-                {enabledPlugins.length > 1 ? "s" : ""} active
-              </span>
-              <span className="text-xs text-text-secondary ml-auto">
-                Applied to every message
-              </span>
+        {/* Editor */}
+        {draft ? (
+          <div className="flex-1 space-y-4 overflow-y-auto px-6 py-5">
+            <div className="flex gap-3">
+              <div>
+                <label className="mb-1.5 block text-xs font-semibold text-text-primary">
+                  Icon
+                </label>
+                <input
+                  value={draft.icon}
+                  onChange={(e) => setDraft({ ...draft, icon: e.target.value })}
+                  className="h-10 w-14 rounded-xl border border-border bg-bg-primary text-center text-lg outline-none transition-colors focus:border-accent/60"
+                />
+              </div>
+              <div className="min-w-0 flex-1">
+                <label className="mb-1.5 block text-xs font-semibold text-text-primary">
+                  Name
+                </label>
+                <input
+                  value={draft.name}
+                  onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+                  placeholder="Rust expert"
+                  maxLength={40}
+                  className="h-10 w-full rounded-xl border border-border bg-bg-primary px-3 text-sm text-text-primary outline-none transition-colors placeholder:text-text-muted focus:border-accent/60"
+                />
+              </div>
             </div>
-          )}
 
-          {categories.map((category) => {
-            const catInfo = CATEGORY_LABELS[category] || {
-              label: category,
-              color: "text-text-secondary",
-            };
-            const plugins = AVAILABLE_PLUGINS.filter(
-              (p) => p.category === category
-            );
-
-            return (
-              <div key={category}>
-                <h3
-                  className={`text-xs font-bold uppercase tracking-wider mb-3 ${catInfo.color}`}
+            <div className="flex flex-wrap gap-1">
+              {SUGGESTED_ICONS.map((ic) => (
+                <button
+                  key={ic}
+                  onClick={() => setDraft({ ...draft, icon: ic })}
+                  className="h-8 w-8 rounded-lg text-base transition-colors hover:bg-bg-hover"
                 >
-                  {catInfo.label}
-                </h3>
+                  {ic}
+                </button>
+              ))}
+            </div>
+
+            <div>
+              <label className="mb-1.5 block text-xs font-semibold text-text-primary">
+                Description <span className="font-normal text-text-muted">(optional)</span>
+              </label>
+              <input
+                value={draft.description}
+                onChange={(e) => setDraft({ ...draft, description: e.target.value })}
+                placeholder="Terse Rust answers, no hand-holding"
+                maxLength={140}
+                className="h-10 w-full rounded-xl border border-border bg-bg-primary px-3 text-sm text-text-primary outline-none transition-colors placeholder:text-text-muted focus:border-accent/60"
+              />
+            </div>
+
+            <div>
+              <label className="mb-1.5 block text-xs font-semibold text-text-primary">
+                Category
+              </label>
+              <div className="flex flex-wrap gap-1.5">
+                {CATEGORIES.map((c) => (
+                  <button
+                    key={c.id}
+                    onClick={() => setDraft({ ...draft, category: c.id })}
+                    data-active={draft.category === c.id}
+                    className="rounded-lg border border-border px-2.5 py-1 text-xs text-text-secondary transition-colors hover:bg-bg-hover data-[active=true]:border-accent/50 data-[active=true]:bg-accent/10 data-[active=true]:text-accent-light"
+                  >
+                    {c.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <label className="mb-1.5 block text-xs font-semibold text-text-primary">
+                Prompt
+              </label>
+              <p className="mb-2 text-[11px] leading-4 text-text-muted">
+                Written as an instruction to the assistant. Appended to the
+                system prompt whenever this plugin is on.
+              </p>
+              <textarea
+                value={draft.prompt}
+                onChange={(e) => setDraft({ ...draft, prompt: e.target.value })}
+                placeholder={"You are a Rust expert. Prefer idiomatic, zero-cost abstractions.\nNever explain basic syntax. Show complete compiling code."}
+                rows={7}
+                maxLength={4000}
+                className="w-full resize-y rounded-xl border border-border bg-bg-primary px-3 py-2.5 font-mono text-[13px] leading-relaxed text-text-primary outline-none transition-colors placeholder:text-text-muted focus:border-accent/60"
+              />
+              <p className="mt-1 text-right text-[10px] text-text-muted">
+                {draft.prompt.length}/4000
+              </p>
+            </div>
+
+            {error && (
+              <p className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
+                {error}
+              </p>
+            )}
+          </div>
+        ) : (
+          <div className="flex-1 space-y-4 overflow-y-auto px-6 py-5">
+            {custom.length > 0 && (
+              <div>
+                <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.1em] text-text-muted">
+                  Your plugins
+                </p>
                 <div className="space-y-2">
-                  {plugins.map((plugin) => {
-                    const isEnabled = enabledPlugins.includes(plugin.id);
-                    return (
-                      <button
-                        key={plugin.id}
-                        onClick={() => onTogglePlugin(plugin.id)}
-                        className={`w-full flex items-start gap-3 px-4 py-3 rounded-xl text-left transition-all duration-200 ${
-                          isEnabled
-                            ? "bg-accent/10 border border-accent/25"
-                            : "bg-bg-tertiary border border-border hover:border-border-light"
-                        }`}
-                      >
-                        <span className="text-xl mt-0.5 flex-shrink-0">
-                          {plugin.icon}
-                        </span>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2">
-                            <span
-                              className={`text-sm font-semibold ${isEnabled ? "text-accent-light" : "text-text-primary"}`}
-                            >
-                              {plugin.name}
-                            </span>
-                          </div>
-                          <p className="text-xs text-text-secondary mt-0.5 leading-relaxed">
-                            {plugin.description}
-                          </p>
-                        </div>
-                        <div
-                          className={`flex-shrink-0 w-10 h-5 rounded-full transition-all duration-200 relative ${
-                            isEnabled ? "bg-accent" : "bg-bg-elevated"
-                          }`}
-                        >
-                          <div
-                            className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow-sm transition-all duration-200 ${
-                              isEnabled ? "left-5" : "left-0.5"
-                            }`}
-                          />
-                        </div>
-                      </button>
-                    );
-                  })}
+                  {custom.map((p) => renderCard(p, true))}
                 </div>
               </div>
-            );
-          })}
+            )}
 
-          {/* Info box */}
-          <div className="px-4 py-3 rounded-xl bg-info/10 border border-info/20">
-            <p className="text-xs text-info leading-relaxed">
-              Plugins modify the system prompt and/or user messages sent to the
-              AI. They apply to every message in every conversation while
-              active. Combine multiple plugins for powerful customization.
-            </p>
+            <div>
+              <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.1em] text-text-muted">
+                Built in
+              </p>
+              <div className="space-y-2">
+                {AVAILABLE_PLUGINS.map((p) => renderCard(p, false))}
+              </div>
+            </div>
           </div>
-        </div>
+        )}
 
         {/* Footer */}
-        <div className="px-6 py-4 border-t border-border flex justify-end">
-          <button onClick={onClose} className="btn-primary">
-            Done
-          </button>
+        <div className="flex flex-none items-center justify-between gap-3 border-t border-border px-6 py-3.5">
+          {draft ? (
+            <>
+              <button
+                onClick={() => setDraft(null)}
+                className="rounded-xl border border-border px-3.5 py-2 text-sm text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={save}
+                disabled={saving || !draft.name.trim() || !draft.prompt.trim()}
+                className="rounded-xl bg-accent px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-accent-light disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {saving ? "Saving…" : draft.id ? "Save changes" : "Create plugin"}
+              </button>
+            </>
+          ) : (
+            <>
+              <span className="text-xs text-text-muted">
+                {enabledPlugins.length} active
+              </span>
+              <button
+                onClick={() => {
+                  setError(null);
+                  setDraft({ ...EMPTY_DRAFT });
+                }}
+                className="flex items-center gap-1.5 rounded-xl bg-accent px-3.5 py-2 text-sm font-medium text-white transition-colors hover:bg-accent-light"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} aria-hidden="true">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 5v14M5 12h14" />
+                </svg>
+                New plugin
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>

@@ -2,9 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { v4 as uuidv4 } from "uuid";
 import { appendMessages, truncateFrom, upsertMessage } from "@/lib/store";
 import type { StoredMessage } from "@/lib/store";
-import { smartSearch, autoThinkingEffort } from "@/lib/smart-search";
+import { smartSearch, autoThinkingEffort, decideSearch } from "@/lib/smart-search";
 import type { SearchResultItem } from "@/lib/smart-search";
 import { AVAILABLE_PLUGINS, buildSystemPrompt } from "@/lib/plugins";
+import { listCustomPlugins } from "@/lib/plugin-store";
 
 export const maxDuration = 300;
 
@@ -59,7 +60,8 @@ interface ChatRequestBody {
   tavilyApiKey?: string;
   model?: string;
   thinkingEffort?: string;
-  webSearchEnabled?: boolean;
+  /** "off" | "auto" | "always" — "auto" lets the model decide per message. */
+  webSearchMode?: "off" | "auto" | "always";
   enabledPluginIds?: string[];
   conversationHistory?: ChatMessage[];
   /** When set, this message and everything after it is dropped first. */
@@ -68,7 +70,7 @@ interface ChatRequestBody {
 
 /** One frame of our own SSE protocol (deliberately simpler than DeepSeek's). */
 type StreamEvent =
-  | { type: "status"; stage: "searching" | "thinking" | "writing" }
+  | { type: "status"; stage: "deciding" | "searching" | "thinking" | "writing" }
   | {
       type: "meta";
       conversationId: string | null;
@@ -76,6 +78,7 @@ type StreamEvent =
       resolvedEffort: string;
       thinkingEnabled: boolean;
       webSearchUsed: boolean;
+      searchReason: string;
       searchResults: { title: string; url: string; domain: string }[] | null;
       searchQueries: string[] | null;
       searchesPerformed: number;
@@ -113,7 +116,7 @@ export async function POST(req: NextRequest) {
     tavilyApiKey,
     model = "deepseek-v4-pro",
     thinkingEffort = "auto",
-    webSearchEnabled = false,
+    webSearchMode = "off",
     enabledPluginIds = [],
     conversationHistory = [],
     regenerateFromId,
@@ -133,17 +136,12 @@ export async function POST(req: NextRequest) {
   // "none" is our UI concept for "don't reason at all".
   const thinkingEnabled = resolvedEffort !== "none";
 
-  // Search runs only when the user explicitly enabled it AND a Tavily key
-  // exists. No heuristic override — the toggle means exactly what it says.
-  const doSearch = Boolean(webSearchEnabled && tavilyApiKey);
+  // Searching is only possible with a Tavily key. Whether one actually happens
+  // is decided inside the stream: "always" every turn, "auto" asks the model,
+  // "off" never.
+  const canSearch = Boolean(tavilyApiKey && webSearchMode !== "off");
 
   const title = deriveTitle(message);
-
-  const plugins = AVAILABLE_PLUGINS.map((p) => ({
-    ...p,
-    enabled: enabledPluginIds.includes(p.id),
-  }));
-  const systemPrompt = buildSystemPrompt(plugins);
 
   const encoder = new TextEncoder();
 
@@ -180,6 +178,20 @@ export async function POST(req: NextRequest) {
       let persisted = false;
 
       try {
+        // Built-ins plus the user's own saved plugins.
+        let customPlugins: Awaited<ReturnType<typeof listCustomPlugins>> = [];
+        try {
+          customPlugins = await listCustomPlugins();
+        } catch (e) {
+          console.error("Failed to load custom plugins:", e);
+        }
+        const systemPrompt = buildSystemPrompt(
+          [...AVAILABLE_PLUGINS, ...customPlugins].map((p) => ({
+            ...p,
+            enabled: enabledPluginIds.includes(p.id),
+          }))
+        );
+
         // Regenerate: drop the previous reply (and anything after it) so the
         // new one replaces it rather than appending a duplicate.
         if (regenerateFromId) {
@@ -204,7 +216,6 @@ export async function POST(req: NextRequest) {
               role: "user",
               content: message,
               thinkingEffort: resolvedEffort,
-              webSearchUsed: doSearch,
               createdAt: new Date().toISOString(),
             },
           ]);
@@ -222,13 +233,33 @@ export async function POST(req: NextRequest) {
         } | null = null;
         let searchSummary = "";
 
+        const recentContext = conversationHistory
+          .slice(-4)
+          .map((m) => `${m.role}: ${m.content}`)
+          .join("\n");
+
+        // Decide whether this turn needs the web. In "auto" the model itself
+        // judges (one cheap Flash call, thinking off) instead of a keyword
+        // guess, so ordinary coding questions skip the search entirely.
+        let doSearch = false;
+        let searchReason = "";
+        if (canSearch) {
+          if (webSearchMode === "always") {
+            doSearch = true;
+          } else {
+            send({ type: "status", stage: "deciding" });
+            const decision = await decideSearch(
+              message,
+              recentContext,
+              deepseekApiKey
+            );
+            doSearch = decision.needed;
+            searchReason = decision.reason;
+          }
+        }
+
         if (doSearch) {
           send({ type: "status", stage: "searching" });
-
-          const recentContext = conversationHistory
-            .slice(-4)
-            .map((m) => `${m.role}: ${m.content}`)
-            .join("\n");
 
           try {
             searchContext = await smartSearch(
@@ -256,6 +287,7 @@ export async function POST(req: NextRequest) {
           resolvedEffort,
           thinkingEnabled,
           webSearchUsed: doSearch,
+          searchReason,
           searchResults:
             searchContext?.results.map((r) => ({
               title: r.title,
