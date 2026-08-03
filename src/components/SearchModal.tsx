@@ -154,6 +154,8 @@ export function SearchModal({
         className={`relative flex w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-[#403c34] bg-[#201e1b] shadow-[0_28px_70px_rgba(0,0,0,0.55)] transition-all duration-200 ${
           visible ? "translate-y-0 opacity-100" : "-translate-y-2 opacity-0"
         }`}
+        role="dialog"
+        aria-modal="true"
       >
         {/* Input */}
         <div className="flex flex-none items-center gap-2.5 border-b border-[#2c2924] px-3.5 py-3">

@@ -125,7 +125,7 @@ export function Sidebar({
     >
       <div className="flex h-full min-w-[288px] flex-col">
         {/* New chat */}
-        <div className="flex items-center gap-2 px-3 pb-2.5 pt-2">
+        <div className="flex h-[60px] flex-none items-center gap-2 px-3">
           <button onClick={onNew} className="new-chat-btn">
             <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 5v14M5 12h14" />
