@@ -36,12 +36,20 @@ export function Dots({ size = 5 }: { size?: number }) {
 
 interface MessageBubbleProps {
   message: Message;
+  /** Only the newest reply offers regenerate, to avoid rewriting history. */
+  isLast?: boolean;
+  onRegenerate?: (assistantId: string) => void;
 }
 
-export function MessageBubble({ message }: MessageBubbleProps) {
+export function MessageBubble({
+  message,
+  isLast,
+  onRegenerate,
+}: MessageBubbleProps) {
   const [showThinking, setShowThinking] = useState(false);
   const [showSources, setShowSources] = useState(false);
   const [followThinking, setFollowThinking] = useState(true);
+  const [copiedMessage, setCopiedMessage] = useState(false);
   const thinkingRef = useRef<HTMLDivElement>(null);
   const isUser = message.role === "user";
 
@@ -58,6 +66,16 @@ export function MessageBubble({ message }: MessageBubbleProps) {
     const el = thinkingRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [message.reasoningContent, followThinking, showThinking]);
+
+  const copyMessage = async () => {
+    try {
+      await navigator.clipboard.writeText(message.content);
+      setCopiedMessage(true);
+      setTimeout(() => setCopiedMessage(false), 2000);
+    } catch {
+      /* clipboard unavailable on non-secure origins */
+    }
+  };
 
   const sourceCount = message.searchResults?.length ?? 0;
   const hasMeta = Boolean(
@@ -260,6 +278,27 @@ export function MessageBubble({ message }: MessageBubbleProps) {
               </div>
             )}
 
+            {/* Reply was cut short — offer to retry rather than leaving a
+                silently truncated answer looking complete. */}
+            {message.incomplete && !message.isStreaming && (
+              <div className="flex items-center gap-2.5 rounded-xl border border-[#cfa25a]/25 bg-[#cfa25a]/8 px-3 py-2">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} aria-hidden="true" className="flex-none text-[#cfa25a]">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+                </svg>
+                <span className="min-w-0 flex-1 text-[12px] leading-snug text-[#cfa25a]">
+                  This reply was interrupted and may be incomplete.
+                </span>
+                {onRegenerate && (
+                  <button
+                    onClick={() => onRegenerate(message.id)}
+                    className="flex-none rounded-md border border-[#cfa25a]/30 px-2 py-1 text-[11px] font-medium text-[#cfa25a] transition-colors hover:bg-[#cfa25a]/15"
+                  >
+                    Try again
+                  </button>
+                )}
+              </div>
+            )}
+
             {/* Main content. While streaming, an unterminated ``` fence is
                 replaced by a placeholder card — watching code type itself line
                 by line is noisy, and half-written markup renders as garbage. */}
@@ -314,6 +353,50 @@ export function MessageBubble({ message }: MessageBubbleProps) {
               </div>
             )}
 
+            {/* Actions on the newest completed reply */}
+            {isLast &&
+              !message.isStreaming &&
+              !message.isError &&
+              message.content && (
+                <div className="flex items-center gap-1 pt-0.5">
+                  <button
+                    onClick={copyMessage}
+                    title="Copy reply"
+                    className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-[11px] font-medium text-[#6d685d] transition-colors hover:bg-[#33302a] hover:text-[#ede9e2]"
+                  >
+                    {copiedMessage ? (
+                      <>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#7ba478" strokeWidth={2.2} aria-hidden="true">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M20 6L9 17l-5-5" />
+                        </svg>
+                        <span className="text-[#7ba478]">Copied</span>
+                      </>
+                    ) : (
+                      <>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+                          <rect x="9" y="9" width="11" height="11" rx="2" />
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M5 15H4a1 1 0 01-1-1V4a1 1 0 011-1h10a1 1 0 011 1v1" />
+                        </svg>
+                        Copy
+                      </>
+                    )}
+                  </button>
+
+                  {onRegenerate && (
+                    <button
+                      onClick={() => onRegenerate(message.id)}
+                      title="Generate a different reply"
+                      className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-[11px] font-medium text-[#6d685d] transition-colors hover:bg-[#33302a] hover:text-[#ede9e2]"
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} aria-hidden="true">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v6h6M20 20v-6h-6" />
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M20 9A8 8 0 006 5.3L4 7m0 8a8 8 0 0014 3.7l2-2" />
+                      </svg>
+                      Regenerate
+                    </button>
+                  )}
+                </div>
+              )}
           </div>
         )}
       </div>
