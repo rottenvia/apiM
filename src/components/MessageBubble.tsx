@@ -1,10 +1,21 @@
 "use client";
 
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  cloneElement,
+  isValidElement,
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import type { ReactElement, ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Message } from "@/app/page";
+import { buildSearchRegex } from "@/lib/chat-search";
 import { CodeBlock } from "@/components/CodeBlock";
 
 /**
@@ -15,6 +26,124 @@ import { CodeBlock } from "@/components/CodeBlock";
 const markdownComponents: Components = {
   pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
 };
+
+/**
+ * Build a react-markdown `components` map that highlights matches inside the
+ * text of each rendered block.
+ *
+ * Highlighting has to happen per rendered element rather than around the
+ * <ReactMarkdown> element itself: at that point the markdown has not been
+ * parsed, so there are no text nodes to walk. The counter is shared across
+ * every block so match numbering stays continuous down the message.
+ */
+function highlightingComponents(
+  regex: RegExp,
+  activeIndex: number
+): Components {
+  const counter = { n: 0 };
+  const wrap = (Tag: keyof React.JSX.IntrinsicElements) => {
+    const Highlighted = ({
+      children,
+      // react-markdown passes the mdast node through; forwarding it would
+      // render node="[object Object]" as a DOM attribute.
+      node: _node,
+      ...props
+    }: {
+      children?: ReactNode;
+      node?: unknown;
+    }) => (
+      <Tag {...props}>
+        {highlightNode(children, regex, activeIndex, counter)}
+      </Tag>
+    );
+    Highlighted.displayName = `Highlighted(${Tag})`;
+    return Highlighted;
+  };
+
+  return {
+    ...markdownComponents,
+    p: wrap("p"),
+    li: wrap("li"),
+    h1: wrap("h1"),
+    h2: wrap("h2"),
+    h3: wrap("h3"),
+    h4: wrap("h4"),
+    td: wrap("td"),
+    th: wrap("th"),
+    blockquote: wrap("blockquote"),
+  };
+}
+
+/**
+ * Wrap matches of `regex` in <mark> inside already-rendered markdown output.
+ *
+ * Operates on the rendered React tree rather than the raw source, so the
+ * markdown is parsed normally first and highlighting can never corrupt it.
+ * Code blocks are skipped: CodeBlock hands its content to the artifact panel
+ * verbatim, and injecting elements there would break copy and download.
+ */
+function highlightNode(
+  node: ReactNode,
+  regex: RegExp,
+  activeIndex: number,
+  counter: { n: number },
+  key = 0
+): ReactNode {
+  if (typeof node === "string") {
+    regex.lastIndex = 0;
+    if (!regex.test(node)) return node;
+    regex.lastIndex = 0;
+
+    const parts: ReactNode[] = [];
+    let cursor = 0;
+    let match: RegExpExecArray | null;
+
+    while ((match = regex.exec(node)) !== null) {
+      if (match.index > cursor) parts.push(node.slice(cursor, match.index));
+      const isActive = counter.n === activeIndex;
+      parts.push(
+        <mark
+          key={`${key}-${match.index}`}
+          data-active-match={isActive || undefined}
+          className={
+            isActive
+              ? "rounded-[3px] bg-[#c96442] px-0.5 text-white"
+              : "rounded-[3px] bg-[#c96442]/25 px-0.5 text-[#ede9e2]"
+          }
+        >
+          {match[0]}
+        </mark>
+      );
+      counter.n += 1;
+      cursor = match.index + match[0].length;
+      if (match[0].length === 0) break;
+    }
+
+    if (cursor < node.length) parts.push(node.slice(cursor));
+    return parts;
+  }
+
+  if (Array.isArray(node)) {
+    return node.map((child, i) =>
+      highlightNode(child, regex, activeIndex, counter, i)
+    );
+  }
+
+  if (isValidElement(node)) {
+    const element = node as ReactElement<{ children?: ReactNode }>;
+    // Leave code blocks untouched.
+    if (element.type === CodeBlock) return node;
+
+    const children = element.props?.children;
+    if (children === undefined) return node;
+
+    return cloneElement(element, {
+      children: highlightNode(children, regex, activeIndex, counter, key),
+    });
+  }
+
+  return node;
+}
 
 /**
  * Bouncing dots. Sized inline so they render correctly regardless of CSS
@@ -39,12 +168,20 @@ interface MessageBubbleProps {
   /** Only the newest reply offers regenerate, to avoid rewriting history. */
   isLast?: boolean;
   onRegenerate?: (assistantId: string) => void;
+  /** Active in-chat search term, highlighted in the reply text. */
+  searchQuery?: string;
+  searchWholeWord?: boolean;
+  /** Global index of the focused match, or -1 when the term is elsewhere. */
+  activeMatchIndex?: number;
 }
 
 function MessageBubbleImpl({
   message,
   isLast,
   onRegenerate,
+  searchQuery,
+  searchWholeWord = true,
+  activeMatchIndex = -1,
 }: MessageBubbleProps) {
   const [showThinking, setShowThinking] = useState(false);
   const [showSources, setShowSources] = useState(false);
@@ -76,6 +213,11 @@ function MessageBubbleImpl({
       /* clipboard unavailable on non-secure origins */
     }
   };
+
+  const searchRegex = useMemo(
+    () => (searchQuery ? buildSearchRegex(searchQuery, searchWholeWord) : null),
+    [searchQuery, searchWholeWord]
+  );
 
   const sourceCount = message.searchResults?.length ?? 0;
   const hasMeta = Boolean(
@@ -137,7 +279,13 @@ function MessageBubbleImpl({
         {/* User message */}
         {isUser && (
           <div className="text-[15px] leading-6 text-text-primary">
-            {message.content}
+            <SearchHighlight
+              query={searchQuery}
+              wholeWord={searchWholeWord}
+              activeIndex={activeMatchIndex}
+            >
+              {message.content}
+            </SearchHighlight>
           </div>
         )}
 
@@ -310,7 +458,11 @@ function MessageBubbleImpl({
               >
                 <ReactMarkdown
                   remarkPlugins={[remarkGfm]}
-                  components={markdownComponents}
+                  components={
+                    searchRegex
+                      ? highlightingComponents(searchRegex, activeMatchIndex)
+                      : markdownComponents
+                  }
                 >
                   {displayContent}
                 </ReactMarkdown>
@@ -405,6 +557,29 @@ function MessageBubbleImpl({
 }
 
 /**
+ * Applies highlighting to plain text (user bubbles, which are not markdown).
+ */
+function SearchHighlight({
+  query,
+  wholeWord,
+  activeIndex,
+  children,
+}: {
+  query?: string;
+  wholeWord: boolean;
+  activeIndex: number;
+  children: ReactNode;
+}) {
+  const regex = useMemo(
+    () => (query ? buildSearchRegex(query, wholeWord) : null),
+    [query, wholeWord]
+  );
+
+  if (!regex) return <>{children}</>;
+  return <>{highlightNode(children, regex, activeIndex, { n: 0 })}</>;
+}
+
+/**
  * Memoised so typing in the composer doesn't re-render the whole transcript.
  *
  * Re-parsing markdown for every message on each keystroke cost ~240ms at 70
@@ -426,6 +601,9 @@ export const MessageBubble = memo(MessageBubbleImpl, (prev, next) => {
     a.thinkingEffort === b.thinkingEffort &&
     a.searchResults === b.searchResults &&
     prev.isLast === next.isLast &&
-    prev.onRegenerate === next.onRegenerate
+    prev.onRegenerate === next.onRegenerate &&
+    prev.searchQuery === next.searchQuery &&
+    prev.searchWholeWord === next.searchWholeWord &&
+    prev.activeMatchIndex === next.activeMatchIndex
   );
 });
