@@ -21,13 +21,13 @@ export function MessageBubble({ message }: MessageBubbleProps) {
       <div
         className={`max-w-[85%] md:max-w-[75%] ${
           isUser
-            ? "bg-accent/15 border border-accent/25 rounded-2xl rounded-br-md px-5 py-3"
+            ? "rounded-[20px] bg-bg-elevated px-4 py-2.5"
             : "bg-transparent"
         }`}
       >
         {/* User message */}
         {isUser && (
-          <div className="text-sm leading-relaxed text-text-primary">
+          <div className="text-[15px] leading-6 text-text-primary">
             {message.content}
           </div>
         )}
@@ -38,21 +38,21 @@ export function MessageBubble({ message }: MessageBubbleProps) {
             {/* Status badges */}
             <div className="flex flex-wrap items-center gap-2">
               {message.thinkingEffort && message.thinkingEffort !== "none" && (
-                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-thinking-glow text-thinking text-xs font-medium border border-thinking/20">
+                <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-thinking-glow text-thinking text-xs font-medium border border-thinking/20">
                   <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 3l1.85 5.15L19 10l-5.15 1.85L12 17l-1.85-5.15L5 10l5.15-1.85L12 3z" />
                   </svg>
                   Think: {message.thinkingEffort}
                 </span>
               )}
               {message.webSearchUsed && (
-                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-search-glow text-search text-xs font-medium border border-search/20">
+                <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-search-glow text-search text-xs font-medium border border-search/20">
                   <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
                     <circle cx="11" cy="11" r="8" />
                     <path strokeLinecap="round" d="M21 21l-4.35-4.35" />
                   </svg>
-                  Web Search
-                  {message.searchesPerformed ? ` (${message.searchesPerformed})` : ""}
+                  Web search
+                  {message.searchesPerformed ? ` · ${message.searchesPerformed}` : ""}
                 </span>
               )}
               {message.tokenCount && (
@@ -77,7 +77,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
                   >
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                   </svg>
-                  💭 View Thinking Process
+                  View thinking process
                 </button>
                 {showThinking && (
                   <div className="px-4 py-3 text-sm text-text-secondary leading-relaxed bg-bg-secondary/50 max-h-96 overflow-y-auto">
@@ -90,7 +90,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
             )}
 
             {/* Main content */}
-            <div className="prose-chat text-sm leading-relaxed text-text-primary">
+            <div className="prose-chat text-[15px] leading-relaxed text-text-primary">
               <ReactMarkdown remarkPlugins={[remarkGfm]}>
                 {message.content}
               </ReactMarkdown>
@@ -111,10 +111,10 @@ export function MessageBubble({ message }: MessageBubbleProps) {
                   >
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                   </svg>
-                  🔗 Sources ({message.searchResults.length})
+                  Sources · {message.searchResults.length}
                   {message.searchQueries && (
-                    <span className="text-xs opacity-70 ml-1">
-                      — Searched: {message.searchQueries.slice(0, 2).map((q) => `"${q}"`).join(", ")}
+                    <span className="text-xs opacity-70 ml-1 truncate">
+                      — {message.searchQueries.slice(0, 2).map((q) => `"${q}"`).join(", ")}
                     </span>
                   )}
                 </button>

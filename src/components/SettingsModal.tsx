@@ -215,22 +215,21 @@ export function SettingsModal({
             </label>
             <div className="grid grid-cols-5 gap-1.5">
               {[
-                { id: "auto", label: "Auto", icon: "✨" },
-                { id: "none", label: "None", icon: "⚡" },
-                { id: "low", label: "Low", icon: "💫" },
-                { id: "high", label: "High", icon: "🧠" },
-                { id: "max", label: "Max", icon: "🔥" },
+                { id: "auto", label: "Auto" },
+                { id: "none", label: "None" },
+                { id: "low", label: "Low" },
+                { id: "high", label: "High" },
+                { id: "max", label: "Max" },
               ].map((e) => (
                 <button
                   key={e.id}
                   onClick={() => onDefaultEffortChange(e.id)}
-                  className={`px-2 py-2 rounded-xl text-xs font-medium transition-all duration-200 ${
+                  className={`px-2 py-2.5 rounded-xl text-xs font-medium transition-all duration-200 ${
                     defaultEffort === e.id
                       ? "bg-accent/15 text-accent-light border border-accent/30"
                       : "bg-bg-tertiary text-text-secondary border border-border hover:border-border-light"
                   }`}
                 >
-                  <span className="block text-base mb-0.5">{e.icon}</span>
                   {e.label}
                 </button>
               ))}
@@ -240,10 +239,7 @@ export function SettingsModal({
 
         {/* Footer */}
         <div className="px-6 py-4 border-t border-border flex justify-end">
-          <button
-            onClick={onClose}
-            className="px-5 py-2 rounded-xl bg-accent text-white text-sm font-medium shadow-lg shadow-accent/25 hover:bg-accent-light hover:shadow-accent/35 transition-all duration-200 active:scale-95"
-          >
+          <button onClick={onClose} className="btn-primary">
             Done
           </button>
         </div>

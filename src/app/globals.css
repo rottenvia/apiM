@@ -1,29 +1,40 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Instrument+Sans:ital,wght@0,400..700;1,400..700&family=JetBrains+Mono:wght@400;500&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&display=swap');
 
 @import "tailwindcss";
 
+/* ---------------------------------------------------------------------------
+   Design tokens — warm, neutral dark palette (Claude-inspired).
+   One restrained terracotta accent. No rainbow gradients.
+--------------------------------------------------------------------------- */
 @theme {
-  --color-bg-primary: #0a0a0f;
-  --color-bg-secondary: #12121a;
-  --color-bg-tertiary: #1a1a26;
-  --color-bg-elevated: #22222e;
-  --color-bg-hover: #2a2a38;
-  --color-border: #2a2a3a;
-  --color-border-light: #3a3a4a;
-  --color-text-primary: #e8e8f0;
-  --color-text-secondary: #9898a8;
-  --color-text-muted: #686878;
-  --color-accent: #7c5cfc;
-  --color-accent-light: #9b7fff;
-  --color-accent-glow: rgba(124, 92, 252, 0.15);
-  --color-success: #22c55e;
-  --color-warning: #f59e0b;
-  --color-danger: #ef4444;
-  --color-info: #3b82f6;
-  --color-search: #06b6d4;
-  --color-search-glow: rgba(6, 182, 212, 0.15);
-  --color-thinking: #f59e0b;
-  --color-thinking-glow: rgba(245, 158, 11, 0.15);
+  --color-bg-primary: #191715;
+  --color-bg-secondary: #141210;
+  --color-bg-tertiary: #201e1b;
+  --color-bg-elevated: #2a2723;
+  --color-bg-hover: #33302a;
+  --color-border: #2c2924;
+  --color-border-light: #403c34;
+  --color-text-primary: #ede9e2;
+  --color-text-secondary: #a29d92;
+  --color-text-muted: #6d685d;
+
+  --color-accent: #c96442;
+  --color-accent-light: #d97f5d;
+  --color-accent-glow: rgba(201, 100, 66, 0.14);
+
+  --color-success: #7ba478;
+  --color-warning: #cfa25a;
+  --color-danger: #cf6a5f;
+  --color-info: #6f98bd;
+  --color-search: #6ba3a0;
+  --color-search-glow: rgba(107, 163, 160, 0.12);
+  --color-thinking: #cfa25a;
+  --color-thinking-glow: rgba(207, 162, 90, 0.12);
+
+  --font-sans: 'Instrument Sans', ui-sans-serif, system-ui, -apple-system,
+    'Segoe UI', sans-serif;
+  --font-serif: 'Source Serif 4', Georgia, 'Times New Roman', serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
 }
 
 * {
@@ -31,15 +42,270 @@
   scrollbar-color: var(--color-border) transparent;
 }
 
+html,
 body {
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  height: 100%;
+}
+
+body {
   background: var(--color-bg-primary);
   color: var(--color-text-primary);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }
 
-/* Markdown styling */
+button {
+  cursor: pointer;
+}
+button:disabled {
+  cursor: not-allowed;
+}
+
+::selection {
+  background: color-mix(in oklab, var(--color-accent) 32%, transparent);
+}
+
+:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--color-accent) 55%, transparent);
+  outline-offset: 1px;
+}
+textarea:focus-visible,
+input:focus-visible {
+  outline: none;
+}
+
+/* ---------------------------------------------------------------------------
+   Unified controls — every toolbar control shares one geometry so the
+   composer row stays perfectly symmetric at any resolution.
+--------------------------------------------------------------------------- */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 10px;
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  user-select: none;
+  transition:
+    color 0.15s ease,
+    background-color 0.15s ease,
+    border-color 0.15s ease;
+}
+.chip:hover {
+  color: var(--color-text-primary);
+  background: var(--color-bg-hover);
+  border-color: var(--color-border-light);
+}
+.chip[aria-expanded='true'] {
+  color: var(--color-text-primary);
+  background: var(--color-bg-hover);
+  border-color: var(--color-border-light);
+}
+.chip[data-active='true'] {
+  color: var(--color-accent-light);
+  background: color-mix(in oklab, var(--color-accent) 10%, transparent);
+  border-color: color-mix(in oklab, var(--color-accent) 32%, transparent);
+}
+.chip[data-active='true']:hover {
+  color: var(--color-accent-light);
+  background: color-mix(in oklab, var(--color-accent) 16%, transparent);
+  border-color: color-mix(in oklab, var(--color-accent) 44%, transparent);
+}
+.chip > svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  color: var(--color-text-secondary);
+  transition:
+    color 0.15s ease,
+    background-color 0.15s ease;
+}
+.icon-btn:hover {
+  color: var(--color-text-primary);
+  background: var(--color-bg-hover);
+}
+.icon-btn > svg {
+  width: 18px;
+  height: 18px;
+}
+
+.send-btn {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 9999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease,
+    transform 0.1s ease;
+}
+.send-btn > svg {
+  width: 16px;
+  height: 16px;
+}
+.send-btn[data-enabled='true'] {
+  background: var(--color-accent);
+  color: #fff;
+}
+.send-btn[data-enabled='true']:hover {
+  background: var(--color-accent-light);
+}
+.send-btn[data-enabled='true']:active {
+  transform: scale(0.94);
+}
+.send-btn[data-enabled='false'] {
+  background: var(--color-bg-elevated);
+  color: var(--color-text-muted);
+}
+
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 18px;
+  border-radius: 12px;
+  border: none;
+  background: var(--color-accent);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
+  transition:
+    background-color 0.15s ease,
+    transform 0.1s ease;
+}
+.btn-primary:hover {
+  background: var(--color-accent-light);
+}
+.btn-primary:active {
+  transform: scale(0.98);
+}
+.btn-primary > svg {
+  width: 16px;
+  height: 16px;
+}
+
+.new-chat-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 40px;
+  padding: 0 12px;
+  border-radius: 12px;
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-primary);
+  font-size: 14px;
+  font-weight: 500;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease;
+}
+.new-chat-btn:hover {
+  background: var(--color-bg-hover);
+  border-color: var(--color-border-light);
+}
+.new-chat-btn > svg {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  color: var(--color-text-secondary);
+  transition: color 0.15s ease;
+}
+.new-chat-btn:hover > svg {
+  color: var(--color-text-primary);
+}
+
+/* ---------------------------------------------------------------------------
+   Popovers — anchored above the composer, centered on the composer column,
+   internally scrollable so they never cover the chat bar.
+--------------------------------------------------------------------------- */
+.popover-card {
+  overflow: hidden;
+  border-radius: 16px;
+  border: 1px solid var(--color-border-light);
+  background: var(--color-bg-elevated);
+  box-shadow:
+    0 18px 48px rgba(0, 0, 0, 0.5),
+    0 2px 8px rgba(0, 0, 0, 0.3);
+  animation: popover-in 0.16s ease-out;
+}
+
+.popover-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  color: var(--color-text-muted);
+  transition:
+    color 0.15s ease,
+    background-color 0.15s ease;
+}
+.popover-close:hover {
+  color: var(--color-text-primary);
+  background: var(--color-bg-hover);
+}
+.popover-close > svg {
+  width: 13px;
+  height: 13px;
+}
+
+.option-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 10px;
+  text-align: left;
+  transition: background-color 0.15s ease;
+}
+.option-item:hover {
+  background: var(--color-bg-hover);
+}
+.option-item[data-active='true'] {
+  background: color-mix(in oklab, var(--color-accent) 8%, transparent);
+}
+
+/* Auto-dismiss margin helpers */
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* ---------------------------------------------------------------------------
+   Markdown content
+--------------------------------------------------------------------------- */
 .prose-chat {
   line-height: 1.7;
 }
@@ -48,14 +314,17 @@ body {
   margin: 0.5em 0;
 }
 
-.prose-chat h1, .prose-chat h2, .prose-chat h3 {
-  font-weight: 700;
+.prose-chat h1,
+.prose-chat h2,
+.prose-chat h3 {
+  font-weight: 650;
   margin-top: 1em;
   margin-bottom: 0.5em;
+  letter-spacing: -0.01em;
 }
 
 .prose-chat pre {
-  background: var(--color-bg-primary);
+  background: var(--color-bg-secondary);
   border: 1px solid var(--color-border);
   border-radius: 12px;
   padding: 1em;
@@ -65,18 +334,20 @@ body {
 }
 
 .prose-chat code {
-  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-family: var(--font-mono);
   font-size: 0.875em;
 }
 
 .prose-chat :not(pre) > code {
   background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
   padding: 0.15em 0.4em;
   border-radius: 6px;
   font-size: 0.85em;
 }
 
-.prose-chat ul, .prose-chat ol {
+.prose-chat ul,
+.prose-chat ol {
   padding-left: 1.5em;
   margin: 0.5em 0;
 }
@@ -104,7 +375,8 @@ body {
   margin: 0.5em 0;
 }
 
-.prose-chat th, .prose-chat td {
+.prose-chat th,
+.prose-chat td {
   border: 1px solid var(--color-border);
   padding: 0.5em 0.75em;
   text-align: left;
@@ -115,85 +387,45 @@ body {
   font-weight: 600;
 }
 
-/* Animations */
+/* ---------------------------------------------------------------------------
+   Animations
+--------------------------------------------------------------------------- */
 @keyframes fadeIn {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
-@keyframes pulse-glow {
-  0%, 100% { box-shadow: 0 0 20px rgba(124, 92, 252, 0.1); }
-  50% { box-shadow: 0 0 30px rgba(124, 92, 252, 0.25); }
+@keyframes popover-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 @keyframes thinking-pulse {
-  0%, 100% { opacity: 0.5; }
-  50% { opacity: 1; }
-}
-
-@keyframes shimmer {
-  0% { background-position: -200% 0; }
-  100% { background-position: 200% 0; }
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 1;
+  }
 }
 
 .animate-fade-in {
   animation: fadeIn 0.3s ease-out forwards;
 }
 
-.animate-pulse-glow {
-  animation: pulse-glow 2s infinite;
-}
-
 .animate-thinking {
   animation: thinking-pulse 1.5s ease-in-out infinite;
-}
-
-.shimmer {
-  background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.05) 50%, transparent 100%);
-  background-size: 200% 100%;
-  animation: shimmer 2s infinite;
-}
-
-/* Tooltip */
-.tooltip-wrapper {
-  position: relative;
-}
-
-.tooltip-content {
-  position: absolute;
-  bottom: calc(100% + 8px);
-  left: 50%;
-  transform: translateX(-50%);
-  background: var(--color-bg-elevated);
-  border: 1px solid var(--color-border);
-  border-radius: 12px;
-  padding: 12px 16px;
-  font-size: 0.8rem;
-  line-height: 1.5;
-  white-space: normal;
-  width: 280px;
-  opacity: 0;
-  visibility: hidden;
-  transition: all 0.2s ease;
-  z-index: 50;
-  box-shadow: 0 8px 32px rgba(0,0,0,0.4);
-  pointer-events: none;
-}
-
-.tooltip-wrapper:hover .tooltip-content {
-  opacity: 1;
-  visibility: visible;
-}
-
-/* Custom button styles */
-.btn-glass {
-  backdrop-filter: blur(12px);
-  background: rgba(255,255,255,0.04);
-  border: 1px solid rgba(255,255,255,0.08);
-  transition: all 0.2s ease;
-}
-
-.btn-glass:hover {
-  background: rgba(255,255,255,0.08);
-  border-color: rgba(255,255,255,0.15);
 }

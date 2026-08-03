@@ -11,59 +11,32 @@ const EFFORTS = [
   {
     id: "auto",
     label: "Auto",
-    icon: "✨",
-    color: "text-purple-400",
-    bgColor: "bg-purple-400/15",
-    borderColor: "border-purple-400/30",
-    description:
-      "Automatically determines the best effort level based on your message complexity. Uses minimal effort for simple queries and maximum for complex ones.",
-    warning:
-      "⚠️ Auto mode may use high effort for complex messages, which consumes more tokens. If you want to save tokens, use a fixed effort level.",
+    description: "Adjusts reasoning depth per message.",
+    warning: "Can spend more tokens on complex prompts.",
   },
   {
     id: "none",
     label: "None",
-    icon: "⚡",
-    color: "text-green-400",
-    bgColor: "bg-green-400/15",
-    borderColor: "border-green-400/30",
-    description:
-      "Disables thinking entirely. Fastest responses, lowest token usage. Best for simple questions.",
+    description: "No reasoning. Fastest and cheapest responses.",
     warning: null,
   },
   {
     id: "low",
     label: "Low",
-    icon: "💫",
-    color: "text-blue-400",
-    bgColor: "bg-blue-400/15",
-    borderColor: "border-blue-400/30",
-    description:
-      "Light reasoning. Good balance of speed and quality for moderate questions.",
+    description: "Light reasoning for everyday questions.",
     warning: null,
   },
   {
     id: "high",
     label: "High",
-    icon: "🧠",
-    color: "text-amber-400",
-    bgColor: "bg-amber-400/15",
-    borderColor: "border-amber-400/30",
-    description:
-      "Deep reasoning chain. Significantly better for complex problems, debugging, and analysis.",
+    description: "Deep reasoning for complex problems and debugging.",
     warning: null,
   },
   {
     id: "max",
     label: "Max",
-    icon: "🔥",
-    color: "text-red-400",
-    bgColor: "bg-red-400/15",
-    borderColor: "border-red-400/30",
-    description:
-      "Maximum reasoning depth. Uses up to 50K+ tokens internally. Best for proofs, architecture, and complex multi-step problems.",
-    warning:
-      "⚠️ Max effort can use 50K+ thinking tokens per message. This significantly increases cost. Use only for genuinely complex tasks.",
+    description: "Maximum depth — 50K+ thinking tokens per reply.",
+    warning: "Slowest and most expensive. Use sparingly.",
   },
 ];
 
@@ -72,12 +45,13 @@ export function ThinkingEffortSelector({
   onChange,
 }: ThinkingEffortSelectorProps) {
   const [isOpen, setIsOpen] = useState(false);
-  const [hoveredId, setHoveredId] = useState<string | null>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
   const current = EFFORTS.find((e) => e.id === value) || EFFORTS[0];
 
+  // Close on outside click
   useEffect(() => {
+    if (!isOpen) return;
     const handleClickOutside = (e: MouseEvent) => {
       if (
         dropdownRef.current &&
@@ -88,99 +62,155 @@ export function ThinkingEffortSelector({
     };
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, []);
+  }, [isOpen]);
 
-  const hoveredEffort = hoveredId
-    ? EFFORTS.find((e) => e.id === hoveredId)
-    : null;
+  // Close on Escape
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setIsOpen(false);
+    };
+    document.addEventListener("keydown", handleEscape);
+    return () => document.removeEventListener("keydown", handleEscape);
+  }, [isOpen]);
 
   return (
-    <div className="relative" ref={dropdownRef}>
+    // NOTE: no `relative` here — the popover anchors to the composer wrapper
+    // (its nearest positioned ancestor) so it is always centered above the
+    // chat bar instead of covering it or hanging crookedly off this button.
+    <div ref={dropdownRef}>
       <button
-        onClick={() => setIsOpen(!isOpen)}
-        className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-medium transition-all duration-200 ${current.bgColor} ${current.color} border ${current.borderColor} shadow-sm`}
+        onClick={() => setIsOpen((o) => !o)}
+        className="chip"
+        data-active={value !== "auto"}
+        aria-expanded={isOpen}
+        aria-haspopup="listbox"
+        title="Thinking effort — how deeply the model reasons"
       >
-        <span>{current.icon}</span>
-        <span>Think: {current.label}</span>
         <svg
-          className={`w-3 h-3 transition-transform duration-200 ${isOpen ? "rotate-180" : ""}`}
+          viewBox="0 0 24 24"
           fill="none"
           stroke="currentColor"
-          viewBox="0 0 24 24"
+          strokeWidth={1.6}
         >
           <path
             strokeLinecap="round"
             strokeLinejoin="round"
-            strokeWidth={2}
-            d="M19 9l-7 7-7-7"
+            d="M12 3l1.85 5.15L19 10l-5.15 1.85L12 17l-1.85-5.15L5 10l5.15-1.85L12 3z"
           />
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            d="M18.5 15.5l.75 2 2 .75-2 .75-.75 2-.75-2-2-.75 2-.75.75-2z"
+          />
+        </svg>
+        <span>{current.label}</span>
+        <svg
+          style={{ width: 11, height: 11 }}
+          className={`opacity-60 transition-transform duration-200 ${isOpen ? "rotate-180" : ""}`}
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={2}
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" d="M6 9l6 6 6-6" />
         </svg>
       </button>
 
       {isOpen && (
-        <div className="absolute bottom-full mb-2 left-0 w-80 bg-bg-elevated border border-border-light rounded-2xl shadow-2xl shadow-black/40 overflow-hidden z-50 animate-fade-in">
-          <div className="px-4 py-3 border-b border-border">
-            <h3 className="text-sm font-semibold text-text-primary">
-              Thinking Effort
-            </h3>
-            <p className="text-xs text-text-secondary mt-0.5">
-              Control how deeply the AI reasons about your messages
-            </p>
-          </div>
-
-          <div className="p-2">
-            {EFFORTS.map((effort) => (
-              <button
-                key={effort.id}
-                onClick={() => {
-                  onChange(effort.id);
-                  setIsOpen(false);
-                }}
-                onMouseEnter={() => setHoveredId(effort.id)}
-                onMouseLeave={() => setHoveredId(null)}
-                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left transition-all duration-150 ${
-                  value === effort.id
-                    ? `${effort.bgColor} ${effort.color} border ${effort.borderColor}`
-                    : "hover:bg-bg-hover text-text-secondary hover:text-text-primary border border-transparent"
-                }`}
-              >
-                <span className="text-base">{effort.icon}</span>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium">{effort.label}</p>
-                  <p className="text-[11px] opacity-70 truncate">
-                    {effort.description.substring(0, 60)}...
-                  </p>
-                </div>
-                {value === effort.id && (
-                  <svg
-                    className="w-4 h-4 flex-shrink-0"
-                    fill="currentColor"
-                    viewBox="0 0 20 20"
-                  >
-                    <path
-                      fillRule="evenodd"
-                      d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
-                      clipRule="evenodd"
-                    />
-                  </svg>
-                )}
-              </button>
-            ))}
-          </div>
-
-          {/* Hover detail panel */}
-          {hoveredEffort && (
-            <div className="border-t border-border px-4 py-3 bg-bg-secondary/50">
-              <p className="text-xs text-text-secondary leading-relaxed">
-                {hoveredEffort.description}
-              </p>
-              {hoveredEffort.warning && (
-                <p className="text-xs text-warning mt-2 leading-relaxed">
-                  {hoveredEffort.warning}
+        <div className="absolute bottom-full left-1/2 z-50 mb-3 w-[min(21rem,calc(100vw-1.5rem))] -translate-x-1/2">
+          <div className="popover-card">
+            {/* Header with dedicated close button */}
+            <div className="flex items-start justify-between gap-3 border-b border-border px-4 py-3">
+              <div className="min-w-0">
+                <p className="text-[13px] font-semibold leading-5 text-text-primary">
+                  Thinking effort
                 </p>
-              )}
+                <p className="mt-0.5 text-[11px] leading-4 text-text-muted">
+                  How deeply the model reasons before replying
+                </p>
+              </div>
+              <button
+                onClick={() => setIsOpen(false)}
+                className="popover-close"
+                aria-label="Close"
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth={2}
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M6 18L18 6M6 6l12 12"
+                  />
+                </svg>
+              </button>
             </div>
-          )}
+
+            {/* Scrollable list — never grows over the chat bar */}
+            <div
+              role="listbox"
+              aria-label="Thinking effort"
+              className="max-h-[min(22rem,calc(100dvh-260px))] overflow-y-auto p-1.5"
+            >
+              {EFFORTS.map((effort) => {
+                const selected = value === effort.id;
+                return (
+                  <button
+                    key={effort.id}
+                    role="option"
+                    aria-selected={selected}
+                    data-active={selected}
+                    className="option-item"
+                    onClick={() => {
+                      onChange(effort.id);
+                      setIsOpen(false);
+                    }}
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <span
+                          className={`text-[13px] font-medium leading-5 ${
+                            selected
+                              ? "text-accent-light"
+                              : "text-text-primary"
+                          }`}
+                        >
+                          {effort.label}
+                        </span>
+                        {selected && (
+                          <svg
+                            className="h-4 w-4 flex-none text-accent"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth={2.2}
+                          >
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              d="M5 13l4 4L19 7"
+                            />
+                          </svg>
+                        )}
+                      </div>
+                      <p className="mt-0.5 text-xs leading-5 text-text-secondary">
+                        {effort.description}
+                      </p>
+                      {effort.warning && (
+                        <p className="mt-1 text-[11px] leading-4 text-warning">
+                          {effort.warning}
+                        </p>
+                      )}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
         </div>
       )}
     </div>
