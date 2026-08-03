@@ -58,6 +58,7 @@ type StreamEvent =
   | {
       type: "meta";
       conversationId: string | null;
+      title: string;
       resolvedEffort: string;
       thinkingEnabled: boolean;
       webSearchUsed: boolean;
@@ -79,8 +80,10 @@ type StreamEvent =
 export interface Conversation {
   id: string;
   title: string;
+  archived: boolean;
   createdAt: string;
   updatedAt: string;
+  messageCount?: number;
 }
 
 /** Shape of a successful POST /api/chat response. */
@@ -161,42 +164,54 @@ export default function Home() {
     }
   }, [deepseekKey, tavilyKey, model, thinkingEffort, enabledPlugins]);
 
-  // Load conversations. Guard against non-JSON responses (HTML error pages)
-  // so a misconfigured backend degrades to "no history" instead of throwing.
-  useEffect(() => {
-    fetch("/api/conversations")
-      .then(async (r) => (r.ok ? ((await r.json()) as unknown) : null))
-      .then((data) => {
-        if (Array.isArray(data)) setConversations(data as Conversation[]);
-      })
-      .catch(() => {});
+  // Load the conversation list. Guarded against non-JSON responses so a
+  // backend problem degrades to "no history" instead of throwing.
+  const refreshConversations = useCallback(async () => {
+    try {
+      const res = await fetch("/api/conversations");
+      if (!res.ok) return;
+      const data = (await res.json()) as unknown;
+      if (Array.isArray(data)) setConversations(data as Conversation[]);
+    } catch {
+      /* ignore */
+    }
   }, []);
+
+  useEffect(() => {
+    // Deferred to a microtask so the fetch's setState never lands
+    // synchronously inside the effect body and cascade a re-render.
+    queueMicrotask(() => {
+      void refreshConversations();
+    });
+  }, [refreshConversations]);
 
   const loadConversation = useCallback(async (id: string) => {
     setCurrentConvId(id);
     try {
       const res = await fetch(`/api/conversations/${id}`);
       if (!res.ok) return;
-      const data = (await res.json()) as unknown;
-      if (Array.isArray(data)) {
-        setMessages(
-          data.map((m: Record<string, unknown>) => ({
-            // Drizzle returns the schema's camelCase property names, not the
-            // underlying snake_case column names. Reading snake_case here
-            // silently dropped reasoning, sources and token counts whenever a
-            // saved conversation was reopened.
+      // The store returns the whole conversation object, messages included.
+      const data = (await res.json()) as { messages?: unknown };
+      const list = Array.isArray(data.messages) ? data.messages : [];
+      setMessages(
+        list.map((raw) => {
+          const m = raw as Record<string, unknown>;
+          return {
             id: m.id as string,
             role: m.role as "user" | "assistant",
-            content: m.content as string,
+            content: (m.content as string) ?? "",
             reasoningContent: m.reasoningContent as string | null | undefined,
             thinkingEffort: m.thinkingEffort as string | undefined,
             webSearchUsed: m.webSearchUsed as boolean | undefined,
             searchResults: parseSearchResults(m.searchResults),
+            searchQueries: Array.isArray(m.searchQueries)
+              ? (m.searchQueries as string[])
+              : undefined,
             tokenCount: m.tokenCount as number | undefined,
             createdAt: m.createdAt as string | undefined,
-          }))
-        );
-      }
+          };
+        })
+      );
     } catch {
       /* ignore */
     }
@@ -206,6 +221,42 @@ export default function Home() {
     setCurrentConvId(null);
     setMessages([]);
   }, []);
+
+  const renameConversation = useCallback(
+    async (id: string, title: string) => {
+      setConversations((prev) =>
+        prev.map((c) => (c.id === id ? { ...c, title } : c))
+      );
+      try {
+        await fetch(`/api/conversations/${id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title }),
+        });
+      } catch {
+        /* optimistic update already applied */
+      }
+    },
+    []
+  );
+
+  const archiveConversation = useCallback(
+    async (id: string, archived: boolean) => {
+      setConversations((prev) =>
+        prev.map((c) => (c.id === id ? { ...c, archived } : c))
+      );
+      try {
+        await fetch(`/api/conversations/${id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ archived }),
+        });
+      } catch {
+        /* optimistic update already applied */
+      }
+    },
+    []
+  );
 
   const deleteConversation = useCallback(
     async (id: string) => {
@@ -338,6 +389,7 @@ export default function Home() {
         const decoder = new TextDecoder();
         let buffer = "";
         let finalMeta: Partial<Message> = {};
+        let streamTitle = "";
         let sawError = false;
 
         while (true) {
@@ -367,6 +419,7 @@ export default function Home() {
                 break;
 
               case "meta":
+                streamTitle = evt.title;
                 finalMeta = {
                   ...finalMeta,
                   thinkingEffort: evt.resolvedEffort,
@@ -405,10 +458,8 @@ export default function Home() {
                       : [
                           {
                             id: evt.conversationId as string,
-                            title:
-                              trimmed.length > 60
-                                ? trimmed.substring(0, 57) + "..."
-                                : trimmed,
+                            title: streamTitle || trimmed.slice(0, 48),
+                            archived: false,
                             createdAt: new Date().toISOString(),
                             updatedAt: new Date().toISOString(),
                           },
@@ -461,6 +512,9 @@ export default function Home() {
         abortRef.current = null;
         setIsLoading(false);
         setStatusStage(null);
+        // Re-sync with disk so ordering, titles and counts match what was
+        // actually written.
+        void refreshConversations();
       }
     },
     [
@@ -474,6 +528,7 @@ export default function Home() {
       webSearchEnabled,
       enabledPlugins,
       messages,
+      refreshConversations,
     ]
   );
 
@@ -493,6 +548,8 @@ export default function Home() {
         onSelect={loadConversation}
         onNew={startNewChat}
         onDelete={deleteConversation}
+        onRename={renameConversation}
+        onArchive={archiveConversation}
         onOpenSettings={() => setShowSettings(true)}
       />
 

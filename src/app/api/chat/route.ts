@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { db, isDatabaseConfigured } from "@/db";
-import { messages, conversations } from "@/db/schema";
-import { eq } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
+import { appendMessages } from "@/lib/store";
+import type { StoredMessage } from "@/lib/store";
 import { smartSearch, autoThinkingEffort } from "@/lib/smart-search";
 import type { SearchResultItem } from "@/lib/smart-search";
 import { AVAILABLE_PLUGINS, buildSystemPrompt } from "@/lib/plugins";
@@ -24,6 +23,29 @@ const MAX_OUTPUT_TOKENS = 65536;
 
 /** Effort levels the API accepts once thinking is enabled. */
 const VALID_EFFORTS = new Set(["low", "high", "max"]);
+
+/**
+ * Derive a readable conversation title from the first user message.
+ * Strips markdown noise, collapses whitespace and cuts on a word boundary so
+ * the sidebar shows "Make an html game" rather than a truncated blob.
+ */
+function deriveTitle(message: string): string {
+  const cleaned = message
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/[#*`>_~]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!cleaned) return "New chat";
+  if (cleaned.length <= 48) {
+    return cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+  }
+
+  const cut = cleaned.slice(0, 48);
+  const lastSpace = cut.lastIndexOf(" ");
+  const base = (lastSpace > 24 ? cut.slice(0, lastSpace) : cut).trim();
+  return base.charAt(0).toUpperCase() + base.slice(1) + "…";
+}
 
 interface ChatMessage {
   role: "user" | "assistant" | "system";
@@ -48,6 +70,7 @@ type StreamEvent =
   | {
       type: "meta";
       conversationId: string | null;
+      title: string;
       resolvedEffort: string;
       thinkingEnabled: boolean;
       webSearchUsed: boolean;
@@ -110,6 +133,8 @@ export async function POST(req: NextRequest) {
   // Search runs only when the user explicitly enabled it AND a Tavily key
   // exists. No heuristic override — the toggle means exactly what it says.
   const doSearch = Boolean(webSearchEnabled && tavilyApiKey);
+
+  const title = deriveTitle(message);
 
   const plugins = AVAILABLE_PLUGINS.map((p) => ({
     ...p,
@@ -175,6 +200,7 @@ export async function POST(req: NextRequest) {
         send({
           type: "meta",
           conversationId: conversationId ?? null,
+          title,
           resolvedEffort,
           thinkingEnabled,
           webSearchUsed: doSearch,
@@ -331,60 +357,52 @@ export async function POST(req: NextRequest) {
         }
 
         // ---------------- Persist ----------------
+        // Chats are stored as JSON under ./data/chats so they survive
+        // restarts without needing a database. Failure here must not discard
+        // a reply the user already watched arrive.
         let convId: string | null = conversationId ?? null;
         const assistantMsgId = uuidv4();
         let persisted = false;
+        const now = new Date().toISOString();
 
-        if (isDatabaseConfigured) {
-          try {
-            if (!convId) {
-              convId = uuidv4();
-              const title =
-                message.length > 60 ? message.substring(0, 57) + "..." : message;
-              await db.insert(conversations).values({ id: convId, title });
-            } else {
-              await db
-                .update(conversations)
-                .set({ updatedAt: new Date() })
-                .where(eq(conversations.id, convId));
-            }
+        try {
+          if (!convId) convId = uuidv4();
 
-            await db.insert(messages).values({
+          const toStore: StoredMessage[] = [
+            {
               id: uuidv4(),
-              conversationId: convId,
               role: "user",
               content: message,
               thinkingEffort: resolvedEffort,
               webSearchUsed: doSearch,
-            });
-
-            await db.insert(messages).values({
+              createdAt: now,
+            },
+            {
               id: assistantMsgId,
-              conversationId: convId,
               role: "assistant",
               content: assistantContent,
               reasoningContent: reasoningContent || null,
               thinkingEffort: resolvedEffort,
               webSearchUsed: doSearch,
-              // jsonb columns take real objects — stringifying stored a quoted
-              // JSON string instead, which had to be double-parsed on read.
-              searchResults: searchContext
-                ? searchContext.results.map((r) => ({
-                    title: r.title,
-                    url: r.url,
-                    domain: r.domain,
-                  }))
-                : null,
-              pluginsUsed: enabledPluginIds.length > 0 ? enabledPluginIds : null,
+              searchResults:
+                searchContext?.results.map((r) => ({
+                  title: r.title,
+                  url: r.url,
+                  domain: r.domain,
+                })) ?? null,
+              searchQueries: searchContext?.queries ?? null,
+              pluginsUsed: enabledPluginIds.length ? enabledPluginIds : null,
               tokenCount:
                 (usage as { total_tokens?: number } | null)?.total_tokens ??
                 null,
-            });
+              createdAt: new Date().toISOString(),
+            },
+          ];
 
-            persisted = true;
-          } catch (dbError) {
-            console.error("Failed to persist chat message:", dbError);
-          }
+          await appendMessages(convId, title, toStore);
+          persisted = true;
+        } catch (storeError) {
+          console.error("Failed to persist conversation:", storeError);
         }
 
         send({
