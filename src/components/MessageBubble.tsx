@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -25,12 +25,52 @@ export function MessageBubble({ message }: MessageBubbleProps) {
   const [showSources, setShowSources] = useState(false);
   const isUser = message.role === "user";
 
-  // While the model is still reasoning there is nothing else to look at, so
-  // open the panel automatically — then collapse it once the answer starts.
+  // Label-only signal that reasoning is still in progress. The panel itself
+  // stays closed unless the user opens it, so nothing expands and collapses
+  // underneath them mid-answer.
   const isThinkingPhase = Boolean(
     message.isStreaming && message.reasoningContent && !message.content
   );
-  const thinkingOpen = showThinking || isThinkingPhase;
+
+  // Detect a code fence that has been opened but not yet closed. An odd number
+  // of ``` markers means the model is mid-block, so we hide the partial code
+  // and show a progress card instead of streaming raw source into the chat.
+  const { displayContent, hasPendingCode, pendingLanguage, pendingLines } =
+    useMemo(() => {
+      const content = message.content ?? "";
+      if (!message.isStreaming) {
+        return {
+          displayContent: content,
+          hasPendingCode: false,
+          pendingLanguage: null as string | null,
+          pendingLines: 0,
+        };
+      }
+
+      const fenceMatches = content.match(/^```/gm);
+      const openFence = (fenceMatches?.length ?? 0) % 2 === 1;
+      if (!openFence) {
+        return {
+          displayContent: content,
+          hasPendingCode: false,
+          pendingLanguage: null as string | null,
+          pendingLines: 0,
+        };
+      }
+
+      const lastFence = content.lastIndexOf("\n```");
+      const cut = lastFence === -1 ? content.indexOf("```") : lastFence + 1;
+      const before = content.slice(0, cut);
+      const block = content.slice(cut);
+      const langMatch = /^```([\w+-]*)/.exec(block);
+
+      return {
+        displayContent: before.trimEnd(),
+        hasPendingCode: true,
+        pendingLanguage: langMatch?.[1] ? langMatch[1] : null,
+        pendingLines: Math.max(0, block.split("\n").length - 1),
+      };
+    }, [message.content, message.isStreaming]);
 
   return (
     <div
@@ -80,38 +120,41 @@ export function MessageBubble({ message }: MessageBubbleProps) {
               )}
             </div>
 
-            {/* Thinking content (collapsible) */}
+            {/* Reasoning — collapsed by default, click to read. Rendered as
+                plain text so a partial stream can never emit broken markup. */}
             {message.reasoningContent && (
-              <div className="border border-thinking/20 rounded-xl overflow-hidden">
+              <div className="overflow-hidden rounded-xl border border-[#cfa25a]/20">
                 <button
                   onClick={() => setShowThinking((v) => !v)}
-                  className="w-full flex items-center gap-2 px-4 py-2.5 bg-thinking-glow text-thinking text-sm font-medium hover:bg-thinking/15 transition-colors"
+                  aria-expanded={showThinking}
+                  className="flex w-full items-center gap-2 bg-[#cfa25a]/10 px-4 py-2.5 text-sm font-medium text-[#cfa25a] transition-colors hover:bg-[#cfa25a]/15"
                 >
                   <svg
-                    className={`w-3.5 h-3.5 transition-transform duration-200 ${thinkingOpen ? "rotate-90" : ""}`}
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
                     fill="none"
                     stroke="currentColor"
-                    viewBox="0 0 24 24"
+                    strokeWidth={2}
+                    aria-hidden="true"
+                    className={`transition-transform duration-200 ${showThinking ? "rotate-90" : ""}`}
                   >
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
                   </svg>
                   {isThinkingPhase ? "Thinking…" : "View thinking process"}
                 </button>
-                {thinkingOpen && (
-                  <div className="thinking-scroll px-4 py-3 text-sm text-text-secondary leading-relaxed bg-bg-secondary/50 max-h-96 overflow-y-auto">
-                    <ReactMarkdown
-                      remarkPlugins={[remarkGfm]}
-                      components={markdownComponents}
-                    >
-                      {message.reasoningContent}
-                    </ReactMarkdown>
+                {showThinking && (
+                  <div className="max-h-96 overflow-y-auto whitespace-pre-wrap break-words bg-[#141210]/50 px-4 py-3 text-sm leading-relaxed text-[#a29d92] [overscroll-behavior:contain]">
+                    {message.reasoningContent}
                   </div>
                 )}
               </div>
             )}
 
-            {/* Main content */}
-            {(message.content || !message.isStreaming) && (
+            {/* Main content. While streaming, an unterminated ``` fence is
+                replaced by a placeholder card — watching code type itself line
+                by line is noisy, and half-written markup renders as garbage. */}
+            {(displayContent || !message.isStreaming) && (
               <div
                 className={`prose-chat text-[15px] leading-relaxed ${
                   message.isError ? "text-danger" : "text-text-primary"
@@ -121,11 +164,50 @@ export function MessageBubble({ message }: MessageBubbleProps) {
                   remarkPlugins={[remarkGfm]}
                   components={markdownComponents}
                 >
-                  {message.content}
+                  {displayContent}
                 </ReactMarkdown>
-                {message.isStreaming && message.content && (
+                {message.isStreaming && displayContent && !hasPendingCode && (
                   <span className="stream-caret" aria-hidden="true" />
                 )}
+              </div>
+            )}
+
+            {/* Placeholder while a code block is still being generated */}
+            {hasPendingCode && (
+              <div className="my-3 flex w-full items-center gap-3 rounded-xl border border-[#2c2924] bg-[#141210] px-3 py-2.5">
+                <span className="flex h-9 w-9 flex-none items-center justify-center rounded-lg bg-[#2a2723] text-[#d97f5d]">
+                  <svg
+                    width="16"
+                    height="16"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth={1.7}
+                    aria-hidden="true"
+                    className="animate-pulse"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M8 9l-3 3 3 3m8-6l3 3-3 3M13.5 6l-3 12" />
+                  </svg>
+                </span>
+                <span className="flex min-w-0 flex-1 flex-col">
+                  <span className="truncate text-sm font-medium text-[#ede9e2]">
+                    {pendingLanguage
+                      ? `Writing ${pendingLanguage}…`
+                      : "Writing code…"}
+                  </span>
+                  <span className="text-[11px] text-[#6d685d]">
+                    {pendingLines} {pendingLines === 1 ? "line" : "lines"} so far
+                  </span>
+                </span>
+                <span className="flex items-end gap-1" aria-hidden="true">
+                  {[0, 150, 300].map((d) => (
+                    <span
+                      key={d}
+                      className="animate-bounce rounded-full bg-[#c96442]"
+                      style={{ width: 5, height: 5, animationDelay: `${d}ms` }}
+                    />
+                  ))}
+                </span>
               </div>
             )}
 

@@ -6,17 +6,7 @@ export interface Artifact {
   code: string;
   language: string | null;
   title: string;
-  runnable: boolean;
 }
-
-type Tab = "preview" | "code";
-type Viewport = "desktop" | "tablet" | "mobile";
-
-const VIEWPORT_WIDTH: Record<Viewport, number | null> = {
-  desktop: null,
-  tablet: 768,
-  mobile: 390,
-};
 
 async function copyText(text: string): Promise<boolean> {
   try {
@@ -52,9 +42,10 @@ const EXTENSIONS: Record<string, string> = {
 };
 
 /**
- * Slide-over panel showing one artifact, with a live preview for runnable
- * HTML and the source behind a tab. Modelled on the "open it beside the
- * conversation" pattern rather than dumping everything inline.
+ * Slide-over panel showing one code artifact.
+ *
+ * Styled entirely with Tailwind utilities and explicit SVG width/height so it
+ * cannot break if a stale stylesheet is ever served against fresh markup.
  */
 export function ArtifactPanel({
   artifact,
@@ -63,9 +54,6 @@ export function ArtifactPanel({
   artifact: Artifact;
   onClose: () => void;
 }) {
-  const [tab, setTab] = useState<Tab>(artifact.runnable ? "preview" : "code");
-  const [viewport, setViewport] = useState<Viewport>("desktop");
-  const [reloadKey, setReloadKey] = useState(0);
   const [copied, setCopied] = useState(false);
   const [visible, setVisible] = useState(false);
   const closeRef = useRef<HTMLButtonElement>(null);
@@ -85,7 +73,8 @@ export function ArtifactPanel({
 
   const handleClose = useCallback(() => {
     setVisible(false);
-    setTimeout(onClose, 220);
+    // Let the slide-out transition finish before unmounting.
+    setTimeout(onClose, 200);
   }, [onClose]);
 
   useEffect(() => {
@@ -106,177 +95,105 @@ export function ArtifactPanel({
 
   const handleDownload = useCallback(() => {
     const ext = (artifact.language && EXTENSIONS[artifact.language]) || "txt";
+    const name = artifact.title.replace(/[^\w.-]+/g, "-").toLowerCase() || "snippet";
     const blob = new Blob([artifact.code], { type: "text/plain;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${artifact.title.replace(/[^\w.-]+/g, "-").toLowerCase()}.${ext}`;
+    a.download = `${name}.${ext}`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }, [artifact]);
 
-  const openInNewTab = useCallback(() => {
-    const blob = new Blob([artifact.code], { type: "text/html;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    window.open(url, "_blank", "noopener,noreferrer");
-    setTimeout(() => URL.revokeObjectURL(url), 30_000);
-  }, [artifact.code]);
-
-  const width = VIEWPORT_WIDTH[viewport];
   const lineCount = artifact.code.split("\n").length;
 
   return (
-    <div className="artifact-layer" data-visible={visible} role="dialog" aria-modal="true">
-      <div className="artifact-scrim" onClick={handleClose} />
+    <div className="fixed inset-0 z-[60] flex justify-end" role="dialog" aria-modal="true">
+      {/* Scrim */}
+      <div
+        onClick={handleClose}
+        className={`absolute inset-0 bg-black/50 backdrop-blur-[2px] transition-opacity duration-200 ${
+          visible ? "opacity-100" : "opacity-0"
+        }`}
+      />
 
-      <aside className="artifact-panel">
-        <header className="artifact-header">
-          <div className="artifact-heading">
-            <span className="artifact-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
+      <aside
+        className={`relative flex h-full w-full flex-col border-l border-[#403c34] bg-[#141210] shadow-[-24px_0_60px_rgba(0,0,0,0.45)] transition-transform duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] sm:w-[min(860px,100%)] ${
+          visible ? "translate-x-0" : "translate-x-full"
+        }`}
+      >
+        {/* Header */}
+        <header className="flex flex-none items-center justify-between gap-3 border-b border-[#2c2924] px-3 py-2.5">
+          <div className="flex min-w-0 items-center gap-2.5">
+            <span className="flex h-8 w-8 flex-none items-center justify-center rounded-lg bg-[#2a2723] text-[#d97f5d]">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} aria-hidden="true">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M8 9l-3 3 3 3m8-6l3 3-3 3M13.5 6l-3 12" />
               </svg>
             </span>
             <div className="min-w-0">
-              <p className="artifact-title">{artifact.title}</p>
-              <p className="artifact-sub">
+              <p className="truncate text-sm font-semibold text-[#ede9e2]">
+                {artifact.title}
+              </p>
+              <p className="text-[11px] text-[#6d685d]">
                 {artifact.language ?? "text"} · {lineCount} lines
               </p>
             </div>
           </div>
 
-          <div className="artifact-header-actions">
-            <button onClick={handleCopy} className="artifact-btn" data-copied={copied}>
+          <div className="flex flex-none items-center gap-1.5">
+            <button
+              onClick={handleCopy}
+              className="flex h-8 items-center gap-1.5 rounded-lg border border-[#2c2924] px-2.5 text-xs font-medium text-[#a29d92] transition-colors hover:border-[#403c34] hover:bg-[#33302a] hover:text-[#ede9e2]"
+            >
               {copied ? (
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M20 6L9 17l-5-5" />
-                </svg>
+                <>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#7ba478" strokeWidth={2} aria-hidden="true">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M20 6L9 17l-5-5" />
+                  </svg>
+                  <span className="text-[#7ba478]">Copied</span>
+                </>
               ) : (
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
-                  <rect x="9" y="9" width="11" height="11" rx="2" />
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 15H4a1 1 0 01-1-1V4a1 1 0 011-1h10a1 1 0 011 1v1" />
-                </svg>
+                <>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} aria-hidden="true">
+                    <rect x="9" y="9" width="11" height="11" rx="2" />
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 15H4a1 1 0 01-1-1V4a1 1 0 011-1h10a1 1 0 011 1v1" />
+                  </svg>
+                  Copy
+                </>
               )}
-              {copied ? "Copied" : "Copy"}
             </button>
 
-            <button onClick={handleDownload} className="artifact-icon-btn" title="Download">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
+            <button
+              onClick={handleDownload}
+              title="Download"
+              aria-label="Download"
+              className="flex h-8 w-8 items-center justify-center rounded-lg text-[#a29d92] transition-colors hover:bg-[#33302a] hover:text-[#ede9e2]"
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} aria-hidden="true">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v12m0 0l-4-4m4 4l4-4M4 19h16" />
               </svg>
             </button>
 
-            <button ref={closeRef} onClick={handleClose} className="artifact-icon-btn artifact-close" title="Close (Esc)">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+            <button
+              ref={closeRef}
+              onClick={handleClose}
+              title="Close (Esc)"
+              aria-label="Close"
+              className="flex h-8 w-8 items-center justify-center rounded-lg text-[#a29d92] transition-colors hover:bg-[#cf6a5f]/15 hover:text-[#cf6a5f]"
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
               </svg>
             </button>
           </div>
         </header>
 
-        {artifact.runnable && (
-          <div className="artifact-subbar">
-            <div className="artifact-tabs" role="tablist">
-              <button
-                role="tab"
-                aria-selected={tab === "preview"}
-                data-active={tab === "preview"}
-                onClick={() => setTab("preview")}
-                className="artifact-tab"
-              >
-                Preview
-              </button>
-              <button
-                role="tab"
-                aria-selected={tab === "code"}
-                data-active={tab === "code"}
-                onClick={() => setTab("code")}
-                className="artifact-tab"
-              >
-                Code
-              </button>
-              <span className="artifact-tab-glider" data-tab={tab} aria-hidden="true" />
-            </div>
-
-            {tab === "preview" && (
-              <div className="artifact-subbar-right">
-                <div className="artifact-viewports" role="group" aria-label="Viewport">
-                  {(Object.keys(VIEWPORT_WIDTH) as Viewport[]).map((v) => (
-                    <button
-                      key={v}
-                      onClick={() => setViewport(v)}
-                      data-active={viewport === v}
-                      className="artifact-vp"
-                      title={v}
-                      aria-label={v}
-                    >
-                      {v === "desktop" && (
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
-                          <rect x="2" y="4" width="20" height="13" rx="2" />
-                          <path strokeLinecap="round" d="M8 21h8" />
-                        </svg>
-                      )}
-                      {v === "tablet" && (
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
-                          <rect x="5" y="2" width="14" height="20" rx="2" />
-                        </svg>
-                      )}
-                      {v === "mobile" && (
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
-                          <rect x="7" y="2" width="10" height="20" rx="2" />
-                        </svg>
-                      )}
-                    </button>
-                  ))}
-                </div>
-                <button
-                  onClick={() => setReloadKey((k) => k + 1)}
-                  className="artifact-icon-btn"
-                  title="Reload"
-                >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v6h6M20 20v-6h-6" />
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M20 9A8 8 0 006 5.3L4 7m0 8a8 8 0 0014 3.7l2-2" />
-                  </svg>
-                </button>
-                <button onClick={openInNewTab} className="artifact-icon-btn" title="Open in new tab">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                  </svg>
-                </button>
-              </div>
-            )}
-          </div>
-        )}
-
-        <div className="artifact-body">
-          {artifact.runnable && tab === "preview" ? (
-            <div className="artifact-stage">
-              <div
-                className="artifact-frame-wrap"
-                style={width ? { width, maxWidth: "100%" } : undefined}
-              >
-                <iframe
-                  key={reloadKey}
-                  srcDoc={artifact.code}
-                  title={artifact.title}
-                  className="artifact-frame"
-                  // Deliberately no allow-same-origin: scripts run in an
-                  // opaque origin and cannot read this app's localStorage
-                  // (where the API keys live) or touch its DOM.
-                  sandbox="allow-scripts allow-forms allow-modals allow-popups"
-                  referrerPolicy="no-referrer"
-                />
-              </div>
-            </div>
-          ) : (
-            <pre className="artifact-code">
-              <code>{artifact.code}</code>
-            </pre>
-          )}
-        </div>
+        {/* Code */}
+        <pre className="m-0 min-h-0 flex-1 overflow-auto bg-[#141210] px-4 py-3.5 font-mono text-[13px] leading-relaxed text-[#ede9e2] [overscroll-behavior:contain] [tab-size:2]">
+          <code>{artifact.code}</code>
+        </pre>
       </aside>
     </div>
   );
