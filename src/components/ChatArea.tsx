@@ -1,7 +1,10 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { memo } from "react";
+import { buildChatSearchIndex } from "@/lib/chat-search";
+import type { ChatSearchIndex } from "@/lib/chat-search";
+import { ChatSearchBar } from "@/components/ChatSearchBar";
 import { Dots, MessageBubble } from "@/components/MessageBubble";
 import { ThinkingEffortSelector } from "@/components/ThinkingEffortSelector";
 import { ModelSelector } from "@/components/ModelSelector";
@@ -55,6 +58,66 @@ export function ChatArea({
 }: ChatAreaProps) {
   const [input, setInput] = useState("");
   const [isFullscreen, setIsFullscreen] = useState(false);
+
+  // In-chat find. Whole-word is the default so "calc" doesn't match
+  // "calculator"; the bar's toggle switches to substring matching.
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
+  const [findWholeWord, setFindWholeWord] = useState(true);
+  const [rawActiveMatch, setActiveMatch] = useState(0);
+
+  const searchIndex = useMemo(
+    () => buildChatSearchIndex(messages, findOpen ? findQuery : "", findWholeWord),
+    [messages, findOpen, findQuery, findWholeWord]
+  );
+
+  // Clamp during render rather than syncing via an effect, so the counter can
+  // never briefly show a stale index after the result set shrinks.
+  const activeMatch =
+    searchIndex.total === 0
+      ? 0
+      : Math.min(rawActiveMatch, searchIndex.total - 1);
+
+  // Ctrl/Cmd+F opens find within the conversation.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
+        e.preventDefault();
+        setFindOpen(true);
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
+
+  // Scroll the focused match into view.
+  useEffect(() => {
+    if (!findOpen || searchIndex.total === 0) return;
+    const id = requestAnimationFrame(() => {
+      document
+        .querySelector("[data-active-match]")
+        ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+    return () => cancelAnimationFrame(id);
+  }, [findOpen, activeMatch, searchIndex.total]);
+
+  const gotoNext = useCallback(() => {
+    if (searchIndex.total === 0) return;
+    setActiveMatch((activeMatch + 1) % searchIndex.total);
+  }, [activeMatch, searchIndex.total]);
+
+  const gotoPrev = useCallback(() => {
+    if (searchIndex.total === 0) return;
+    setActiveMatch(
+      (activeMatch - 1 + searchIndex.total) % searchIndex.total
+    );
+  }, [activeMatch, searchIndex.total]);
+
+  const closeFind = useCallback(() => {
+    setFindOpen(false);
+    setFindQuery("");
+    setActiveMatch(0);
+  }, []);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -186,9 +249,23 @@ export function ChatArea({
 
         <div className="flex items-center gap-1">
           <button
+            onClick={() => setFindOpen((v) => !v)}
+            className="icon-btn"
+            data-active={findOpen}
+            title="Find in this chat (Ctrl+F)"
+            aria-label="Find in this chat"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
+              <circle cx="10" cy="10" r="6" />
+              <path strokeLinecap="round" d="M14.5 14.5L20 20" />
+              <path strokeLinecap="round" d="M7.5 10h5" />
+            </svg>
+          </button>
+
+          <button
             onClick={onOpenSearch}
             className="icon-btn"
-            title="Search chats (Ctrl+K)"
+            title="Search all chats (Ctrl+K)"
             aria-label="Search chats"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
@@ -244,6 +321,26 @@ export function ChatArea({
         </div>
       </header>
 
+      {findOpen && (
+        <ChatSearchBar
+          query={findQuery}
+          onQueryChange={(v) => {
+            setFindQuery(v);
+            setActiveMatch(0);
+          }}
+          wholeWord={findWholeWord}
+          onWholeWordChange={(v) => {
+            setFindWholeWord(v);
+            setActiveMatch(0);
+          }}
+          total={searchIndex.total}
+          current={activeMatch}
+          onNext={gotoNext}
+          onPrev={gotoPrev}
+          onClose={closeFind}
+        />
+      )}
+
       {/* Messages */}
       <div
         ref={scrollRef}
@@ -257,7 +354,15 @@ export function ChatArea({
             className={`mx-auto w-full px-4 sm:px-6 py-6 transition-[max-width] duration-300 ${columnWidth}`}
           >
             <div className="space-y-6">
-              <MessageList messages={messages} onRegenerate={onRegenerate} />
+              <MessageList
+                messages={messages}
+                onRegenerate={onRegenerate}
+                searchQuery={findOpen ? findQuery : undefined}
+                searchWholeWord={findWholeWord}
+                searchIndex={searchIndex}
+                activeMatch={activeMatch}
+                revealAll={findOpen && findQuery.trim().length > 0}
+              />
 
               {/* Only shown before the first token lands; afterwards the
                   streaming bubble itself is the feedback. */}
@@ -473,9 +578,19 @@ const WINDOW_STEP = 60;
 const MessageList = memo(function MessageList({
   messages,
   onRegenerate,
+  searchQuery,
+  searchWholeWord,
+  searchIndex,
+  activeMatch,
+  revealAll,
 }: {
   messages: Message[];
   onRegenerate: (assistantId: string) => void;
+  searchQuery?: string;
+  searchWholeWord: boolean;
+  searchIndex: ChatSearchIndex;
+  activeMatch: number;
+  revealAll: boolean;
 }) {
   // Only the most recent slice is mounted. Rendering every bubble cost ~650ms
   // at 1000 messages and grew linearly, so a long conversation became slow to
@@ -493,9 +608,22 @@ const MessageList = memo(function MessageList({
     }
   }, [firstId]);
 
-  const hidden = Math.max(0, messages.length - limit);
+  // While searching, mount everything from the earliest match onward so a hit
+  // in an old message isn't hidden behind the "show earlier" control.
+  const effectiveLimit =
+    revealAll && searchIndex.firstMatchIndex >= 0
+      ? Math.max(limit, messages.length - searchIndex.firstMatchIndex)
+      : limit;
+
+  const hidden = Math.max(0, messages.length - effectiveLimit);
   const visible = hidden > 0 ? messages.slice(hidden) : messages;
   const lastId = messages[messages.length - 1]?.id;
+
+  // Map each visible message to where its matches start globally, so only the
+  // bubble containing the focused match highlights it as active.
+  const offsetById = new Map(
+    searchIndex.entries.map((e) => [e.messageId, e] as const)
+  );
 
   return (
     <>
@@ -522,14 +650,26 @@ const MessageList = memo(function MessageList({
         </div>
       )}
 
-      {visible.map((msg) => (
-        <MessageBubble
-          key={msg.id}
-          message={msg}
-          isLast={msg.id === lastId}
-          onRegenerate={onRegenerate}
-        />
-      ))}
+      {visible.map((msg) => {
+        const entry = offsetById.get(msg.id);
+        const localActive =
+          entry &&
+          activeMatch >= entry.offset &&
+          activeMatch < entry.offset + entry.count
+            ? activeMatch - entry.offset
+            : -1;
+        return (
+          <MessageBubble
+            key={msg.id}
+            message={msg}
+            isLast={msg.id === lastId}
+            onRegenerate={onRegenerate}
+            searchQuery={searchQuery}
+            searchWholeWord={searchWholeWord}
+            activeMatchIndex={localActive}
+          />
+        );
+      })}
     </>
   );
 });
