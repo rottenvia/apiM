@@ -388,7 +388,7 @@ input:focus-visible {
 }
 
 /* ---------------------------------------------------------------------------
-   Code blocks — sticky header bar with language, line count and actions.
+   Inline code blocks (short snippets only)
 --------------------------------------------------------------------------- */
 .code-block {
   position: relative;
@@ -399,8 +399,6 @@ input:focus-visible {
   background: var(--color-bg-secondary);
 }
 
-/* The bar is sticky so Copy/Preview stay reachable while scrolling a long
-   block. Previously they scrolled out of view and became unusable. */
 .code-block-bar {
   position: sticky;
   top: 0;
@@ -411,14 +409,12 @@ input:focus-visible {
   gap: 0.75rem;
   padding: 0.375rem 0.375rem 0.375rem 0.875rem;
   background: color-mix(in oklab, var(--color-bg-tertiary) 92%, transparent);
+  -webkit-backdrop-filter: blur(8px);
   backdrop-filter: blur(8px);
   border-bottom: 1px solid var(--color-border);
 }
 
 .code-block-lang {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 0.625rem;
   font-family: var(--font-mono);
   font-size: 0.6875rem;
   letter-spacing: 0.06em;
@@ -426,20 +422,7 @@ input:focus-visible {
   color: var(--color-text-muted);
   user-select: none;
 }
-.code-block-lines {
-  font-size: 0.625rem;
-  letter-spacing: 0.04em;
-  opacity: 0.55;
-}
 
-.code-block-actions {
-  display: flex;
-  align-items: center;
-  gap: 0.25rem;
-}
-
-/* Actions stay mounted so the layout never shifts; they fade in on hover or
-   keyboard focus, and stay visible while showing a result. */
 .code-action-btn {
   display: inline-flex;
   align-items: center;
@@ -458,13 +441,11 @@ input:focus-visible {
     opacity 0.15s ease,
     color 0.15s ease,
     background-color 0.15s ease,
-    border-color 0.15s ease,
-    transform 0.1s ease;
+    border-color 0.15s ease;
 }
 .code-block:hover .code-action-btn,
 .code-action-btn:focus-visible,
-.code-action-btn[data-state='copied'],
-.code-action-btn[data-state='failed'] {
+.code-action-btn[data-state='copied'] {
   opacity: 1;
 }
 .code-action-btn:hover {
@@ -472,35 +453,14 @@ input:focus-visible {
   border-color: var(--color-border-light);
   color: var(--color-text-primary);
 }
-.code-action-btn:active {
-  transform: scale(0.96);
-}
 .code-action-btn[data-state='copied'] {
   color: var(--color-success);
-}
-.code-action-btn[data-state='failed'] {
-  color: var(--color-danger);
 }
 .code-action-btn svg {
   width: 0.875rem;
   height: 0.875rem;
   flex-shrink: 0;
 }
-
-/* The Preview action is the primary affordance — keep it always visible. */
-.code-action-run {
-  opacity: 1;
-  color: var(--color-accent-light);
-  border-color: color-mix(in oklab, var(--color-accent) 30%, transparent);
-  background: color-mix(in oklab, var(--color-accent) 10%, transparent);
-}
-.code-action-run:hover {
-  color: var(--color-accent-light);
-  background: color-mix(in oklab, var(--color-accent) 18%, transparent);
-  border-color: color-mix(in oklab, var(--color-accent) 45%, transparent);
-}
-
-/* Touch devices have no hover, so keep controls permanently visible. */
 @media (hover: none) {
   .code-action-btn {
     opacity: 1;
@@ -508,20 +468,10 @@ input:focus-visible {
 }
 
 .code-block-body {
-  max-height: none;
   overflow: auto;
-  /* Stop scroll chaining: reaching the end of a scrollable code block no
-     longer starts scrolling the whole conversation behind it. */
+  /* Stop scroll chaining into the conversation behind. */
   overscroll-behavior: contain;
 }
-.code-block[data-collapsed='true'] .code-block-body {
-  max-height: 26rem;
-  overflow: hidden;
-  -webkit-mask-image: linear-gradient(to bottom, #000 72%, transparent 100%);
-  mask-image: linear-gradient(to bottom, #000 72%, transparent 100%);
-}
-
-/* The wrapper owns the frame — reset the inner <pre>. */
 .code-block pre {
   margin: 0;
   border: 0;
@@ -529,125 +479,274 @@ input:focus-visible {
   background: transparent;
 }
 
-.code-expand-btn {
+/* ---------------------------------------------------------------------------
+   Artifact card — compact stand-in for long / runnable output
+--------------------------------------------------------------------------- */
+.artifact-card {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 0.375rem;
+  gap: 0.75rem;
   width: 100%;
-  padding: 0.5rem;
-  border-top: 1px solid var(--color-border);
-  background: var(--color-bg-tertiary);
-  color: var(--color-text-secondary);
-  font-size: 0.75rem;
-  font-weight: 500;
+  margin: 0.75em 0;
+  padding: 0.75rem 0.75rem 0.75rem 0.875rem;
+  border-radius: 14px;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-secondary);
+  cursor: pointer;
+  text-align: left;
   transition:
+    border-color 0.18s ease,
+    background-color 0.18s ease,
+    transform 0.14s cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 0.18s ease;
+}
+.artifact-card:hover {
+  border-color: color-mix(in oklab, var(--color-accent) 45%, transparent);
+  background: var(--color-bg-tertiary);
+  transform: translateY(-1px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+}
+.artifact-card:active {
+  transform: translateY(0);
+}
+
+.artifact-card-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--color-accent) 14%, transparent);
+  color: var(--color-accent-light);
+  transition: background-color 0.18s ease;
+}
+.artifact-card:hover .artifact-card-icon {
+  background: color-mix(in oklab, var(--color-accent) 22%, transparent);
+}
+.artifact-card-icon > svg {
+  width: 17px;
+  height: 17px;
+}
+
+.artifact-card-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+.artifact-card-title {
+  font-size: 0.875rem;
+  font-weight: 550;
+  color: var(--color-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.artifact-card-meta {
+  font-size: 0.6875rem;
+  color: var(--color-text-muted);
+}
+
+.artifact-card-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  color: var(--color-text-muted);
+  opacity: 0;
+  transition:
+    opacity 0.15s ease,
     color 0.15s ease,
     background-color 0.15s ease;
 }
-.code-expand-btn:hover {
+.artifact-card:hover .artifact-card-copy,
+.artifact-card-copy:focus-visible {
+  opacity: 1;
+}
+.artifact-card-copy:hover {
   color: var(--color-text-primary);
   background: var(--color-bg-hover);
 }
-.code-expand-btn svg {
-  width: 0.875rem;
-  height: 0.875rem;
-  transition: transform 0.2s ease;
+.artifact-card-copy > svg {
+  width: 15px;
+  height: 15px;
 }
-.code-expand-btn svg[data-expanded='true'] {
-  transform: rotate(180deg);
+@media (hover: none) {
+  .artifact-card-copy {
+    opacity: 1;
+  }
 }
 
 /* ---------------------------------------------------------------------------
-   Live HTML preview overlay
+   Artifact slide-over panel
 --------------------------------------------------------------------------- */
-.preview-overlay {
+.artifact-layer {
   position: fixed;
   inset: 0;
   z-index: 60;
   display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: clamp(0.5rem, 3vw, 2.5rem);
+  justify-content: flex-end;
 }
 
-.preview-backdrop {
+.artifact-scrim {
   position: absolute;
   inset: 0;
-  background: rgba(0, 0, 0, 0.62);
-  backdrop-filter: blur(6px);
+  background: rgba(0, 0, 0, 0.5);
+  -webkit-backdrop-filter: blur(3px);
+  backdrop-filter: blur(3px);
   opacity: 0;
-  transition: opacity 0.22s ease;
+  transition: opacity 0.24s ease;
 }
-.preview-overlay[data-visible='true'] .preview-backdrop {
+.artifact-layer[data-visible='true'] .artifact-scrim {
   opacity: 1;
 }
 
-.preview-panel {
+.artifact-panel {
   position: relative;
   display: flex;
   flex-direction: column;
-  width: min(1200px, 100%);
-  height: min(860px, 100%);
-  overflow: hidden;
-  border-radius: 18px;
-  border: 1px solid var(--color-border-light);
+  width: min(920px, 100%);
+  height: 100%;
   background: var(--color-bg-secondary);
-  box-shadow:
-    0 32px 80px rgba(0, 0, 0, 0.55),
-    0 4px 16px rgba(0, 0, 0, 0.35);
-  opacity: 0;
-  transform: translateY(14px) scale(0.975);
-  transition:
-    opacity 0.24s cubic-bezier(0.22, 1, 0.36, 1),
-    transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+  border-left: 1px solid var(--color-border-light);
+  box-shadow: -24px 0 60px rgba(0, 0, 0, 0.45);
+  transform: translateX(100%);
+  transition: transform 0.34s cubic-bezier(0.22, 1, 0.36, 1);
 }
-.preview-overlay[data-visible='true'] .preview-panel {
-  opacity: 1;
-  transform: translateY(0) scale(1);
+.artifact-layer[data-visible='true'] .artifact-panel {
+  transform: translateX(0);
 }
 
-.preview-toolbar {
+.artifact-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
   flex: none;
-  padding: 0.625rem 0.75rem;
+  padding: 0.75rem 0.875rem;
+  border-bottom: 1px solid var(--color-border);
+}
+.artifact-heading {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  min-width: 0;
+}
+.artifact-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  background: color-mix(in oklab, var(--color-accent) 14%, transparent);
+  color: var(--color-accent-light);
+}
+.artifact-icon > svg {
+  width: 16px;
+  height: 16px;
+}
+.artifact-title {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.artifact-sub {
+  font-size: 0.6875rem;
+  color: var(--color-text-muted);
+}
+
+.artifact-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  flex: none;
+}
+
+.artifact-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  height: 30px;
+  padding: 0 0.7rem;
+  border-radius: 9px;
+  border: 1px solid var(--color-border);
+  color: var(--color-text-secondary);
+  font-size: 0.75rem;
+  font-weight: 500;
+  transition:
+    color 0.15s ease,
+    background-color 0.15s ease,
+    border-color 0.15s ease;
+}
+.artifact-btn:hover {
+  color: var(--color-text-primary);
+  background: var(--color-bg-hover);
+  border-color: var(--color-border-light);
+}
+.artifact-btn[data-copied='true'] {
+  color: var(--color-success);
+  border-color: color-mix(in oklab, var(--color-success) 40%, transparent);
+}
+.artifact-btn > svg {
+  width: 14px;
+  height: 14px;
+}
+
+.artifact-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  color: var(--color-text-secondary);
+  transition:
+    color 0.15s ease,
+    background-color 0.15s ease;
+}
+.artifact-icon-btn:hover {
+  color: var(--color-text-primary);
+  background: var(--color-bg-hover);
+}
+.artifact-icon-btn > svg {
+  width: 15px;
+  height: 15px;
+}
+.artifact-close:hover {
+  color: var(--color-danger);
+  background: color-mix(in oklab, var(--color-danger) 14%, transparent);
+}
+
+.artifact-subbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex: none;
+  padding: 0.5rem 0.875rem;
   border-bottom: 1px solid var(--color-border);
   background: var(--color-bg-tertiary);
 }
-.preview-toolbar-group {
+.artifact-subbar-right {
   display: flex;
   align-items: center;
   gap: 0.375rem;
 }
 
-.preview-dot {
-  width: 11px;
-  height: 11px;
-  border-radius: 9999px;
-  flex: none;
-}
-.preview-dot-red {
-  background: #e06c60;
-}
-.preview-dot-amber {
-  background: #d9a441;
-}
-.preview-dot-green {
-  background: #7ab866;
-}
-.preview-title {
-  margin-left: 0.5rem;
-  font-size: 0.75rem;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  color: var(--color-text-secondary);
-  user-select: none;
-}
-
-.preview-segmented {
+/* Tabs with a sliding indicator rather than a hard state swap. */
+.artifact-tabs {
+  position: relative;
   display: flex;
   gap: 2px;
   padding: 2px;
@@ -655,62 +754,87 @@ input:focus-visible {
   background: var(--color-bg-primary);
   border: 1px solid var(--color-border);
 }
-.preview-segment {
-  padding: 0.3rem 0.7rem;
+.artifact-tab {
+  position: relative;
+  z-index: 1;
+  width: 78px;
+  padding: 0.3rem 0;
   border-radius: 8px;
   font-size: 0.75rem;
   font-weight: 500;
+  color: var(--color-text-muted);
+  transition: color 0.18s ease;
+}
+.artifact-tab[data-active='true'] {
+  color: var(--color-text-primary);
+}
+.artifact-tab-glider {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 78px;
+  height: calc(100% - 4px);
+  border-radius: 8px;
+  background: var(--color-bg-elevated);
+  transition: transform 0.26s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.artifact-tab-glider[data-tab='code'] {
+  transform: translateX(80px);
+}
+
+.artifact-viewports {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 9px;
+  background: var(--color-bg-primary);
+  border: 1px solid var(--color-border);
+}
+.artifact-vp {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 24px;
+  border-radius: 7px;
   color: var(--color-text-muted);
   transition:
     color 0.15s ease,
     background-color 0.15s ease;
 }
-.preview-segment:hover {
+.artifact-vp:hover {
   color: var(--color-text-primary);
 }
-.preview-segment[data-active='true'] {
+.artifact-vp[data-active='true'] {
   background: var(--color-bg-elevated);
   color: var(--color-text-primary);
 }
-
-.preview-icon-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 30px;
-  border-radius: 8px;
-  color: var(--color-text-secondary);
-  transition:
-    color 0.15s ease,
-    background-color 0.15s ease;
-}
-.preview-icon-btn:hover {
-  color: var(--color-text-primary);
-  background: var(--color-bg-hover);
-}
-.preview-icon-btn > svg {
-  width: 15px;
-  height: 15px;
-}
-.preview-icon-close:hover {
-  color: var(--color-danger);
-  background: color-mix(in oklab, var(--color-danger) 15%, transparent);
+.artifact-vp > svg {
+  width: 14px;
+  height: 14px;
 }
 
-.preview-stage {
+.artifact-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.artifact-stage {
   flex: 1;
   min-height: 0;
   display: flex;
   justify-content: center;
   padding: 1rem;
   background:
-    linear-gradient(45deg, rgba(255, 255, 255, 0.015) 25%, transparent 25%) 0 0 / 20px 20px,
-    linear-gradient(-45deg, rgba(255, 255, 255, 0.015) 25%, transparent 25%) 0 10px / 20px 20px,
+    linear-gradient(45deg, rgba(255, 255, 255, 0.014) 25%, transparent 25%) 0 0 / 20px 20px,
+    linear-gradient(-45deg, rgba(255, 255, 255, 0.014) 25%, transparent 25%) 0 10px / 20px 20px,
     var(--color-bg-primary);
 }
 
-.preview-frame-wrap {
+.artifact-frame-wrap {
   width: 100%;
   height: 100%;
   border-radius: 10px;
@@ -720,12 +844,40 @@ input:focus-visible {
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
   transition: width 0.32s cubic-bezier(0.22, 1, 0.36, 1);
 }
-
-.preview-frame {
+.artifact-frame {
   width: 100%;
   height: 100%;
   border: 0;
   display: block;
+}
+
+.artifact-code {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 1rem 1.125rem;
+  overflow: auto;
+  overscroll-behavior: contain;
+  background: var(--color-bg-secondary);
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  line-height: 1.65;
+  color: var(--color-text-primary);
+  tab-size: 2;
+}
+
+@media (max-width: 640px) {
+  .artifact-panel {
+    width: 100%;
+    border-left: 0;
+  }
+  .artifact-tab,
+  .artifact-tab-glider {
+    width: 64px;
+  }
+  .artifact-tab-glider[data-tab='code'] {
+    transform: translateX(66px);
+  }
 }
 
 /* ---------------------------------------------------------------------------
