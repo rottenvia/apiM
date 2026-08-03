@@ -25,6 +25,13 @@ export function MessageBubble({ message }: MessageBubbleProps) {
   const [showSources, setShowSources] = useState(false);
   const isUser = message.role === "user";
 
+  // While the model is still reasoning there is nothing else to look at, so
+  // open the panel automatically — then collapse it once the answer starts.
+  const isThinkingPhase = Boolean(
+    message.isStreaming && message.reasoningContent && !message.content
+  );
+  const thinkingOpen = showThinking || isThinkingPhase;
+
   return (
     <div
       className={`animate-fade-in ${isUser ? "flex justify-end" : "flex justify-start"}`}
@@ -77,21 +84,21 @@ export function MessageBubble({ message }: MessageBubbleProps) {
             {message.reasoningContent && (
               <div className="border border-thinking/20 rounded-xl overflow-hidden">
                 <button
-                  onClick={() => setShowThinking(!showThinking)}
+                  onClick={() => setShowThinking((v) => !v)}
                   className="w-full flex items-center gap-2 px-4 py-2.5 bg-thinking-glow text-thinking text-sm font-medium hover:bg-thinking/15 transition-colors"
                 >
                   <svg
-                    className={`w-3.5 h-3.5 transition-transform duration-200 ${showThinking ? "rotate-90" : ""}`}
+                    className={`w-3.5 h-3.5 transition-transform duration-200 ${thinkingOpen ? "rotate-90" : ""}`}
                     fill="none"
                     stroke="currentColor"
                     viewBox="0 0 24 24"
                   >
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                   </svg>
-                  View thinking process
+                  {isThinkingPhase ? "Thinking…" : "View thinking process"}
                 </button>
-                {showThinking && (
-                  <div className="px-4 py-3 text-sm text-text-secondary leading-relaxed bg-bg-secondary/50 max-h-96 overflow-y-auto">
+                {thinkingOpen && (
+                  <div className="thinking-scroll px-4 py-3 text-sm text-text-secondary leading-relaxed bg-bg-secondary/50 max-h-96 overflow-y-auto">
                     <ReactMarkdown
                       remarkPlugins={[remarkGfm]}
                       components={markdownComponents}
@@ -104,14 +111,23 @@ export function MessageBubble({ message }: MessageBubbleProps) {
             )}
 
             {/* Main content */}
-            <div className="prose-chat text-[15px] leading-relaxed text-text-primary">
-              <ReactMarkdown
-                remarkPlugins={[remarkGfm]}
-                components={markdownComponents}
+            {(message.content || !message.isStreaming) && (
+              <div
+                className={`prose-chat text-[15px] leading-relaxed ${
+                  message.isError ? "text-danger" : "text-text-primary"
+                }`}
               >
-                {message.content}
-              </ReactMarkdown>
-            </div>
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  components={markdownComponents}
+                >
+                  {message.content}
+                </ReactMarkdown>
+                {message.isStreaming && message.content && (
+                  <span className="stream-caret" aria-hidden="true" />
+                )}
+              </div>
+            )}
 
             {/* Search sources (collapsible) */}
             {message.searchResults && message.searchResults.length > 0 && (

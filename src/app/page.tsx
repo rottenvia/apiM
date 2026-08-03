@@ -19,7 +19,61 @@ export interface Message {
   pluginsUsed?: string[];
   tokenCount?: number;
   createdAt?: string;
+  /** True while deltas are still arriving for this message. */
+  isStreaming?: boolean;
+  /** Renders the bubble in the error style instead of as a normal reply. */
+  isError?: boolean;
 }
+
+/** What the assistant is currently doing, for the live status indicator. */
+export type StatusStage = "searching" | "thinking" | "writing";
+
+/**
+ * Normalise a stored `search_results` value. Newer rows hold real jsonb
+ * arrays; older rows were written as a JSON *string*, so both are accepted.
+ */
+function parseSearchResults(
+  value: unknown
+): { title: string; url: string; domain: string }[] | null {
+  if (!value) return null;
+  const raw =
+    typeof value === "string"
+      ? (() => {
+          try {
+            return JSON.parse(value) as unknown;
+          } catch {
+            return null;
+          }
+        })()
+      : value;
+  return Array.isArray(raw)
+    ? (raw as { title: string; url: string; domain: string }[])
+    : null;
+}
+
+/** Frames of the SSE protocol served by /api/chat. */
+type StreamEvent =
+  | { type: "status"; stage: StatusStage }
+  | {
+      type: "meta";
+      conversationId: string | null;
+      resolvedEffort: string;
+      thinkingEnabled: boolean;
+      webSearchUsed: boolean;
+      searchResults: { title: string; url: string; domain: string }[] | null;
+      searchQueries: string[] | null;
+      searchesPerformed: number;
+    }
+  | { type: "reasoning"; delta: string }
+  | { type: "content"; delta: string }
+  | {
+      type: "done";
+      id: string;
+      conversationId: string | null;
+      persisted: boolean;
+      usage: unknown;
+    }
+  | { type: "error"; error: string };
 
 export interface Conversation {
   id: string;
@@ -49,6 +103,7 @@ export default function Home() {
   const [currentConvId, setCurrentConvId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [statusStage, setStatusStage] = useState<StatusStage | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [showPlugins, setShowPlugins] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -63,6 +118,8 @@ export default function Home() {
 
   const hasKeys = deepseekKey.length > 0;
   const initialLoadDone = useRef(false);
+  /** Lets the Stop button cancel an in-flight stream. */
+  const abortRef = useRef<AbortController | null>(null);
 
   // Load settings from localStorage after mount (deferred to a microtask so
   // state updates don't cascade synchronously through the first commit)
@@ -123,19 +180,19 @@ export default function Home() {
       if (Array.isArray(data)) {
         setMessages(
           data.map((m: Record<string, unknown>) => ({
+            // Drizzle returns the schema's camelCase property names, not the
+            // underlying snake_case column names. Reading snake_case here
+            // silently dropped reasoning, sources and token counts whenever a
+            // saved conversation was reopened.
             id: m.id as string,
             role: m.role as "user" | "assistant",
             content: m.content as string,
-            reasoningContent: m.reasoning_content as string | null | undefined,
-            thinkingEffort: m.thinking_effort as string | undefined,
-            webSearchUsed: m.web_search_used as boolean | undefined,
-            searchResults: m.search_results
-              ? (typeof m.search_results === "string"
-                  ? JSON.parse(m.search_results as string)
-                  : m.search_results) as { title: string; url: string; domain: string }[] | null
-              : null,
-            tokenCount: m.token_count as number | undefined,
-            createdAt: m.created_at as string | undefined,
+            reasoningContent: m.reasoningContent as string | null | undefined,
+            thinkingEffort: m.thinkingEffort as string | undefined,
+            webSearchUsed: m.webSearchUsed as boolean | undefined,
+            searchResults: parseSearchResults(m.searchResults),
+            tokenCount: m.tokenCount as number | undefined,
+            createdAt: m.createdAt as string | undefined,
           }))
         );
       }
@@ -164,23 +221,85 @@ export default function Home() {
     async (content: string) => {
       if (!content.trim() || isLoading || !hasKeys) return;
 
+      const trimmed = content.trim();
       const userMsg: Message = {
         id: `temp-${Date.now()}`,
         role: "user",
-        content: content.trim(),
+        content: trimmed,
         thinkingEffort,
         webSearchUsed: webSearchEnabled,
       };
 
-      setMessages((prev) => [...prev, userMsg]);
+      // The assistant bubble is created immediately and filled in as deltas
+      // arrive, so the user sees text within a second instead of staring at a
+      // spinner until the whole (possibly 60K-token) answer is finished.
+      const streamingId = `stream-${Date.now()}`;
+      const assistantMsg: Message = {
+        id: streamingId,
+        role: "assistant",
+        content: "",
+        reasoningContent: "",
+        isStreaming: true,
+      };
+
+      setMessages((prev) => [...prev, userMsg, assistantMsg]);
       setIsLoading(true);
+      setStatusStage(webSearchEnabled ? "searching" : "thinking");
+
+      const historyForApi = messages.map((m) => ({
+        role: m.role,
+        content: m.content,
+      }));
+
+      const controller = new AbortController();
+      abortRef.current = controller;
+
+      // Batch deltas into one state update per animation frame. Without this a
+      // fast stream triggers hundreds of re-renders a second and the UI janks.
+      let pendingContent = "";
+      let pendingReasoning = "";
+      let frame: number | null = null;
+
+      const flush = () => {
+        frame = null;
+        if (!pendingContent && !pendingReasoning) return;
+        const c = pendingContent;
+        const r = pendingReasoning;
+        pendingContent = "";
+        pendingReasoning = "";
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === streamingId
+              ? {
+                  ...m,
+                  content: m.content + c,
+                  reasoningContent: (m.reasoningContent ?? "") + r,
+                }
+              : m
+          )
+        );
+      };
+      const scheduleFlush = () => {
+        if (frame === null) frame = requestAnimationFrame(flush);
+      };
+
+      const finish = (patch: Partial<Message>) => {
+        if (frame !== null) cancelAnimationFrame(frame);
+        flush();
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === streamingId ? { ...m, ...patch, isStreaming: false } : m
+          )
+        );
+      };
 
       try {
         const res = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
+          signal: controller.signal,
           body: JSON.stringify({
-            message: content.trim(),
+            message: trimmed,
             conversationId: currentConvId,
             deepseekApiKey: deepseekKey,
             tavilyApiKey: tavilyKey,
@@ -188,99 +307,159 @@ export default function Home() {
             thinkingEffort,
             webSearchEnabled,
             enabledPluginIds: enabledPlugins,
-            conversationHistory: messages.map((m) => ({
-              role: m.role,
-              content: m.content,
-            })),
+            conversationHistory: historyForApi,
           }),
         });
 
-        // The server can fail before it ever reaches our JSON handlers (e.g.
-        // a crashed route returns Next.js' HTML error page, or a proxy returns
-        // a gateway page). Parsing that as JSON is what produced the confusing
-        // "Unexpected token '<', "<!DOCTYPE "... is not valid JSON" message,
-        // so read the body as text first and decide based on the status.
-        const raw = await res.text();
-
-        let data: Record<string, unknown> = {};
-        let parseFailed = false;
-        if (raw) {
+        // Validation failures still come back as ordinary JSON responses.
+        if (!res.ok || !res.body) {
+          const raw = await res.text();
+          let serverError: string | null = null;
           try {
-            data = JSON.parse(raw) as Record<string, unknown>;
+            const parsed = JSON.parse(raw) as { error?: unknown };
+            if (typeof parsed.error === "string") serverError = parsed.error;
           } catch {
-            parseFailed = true;
+            /* non-JSON (e.g. an HTML error page) — handled below */
           }
-        }
-
-        if (!res.ok || parseFailed) {
-          const serverError =
-            typeof data.error === "string" ? data.error : null;
-
-          const content = serverError
-            ? `⚠️ ${serverError}`
-            : res.status >= 500
-              ? `⚠️ The server hit an error (${res.status}). This usually means the app's database or API configuration isn't set up correctly — check the server logs for details.`
-              : res.status > 0 && !res.ok
-                ? `⚠️ Request failed (${res.status} ${res.statusText || "Error"}).`
-                : "⚠️ The server returned an unexpected (non-JSON) response.";
-
-          const errorMsg: Message = {
-            id: `err-${Date.now()}`,
-            role: "assistant",
-            content,
-          };
-          setMessages((prev) => [...prev, errorMsg]);
+          finish({
+            content: `⚠️ ${
+              serverError ??
+              (res.status >= 500
+                ? `The server hit an error (${res.status}). Check the server logs for details.`
+                : `Request failed (${res.status} ${res.statusText || "Error"}).`)
+            }`,
+            isError: true,
+          });
           return;
         }
 
-        const payload = data as unknown as ChatResponse;
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let finalMeta: Partial<Message> = {};
+        let sawError = false;
 
-        const assistantMsg: Message = {
-          id: payload.id ?? `msg-${Date.now()}`,
-          role: "assistant",
-          content: payload.content ?? "",
-          reasoningContent: payload.reasoningContent,
-          thinkingEffort: payload.resolvedEffort,
-          webSearchUsed: payload.webSearchUsed,
-          searchResults: payload.searchResults,
-          searchQueries: payload.searchQueries,
-          searchesPerformed: payload.searchesPerformed,
-          pluginsUsed: payload.pluginsUsed,
-          tokenCount: payload.usage?.total_tokens,
-        };
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
 
-        setMessages((prev) => [...prev, assistantMsg]);
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() ?? "";
 
-        // Update conversation
-        if (!currentConvId && payload.conversationId) {
-          setCurrentConvId(payload.conversationId);
-          setConversations((prev) => [
-            {
-              id: payload.conversationId as string,
-              title:
-                content.length > 60
-                  ? content.substring(0, 57) + "..."
-                  : content,
-              createdAt: new Date().toISOString(),
-              updatedAt: new Date().toISOString(),
-            },
-            ...prev,
-          ]);
+          for (const rawLine of lines) {
+            const line = rawLine.trim();
+            if (!line.startsWith("data:")) continue;
+            const payload = line.slice(5).trim();
+            if (!payload) continue;
+
+            let evt: StreamEvent;
+            try {
+              evt = JSON.parse(payload) as StreamEvent;
+            } catch {
+              continue;
+            }
+
+            switch (evt.type) {
+              case "status":
+                setStatusStage(evt.stage);
+                break;
+
+              case "meta":
+                finalMeta = {
+                  ...finalMeta,
+                  thinkingEffort: evt.resolvedEffort,
+                  webSearchUsed: evt.webSearchUsed,
+                  searchResults: evt.searchResults,
+                  searchQueries: evt.searchQueries ?? undefined,
+                  searchesPerformed: evt.searchesPerformed,
+                };
+                if (!currentConvId && evt.conversationId) {
+                  setCurrentConvId(evt.conversationId);
+                }
+                break;
+
+              case "reasoning":
+                pendingReasoning += evt.delta;
+                scheduleFlush();
+                break;
+
+              case "content":
+                pendingContent += evt.delta;
+                scheduleFlush();
+                break;
+
+              case "done": {
+                const usage = evt.usage as { total_tokens?: number } | null;
+                finish({
+                  ...finalMeta,
+                  id: evt.id || streamingId,
+                  tokenCount: usage?.total_tokens,
+                });
+                if (evt.conversationId) {
+                  setCurrentConvId(evt.conversationId);
+                  setConversations((prev) =>
+                    prev.some((c) => c.id === evt.conversationId)
+                      ? prev
+                      : [
+                          {
+                            id: evt.conversationId as string,
+                            title:
+                              trimmed.length > 60
+                                ? trimmed.substring(0, 57) + "..."
+                                : trimmed,
+                            createdAt: new Date().toISOString(),
+                            updatedAt: new Date().toISOString(),
+                          },
+                          ...prev,
+                        ]
+                  );
+                }
+                break;
+              }
+
+              case "error":
+                sawError = true;
+                finish({ content: `⚠️ ${evt.error}`, isError: true });
+                break;
+            }
+          }
+        }
+
+        // Stream ended without a terminal frame (dropped connection).
+        if (!sawError) {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === streamingId && m.isStreaming
+                ? {
+                    ...m,
+                    ...finalMeta,
+                    isStreaming: false,
+                    content:
+                      m.content ||
+                      "⚠️ The connection closed before a reply arrived.",
+                  }
+                : m
+            )
+          );
         }
       } catch (err) {
-        // Reaching here means the request itself failed (offline, DNS, CORS,
-        // aborted). Response-parsing problems are handled above, so this
-        // message is now only ever shown for genuine connectivity issues.
-        const errorMsg: Message = {
-          id: `err-${Date.now()}`,
-          role: "assistant",
-          content: `⚠️ Couldn't reach the server: ${
-            err instanceof Error ? err.message : "connection failed"
-          }. Check your connection and try again.`,
-        };
-        setMessages((prev) => [...prev, errorMsg]);
+        if (err instanceof Error && err.name === "AbortError") {
+          // User pressed stop — keep whatever streamed in so far.
+          finish({});
+        } else {
+          finish({
+            content: `⚠️ Couldn't reach the server: ${
+              err instanceof Error ? err.message : "connection failed"
+            }. Check your connection and try again.`,
+            isError: true,
+          });
+        }
       } finally {
+        if (frame !== null) cancelAnimationFrame(frame);
+        abortRef.current = null;
         setIsLoading(false);
+        setStatusStage(null);
       }
     },
     [
@@ -296,6 +475,10 @@ export default function Home() {
       messages,
     ]
   );
+
+  const stopGeneration = useCallback(() => {
+    abortRef.current?.abort();
+  }, []);
 
   return (
     <div className="flex h-dvh w-full overflow-hidden bg-bg-primary">
@@ -315,6 +498,8 @@ export default function Home() {
       <ChatArea
         messages={messages}
         isLoading={isLoading}
+        statusStage={statusStage}
+        onStop={stopGeneration}
         hasKeys={hasKeys}
         model={model}
         thinkingEffort={thinkingEffort}

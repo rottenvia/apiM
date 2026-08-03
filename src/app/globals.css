@@ -388,11 +388,10 @@ input:focus-visible {
 }
 
 /* ---------------------------------------------------------------------------
-   Code blocks — header bar with language label + copy button.
-   The bar and the <pre> share one border/radius so they read as a single
-   surface, matching the sources/thinking panels.
+   Code blocks — sticky header bar with language, line count and actions.
 --------------------------------------------------------------------------- */
 .code-block {
+  position: relative;
   margin: 0.75em 0;
   border: 1px solid var(--color-border);
   border-radius: 12px;
@@ -400,17 +399,26 @@ input:focus-visible {
   background: var(--color-bg-secondary);
 }
 
+/* The bar is sticky so Copy/Preview stay reachable while scrolling a long
+   block. Previously they scrolled out of view and became unusable. */
 .code-block-bar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 0.75rem;
   padding: 0.375rem 0.375rem 0.375rem 0.875rem;
-  background: var(--color-bg-tertiary);
+  background: color-mix(in oklab, var(--color-bg-tertiary) 92%, transparent);
+  backdrop-filter: blur(8px);
   border-bottom: 1px solid var(--color-border);
 }
 
 .code-block-lang {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.625rem;
   font-family: var(--font-mono);
   font-size: 0.6875rem;
   letter-spacing: 0.06em;
@@ -418,10 +426,21 @@ input:focus-visible {
   color: var(--color-text-muted);
   user-select: none;
 }
+.code-block-lines {
+  font-size: 0.625rem;
+  letter-spacing: 0.04em;
+  opacity: 0.55;
+}
 
-/* The button stays mounted so layout never shifts; it just fades up on hover
-   or keyboard focus, and stays visible while showing its result. */
-.code-copy-btn {
+.code-block-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+/* Actions stay mounted so the layout never shifts; they fade in on hover or
+   keyboard focus, and stay visible while showing a result. */
+.code-action-btn {
   display: inline-flex;
   align-items: center;
   gap: 0.375rem;
@@ -439,49 +458,353 @@ input:focus-visible {
     opacity 0.15s ease,
     color 0.15s ease,
     background-color 0.15s ease,
-    border-color 0.15s ease;
+    border-color 0.15s ease,
+    transform 0.1s ease;
 }
-
-.code-block:hover .code-copy-btn,
-.code-copy-btn:focus-visible,
-.code-copy-btn[data-state="copied"],
-.code-copy-btn[data-state="failed"] {
+.code-block:hover .code-action-btn,
+.code-action-btn:focus-visible,
+.code-action-btn[data-state='copied'],
+.code-action-btn[data-state='failed'] {
   opacity: 1;
 }
-
-.code-copy-btn:hover {
+.code-action-btn:hover {
   background: var(--color-bg-hover);
   border-color: var(--color-border-light);
   color: var(--color-text-primary);
 }
-
-.code-copy-btn[data-state="copied"] {
+.code-action-btn:active {
+  transform: scale(0.96);
+}
+.code-action-btn[data-state='copied'] {
   color: var(--color-success);
 }
-
-.code-copy-btn[data-state="failed"] {
+.code-action-btn[data-state='failed'] {
   color: var(--color-danger);
 }
-
-.code-copy-btn svg {
+.code-action-btn svg {
   width: 0.875rem;
   height: 0.875rem;
   flex-shrink: 0;
 }
 
-/* Touch devices have no hover, so keep the control permanently visible. */
+/* The Preview action is the primary affordance — keep it always visible. */
+.code-action-run {
+  opacity: 1;
+  color: var(--color-accent-light);
+  border-color: color-mix(in oklab, var(--color-accent) 30%, transparent);
+  background: color-mix(in oklab, var(--color-accent) 10%, transparent);
+}
+.code-action-run:hover {
+  color: var(--color-accent-light);
+  background: color-mix(in oklab, var(--color-accent) 18%, transparent);
+  border-color: color-mix(in oklab, var(--color-accent) 45%, transparent);
+}
+
+/* Touch devices have no hover, so keep controls permanently visible. */
 @media (hover: none) {
-  .code-copy-btn {
+  .code-action-btn {
     opacity: 1;
   }
 }
 
-/* The wrapper now owns the frame — reset the inner <pre>. */
+.code-block-body {
+  max-height: none;
+  overflow: auto;
+  /* Stop scroll chaining: reaching the end of a scrollable code block no
+     longer starts scrolling the whole conversation behind it. */
+  overscroll-behavior: contain;
+}
+.code-block[data-collapsed='true'] .code-block-body {
+  max-height: 26rem;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, #000 72%, transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 72%, transparent 100%);
+}
+
+/* The wrapper owns the frame — reset the inner <pre>. */
 .code-block pre {
   margin: 0;
   border: 0;
   border-radius: 0;
   background: transparent;
+}
+
+.code-expand-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  width: 100%;
+  padding: 0.5rem;
+  border-top: 1px solid var(--color-border);
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-secondary);
+  font-size: 0.75rem;
+  font-weight: 500;
+  transition:
+    color 0.15s ease,
+    background-color 0.15s ease;
+}
+.code-expand-btn:hover {
+  color: var(--color-text-primary);
+  background: var(--color-bg-hover);
+}
+.code-expand-btn svg {
+  width: 0.875rem;
+  height: 0.875rem;
+  transition: transform 0.2s ease;
+}
+.code-expand-btn svg[data-expanded='true'] {
+  transform: rotate(180deg);
+}
+
+/* ---------------------------------------------------------------------------
+   Live HTML preview overlay
+--------------------------------------------------------------------------- */
+.preview-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: clamp(0.5rem, 3vw, 2.5rem);
+}
+
+.preview-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.62);
+  backdrop-filter: blur(6px);
+  opacity: 0;
+  transition: opacity 0.22s ease;
+}
+.preview-overlay[data-visible='true'] .preview-backdrop {
+  opacity: 1;
+}
+
+.preview-panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: min(1200px, 100%);
+  height: min(860px, 100%);
+  overflow: hidden;
+  border-radius: 18px;
+  border: 1px solid var(--color-border-light);
+  background: var(--color-bg-secondary);
+  box-shadow:
+    0 32px 80px rgba(0, 0, 0, 0.55),
+    0 4px 16px rgba(0, 0, 0, 0.35);
+  opacity: 0;
+  transform: translateY(14px) scale(0.975);
+  transition:
+    opacity 0.24s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.preview-overlay[data-visible='true'] .preview-panel {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+
+.preview-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex: none;
+  padding: 0.625rem 0.75rem;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-bg-tertiary);
+}
+.preview-toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+.preview-dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 9999px;
+  flex: none;
+}
+.preview-dot-red {
+  background: #e06c60;
+}
+.preview-dot-amber {
+  background: #d9a441;
+}
+.preview-dot-green {
+  background: #7ab866;
+}
+.preview-title {
+  margin-left: 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--color-text-secondary);
+  user-select: none;
+}
+
+.preview-segmented {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 10px;
+  background: var(--color-bg-primary);
+  border: 1px solid var(--color-border);
+}
+.preview-segment {
+  padding: 0.3rem 0.7rem;
+  border-radius: 8px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--color-text-muted);
+  transition:
+    color 0.15s ease,
+    background-color 0.15s ease;
+}
+.preview-segment:hover {
+  color: var(--color-text-primary);
+}
+.preview-segment[data-active='true'] {
+  background: var(--color-bg-elevated);
+  color: var(--color-text-primary);
+}
+
+.preview-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  color: var(--color-text-secondary);
+  transition:
+    color 0.15s ease,
+    background-color 0.15s ease;
+}
+.preview-icon-btn:hover {
+  color: var(--color-text-primary);
+  background: var(--color-bg-hover);
+}
+.preview-icon-btn > svg {
+  width: 15px;
+  height: 15px;
+}
+.preview-icon-close:hover {
+  color: var(--color-danger);
+  background: color-mix(in oklab, var(--color-danger) 15%, transparent);
+}
+
+.preview-stage {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  justify-content: center;
+  padding: 1rem;
+  background:
+    linear-gradient(45deg, rgba(255, 255, 255, 0.015) 25%, transparent 25%) 0 0 / 20px 20px,
+    linear-gradient(-45deg, rgba(255, 255, 255, 0.015) 25%, transparent 25%) 0 10px / 20px 20px,
+    var(--color-bg-primary);
+}
+
+.preview-frame-wrap {
+  width: 100%;
+  height: 100%;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  background: #fff;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  transition: width 0.32s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.preview-frame {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  display: block;
+}
+
+/* ---------------------------------------------------------------------------
+   Streaming + scroll affordances
+--------------------------------------------------------------------------- */
+
+/* Caret that trails the text as tokens arrive. */
+.stream-caret {
+  display: inline-block;
+  width: 2px;
+  height: 1.05em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  border-radius: 1px;
+  background: var(--color-accent);
+  animation: caret-blink 1s steps(2, start) infinite;
+}
+
+@keyframes caret-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
+.scroll-bottom-btn {
+  position: absolute;
+  right: 50%;
+  bottom: 0.75rem;
+  transform: translateX(50%);
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 9999px;
+  border: 1px solid var(--color-border-light);
+  background: var(--color-bg-elevated);
+  color: var(--color-text-secondary);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+  animation: fadeIn 0.2s ease-out;
+  transition:
+    color 0.15s ease,
+    background-color 0.15s ease,
+    transform 0.12s ease;
+}
+.scroll-bottom-btn:hover {
+  color: var(--color-text-primary);
+  background: var(--color-bg-hover);
+}
+.scroll-bottom-btn:active {
+  transform: translateX(50%) scale(0.94);
+}
+.scroll-bottom-btn > svg {
+  width: 16px;
+  height: 16px;
+}
+
+.stop-btn {
+  background: var(--color-bg-elevated) !important;
+  color: var(--color-danger) !important;
+  border: 1px solid color-mix(in oklab, var(--color-danger) 35%, transparent);
+}
+.stop-btn:hover {
+  background: color-mix(in oklab, var(--color-danger) 16%, transparent) !important;
+}
+.stop-btn > svg {
+  width: 12px;
+  height: 12px;
+}
+
+/* Reasoning panel: contain scrolling so the conversation behind it stays put
+   when the inner panel reaches its end. */
+.thinking-scroll {
+  overscroll-behavior: contain;
 }
 
 /* ---------------------------------------------------------------------------
