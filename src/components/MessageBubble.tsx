@@ -2,8 +2,19 @@
 
 import { useState } from "react";
 import ReactMarkdown from "react-markdown";
+import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Message } from "@/app/page";
+import { CodeBlock } from "@/components/CodeBlock";
+
+/**
+ * Render fenced code blocks with a language label and copy button.
+ * Defined once at module scope so the object identity is stable across
+ * renders and react-markdown doesn't rebuild its renderer each time.
+ */
+const markdownComponents: Components = {
+  pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
+};
 
 interface MessageBubbleProps {
   message: Message;
@@ -81,7 +92,10 @@ export function MessageBubble({ message }: MessageBubbleProps) {
                 </button>
                 {showThinking && (
                   <div className="px-4 py-3 text-sm text-text-secondary leading-relaxed bg-bg-secondary/50 max-h-96 overflow-y-auto">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm]}
+                      components={markdownComponents}
+                    >
                       {message.reasoningContent}
                     </ReactMarkdown>
                   </div>
@@ -91,7 +105,10 @@ export function MessageBubble({ message }: MessageBubbleProps) {
 
             {/* Main content */}
             <div className="prose-chat text-[15px] leading-relaxed text-text-primary">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                components={markdownComponents}
+              >
                 {message.content}
               </ReactMarkdown>
             </div>
