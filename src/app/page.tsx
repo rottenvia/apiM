@@ -5,6 +5,7 @@ import { Sidebar } from "@/components/Sidebar";
 import { ChatArea } from "@/components/ChatArea";
 import { SettingsModal } from "@/components/SettingsModal";
 import { PluginsModal } from "@/components/PluginsModal";
+import { ArtifactProvider } from "@/components/ArtifactContext";
 
 export interface Message {
   id: string;
@@ -481,6 +482,7 @@ export default function Home() {
   }, []);
 
   return (
+    <ArtifactProvider>
     <div className="flex h-dvh w-full overflow-hidden bg-bg-primary">
       {/* Sidebar */}
       <Sidebar
@@ -545,5 +547,6 @@ export default function Home() {
         />
       )}
     </div>
+    </ArtifactProvider>
   );
 }
