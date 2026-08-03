@@ -68,14 +68,21 @@ async function copyText(text: string): Promise<boolean> {
 function deriveTitle(code: string, language: string | null): string {
   const titleTag = /<title>([^<]{1,60})<\/title>/i.exec(code);
   if (titleTag) return titleTag[1].trim();
-  if (language === "html") return "HTML document";
   if (language) return `${language} snippet`;
   return "Snippet";
 }
 
-/** Blocks longer than this collapse to a compact card instead of inlining. */
+/** Blocks longer than this collapse to a card instead of rendering inline. */
 const CARD_THRESHOLD = 14;
 
+/**
+ * NOTE ON STYLING: every rule here is a Tailwind utility rather than a custom
+ * class in globals.css. Custom classes broke badly once when a browser served
+ * a cached stylesheet against new markup — unstyled SVGs with only a viewBox
+ * expand to fill their container, which produced a full-screen icon. Utilities
+ * are content-hashed with the page, and the SVGs also carry explicit
+ * width/height attributes so they can never blow up even with no CSS at all.
+ */
 export function CodeBlock({ children }: { children?: ReactNode }) {
   const { open } = useArtifact();
   const [copied, setCopied] = useState(false);
@@ -91,11 +98,6 @@ export function CodeBlock({ children }: { children?: ReactNode }) {
   const code = useMemo(() => nodeToText(children).replace(/\n$/, ""), [children]);
   const language = useMemo(() => languageOf(children), [children]);
   const lineCount = useMemo(() => code.split("\n").length, [code]);
-
-  const runnable = useMemo(
-    () => language === "html" && /<html[\s>]|<!doctype html/i.test(code),
-    [language, code]
-  );
   const title = useMemo(() => deriveTitle(code, language), [code, language]);
 
   const handleCopy = useCallback(
@@ -110,16 +112,14 @@ export function CodeBlock({ children }: { children?: ReactNode }) {
   );
 
   const openArtifact = useCallback(
-    () => open({ code, language, title, runnable }),
-    [open, code, language, title, runnable]
+    () => open({ code, language, title }),
+    [open, code, language, title]
   );
 
-  // Long or runnable output becomes a compact card that opens beside the
-  // conversation — inlining hundreds of lines buries the actual reply.
-  if (runnable || lineCount > CARD_THRESHOLD) {
+  // Long output becomes a compact card that opens beside the conversation.
+  if (lineCount > CARD_THRESHOLD) {
     return (
       <div
-        className="artifact-card"
         role="button"
         tabIndex={0}
         onClick={openArtifact}
@@ -129,34 +129,47 @@ export function CodeBlock({ children }: { children?: ReactNode }) {
             openArtifact();
           }
         }}
+        className="group my-3 flex w-full cursor-pointer items-center gap-3 rounded-xl border border-[#2c2924] bg-[#141210] px-3 py-2.5 text-left transition-colors duration-150 hover:border-[#403c34] hover:bg-[#201e1b]"
       >
-        <span className="artifact-card-icon">
-          {runnable ? (
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M8 5.5v13l11-6.5-11-6.5z" />
-            </svg>
-          ) : (
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M8 9l-3 3 3 3m8-6l3 3-3 3M13.5 6l-3 12" />
-            </svg>
-          )}
+        <span className="flex h-9 w-9 flex-none items-center justify-center rounded-lg bg-[#2a2723] text-[#d97f5d]">
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={1.7}
+            aria-hidden="true"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              d="M8 9l-3 3 3 3m8-6l3 3-3 3M13.5 6l-3 12"
+            />
+          </svg>
         </span>
 
-        <span className="artifact-card-text">
-          <span className="artifact-card-title">{title}</span>
-          <span className="artifact-card-meta">
-            {runnable ? "Click to run · " : "Click to open · "}
-            {language ?? "text"} · {lineCount} lines
+        <span className="flex min-w-0 flex-1 flex-col">
+          <span className="truncate text-sm font-medium text-[#ede9e2]">
+            {title}
+          </span>
+          <span className="text-[11px] text-[#6d685d]">
+            {language ?? "text"} · {lineCount} lines · click to open
           </span>
         </span>
 
-        <button onClick={handleCopy} className="artifact-card-copy" title="Copy code" aria-label="Copy code">
+        <button
+          onClick={handleCopy}
+          title={copied ? "Copied" : "Copy code"}
+          aria-label="Copy code"
+          className="flex h-8 w-8 flex-none items-center justify-center rounded-lg text-[#6d685d] transition-colors hover:bg-[#33302a] hover:text-[#ede9e2]"
+        >
           {copied ? (
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#7ba478" strokeWidth={2} aria-hidden="true">
               <path strokeLinecap="round" strokeLinejoin="round" d="M20 6L9 17l-5-5" />
             </svg>
           ) : (
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} aria-hidden="true">
               <rect x="9" y="9" width="11" height="11" rx="2" />
               <path strokeLinecap="round" strokeLinejoin="round" d="M5 15H4a1 1 0 01-1-1V4a1 1 0 011-1h10a1 1 0 011 1v1" />
             </svg>
@@ -168,26 +181,27 @@ export function CodeBlock({ children }: { children?: ReactNode }) {
 
   // Short snippets stay inline — a card would be more friction than the code.
   return (
-    <div className="code-block group">
-      <div className="code-block-bar">
-        <span className="code-block-lang">{language ?? "code"}</span>
+    <div className="group my-3 overflow-hidden rounded-xl border border-[#2c2924] bg-[#141210]">
+      <div className="flex items-center justify-between gap-3 border-b border-[#2c2924] bg-[#201e1b] py-1.5 pl-3.5 pr-1.5">
+        <span className="font-mono text-[11px] uppercase tracking-wider text-[#6d685d]">
+          {language ?? "code"}
+        </span>
         <button
           onClick={handleCopy}
-          className="code-action-btn"
-          data-state={copied ? "copied" : "idle"}
           title={copied ? "Copied" : "Copy code"}
           aria-label="Copy code"
+          className="flex h-7 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium text-[#a29d92] opacity-0 transition-all duration-150 hover:bg-[#33302a] hover:text-[#ede9e2] focus-visible:opacity-100 group-hover:opacity-100"
         >
           {copied ? (
             <>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#7ba478" strokeWidth={2} aria-hidden="true">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M20 6L9 17l-5-5" />
               </svg>
-              Copied
+              <span className="text-[#7ba478]">Copied</span>
             </>
           ) : (
             <>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} aria-hidden="true">
                 <rect x="9" y="9" width="11" height="11" rx="2" />
                 <path strokeLinecap="round" strokeLinejoin="round" d="M5 15H4a1 1 0 01-1-1V4a1 1 0 011-1h10a1 1 0 011 1v1" />
               </svg>
@@ -196,8 +210,10 @@ export function CodeBlock({ children }: { children?: ReactNode }) {
           )}
         </button>
       </div>
-      <div className="code-block-body">
-        <pre>{children}</pre>
+      <div className="overflow-auto [overscroll-behavior:contain]">
+        <pre className="!m-0 !rounded-none !border-0 !bg-transparent">
+          {children}
+        </pre>
       </div>
     </div>
   );

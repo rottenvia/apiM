@@ -451,31 +451,30 @@ function EmptyState({
 }
 
 const STAGE_LABELS: Record<StatusStage, string> = {
-  searching: "Searching the web…",
-  thinking: "Thinking…",
-  writing: "Writing…",
+  searching: "Searching the web",
+  thinking: "Thinking",
+  writing: "Writing",
 };
 
+/**
+ * Bouncing-dots indicator. Sizes come from inline styles rather than custom
+ * CSS classes so it renders correctly even if a stale stylesheet is served.
+ */
 function LoadingIndicator({ stage }: { stage: StatusStage | null }) {
   return (
-    <div className="flex justify-start animate-fade-in">
-      <div className="flex items-center gap-3 px-1 py-2">
-        <div className="flex gap-1">
-          <div
-            className="w-1.5 h-1.5 rounded-full bg-accent animate-bounce"
-            style={{ animationDelay: "0ms" }}
-          />
-          <div
-            className="w-1.5 h-1.5 rounded-full bg-accent animate-bounce"
-            style={{ animationDelay: "150ms" }}
-          />
-          <div
-            className="w-1.5 h-1.5 rounded-full bg-accent animate-bounce"
-            style={{ animationDelay: "300ms" }}
-          />
-        </div>
-        <span className="text-xs text-text-secondary animate-thinking">
-          {STAGE_LABELS[stage ?? "thinking"]}
+    <div className="flex animate-fade-in justify-start">
+      <div className="flex items-center gap-2.5 px-1 py-2">
+        <span className="flex items-end gap-1" aria-hidden="true">
+          {[0, 150, 300].map((delay) => (
+            <span
+              key={delay}
+              className="animate-bounce rounded-full bg-[#c96442]"
+              style={{ width: 6, height: 6, animationDelay: `${delay}ms` }}
+            />
+          ))}
+        </span>
+        <span className="animate-thinking text-xs text-[#a29d92]">
+          {STAGE_LABELS[stage ?? "thinking"]}…
         </span>
       </div>
     </div>
