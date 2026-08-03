@@ -465,6 +465,11 @@ function EmptyState({
  * made typing feel laggy. This subtree now only re-renders when the messages
  * themselves change.
  */
+/** How many recent messages to render before the user asks for more. */
+const WINDOW_SIZE = 60;
+/** How many additional messages each "load earlier" click reveals. */
+const WINDOW_STEP = 60;
+
 const MessageList = memo(function MessageList({
   messages,
   onRegenerate,
@@ -472,10 +477,52 @@ const MessageList = memo(function MessageList({
   messages: Message[];
   onRegenerate: (assistantId: string) => void;
 }) {
+  // Only the most recent slice is mounted. Rendering every bubble cost ~650ms
+  // at 1000 messages and grew linearly, so a long conversation became slow to
+  // open and to scroll. Older messages stay one click away and are still fully
+  // searchable and exportable, since those read from disk rather than the DOM.
+  const [limit, setLimit] = useState(WINDOW_SIZE);
+
+  // A new conversation should start from the bottom again.
+  const firstId = messages[0]?.id;
+  const prevFirstId = useRef(firstId);
+  useEffect(() => {
+    if (prevFirstId.current !== firstId) {
+      prevFirstId.current = firstId;
+      setLimit(WINDOW_SIZE);
+    }
+  }, [firstId]);
+
+  const hidden = Math.max(0, messages.length - limit);
+  const visible = hidden > 0 ? messages.slice(hidden) : messages;
   const lastId = messages[messages.length - 1]?.id;
+
   return (
     <>
-      {messages.map((msg) => (
+      {hidden > 0 && (
+        <div className="flex justify-center pb-2">
+          <button
+            onClick={() => setLimit((n) => n + WINDOW_STEP)}
+            className="flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-xs font-medium text-text-secondary transition-colors hover:border-border-light hover:bg-bg-hover hover:text-text-primary"
+          >
+            <svg
+              width="12"
+              height="12"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={2}
+              aria-hidden="true"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" d="M18 15l-6-6-6 6" />
+            </svg>
+            Show {Math.min(hidden, WINDOW_STEP)} earlier
+            {hidden > WINDOW_STEP ? ` of ${hidden}` : ""}
+          </button>
+        </div>
+      )}
+
+      {visible.map((msg) => (
         <MessageBubble
           key={msg.id}
           message={msg}

@@ -344,8 +344,12 @@ export default function Home() {
             Math.max(0, messages.findIndex((m) => m.id === regenerateFromId))
           )
         : messages;
+      // Only the recent turns are sent. The server also caps this, but
+      // trimming here keeps the request body small in very long chats — with
+      // thousands of messages the payload alone would be megabytes.
       const historyForApi = sourceHistory
         .filter((m) => m.content && !m.isError)
+        .slice(-20)
         .map((m) => ({ role: m.role, content: m.content }));
 
       const controller = new AbortController();
