@@ -28,6 +28,22 @@ export interface Conversation {
   updatedAt: string;
 }
 
+/** Shape of a successful POST /api/chat response. */
+interface ChatResponse {
+  id?: string;
+  conversationId?: string | null;
+  content?: string;
+  reasoningContent?: string | null;
+  resolvedEffort?: string;
+  webSearchUsed?: boolean;
+  searchResults?: { title: string; url: string; domain: string }[] | null;
+  searchQueries?: string[];
+  searchesPerformed?: number;
+  pluginsUsed?: string[];
+  persisted?: boolean;
+  usage?: { total_tokens?: number };
+}
+
 export default function Home() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [currentConvId, setCurrentConvId] = useState<string | null>(null);
@@ -87,12 +103,13 @@ export default function Home() {
     }
   }, [deepseekKey, tavilyKey, model, thinkingEffort, enabledPlugins]);
 
-  // Load conversations
+  // Load conversations. Guard against non-JSON responses (HTML error pages)
+  // so a misconfigured backend degrades to "no history" instead of throwing.
   useEffect(() => {
     fetch("/api/conversations")
-      .then((r) => r.json())
+      .then(async (r) => (r.ok ? ((await r.json()) as unknown) : null))
       .then((data) => {
-        if (Array.isArray(data)) setConversations(data);
+        if (Array.isArray(data)) setConversations(data as Conversation[]);
       })
       .catch(() => {});
   }, []);
@@ -101,7 +118,8 @@ export default function Home() {
     setCurrentConvId(id);
     try {
       const res = await fetch(`/api/conversations/${id}`);
-      const data = await res.json();
+      if (!res.ok) return;
+      const data = (await res.json()) as unknown;
       if (Array.isArray(data)) {
         setMessages(
           data.map((m: Record<string, unknown>) => ({
@@ -177,40 +195,68 @@ export default function Home() {
           }),
         });
 
-        const data = await res.json();
+        // The server can fail before it ever reaches our JSON handlers (e.g.
+        // a crashed route returns Next.js' HTML error page, or a proxy returns
+        // a gateway page). Parsing that as JSON is what produced the confusing
+        // "Unexpected token '<', "<!DOCTYPE "... is not valid JSON" message,
+        // so read the body as text first and decide based on the status.
+        const raw = await res.text();
 
-        if (!res.ok) {
+        let data: Record<string, unknown> = {};
+        let parseFailed = false;
+        if (raw) {
+          try {
+            data = JSON.parse(raw) as Record<string, unknown>;
+          } catch {
+            parseFailed = true;
+          }
+        }
+
+        if (!res.ok || parseFailed) {
+          const serverError =
+            typeof data.error === "string" ? data.error : null;
+
+          const content = serverError
+            ? `⚠️ ${serverError}`
+            : res.status >= 500
+              ? `⚠️ The server hit an error (${res.status}). This usually means the app's database or API configuration isn't set up correctly — check the server logs for details.`
+              : res.status > 0 && !res.ok
+                ? `⚠️ Request failed (${res.status} ${res.statusText || "Error"}).`
+                : "⚠️ The server returned an unexpected (non-JSON) response.";
+
           const errorMsg: Message = {
             id: `err-${Date.now()}`,
             role: "assistant",
-            content: `⚠️ Error: ${data.error || "Unknown error occurred"}`,
+            content,
           };
           setMessages((prev) => [...prev, errorMsg]);
           return;
         }
 
+        const payload = data as unknown as ChatResponse;
+
         const assistantMsg: Message = {
-          id: data.id,
+          id: payload.id ?? `msg-${Date.now()}`,
           role: "assistant",
-          content: data.content,
-          reasoningContent: data.reasoningContent,
-          thinkingEffort: data.resolvedEffort,
-          webSearchUsed: data.webSearchUsed,
-          searchResults: data.searchResults,
-          searchQueries: data.searchQueries,
-          searchesPerformed: data.searchesPerformed,
-          pluginsUsed: data.pluginsUsed,
-          tokenCount: data.usage?.total_tokens,
+          content: payload.content ?? "",
+          reasoningContent: payload.reasoningContent,
+          thinkingEffort: payload.resolvedEffort,
+          webSearchUsed: payload.webSearchUsed,
+          searchResults: payload.searchResults,
+          searchQueries: payload.searchQueries,
+          searchesPerformed: payload.searchesPerformed,
+          pluginsUsed: payload.pluginsUsed,
+          tokenCount: payload.usage?.total_tokens,
         };
 
         setMessages((prev) => [...prev, assistantMsg]);
 
         // Update conversation
-        if (!currentConvId && data.conversationId) {
-          setCurrentConvId(data.conversationId);
+        if (!currentConvId && payload.conversationId) {
+          setCurrentConvId(payload.conversationId);
           setConversations((prev) => [
             {
-              id: data.conversationId,
+              id: payload.conversationId as string,
               title:
                 content.length > 60
                   ? content.substring(0, 57) + "..."
@@ -222,10 +268,15 @@ export default function Home() {
           ]);
         }
       } catch (err) {
+        // Reaching here means the request itself failed (offline, DNS, CORS,
+        // aborted). Response-parsing problems are handled above, so this
+        // message is now only ever shown for genuine connectivity issues.
         const errorMsg: Message = {
           id: `err-${Date.now()}`,
           role: "assistant",
-          content: `⚠️ Network error: ${err instanceof Error ? err.message : "Connection failed"}`,
+          content: `⚠️ Couldn't reach the server: ${
+            err instanceof Error ? err.message : "connection failed"
+          }. Check your connection and try again.`,
         };
         setMessages((prev) => [...prev, errorMsg]);
       } finally {
