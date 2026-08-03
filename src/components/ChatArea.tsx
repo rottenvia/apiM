@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import { MessageBubble } from "@/components/MessageBubble";
+import { Dots, MessageBubble } from "@/components/MessageBubble";
 import { ThinkingEffortSelector } from "@/components/ThinkingEffortSelector";
 import { ModelSelector } from "@/components/ModelSelector";
 import type { Message, StatusStage } from "@/app/page";
@@ -120,7 +120,13 @@ export function ChatArea({
   };
 
   const canSend = Boolean(input.trim()) && !isLoading && hasKeys;
-  const hasStreamingMessage = messages.some((m) => m.isStreaming);
+  // Show the standalone indicator until the assistant bubble actually has
+  // something to display. Previously an empty streaming bubble was created
+  // instantly, which suppressed the indicator and left a silent gap between
+  // sending and the first token.
+  const streamingHasOutput = messages.some(
+    (m) => m.isStreaming && (m.content || m.reasoningContent)
+  );
 
   // One shared column width for the messages and the composer, and it widens
   // in fullscreen so controls are placed optimally for the user's resolution.
@@ -240,7 +246,7 @@ export function ChatArea({
 
               {/* Only shown before the first token lands; afterwards the
                   streaming bubble itself is the feedback. */}
-              {isLoading && !hasStreamingMessage && (
+              {isLoading && !streamingHasOutput && (
                 <LoadingIndicator stage={statusStage} />
               )}
 
@@ -464,14 +470,8 @@ function LoadingIndicator({ stage }: { stage: StatusStage | null }) {
   return (
     <div className="flex animate-fade-in justify-start">
       <div className="flex items-center gap-2.5 px-1 py-2">
-        <span className="flex items-end gap-1" aria-hidden="true">
-          {[0, 150, 300].map((delay) => (
-            <span
-              key={delay}
-              className="animate-bounce rounded-full bg-[#c96442]"
-              style={{ width: 6, height: 6, animationDelay: `${delay}ms` }}
-            />
-          ))}
+        <span className="text-[#c96442]">
+          <Dots size={5} />
         </span>
         <span className="animate-thinking text-xs text-[#a29d92]">
           {STAGE_LABELS[stage ?? "thinking"]}…
