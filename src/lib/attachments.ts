@@ -13,6 +13,15 @@ export interface Attachment {
   content: string;
   /** True when the file was longer than MAX_CHARS and had to be cut. */
   truncated: boolean;
+  kind: "text" | "image";
+  /** Images only: base64 data URL used for the thumbnail and the API call. */
+  dataUrl?: string;
+  /** Images only: description produced by the vision model. */
+  description?: string;
+  /** Images only: extraction still running. */
+  analyzing?: boolean;
+  /** Images only: extraction failed, with the reason. */
+  visionError?: string;
 }
 
 /** Per-file cap. Large files would otherwise blow past the context window. */
@@ -20,6 +29,8 @@ export const MAX_CHARS = 200_000;
 /** Reject anything over this outright rather than reading it into memory. */
 export const MAX_BYTES = 5 * 1024 * 1024;
 export const MAX_FILES = 10;
+/** Images are capped separately — they are sent to the vision model whole. */
+export const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 
 /**
  * Extensions treated as text. Anything else is rejected, because binary
@@ -97,6 +108,37 @@ export interface ReadResult {
   error?: string;
 }
 
+/** Read an image as a data URL so it can be previewed and sent for analysis. */
+export async function readImageFile(file: File): Promise<ReadResult> {
+  if (file.size > MAX_IMAGE_BYTES) {
+    return {
+      error: `${file.name} is ${formatBytes(file.size)} — the image limit is ${formatBytes(MAX_IMAGE_BYTES)}`,
+    };
+  }
+
+  const dataUrl = await new Promise<string | null>((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => resolve(null);
+    reader.readAsDataURL(file);
+  });
+
+  if (!dataUrl) return { error: `Couldn't read ${file.name}` };
+
+  return {
+    attachment: {
+      id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      name: file.name,
+      size: file.size,
+      content: "",
+      truncated: false,
+      kind: "image",
+      dataUrl,
+      analyzing: true,
+    },
+  };
+}
+
 export async function readTextFile(file: File): Promise<ReadResult> {
   if (file.size > MAX_BYTES) {
     return {
@@ -127,6 +169,7 @@ export async function readTextFile(file: File): Promise<ReadResult> {
       size: file.size,
       content: truncated ? raw.slice(0, MAX_CHARS) : raw,
       truncated,
+      kind: "text",
     },
   };
 }
@@ -144,6 +187,15 @@ export function buildMessageWithAttachments(
   if (attachments.length === 0) return text;
 
   const blocks = attachments.map((a) => {
+    // Images arrive as a description from the vision model, since DeepSeek's
+    // API is text-only and cannot accept pixels.
+    if (a.kind === "image") {
+      if (a.description) {
+        return `<image name="${a.name}">\n${a.description}\n</image>`;
+      }
+      return `<image name="${a.name}">\n[the image could not be read]\n</image>`;
+    }
+
     const ext = extensionOf(a.name);
     const fence = ext && ext.length <= 12 ? ext : "";
     const note = a.truncated
