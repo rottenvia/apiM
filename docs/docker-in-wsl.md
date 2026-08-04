@@ -59,6 +59,12 @@ and will do something entirely unrelated.
 
 The second line makes it start on boot, so this does not come back.
 
+`start=auto` costs nothing — an idle service uses no CPU or RAM. Worried about
+gaming performance? See **[wsl-gaming-performance.md](./wsl-gaming-performance.md)**:
+the short version is that the service is free, the hypervisor is almost
+certainly already running on Windows 11, and the only real cost is RAM while
+WSL is active, which is capped in one file.
+
 Then run the install again:
 
 ```powershell
@@ -136,6 +142,14 @@ Newer Ubuntu images on WSL start Docker automatically. If yours doesn't, run
 ```bash
 echo "sudo service docker start" >> ~/.bashrc
 ```
+
+---
+
+## Optional — cap WSL's memory
+
+By default WSL2 can take up to half your RAM. On a machine you also game on,
+that is worth limiting. One file, one minute:
+**[wsl-gaming-performance.md](./wsl-gaming-performance.md)**.
 
 ---
 
