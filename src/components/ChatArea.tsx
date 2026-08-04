@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { memo } from "react";
 import { buildChatSearchIndex } from "@/lib/chat-search";
+import { estimateCost, formatCost, formatDuration } from "@/lib/pricing";
 import type { ChatSearchIndex } from "@/lib/chat-search";
 import { ChatSearchBar } from "@/components/ChatSearchBar";
 import { AttachmentChips } from "@/components/AttachmentChips";
@@ -187,6 +188,22 @@ export function ChatArea({
     if (errors.length > 0) setAttachError(errors.join(" · "));
   }, [analyzeImage]);
 
+  /** Re-run a failed description, so a transient API error isn't terminal. */
+  const retryImage = useCallback(
+    (id: string) => {
+      setAttachments((prev) =>
+        prev.map((a) =>
+          a.id === id
+            ? { ...a, analyzing: true, visionError: undefined }
+            : a
+        )
+      );
+      const target = attachments.find((a) => a.id === id);
+      if (target) void analyzeImage({ ...target, visionError: undefined });
+    },
+    [attachments, analyzeImage]
+  );
+
   const removeAttachment = useCallback((id: string) => {
     setAttachments((prev) => prev.filter((a) => a.id !== id));
     setAttachError(null);
@@ -332,6 +349,25 @@ export function ChatArea({
       handleSubmit();
     }
   };
+
+  // Running totals for the conversation, so the cost of a whole thread is
+  // visible rather than only per-reply.
+  const totals = useMemo(() => {
+    let tokens = 0;
+    let cost = 0;
+    let ms = 0;
+    let priced = 0;
+    for (const m of messages) {
+      if (m.tokenCount) tokens += m.tokenCount;
+      if (m.durationMs) ms += m.durationMs;
+      const c = estimateCost(m.usage, m.model ?? "");
+      if (c !== null) {
+        cost += c;
+        priced += 1;
+      }
+    }
+    return { tokens, cost, ms, priced };
+  }, [messages]);
 
   const analyzingImages = attachments.some((a) => a.analyzing);
   const canSend =
@@ -483,6 +519,28 @@ export function ChatArea({
           <div
             className={`mx-auto w-full px-4 sm:px-6 py-6 transition-[max-width] duration-300 ${columnWidth}`}
           >
+            {totals.tokens > 0 && (
+              <div className="mb-5 flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-border pb-3 text-[11px] text-text-muted">
+                <span className="font-medium text-text-secondary">
+                  This conversation
+                </span>
+                <span>{totals.tokens.toLocaleString()} tokens</span>
+                {totals.priced > 0 && (
+                  <span title="Estimated from the models used">
+                    {formatCost(totals.cost)}
+                  </span>
+                )}
+                {totals.ms > 0 && (
+                  <span title="Total time spent generating">
+                    {formatDuration(totals.ms)}
+                  </span>
+                )}
+                <span className="ml-auto">
+                  {messages.filter((m) => m.role === "user").length} messages
+                </span>
+              </div>
+            )}
+
             <div className="space-y-6">
               <MessageList
                 messages={messages}
@@ -588,6 +646,7 @@ export function ChatArea({
             <AttachmentChips
               attachments={attachments}
               onRemove={removeAttachment}
+              onRetry={retryImage}
             />
 
             {attachError && (

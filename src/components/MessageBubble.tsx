@@ -16,6 +16,7 @@ import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Message, MessageAttachment } from "@/app/page";
 import { ImageLightbox } from "@/components/ImageLightbox";
+import { CompareVersions } from "@/components/CompareVersions";
 import { buildSearchRegex } from "@/lib/chat-search";
 import { estimateCost, formatCost, formatDuration } from "@/lib/pricing";
 import { CodeBlock } from "@/components/CodeBlock";
@@ -195,6 +196,7 @@ function MessageBubbleImpl({
   const [previewImage, setPreviewImage] = useState<MessageAttachment | null>(
     null
   );
+  const [comparing, setComparing] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const thinkingRef = useRef<HTMLDivElement>(null);
@@ -412,6 +414,24 @@ function MessageBubbleImpl({
               )
             )}
           </div>
+        )}
+
+        {comparing && (message.previousVersions?.length ?? 0) > 0 && (
+          <CompareVersions
+            versions={[
+              ...(message.previousVersions ?? []).map((v, i) => ({
+                ...v,
+                label: `Version ${i + 1}`,
+              })),
+              {
+                content: message.content,
+                model: message.model,
+                createdAt: message.createdAt,
+                label: "Current",
+              },
+            ]}
+            onClose={() => setComparing(false)}
+          />
         )}
 
         {previewImage?.dataUrl && (
@@ -699,6 +719,22 @@ function MessageBubbleImpl({
                     )}
                   </button>
 
+                  {(message.previousVersions?.length ?? 0) > 0 && (
+                    <button
+                      onClick={() => setComparing(true)}
+                      title="Compare with the previous reply"
+                      className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-[11px] font-medium text-[#d97f5d] transition-colors hover:bg-[#c96442]/12"
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} aria-hidden="true">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M8 7h12m0 0l-4-4m4 4l-4 4M16 17H4m0 0l4 4m-4-4l4-4" />
+                      </svg>
+                      Compare
+                      <span className="text-[#6d685d]">
+                        {(message.previousVersions?.length ?? 0) + 1}
+                      </span>
+                    </button>
+                  )}
+
                   {onRegenerate && (
                     <button
                       onClick={() => onRegenerate(message.id)}
@@ -768,6 +804,7 @@ export const MessageBubble = memo(MessageBubbleImpl, (prev, next) => {
     a.attachments === b.attachments &&
     a.usage === b.usage &&
     a.durationMs === b.durationMs &&
+    a.previousVersions === b.previousVersions &&
     prev.isLast === next.isLast &&
     prev.onRegenerate === next.onRegenerate &&
     prev.onEdit === next.onEdit &&
