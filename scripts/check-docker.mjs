@@ -107,9 +107,22 @@ async function main() {
       );
       console.log(dim("      'Inference manager' or 'dockerInference', that's a known"));
       console.log(dim("      Docker bug — not your machine, not virtualisation."));
-      console.log(dim("\n      Fix: reboot Windows, then open Docker Desktop again."));
+      console.log(dim("\n      Read the word just before the colon in that error:"));
       console.log(
-        dim("      Still crashing? See docs/docker-desktop-crash-fix.md\n")
+        dim("        'remove ...'  -> stale socket file. Reboot Windows.")
+      );
+      console.log(
+        dim("        'socket: ...' -> Windows is refusing to create Unix sockets.")
+      );
+      console.log(
+        dim("                         A reboot will NOT fix it. In an admin")
+      );
+      console.log(dim("                         Command Prompt run:"));
+      console.log(dim("                           netsh winsock reset"));
+      console.log(dim("                           netsh int ip reset"));
+      console.log(dim("                         then reboot."));
+      console.log(
+        dim("\n      Full guide: docs/docker-desktop-crash-fix.md\n")
       );
     } else {
       console.log(

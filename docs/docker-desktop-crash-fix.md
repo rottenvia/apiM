@@ -30,14 +30,57 @@ do. After rebooting, open Docker Desktop.
 
 ---
 
-## The stale-socket crash
+## Read the middle of the error — there are two different faults
 
-If WSL2 *is* installed and Docker Desktop still crashes with that message, it
-is a Docker bug, not a problem with your machine. It is not related to
-virtualisation or your hardware — a clean install on a perfectly healthy PC
-hits it. Tracked upstream as
+The message looks the same at a glance, but the verb before the colon tells
+you which problem you have, and they need opposite fixes.
+
+**`remove ...: The file cannot be accessed by the system`**
+A stale socket file is left over and Windows won't release it. **A reboot
+fixes this.**
+
+**`socket: An address incompatible with the requested protocol was used`**
+Windows refused to *create* an AF_UNIX socket at all. This is Winsock error
+10047, `WSAEAFNOSUPPORT` — "address family not supported". Rebooting will
+never fix it, because nothing is stale; the socket layer itself is rejecting
+Unix sockets. Docker Desktop cannot start without them.
+
+This usually means the Winsock catalog is corrupted, typically by antivirus or
+VPN software that installs a Layered Service Provider, or by one being removed
+badly. Skip to **Fix A** below.
+
+Both are tracked upstream:
 [docker/desktop-feedback#342](https://github.com/docker/desktop-feedback/issues/342)
 and [#460](https://github.com/docker/desktop-feedback/issues/460).
+
+---
+
+## Fix A — reset Winsock (for the `socket:` variant)
+
+This rebuilds Windows' socket configuration. It is a standard, safe repair,
+but it does clear custom network settings added by VPN or antivirus software —
+so a VPN may need reconnecting afterwards.
+
+Open **Command Prompt as Administrator** — press Start, type `cmd`, right-click
+**Command Prompt**, choose **Run as administrator** — then run these in order:
+
+```
+netsh winsock reset
+netsh int ip reset
+```
+
+**Reboot.** This one genuinely requires it; the reset does not take effect
+until you do.
+
+Then open Docker Desktop.
+
+If it still fails identically, the likely culprit is security software holding
+the socket layer open. Temporarily disabling third-party antivirus or VPN and
+starting Docker once will tell you whether that is it.
+
+---
+
+## Fix B — the stale-socket crash (for the `remove:` variant)
 
 ## What is actually happening
 
@@ -57,8 +100,6 @@ Turning the Inference / Model Runner feature off in settings **does not help** �
 the listener initialises before that setting is read. Several people have tried.
 
 ---
-
-## Fixes, easiest first
 
 ### 1. Reboot
 
