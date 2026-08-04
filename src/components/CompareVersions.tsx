@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -62,7 +63,12 @@ export function CompareVersions({
   const bottom = versions[index + 1] ?? versions[versions.length - 1];
   const canPage = versions.length > 2;
 
-  return (
+  // Portalled for the same reason as ImageLightbox: the message bubble's
+  // fade-in animation leaves a transform, which would otherwise anchor this
+  // fixed overlay to the bubble instead of the viewport.
+  if (typeof document === "undefined") return null;
+
+  return createPortal(
     <div
       className="fixed inset-0 z-[85] flex items-center justify-center p-4 sm:p-8"
       role="dialog"
@@ -151,7 +157,8 @@ export function CompareVersions({
           <Pane version={bottom} tone="current" />
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
