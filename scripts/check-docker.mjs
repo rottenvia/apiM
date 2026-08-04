@@ -8,11 +8,31 @@
  * and actually able to start a locked-down container — before any of that
  * work gets built on an assumption.
  */
+import { createRequire } from "node:module";
 import { execFile } from "node:child_process";
+
+const require = createRequire(import.meta.url);
 import { promisify } from "node:util";
 import os from "node:os";
 
 const run = promisify(execFile);
+
+/**
+ * True when running inside WSL. Advice differs there: Docker Desktop is
+ * irrelevant, and the engine is started with `service docker start`.
+ */
+const IS_WSL =
+  process.platform === "linux" &&
+  (Boolean(process.env.WSL_DISTRO_NAME) ||
+    (() => {
+      try {
+        return /microsoft/i.test(
+          require("node:fs").readFileSync("/proc/version", "utf8")
+        );
+      } catch {
+        return false;
+      }
+    })());
 
 const COLOR = process.stdout.isTTY && !process.env.NO_COLOR;
 const wrap = (c) => (s) => (COLOR ? `\x1b[${c}m${s}\x1b[0m` : s);
@@ -73,16 +93,30 @@ async function main() {
   const version = await tryRun("docker", ["--version"]);
   if (!version.ok) {
     no("Docker is installed");
-    console.log(
-      dim("\n      Not found. Install Docker Desktop (free for personal use):")
-    );
-    console.log(dim("      https://www.docker.com/products/docker-desktop/\n"));
-    console.log(
-      dim("      On Windows it needs WSL2 and virtualisation enabled in BIOS.")
-    );
-    console.log(
-      dim("      Check: Task Manager → Performance → CPU → 'Virtualization'.\n")
-    );
+    if (IS_WSL) {
+      console.log(dim("\n      You're inside WSL. Install the engine here:"));
+      console.log(dim("        sudo apt update"));
+      console.log(dim("        sudo apt install -y docker.io"));
+      console.log(dim("        sudo usermod -aG docker $USER"));
+      console.log(
+        dim("      Then run 'wsl --shutdown' in PowerShell and reopen Ubuntu.\n")
+      );
+      console.log(dim("      Full guide: docs/docker-in-wsl.md\n"));
+    } else {
+      console.log(
+        dim("\n      Not found. Install Docker Desktop (free for personal use):")
+      );
+      console.log(dim("      https://www.docker.com/products/docker-desktop/\n"));
+      console.log(
+        dim("      On Windows it needs WSL2 and virtualisation enabled in BIOS.")
+      );
+      console.log(
+        dim("      Check: Task Manager → Performance → CPU → 'Virtualization'.\n")
+      );
+      console.log(
+        dim("      Docker Desktop crashing? You don't need it — docs/docker-in-wsl.md\n")
+      );
+    }
     process.exit(1);
   }
   yes("Docker is installed", version.out);
@@ -101,7 +135,14 @@ async function main() {
         info.out
       );
 
-    if (stale || process.platform === "win32") {
+    if (IS_WSL) {
+      console.log(dim("\n      The engine isn't started. In this Ubuntu window:"));
+      console.log(dim("        sudo service docker start\n"));
+      console.log(
+        dim("      Permission denied instead? Run 'wsl --shutdown' in PowerShell,")
+      );
+      console.log(dim("      then reopen Ubuntu — the docker group needs a new session.\n"));
+    } else if (stale || process.platform === "win32") {
       console.log(
         dim("\n      If Docker Desktop closed itself with an error mentioning")
       );
@@ -122,7 +163,10 @@ async function main() {
       console.log(dim("                           netsh int ip reset"));
       console.log(dim("                         then reboot."));
       console.log(
-        dim("\n      Full guide: docs/docker-desktop-crash-fix.md\n")
+        dim("\n      Tried those already? Skip Docker Desktop entirely — the")
+      );
+      console.log(
+        dim("      engine runs in WSL without it: docs/docker-in-wsl.md\n")
       );
     } else {
       console.log(
