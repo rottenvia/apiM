@@ -3,7 +3,7 @@ import { v4 as uuidv4 } from "uuid";
 import { appendMessages, truncateFrom, upsertMessage } from "@/lib/store";
 import type { StoredMessage } from "@/lib/store";
 import { smartSearch, autoThinkingEffort, decideSearch } from "@/lib/smart-search";
-import type { SearchResultItem } from "@/lib/smart-search";
+import type { SmartSearchContext } from "@/lib/smart-search";
 import { AVAILABLE_PLUGINS, buildSystemPrompt } from "@/lib/plugins";
 import { listCustomPlugins } from "@/lib/plugin-store";
 
@@ -79,6 +79,8 @@ type StreamEvent =
       thinkingEnabled: boolean;
       webSearchUsed: boolean;
       searchReason: string;
+      searchRounds: number;
+      searchStopReason: string;
       searchResults: { title: string; url: string; domain: string }[] | null;
       searchQueries: string[] | null;
       searchesPerformed: number;
@@ -224,13 +226,7 @@ export async function POST(req: NextRequest) {
         }
 
         // ---------------- Web search ----------------
-        let searchContext: {
-          results: SearchResultItem[];
-          queries: string[];
-          summary: string;
-          searchesPerformed: number;
-          sourcesUsed: number;
-        } | null = null;
+        let searchContext: SmartSearchContext | null = null;
         let searchSummary = "";
 
         const recentContext = conversationHistory
@@ -243,6 +239,7 @@ export async function POST(req: NextRequest) {
         // guess, so ordinary coding questions skip the search entirely.
         let doSearch = false;
         let searchReason = "";
+        let clarifyHint = "";
         if (canSearch) {
           if (webSearchMode === "always") {
             doSearch = true;
@@ -255,6 +252,9 @@ export async function POST(req: NextRequest) {
             );
             doSearch = decision.needed;
             searchReason = decision.reason;
+            // Underspecified questions get a clarifying question instead of a
+            // search that would only return generic articles.
+            if (decision.clarify) clarifyHint = decision.clarify;
           }
         }
 
@@ -288,6 +288,8 @@ export async function POST(req: NextRequest) {
           thinkingEnabled,
           webSearchUsed: doSearch,
           searchReason,
+          searchRounds: searchContext?.rounds ?? 0,
+          searchStopReason: searchContext?.stopReason ?? "",
           searchResults:
             searchContext?.results.map((r) => ({
               title: r.title,
@@ -299,8 +301,15 @@ export async function POST(req: NextRequest) {
         });
 
         // ---------------- Build the request ----------------
+        const clarifyInstruction = clarifyHint
+          ? `\n\nThis question depends on details only the user has. Before giving a general answer, ask them: "${clarifyHint}" Keep it to one short question, explain in a sentence why it changes the answer, and offer what general guidance you can meanwhile.`
+          : "";
+
         const apiMessages: { role: string; content: string }[] = [
-          { role: "system", content: systemPrompt + searchSummary },
+          {
+            role: "system",
+            content: systemPrompt + searchSummary + clarifyInstruction,
+          },
         ];
         for (const msg of conversationHistory.slice(-20)) {
           apiMessages.push({ role: msg.role, content: msg.content });
