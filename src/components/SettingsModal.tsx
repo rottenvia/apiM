@@ -2,6 +2,12 @@
 
 import { useState } from "react";
 
+import {
+  clampDeleteDelay,
+  MIN_DELETE_DELAY,
+  MAX_DELETE_DELAY,
+} from "@/components/DeleteChatDialog";
+
 interface SettingsModalProps {
   deepseekKey: string;
   tavilyKey: string;
@@ -15,6 +21,8 @@ interface SettingsModalProps {
   onVisionModelChange: (model: string) => void;
   onModelChange: (model: string) => void;
   onDefaultEffortChange: (effort: string) => void;
+  deleteDelay: number;
+  onDeleteDelayChange: (seconds: number) => void;
   onClose: () => void;
 }
 
@@ -31,6 +39,8 @@ export function SettingsModal({
   onVisionModelChange,
   onModelChange,
   onDefaultEffortChange,
+  deleteDelay,
+  onDeleteDelayChange,
   onClose,
 }: SettingsModalProps) {
   const [showDsKey, setShowDsKey] = useState(false);
@@ -317,6 +327,57 @@ export function SettingsModal({
                 </button>
               ))}
             </div>
+          </div>
+
+          {/* Delete confirmation delay */}
+          <div>
+            <label
+              htmlFor="delete-delay"
+              className="block text-sm font-semibold text-text-primary mb-2"
+            >
+              Delete confirmation lock
+            </label>
+            <p className="mb-2.5 text-[12px] leading-relaxed text-text-secondary">
+              How long the Delete button stays locked when deleting a chat.
+              Deleting is permanent, so the pause is there to catch a misclick.
+            </p>
+            <div className="flex items-center gap-3">
+              <input
+                id="delete-delay"
+                type="range"
+                min={MIN_DELETE_DELAY}
+                max={MAX_DELETE_DELAY}
+                step={1}
+                value={deleteDelay}
+                onChange={(e) =>
+                  onDeleteDelayChange(clampDeleteDelay(e.target.value))
+                }
+                className="h-1.5 min-w-0 flex-1 cursor-pointer appearance-none rounded-full bg-bg-tertiary accent-accent"
+              />
+              <input
+                type="number"
+                min={MIN_DELETE_DELAY}
+                max={MAX_DELETE_DELAY}
+                value={deleteDelay}
+                aria-label="Delete confirmation lock in seconds"
+                // Clamped on blur rather than on change, so typing "10" isn't
+                // rewritten to the minimum the moment "1" is entered.
+                onChange={(e) => {
+                  const n = Number(e.target.value);
+                  if (Number.isFinite(n)) onDeleteDelayChange(n);
+                }}
+                onBlur={(e) =>
+                  onDeleteDelayChange(clampDeleteDelay(e.target.value))
+                }
+                className="w-16 flex-none rounded-lg border border-border bg-bg-tertiary px-2 py-1.5 text-center text-sm text-text-primary outline-none focus:border-border-light"
+              />
+              <span className="flex-none text-[12px] text-text-secondary">
+                sec
+              </span>
+            </div>
+            <p className="mt-1.5 text-[11px] text-text-muted">
+              Between {MIN_DELETE_DELAY} and {MAX_DELETE_DELAY} seconds.
+            </p>
           </div>
         </div>
 

@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Conversation } from "@/app/page";
+import { DeleteChatDialog } from "@/components/DeleteChatDialog";
 
 interface SidebarProps {
   conversations: Conversation[];
@@ -16,6 +17,8 @@ interface SidebarProps {
   onOpenSearch: () => void;
   onImported: () => void;
   onOpenSettings: () => void;
+  /** How long the delete button stays locked, in seconds. */
+  deleteDelay: number;
 }
 
 const EXPORT_FORMATS = [
@@ -37,6 +40,7 @@ export function Sidebar({
   onOpenSearch,
   onImported,
   onOpenSettings,
+  deleteDelay,
 }: SidebarProps) {
   const [menuFor, setMenuFor] = useState<string | null>(null);
   const [exportFor, setExportFor] = useState<string | null>(null);
@@ -84,6 +88,12 @@ export function Sidebar({
   );
 
   const visible = showArchived ? archived : active;
+
+  // Resolved from the full list, not the filtered one: the dialog must stay
+  // open even if the chat scrolls out of view or the archive tab is switched.
+  const pendingDelete = confirmDelete
+    ? conversations.find((c) => c.id === confirmDelete)
+    : undefined;
 
   // Close any open popover on outside click or Escape.
   //
@@ -354,40 +364,19 @@ export function Sidebar({
 
                     <div className="my-1 h-px bg-border" />
 
-                    {confirmDelete === conv.id ? (
-                      <div className="px-2.5 py-1.5">
-                        <p className="mb-1.5 text-[11px] leading-4 text-text-secondary">
-                          Delete this chat permanently?
-                        </p>
-                        <div className="flex gap-1.5">
-                          <button
-                            onClick={() => {
-                              onDelete(conv.id);
-                              setMenuFor(null);
-                              setConfirmDelete(null);
-                            }}
-                            className="flex-1 rounded-md bg-danger/90 px-2 py-1 text-[11px] font-medium text-white transition-colors hover:bg-danger"
-                          >
-                            Delete
-                          </button>
-                          <button
-                            onClick={() => setConfirmDelete(null)}
-                            className="flex-1 rounded-md border border-border px-2 py-1 text-[11px] text-text-secondary transition-colors hover:bg-bg-hover"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      </div>
-                    ) : (
-                      <MenuItem
-                        onClick={() => setConfirmDelete(conv.id)}
-                        label="Delete"
-                        danger
-                        icon={
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                        }
-                      />
-                    )}
+                    <MenuItem
+                      onClick={() => {
+                        // Close the menu first: the dialog is modal, and
+                        // leaving the popover mounted behind it traps focus.
+                        setMenuFor(null);
+                        setConfirmDelete(conv.id);
+                      }}
+                      label="Delete"
+                      danger
+                      icon={
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                      }
+                    />
                   </div>
                 )}
               </div>
@@ -422,6 +411,20 @@ export function Sidebar({
           </button>
         </div>
       </div>
+
+      {pendingDelete && (
+        <DeleteChatDialog
+          title={pendingDelete.title}
+          messageCount={pendingDelete.messageCount}
+          delaySeconds={deleteDelay}
+          onCancel={() => setConfirmDelete(null)}
+          onConfirm={() => {
+            const id = pendingDelete.id;
+            setConfirmDelete(null);
+            onDelete(id);
+          }}
+        />
+      )}
     </div>
   );
 }
