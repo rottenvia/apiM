@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 /**
  * Full-size preview for an attached image.
@@ -55,9 +56,13 @@ export function ImageLightbox({
     };
   }, []);
 
-  return (
+  // Rendered in a portal so the overlay escapes the message bubble's
+  // transformed ancestor and can actually cover the viewport.
+  if (typeof document === "undefined") return null;
+
+  return createPortal(
     <div
-      className="fixed inset-0 z-[80] flex items-center justify-center p-4 sm:p-8"
+      className="fixed inset-0 z-[80] flex items-center justify-center p-3 sm:p-6"
       role="dialog"
       aria-modal="true"
       aria-label={`Preview of ${name}`}
@@ -70,7 +75,7 @@ export function ImageLightbox({
       />
 
       <div
-        className={`relative flex max-h-full w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-[#403c34] bg-[#141210] shadow-[0_28px_80px_rgba(0,0,0,0.6)] transition-all duration-200 ${
+        className={`relative flex max-h-full h-full w-full max-w-[92vw] flex-col overflow-hidden rounded-2xl border border-[#403c34] bg-[#141210] shadow-[0_28px_80px_rgba(0,0,0,0.6)] transition-all duration-200 ${
           visible ? "scale-100 opacity-100" : "scale-[0.97] opacity-0"
         }`}
       >
@@ -126,7 +131,7 @@ export function ImageLightbox({
             <img
               src={src}
               alt={name}
-              className="max-h-[70vh] max-w-full rounded-lg object-contain"
+              className="max-h-full max-w-full rounded-lg object-contain"
             />
           </div>
 
@@ -142,6 +147,7 @@ export function ImageLightbox({
           )}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
