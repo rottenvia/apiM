@@ -1,0 +1,56 @@
+# apiM on a server.
+#
+# Two containers: the app, and Caddy in front of it handling HTTPS.
+#
+# The app never listens on a public port. Only Caddy is exposed, so the only
+# way in is through TLS and, behind that, the password.
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    # No `ports:` on purpose. Publishing 3000 here would bypass Caddy and
+    # expose the app directly — and on Linux, Docker's published ports punch
+    # through ufw without appearing in its rules.
+    expose:
+      - "3000"
+    environment:
+      NODE_ENV: production
+      APP_PASSWORD: ${APP_PASSWORD:?set APP_PASSWORD in deploy/.env}
+      AUTH_SECRET: ${AUTH_SECRET:?set AUTH_SECRET in deploy/.env}
+      # Refuse to serve at all if auth is somehow unconfigured, rather than
+      # running wide open on a public IP.
+      REQUIRE_AUTH: "1"
+    volumes:
+      # Chats and workspace files live on the host, so rebuilding the image
+      # or updating the app never destroys them.
+      - ../data:/app/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/auth/status').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      # A bare IP gets `:80` here, which serves plain HTTP. A domain gets a
+      # free certificate automatically.
+      SITE_ADDRESS: ${SITE_ADDRESS:?set SITE_ADDRESS in deploy/.env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+
+volumes:
+  caddy_data:
+  caddy_config:

@@ -47,3 +47,6 @@ tsconfig.tsbuildinfo
 
 # Local chat history (file-backed store)
 data/
+
+# Server deployment secrets — contains the app password and session key.
+deploy/.env
