@@ -75,6 +75,50 @@ wsl --install -d Ubuntu
 `vmcompute` nothing virtualised can start, and each component fails with its
 own confusing message.
 
+### If `vmcompute` didn't fix it: the hypervisor may be switched off at boot
+
+The service can be running while the hypervisor itself never starts, because
+Windows has a boot-level switch for it. This is the single most common cause
+of `0xc03a0014`, and it is very often set deliberately — many "optimise
+Windows for gaming" guides, and some anti-cheat troubleshooting steps, tell
+people to turn it off. It is also required by VirtualBox and older VMware,
+which switch it off themselves.
+
+Check it (Command Prompt or PowerShell, **as Administrator**):
+
+```
+bcdedit /enum | findstr -i hypervisorlaunchtype
+```
+
+- **`hypervisorlaunchtype Off`** — that is the problem. Nothing virtualised
+  can start. Fix below.
+- **`Auto`**, or no output at all — this is not it; keep reading.
+
+Turn it on:
+
+```
+bcdedit /set hypervisorlaunchtype auto
+```
+
+**Reboot.** This is a boot setting; it does nothing until restart.
+
+Then run `wsl --install -d Ubuntu` again — and try Docker Desktop, which was
+almost certainly failing for the same reason.
+
+**This is the setting with the real gaming cost** — the 2-5% FPS discussed in
+[wsl-gaming-performance.md](./wsl-gaming-performance.md). If it was `Off`, you
+were genuinely avoiding that cost, and turning it on genuinely takes it. To
+switch back later:
+
+```
+bcdedit /set hypervisorlaunchtype off
+```
+
+Reboot again. Docker and WSL stop working until you set it back to `auto`, so
+it is a toggle, not a permanent decision.
+
+### If the service doesn't exist at all
+
 If `sc.exe start vmcompute` reports that the service does not exist, the
 feature isn't installed. Enable it, then reboot:
 
