@@ -114,10 +114,21 @@ Check afterwards with `fltmc filters`; if some other driver already occupies
 ## Step 4 — Test
 
 ```
-fltmc filters
+fltmc load FsDepends
 ```
 
-`FsDepends` should appear in the list. Then the real test:
+This asks the filter manager to load it **now** and prints the reason if it
+cannot — far more useful than a silent absence.
+
+- **No output** — it loaded. Good.
+- **"system cannot find the file"** — the registration is wrong or missing.
+- **"has not been registered"** — the `Instances` keys did not take.
+
+Note that `fltmc filters` will **not** list it before this. With `Start 3` the
+driver loads on demand, not at boot, so an empty list right after restarting is
+normal rather than a failure.
+
+Then the real test:
 
 ```
 diskpart
@@ -146,6 +157,18 @@ reg add HKLM\SYSTEM\CurrentControlSet\Services\vhdmp /v Start /t REG_DWORD /d 0 
 ```
 
 ---
+
+## Anti-cheat drivers
+
+If `fltmc filters` shows an anti-cheat (FACEIT, Vanguard, EasyAntiCheat and
+similar), be aware they are actively hostile to virtualisation — several
+detect or block Hyper-V, and their installers and "compatibility" steps are a
+known cause of virtualisation components being disabled or removed. That is a
+plausible origin for a missing `FsDepends` registration on a gaming machine.
+
+They do not usually prevent the fix, but if the driver loads and VHD creation
+still fails, temporarily stopping the anti-cheat service and retesting is worth
+one attempt.
 
 ## If Windows won't boot after a change
 
