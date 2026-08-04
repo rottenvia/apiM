@@ -9,7 +9,31 @@ socket: An address incompatible with the requested protocol was used.
 (listener: The filename, directory name, or volume label syntax is incorrect.)
 ```
 
-## First: check WSL2 is actually installed
+## First: is the Hyper-V Host Compute Service running?
+
+Docker Desktop cannot start anything virtualised without `vmcompute`, and when
+it is stopped every component fails with its own unrelated-looking message.
+This is the most common cause and the quickest to rule out.
+
+In **PowerShell as Administrator**:
+
+```powershell
+sc.exe start vmcompute
+sc.exe config vmcompute start=auto
+```
+
+Use `sc.exe`, not `sc` — in PowerShell `sc` is an alias for `Set-Content`.
+
+The second line makes it start automatically on boot. Then open Docker Desktop
+again.
+
+The same stopped service also breaks `wsl --install` with error `0xc03a0014`,
+which is documented as a WSL bug because the message never mentions it:
+[microsoft/WSL#40734](https://github.com/microsoft/WSL/issues/40734).
+
+---
+
+## Second: check WSL2 is actually installed
 
 Before assuming the Docker bug below, run this in PowerShell:
 

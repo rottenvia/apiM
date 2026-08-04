@@ -73,8 +73,25 @@ async function main() {
     )
   );
 
-  // 0. On Windows, Docker Desktop cannot start without WSL2, and its failure
-  //    to do so surfaces as an unrelated-looking crash. Rule that out first.
+  // 0. Nothing virtualised starts without the Hyper-V Host Compute Service,
+  //    and every component then fails with its own unrelated-looking error.
+  //    Cheapest thing to rule out, and the most common cause.
+  if (process.platform === "win32") {
+    const vm = await tryRun("sc.exe", ["query", "vmcompute"], 15_000);
+    if (vm.ok && /STATE\s*:\s*\d+\s+RUNNING/i.test(vm.out)) {
+      yes("Hyper-V Host Compute Service is running");
+    } else if (vm.ok) {
+      no("Hyper-V Host Compute Service is running", "vmcompute is stopped");
+      console.log(dim("\n      Nothing virtualised can start without it."));
+      console.log(dim("      In PowerShell as Administrator:"));
+      console.log(dim("        sc.exe start vmcompute"));
+      console.log(dim("        sc.exe config vmcompute start=auto\n"));
+      process.exit(1);
+    }
+  }
+
+  // 0b. Docker Desktop also cannot start without WSL2, and its failure to do
+  //     so surfaces as an unrelated-looking crash.
   if (process.platform === "win32") {
     const wsl = await tryRun("wsl", ["--status"], 15_000);
     const missing =
