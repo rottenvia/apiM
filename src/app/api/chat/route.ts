@@ -55,6 +55,18 @@ interface ChatMessage {
 
 interface ChatRequestBody {
   message?: string;
+  /**
+   * What the user actually typed, when `message` also carries inlined file
+   * contents or image descriptions. Only this is stored and shown in the
+   * transcript; the model still receives the full `message`.
+   */
+  displayContent?: string;
+  /** Attachment metadata for re-rendering chips after a reload. */
+  attachments?: {
+    name: string;
+    kind: "text" | "image";
+    dataUrl?: string;
+  }[];
   conversationId?: string | null;
   deepseekApiKey?: string;
   tavilyApiKey?: string;
@@ -125,6 +137,8 @@ export async function POST(req: NextRequest) {
     enabledPluginIds = [],
     conversationHistory = [],
     regenerateFromId,
+    displayContent,
+    attachments,
   } = body;
 
   if (!message || !deepseekApiKey) {
@@ -146,7 +160,7 @@ export async function POST(req: NextRequest) {
   // "off" never.
   const canSearch = Boolean(tavilyApiKey && webSearchMode !== "off");
 
-  const title = deriveTitle(message);
+  const title = deriveTitle(displayContent?.trim() || message);
 
   const encoder = new TextEncoder();
 
@@ -220,7 +234,10 @@ export async function POST(req: NextRequest) {
             {
               id: uuidv4(),
               role: "user",
-              content: message,
+              // Store what the user typed. Saving the full payload meant the
+              // <image> block reappeared in the transcript after a reload.
+              content: (displayContent ?? message).trim(),
+              attachments: attachments?.length ? attachments : null,
               thinkingEffort: resolvedEffort,
               createdAt: new Date().toISOString(),
             },

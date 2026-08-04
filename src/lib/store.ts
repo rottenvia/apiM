@@ -15,6 +15,12 @@ export interface StoredMessage {
   id: string;
   role: "user" | "assistant";
   content: string;
+  /** Files sent with this message, so chips survive a reload. */
+  attachments?: {
+    name: string;
+    kind: "text" | "image";
+    dataUrl?: string;
+  }[] | null;
   reasoningContent?: string | null;
   thinkingEffort?: string | null;
   webSearchUsed?: boolean;
