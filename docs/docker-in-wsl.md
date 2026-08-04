@@ -117,6 +117,83 @@ bcdedit /set hypervisorlaunchtype off
 Reboot again. Docker and WSL stop working until you set it back to `auto`, so
 it is a toggle, not a permanent decision.
 
+### If both of those are fine: the virtual disk driver itself
+
+If `vmcompute` is running and `hypervisorlaunchtype` is `Auto` and you still
+get `0xc03a0014`, the problem is one layer lower — Windows' **VHDX support**,
+which WSL2 needs to create its disk. That is a separate subsystem from
+virtualisation, which is why enabling Hyper-V things changes nothing.
+
+**Prove it in ten seconds.** This has nothing to do with WSL or Docker — it
+just asks Windows to make a virtual disk. Command Prompt **as Administrator**:
+
+```
+diskpart
+```
+
+Then at the `DISKPART>` prompt:
+
+```
+create vdisk file=C:\test.vhdx maximum=64 type=expandable
+```
+
+Then `exit`.
+
+- **`DiskPart successfully created the virtual disk file`** — VHDX works, and
+  the cause is elsewhere. Delete `C:\test.vhdx` and say so.
+- **`A virtual disk support provider for the specified file was not found`** —
+  confirmed. Windows cannot create virtual disks at all. Nothing about WSL is
+  broken; the disk layer beneath it is.
+
+This is a much better signal than the WSL error, because it removes WSL,
+Docker, Hyper-V and the hypervisor from the picture entirely.
+
+#### The fix: the FsDepends driver
+
+`FsDepends` is the driver Windows uses for virtual disk files. When its start
+type is set to `3` (manual) instead of `0` (boot), VHDX creation fails exactly
+like this. Various "debloat" and optimiser scripts change it.
+
+**Back up the registry key first** (Command Prompt as Administrator):
+
+```
+reg export HKLM\SYSTEM\CurrentControlSet\Services\FsDepends "%USERPROFILE%\Desktop\FsDepends-backup.reg"
+```
+
+Check the current value:
+
+```
+reg query HKLM\SYSTEM\CurrentControlSet\Services\FsDepends /v Start
+```
+
+If it shows anything other than `0x0`, set it:
+
+```
+reg add HKLM\SYSTEM\CurrentControlSet\Services\FsDepends /v Start /t REG_DWORD /d 0 /f
+```
+
+**Reboot**, then repeat the `diskpart` test above. If the disk is created,
+`wsl --install -d Ubuntu` will work.
+
+Also worth checking the same way — these three are all part of the VHD stack
+and all should be `0`:
+
+```
+reg query HKLM\SYSTEM\CurrentControlSet\Services\vdrvroot /v Start
+reg query HKLM\SYSTEM\CurrentControlSet\Services\volsnap /v Start
+reg query HKLM\SYSTEM\CurrentControlSet\Services\vhdmp /v Start
+```
+
+Same `reg add` command with the service name swapped to fix any that aren't.
+
+#### If VHDX still fails after that
+
+At that point it is a genuinely damaged Windows install, and the supported
+answer is a repair install (an in-place upgrade that keeps your files and
+programs). That is a big step for a side project — the sensible alternative is
+to skip local Docker entirely and use a cheap Linux VPS for the sandbox, where
+none of this applies.
+
 ### If the service doesn't exist at all
 
 If `sc.exe start vmcompute` reports that the service does not exist, the
