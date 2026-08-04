@@ -8,9 +8,11 @@ import { ChatSearchBar } from "@/components/ChatSearchBar";
 import { AttachmentChips } from "@/components/AttachmentChips";
 import {
   buildMessageWithAttachments,
+  readImageFile,
   readTextFile,
   MAX_FILES,
 } from "@/lib/attachments";
+import { isImageFile } from "@/lib/vision";
 import type { Attachment } from "@/lib/attachments";
 import { Dots, MessageBubble } from "@/components/MessageBubble";
 import { ThinkingEffortSelector } from "@/components/ThinkingEffortSelector";
@@ -27,6 +29,8 @@ interface ChatAreaProps {
   model: string;
   thinkingEffort: string;
   webSearchMode: "off" | "auto" | "always";
+  visionKey: string;
+  visionModel: string;
   enabledPlugins: string[];
   sidebarOpen: boolean;
   onSend: (message: string) => void;
@@ -49,6 +53,8 @@ export function ChatArea({
   model,
   thinkingEffort,
   webSearchMode,
+  visionKey,
+  visionModel,
   enabledPlugins,
   sidebarOpen,
   onSend,
@@ -73,6 +79,67 @@ export function ChatArea({
   // toggling on every enter/leave — otherwise the overlay flickers.
   const dragDepth = useRef(0);
 
+  /** Ask the server to describe an image, then store the result on the chip. */
+  const analyzeImage = useCallback(
+    async (image: Attachment) => {
+      if (!image.dataUrl) return;
+
+      if (!visionKey) {
+        setAttachments((prev) =>
+          prev.map((a) =>
+            a.id === image.id
+              ? {
+                  ...a,
+                  analyzing: false,
+                  visionError:
+                    "Add a vision API key in Settings to read screenshots",
+                }
+              : a
+          )
+        );
+        return;
+      }
+
+      try {
+        const res = await fetch("/api/vision", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            dataUrl: image.dataUrl,
+            apiKey: visionKey,
+            model: visionModel,
+          }),
+        });
+        const body = (await res.json()) as {
+          description?: string;
+          error?: string;
+        };
+
+        setAttachments((prev) =>
+          prev.map((a) =>
+            a.id === image.id
+              ? {
+                  ...a,
+                  analyzing: false,
+                  description: body.description,
+                  visionError: body.error,
+                }
+              : a
+          )
+        );
+      } catch {
+        setAttachments((prev) =>
+          prev.map((a) =>
+            a.id === image.id
+              ? { ...a, analyzing: false, visionError: "Couldn't reach the server" }
+              : a
+          )
+        );
+      }
+    },
+    [visionKey, visionModel]
+  );
+
   const addFiles = useCallback(async (files: FileList | File[]) => {
     const list = Array.from(files);
     if (list.length === 0) return;
@@ -82,9 +149,17 @@ export function ChatArea({
     const errors: string[] = [];
 
     for (const file of list) {
-      const { attachment, error } = await readTextFile(file);
+      const { attachment, error } = isImageFile(file)
+        ? await readImageFile(file)
+        : await readTextFile(file);
       if (attachment) accepted.push(attachment);
       else if (error) errors.push(error);
+    }
+
+    // Images need a description before they are any use to a text-only model,
+    // so kick that off as soon as they are attached rather than at send time.
+    for (const image of accepted.filter((a) => a.kind === "image")) {
+      void analyzeImage(image);
     }
 
     if (accepted.length > 0) {
@@ -102,7 +177,7 @@ export function ChatArea({
     }
 
     if (errors.length > 0) setAttachError(errors.join(" · "));
-  }, []);
+  }, [analyzeImage]);
 
   const removeAttachment = useCallback((id: string) => {
     setAttachments((prev) => prev.filter((a) => a.id !== id));
@@ -241,8 +316,12 @@ export function ChatArea({
     }
   };
 
+  const analyzingImages = attachments.some((a) => a.analyzing);
   const canSend =
-    (Boolean(input.trim()) || attachments.length > 0) && !isLoading && hasKeys;
+    (Boolean(input.trim()) || attachments.length > 0) &&
+    !isLoading &&
+    !analyzingImages &&
+    hasKeys;
   // Show the standalone indicator until the assistant bubble actually has
   // something to display. Previously an empty streaming bubble was created
   // instantly, which suppressed the indicator and left a silent gap between

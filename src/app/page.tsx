@@ -122,6 +122,8 @@ export default function Home() {
   // Settings
   const [deepseekKey, setDeepseekKey] = useState("");
   const [tavilyKey, setTavilyKey] = useState("");
+  const [visionKey, setVisionKey] = useState("");
+  const [visionModel, setVisionModel] = useState("gpt-4o-mini");
   const [model, setModel] = useState("deepseek-v4-pro");
   const [thinkingEffort, setThinkingEffort] = useState("auto");
   const [webSearchMode, setWebSearchMode] = useState<"off" | "auto" | "always">("auto");
@@ -148,6 +150,8 @@ export default function Home() {
             const s = JSON.parse(saved);
             if (s.deepseekKey) setDeepseekKey(s.deepseekKey);
             if (s.tavilyKey) setTavilyKey(s.tavilyKey);
+            if (s.visionKey) setVisionKey(s.visionKey);
+            if (s.visionModel) setVisionModel(s.visionModel);
             if (s.model) setModel(s.model);
             if (s.thinkingEffort) setThinkingEffort(s.thinkingEffort);
             if (s.enabledPlugins) setEnabledPlugins(s.enabledPlugins);
@@ -169,6 +173,8 @@ export default function Home() {
         JSON.stringify({
           deepseekKey,
           tavilyKey,
+          visionKey,
+          visionModel,
           model,
           thinkingEffort,
           enabledPlugins,
@@ -176,7 +182,16 @@ export default function Home() {
         })
       );
     }
-  }, [deepseekKey, tavilyKey, model, thinkingEffort, enabledPlugins, webSearchMode]);
+  }, [
+    deepseekKey,
+    tavilyKey,
+    visionKey,
+    visionModel,
+    model,
+    thinkingEffort,
+    enabledPlugins,
+    webSearchMode,
+  ]);
 
   // Load the conversation list. Guarded against non-JSON responses so a
   // backend problem degrades to "no history" instead of throwing.
@@ -640,6 +655,8 @@ export default function Home() {
         model={model}
         thinkingEffort={thinkingEffort}
         webSearchMode={webSearchMode}
+        visionKey={visionKey}
+        visionModel={visionModel}
         enabledPlugins={enabledPlugins}
         sidebarOpen={sidebarOpen}
         onSend={sendMessage}
@@ -658,6 +675,10 @@ export default function Home() {
         <SettingsModal
           deepseekKey={deepseekKey}
           tavilyKey={tavilyKey}
+          visionKey={visionKey}
+          visionModel={visionModel}
+          onVisionKeyChange={setVisionKey}
+          onVisionModelChange={setVisionModel}
           model={model}
           defaultEffort={thinkingEffort}
           onDeepseekKeyChange={setDeepseekKey}

@@ -5,10 +5,14 @@ import { useState } from "react";
 interface SettingsModalProps {
   deepseekKey: string;
   tavilyKey: string;
+  visionKey: string;
+  visionModel: string;
   model: string;
   defaultEffort: string;
   onDeepseekKeyChange: (key: string) => void;
   onTavilyKeyChange: (key: string) => void;
+  onVisionKeyChange: (key: string) => void;
+  onVisionModelChange: (model: string) => void;
   onModelChange: (model: string) => void;
   onDefaultEffortChange: (effort: string) => void;
   onClose: () => void;
@@ -17,16 +21,21 @@ interface SettingsModalProps {
 export function SettingsModal({
   deepseekKey,
   tavilyKey,
+  visionKey,
+  visionModel,
   model,
   defaultEffort,
   onDeepseekKeyChange,
   onTavilyKeyChange,
+  onVisionKeyChange,
+  onVisionModelChange,
   onModelChange,
   onDefaultEffortChange,
   onClose,
 }: SettingsModalProps) {
   const [showDsKey, setShowDsKey] = useState(false);
   const [showTvKey, setShowTvKey] = useState(false);
+  const [showVsKey, setShowVsKey] = useState(false);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -164,6 +173,80 @@ export function SettingsModal({
               </button>
             </div>
             {tavilyKey && (
+              <div className="flex items-center gap-1.5 mt-1.5">
+                <div className="w-1.5 h-1.5 rounded-full bg-success" />
+                <span className="text-xs text-success">Key saved</span>
+              </div>
+            )}
+          </div>
+
+          <div className="h-px bg-border" />
+
+          {/* Vision — DeepSeek's API is text-only, so screenshots are
+              described by a separate model before being sent on. */}
+          <div>
+            <label className="block text-sm font-semibold text-text-primary mb-1.5">
+              Vision API Key
+              <span className="ml-1 text-xs font-normal text-text-muted">
+                (for screenshots)
+              </span>
+            </label>
+            <p className="text-xs text-text-secondary mb-2">
+              DeepSeek can&apos;t read images, so attached screenshots are
+              described by an OpenAI vision model first. Get a key from{" "}
+              <a
+                href="https://platform.openai.com/api-keys"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-accent-light underline underline-offset-2"
+              >
+                platform.openai.com
+              </a>
+            </p>
+            <div className="relative">
+              <input
+                type={showVsKey ? "text" : "password"}
+                value={visionKey}
+                onChange={(e) => onVisionKeyChange(e.target.value)}
+                placeholder="sk-..."
+                className="w-full px-4 py-2.5 rounded-xl bg-bg-tertiary border border-border text-sm text-text-primary placeholder-text-muted outline-none focus:border-accent/50 focus:ring-1 focus:ring-accent/25 transition-all"
+              />
+              <button
+                type="button"
+                onClick={() => setShowVsKey(!showVsKey)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-text-muted hover:text-text-secondary transition-colors"
+                aria-label={showVsKey ? "Hide key" : "Show key"}
+              >
+                {showVsKey ? (
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
+                  </svg>
+                ) : (
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                  </svg>
+                )}
+              </button>
+            </div>
+
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {["gpt-4o-mini", "gpt-4o"].map((m) => (
+                <button
+                  key={m}
+                  onClick={() => onVisionModelChange(m)}
+                  data-active={visionModel === m}
+                  className="rounded-lg border border-border px-2.5 py-1 font-mono text-[11px] text-text-secondary transition-colors hover:bg-bg-hover data-[active=true]:border-accent/50 data-[active=true]:bg-accent/10 data-[active=true]:text-accent-light"
+                >
+                  {m}
+                </button>
+              ))}
+              <span className="self-center text-[10px] text-text-muted">
+                mini is ~10x cheaper and enough for most screenshots
+              </span>
+            </div>
+
+            {visionKey && (
               <div className="flex items-center gap-1.5 mt-1.5">
                 <div className="w-1.5 h-1.5 rounded-full bg-success" />
                 <span className="text-xs text-success">Key saved</span>
