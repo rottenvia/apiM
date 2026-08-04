@@ -53,6 +53,22 @@ async function main() {
     )
   );
 
+  // 0. On Windows, Docker Desktop cannot start without WSL2, and its failure
+  //    to do so surfaces as an unrelated-looking crash. Rule that out first.
+  if (process.platform === "win32") {
+    const wsl = await tryRun("wsl", ["--status"], 15_000);
+    const missing =
+      !wsl.ok && /not installed|no installed distributions/i.test(wsl.out);
+    if (missing) {
+      no("WSL2 is installed");
+      console.log(dim("\n      Docker Desktop needs WSL2 and crashes without it."));
+      console.log(dim("      In PowerShell:  wsl --install"));
+      console.log(dim("      Then REBOOT — nothing works until you do.\n"));
+      process.exit(1);
+    }
+    if (wsl.ok) yes("WSL2 is installed");
+  }
+
   // 1. Is Docker installed?
   const version = await tryRun("docker", ["--version"]);
   if (!version.ok) {
