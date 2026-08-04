@@ -303,6 +303,9 @@ export default function Home() {
           durationMs: m.durationMs as number | undefined,
           createdAt: m.createdAt as string | undefined,
           incomplete: m.incomplete === true,
+          attachments: Array.isArray(m.attachments)
+            ? (m.attachments as Message["attachments"])
+            : undefined,
         };
       });
 
@@ -488,6 +491,9 @@ export default function Home() {
           signal: controller.signal,
           body: JSON.stringify({
             message: trimmed,
+            // The model gets `message`; the transcript stores these instead.
+            displayContent: options?.displayContent,
+            attachments: options?.attachments,
             conversationId: currentConvId,
             deepseekApiKey: deepseekKey,
             tavilyApiKey: tavilyKey,
