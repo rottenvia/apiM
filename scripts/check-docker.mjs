@@ -76,10 +76,33 @@ async function main() {
   const info = await tryRun("docker", ["info", "--format", "{{.ServerVersion}}"]);
   if (!info.ok) {
     no("Docker is running");
-    console.log(
-      dim("\n      Docker is installed but the engine isn't running.")
-    );
-    console.log(dim("      Start Docker Desktop and wait for it to say 'Running'.\n"));
+
+    // Docker Desktop on Windows crash-loops on a stale AF_UNIX socket that
+    // Windows won't release until reboot. It looks like a broken machine and
+    // isn't, so name it rather than leaving the user to guess.
+    const stale =
+      /dockerInference|Inference manager|secrets-engine|address incompatible/i.test(
+        info.out
+      );
+
+    if (stale || process.platform === "win32") {
+      console.log(
+        dim("\n      If Docker Desktop closed itself with an error mentioning")
+      );
+      console.log(dim("      'Inference manager' or 'dockerInference', that's a known"));
+      console.log(dim("      Docker bug — not your machine, not virtualisation."));
+      console.log(dim("\n      Fix: reboot Windows, then open Docker Desktop again."));
+      console.log(
+        dim("      Still crashing? See docs/docker-desktop-crash-fix.md\n")
+      );
+    } else {
+      console.log(
+        dim("\n      Docker is installed but the engine isn't running.")
+      );
+      console.log(
+        dim("      Start Docker Desktop and wait for it to say 'Running'.\n")
+      );
+    }
     process.exit(1);
   }
   yes("Docker is running", `engine ${info.out}`);
