@@ -158,6 +158,53 @@ reg add HKLM\SYSTEM\CurrentControlSet\Services\vhdmp /v Start /t REG_DWORD /d 0 
 
 ---
 
+## If FsDepends loads but VHDX creation still fails
+
+`FsDepends` is a *dependency* of the VHD system, not the provider itself. The
+driver that actually provides VHDX support — the "virtual disk support
+provider" the error names — is **`vhdmp`**, and it needs **`vdrvroot`**
+(Microsoft Virtual Drive Enumerator) to enumerate it.
+
+If one of those is missing or disabled, the error is identical even with
+FsDepends working.
+
+Check all three (Administrator Command Prompt):
+
+```
+sc.exe query vhdmp
+sc.exe query vdrvroot
+reg query HKLM\SYSTEM\CurrentControlSet\Services\vdrvroot /v Start
+```
+
+`vdrvroot` must be `0x0` (boot start) — unlike `vhdmp`, demand start is not
+correct for it, because it is the root device that makes `vhdmp` reachable at
+all:
+
+```
+reg add HKLM\SYSTEM\CurrentControlSet\Services\vdrvroot /v Start /t REG_DWORD /d 0 /f
+```
+
+Try loading the provider directly:
+
+```
+sc.exe start vhdmp
+```
+
+- **"The service cannot be started"** with error 2 — the registration or file
+  is missing, same problem as FsDepends but for this driver.
+- **Starts, and VHDX now works** — set both to boot start so it survives a
+  reboot:
+
+```
+reg add HKLM\SYSTEM\CurrentControlSet\Services\vhdmp /v Start /t REG_DWORD /d 0 /f
+reg add HKLM\SYSTEM\CurrentControlSet\Services\FsDepends /v Start /t REG_DWORD /d 0 /f
+```
+
+Also confirm the root device exists in Device Manager: **View → Show hidden
+devices**, then under **System devices** look for *Microsoft Virtual Drive
+Enumerator*. If it is absent, `vdrvroot` is not registered and `vhdmp` can
+never attach.
+
 ## Anti-cheat drivers
 
 If `fltmc filters` shows an anti-cheat (FACEIT, Vanguard, EasyAntiCheat and
