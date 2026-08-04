@@ -14,7 +14,8 @@ import type { ReactElement, ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { Message } from "@/app/page";
+import type { Message, MessageAttachment } from "@/app/page";
+import { ImageLightbox } from "@/components/ImageLightbox";
 import { buildSearchRegex } from "@/lib/chat-search";
 import { CodeBlock } from "@/components/CodeBlock";
 
@@ -187,6 +188,9 @@ function MessageBubbleImpl({
   const [showSources, setShowSources] = useState(false);
   const [followThinking, setFollowThinking] = useState(true);
   const [copiedMessage, setCopiedMessage] = useState(false);
+  const [previewImage, setPreviewImage] = useState<MessageAttachment | null>(
+    null
+  );
   const thinkingRef = useRef<HTMLDivElement>(null);
   const isUser = message.role === "user";
 
@@ -278,15 +282,60 @@ function MessageBubbleImpl({
       >
         {/* User message */}
         {isUser && (
-          <div className="text-[15px] leading-6 text-text-primary">
-            <SearchHighlight
-              query={searchQuery}
-              wholeWord={searchWholeWord}
-              activeIndex={activeMatchIndex}
-            >
-              {message.content}
-            </SearchHighlight>
+          <div className="space-y-2">
+            {message.attachments && message.attachments.length > 0 && (
+              <div className="flex flex-wrap gap-1.5">
+                {message.attachments.map((file, i) =>
+                  file.kind === "image" && file.dataUrl ? (
+                    <button
+                      key={i}
+                      onClick={() => setPreviewImage(file)}
+                      title={`${file.name} — click to enlarge`}
+                      className="overflow-hidden rounded-lg border border-border transition-transform hover:scale-[1.03]"
+                    >
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={file.dataUrl}
+                        alt={file.name}
+                        className="h-24 w-auto max-w-[12rem] object-cover"
+                      />
+                    </button>
+                  ) : (
+                    <span
+                      key={i}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-bg-secondary/60 px-2 py-1 text-xs text-text-secondary"
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} aria-hidden="true">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M14 2v6h6" />
+                      </svg>
+                      {file.name}
+                    </span>
+                  )
+                )}
+              </div>
+            )}
+
+            {message.content && (
+              <div className="text-[15px] leading-6 text-text-primary">
+                <SearchHighlight
+                  query={searchQuery}
+                  wholeWord={searchWholeWord}
+                  activeIndex={activeMatchIndex}
+                >
+                  {message.content}
+                </SearchHighlight>
+              </div>
+            )}
           </div>
+        )}
+
+        {previewImage?.dataUrl && (
+          <ImageLightbox
+            src={previewImage.dataUrl}
+            name={previewImage.name}
+            onClose={() => setPreviewImage(null)}
+          />
         )}
 
         {/* Assistant message */}
@@ -600,6 +649,7 @@ export const MessageBubble = memo(MessageBubbleImpl, (prev, next) => {
     a.tokenCount === b.tokenCount &&
     a.thinkingEffort === b.thinkingEffort &&
     a.searchResults === b.searchResults &&
+    a.attachments === b.attachments &&
     prev.isLast === next.isLast &&
     prev.onRegenerate === next.onRegenerate &&
     prev.searchQuery === next.searchQuery &&

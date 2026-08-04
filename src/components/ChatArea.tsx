@@ -33,7 +33,13 @@ interface ChatAreaProps {
   visionModel: string;
   enabledPlugins: string[];
   sidebarOpen: boolean;
-  onSend: (message: string) => void;
+  onSend: (
+    message: string,
+    options?: {
+      displayContent?: string;
+      attachments?: { name: string; kind: "text" | "image"; dataUrl?: string }[];
+    }
+  ) => void;
   onRegenerate: (assistantId: string) => void;
   onToggleSidebar: () => void;
   onNewChat: () => void;
@@ -303,7 +309,16 @@ export function ChatArea({
   const handleSubmit = () => {
     // A message of only attachments is valid — the files are the content.
     if ((!input.trim() && attachments.length === 0) || isLoading) return;
-    onSend(buildMessageWithAttachments(input, attachments));
+    // The model receives the file contents and image descriptions; the
+    // transcript shows only what the user typed, plus attachment chips.
+    onSend(buildMessageWithAttachments(input, attachments), {
+      displayContent: input,
+      attachments: attachments.map((a) => ({
+        name: a.name,
+        kind: a.kind,
+        dataUrl: a.dataUrl,
+      })),
+    });
     setInput("");
     setAttachments([]);
     setAttachError(null);
@@ -382,31 +397,6 @@ export function ChatArea({
 
         <div className="flex items-center gap-1">
           <button
-            onClick={() => setFindOpen((v) => !v)}
-            className="icon-btn"
-            data-active={findOpen}
-            title="Find in this chat (Ctrl+F)"
-            aria-label="Find in this chat"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
-              <circle cx="10" cy="10" r="6" />
-              <path strokeLinecap="round" d="M14.5 14.5L20 20" />
-              <path strokeLinecap="round" d="M7.5 10h5" />
-            </svg>
-          </button>
-
-          {enabledPlugins.length > 0 && (
-            <button
-              onClick={onOpenPlugins}
-              className="mr-1 inline-flex h-7 items-center gap-1.5 rounded-full border border-border px-2.5 text-xs font-medium text-text-secondary transition-colors hover:border-border-light hover:text-text-primary"
-              title="Active plugins"
-            >
-              <span className="h-1.5 w-1.5 rounded-full bg-accent" />
-              {enabledPlugins.length} plugin
-              {enabledPlugins.length > 1 ? "s" : ""}
-            </button>
-          )}
-          <button
             onClick={toggleFullscreen}
             className="icon-btn"
             title={isFullscreen ? "Exit full screen" : "Full screen"}
@@ -439,6 +429,19 @@ export function ChatArea({
                 />
               </svg>
             )}
+          </button>
+          <button
+            onClick={() => setFindOpen((v) => !v)}
+            className="icon-btn"
+            data-active={findOpen}
+            title="Find in this chat (Ctrl+F)"
+            aria-label="Find in this chat"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
+              <circle cx="10" cy="10" r="6" />
+              <path strokeLinecap="round" d="M14.5 14.5L20 20" />
+              <path strokeLinecap="round" d="M7.5 10h5" />
+            </svg>
           </button>
         </div>
       </header>

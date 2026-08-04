@@ -29,6 +29,16 @@ export interface Message {
   incomplete?: boolean;
   /** Why auto-search did or didn't run, shown as a tooltip. */
   searchReason?: string;
+  /** Files sent with this message, rendered as chips on the bubble. */
+  attachments?: MessageAttachment[];
+}
+
+/** Lightweight record of an attachment, for display only. */
+export interface MessageAttachment {
+  name: string;
+  kind: "text" | "image";
+  /** Images only: data URL for the inline thumbnail. */
+  dataUrl?: string;
 }
 
 /** What the assistant is currently doing, for the live status indicator. */
@@ -314,7 +324,16 @@ export default function Home() {
   );
 
   const sendMessage = useCallback(
-    async (content: string, options?: { regenerateFromId?: string }) => {
+    async (
+      content: string,
+      options?: {
+        regenerateFromId?: string;
+        /** What the user actually typed, when it differs from `content`. */
+        displayContent?: string;
+        /** Thumbnails to show on the user's bubble. */
+        attachments?: MessageAttachment[];
+      }
+    ) => {
       if (!content.trim() || isLoading || !hasKeys) return;
 
       const trimmed = content.trim();
@@ -322,7 +341,10 @@ export default function Home() {
       const userMsg: Message = {
         id: `temp-${Date.now()}`,
         role: "user",
-        content: trimmed,
+        // Attachment payloads are for the model, not the transcript — showing
+        // the raw <image> block made the user's own message unreadable.
+        content: (options?.displayContent ?? trimmed).trim(),
+        attachments: options?.attachments,
         thinkingEffort,
       };
 
