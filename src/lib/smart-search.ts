@@ -11,12 +11,18 @@
 const DEEPSEEK_BASE_URL =
   process.env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com";
 
+/** Overridable so the search path can be exercised against a stub in tests. */
+const TAVILY_BASE_URL =
+  process.env.TAVILY_BASE_URL ?? "https://api.tavily.com";
+
 export interface SearchResultItem {
   title: string;
   url: string;
   content: string;
   score: number;
   domain: string;
+  /** Publication date, when Tavily supplies one. */
+  publishedDate?: string;
 }
 
 export interface SmartSearchContext {
@@ -25,7 +31,47 @@ export interface SmartSearchContext {
   summary: string;
   searchesPerformed: number;
   sourcesUsed: number;
+  /** How many escalation rounds ran. */
+  rounds: number;
+  /** Why the loop stopped, surfaced in the UI. */
+  stopReason: string;
 }
+
+/**
+ * Per-source character cap.
+ *
+ * Tavily's `content` field is a ~500 character snippet, so a detail sitting
+ * just past the cut was invisible to the model — it would then answer
+ * confidently from incomplete information. Requesting the parsed full page
+ * and capping generously removes that failure entirely; the cap only exists
+ * so one enormous reference page cannot swamp the context.
+ */
+export const MAX_SOURCE_CHARS = 30_000;
+
+/**
+ * Upper bound on escalation rounds.
+ *
+ * This is a safety guard, not a budget: if the sufficiency check ever gets
+ * stuck reporting "not enough", an uncapped loop would search forever and the
+ * request would hang. Real questions settle in one or two rounds.
+ */
+export const MAX_SEARCH_ROUNDS = 5;
+
+/** Sources whose answers are authoritative for technical questions. */
+const TRUSTED_DOMAINS = [
+  "docs.python.org", "developer.mozilla.org", "nodejs.org", "react.dev",
+  "docs.djangoproject.com", "go.dev", "doc.rust-lang.org", "docs.oracle.com",
+  "learn.microsoft.com", "docs.aws.amazon.com", "cloud.google.com",
+  "github.com", "stackoverflow.com", "pypi.org", "npmjs.com", "crates.io",
+  "developer.apple.com", "developer.android.com", "kubernetes.io",
+  "postgresql.org", "redis.io", "docs.docker.com",
+];
+
+/** Content farms and scrapers that mostly republish other people's answers. */
+const BLOCKED_DOMAINS = [
+  "pinterest.com", "quora.com", "answers.com", "coursehero.com",
+  "w3schools.blog", "geeksforgeeks.org", "tutorialspoint.com",
+];
 
 /**
  * Determine thinking effort based on message complexity.
@@ -100,7 +146,7 @@ export async function decideSearch(
   message: string,
   context: string,
   deepseekKey: string
-): Promise<{ needed: boolean; reason: string }> {
+): Promise<{ needed: boolean; reason: string; clarify?: string }> {
   if (obviouslyNoSearch(message)) {
     return { needed: false, reason: "no external information required" };
   }
@@ -119,18 +165,28 @@ export async function decideSearch(
           messages: [
             {
               role: "system",
-              content: `Decide whether answering the user's message requires a live web search.
+              content: `Decide how to handle the user's message. Choose exactly one action.
 
-Answer NO when the model can answer from its own knowledge: general programming,
+"answer" — the model can answer from its own knowledge: general programming,
 explanations, maths, writing, refactoring, opinions, or anything about code the
 user already provided.
 
-Answer YES only when the answer depends on information the model cannot know:
-current events, today's prices or weather, release notes for something recent,
-a specific library's latest version, a niche error message, or the user
-explicitly asks to search or cite sources.
+"search" — the answer depends on information the model cannot know: current
+events, today's prices, recent release notes, a library's latest version, a
+niche error message, or the user explicitly asks to search.
 
-Respond with JSON only: {"search": true|false, "reason": "under 8 words"}`,
+"clarify" — the question is too underspecified for a search to help, and the
+useful answer depends on details only the user has. Typically personal or
+situational questions ("how do I grow taller", "is this a good salary",
+"which laptop should I buy") where searching returns generic articles that do
+not address their actual situation. When choosing this, supply ONE specific
+question that would unlock a genuinely useful answer.
+
+Prefer "answer" or "search" when either would serve. Only pick "clarify" when
+the missing detail materially changes the answer.
+
+Respond with JSON only:
+{"action": "answer"|"search"|"clarify", "reason": "under 8 words", "question": "only when action is clarify"}`,
             },
             {
               role: "user",
@@ -150,9 +206,18 @@ Respond with JSON only: {"search": true|false, "reason": "under 8 words"}`,
       const data = await response.json();
       const parsed = JSON.parse(
         data?.choices?.[0]?.message?.content ?? "{}"
-      ) as { search?: boolean; reason?: string };
+      ) as { action?: string; reason?: string; question?: string };
+
+      if (parsed.action === "clarify" && parsed.question) {
+        return {
+          needed: false,
+          reason: parsed.reason ?? "needs more detail",
+          clarify: parsed.question,
+        };
+      }
+
       return {
-        needed: parsed.search === true,
+        needed: parsed.action === "search",
         reason: parsed.reason ?? "",
       };
     }
@@ -169,6 +234,15 @@ interface QueryPlan {
   queries: string[];
   intent: string;
   type: string;
+  /**
+   * Recency window passed straight to Tavily. Filtering at query time is
+   * strictly better than re-ranking afterwards: Tavily only returns
+   * `published_date` for news topics, so post-hoc date sorting is impossible
+   * for general searches.
+   */
+  timeRange?: "day" | "week" | "month" | "year";
+  /** Restrict to these domains when the question is clearly about one. */
+  includeDomains?: string[];
 }
 
 /**
@@ -194,14 +268,24 @@ async function generateSearchQueries(
             {
               role: "system",
               content: `You are a search query optimizer. Generate 2-4 precise web search queries.
+
 Rules:
 - Each query targets a SPECIFIC aspect
-- Include version numbers, specific terms
+- Include version numbers and specific terms
 - Include FULL error messages if present
 - Never generate vague single-word queries
 
+Also decide:
+- timeRange: set "day"/"week"/"month"/"year" ONLY when freshness matters
+  (latest version, recent release, current price, news). Omit otherwise —
+  most technical questions are better served by the best answer, not the
+  newest one.
+- includeDomains: restrict to official sources when the question is clearly
+  about one project (e.g. ["docs.python.org"] for a Python stdlib question).
+  Omit when a general search is more appropriate.
+
 Respond in JSON ONLY:
-{"queries": ["query1", "query2"], "intent": "brief description", "type": "documentation|github|forum|article"}`,
+{"queries": ["query1", "query2"], "intent": "brief description", "type": "documentation|github|forum|article", "timeRange": "year", "includeDomains": []}`,
             },
             {
               role: "user",
@@ -227,10 +311,17 @@ Respond in JSON ONLY:
         data?.choices?.[0]?.message?.content ?? "{}";
       const parsed = JSON.parse(content) as Partial<QueryPlan>;
       if (Array.isArray(parsed.queries) && parsed.queries.length > 0) {
+        const validRanges = ["day", "week", "month", "year"];
         return {
           queries: parsed.queries.map(String),
           intent: parsed.intent ?? message,
           type: parsed.type ?? "general",
+          timeRange: validRanges.includes(parsed.timeRange as string)
+            ? (parsed.timeRange as QueryPlan["timeRange"])
+            : undefined,
+          includeDomains: Array.isArray(parsed.includeDomains)
+            ? parsed.includeDomains.map(String).slice(0, 10)
+            : undefined,
         };
       }
     }
@@ -247,41 +338,142 @@ Respond in JSON ONLY:
 async function tavilySearch(
   query: string,
   tavilyKey: string,
-  maxResults = 5
+  options: {
+    maxResults?: number;
+    timeRange?: string;
+    includeDomains?: string[];
+  } = {}
 ): Promise<Omit<SearchResultItem, "domain">[]> {
+  const { maxResults = 5, timeRange, includeDomains } = options;
+
   try {
-    const response = await fetch("https://api.tavily.com/search", {
+    const body: Record<string, unknown> = {
+      query,
+      search_depth: "advanced",
+      max_results: maxResults,
+      include_answer: true,
+      chunks_per_source: 3,
+      // Ask for the parsed, cleaned page rather than only a ~500 char
+      // snippet, so a detail just past the snippet boundary is still visible.
+      // Tavily does the fetching and strips nav/ads, which avoids building a
+      // scraper that would trip over paywalls and bot checks.
+      include_raw_content: "markdown",
+      exclude_domains: BLOCKED_DOMAINS,
+    };
+
+    if (timeRange) body.time_range = timeRange;
+    if (includeDomains?.length) body.include_domains = includeDomains;
+
+    const response = await fetch(`${TAVILY_BASE_URL}/search`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${tavilyKey}`,
       },
-      body: JSON.stringify({
-        query,
-        search_depth: "advanced",
-        max_results: maxResults,
-        include_answer: true,
-        chunks_per_source: 3,
-      }),
-      signal: AbortSignal.timeout(30_000),
+      body: JSON.stringify(body),
+      // Full-page retrieval is slower than snippets alone.
+      signal: AbortSignal.timeout(45_000),
     });
 
     if (response.ok) {
       const data = await response.json();
-      return (data?.results ?? []).map(
-        (r: Record<string, unknown>) => ({
+      return (data?.results ?? []).map((r: Record<string, unknown>) => {
+        const snippet = String(r.content ?? "");
+        const full = String(r.raw_content ?? "");
+        // Prefer the full page, but fall back to the snippet when extraction
+        // failed or returned less than the snippet already had.
+        const best = full.length > snippet.length ? full : snippet;
+        return {
           title: String(r.title ?? ""),
           url: String(r.url ?? ""),
-          content: String(r.content ?? ""),
+          content: best.slice(0, MAX_SOURCE_CHARS),
           score: Number(r.score ?? 0),
-        })
-      );
+          publishedDate: r.published_date
+            ? String(r.published_date)
+            : undefined,
+        };
+      });
     }
   } catch (error) {
     console.error("Tavily search error:", error);
   }
 
   return [];
+}
+
+/**
+ * Ask a cheap model whether the gathered sources actually answer the question.
+ *
+ * Deliberately concrete — "does this contain the specific fact needed" rather
+ * than "are you satisfied" — because a vague prompt produces a vague verdict.
+ * Only titles and the opening of each source are sent, so the check stays
+ * small regardless of how much page content was retrieved.
+ */
+async function assessSufficiency(
+  message: string,
+  results: SearchResultItem[],
+  deepseekKey: string
+): Promise<{ sufficient: boolean; missing: string }> {
+  if (results.length === 0) return { sufficient: false, missing: message };
+
+  const digest = results
+    .slice(0, 8)
+    .map(
+      (r, i) =>
+        `[${i + 1}] ${r.title} (${r.domain})\n${r.content.slice(0, 600)}`
+    )
+    .join("\n\n");
+
+  try {
+    const response = await fetch(`${DEEPSEEK_BASE_URL}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${deepseekKey}`,
+      },
+      body: JSON.stringify({
+        model: "deepseek-v4-flash",
+        messages: [
+          {
+            role: "system",
+            content: `Decide whether the search results contain the specific information needed to answer the question completely.
+
+Answer sufficient=false only when something concrete is missing — a version number, an error cause, a specific value. Do not demand exhaustive coverage; enough to answer well is enough.
+
+When false, state briefly what is still missing so a better query can be written.
+
+Respond in JSON ONLY:
+{"sufficient": true|false, "missing": "what is still needed, under 15 words"}`,
+          },
+          {
+            role: "user",
+            content: `Question: ${message}\n\nResults:\n${digest}`,
+          },
+        ],
+        response_format: { type: "json_object" },
+        temperature: 0,
+        max_tokens: 120,
+        thinking: { type: "disabled" },
+      }),
+      signal: AbortSignal.timeout(20_000),
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      const parsed = JSON.parse(
+        data?.choices?.[0]?.message?.content ?? "{}"
+      ) as { sufficient?: boolean; missing?: string };
+      return {
+        sufficient: parsed.sufficient !== false,
+        missing: parsed.missing ?? "",
+      };
+    }
+  } catch (error) {
+    console.error("Sufficiency check failed:", error);
+  }
+
+  // If the judge is unavailable, stop rather than loop blindly.
+  return { sufficient: true, missing: "" };
 }
 
 function domainOf(url: string): string {
@@ -303,45 +495,112 @@ export async function smartSearch(
   tavilyKey: string
 ): Promise<SmartSearchContext> {
   const plan = await generateSearchQueries(message, context, deepseekKey);
-  const queries = plan.queries.slice(0, 4);
 
-  const allResults: Omit<SearchResultItem, "domain">[] = [];
-  let searchesPerformed = 0;
-
-  // Run every query concurrently. Sequentially this cost one full round trip
-  // per query (up to 4) before the model could even start answering.
-  const settled = await Promise.all(
-    queries.map((query) => tavilySearch(query, tavilyKey))
-  );
-  for (const results of settled) {
-    searchesPerformed += 1;
-    allResults.push(...results);
-  }
-
-  // Deduplicate by URL, keep quality hits only
   const seenUrls = new Set<string>();
-  const uniqueResults: SearchResultItem[] = [];
-  for (const r of allResults) {
-    if (!r.url || seenUrls.has(r.url)) continue;
-    if (r.score < 0.3 || r.content.length < 50) continue;
-    seenUrls.add(r.url);
-    uniqueResults.push({ ...r, domain: domainOf(r.url) });
+  const seenQueries = new Set<string>();
+  const collected: SearchResultItem[] = [];
+  const allQueries: string[] = [];
+  let searchesPerformed = 0;
+  let rounds = 0;
+  let stopReason = "";
+
+  // Rank trusted sources above general ones. Tavily's score reflects textual
+  // relevance only, so an SEO blog can outrank official documentation.
+  const rank = (r: SearchResultItem) => {
+    const trusted = TRUSTED_DOMAINS.some(
+      (d) => r.domain === d || r.domain.endsWith(`.${d}`)
+    );
+    return r.score + (trusted ? 0.25 : 0);
+  };
+
+  const runQueries = async (
+    queries: string[],
+    timeRange?: string,
+    includeDomains?: string[]
+  ) => {
+    const fresh = queries
+      .map((q) => q.trim())
+      .filter((q) => q && !seenQueries.has(q.toLowerCase()));
+    if (fresh.length === 0) return;
+
+    fresh.forEach((q) => seenQueries.add(q.toLowerCase()));
+    allQueries.push(...fresh);
+
+    const settled = await Promise.all(
+      fresh.map((query) =>
+        tavilySearch(query, tavilyKey, { timeRange, includeDomains })
+      )
+    );
+
+    for (const results of settled) {
+      searchesPerformed += 1;
+      for (const r of results) {
+        if (!r.url || seenUrls.has(r.url)) continue;
+        if (r.score < 0.3 || r.content.length < 50) continue;
+        seenUrls.add(r.url);
+        collected.push({ ...r, domain: domainOf(r.url) });
+      }
+    }
+  };
+
+  // Round 1 — the planned queries.
+  rounds += 1;
+  await runQueries(plan.queries.slice(0, 4), plan.timeRange, plan.includeDomains);
+
+  // Escalate only while something concrete is still missing. Most questions
+  // stop here; the cap exists so a stuck judge cannot loop forever.
+  while (rounds < MAX_SEARCH_ROUNDS) {
+    const verdict = await assessSufficiency(message, collected, deepseekKey);
+    if (verdict.sufficient) {
+      stopReason =
+        rounds === 1 ? "found what was needed" : "found what was needed after follow-up";
+      break;
+    }
+
+    const followUp = await generateSearchQueries(
+      `${message}\n\nStill missing: ${verdict.missing}`,
+      context,
+      deepseekKey
+    );
+
+    const before = collected.length;
+    rounds += 1;
+    await runQueries(
+      followUp.queries.slice(0, 3),
+      followUp.timeRange ?? plan.timeRange,
+      followUp.includeDomains
+    );
+
+    // No new sources means further rounds would repeat themselves.
+    if (collected.length === before) {
+      stopReason = "no further sources found";
+      break;
+    }
+
+    if (rounds >= MAX_SEARCH_ROUNDS) {
+      stopReason = "reached the search limit";
+    }
   }
 
-  uniqueResults.sort((a, b) => b.score - a.score);
-  const topResults = uniqueResults.slice(0, 8);
+  if (!stopReason) stopReason = "reached the search limit";
+
+  collected.sort((a, b) => rank(b) - rank(a));
+  const topResults = collected.slice(0, 8);
 
   const summary = topResults
-    .map(
-      (r, i) => `[${i + 1}] ${r.title}\nURL: ${r.url}\n${r.content}\n\n---\n`
-    )
+    .map((r, i) => {
+      const date = r.publishedDate ? ` (${r.publishedDate})` : "";
+      return `[${i + 1}] ${r.title}${date}\nURL: ${r.url}\n${r.content}\n\n---\n`;
+    })
     .join("\n");
 
   return {
     results: topResults,
-    queries,
+    queries: allQueries,
     summary,
     searchesPerformed,
     sourcesUsed: topResults.length,
+    rounds,
+    stopReason,
   };
 }

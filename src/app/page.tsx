@@ -68,6 +68,8 @@ type StreamEvent =
       thinkingEnabled: boolean;
       webSearchUsed: boolean;
       searchReason: string;
+      searchRounds: number;
+      searchStopReason: string;
       searchResults: { title: string; url: string; domain: string }[] | null;
       searchQueries: string[] | null;
       searchesPerformed: number;
