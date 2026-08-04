@@ -68,15 +68,7 @@ to the first than the second. The next step is what closes the distance.
 
 ## Next steps, in order
 
-### 1. Auth — before anything else
-
-Right now anyone who can reach the app can read and write files in
-`data/workspaces/`. On your own machine that's fine. The moment it goes on a
-server it is not, and step 3 makes it far worse.
-
-This is a hard blocker on hosting, not a nice-to-have.
-
-### 2. Command execution in a sandbox
+### 1. Command execution in a sandbox — the loop
 
 This is the one that changes what the product *is*. The model gets a
 `run_command` tool, so it can:
@@ -88,8 +80,7 @@ write app.py  →  run it  →  read the error  →  fix it  →  run again
 That loop is the difference between a code generator and an agent.
 
 It cannot ship without a sandbox. Letting a language model run shell commands
-on your machine is how you lose your files. The plan (already specced in
-`workspace-plan.md`) is Docker with:
+directly on your machine is how you lose your files. The isolation flags:
 
 ```
 --network none --memory 512m --cpus 0.5 --pids-limit 128
@@ -97,12 +88,32 @@ on your machine is how you lose your files. The plan (already specced in
 --user 1000:1000  + 30-60s wall-clock timeout
 ```
 
-Needs a real server — the Hetzner CX33 at about €6.50/month is the pick.
+**This does not need a server.** An earlier version of this document said it
+did. That was wrong, and worth correcting because it changes the order of the
+work.
+
+Docker runs on Windows through WSL2, and Docker Desktop is free for personal
+use — the paid tiers only apply to companies over 250 employees or $10M
+revenue. Requirements are a 64-bit CPU with virtualisation enabled in BIOS,
+4 GB RAM minimum (8 GB recommended), and about 6 GB of disk.
+
+So the loop can be built and used entirely on your own PC. The container is
+what provides the safety; running it elsewhere adds nothing to that.
+
+### 2. Auth — only when it goes online
+
+A server is needed for one reason: reaching the app from another device, or
+letting someone else use it. That is a hosting question, not a sandboxing one,
+and it is what makes auth mandatory — anyone who can reach the app can read and
+write files in `data/workspaces/`, and step 1 makes that far more dangerous.
+
+Running locally you are the only one who can reach `localhost`, so auth stays
+optional until then. Hosting, if wanted: Hetzner CX33, about €6.50/month.
 
 ### 3. Live preview
 
 Once things can run, show the result. A panel with the running app in it, the
-way Arena does. Only meaningful after step 2.
+way Arena does. Only meaningful after step 1.
 
 ### 4. Project awareness
 
