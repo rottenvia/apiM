@@ -17,6 +17,7 @@ import remarkGfm from "remark-gfm";
 import type { Message, MessageAttachment } from "@/app/page";
 import { ImageLightbox } from "@/components/ImageLightbox";
 import { buildSearchRegex } from "@/lib/chat-search";
+import { estimateCost, formatCost, formatDuration } from "@/lib/pricing";
 import { CodeBlock } from "@/components/CodeBlock";
 
 /**
@@ -169,6 +170,8 @@ interface MessageBubbleProps {
   /** Only the newest reply offers regenerate, to avoid rewriting history. */
   isLast?: boolean;
   onRegenerate?: (assistantId: string) => void;
+  /** Resend a user message with edited text, replacing everything after it. */
+  onEdit?: (messageId: string, newContent: string) => void;
   /** Active in-chat search term, highlighted in the reply text. */
   searchQuery?: string;
   searchWholeWord?: boolean;
@@ -180,6 +183,7 @@ function MessageBubbleImpl({
   message,
   isLast,
   onRegenerate,
+  onEdit,
   searchQuery,
   searchWholeWord = true,
   activeMatchIndex = -1,
@@ -191,6 +195,8 @@ function MessageBubbleImpl({
   const [previewImage, setPreviewImage] = useState<MessageAttachment | null>(
     null
   );
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
   const thinkingRef = useRef<HTMLDivElement>(null);
   const isUser = message.role === "user";
 
@@ -224,9 +230,25 @@ function MessageBubbleImpl({
   );
 
   const sourceCount = message.searchResults?.length ?? 0;
+
+  const cost = useMemo(
+    () => estimateCost(message.usage, message.model ?? ""),
+    [message.usage, message.model]
+  );
+
+  const searchTooltip = useMemo(() => {
+    const parts: string[] = [];
+    if (message.searchReason) parts.push(`Searched because: ${message.searchReason}`);
+    if (message.searchRounds && message.searchRounds > 1) {
+      parts.push(`${message.searchRounds} rounds`);
+    }
+    if (message.searchStopReason) parts.push(message.searchStopReason);
+    return parts.join(" · ") || undefined;
+  }, [message.searchReason, message.searchRounds, message.searchStopReason]);
   const hasMeta = Boolean(
     (message.thinkingEffort && message.thinkingEffort !== "none") ||
-      message.tokenCount
+      message.tokenCount ||
+      message.durationMs
   );
 
   // Detect a code fence that has been opened but not yet closed. An odd number
@@ -316,16 +338,78 @@ function MessageBubbleImpl({
               </div>
             )}
 
-            {message.content && (
-              <div className="text-[15px] leading-6 text-text-primary">
-                <SearchHighlight
-                  query={searchQuery}
-                  wholeWord={searchWholeWord}
-                  activeIndex={activeMatchIndex}
-                >
-                  {message.content}
-                </SearchHighlight>
+            {editing ? (
+              <div className="space-y-2">
+                <textarea
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") {
+                      e.preventDefault();
+                      setEditing(false);
+                    }
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      if (draft.trim()) {
+                        onEdit?.(message.id, draft.trim());
+                        setEditing(false);
+                      }
+                    }
+                  }}
+                  autoFocus
+                  rows={Math.min(10, draft.split("\n").length + 1)}
+                  className="w-full resize-y rounded-lg border border-accent/40 bg-bg-primary px-3 py-2 text-[15px] leading-6 text-text-primary outline-none"
+                />
+                <div className="flex items-center justify-end gap-1.5">
+                  <button
+                    onClick={() => setEditing(false)}
+                    className="rounded-md px-2 py-1 text-[11px] text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (!draft.trim()) return;
+                      onEdit?.(message.id, draft.trim());
+                      setEditing(false);
+                    }}
+                    disabled={!draft.trim()}
+                    className="rounded-md bg-accent px-2.5 py-1 text-[11px] font-medium text-white transition-colors hover:bg-accent-light disabled:opacity-40"
+                  >
+                    Send
+                  </button>
+                </div>
               </div>
+            ) : (
+              message.content && (
+                <div className="group/msg relative">
+                  <div className="text-[15px] leading-6 text-text-primary">
+                    <SearchHighlight
+                      query={searchQuery}
+                      wholeWord={searchWholeWord}
+                      activeIndex={activeMatchIndex}
+                    >
+                      {message.content}
+                    </SearchHighlight>
+                  </div>
+
+                  {onEdit && (
+                    <button
+                      onClick={() => {
+                        setDraft(message.content);
+                        setEditing(true);
+                      }}
+                      title="Edit and resend"
+                      aria-label="Edit message"
+                      className="absolute -left-8 top-0 flex h-6 w-6 items-center justify-center rounded-md text-text-muted opacity-0 transition-opacity hover:bg-bg-hover hover:text-text-primary focus-visible:opacity-100 group-hover/msg:opacity-100"
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                      </svg>
+                    </button>
+                  )}
+                </div>
+              )
             )}
           </div>
         )}
@@ -354,10 +438,13 @@ function MessageBubbleImpl({
                     </span>
                   )}
 
+                {/* Search reason lives on the sources pill — the control it
+                    explains — rather than as another separate badge. */}
                 {sourceCount > 0 && (
                   <button
                     onClick={() => setShowSources((v) => !v)}
                     aria-expanded={showSources}
+                    title={searchTooltip}
                     className="inline-flex items-center gap-1 rounded-md border border-[#6ba3a0]/25 bg-[#6ba3a0]/10 px-1.5 py-0.5 text-[10px] font-medium text-[#6ba3a0] transition-colors hover:bg-[#6ba3a0]/20"
                   >
                     <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} aria-hidden="true">
@@ -376,8 +463,37 @@ function MessageBubbleImpl({
                 )}
 
                 {message.tokenCount ? (
-                  <span className="text-[10px] text-[#6d685d]">
+                  <span
+                    className="text-[10px] text-[#6d685d]"
+                    title={
+                      message.usage
+                        ? `${(message.usage.prompt_tokens ?? 0).toLocaleString()} in · ${(message.usage.completion_tokens ?? 0).toLocaleString()} out`
+                        : undefined
+                    }
+                  >
                     {message.tokenCount.toLocaleString()} tokens
+                  </span>
+                ) : null}
+
+                {cost !== null && (
+                  <span
+                    className="text-[10px] text-[#6d685d]"
+                    title={`Estimated from ${message.model ?? "model"} pricing`}
+                  >
+                    {formatCost(cost)}
+                  </span>
+                )}
+
+                {message.durationMs ? (
+                  <span
+                    className="inline-flex items-center gap-1 text-[10px] text-[#6d685d]"
+                    title="Time from sending to the last token"
+                  >
+                    <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} aria-hidden="true">
+                      <circle cx="12" cy="12" r="9" />
+                      <path strokeLinecap="round" d="M12 7v5l3 2" />
+                    </svg>
+                    {formatDuration(message.durationMs)}
                   </span>
                 ) : null}
               </div>
@@ -650,8 +766,11 @@ export const MessageBubble = memo(MessageBubbleImpl, (prev, next) => {
     a.thinkingEffort === b.thinkingEffort &&
     a.searchResults === b.searchResults &&
     a.attachments === b.attachments &&
+    a.usage === b.usage &&
+    a.durationMs === b.durationMs &&
     prev.isLast === next.isLast &&
     prev.onRegenerate === next.onRegenerate &&
+    prev.onEdit === next.onEdit &&
     prev.searchQuery === next.searchQuery &&
     prev.searchWholeWord === next.searchWholeWord &&
     prev.activeMatchIndex === next.activeMatchIndex

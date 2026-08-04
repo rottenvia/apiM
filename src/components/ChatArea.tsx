@@ -41,6 +41,7 @@ interface ChatAreaProps {
     }
   ) => void;
   onRegenerate: (assistantId: string) => void;
+  onEdit: (messageId: string, newContent: string) => void;
   onToggleSidebar: () => void;
   onNewChat: () => void;
   onSetSearchMode: (mode: "off" | "auto" | "always") => void;
@@ -65,6 +66,7 @@ export function ChatArea({
   sidebarOpen,
   onSend,
   onRegenerate,
+  onEdit,
   onToggleSidebar,
   onNewChat,
   onSetSearchMode,
@@ -485,6 +487,7 @@ export function ChatArea({
               <MessageList
                 messages={messages}
                 onRegenerate={onRegenerate}
+                onEdit={onEdit}
                 searchQuery={findOpen ? findQuery : undefined}
                 searchWholeWord={findWholeWord}
                 searchIndex={searchIndex}
@@ -787,6 +790,7 @@ const WINDOW_STEP = 60;
 const MessageList = memo(function MessageList({
   messages,
   onRegenerate,
+  onEdit,
   searchQuery,
   searchWholeWord,
   searchIndex,
@@ -795,6 +799,7 @@ const MessageList = memo(function MessageList({
 }: {
   messages: Message[];
   onRegenerate: (assistantId: string) => void;
+  onEdit: (messageId: string, newContent: string) => void;
   searchQuery?: string;
   searchWholeWord: boolean;
   searchIndex: ChatSearchIndex;
@@ -873,6 +878,7 @@ const MessageList = memo(function MessageList({
             message={msg}
             isLast={msg.id === lastId}
             onRegenerate={onRegenerate}
+            onEdit={msg.role === "user" ? onEdit : undefined}
             searchQuery={searchQuery}
             searchWholeWord={searchWholeWord}
             activeMatchIndex={localActive}

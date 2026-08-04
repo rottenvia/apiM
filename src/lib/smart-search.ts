@@ -15,6 +15,18 @@ const DEEPSEEK_BASE_URL =
 const TAVILY_BASE_URL =
   process.env.TAVILY_BASE_URL ?? "https://api.tavily.com";
 
+/**
+ * Combine an external abort signal with a per-request timeout, so a request
+ * ends on whichever happens first. Previously only the timeout was honoured,
+ * which is why pressing Stop left searches running to completion.
+ */
+function withTimeout(signal: AbortSignal | undefined, ms: number): AbortSignal {
+  const timeout = AbortSignal.timeout(ms);
+  if (!signal) return timeout;
+  // AbortSignal.any is available on Node 20+ and all current browsers.
+  return AbortSignal.any([signal, timeout]);
+}
+
 export interface SearchResultItem {
   title: string;
   url: string;
@@ -145,7 +157,8 @@ export function obviouslyNoSearch(message: string): boolean {
 export async function decideSearch(
   message: string,
   context: string,
-  deepseekKey: string
+  deepseekKey: string,
+  signal?: AbortSignal
 ): Promise<{ needed: boolean; reason: string; clarify?: string }> {
   if (obviouslyNoSearch(message)) {
     return { needed: false, reason: "no external information required" };
@@ -198,7 +211,7 @@ Respond with JSON only:
           max_tokens: 60,
           thinking: { type: "disabled" },
         }),
-        signal: AbortSignal.timeout(12_000),
+        signal: withTimeout(signal, 12_000),
       }
     );
 
@@ -222,7 +235,9 @@ Respond with JSON only:
       };
     }
   } catch (error) {
-    console.error("Search decision failed:", error);
+    if (!(error instanceof Error && error.name === "AbortError")) {
+      console.error("Search decision failed:", error);
+    }
   }
 
   // On any failure, skip the search rather than spending tokens on one that
@@ -251,7 +266,8 @@ interface QueryPlan {
 async function generateSearchQueries(
   message: string,
   context: string,
-  deepseekKey: string
+  deepseekKey: string,
+  signal?: AbortSignal
 ): Promise<QueryPlan> {
   try {
     const response = await fetch(
@@ -301,7 +317,7 @@ Respond in JSON ONLY:
           // SDK understands and the REST API silently ignores).
           thinking: { type: "disabled" },
         }),
-        signal: AbortSignal.timeout(30_000),
+        signal: withTimeout(signal, 30_000),
       }
     );
 
@@ -326,7 +342,9 @@ Respond in JSON ONLY:
       }
     }
   } catch (error) {
-    console.error("Query generation error:", error);
+    if (!(error instanceof Error && error.name === "AbortError")) {
+      console.error("Query generation error:", error);
+    }
   }
 
   return { queries: [message], intent: message, type: "general" };
@@ -342,9 +360,10 @@ async function tavilySearch(
     maxResults?: number;
     timeRange?: string;
     includeDomains?: string[];
+    signal?: AbortSignal;
   } = {}
 ): Promise<Omit<SearchResultItem, "domain">[]> {
-  const { maxResults = 5, timeRange, includeDomains } = options;
+  const { maxResults = 5, timeRange, includeDomains, signal } = options;
 
   try {
     const body: Record<string, unknown> = {
@@ -372,7 +391,7 @@ async function tavilySearch(
       },
       body: JSON.stringify(body),
       // Full-page retrieval is slower than snippets alone.
-      signal: AbortSignal.timeout(45_000),
+      signal: withTimeout(signal, 45_000),
     });
 
     if (response.ok) {
@@ -395,7 +414,10 @@ async function tavilySearch(
       });
     }
   } catch (error) {
-    console.error("Tavily search error:", error);
+    // AbortError just means the user pressed Stop.
+    if (!(error instanceof Error && error.name === "AbortError")) {
+      console.error("Tavily search error:", error);
+    }
   }
 
   return [];
@@ -412,7 +434,8 @@ async function tavilySearch(
 async function assessSufficiency(
   message: string,
   results: SearchResultItem[],
-  deepseekKey: string
+  deepseekKey: string,
+  signal?: AbortSignal
 ): Promise<{ sufficient: boolean; missing: string }> {
   if (results.length === 0) return { sufficient: false, missing: message };
 
@@ -455,7 +478,7 @@ Respond in JSON ONLY:
         max_tokens: 120,
         thinking: { type: "disabled" },
       }),
-      signal: AbortSignal.timeout(20_000),
+      signal: withTimeout(signal, 20_000),
     });
 
     if (response.ok) {
@@ -469,7 +492,9 @@ Respond in JSON ONLY:
       };
     }
   } catch (error) {
-    console.error("Sufficiency check failed:", error);
+    if (!(error instanceof Error && error.name === "AbortError")) {
+      console.error("Sufficiency check failed:", error);
+    }
   }
 
   // If the judge is unavailable, stop rather than loop blindly.
@@ -492,9 +517,10 @@ export async function smartSearch(
   message: string,
   context: string,
   deepseekKey: string,
-  tavilyKey: string
+  tavilyKey: string,
+  signal?: AbortSignal
 ): Promise<SmartSearchContext> {
-  const plan = await generateSearchQueries(message, context, deepseekKey);
+  const plan = await generateSearchQueries(message, context, deepseekKey, signal);
 
   const seenUrls = new Set<string>();
   const seenQueries = new Set<string>();
@@ -528,7 +554,7 @@ export async function smartSearch(
 
     const settled = await Promise.all(
       fresh.map((query) =>
-        tavilySearch(query, tavilyKey, { timeRange, includeDomains })
+        tavilySearch(query, tavilyKey, { timeRange, includeDomains, signal })
       )
     );
 
@@ -550,7 +576,18 @@ export async function smartSearch(
   // Escalate only while something concrete is still missing. Most questions
   // stop here; the cap exists so a stuck judge cannot loop forever.
   while (rounds < MAX_SEARCH_ROUNDS) {
-    const verdict = await assessSufficiency(message, collected, deepseekKey);
+    // Abandon the loop the moment the client goes away.
+    if (signal?.aborted) {
+      stopReason = "stopped";
+      break;
+    }
+
+    const verdict = await assessSufficiency(
+      message,
+      collected,
+      deepseekKey,
+      signal
+    );
     if (verdict.sufficient) {
       stopReason =
         rounds === 1 ? "found what was needed" : "found what was needed after follow-up";
@@ -560,7 +597,8 @@ export async function smartSearch(
     const followUp = await generateSearchQueries(
       `${message}\n\nStill missing: ${verdict.missing}`,
       context,
-      deepseekKey
+      deepseekKey,
+      signal
     );
 
     const before = collected.length;
