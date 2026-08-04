@@ -12,6 +12,7 @@ import {
 } from "react";
 import type { ReactElement, ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
+import { ToolActivity } from "@/components/ToolActivity";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Message, MessageAttachment } from "@/app/page";
@@ -180,6 +181,8 @@ interface MessageBubbleProps {
   searchWholeWord?: boolean;
   /** Global index of the focused match, or -1 when the term is elsewhere. */
   activeMatchIndex?: number;
+  /** Opens the workspace panel at a file the assistant changed. */
+  onOpenWorkspaceFile?: (path: string) => void;
 }
 
 function MessageBubbleImpl({
@@ -191,6 +194,7 @@ function MessageBubbleImpl({
   searchQuery,
   searchWholeWord = true,
   activeMatchIndex = -1,
+  onOpenWorkspaceFile,
 }: MessageBubbleProps) {
   const [showThinking, setShowThinking] = useState(false);
   const [showSources, setShowSources] = useState(false);
@@ -667,6 +671,15 @@ function MessageBubbleImpl({
               </div>
             )}
 
+            {/* File operations, above the reply: they happen before the
+                model summarises them, so this matches the real order. */}
+            {message.toolEvents && message.toolEvents.length > 0 && (
+              <ToolActivity
+                events={message.toolEvents}
+                onOpenFile={onOpenWorkspaceFile}
+              />
+            )}
+
             {/* Main content. While streaming, an unterminated ``` fence is
                 replaced by a placeholder card — watching code type itself line
                 by line is noisy, and half-written markup renders as garbage. */}
@@ -845,12 +858,16 @@ export const MessageBubble = memo(MessageBubbleImpl, (prev, next) => {
     a.usage === b.usage &&
     a.durationMs === b.durationMs &&
     a.previousVersions === b.previousVersions &&
+    // New array identity on every tool frame, so this is what makes the
+    // "Writing app.py" lines appear as they happen.
+    a.toolEvents === b.toolEvents &&
     prev.isLast === next.isLast &&
     prev.onRegenerate === next.onRegenerate &&
     prev.onEdit === next.onEdit &&
     prev.onDelete === next.onDelete &&
     prev.searchQuery === next.searchQuery &&
     prev.searchWholeWord === next.searchWholeWord &&
-    prev.activeMatchIndex === next.activeMatchIndex
+    prev.activeMatchIndex === next.activeMatchIndex &&
+    prev.onOpenWorkspaceFile === next.onOpenWorkspaceFile
   );
 });

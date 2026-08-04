@@ -398,6 +398,16 @@ export async function POST(req: NextRequest) {
         // several API turns once tools are involved.
         let assistantContent = "";
         let reasoningContent = "";
+        // Mirrors what the client is shown, so a reopened chat still lists
+        // the files this reply touched.
+        const toolEvents: {
+          id: string;
+          name: string;
+          args: string;
+          ok?: boolean;
+          summary?: string;
+          changedPath?: string;
+        }[] = [];
         let usage: unknown = null;
         let announcedWriting = false;
         const toolSummaries: { name: string; ok: boolean; summary: string }[] =
@@ -524,6 +534,7 @@ export async function POST(req: NextRequest) {
                 searchQueries: searchContext?.queries ?? null,
                 pluginsUsed: enabledPluginIds.length ? enabledPluginIds : null,
                 tokenCount: null,
+                toolEvents: toolEvents.length ? toolEvents : null,
                 createdAt: new Date().toISOString(),
                 incomplete: true,
               });
@@ -650,6 +661,12 @@ export async function POST(req: NextRequest) {
               args: call.function.arguments,
             });
 
+            toolEvents.push({
+              id: call.id,
+              name: call.function.name,
+              args: call.function.arguments,
+            });
+
             const parsed = parseToolArguments(call.function.arguments);
             const result = parsed.ok
               ? await runTool(workspace, call.function.name, parsed.value)
@@ -674,6 +691,13 @@ export async function POST(req: NextRequest) {
               summary: result.summary,
               changedPath: result.changedPath,
             });
+
+            const recorded = toolEvents.find((e) => e.id === call.id);
+            if (recorded) {
+              recorded.ok = result.ok;
+              recorded.summary = result.summary;
+              recorded.changedPath = result.changedPath;
+            }
 
             toolSummaries.push({
               name: call.function.name,
@@ -709,6 +733,7 @@ export async function POST(req: NextRequest) {
             usage: (usage as Record<string, number> | null) ?? null,
             model,
             durationMs: Date.now() - startedAt,
+            toolEvents: toolEvents.length ? toolEvents : null,
             createdAt: new Date().toISOString(),
             incomplete: false,
           });

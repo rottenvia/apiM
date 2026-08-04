@@ -41,6 +41,15 @@ export interface StoredMessage {
    * a retry instead of silently showing a truncated message as final.
    */
   incomplete?: boolean;
+  /** File operations run during this reply, so they survive a reload. */
+  toolEvents?: {
+    id: string;
+    name: string;
+    args: string;
+    ok?: boolean;
+    summary?: string;
+    changedPath?: string;
+  }[] | null;
 }
 
 export interface StoredConversation {
