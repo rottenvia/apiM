@@ -12,7 +12,8 @@
     "dev:mock": "node scripts/dev-mock.mjs",
     "test:real": "node --no-warnings --experimental-strip-types scripts/test-real.mjs",
     "test:delete": "node --no-warnings --experimental-strip-types scripts/test-delete.mjs",
-    "check:docker": "node --no-warnings scripts/check-docker.mjs"
+    "check:docker": "node --no-warnings scripts/check-docker.mjs",
+    "test:auth": "node --no-warnings --experimental-strip-types scripts/test-auth.mjs"
   },
   "dependencies": {
     "@types/uuid": "^10.0.0",
