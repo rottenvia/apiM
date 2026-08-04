@@ -6,7 +6,10 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:workspace": "node --no-warnings --experimental-strip-types scripts/test-workspace.mjs",
+    "mock:deepseek": "node scripts/mock-deepseek.mjs",
+    "dev:mock": "DEEPSEEK_BASE_URL=http://127.0.0.1:8820 next dev"
   },
   "dependencies": {
     "@types/uuid": "^10.0.0",
