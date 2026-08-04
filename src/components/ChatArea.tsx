@@ -5,6 +5,13 @@ import { memo } from "react";
 import { buildChatSearchIndex } from "@/lib/chat-search";
 import type { ChatSearchIndex } from "@/lib/chat-search";
 import { ChatSearchBar } from "@/components/ChatSearchBar";
+import { AttachmentChips } from "@/components/AttachmentChips";
+import {
+  buildMessageWithAttachments,
+  readTextFile,
+  MAX_FILES,
+} from "@/lib/attachments";
+import type { Attachment } from "@/lib/attachments";
 import { Dots, MessageBubble } from "@/components/MessageBubble";
 import { ThinkingEffortSelector } from "@/components/ThinkingEffortSelector";
 import { ModelSelector } from "@/components/ModelSelector";
@@ -56,6 +63,51 @@ export function ChatArea({
 }: ChatAreaProps) {
   const [input, setInput] = useState("");
   const [isFullscreen, setIsFullscreen] = useState(false);
+
+  // Text attachments, read in the browser and inlined into the message.
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [attachError, setAttachError] = useState<string | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  // Drag events fire for child elements too, so track depth rather than
+  // toggling on every enter/leave — otherwise the overlay flickers.
+  const dragDepth = useRef(0);
+
+  const addFiles = useCallback(async (files: FileList | File[]) => {
+    const list = Array.from(files);
+    if (list.length === 0) return;
+
+    setAttachError(null);
+    const accepted: Attachment[] = [];
+    const errors: string[] = [];
+
+    for (const file of list) {
+      const { attachment, error } = await readTextFile(file);
+      if (attachment) accepted.push(attachment);
+      else if (error) errors.push(error);
+    }
+
+    if (accepted.length > 0) {
+      setAttachments((prev) => {
+        const room = MAX_FILES - prev.length;
+        if (room <= 0) {
+          errors.push(`You can attach up to ${MAX_FILES} files`);
+          return prev;
+        }
+        if (accepted.length > room) {
+          errors.push(`Only the first ${room} file(s) were added`);
+        }
+        return [...prev, ...accepted.slice(0, room)];
+      });
+    }
+
+    if (errors.length > 0) setAttachError(errors.join(" · "));
+  }, []);
+
+  const removeAttachment = useCallback((id: string) => {
+    setAttachments((prev) => prev.filter((a) => a.id !== id));
+    setAttachError(null);
+  }, []);
 
   // In-chat find. Whole-word is the default so "calc" doesn't match
   // "calculator"; the bar's toggle switches to substring matching.
@@ -174,9 +226,12 @@ export function ChatArea({
   }, [input]);
 
   const handleSubmit = () => {
-    if (!input.trim() || isLoading) return;
-    onSend(input);
+    // A message of only attachments is valid — the files are the content.
+    if ((!input.trim() && attachments.length === 0) || isLoading) return;
+    onSend(buildMessageWithAttachments(input, attachments));
     setInput("");
+    setAttachments([]);
+    setAttachError(null);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -186,7 +241,8 @@ export function ChatArea({
     }
   };
 
-  const canSend = Boolean(input.trim()) && !isLoading && hasKeys;
+  const canSend =
+    (Boolean(input.trim()) || attachments.length > 0) && !isLoading && hasKeys;
   // Show the standalone indicator until the assistant bubble actually has
   // something to display. Previously an empty streaming bubble was created
   // instantly, which suppressed the indicator and left a silent gap between
@@ -397,15 +453,82 @@ export function ChatArea({
         <div
           className={`relative mx-auto w-full transition-[max-width] duration-300 ${columnWidth}`}
         >
-          <div className="rounded-[22px] border border-border bg-bg-tertiary shadow-[0_6px_28px_rgba(0,0,0,0.28)] transition-colors focus-within:border-border-light">
+          <div
+            onDragEnter={(e) => {
+              if (!e.dataTransfer.types.includes("Files")) return;
+              e.preventDefault();
+              dragDepth.current += 1;
+              setIsDragging(true);
+            }}
+            onDragOver={(e) => {
+              if (e.dataTransfer.types.includes("Files")) e.preventDefault();
+            }}
+            onDragLeave={() => {
+              dragDepth.current = Math.max(0, dragDepth.current - 1);
+              if (dragDepth.current === 0) setIsDragging(false);
+            }}
+            onDrop={(e) => {
+              if (!e.dataTransfer.files?.length) return;
+              e.preventDefault();
+              dragDepth.current = 0;
+              setIsDragging(false);
+              void addFiles(e.dataTransfer.files);
+            }}
+            data-dragging={isDragging}
+            className="relative rounded-[22px] border border-border bg-bg-tertiary shadow-[0_6px_28px_rgba(0,0,0,0.28)] transition-colors focus-within:border-border-light data-[dragging=true]:border-accent data-[dragging=true]:bg-accent/[0.06]"
+          >
+            {isDragging && (
+              <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-[22px] bg-bg-tertiary/85 backdrop-blur-[1px]">
+                <span className="flex items-center gap-2 text-sm font-medium text-accent-light">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 16V4m0 0L8 8m4-4l4 4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" />
+                  </svg>
+                  Drop text files to attach
+                </span>
+              </div>
+            )}
+
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              onChange={(e) => {
+                if (e.target.files) void addFiles(e.target.files);
+                // Reset so re-picking the same file still fires onChange.
+                e.target.value = "";
+              }}
+            />
+
+            <AttachmentChips
+              attachments={attachments}
+              onRemove={removeAttachment}
+            />
+
+            {attachError && (
+              <p className="px-3 pt-2 text-[11px] leading-4 text-danger">
+                {attachError}
+              </p>
+            )}
+
             <textarea
               ref={textareaRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
+              onPaste={(e) => {
+                // Pasting a file (e.g. from a file manager) attaches it.
+                const files = Array.from(e.clipboardData.files ?? []);
+                if (files.length > 0) {
+                  e.preventDefault();
+                  void addFiles(files);
+                }
+              }}
               placeholder={
                 hasKeys
-                  ? "Type your message…"
+                  ? attachments.length > 0
+                    ? "Add a question about these files…"
+                    : "Type your message…"
                   : "Add your API keys in Settings to start chatting"
               }
               disabled={!hasKeys}
@@ -417,6 +540,19 @@ export function ChatArea({
               {/* Uniform chips in a single row — scrolls instead of wrapping
                   on narrow resolutions, so spacing never breaks */}
               <div className="no-scrollbar flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto">
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  className="chip"
+                  data-active={attachments.length > 0}
+                  title="Attach text files"
+                  aria-label="Attach files"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" />
+                  </svg>
+                  {attachments.length > 0 && <span>{attachments.length}</span>}
+                </button>
+
                 <ModelSelector value={model} onChange={onSetModel} />
 
                 <ThinkingEffortSelector
