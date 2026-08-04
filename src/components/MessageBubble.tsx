@@ -200,6 +200,7 @@ function MessageBubbleImpl({
     null
   );
   const [comparing, setComparing] = useState(false);
+  const [showInterrupted, setShowInterrupted] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const thinkingRef = useRef<HTMLDivElement>(null);
@@ -399,7 +400,9 @@ function MessageBubbleImpl({
                   </div>
 
                   {(onEdit || onDelete) && (
-                    <div className="mt-1 flex items-center justify-end gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover/msg:opacity-100">
+                    <div className="grid grid-rows-[0fr] opacity-0 transition-all duration-200 focus-within:grid-rows-[1fr] focus-within:opacity-100 group-hover/msg:grid-rows-[1fr] group-hover/msg:opacity-100">
+                      <div className="overflow-hidden">
+                        <div className="mt-1 flex items-center justify-between gap-2">
                       {onEdit && (
                         <button
                           onClick={() => {
@@ -430,6 +433,8 @@ function MessageBubbleImpl({
                           Delete
                         </button>
                       )}
+                        </div>
+                      </div>
                     </div>
                   )}
                 </div>
@@ -640,9 +645,17 @@ function MessageBubbleImpl({
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} aria-hidden="true" className="flex-none text-[#cfa25a]">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
                 </svg>
-                <span className="min-w-0 flex-1 text-[12px] leading-snug text-[#cfa25a]">
-                  This reply was interrupted and may be incomplete.
-                </span>
+                <button
+                  onClick={() => setShowInterrupted((v) => !v)}
+                  className="min-w-0 flex-1 text-left text-[12px] leading-snug text-[#cfa25a] hover:underline"
+                >
+                  This reply was interrupted
+                  {message.content ? (
+                    <span className="ml-1 opacity-70">
+                      · {showInterrupted ? "hide" : "show"} what arrived
+                    </span>
+                  ) : null}
+                </button>
                 {onRegenerate && (
                   <button
                     onClick={() => onRegenerate(message.id)}
@@ -657,10 +670,15 @@ function MessageBubbleImpl({
             {/* Main content. While streaming, an unterminated ``` fence is
                 replaced by a placeholder card — watching code type itself line
                 by line is noisy, and half-written markup renders as garbage. */}
-            {(displayContent || !message.isStreaming) && (
+            {(displayContent || !message.isStreaming) &&
+              !(message.incomplete && !message.isStreaming && !showInterrupted) && (
               <div
                 className={`prose-chat text-[15px] leading-relaxed ${
-                  message.isError ? "text-danger" : "text-text-primary"
+                  message.isError
+                    ? "text-danger"
+                    : message.incomplete
+                      ? "text-text-secondary"
+                      : "text-text-primary"
                 }`}
               >
                 <ReactMarkdown
