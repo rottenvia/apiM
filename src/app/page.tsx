@@ -7,6 +7,8 @@ import { SettingsModal } from "@/components/SettingsModal";
 import { PluginsModal } from "@/components/PluginsModal";
 import { ArtifactProvider } from "@/components/ArtifactContext";
 import { SearchModal } from "@/components/SearchModal";
+import { WorkspacePanel } from "@/components/WorkspacePanel";
+import type { ToolEvent } from "@/components/ToolActivity";
 
 export interface Message {
   id: string;
@@ -45,6 +47,8 @@ export interface Message {
    * regenerated so the two can be compared side by side.
    */
   previousVersions?: { content: string; model?: string; createdAt?: string }[];
+  /** File operations the model ran while producing this reply. */
+  toolEvents?: ToolEvent[];
 }
 
 /** Lightweight record of an attachment, for display only. */
@@ -56,7 +60,12 @@ export interface MessageAttachment {
 }
 
 /** What the assistant is currently doing, for the live status indicator. */
-export type StatusStage = "deciding" | "searching" | "thinking" | "writing";
+export type StatusStage =
+  | "deciding"
+  | "searching"
+  | "thinking"
+  | "writing"
+  | "working";
 
 /**
  * Normalise a stored `search_results` value. Newer rows hold real jsonb
@@ -99,6 +108,15 @@ type StreamEvent =
       searchesPerformed: number;
     }
   | { type: "reasoning"; delta: string }
+  | { type: "tool_start"; id: string; name: string; args: string }
+  | {
+      type: "tool_result";
+      id: string;
+      name: string;
+      ok: boolean;
+      summary: string;
+      changedPath?: string;
+    }
   | { type: "content"; delta: string }
   | {
       type: "done";
@@ -147,6 +165,13 @@ export default function Home() {
   const [showSearch, setShowSearch] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
+  // Workspace. The id follows the conversation so each chat gets its own
+  // folder; `pendingWorkspaceId` covers a brand-new chat that has no id yet.
+  const [workspaceEnabled, setWorkspaceEnabled] = useState(false);
+  const [showWorkspace, setShowWorkspace] = useState(false);
+  const [workspaceHighlight, setWorkspaceHighlight] = useState<string | null>(null);
+  const [workspaceFileCount, setWorkspaceFileCount] = useState(0);
+
   // Settings
   const [deepseekKey, setDeepseekKey] = useState("");
   const [tavilyKey, setTavilyKey] = useState("");
@@ -159,6 +184,8 @@ export default function Home() {
 
   const hasKeys = deepseekKey.length > 0;
   const initialLoadDone = useRef(false);
+  /** Current workspace id, readable from callbacks without re-creating them. */
+  const workspaceIdRef = useRef<string | null>(null);
   /** Lets the Stop button cancel an in-flight stream. */
   const abortRef = useRef<AbortController | null>(null);
   /** Latest messages + sender, so stable callbacks can read them. */
@@ -191,6 +218,7 @@ export default function Home() {
             if (s.thinkingEffort) setThinkingEffort(s.thinkingEffort);
             if (s.enabledPlugins) setEnabledPlugins(s.enabledPlugins);
             if (s.webSearchMode) setWebSearchMode(s.webSearchMode);
+            if (s.workspaceEnabled) setWorkspaceEnabled(true);
           } catch {
             /* ignore */
           }
@@ -214,6 +242,7 @@ export default function Home() {
           thinkingEffort,
           enabledPlugins,
           webSearchMode,
+          workspaceEnabled,
         })
       );
     }
@@ -226,7 +255,39 @@ export default function Home() {
     thinkingEffort,
     enabledPlugins,
     webSearchMode,
+    workspaceEnabled,
   ]);
+
+  /**
+   * Stable identity so it can be passed down to memoized message bubbles
+   * without giving them a new prop on every render.
+   */
+  const openWorkspace = useCallback((filePath?: string) => {
+    setWorkspaceHighlight(filePath ?? null);
+    setShowWorkspace(true);
+  }, []);
+
+  /**
+   * Refresh the file count shown on the composer chip.
+   *
+   * Reads through a ref because the id can be assigned mid-stream, when the
+   * server creates the conversation — a captured value would be stale.
+   */
+  const refreshWorkspaceFiles = useCallback(async () => {
+    const id = workspaceIdRef.current;
+    if (!id) {
+      setWorkspaceFileCount(0);
+      return;
+    }
+    try {
+      const res = await fetch(`/api/workspace/${id}`);
+      if (!res.ok) return;
+      const data = (await res.json()) as { files?: unknown[] };
+      setWorkspaceFileCount(Array.isArray(data.files) ? data.files.length : 0);
+    } catch {
+      /* the count is cosmetic — leave the last known value */
+    }
+  }, []);
 
   // Load the conversation list. Guarded against non-JSON responses so a
   // backend problem degrades to "no history" instead of throwing.
@@ -305,6 +366,9 @@ export default function Home() {
           incomplete: m.incomplete === true,
           attachments: Array.isArray(m.attachments)
             ? (m.attachments as Message["attachments"])
+            : undefined,
+          toolEvents: Array.isArray(m.toolEvents)
+            ? (m.toolEvents as ToolEvent[])
             : undefined,
         };
       });
@@ -474,6 +538,9 @@ export default function Home() {
         if (frame === null) frame = requestAnimationFrame(flush);
       };
 
+      /** Set when a tool changed the workspace, so the count can refresh. */
+      let sawToolWrite = false;
+
       const finish = (patch: Partial<Message>) => {
         if (frame !== null) cancelAnimationFrame(frame);
         flush();
@@ -503,6 +570,10 @@ export default function Home() {
             enabledPluginIds: enabledPlugins,
             conversationHistory: historyForApi,
             regenerateFromId,
+            workspaceEnabled,
+            // A new chat has no id yet; the server falls back to the
+            // conversation id it creates, which is what we adopt below.
+            workspaceId: currentConvId ?? undefined,
           }),
         });
 
@@ -575,6 +646,9 @@ export default function Home() {
                   searchesPerformed: evt.searchesPerformed,
                 };
                 if (!currentConvId && evt.conversationId) {
+                  // Ref first: `finally` reads it to refresh the file count,
+                  // and a brand-new chat only learns its id here.
+                  workspaceIdRef.current = evt.conversationId;
                   setCurrentConvId(evt.conversationId);
                 }
                 break;
@@ -583,6 +657,51 @@ export default function Home() {
                 pendingReasoning += evt.delta;
                 scheduleFlush();
                 break;
+
+              // Tool frames are applied immediately rather than batched:
+              // there are only a handful per reply, and the delay would make
+              // the "Writing app.py" line appear after the file already
+              // existed.
+              case "tool_start": {
+                const started: ToolEvent = {
+                  id: evt.id,
+                  name: evt.name,
+                  args: evt.args,
+                };
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === streamingId
+                      ? { ...m, toolEvents: [...(m.toolEvents ?? []), started] }
+                      : m
+                  )
+                );
+                break;
+              }
+
+              case "tool_result": {
+                sawToolWrite ||=
+                  evt.ok && evt.name !== "read_file" && evt.name !== "list_files";
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === streamingId
+                      ? {
+                          ...m,
+                          toolEvents: (m.toolEvents ?? []).map((t) =>
+                            t.id === evt.id
+                              ? {
+                                  ...t,
+                                  ok: evt.ok,
+                                  summary: evt.summary,
+                                  changedPath: evt.changedPath,
+                                }
+                              : t
+                          ),
+                        }
+                      : m
+                  )
+                );
+                break;
+              }
 
               case "content":
                 pendingContent += evt.delta;
@@ -666,6 +785,7 @@ export default function Home() {
         // Re-sync with disk so ordering, titles and counts match what was
         // actually written.
         void refreshConversations();
+        if (sawToolWrite) void refreshWorkspaceFiles();
       }
     },
     [
@@ -680,6 +800,8 @@ export default function Home() {
       enabledPlugins,
       messages,
       refreshConversations,
+      workspaceEnabled,
+      refreshWorkspaceFiles,
     ]
   );
 
@@ -688,6 +810,18 @@ export default function Home() {
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
+
+  // Each conversation owns a workspace folder. Switching chats therefore
+  // switches workspaces, so the file count has to be re-read.
+  useEffect(() => {
+    workspaceIdRef.current = currentConvId;
+    // Deferred so the state update doesn't cascade through this commit,
+    // matching how the rest of this file loads data on mount.
+    queueMicrotask(() => {
+      if (workspaceEnabled) void refreshWorkspaceFiles();
+      else setWorkspaceFileCount(0);
+    });
+  }, [currentConvId, workspaceEnabled, refreshWorkspaceFiles]);
 
   useEffect(() => {
     sendMessageRef.current = sendMessage;
@@ -839,6 +973,10 @@ export default function Home() {
         onSetModel={setModel}
         onOpenSettings={() => setShowSettings(true)}
         onOpenPlugins={() => setShowPlugins(true)}
+        workspaceEnabled={workspaceEnabled}
+        workspaceFileCount={workspaceFileCount}
+        onSetWorkspaceEnabled={setWorkspaceEnabled}
+        onOpenWorkspace={openWorkspace}
       />
 
       {/* Modals */}
@@ -865,6 +1003,18 @@ export default function Home() {
           onSelect={loadConversation}
           onClose={() => setShowSearch(false)}
           sidebarOpen={sidebarOpen}
+        />
+      )}
+
+      {showWorkspace && currentConvId && (
+        <WorkspacePanel
+          workspaceId={currentConvId}
+          highlightPath={workspaceHighlight}
+          onClose={() => {
+            setShowWorkspace(false);
+            setWorkspaceHighlight(null);
+            void refreshWorkspaceFiles();
+          }}
         />
       )}
 

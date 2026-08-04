@@ -19,6 +19,7 @@ import { Dots, MessageBubble } from "@/components/MessageBubble";
 import { ThinkingEffortSelector } from "@/components/ThinkingEffortSelector";
 import { ModelSelector } from "@/components/ModelSelector";
 import { SearchModeSelector } from "@/components/SearchModeSelector";
+import { WorkspaceToggle } from "@/components/WorkspaceToggle";
 import type { Message, StatusStage } from "@/app/page";
 
 interface ChatAreaProps {
@@ -51,6 +52,11 @@ interface ChatAreaProps {
   onSetModel: (model: string) => void;
   onOpenSettings: () => void;
   onOpenPlugins: () => void;
+  workspaceEnabled: boolean;
+  workspaceFileCount: number;
+  onSetWorkspaceEnabled: (enabled: boolean) => void;
+  /** Opens the file panel, optionally jumping straight to one file. */
+  onOpenWorkspace: (path?: string) => void;
 }
 
 export function ChatArea({
@@ -77,6 +83,10 @@ export function ChatArea({
   onSetModel,
   onOpenSettings,
   onOpenPlugins,
+  workspaceEnabled,
+  workspaceFileCount,
+  onSetWorkspaceEnabled,
+  onOpenWorkspace,
 }: ChatAreaProps) {
   const [input, setInput] = useState("");
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -371,6 +381,14 @@ export function ChatArea({
     return { tokens, cost, ms, priced };
   }, [messages]);
 
+  // Stable identity: an inline arrow here would give every MessageBubble a
+  // new prop on each keystroke and defeat the memoisation that fixed the
+  // typing lag in long chats.
+  const openWorkspaceFile = useCallback(
+    (path: string) => onOpenWorkspace(path),
+    [onOpenWorkspace]
+  );
+
   const analyzingImages = attachments.some((a) => a.analyzing);
   const canSend =
     (Boolean(input.trim()) || attachments.length > 0) &&
@@ -555,6 +573,7 @@ export function ChatArea({
                 searchIndex={searchIndex}
                 activeMatch={activeMatch}
                 revealAll={findOpen && findQuery.trim().length > 0}
+                onOpenWorkspaceFile={openWorkspaceFile}
               />
 
               {/* Only shown before the first token lands; afterwards the
@@ -713,6 +732,13 @@ export function ChatArea({
                   onChange={onSetSearchMode}
                 />
 
+                <WorkspaceToggle
+                  enabled={workspaceEnabled}
+                  fileCount={workspaceFileCount}
+                  onToggle={onSetWorkspaceEnabled}
+                  onOpenFiles={() => onOpenWorkspace()}
+                />
+
                 <button
                   onClick={onOpenPlugins}
                   className="chip"
@@ -860,11 +886,13 @@ const MessageList = memo(function MessageList({
   searchIndex,
   activeMatch,
   revealAll,
+  onOpenWorkspaceFile,
 }: {
   messages: Message[];
   onRegenerate: (assistantId: string) => void;
   onEdit: (messageId: string, newContent: string) => void;
   onDeleteMessage: (messageId: string) => void;
+  onOpenWorkspaceFile: (path: string) => void;
   searchQuery?: string;
   searchWholeWord: boolean;
   searchIndex: ChatSearchIndex;
@@ -948,6 +976,7 @@ const MessageList = memo(function MessageList({
             searchQuery={searchQuery}
             searchWholeWord={searchWholeWord}
             activeMatchIndex={localActive}
+            onOpenWorkspaceFile={onOpenWorkspaceFile}
           />
         );
       })}
@@ -960,6 +989,7 @@ const STAGE_LABELS: Record<StatusStage, string> = {
   searching: "Searching the web",
   thinking: "Thinking",
   writing: "Writing",
+  working: "Working on your files",
 };
 
 /**
