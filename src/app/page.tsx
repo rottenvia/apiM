@@ -9,6 +9,7 @@ import { ArtifactProvider } from "@/components/ArtifactContext";
 import { SearchModal } from "@/components/SearchModal";
 import { WorkspacePanel } from "@/components/WorkspacePanel";
 import type { ToolEvent } from "@/components/ToolActivity";
+import { clampDeleteDelay, DEFAULT_DELETE_DELAY } from "@/components/DeleteChatDialog";
 
 export interface Message {
   id: string;
@@ -169,6 +170,7 @@ export default function Home() {
   // folder; `pendingWorkspaceId` covers a brand-new chat that has no id yet.
   const [workspaceEnabled, setWorkspaceEnabled] = useState(false);
   const [showWorkspace, setShowWorkspace] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [workspaceHighlight, setWorkspaceHighlight] = useState<string | null>(null);
   const [workspaceFileCount, setWorkspaceFileCount] = useState(0);
 
@@ -181,6 +183,8 @@ export default function Home() {
   const [thinkingEffort, setThinkingEffort] = useState("auto");
   const [webSearchMode, setWebSearchMode] = useState<"off" | "auto" | "always">("auto");
   const [enabledPlugins, setEnabledPlugins] = useState<string[]>([]);
+  /** Seconds the delete button stays locked in the confirmation dialog. */
+  const [deleteDelay, setDeleteDelay] = useState(DEFAULT_DELETE_DELAY);
 
   const hasKeys = deepseekKey.length > 0;
   const initialLoadDone = useRef(false);
@@ -219,6 +223,11 @@ export default function Home() {
             if (s.enabledPlugins) setEnabledPlugins(s.enabledPlugins);
             if (s.webSearchMode) setWebSearchMode(s.webSearchMode);
             if (s.workspaceEnabled) setWorkspaceEnabled(true);
+            // Clamped on read as well as write: a hand-edited or older
+            // localStorage value must not produce an un-closable dialog.
+            if (s.deleteDelay !== undefined) {
+              setDeleteDelay(clampDeleteDelay(s.deleteDelay));
+            }
           } catch {
             /* ignore */
           }
@@ -243,6 +252,7 @@ export default function Home() {
           enabledPlugins,
           webSearchMode,
           workspaceEnabled,
+          deleteDelay,
         })
       );
     }
@@ -256,6 +266,7 @@ export default function Home() {
     enabledPlugins,
     webSearchMode,
     workspaceEnabled,
+    deleteDelay,
   ]);
 
   /**
@@ -423,13 +434,36 @@ export default function Home() {
 
   const deleteConversation = useCallback(
     async (id: string) => {
-      await fetch(`/api/conversations/${id}`, { method: "DELETE" });
+      let ok = false;
+      try {
+        const res = await fetch(`/api/conversations/${id}`, {
+          method: "DELETE",
+        });
+        // The response was previously ignored, so a failed delete still
+        // disappeared from the list and came back on the next refresh.
+        ok = res.ok;
+      } catch {
+        ok = false;
+      }
+
+      if (!ok) {
+        // Surfaced rather than swallowed: the old code removed the row
+        // regardless, so a failed delete looked like it had worked until the
+        // chat reappeared on the next refresh.
+        setDeleteError("That chat couldn't be deleted. Please try again.");
+        void refreshConversations();
+        return;
+      }
+
+      // Drop the cached transcript too, or reopening a same-id chat would
+      // show the deleted messages from memory.
+      conversationCache.current.delete(id);
       setConversations((prev) => prev.filter((c) => c.id !== id));
       if (currentConvId === id) {
         startNewChat();
       }
     },
-    [currentConvId, startNewChat]
+    [currentConvId, startNewChat, refreshConversations]
   );
 
   const sendMessage = useCallback(
@@ -946,6 +980,7 @@ export default function Home() {
         onRename={renameConversation}
         onArchive={archiveConversation}
         onOpenSettings={() => setShowSettings(true)}
+        deleteDelay={deleteDelay}
       />
 
       {/* Main Chat Area */}
@@ -994,6 +1029,8 @@ export default function Home() {
           onTavilyKeyChange={setTavilyKey}
           onModelChange={setModel}
           onDefaultEffortChange={setThinkingEffort}
+          deleteDelay={deleteDelay}
+          onDeleteDelayChange={setDeleteDelay}
           onClose={() => setShowSettings(false)}
         />
       )}
@@ -1004,6 +1041,23 @@ export default function Home() {
           onClose={() => setShowSearch(false)}
           sidebarOpen={sidebarOpen}
         />
+      )}
+
+      {deleteError && (
+        <div
+          role="alert"
+          className="fixed bottom-5 left-1/2 z-[95] -translate-x-1/2 rounded-xl border border-danger/30 bg-bg-secondary px-4 py-2.5 shadow-2xl"
+        >
+          <div className="flex items-center gap-3">
+            <span className="text-[13px] text-text-primary">{deleteError}</span>
+            <button
+              onClick={() => setDeleteError(null)}
+              className="rounded-md px-2 py-0.5 text-[12px] text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
       )}
 
       {showWorkspace && currentConvId && (

@@ -128,31 +128,47 @@ export async function getConversation(
  */
 const writeQueues = new Map<string, Promise<void>>();
 
+/**
+ * Conversations deleted during this process's lifetime.
+ *
+ * A delete has to outrank writes that were already queued behind it, and also
+ * any that a streaming reply issues *after* it: a checkpoint captured its data
+ * before the delete and would otherwise write the file back out. Deleting a
+ * chat mid-reply is exactly when that happens, which is why deletes appeared
+ * to silently fail — the row vanished and then returned.
+ */
+const deletedIds = new Set<string>();
+
+/** Runs `task` after any pending write for this conversation. */
+function enqueue(id: string, task: () => Promise<void>): Promise<void> {
+  const previous = writeQueues.get(id) ?? Promise.resolve();
+  const next = previous.catch(() => {}).then(task);
+  writeQueues.set(id, next);
+  return next.finally(() => {
+    if (writeQueues.get(id) === next) writeQueues.delete(id);
+  });
+}
+
 async function writeConversation(conv: StoredConversation): Promise<void> {
-  const previous = writeQueues.get(conv.id) ?? Promise.resolve();
+  // Checked before queueing and again inside, since the delete may land while
+  // this write is still waiting its turn.
+  if (deletedIds.has(conv.id)) return;
 
-  const next = previous
-    .catch(() => {})
-    .then(async () => {
-      await ensureDir();
-      const target = fileFor(conv.id);
-      // Unique suffix so two writers can never collide on the same temp path.
-      const tmp = `${target}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
-      try {
-        await fs.writeFile(tmp, JSON.stringify(conv, null, 2), "utf8");
-        await fs.rename(tmp, target);
-      } catch (err) {
-        await fs.unlink(tmp).catch(() => {});
-        throw err;
-      }
-    });
+  return enqueue(conv.id, async () => {
+    if (deletedIds.has(conv.id)) return;
 
-  writeQueues.set(conv.id, next);
-  try {
-    await next;
-  } finally {
-    if (writeQueues.get(conv.id) === next) writeQueues.delete(conv.id);
-  }
+    await ensureDir();
+    const target = fileFor(conv.id);
+    // Unique suffix so two writers can never collide on the same temp path.
+    const tmp = `${target}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+    try {
+      await fs.writeFile(tmp, JSON.stringify(conv, null, 2), "utf8");
+      await fs.rename(tmp, target);
+    } catch (err) {
+      await fs.unlink(tmp).catch(() => {});
+      throw err;
+    }
+  });
 }
 
 export async function appendMessages(
@@ -252,13 +268,41 @@ export async function updateConversation(
 }
 
 export async function deleteConversation(id: string): Promise<boolean> {
+  // Validate before marking, so a bad id can't poison the tombstone set.
+  const target = fileFor(id);
+
+  // Tombstone first: this stops writes that are already queued, and any the
+  // in-flight reply issues from here on.
+  deletedIds.add(id);
+
+  let removed = false;
+  // Queued like a write, so it can never overtake or be overtaken by one.
+  await enqueue(id, async () => {
+    try {
+      await fs.unlink(target);
+      removed = true;
+    } catch {
+      removed = false;
+    }
+  });
+
+  // Sweep any temp file a racing write left behind, so the directory doesn't
+  // accumulate orphans that a later readdir would trip over.
   try {
-    await fs.unlink(fileFor(id));
-    return true;
+    const dir = path.dirname(target);
+    const base = `${id}.json.`;
+    for (const name of await fs.readdir(dir)) {
+      if (name.startsWith(base) && name.endsWith(".tmp")) {
+        await fs.unlink(path.join(dir, name)).catch(() => {});
+      }
+    }
   } catch {
-    return false;
+    /* best effort */
   }
+
+  return removed;
 }
+
 
 export interface SearchHit {
   conversationId: string;
@@ -364,7 +408,8 @@ export interface ImportResult {
  * Accepts either a single conversation object or an array of them, and
  * tolerates partial records — anything with recognisable messages is taken.
  * Imported chats always get a fresh id so they can never overwrite an
- * existing conversation.
+ * existing conversation, which also means a delete tombstone can never
+ * shadow an import.
  */
 export async function importConversations(
   raw: unknown
