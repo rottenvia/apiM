@@ -14,6 +14,7 @@ interface SidebarProps {
   onRename: (id: string, title: string) => void;
   onArchive: (id: string, archived: boolean) => void;
   onOpenSearch: () => void;
+  onImported: () => void;
   onOpenSettings: () => void;
 }
 
@@ -34,6 +35,7 @@ export function Sidebar({
   onRename,
   onArchive,
   onOpenSearch,
+  onImported,
   onOpenSettings,
 }: SidebarProps) {
   const [menuFor, setMenuFor] = useState<string | null>(null);
@@ -42,7 +44,36 @@ export function Sidebar({
   const [draft, setDraft] = useState("");
   const [showArchived, setShowArchived] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [importState, setImportState] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const importRef = useRef<HTMLInputElement>(null);
+
+  const handleImport = async (file: File) => {
+    setImportState("Importing…");
+    try {
+      const parsed = JSON.parse(await file.text());
+      const res = await fetch("/api/conversations/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(parsed),
+      });
+      const body = (await res.json()) as {
+        imported?: number;
+        error?: string;
+      };
+      if (!res.ok) {
+        setImportState(body.error ?? "Import failed");
+      } else {
+        setImportState(
+          `Imported ${body.imported} chat${body.imported === 1 ? "" : "s"}`
+        );
+        onImported();
+      }
+    } catch {
+      setImportState("That file isn't valid JSON");
+    }
+    setTimeout(() => setImportState(null), 4000);
+  };
 
   const { active, archived } = useMemo(
     () => ({
@@ -133,6 +164,29 @@ export function Sidebar({
             New chat
           </button>
 
+          <input
+            ref={importRef}
+            type="file"
+            accept="application/json,.json"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) void handleImport(file);
+              e.target.value = "";
+            }}
+          />
+
+          <button
+            onClick={() => importRef.current?.click()}
+            title="Import a chat from a JSON export"
+            aria-label="Import chat"
+            className="flex h-10 w-10 flex-none items-center justify-center rounded-xl border border-border text-text-secondary transition-colors hover:border-border-light hover:bg-bg-hover hover:text-text-primary"
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 15V3m0 12l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" />
+            </svg>
+          </button>
+
           <button
             onClick={onOpenSearch}
             title="Search chats  (Ctrl+K)"
@@ -146,6 +200,12 @@ export function Sidebar({
           </button>
 
         </div>
+
+        {importState && (
+          <p className="px-3 pb-1 text-[11px] leading-4 text-text-secondary animate-fade-in">
+            {importState}
+          </p>
+        )}
 
         {/* Active / Archived switch */}
         {(active.length > 0 || archived.length > 0) && (

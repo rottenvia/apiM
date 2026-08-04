@@ -93,6 +93,9 @@ type StreamEvent =
       conversationId: string | null;
       persisted: boolean;
       usage: unknown;
+      /** Wall-clock milliseconds from request start to final token. */
+      durationMs: number;
+      model: string;
     }
   | { type: "error"; error: string };
 
@@ -175,6 +178,7 @@ export async function POST(req: NextRequest) {
 
       // Ids are allocated up front so the same assistant message can be
       // rewritten in place as it streams.
+      const startedAt = Date.now();
       const convId: string = conversationId ?? uuidv4();
       const assistantMsgId = uuidv4();
       let persisted = false;
@@ -248,7 +252,8 @@ export async function POST(req: NextRequest) {
             const decision = await decideSearch(
               message,
               recentContext,
-              deepseekApiKey
+              deepseekApiKey,
+              req.signal
             );
             doSearch = decision.needed;
             searchReason = decision.reason;
@@ -266,7 +271,8 @@ export async function POST(req: NextRequest) {
               message,
               recentContext,
               deepseekApiKey,
-              tavilyApiKey as string
+              tavilyApiKey as string,
+              req.signal
             );
           } catch (searchError) {
             // A failed search shouldn't kill the answer — carry on without it.
@@ -278,6 +284,11 @@ export async function POST(req: NextRequest) {
               .map((q) => `"${q}"`)
               .join(", ")}\n\nFound ${searchContext.sourcesUsed} relevant sources:\n\n${searchContext.summary}\n</web_search_results>\n\nIMPORTANT: Use the search results above to provide accurate, up-to-date information. Cite sources with their URLs. If the search results contain links to GitHub repos, documentation, or solutions, include those EXACT URLs. Never make up URLs.`;
           }
+        }
+
+        if (req.signal.aborted) {
+          close();
+          return;
         }
 
         send({
@@ -521,6 +532,9 @@ export async function POST(req: NextRequest) {
             pluginsUsed: enabledPluginIds.length ? enabledPluginIds : null,
             tokenCount:
               (usage as { total_tokens?: number } | null)?.total_tokens ?? null,
+            usage: (usage as Record<string, number> | null) ?? null,
+            model,
+            durationMs: Date.now() - startedAt,
             createdAt: new Date().toISOString(),
             incomplete: false,
           });
@@ -535,6 +549,8 @@ export async function POST(req: NextRequest) {
           conversationId: convId,
           persisted,
           usage,
+          durationMs: Date.now() - startedAt,
+          model,
         });
         close();
       } catch (error) {

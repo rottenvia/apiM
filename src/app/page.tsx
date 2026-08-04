@@ -31,6 +31,15 @@ export interface Message {
   searchReason?: string;
   /** Files sent with this message, rendered as chips on the bubble. */
   attachments?: MessageAttachment[];
+  /** Full token usage, for cost estimation. */
+  usage?: Record<string, number> | null;
+  /** Model that produced the reply, needed to price it. */
+  model?: string;
+  /** Wall-clock time the reply took. */
+  durationMs?: number;
+  /** How many search rounds ran, and why the loop stopped. */
+  searchRounds?: number;
+  searchStopReason?: string;
 }
 
 /** Lightweight record of an attachment, for display only. */
@@ -92,6 +101,8 @@ type StreamEvent =
       conversationId: string | null;
       persisted: boolean;
       usage: unknown;
+      durationMs: number;
+      model: string;
     }
   | { type: "error"; error: string };
 
@@ -261,6 +272,9 @@ export default function Home() {
               ? (m.searchQueries as string[])
               : undefined,
             tokenCount: m.tokenCount as number | undefined,
+            usage: (m.usage as Record<string, number> | null) ?? null,
+            model: m.model as string | undefined,
+            durationMs: m.durationMs as number | undefined,
             createdAt: m.createdAt as string | undefined,
             incomplete: m.incomplete === true,
           };
@@ -514,6 +528,8 @@ export default function Home() {
                   thinkingEffort: evt.resolvedEffort,
                   webSearchUsed: evt.webSearchUsed,
                   searchReason: evt.searchReason,
+                  searchRounds: evt.searchRounds,
+                  searchStopReason: evt.searchStopReason,
                   searchResults: evt.searchResults,
                   searchQueries: evt.searchQueries ?? undefined,
                   searchesPerformed: evt.searchesPerformed,
@@ -534,11 +550,14 @@ export default function Home() {
                 break;
 
               case "done": {
-                const usage = evt.usage as { total_tokens?: number } | null;
+                const usage = evt.usage as Record<string, number> | null;
                 finish({
                   ...finalMeta,
                   id: evt.id || streamingId,
                   tokenCount: usage?.total_tokens,
+                  usage,
+                  model: evt.model,
+                  durationMs: evt.durationMs,
                 });
                 if (evt.conversationId) {
                   setCurrentConvId(evt.conversationId);
@@ -636,6 +655,16 @@ export default function Home() {
     abortRef.current?.abort();
   }, []);
 
+  /** Resend an edited user message, discarding everything after it. */
+  const editMessage = useCallback((messageId: string, newContent: string) => {
+    const list = messagesRef.current;
+    const index = list.findIndex((m) => m.id === messageId);
+    if (index === -1) return;
+    // Truncate from the edited message so the new turn replaces the old
+    // exchange rather than appending a second copy of the question.
+    void sendMessageRef.current?.(newContent, { regenerateFromId: messageId });
+  }, []);
+
   /** Re-run the user turn that produced `assistantId`. */
   // Read through refs so this callback keeps a stable identity. Depending on
   // `messages` would give MessageBubble a new prop on every message and defeat
@@ -662,6 +691,7 @@ export default function Home() {
         onToggle={() => setSidebarOpen(!sidebarOpen)}
         onSelect={loadConversation}
         onOpenSearch={() => setShowSearch(true)}
+        onImported={() => void refreshConversations()}
         onNew={startNewChat}
         onDelete={deleteConversation}
         onRename={renameConversation}
@@ -685,6 +715,7 @@ export default function Home() {
         sidebarOpen={sidebarOpen}
         onSend={sendMessage}
         onRegenerate={regenerate}
+        onEdit={editMessage}
         onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}
         onNewChat={startNewChat}
         onSetSearchMode={setWebSearchMode}

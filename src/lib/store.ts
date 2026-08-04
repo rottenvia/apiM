@@ -22,6 +22,12 @@ export interface StoredMessage {
   searchQueries?: string[] | null;
   pluginsUsed?: string[] | null;
   tokenCount?: number | null;
+  /** Full usage breakdown, for cost estimation. */
+  usage?: Record<string, number> | null;
+  /** Model that produced this reply, needed to price it. */
+  model?: string | null;
+  /** Wall-clock time the reply took. */
+  durationMs?: number | null;
   createdAt: string;
   /**
    * True while the reply is still streaming. If the process dies or the tab
@@ -329,6 +335,84 @@ export async function searchConversations(
   });
 
   return hits.slice(0, limit);
+}
+
+export interface ImportResult {
+  imported: number;
+  skipped: number;
+  errors: string[];
+}
+
+/**
+ * Import conversations from an exported JSON file.
+ *
+ * Accepts either a single conversation object or an array of them, and
+ * tolerates partial records — anything with recognisable messages is taken.
+ * Imported chats always get a fresh id so they can never overwrite an
+ * existing conversation.
+ */
+export async function importConversations(
+  raw: unknown
+): Promise<ImportResult> {
+  const candidates: unknown[] = Array.isArray(raw) ? raw : [raw];
+  const result: ImportResult = { imported: 0, skipped: 0, errors: [] };
+
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== "object") {
+      result.skipped += 1;
+      continue;
+    }
+
+    const conv = candidate as Partial<StoredConversation>;
+    const messages = Array.isArray(conv.messages) ? conv.messages : [];
+
+    const cleaned: StoredMessage[] = messages
+      .filter(
+        (m): m is StoredMessage =>
+          !!m &&
+          typeof m === "object" &&
+          typeof (m as StoredMessage).content === "string" &&
+          ((m as StoredMessage).role === "user" ||
+            (m as StoredMessage).role === "assistant")
+      )
+      .map((m, i) => ({
+        ...m,
+        // Regenerate ids so an import can't collide with existing messages.
+        id: `${Date.now().toString(36)}-${i}-${Math.random().toString(36).slice(2, 7)}`,
+        createdAt: m.createdAt ?? new Date().toISOString(),
+      }));
+
+    if (cleaned.length === 0) {
+      result.skipped += 1;
+      result.errors.push(
+        `"${String(conv.title ?? "untitled").slice(0, 40)}" had no usable messages`
+      );
+      continue;
+    }
+
+    const now = new Date().toISOString();
+    const imported: StoredConversation = {
+      id: `imported-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      title:
+        typeof conv.title === "string" && conv.title.trim()
+          ? conv.title.slice(0, 200)
+          : "Imported chat",
+      archived: false,
+      createdAt: typeof conv.createdAt === "string" ? conv.createdAt : now,
+      updatedAt: now,
+      messages: cleaned,
+    };
+
+    try {
+      await writeConversation(imported);
+      result.imported += 1;
+    } catch {
+      result.skipped += 1;
+      result.errors.push(`Couldn't save "${imported.title}"`);
+    }
+  }
+
+  return result;
 }
 
 /** Absolute path shown in the UI so the user knows where chats live. */
