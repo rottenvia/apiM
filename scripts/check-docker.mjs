@@ -73,7 +73,25 @@ async function main() {
     )
   );
 
-  // 0. Nothing virtualised starts without the Hyper-V Host Compute Service,
+  // 0. The hypervisor has a boot-level switch that is independent of the
+  //    service, and gaming-optimisation guides routinely turn it off. When
+  //    off, nothing virtualised starts and every error is misleading.
+  if (process.platform === "win32") {
+    const bcd = await tryRun("bcdedit", ["/enum", "{current}"], 15_000);
+    if (bcd.ok && /hypervisorlaunchtype\s+off/i.test(bcd.out)) {
+      no("Hypervisor is enabled at boot", "hypervisorlaunchtype is Off");
+      console.log(dim("\n      Nothing virtualised can start. As Administrator:"));
+      console.log(dim("        bcdedit /set hypervisorlaunchtype auto"));
+      console.log(dim("      then REBOOT — it's a boot setting.\n"));
+      console.log(
+        dim("      Note: this is the setting with the real 2-5% gaming cost.")
+      );
+      console.log(dim("      See docs/wsl-gaming-performance.md\n"));
+      process.exit(1);
+    }
+  }
+
+  // 0a. Nothing virtualised starts without the Hyper-V Host Compute Service,
   //    and every component then fails with its own unrelated-looking error.
   //    Cheapest thing to rule out, and the most common cause.
   if (process.platform === "win32") {
