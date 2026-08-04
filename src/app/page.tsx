@@ -8,6 +8,7 @@ import { PluginsModal } from "@/components/PluginsModal";
 import { ArtifactProvider } from "@/components/ArtifactContext";
 import { SearchModal } from "@/components/SearchModal";
 import { WorkspacePanel } from "@/components/WorkspacePanel";
+import type { WorkspaceFileInfo } from "@/components/WorkspaceBar";
 import type { ToolEvent } from "@/components/ToolActivity";
 import { clampDeleteDelay, DEFAULT_DELETE_DELAY } from "@/components/DeleteChatDialog";
 
@@ -172,7 +173,9 @@ export default function Home() {
   const [showWorkspace, setShowWorkspace] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [workspaceHighlight, setWorkspaceHighlight] = useState<string | null>(null);
-  const [workspaceFileCount, setWorkspaceFileCount] = useState(0);
+  const [workspaceFiles, setWorkspaceFiles] = useState<WorkspaceFileInfo[]>([]);
+  /** Paths the last reply touched, highlighted in the workspace bar. */
+  const [recentlyChanged, setRecentlyChanged] = useState<string[]>([]);
 
   // Settings
   const [deepseekKey, setDeepseekKey] = useState("");
@@ -287,16 +290,19 @@ export default function Home() {
   const refreshWorkspaceFiles = useCallback(async () => {
     const id = workspaceIdRef.current;
     if (!id) {
-      setWorkspaceFileCount(0);
+      setWorkspaceFiles([]);
       return;
     }
     try {
       const res = await fetch(`/api/workspace/${id}`);
       if (!res.ok) return;
-      const data = (await res.json()) as { files?: unknown[] };
-      setWorkspaceFileCount(Array.isArray(data.files) ? data.files.length : 0);
+      const data = (await res.json()) as { files?: WorkspaceFileInfo[] };
+      // Ignore a response that arrived after the user switched chats, or the
+      // bar would list another conversation's files.
+      if (workspaceIdRef.current !== id) return;
+      setWorkspaceFiles(Array.isArray(data.files) ? data.files : []);
     } catch {
-      /* the count is cosmetic — leave the last known value */
+      /* cosmetic — leave the last known list rather than blanking it */
     }
   }, []);
 
@@ -572,8 +578,9 @@ export default function Home() {
         if (frame === null) frame = requestAnimationFrame(flush);
       };
 
-      /** Set when a tool changed the workspace, so the count can refresh. */
+      /** Set when a tool changed the workspace, so the list can refresh. */
       let sawToolWrite = false;
+      const changedPaths = new Set<string>();
 
       const finish = (patch: Partial<Message>) => {
         if (frame !== null) cancelAnimationFrame(frame);
@@ -713,8 +720,12 @@ export default function Home() {
               }
 
               case "tool_result": {
-                sawToolWrite ||=
+                const isWrite =
                   evt.ok && evt.name !== "read_file" && evt.name !== "list_files";
+                sawToolWrite ||= isWrite;
+                if (isWrite && evt.changedPath) {
+                  changedPaths.add(evt.changedPath);
+                }
                 setMessages((prev) =>
                   prev.map((m) =>
                     m.id === streamingId
@@ -819,7 +830,10 @@ export default function Home() {
         // Re-sync with disk so ordering, titles and counts match what was
         // actually written.
         void refreshConversations();
-        if (sawToolWrite) void refreshWorkspaceFiles();
+        if (sawToolWrite) {
+          setRecentlyChanged([...changedPaths]);
+          void refreshWorkspaceFiles();
+        }
       }
     },
     [
@@ -853,7 +867,7 @@ export default function Home() {
     // matching how the rest of this file loads data on mount.
     queueMicrotask(() => {
       if (workspaceEnabled) void refreshWorkspaceFiles();
-      else setWorkspaceFileCount(0);
+      else setWorkspaceFiles([]);
     });
   }, [currentConvId, workspaceEnabled, refreshWorkspaceFiles]);
 
@@ -1009,7 +1023,8 @@ export default function Home() {
         onOpenSettings={() => setShowSettings(true)}
         onOpenPlugins={() => setShowPlugins(true)}
         workspaceEnabled={workspaceEnabled}
-        workspaceFileCount={workspaceFileCount}
+        workspaceFiles={workspaceFiles}
+        recentlyChanged={recentlyChanged}
         onSetWorkspaceEnabled={setWorkspaceEnabled}
         onOpenWorkspace={openWorkspace}
       />

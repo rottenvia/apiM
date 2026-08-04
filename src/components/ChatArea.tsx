@@ -20,6 +20,8 @@ import { ThinkingEffortSelector } from "@/components/ThinkingEffortSelector";
 import { ModelSelector } from "@/components/ModelSelector";
 import { SearchModeSelector } from "@/components/SearchModeSelector";
 import { WorkspaceToggle } from "@/components/WorkspaceToggle";
+import { WorkspaceBar } from "@/components/WorkspaceBar";
+import type { WorkspaceFileInfo } from "@/components/WorkspaceBar";
 import type { Message, StatusStage } from "@/app/page";
 
 interface ChatAreaProps {
@@ -53,7 +55,9 @@ interface ChatAreaProps {
   onOpenSettings: () => void;
   onOpenPlugins: () => void;
   workspaceEnabled: boolean;
-  workspaceFileCount: number;
+  workspaceFiles: WorkspaceFileInfo[];
+  /** Paths the most recent reply changed. */
+  recentlyChanged: string[];
   onSetWorkspaceEnabled: (enabled: boolean) => void;
   /** Opens the file panel, optionally jumping straight to one file. */
   onOpenWorkspace: (path?: string) => void;
@@ -84,7 +88,8 @@ export function ChatArea({
   onOpenSettings,
   onOpenPlugins,
   workspaceEnabled,
-  workspaceFileCount,
+  workspaceFiles,
+  recentlyChanged,
   onSetWorkspaceEnabled,
   onOpenWorkspace,
 }: ChatAreaProps) {
@@ -535,7 +540,12 @@ export function ChatArea({
         className="relative flex-1 overflow-y-auto"
       >
         {messages.length === 0 ? (
-          <EmptyState hasKeys={hasKeys} onOpenSettings={onOpenSettings} />
+          <EmptyState
+            hasKeys={hasKeys}
+            onOpenSettings={onOpenSettings}
+            workspaceEnabled={workspaceEnabled}
+            onEnableWorkspace={() => onSetWorkspaceEnabled(true)}
+          />
         ) : (
           <div
             className={`mx-auto w-full px-4 sm:px-6 py-6 transition-[max-width] duration-300 ${columnWidth}`}
@@ -561,6 +571,15 @@ export function ChatArea({
                 </span>
               </div>
             )}
+
+            <WorkspaceBar
+              enabled={workspaceEnabled}
+              files={workspaceFiles}
+              recentlyChanged={recentlyChanged}
+              onEnable={() => onSetWorkspaceEnabled(true)}
+              onOpen={() => onOpenWorkspace()}
+              onOpenFile={openWorkspaceFile}
+            />
 
             <div className="space-y-6">
               <MessageList
@@ -734,7 +753,7 @@ export function ChatArea({
 
                 <WorkspaceToggle
                   enabled={workspaceEnabled}
-                  fileCount={workspaceFileCount}
+                  fileCount={workspaceFiles.length}
                   onToggle={onSetWorkspaceEnabled}
                   onOpenFiles={() => onOpenWorkspace()}
                 />
@@ -817,9 +836,13 @@ export function ChatArea({
 function EmptyState({
   hasKeys,
   onOpenSettings,
+  workspaceEnabled,
+  onEnableWorkspace,
 }: {
   hasKeys: boolean;
   onOpenSettings: () => void;
+  workspaceEnabled: boolean;
+  onEnableWorkspace: () => void;
 }) {
   return (
     <div className="flex h-full items-center justify-center px-6">
@@ -829,9 +852,58 @@ function EmptyState({
         </h1>
 
         {hasKeys ? (
-          <p className="mt-3 text-sm leading-6 text-text-secondary">
-            Type a message below to start a conversation.
-          </p>
+          <>
+            <p className="mt-3 text-sm leading-6 text-text-secondary">
+              Type a message below to start a conversation.
+            </p>
+
+            {/* States the capability up front, rather than leaving it buried
+                in a popover the user has no reason to open. */}
+            <div className="mt-6 flex items-center gap-2.5 rounded-xl border border-border px-3 py-2.5 text-left">
+              <span
+                className={`flex-none ${
+                  workspaceEnabled ? "text-accent-light" : "text-text-muted"
+                }`}
+              >
+                <svg
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth={1.6}
+                  aria-hidden="true"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"
+                  />
+                </svg>
+              </span>
+              <p className="min-w-0 flex-1 text-[12px] leading-4 text-text-muted">
+                {workspaceEnabled ? (
+                  <>
+                    <span className="text-text-secondary">Workspace is on.</span>{" "}
+                    Ask for a file and it gets written to disk.
+                  </>
+                ) : (
+                  <>
+                    <span className="text-text-secondary">Workspace is off.</span>{" "}
+                    Turn it on to have files written instead of printed.
+                  </>
+                )}
+              </p>
+              {!workspaceEnabled && (
+                <button
+                  onClick={onEnableWorkspace}
+                  className="flex-none rounded-lg border border-border px-2.5 py-1 text-[12px] font-medium text-text-secondary transition-colors hover:border-border-light hover:bg-bg-hover hover:text-text-primary"
+                >
+                  Turn on
+                </button>
+              )}
+            </div>
+          </>
         ) : (
           <>
             <p className="mt-3 text-sm leading-6 text-text-secondary">
