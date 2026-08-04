@@ -236,10 +236,10 @@ export function Sidebar({
             return (
               <div
                 key={conv.id}
-                className={`group relative flex items-center gap-1 rounded-xl px-2.5 py-2 transition-colors duration-150 ${
+                className={`group relative mb-1 flex items-center gap-1 rounded-xl border px-2.5 py-2 transition-colors duration-150 ${
                   isCurrent
-                    ? "bg-bg-elevated text-text-primary"
-                    : "text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
+                    ? "border-accent/40 bg-bg-elevated text-text-primary"
+                    : "border-border/60 text-text-secondary hover:border-border-light hover:bg-bg-tertiary hover:text-text-primary"
                 }`}
               >
                 {editingId === conv.id ? (

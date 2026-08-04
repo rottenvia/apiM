@@ -40,6 +40,11 @@ export interface Message {
   /** How many search rounds ran, and why the loop stopped. */
   searchRounds?: number;
   searchStopReason?: string;
+  /**
+   * Previous versions of this reply, kept when a message is edited or
+   * regenerated so the two can be compared side by side.
+   */
+  previousVersions?: { content: string; model?: string; createdAt?: string }[];
 }
 
 /** Lightweight record of an attachment, for display only. */
@@ -159,7 +164,14 @@ export default function Home() {
   /** Latest messages + sender, so stable callbacks can read them. */
   const messagesRef = useRef<Message[]>([]);
   const sendMessageRef = useRef<
-    ((content: string, options?: { regenerateFromId?: string }) => void) | null
+    | ((
+        content: string,
+        options?: {
+          regenerateFromId?: string;
+          previousVersions?: Message["previousVersions"];
+        }
+      ) => void)
+    | null
   >(null);
 
   // Load settings from localStorage after mount (deferred to a microtask so
@@ -346,6 +358,8 @@ export default function Home() {
         displayContent?: string;
         /** Thumbnails to show on the user's bubble. */
         attachments?: MessageAttachment[];
+        /** Earlier replies being superseded, retained for comparison. */
+        previousVersions?: Message["previousVersions"];
       }
     ) => {
       if (!content.trim() || isLoading || !hasKeys) return;
@@ -372,6 +386,7 @@ export default function Home() {
         content: "",
         reasoningContent: "",
         isStreaming: true,
+        previousVersions: options?.previousVersions,
       };
 
       setMessages((prev) => {
@@ -660,9 +675,26 @@ export default function Home() {
     const list = messagesRef.current;
     const index = list.findIndex((m) => m.id === messageId);
     if (index === -1) return;
-    // Truncate from the edited message so the new turn replaces the old
-    // exchange rather than appending a second copy of the question.
-    void sendMessageRef.current?.(newContent, { regenerateFromId: messageId });
+
+    // Keep the reply being replaced so it can be compared with the new one
+    // instead of being silently discarded.
+    const replaced = list[index + 1];
+    const carried =
+      replaced?.role === "assistant" && replaced.content
+        ? [
+            ...(replaced.previousVersions ?? []),
+            {
+              content: replaced.content,
+              model: replaced.model,
+              createdAt: replaced.createdAt,
+            },
+          ]
+        : undefined;
+
+    void sendMessageRef.current?.(newContent, {
+      regenerateFromId: messageId,
+      previousVersions: carried,
+    });
   }, []);
 
   /** Re-run the user turn that produced `assistantId`. */
@@ -675,8 +707,16 @@ export default function Home() {
     if (index < 1) return;
     const prompt = list[index - 1];
     if (prompt.role !== "user") return;
+
+    const old = list[index];
     void sendMessageRef.current?.(prompt.content, {
       regenerateFromId: assistantId,
+      previousVersions: old.content
+        ? [
+            ...(old.previousVersions ?? []),
+            { content: old.content, model: old.model, createdAt: old.createdAt },
+          ]
+        : undefined,
     });
   }, []);
 

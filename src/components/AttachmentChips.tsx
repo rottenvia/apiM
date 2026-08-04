@@ -8,9 +8,12 @@ import { ImageLightbox } from "@/components/ImageLightbox";
 export function AttachmentChips({
   attachments,
   onRemove,
+  onRetry,
 }: {
   attachments: Attachment[];
   onRemove: (id: string) => void;
+  /** Re-run a failed image description without re-attaching the file. */
+  onRetry?: (id: string) => void;
 }) {
   const [preview, setPreview] = useState<Attachment | null>(null);
 
@@ -35,8 +38,16 @@ export function AttachmentChips({
             className="group relative overflow-hidden rounded-lg border border-border bg-bg-elevated"
           >
             <button
-              onClick={() => setPreview(file)}
-              title={`${file.name} — click to enlarge`}
+              onClick={() =>
+                file.visionError && onRetry
+                  ? onRetry(file.id)
+                  : setPreview(file)
+              }
+              title={
+                file.visionError
+                  ? `${file.visionError} — click to retry`
+                  : `${file.name} — click to enlarge`
+              }
               className="block"
             >
               {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -54,10 +65,11 @@ export function AttachmentChips({
 
               {file.visionError && !file.analyzing && (
                 <span
-                  className="absolute inset-0 flex items-center justify-center bg-danger/75 px-1 text-center text-[9px] font-medium leading-tight text-white"
+                  className="absolute inset-0 flex flex-col items-center justify-center gap-0.5 bg-danger/75 px-1 text-center text-[9px] font-medium leading-tight text-white"
                   title={file.visionError}
                 >
                   Failed
+                  {onRetry && <span className="underline">retry</span>}
                 </span>
               )}
 
