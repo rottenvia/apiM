@@ -724,9 +724,16 @@ export default function Home() {
 
     // Editing an older message: asking it again in place would answer a
     // question buried in the middle of the transcript, leaving the newest
-    // exchange stranded. Move it to the end instead, so the conversation
-    // still reads in order.
-    setMessages((prev) => prev.filter((m) => m.id !== messageId));
+    // exchange stranded. Move the whole exchange to the end instead.
+    //
+    // Both the question AND its reply must go — removing only the question
+    // left the old answer floating with nothing above it.
+    setMessages((prev) => {
+      const i = prev.findIndex((m) => m.id === messageId);
+      if (i === -1) return prev;
+      const removeCount = prev[i + 1]?.role === "assistant" ? 2 : 1;
+      return [...prev.slice(0, i), ...prev.slice(i + removeCount)];
+    });
     void sendMessageRef.current?.(newContent);
   }, []);
 
@@ -753,6 +760,22 @@ export default function Home() {
     if (index < 1) return;
     const prompt = list[index - 1];
     if (prompt.role !== "user") return;
+
+    // A reply stopped before the server confirmed it still carries its
+    // temporary streaming id, which the store knows nothing about. Retrying
+    // such a message must not send regenerateFromId, or the server would try
+    // to truncate from an id that was never written and silently do nothing.
+    const isProvisional = assistantId.startsWith("stream-");
+    if (isProvisional) {
+      // Drop the question and its abandoned reply, then ask again — sending
+      // without removing the prompt would leave a duplicate question.
+      setMessages((prev) => {
+        const i = prev.findIndex((m) => m.id === assistantId);
+        return i < 1 ? prev : prev.slice(0, i - 1);
+      });
+      void sendMessageRef.current?.(prompt.content);
+      return;
+    }
 
     const old = list[index];
     void sendMessageRef.current?.(prompt.content, {
