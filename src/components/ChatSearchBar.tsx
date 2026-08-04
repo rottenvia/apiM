@@ -44,7 +44,7 @@ export function ChatSearchBar({
   const hasQuery = query.trim().length > 0;
 
   return (
-    <div className="flex w-full justify-center">
+    <div className="flex w-full justify-center pr-4">
       <div
         onKeyDown={handleKeyDown}
         className="pointer-events-auto mt-2 flex w-full max-w-md items-center gap-1.5 rounded-xl border border-border-light bg-bg-elevated/95 px-2 py-1.5 shadow-[0_10px_32px_rgba(0,0,0,0.45)] backdrop-blur-sm animate-fade-in"

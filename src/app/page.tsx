@@ -261,37 +261,53 @@ export default function Home() {
     return () => document.removeEventListener("keydown", onKey);
   }, []);
 
+  /** Cache of loaded conversations, so switching back is instant. */
+  const conversationCache = useRef(new Map<string, Message[]>());
+  const loadSeq = useRef(0);
+
   const loadConversation = useCallback(async (id: string) => {
+    // Each load gets a sequence number; a slower earlier response is ignored
+    // once a newer one starts, so rapidly switching chats can't leave the
+    // wrong transcript on screen.
+    const seq = ++loadSeq.current;
     setCurrentConvId(id);
+
+    // Show the cached copy immediately, then refresh from disk.
+    const cached = conversationCache.current.get(id);
+    setMessages(cached ?? []);
+
     try {
       const res = await fetch(`/api/conversations/${id}`);
-      if (!res.ok) return;
-      // The store returns the whole conversation object, messages included.
+      if (!res.ok || seq !== loadSeq.current) return;
+
       const data = (await res.json()) as { messages?: unknown };
+      if (seq !== loadSeq.current) return;
+
       const list = Array.isArray(data.messages) ? data.messages : [];
-      setMessages(
-        list.map((raw) => {
-          const m = raw as Record<string, unknown>;
-          return {
-            id: m.id as string,
-            role: m.role as "user" | "assistant",
-            content: (m.content as string) ?? "",
-            reasoningContent: m.reasoningContent as string | null | undefined,
-            thinkingEffort: m.thinkingEffort as string | undefined,
-            webSearchUsed: m.webSearchUsed as boolean | undefined,
-            searchResults: parseSearchResults(m.searchResults),
-            searchQueries: Array.isArray(m.searchQueries)
-              ? (m.searchQueries as string[])
-              : undefined,
-            tokenCount: m.tokenCount as number | undefined,
-            usage: (m.usage as Record<string, number> | null) ?? null,
-            model: m.model as string | undefined,
-            durationMs: m.durationMs as number | undefined,
-            createdAt: m.createdAt as string | undefined,
-            incomplete: m.incomplete === true,
-          };
-        })
-      );
+      const parsed: Message[] = list.map((raw) => {
+        const m = raw as Record<string, unknown>;
+        return {
+          id: m.id as string,
+          role: m.role as "user" | "assistant",
+          content: (m.content as string) ?? "",
+          reasoningContent: m.reasoningContent as string | null | undefined,
+          thinkingEffort: m.thinkingEffort as string | undefined,
+          webSearchUsed: m.webSearchUsed as boolean | undefined,
+          searchResults: parseSearchResults(m.searchResults),
+          searchQueries: Array.isArray(m.searchQueries)
+            ? (m.searchQueries as string[])
+            : undefined,
+          tokenCount: m.tokenCount as number | undefined,
+          usage: (m.usage as Record<string, number> | null) ?? null,
+          model: m.model as string | undefined,
+          durationMs: m.durationMs as number | undefined,
+          createdAt: m.createdAt as string | undefined,
+          incomplete: m.incomplete === true,
+        };
+      });
+
+      conversationCache.current.set(id, parsed);
+      setMessages(parsed);
     } catch {
       /* ignore */
     }
@@ -415,8 +431,11 @@ export default function Home() {
       // Only the recent turns are sent. The server also caps this, but
       // trimming here keeps the request body small in very long chats — with
       // thousands of messages the payload alone would be megabytes.
+      // Drop errors and any reply that was cut short with no content: sending
+      // a blank assistant turn makes the model continue the abandoned answer
+      // rather than respond to the new question.
       const historyForApi = sourceHistory
-        .filter((m) => m.content && !m.isError)
+        .filter((m) => m.content.trim() && !m.isError)
         .slice(-20)
         .map((m) => ({ role: m.role, content: m.content }));
 
@@ -621,8 +640,10 @@ export default function Home() {
         }
       } catch (err) {
         if (err instanceof Error && err.name === "AbortError") {
-          // User pressed stop — keep whatever streamed in so far.
-          finish({});
+          // Keep whatever streamed in, but mark it stopped. Without this the
+          // partial text was later sent back as a completed reply, so the
+          // model answered the abandoned question instead of the new one.
+          finish({ incomplete: true });
         } else {
           finish({
             content: `⚠️ Couldn't reach the server: ${
@@ -676,24 +697,49 @@ export default function Home() {
     const index = list.findIndex((m) => m.id === messageId);
     if (index === -1) return;
 
-    // Keep the reply being replaced so it can be compared with the new one
-    // instead of being silently discarded.
-    const replaced = list[index + 1];
-    const carried =
-      replaced?.role === "assistant" && replaced.content
-        ? [
-            ...(replaced.previousVersions ?? []),
-            {
-              content: replaced.content,
-              model: replaced.model,
-              createdAt: replaced.createdAt,
-            },
-          ]
-        : undefined;
+    const isLastTurn = index >= list.length - 2;
 
-    void sendMessageRef.current?.(newContent, {
-      regenerateFromId: messageId,
-      previousVersions: carried,
+    if (isLastTurn) {
+      // Editing the most recent turn: replace it in place, carrying the old
+      // reply forward so the two can be compared.
+      const replaced = list[index + 1];
+      const carried =
+        replaced?.role === "assistant" && replaced.content
+          ? [
+              ...(replaced.previousVersions ?? []),
+              {
+                content: replaced.content,
+                model: replaced.model,
+                createdAt: replaced.createdAt,
+              },
+            ]
+          : undefined;
+
+      void sendMessageRef.current?.(newContent, {
+        regenerateFromId: messageId,
+        previousVersions: carried,
+      });
+      return;
+    }
+
+    // Editing an older message: asking it again in place would answer a
+    // question buried in the middle of the transcript, leaving the newest
+    // exchange stranded. Move it to the end instead, so the conversation
+    // still reads in order.
+    setMessages((prev) => prev.filter((m) => m.id !== messageId));
+    void sendMessageRef.current?.(newContent);
+  }, []);
+
+  /** Remove a user message and the reply it produced. */
+  const deleteMessage = useCallback((messageId: string) => {
+    setMessages((prev) => {
+      const index = prev.findIndex((m) => m.id === messageId);
+      if (index === -1) return prev;
+      // Drop the following assistant turn too, so the transcript never shows
+      // an answer with no question.
+      const removeCount =
+        prev[index + 1]?.role === "assistant" ? 2 : 1;
+      return [...prev.slice(0, index), ...prev.slice(index + removeCount)];
     });
   }, []);
 
@@ -756,6 +802,7 @@ export default function Home() {
         onSend={sendMessage}
         onRegenerate={regenerate}
         onEdit={editMessage}
+        onDeleteMessage={deleteMessage}
         onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}
         onNewChat={startNewChat}
         onSetSearchMode={setWebSearchMode}

@@ -173,6 +173,8 @@ interface MessageBubbleProps {
   onRegenerate?: (assistantId: string) => void;
   /** Resend a user message with edited text, replacing everything after it. */
   onEdit?: (messageId: string, newContent: string) => void;
+  /** Remove a message and the reply that followed it. */
+  onDelete?: (messageId: string) => void;
   /** Active in-chat search term, highlighted in the reply text. */
   searchQuery?: string;
   searchWholeWord?: boolean;
@@ -185,6 +187,7 @@ function MessageBubbleImpl({
   isLast,
   onRegenerate,
   onEdit,
+  onDelete,
   searchQuery,
   searchWholeWord = true,
   activeMatchIndex = -1,
@@ -395,20 +398,39 @@ function MessageBubbleImpl({
                     </SearchHighlight>
                   </div>
 
-                  {onEdit && (
-                    <button
-                      onClick={() => {
-                        setDraft(message.content);
-                        setEditing(true);
-                      }}
-                      title="Edit and resend"
-                      aria-label="Edit message"
-                      className="absolute -left-8 top-0 flex h-6 w-6 items-center justify-center rounded-md text-text-muted opacity-0 transition-opacity hover:bg-bg-hover hover:text-text-primary focus-visible:opacity-100 group-hover/msg:opacity-100"
-                    >
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                      </svg>
-                    </button>
+                  {(onEdit || onDelete) && (
+                    <div className="mt-1 flex items-center justify-end gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover/msg:opacity-100">
+                      {onEdit && (
+                        <button
+                          onClick={() => {
+                            setDraft(message.content);
+                            setEditing(true);
+                          }}
+                          title="Edit and resend"
+                          aria-label="Edit message"
+                          className="flex h-6 items-center gap-1 rounded-md px-1.5 text-[10px] font-medium text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
+                        >
+                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} aria-hidden="true">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                          </svg>
+                          Edit
+                        </button>
+                      )}
+
+                      {onDelete && (
+                        <button
+                          onClick={() => onDelete(message.id)}
+                          title="Delete this message and its reply"
+                          aria-label="Delete message"
+                          className="flex h-6 items-center gap-1 rounded-md px-1.5 text-[10px] font-medium text-text-muted transition-colors hover:bg-danger/12 hover:text-danger"
+                        >
+                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} aria-hidden="true">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M4 7h16" />
+                          </svg>
+                          Delete
+                        </button>
+                      )}
+                    </div>
                   )}
                 </div>
               )
@@ -808,6 +830,7 @@ export const MessageBubble = memo(MessageBubbleImpl, (prev, next) => {
     prev.isLast === next.isLast &&
     prev.onRegenerate === next.onRegenerate &&
     prev.onEdit === next.onEdit &&
+    prev.onDelete === next.onDelete &&
     prev.searchQuery === next.searchQuery &&
     prev.searchWholeWord === next.searchWholeWord &&
     prev.activeMatchIndex === next.activeMatchIndex
