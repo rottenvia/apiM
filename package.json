@@ -9,7 +9,8 @@
     "typecheck": "tsc --noEmit",
     "test:workspace": "node --no-warnings --experimental-strip-types scripts/test-workspace.mjs",
     "mock:deepseek": "node scripts/mock-deepseek.mjs",
-    "dev:mock": "node scripts/dev-mock.mjs"
+    "dev:mock": "node scripts/dev-mock.mjs",
+    "test:real": "node --no-warnings --experimental-strip-types scripts/test-real.mjs"
   },
   "dependencies": {
     "@types/uuid": "^10.0.0",
