@@ -35,6 +35,49 @@ If it says Ubuntu is already installed, that's fine — carry on.
 
 **Reboot if it asks.** It usually does.
 
+### If you get error `0xc03a0014`
+
+```
+A virtual disk support provider for the specified file was not found.
+Error code: Wsl/InstallDistro/Service/RegisterDistro/0xc03a0014
+```
+
+This almost always means the **Hyper-V Host Compute Service (`vmcompute`) is
+not running**. The message says nothing about that, which is why it sends
+people off chasing missing drivers and corrupt installs — it is a known WSL
+bug ([microsoft/WSL#40734](https://github.com/microsoft/WSL/issues/40734)).
+
+In **PowerShell as Administrator**:
+
+```powershell
+sc.exe start vmcompute
+sc.exe config vmcompute start=auto
+```
+
+Note `sc.exe`, not `sc` — in PowerShell, `sc` is an alias for `Set-Content`
+and will do something entirely unrelated.
+
+The second line makes it start on boot, so this does not come back.
+
+Then run the install again:
+
+```powershell
+wsl --install -d Ubuntu
+```
+
+**This is very likely the same reason Docker Desktop was crashing.** Without
+`vmcompute` nothing virtualised can start, and each component fails with its
+own confusing message.
+
+If `sc.exe start vmcompute` reports that the service does not exist, the
+feature isn't installed. Enable it, then reboot:
+
+```powershell
+dism /online /enable-feature /featurename:Microsoft-Hyper-V-All /all /norestart
+dism /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart
+dism /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart
+```
+
 After the reboot an Ubuntu window opens and asks for a **username and
 password**. This is a brand-new Linux account, nothing to do with your Windows
 login. Pick something short. **Remember the password** — you'll need it for
@@ -165,6 +208,8 @@ bar.
 
 **`wsl --install` says virtualisation is disabled** — enable it in BIOS. Check
 first: Task Manager → Performance → CPU → "Virtualization" bottom right.
+
+**Error `0xc03a0014` on install** — `vmcompute` is stopped. See Step 1.
 
 **`npm: command not found`** — Node is installed in Windows, not Ubuntu. They
 are separate systems. See Step 5.
