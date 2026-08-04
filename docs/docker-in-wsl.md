@@ -186,6 +186,57 @@ reg query HKLM\SYSTEM\CurrentControlSet\Services\vhdmp /v Start
 
 Same `reg add` command with the service name swapped to fix any that aren't.
 
+#### If the FsDepends key is missing entirely
+
+`ERROR: The system was unable to find the specified registry key or value` is
+different from a wrong value. `FsDepends` is a **built-in Windows driver** that
+the VHD system depends on — every Windows install has it. If the key does not
+exist, the driver is not registered at all, which is why nothing can create a
+virtual disk.
+
+Do **not** try to recreate the key by hand, and do not import one from another
+PC. Driver registrations reference machine-specific state, and a hand-built one
+can leave Windows unbootable.
+
+**1. Check whether the file is still on disk:**
+
+```
+dir C:\Windows\System32\drivers\FsDepends.sys
+```
+
+**2. Repair the Windows image.** These restore missing system components from
+Microsoft's servers. Takes 10-30 minutes; leave it running:
+
+```
+DISM /Online /Cleanup-Image /RestoreHealth
+sfc /scannow
+```
+
+**Reboot**, then re-run the diskpart test.
+
+**3. If that doesn't restore it: in-place repair upgrade.** Download the
+Windows 11 ISO from Microsoft, mount it (or extract it with 7-Zip if mounting
+fails — mounting an ISO also needs the virtual disk stack, which is broken),
+run `setup.exe` from inside it, and choose **Keep personal files and apps**.
+
+It reinstalls Windows' system components while keeping your files, programs and
+settings. About an hour. This is the supported fix for a missing system driver
+and it does work — but it is a big operation.
+
+### Honestly: is this worth fixing?
+
+If a repair upgrade is more than you want to take on for a side project, that
+is a completely reasonable call. The sandbox does not have to run on this
+machine.
+
+A Linux VPS — Hetzner CX33, about €6.50/month — has a working Docker in about
+five minutes, with none of this. It also removes the "does my gaming PC take a
+2-5% hit" question entirely, since nothing runs locally.
+
+The trade-off is that the app then lives on a server, which makes auth
+mandatory rather than optional. That was already on the roadmap; this just
+changes the order.
+
 #### If VHDX still fails after that
 
 At that point it is a genuinely damaged Windows install, and the supported
