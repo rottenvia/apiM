@@ -9,6 +9,27 @@ is capped in one file.
 
 ## The three separate things people mix up
 
+### 0. "Always" — no, WSL is not always running
+
+Worth clearing up first, because `start=auto` sounds like it means Linux is
+permanently on. It does not.
+
+| | What it is | When it runs |
+|---|---|---|
+| `vmcompute` service | a tiny Windows service | ready in the background, does nothing until asked |
+| WSL2 / Ubuntu | the actual Linux machine | **only when you open it** |
+
+`start=auto` applies to the service, not to Linux. The service being ready is
+like the ignition working in a parked car — the engine is not running.
+
+WSL2 starts when you open Ubuntu or start Docker, and stops when you close it
+or run `wsl --shutdown`. Closed, it uses zero RAM and zero CPU. It does not
+start with Windows and it is not sitting there while you game.
+
+The only reason to set the service to auto is that otherwise it is stopped
+after every reboot, and the next time you *do* want Docker you hit the same
+`0xc03a0014` error again.
+
 ### 1. The `vmcompute` service — free
 
 `start=auto` only means the service starts with Windows instead of waiting to
