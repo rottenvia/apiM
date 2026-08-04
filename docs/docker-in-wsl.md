@@ -188,6 +188,12 @@ Same `reg add` command with the service name swapped to fix any that aren't.
 
 #### If the FsDepends key is missing entirely
 
+**Full walkthrough: [restore-fsdepends.md](./restore-fsdepends.md)** — recovers
+the original values from a backup control set where possible, and recreates the
+registration by hand where not, without a repair install.
+
+Summary of the same:
+
 `ERROR: The system was unable to find the specified registry key or value` is
 different from a wrong value. `FsDepends` is a **built-in Windows driver** that
 the VHD system depends on — every Windows install has it. If the key does not
