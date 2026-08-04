@@ -6,6 +6,9 @@ are not — so for now you test it from the terminal.
 
 There are two ways. Start with the first.
 
+Everything below works on **Windows, macOS and Linux**. On Windows use
+PowerShell or the plain Command Prompt — nothing here needs Git Bash or WSL.
+
 ---
 
 ## Way 1 — the one-command check (free, 10 seconds)
@@ -48,13 +51,30 @@ All 10 checks passed.
 Then look at the file it made with your own eyes:
 
 ```bash
+# macOS / Linux
 cat data/workspaces/selftest/hello.py
+```
+
+```powershell
+# Windows
+type data\workspaces\selftest\hello.py
 ```
 
 If something fails, run it again with more detail:
 
 ```bash
+# macOS / Linux
 VERBOSE=1 npm run test:workspace
+```
+
+```powershell
+# Windows PowerShell
+$env:VERBOSE=1; npm run test:workspace
+```
+
+```
+:: Windows Command Prompt
+set VERBOSE=1 && npm run test:workspace
 ```
 
 ### What each section is actually proving
@@ -98,6 +118,7 @@ npm run dev:mock
 **Terminal 3 (or the same one) — send a request:**
 
 ```bash
+# macOS / Linux
 curl -N -X POST http://localhost:3000/api/chat \
   -H 'Content-Type: application/json' \
   -d '{
@@ -106,6 +127,21 @@ curl -N -X POST http://localhost:3000/api/chat \
     "workspaceEnabled": true,
     "workspaceId": "myfiles"
   }'
+```
+
+On Windows, `curl` chokes on single quotes, so use PowerShell instead:
+
+```powershell
+# Windows PowerShell
+$body = @{
+  message         = "create notes.md with a heading"
+  deepseekApiKey  = "sk-mock"
+  workspaceEnabled = $true
+  workspaceId     = "myfiles"
+} | ConvertTo-Json
+
+Invoke-RestMethod -Uri http://localhost:3000/api/chat -Method Post `
+  -ContentType 'application/json' -Body $body
 ```
 
 You'll watch it happen live:
@@ -123,8 +159,15 @@ You'll watch it happen live:
 And the file is really there:
 
 ```bash
+# macOS / Linux
 ls data/workspaces/myfiles/
 cat data/workspaces/myfiles/notes.md
+```
+
+```powershell
+# Windows
+dir data\workspaces\myfiles\
+type data\workspaces\myfiles\notes.md
 ```
 
 Change `notes.md` in the message to `script.js`, `index.html`, `data.json` — the
@@ -174,8 +217,29 @@ Everything the tests make lives in `data/workspaces/`, which git ignores. Delete
 it whenever you like:
 
 ```bash
+# macOS / Linux
 rm -rf data/workspaces
 ```
+
+```powershell
+# Windows
+rmdir /s /q data\workspaces
+```
+
+---
+
+## If something goes wrong
+
+**`'DEEPSEEK_BASE_URL' is not recognized`** — you're on an old copy. Pull again;
+the scripts no longer use Unix-only shell syntax.
+
+**`spawn npx ENOENT`** — same thing, old copy. The scripts now launch Next
+directly instead of going through `npx`.
+
+**`Cannot find module 'next'`** — run `npm install` first.
+
+**Something else** — run with `VERBOSE=1` (see above) and send me the output.
+The test prints the reason it couldn't start rather than hanging.
 
 ---
 
