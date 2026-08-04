@@ -9,9 +9,33 @@ socket: An address incompatible with the requested protocol was used.
 (listener: The filename, directory name, or volume label syntax is incorrect.)
 ```
 
-**This is a Docker bug, not a problem with your machine.** It is not related to
-virtualisation, WSL2 or your hardware — a clean install on a perfectly healthy
-PC hits it. Tracked upstream as
+## First: check WSL2 is actually installed
+
+Before assuming the Docker bug below, run this in PowerShell:
+
+```powershell
+wsl --status
+```
+
+If it says **"The Windows Subsystem for Linux is not installed"**, that is your
+cause and the rest of this page does not apply. Docker Desktop's per-user
+install requires WSL2 and crashes without it.
+
+```powershell
+wsl --install
+```
+
+Then **reboot** — the installer says so explicitly, and nothing works until you
+do. After rebooting, open Docker Desktop.
+
+---
+
+## The stale-socket crash
+
+If WSL2 *is* installed and Docker Desktop still crashes with that message, it
+is a Docker bug, not a problem with your machine. It is not related to
+virtualisation or your hardware — a clean install on a perfectly healthy PC
+hits it. Tracked upstream as
 [docker/desktop-feedback#342](https://github.com/docker/desktop-feedback/issues/342)
 and [#460](https://github.com/docker/desktop-feedback/issues/460).
 
@@ -112,9 +136,14 @@ This is a genuinely good option if Docker Desktop keeps fighting you.
 wsl --install -d Ubuntu
 ```
 
-Reboot if asked. Set a username and password when Ubuntu first opens.
+**Reboot if it says to.** It usually does, and nothing after this works until
+you have. When Ubuntu first opens it asks for a username and password — that is
+a new Linux account, unrelated to your Windows login. Remember the password;
+`sudo` asks for it.
 
-**2. Install the Docker engine** — inside the Ubuntu window:
+**2. Install the Docker engine** — these commands go in the **Ubuntu window**,
+not PowerShell. PowerShell has no `sudo` or `apt`, and rejects `&&` as a
+separator, so running them in the wrong window produces confusing errors:
 
 ```bash
 sudo apt update
