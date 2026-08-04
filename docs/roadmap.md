@@ -100,6 +100,13 @@ revenue. Requirements are a 64-bit CPU with virtualisation enabled in BIOS,
 So the loop can be built and used entirely on your own PC. The container is
 what provides the safety; running it elsewhere adds nothing to that.
 
+> **Update 2026-08-04:** the Windows machine turned out to have a damaged
+> virtual-disk driver stack (missing `FsDepends` registration), so local Docker
+> is not viable there without rebuilding Windows components by hand. The
+> practical answer is a small Linux server — see
+> [which-server.md](./which-server.md). That moves auth from "later" to
+> "first", since the app becomes publicly reachable.
+
 ### 2. Auth — only when it goes online
 
 A server is needed for one reason: reaching the app from another device, or
