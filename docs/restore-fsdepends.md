@@ -99,6 +99,16 @@ What these mean:
 | `DependOnService FltMgr` | every minifilter needs the filter manager |
 | `Altitude 407000` | position in the filter stack |
 
+On the altitude: `407000` sits in the range Microsoft reserves for
+`FSFilter System Recovery` (400000-409999), which is the group this driver
+belongs to. If it is not the exact original number that is tolerable — altitude
+only decides ordering between filters, and a unique value in the right range
+loads fine. A *missing* altitude does not, which is why the `Instances` keys
+matter.
+
+Check afterwards with `fltmc filters`; if some other driver already occupies
+407000, pick another number in that range and set it again.
+
 **Reboot.**
 
 ## Step 4 — Test
