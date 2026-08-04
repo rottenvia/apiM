@@ -185,29 +185,74 @@ curl -N -X POST http://localhost:3000/api/chat \
 
 ---
 
-## Way 3 — with the real DeepSeek (costs a few cents)
+## Way 3 — with the real DeepSeek (costs under a cent)
 
 Everything above uses a fake model. The fake always behaves perfectly, so it
 proves the *plumbing* works — it does **not** prove the real DeepSeek picks
-sensible tools.
-
-To test for real, just start the app normally (`npm run dev`, real key in
-Settings) and send the same curl, but with your actual key:
+sensible tools. This is the one thing no local test can answer.
 
 ```bash
-curl -N -X POST http://localhost:3000/api/chat \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "message": "create a python script fizzbuzz.py that prints fizzbuzz to 20",
-    "deepseekApiKey": "sk-YOUR-REAL-KEY",
-    "workspaceEnabled": true,
-    "workspaceId": "real-test"
-  }'
+npm run test:real
 ```
 
-Expect this to cost well under one cent. Watch whether it picks `write_file`
-straight away or fumbles around first — that's the one thing no local test can
-answer.
+It asks for your API key, starts the app itself, sends **one** real request,
+and tells you what happened. No quotes, no escaping, no second terminal.
+
+```
+apiM workspace — REAL DeepSeek test
+
+  Paste your DeepSeek API key and press Enter.
+  It starts with sk- . No quotes needed — just paste it.
+
+  key: ‹paste here›
+
+  Asking DeepSeek:
+  "create fizzbuzz.py that prints fizzbuzz for the numbers 1 to 20"
+
+  → calling write_file {"path":"fizzbuzz.py","content":"for i in range(1,21):…
+  ← write_file ok Created fizzbuzz.py
+  → calling read_file {"path":"fizzbuzz.py"}
+  ← read_file ok Read fizzbuzz.py
+
+  Result
+
+  YES  the real model used the file tools  (write_file -> read_file)
+  YES  it successfully wrote a file
+  YES  fizzbuzz.py is on your disk  (data/workspaces/real-test/fizzbuzz.py)
+  time: 14.2s   rounds: 2
+  tokens: 1204 in, 386 out   cost: about $0.00086
+
+  What it wrote:
+
+    for i in range(1, 21):
+        if i % 15 == 0:
+            print("FizzBuzz")
+    …
+
+  It works with the real model.
+```
+
+The key is saved to `data/.deepseek-key` so you're only asked once. That folder
+is ignored by git, so **the key never leaves your machine and can never be
+committed**. To use a different key, delete that file.
+
+You can also set it as an environment variable instead, if you prefer:
+
+```powershell
+# Windows PowerShell
+$env:DEEPSEEK_API_KEY="sk-your-key"; npm run test:real
+```
+
+### What the answer means
+
+**`YES` on all three** — the real model uses the tools properly. The workspace
+is genuinely ready.
+
+**`NO` on "used the file tools"** — the model ignored them and printed code in
+the chat instead. That's a real finding, not a crash: the tool descriptions
+need work. Send me the output.
+
+**A rejected key** — delete `data/.deepseek-key` and run again to re-enter it.
 
 ---
 
