@@ -139,7 +139,7 @@ export function SearchModal({
 
   return (
     <div
-      className="fixed inset-y-0 right-0 z-[70] flex items-start justify-center px-4 pt-[12vh] transition-[left] duration-300 ease-in-out sm:px-6"
+      className="fixed inset-y-0 right-0 z-[70] flex items-start justify-center px-4 pr-8 pt-[12vh] transition-[left] duration-300 ease-in-out sm:px-6 sm:pr-10"
       style={{ left: sidebarOpen ? "18rem" : 0 }}
     >
       <div

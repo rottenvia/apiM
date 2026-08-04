@@ -256,14 +256,22 @@ export function Sidebar({
                     className="min-w-0 flex-1 rounded-md border border-accent/40 bg-bg-primary px-1.5 py-0.5 text-sm text-text-primary outline-none"
                   />
                 ) : (
-                  <button
-                    onClick={() => onSelect(conv.id)}
-                    onDoubleClick={() => startRename(conv)}
-                    className="min-w-0 flex-1 truncate text-left text-sm leading-5"
-                    title={conv.title}
-                  >
-                    {conv.title}
-                  </button>
+                  <>
+                    {/* Covers the row's padding so the whole card is
+                        clickable, not just the text. */}
+                    <button
+                      onClick={() => onSelect(conv.id)}
+                      onDoubleClick={() => startRename(conv)}
+                      aria-label={conv.title}
+                      className="absolute inset-0 rounded-xl"
+                    />
+                    <span
+                      className="pointer-events-none relative min-w-0 flex-1 truncate text-left text-sm leading-5"
+                      title={conv.title}
+                    >
+                      {conv.title}
+                    </span>
+                  </>
                 )}
 
                 {editingId !== conv.id && (
@@ -277,7 +285,7 @@ export function Sidebar({
                     }}
                     aria-label="Conversation options"
                     data-open={menuOpen}
-                    className="flex h-6 w-6 flex-none items-center justify-center rounded-md text-text-muted opacity-0 transition-all hover:bg-bg-hover hover:text-text-primary focus-visible:opacity-100 group-hover:opacity-100 data-[open=true]:opacity-100"
+                    className="relative z-10 flex h-6 w-6 flex-none items-center justify-center rounded-md text-text-muted opacity-0 transition-all hover:bg-bg-hover hover:text-text-primary focus-visible:opacity-100 group-hover:opacity-100 data-[open=true]:opacity-100"
                   >
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                       <circle cx="12" cy="5" r="1.6" />

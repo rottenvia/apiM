@@ -43,6 +43,7 @@ interface ChatAreaProps {
   ) => void;
   onRegenerate: (assistantId: string) => void;
   onEdit: (messageId: string, newContent: string) => void;
+  onDeleteMessage: (messageId: string) => void;
   onToggleSidebar: () => void;
   onNewChat: () => void;
   onSetSearchMode: (mode: "off" | "auto" | "always") => void;
@@ -68,6 +69,7 @@ export function ChatArea({
   onSend,
   onRegenerate,
   onEdit,
+  onDeleteMessage,
   onToggleSidebar,
   onNewChat,
   onSetSearchMode,
@@ -435,6 +437,20 @@ export function ChatArea({
 
         <div className="flex items-center gap-1">
           <button
+            onClick={() => setFindOpen((v) => !v)}
+            className="icon-btn"
+            data-active={findOpen}
+            title="Find in this chat (Ctrl+F)"
+            aria-label="Find in this chat"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
+              <circle cx="10" cy="10" r="6" />
+              <path strokeLinecap="round" d="M14.5 14.5L20 20" />
+              <path strokeLinecap="round" d="M7.5 10h5" />
+            </svg>
+          </button>
+
+          <button
             onClick={toggleFullscreen}
             className="icon-btn"
             title={isFullscreen ? "Exit full screen" : "Full screen"}
@@ -467,19 +483,6 @@ export function ChatArea({
                 />
               </svg>
             )}
-          </button>
-          <button
-            onClick={() => setFindOpen((v) => !v)}
-            className="icon-btn"
-            data-active={findOpen}
-            title="Find in this chat (Ctrl+F)"
-            aria-label="Find in this chat"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
-              <circle cx="10" cy="10" r="6" />
-              <path strokeLinecap="round" d="M14.5 14.5L20 20" />
-              <path strokeLinecap="round" d="M7.5 10h5" />
-            </svg>
           </button>
         </div>
       </header>
@@ -546,6 +549,7 @@ export function ChatArea({
                 messages={messages}
                 onRegenerate={onRegenerate}
                 onEdit={onEdit}
+                onDeleteMessage={onDeleteMessage}
                 searchQuery={findOpen ? findQuery : undefined}
                 searchWholeWord={findWholeWord}
                 searchIndex={searchIndex}
@@ -850,6 +854,7 @@ const MessageList = memo(function MessageList({
   messages,
   onRegenerate,
   onEdit,
+  onDeleteMessage,
   searchQuery,
   searchWholeWord,
   searchIndex,
@@ -859,6 +864,7 @@ const MessageList = memo(function MessageList({
   messages: Message[];
   onRegenerate: (assistantId: string) => void;
   onEdit: (messageId: string, newContent: string) => void;
+  onDeleteMessage: (messageId: string) => void;
   searchQuery?: string;
   searchWholeWord: boolean;
   searchIndex: ChatSearchIndex;
@@ -938,6 +944,7 @@ const MessageList = memo(function MessageList({
             isLast={msg.id === lastId}
             onRegenerate={onRegenerate}
             onEdit={msg.role === "user" ? onEdit : undefined}
+            onDelete={msg.role === "user" ? onDeleteMessage : undefined}
             searchQuery={searchQuery}
             searchWholeWord={searchWholeWord}
             activeMatchIndex={localActive}
