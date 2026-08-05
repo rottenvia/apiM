@@ -636,12 +636,27 @@ function MessageBubbleImpl({
                 still thinking, and a follow/free-scroll toggle controls
                 whether the panel tracks the incoming text. */}
             {message.reasoningContent && (
-              <div className="overflow-hidden rounded-xl border border-[#cfa25a]/20">
-                <div className="flex items-center gap-2 bg-[#cfa25a]/10 pr-1.5">
+              <div
+                className={`thinking-panel overflow-hidden rounded-[10px] border transition-colors duration-300 ${
+                  showThinking
+                    ? "border-[#cfa25a]/25 bg-[#cfa25a]/[0.04]"
+                    : "border-[#cfa25a]/20"
+                }`}
+              >
+                {/* The header keeps identical type, padding and colour whether
+                    the body is open or shut. It used to sit on a solid tint
+                    that vanished on expand, so opening visibly moved the label
+                    and changed its background — the panel read as two
+                    different components rather than one opening. */}
+                <div
+                  className={`flex items-center gap-2 pr-1.5 transition-colors duration-300 ${
+                    showThinking ? "bg-[#cfa25a]/[0.07]" : "bg-[#cfa25a]/10"
+                  }`}
+                >
                   <button
                     onClick={() => setShowThinking((v) => !v)}
                     aria-expanded={showThinking}
-                    className="flex min-w-0 flex-1 items-center gap-2 px-3.5 py-2 text-left text-[13px] font-medium text-[#cfa25a] transition-colors hover:bg-[#cfa25a]/10"
+                    className="flex min-w-0 flex-1 items-center gap-2 px-3.5 py-2 text-left font-sans text-[13px] font-medium leading-5 text-[#cfa25a] transition-colors hover:bg-[#cfa25a]/[0.06]"
                   >
                     <svg
                       width="13" height="13" viewBox="0 0 24 24" fill="none"
@@ -650,10 +665,12 @@ function MessageBubbleImpl({
                     >
                       <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
                     </svg>
-                    <span className="truncate">
-                      {isThinkingPhase ? "Thinking" : "View thinking process"}
+                    <span className="truncate">Thinking</span>
+                    {/* Reserved whether or not the dots are showing, so the
+                        row does not reflow when thinking finishes. */}
+                    <span className="flex h-[7px] w-[19px] flex-none items-center">
+                      {isThinkingPhase && <Dots size={4} />}
                     </span>
-                    {isThinkingPhase && <Dots size={4} />}
                   </button>
 
                   {showThinking && message.isStreaming && (
@@ -679,14 +696,20 @@ function MessageBubbleImpl({
                   )}
                 </div>
 
-                {showThinking && (
-                  <div
-                    ref={thinkingRef}
-                    className="max-h-80 overflow-y-auto whitespace-pre-wrap break-words bg-[#141210]/50 px-3.5 py-2.5 text-[13px] leading-relaxed text-[#a29d92] [overscroll-behavior:contain]"
-                  >
-                    {message.reasoningContent}
+                {/* Always mounted, so the body can animate its height open
+                    and shut. Rendering it only when open meant the text
+                    appeared instantly at full size with nothing to ease. */}
+                <div className="thinking-body" data-open={showThinking}>
+                  <div>
+                    <div
+                      ref={thinkingRef}
+                      aria-hidden={!showThinking}
+                      className="max-h-80 overflow-y-auto whitespace-pre-wrap break-words border-t border-[#cfa25a]/15 px-3.5 py-2.5 font-sans text-[13px] leading-5 text-[#a29d92] [overscroll-behavior:contain]"
+                    >
+                      {message.reasoningContent}
+                    </div>
                   </div>
-                )}
+                </div>
               </div>
             )}
 
