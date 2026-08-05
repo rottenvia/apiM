@@ -208,19 +208,27 @@ input:focus-visible {
   height: 16px;
 }
 
+/* The primary action in the sidebar.
+ *
+ * It previously shared its exact styling with the two icon buttons beside it
+ * — same border, same transparent fill, same radius — so three controls of
+ * very different importance shouted at the same volume and the block read as
+ * a row of boxes rather than as one action with two utilities. A filled
+ * surface separates it without adding a second accent colour. */
 .new-chat-btn {
   display: flex;
   align-items: center;
   gap: 8px;
   width: 100%;
-  height: 40px;
+  height: 38px;
   padding: 0 12px;
-  border-radius: 12px;
-  border: 1px solid var(--color-border);
-  background: transparent;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  background: var(--color-bg-elevated);
   color: var(--color-text-primary);
-  font-size: 14px;
+  font-size: 13.5px;
   font-weight: 500;
+  letter-spacing: -0.005em;
   transition:
     background-color 0.15s ease,
     border-color 0.15s ease;
@@ -228,6 +236,76 @@ input:focus-visible {
 .new-chat-btn:hover {
   background: var(--color-bg-hover);
   border-color: var(--color-border-light);
+}
+
+/* Secondary utilities: quiet until reached for, so they read as tools beside
+ * the action rather than as peers of it. */
+.sidebar-icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--color-text-muted);
+  transition:
+    color 0.15s ease,
+    background-color 0.15s ease,
+    border-color 0.15s ease;
+}
+.sidebar-icon-btn:hover {
+  color: var(--color-text-primary);
+  background: var(--color-bg-tertiary);
+  border-color: var(--color-border);
+}
+
+/* A segmented control on one shared track, rather than two loose buttons each
+ * claiming half the sidebar. The moving thumb is what makes it read as one
+ * control with two states instead of two competing controls. */
+.segmented {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 10px;
+  background: var(--color-bg-tertiary);
+}
+.segmented-item {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition:
+    color 0.15s ease,
+    background-color 0.15s ease;
+}
+.segmented-item:hover {
+  color: var(--color-text-secondary);
+}
+.segmented-item[data-active='true'] {
+  background: var(--color-bg-elevated);
+  color: var(--color-text-primary);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.25);
+}
+.segmented-item[data-active='true']:hover {
+  color: var(--color-text-primary);
+}
+/* The count is supporting detail, not part of the label. */
+.segmented-count {
+  margin-left: 5px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.55;
 }
 .new-chat-btn > svg {
   width: 15px;
