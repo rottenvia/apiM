@@ -16,7 +16,8 @@
     "test:auth": "node --no-warnings --experimental-strip-types scripts/test-auth.mjs",
     "test:diff": "node --no-warnings --experimental-strip-types scripts/test-diff.mjs",
     "test:runner": "tsx scripts/test-runner.mjs",
-    "test:folders": "tsx scripts/test-folders.mjs"
+    "test:folders": "tsx scripts/test-folders.mjs",
+    "test:titles": "tsx scripts/test-titles.mjs"
   },
   "dependencies": {
     "@types/uuid": "^10.0.0",

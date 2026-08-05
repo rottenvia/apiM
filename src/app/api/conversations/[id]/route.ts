@@ -3,6 +3,7 @@ import {
   deleteConversation,
   getConversation,
   updateConversation,
+  DuplicateTitleError,
 } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
@@ -36,6 +37,17 @@ export async function PATCH(
     void _messages;
     return NextResponse.json(summary);
   } catch (error) {
+    // 409 Conflict, not 500: the request was fine, the name is taken. The UI
+    // shows this message directly, so it has to read as an explanation.
+    if (error instanceof DuplicateTitleError) {
+      return NextResponse.json(
+        {
+          error: `A chat named "${error.title}" already exists. Pick a different name.`,
+          code: "duplicate_title",
+        },
+        { status: 409 }
+      );
+    }
     console.error("Error updating conversation:", error);
     return NextResponse.json({ error: "Failed to update" }, { status: 500 });
   }

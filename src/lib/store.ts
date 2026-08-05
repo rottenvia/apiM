@@ -418,6 +418,66 @@ export async function truncateFrom(
   return true;
 }
 
+/** Thrown when a rename would collide with another chat. */
+export class DuplicateTitleError extends Error {
+  constructor(public readonly title: string) {
+    super(`A chat named "${title}" already exists`);
+    this.name = "DuplicateTitleError";
+  }
+}
+
+/** Comparison form: case and surrounding space shouldn't make titles distinct. */
+function titleKey(title: string): string {
+  return title.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+/**
+ * The chat using this title, if any.
+ *
+ * Titles are compared rather than folder names because two titles can slug to
+ * the same folder while reading as different chats — and because the message
+ * the user needs is about the name they typed, not the directory.
+ */
+export async function findByTitle(
+  title: string,
+  exceptId?: string
+): Promise<ConversationSummary | null> {
+  const key = titleKey(title);
+  if (!key) return null;
+
+  for (const conv of await listConversations()) {
+    if (conv.id === exceptId) continue;
+    if (titleKey(conv.title) === key) return conv;
+  }
+  return null;
+}
+
+/**
+ * A title nobody is using, by appending a number.
+ *
+ * For titles the app generates itself, where silently picking "Hello 2" is
+ * better than refusing to save the message.
+ */
+export async function availableTitle(
+  desired: string,
+  exceptId?: string
+): Promise<string> {
+  const base = desired.trim() || "New chat";
+  if (!(await findByTitle(base, exceptId))) return base;
+
+  const taken = new Set(
+    (await listConversations())
+      .filter((c) => c.id !== exceptId)
+      .map((c) => titleKey(c.title))
+  );
+
+  for (let n = 2; n < 1000; n++) {
+    const candidate = `${base} ${n}`;
+    if (!taken.has(titleKey(candidate))) return candidate;
+  }
+  return `${base} ${Date.now().toString(36)}`;
+}
+
 export async function updateConversation(
   id: string,
   patch: { title?: string; archived?: boolean }
@@ -426,7 +486,16 @@ export async function updateConversation(
   if (!conv) return null;
 
   if (typeof patch.title === "string") {
-    conv.title = patch.title.slice(0, 200);
+    const next = patch.title.slice(0, 200).trim();
+
+    // Renaming to the same thing is a no-op, not an error — otherwise
+    // clicking Save without editing would look like a failure.
+    if (titleKey(next) !== titleKey(conv.title)) {
+      const clash = await findByTitle(next, id);
+      if (clash) throw new DuplicateTitleError(next);
+    }
+
+    conv.title = next;
   }
   if (typeof patch.archived === "boolean") {
     conv.archived = patch.archived;
