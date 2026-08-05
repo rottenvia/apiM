@@ -137,11 +137,38 @@ export function Sidebar({
     setMenuFor(null);
   };
 
+  /**
+   * The chat already using the name being typed, if any.
+   *
+   * Checked here as well as on the server so the clash is visible while
+   * typing rather than only after saving. The server remains the authority.
+   */
+  const duplicateOf = useMemo(() => {
+    if (!editingId) return null;
+    const key = draft.trim().toLowerCase().replace(/\s+/g, " ");
+    if (!key) return null;
+    return (
+      conversations.find(
+        (c) =>
+          c.id !== editingId &&
+          c.title.trim().toLowerCase().replace(/\s+/g, " ") === key
+      ) ?? null
+    );
+  }, [editingId, draft, conversations]);
+
   const commitRename = () => {
-    if (editingId) {
-      const next = draft.trim();
-      if (next) onRename(editingId, next);
+    if (!editingId) return;
+
+    const next = draft.trim();
+
+    // Blank, unchanged, or already taken: close without saving rather than
+    // sending something the server will refuse.
+    if (!next || duplicateOf) {
+      setEditingId(null);
+      return;
     }
+
+    onRename(editingId, next);
     setEditingId(null);
   };
 
@@ -253,18 +280,48 @@ export function Sidebar({
                 }`}
               >
                 {editingId === conv.id ? (
-                  <input
-                    ref={inputRef}
-                    data-menu-root
-                    value={draft}
-                    onChange={(e) => setDraft(e.target.value)}
-                    onBlur={commitRename}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") commitRename();
-                      if (e.key === "Escape") setEditingId(null);
-                    }}
-                    className="min-w-0 flex-1 rounded-md border border-accent/40 bg-bg-primary px-1.5 py-0.5 text-sm text-text-primary outline-none"
-                  />
+                  <div className="min-w-0 flex-1" data-menu-root>
+                    <input
+                      ref={inputRef}
+                      data-menu-root
+                      value={draft}
+                      onChange={(e) => setDraft(e.target.value)}
+                      onBlur={commitRename}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") commitRename();
+                        if (e.key === "Escape") setEditingId(null);
+                      }}
+                      aria-invalid={Boolean(duplicateOf)}
+                      className={`w-full rounded-md border bg-bg-primary px-1.5 py-0.5 text-sm text-text-primary outline-none ${
+                        duplicateOf ? "border-danger/60" : "border-accent/40"
+                      }`}
+                    />
+                    {duplicateOf && (
+                      <p
+                        role="alert"
+                        className="mt-1 flex items-start gap-1 text-[11px] leading-4 text-danger"
+                      >
+                        <svg
+                          width="11"
+                          height="11"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth={2}
+                          className="mt-0.5 flex-none"
+                          aria-hidden="true"
+                        >
+                          <circle cx="12" cy="12" r="9" />
+                          <path strokeLinecap="round" d="M12 8v4M12 16h.01" />
+                        </svg>
+                        <span>
+                          Another chat is already called that. Every chat needs
+                          its own name — its files live in a folder named after
+                          it.
+                        </span>
+                      </p>
+                    )}
+                  </div>
                 ) : (
                   <>
                     {/* Covers the row's padding so the whole card is

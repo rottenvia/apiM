@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { v4 as uuidv4 } from "uuid";
-import { appendMessages, truncateFrom, upsertMessage } from "@/lib/store";
+import {
+  appendMessages,
+  truncateFrom,
+  upsertMessage,
+  availableTitle,
+} from "@/lib/store";
 import type { StoredMessage } from "@/lib/store";
 import { smartSearch, autoThinkingEffort, decideSearch } from "@/lib/smart-search";
 import type { SmartSearchContext } from "@/lib/smart-search";
@@ -201,7 +206,7 @@ export async function POST(req: NextRequest) {
   // "off" never.
   const canSearch = Boolean(tavilyApiKey && webSearchMode !== "off");
 
-  const title = deriveTitle(displayContent?.trim() || message);
+  const derivedTitle = deriveTitle(displayContent?.trim() || message);
 
   const encoder = new TextEncoder();
 
@@ -235,6 +240,13 @@ export async function POST(req: NextRequest) {
       // rewritten in place as it streams.
       const startedAt = Date.now();
       const convId: string = conversationId ?? uuidv4();
+
+      // Two chats opened with the same first message would otherwise want the
+      // same title, and the second would land in the first's folder. Only new
+      // chats are adjusted; an existing one keeps whatever it is called.
+      const title = conversationId
+        ? derivedTitle
+        : await availableTitle(derivedTitle);
       const assistantMsgId = uuidv4();
       let persisted = false;
 

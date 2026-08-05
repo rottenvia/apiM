@@ -184,6 +184,7 @@ export default function Home() {
   const [workspaceEnabled, setWorkspaceEnabled] = useState(false);
   const [showWorkspace, setShowWorkspace] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [renameError, setRenameError] = useState<string | null>(null);
   const [workspaceHighlight, setWorkspaceHighlight] = useState<string | null>(null);
   const [workspaceFiles, setWorkspaceFiles] = useState<WorkspaceFileInfo[]>([]);
   /** Paths the last reply touched, highlighted in the workspace bar. */
@@ -205,6 +206,8 @@ export default function Home() {
   const initialLoadDone = useRef(false);
   /** Current workspace id, readable from callbacks without re-creating them. */
   const workspaceIdRef = useRef<string | null>(null);
+  /** Latest conversation list, so rename can restore the old title on failure. */
+  const conversationsRef = useRef<Conversation[]>([]);
   /** Lets the Stop button cancel an in-flight stream. */
   const abortRef = useRef<AbortController | null>(null);
   /** Latest messages + sender, so stable callbacks can read them. */
@@ -439,17 +442,39 @@ export default function Home() {
 
   const renameConversation = useCallback(
     async (id: string, title: string) => {
+      const previous = conversationsRef.current.find((c) => c.id === id)?.title;
+
       setConversations((prev) =>
         prev.map((c) => (c.id === id ? { ...c, title } : c))
       );
+
       try {
-        await fetch(`/api/conversations/${id}`, {
+        const res = await fetch(`/api/conversations/${id}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ title }),
         });
+
+        if (!res.ok) {
+          // The response was previously ignored, so a rejected rename still
+          // appeared to work until the next refresh put the old name back.
+          const data = (await res.json().catch(() => ({}))) as {
+            error?: string;
+          };
+          if (previous !== undefined) {
+            setConversations((prev) =>
+              prev.map((c) => (c.id === id ? { ...c, title: previous } : c))
+            );
+          }
+          setRenameError(data.error ?? "Couldn't rename that chat.");
+        }
       } catch {
-        /* optimistic update already applied */
+        if (previous !== undefined) {
+          setConversations((prev) =>
+            prev.map((c) => (c.id === id ? { ...c, title: previous } : c))
+          );
+        }
+        setRenameError("Couldn't reach the server.");
       }
     },
     []
@@ -928,6 +953,10 @@ export default function Home() {
     messagesRef.current = messages;
   }, [messages]);
 
+  useEffect(() => {
+    conversationsRef.current = conversations;
+  }, [conversations]);
+
   // Each conversation owns a workspace folder. Switching chats therefore
   // switches workspaces, so the file count has to be re-read.
   useEffect(() => {
@@ -1126,6 +1155,40 @@ export default function Home() {
           onClose={() => setShowSearch(false)}
           sidebarOpen={sidebarOpen}
         />
+      )}
+
+      {renameError && (
+        <div
+          role="alert"
+          className="fixed bottom-5 left-1/2 z-[95] -translate-x-1/2 rounded-xl border border-danger/30 bg-bg-secondary px-4 py-2.5 shadow-2xl"
+        >
+          <div className="flex items-center gap-3">
+            <span className="flex-none text-danger">
+              <svg
+                width="15"
+                height="15"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={1.8}
+                aria-hidden="true"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"
+                />
+              </svg>
+            </span>
+            <span className="text-[13px] text-text-primary">{renameError}</span>
+            <button
+              onClick={() => setRenameError(null)}
+              className="rounded-md px-2 py-0.5 text-[12px] text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
       )}
 
       {deleteError && (
