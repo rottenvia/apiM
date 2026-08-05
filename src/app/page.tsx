@@ -126,6 +126,14 @@ type StreamEvent =
       searchUsd: number;
     }
   | { type: "reasoning"; delta: string }
+  | {
+      type: "retrying";
+      attempt: number;
+      attempts: number;
+      delayMs: number;
+      reason: string;
+    }
+  | { type: "context_pruned"; collapsed: number; tokensSaved: number }
   | { type: "tool_start"; id: string; name: string; args: string }
   | {
       type: "approval_request";
@@ -196,6 +204,10 @@ export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [statusStage, setStatusStage] = useState<StatusStage | null>(null);
+  // A transient upstream failure being retried. Shown rather than hidden: a
+  // silent 8-second pause reads as a freeze, and the user needs to know the
+  // work is not lost.
+  const [retryNotice, setRetryNotice] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [showPlugins, setShowPlugins] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
@@ -843,6 +855,18 @@ export default function Home() {
             switch (evt.type) {
               case "status":
                 setStatusStage(evt.stage);
+                // Any progress means the retry resolved.
+                setRetryNotice(null);
+                break;
+
+              case "retrying":
+                setRetryNotice(
+                  `${evt.reason} — retrying (${evt.attempt}/${evt.attempts - 1}) in ${Math.round(evt.delayMs / 100) / 10}s`
+                );
+                break;
+
+              case "context_pruned":
+                // Informational only; the reply is unaffected.
                 break;
 
               case "meta":
@@ -1089,6 +1113,7 @@ export default function Home() {
         abortRef.current = null;
         setIsLoading(false);
         setStatusStage(null);
+        setRetryNotice(null);
         // Re-sync with disk so ordering, titles and counts match what was
         // actually written.
         void refreshConversations();
@@ -1272,6 +1297,7 @@ export default function Home() {
         messages={messages}
         isLoading={isLoading}
         statusStage={statusStage}
+        retryNotice={retryNotice}
         onStop={stopGeneration}
         hasKeys={hasKeys}
         model={model}

@@ -30,6 +30,8 @@ interface ChatAreaProps {
   messages: Message[];
   isLoading: boolean;
   statusStage: StatusStage | null;
+  /** Set while a transient upstream failure is being retried. */
+  retryNotice?: string | null;
   onStop: () => void;
   hasKeys: boolean;
   model: string;
@@ -76,6 +78,7 @@ export function ChatArea({
   messages,
   isLoading,
   statusStage,
+  retryNotice,
   onStop,
   hasKeys,
   model,
@@ -682,7 +685,7 @@ export function ChatArea({
               {/* Only shown before the first token lands; afterwards the
                   streaming bubble itself is the feedback. */}
               {isLoading && !streamingHasOutput && (
-                <LoadingIndicator stage={statusStage} />
+                <LoadingIndicator stage={statusStage} retryNotice={retryNotice} />
               )}
 
               <div ref={messagesEndRef} />
@@ -1158,16 +1161,31 @@ const STAGE_LABELS: Record<StatusStage, string> = {
  * Bouncing-dots indicator. Sizes come from inline styles rather than custom
  * CSS classes so it renders correctly even if a stale stylesheet is served.
  */
-function LoadingIndicator({ stage }: { stage: StatusStage | null }) {
+function LoadingIndicator({
+  stage,
+  retryNotice,
+}: {
+  stage: StatusStage | null;
+  retryNotice?: string | null;
+}) {
   return (
     <div className="flex animate-fade-in justify-start">
-      <div className="flex items-center gap-2.5 px-1 py-2">
-        <span className="text-[#c96442]">
-          <Dots size={5} />
-        </span>
-        <span className="animate-thinking text-xs text-[#a29d92]">
-          {STAGE_LABELS[stage ?? "thinking"]}…
-        </span>
+      <div className="flex flex-col gap-1 px-1 py-2">
+        <div className="flex items-center gap-2.5">
+          <span className="text-[#c96442]">
+            <Dots size={5} />
+          </span>
+          <span className="animate-thinking text-xs text-[#a29d92]">
+            {STAGE_LABELS[stage ?? "thinking"]}…
+          </span>
+        </div>
+        {/* Shown rather than hidden: an unexplained pause reads as a freeze,
+            and the point is that the work so far is not lost. */}
+        {retryNotice && (
+          <span className="pl-[18px] text-[11px] text-[#cfa25a]">
+            {retryNotice}
+          </span>
+        )}
       </div>
     </div>
   );

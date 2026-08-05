@@ -26,6 +26,8 @@ import {
   serializeForApi,
 } from "@/lib/transcript";
 import type { TranscriptMessage } from "@/lib/transcript";
+import { pruneTranscript } from "@/lib/prune";
+import { fetchWithRetry } from "@/lib/retry";
 import { listCustomPlugins } from "@/lib/plugin-store";
 
 export const maxDuration = 300;
@@ -140,6 +142,20 @@ type StreamEvent =
       searchUsd: number;
     }
   | { type: "reasoning"; delta: string }
+  | {
+      /** A transient upstream failure is being retried rather than surfaced. */
+      type: "retrying";
+      attempt: number;
+      attempts: number;
+      delayMs: number;
+      reason: string;
+    }
+  | {
+      /** Old tool output was collapsed to keep a long run affordable. */
+      type: "context_pruned";
+      collapsed: number;
+      tokensSaved: number;
+    }
   | { type: "tool_start"; id: string; name: string; args: string }
   | {
       type: "approval_request";
@@ -535,9 +551,22 @@ export async function POST(req: NextRequest) {
           let roundContent = "";
           let roundReasoning = "";
 
+          // Collapse old tool results before sending. The stored transcript
+          // keeps everything; only the copy going upstream is reduced, so a
+          // long agent run does not re-pay for the full text of a file it
+          // read thirty rounds ago.
+          const pruned = pruneTranscript(transcript);
+          if (pruned.stats.collapsed > 0) {
+            send({
+              type: "context_pruned",
+              collapsed: pruned.stats.collapsed,
+              tokensSaved: pruned.stats.tokensSaved,
+            });
+          }
+
           const dsRequestBody: Record<string, unknown> = {
             model,
-            messages: serializeForApi(transcript),
+            messages: serializeForApi(pruned.messages),
             stream: true,
             stream_options: { include_usage: true },
             max_tokens: MAX_OUTPUT_TOKENS,
@@ -570,30 +599,51 @@ export async function POST(req: NextRequest) {
           send({ type: "status", stage: thinkingEnabled ? "thinking" : "writing" });
 
           // ---------------- Call DeepSeek ----------------
-          let dsResponse: Response;
-          try {
-            dsResponse = await fetch(`${DEEPSEEK_BASE_URL}/chat/completions`, {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${deepseekApiKey}`,
+          // Retried rather than failed outright: a blip on round thirty of a
+          // long task used to discard the whole run, including every token
+          // already paid for. Only transient failures retry — a rejected key
+          // or an empty balance fails the same way every time.
+          const attempt = await fetchWithRetry(
+            () =>
+              fetch(`${DEEPSEEK_BASE_URL}/chat/completions`, {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  Authorization: `Bearer ${deepseekApiKey}`,
+                },
+                body: JSON.stringify(dsRequestBody),
+                signal: AbortSignal.any([
+                  req.signal,
+                  AbortSignal.timeout(280_000),
+                ]),
+              }),
+            {
+              signal: req.signal,
+              onRetry: ({ attempt: n, attempts, delayMs, reason }) => {
+                send({ type: "retrying", attempt: n, attempts, delayMs, reason });
               },
-              body: JSON.stringify(dsRequestBody),
-              signal: AbortSignal.timeout(280_000),
-            });
-          } catch (networkError) {
-            const timedOut =
-              networkError instanceof Error &&
-              networkError.name === "TimeoutError";
+            }
+          );
+
+          if (!attempt.response) {
+            const err = attempt.error;
+            if (err instanceof Error && err.name === "AbortError") {
+              // The user pressed Stop; the abort handler already tidied up.
+              close();
+              return;
+            }
+            const timedOut = err instanceof Error && err.name === "TimeoutError";
             send({
               type: "error",
               error: timedOut
-                ? "The DeepSeek API took too long to respond. Please try again."
-                : "Couldn't reach the DeepSeek API. Check the network connection and try again.",
+                ? `The DeepSeek API took too long to respond, after ${attempt.attempts} attempt(s).`
+                : `Couldn't reach the DeepSeek API after ${attempt.attempts} attempt(s). Check the network connection and try again.`,
             });
             close();
             return;
           }
+
+          const dsResponse = attempt.response;
 
           if (!dsResponse.ok || !dsResponse.body) {
             const errText = await dsResponse.text().catch(() => "");
