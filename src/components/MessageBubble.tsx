@@ -13,6 +13,7 @@ import {
 import type { ReactElement, ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import { ToolActivity } from "@/components/ToolActivity";
+import { ApprovalPrompt } from "@/components/ApprovalPrompt";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Message, MessageAttachment } from "@/app/page";
@@ -183,6 +184,8 @@ interface MessageBubbleProps {
   activeMatchIndex?: number;
   /** Opens the workspace panel at a file the assistant changed. */
   onOpenWorkspaceFile?: (path: string) => void;
+  /** Answers a pending command approval. */
+  onDecideCommand?: (id: string, approved: boolean, remember: boolean) => void;
 }
 
 function MessageBubbleImpl({
@@ -195,6 +198,7 @@ function MessageBubbleImpl({
   searchWholeWord = true,
   activeMatchIndex = -1,
   onOpenWorkspaceFile,
+  onDecideCommand,
 }: MessageBubbleProps) {
   const [showThinking, setShowThinking] = useState(false);
   const [showSources, setShowSources] = useState(false);
@@ -680,6 +684,13 @@ function MessageBubbleImpl({
               />
             )}
 
+            {message.pendingCommand && onDecideCommand && (
+              <ApprovalPrompt
+                pending={message.pendingCommand}
+                onDecide={onDecideCommand}
+              />
+            )}
+
             {/* Main content. While streaming, an unterminated ``` fence is
                 replaced by a placeholder card — watching code type itself line
                 by line is noisy, and half-written markup renders as garbage. */}
@@ -861,6 +872,7 @@ export const MessageBubble = memo(MessageBubbleImpl, (prev, next) => {
     // New array identity on every tool frame, so this is what makes the
     // "Writing app.py" lines appear as they happen.
     a.toolEvents === b.toolEvents &&
+    a.pendingCommand === b.pendingCommand &&
     prev.isLast === next.isLast &&
     prev.onRegenerate === next.onRegenerate &&
     prev.onEdit === next.onEdit &&
@@ -868,6 +880,7 @@ export const MessageBubble = memo(MessageBubbleImpl, (prev, next) => {
     prev.searchQuery === next.searchQuery &&
     prev.searchWholeWord === next.searchWholeWord &&
     prev.activeMatchIndex === next.activeMatchIndex &&
-    prev.onOpenWorkspaceFile === next.onOpenWorkspaceFile
+    prev.onOpenWorkspaceFile === next.onOpenWorkspaceFile &&
+    prev.onDecideCommand === next.onDecideCommand
   );
 });

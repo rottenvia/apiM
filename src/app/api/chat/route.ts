@@ -7,6 +7,13 @@ import type { SmartSearchContext } from "@/lib/smart-search";
 import { AVAILABLE_PLUGINS, buildSystemPrompt } from "@/lib/plugins";
 import { WORKSPACE_TOOLS, runTool } from "@/lib/tools";
 import {
+  runCommand,
+  validateCommand,
+  describeCommand,
+  formatRunResult,
+} from "@/lib/runner";
+import { requestApproval, isRemembered } from "@/lib/approvals";
+import {
   ToolCallAccumulator,
   parseToolArguments,
   serializeForApi,
@@ -113,6 +120,15 @@ type StreamEvent =
     }
   | { type: "reasoning"; delta: string }
   | { type: "tool_start"; id: string; name: string; args: string }
+  | {
+      type: "approval_request";
+      id: string;
+      command: string;
+      args: string[];
+      display: string;
+      reason: string;
+    }
+  | { type: "approval_resolved"; id: string; approved: boolean }
   | {
       type: "tool_result";
       id: string;
@@ -360,7 +376,7 @@ export async function POST(req: NextRequest) {
 
         const workspace = workspaceId ?? convId;
         const workspaceInstruction = workspaceEnabled
-          ? `\n\nYou have a workspace on the user's machine and tools to work in it. Prefer creating real files over printing code in chat: the user wants working files, not snippets to copy. List or read before editing so your replacements match exactly. After finishing, briefly say what you changed.`
+          ? `\n\nYou have a workspace on the user's machine and tools to work in it. Prefer creating real files over printing code in chat: the user wants working files, not snippets to copy. List or read before editing so your replacements match exactly.\n\nYou can also run code with run_command. After writing something runnable, run it and check the output rather than assuming it works. If it fails, read the error, fix the file, and run it again. Each command needs the user's approval, so keep them few and purposeful, and say briefly why in the reason field. There is no shell and commands are stopped after 30 seconds, so never start a server or anything interactive. When you are done, briefly say what you changed and whether it ran.`
           : "";
 
         // A structured transcript, not bare {role, content}. Tool calls and
@@ -390,7 +406,9 @@ export async function POST(req: NextRequest) {
         // Without tools this runs exactly once. With them, each pass may end
         // in tool calls, which are executed and fed back as `role: "tool"`
         // messages before the next pass.
-        const MAX_TOOL_ROUNDS = 12;
+        // Higher than the file-only limit: write, run, read the error, fix,
+        // run again is four rounds for one bug, and real work has several.
+        const MAX_TOOL_ROUNDS = 20;
         let round = 0;
         let toolRounds = 0;
 
@@ -668,14 +686,117 @@ export async function POST(req: NextRequest) {
             });
 
             const parsed = parseToolArguments(call.function.arguments);
-            const result = parsed.ok
-              ? await runTool(workspace, call.function.name, parsed.value)
-              : {
+
+            let result: {
+              ok: boolean;
+              content: string;
+              summary: string;
+              changedPath?: string;
+            };
+
+            if (!parsed.ok) {
+              result = {
+                ok: false,
+                content: `Error: arguments were not valid JSON (${parsed.error})`,
+                summary: "Invalid tool arguments",
+              };
+            } else if (call.function.name === "run_command") {
+              // Handled here rather than in runTool: it is the only tool that
+              // has to pause and wait for the user.
+              const args = parsed.value as {
+                command?: unknown;
+                args?: unknown;
+                reason?: unknown;
+              };
+              const check = validateCommand(args.command, args.args);
+
+              if (!check.ok) {
+                // Rejected before the user is asked — no point prompting for
+                // something that could never run.
+                result = {
                   ok: false,
-                  content: `Error: arguments were not valid JSON (${parsed.error})`,
-                  summary: "Invalid tool arguments",
-                  changedPath: undefined as string | undefined,
+                  content: `Error: ${check.reason}`,
+                  summary: "Command not allowed",
                 };
+              } else {
+                const display = describeCommand(check.command, check.args);
+                const reason =
+                  typeof args.reason === "string" && args.reason.trim()
+                    ? args.reason.trim()
+                    : "";
+
+                const preApproved = isRemembered(
+                  workspace,
+                  check.command,
+                  check.args
+                );
+
+                let approved = true;
+                let declineReason = "";
+
+                if (!preApproved) {
+                  send({
+                    type: "approval_request",
+                    id: call.id,
+                    command: check.command,
+                    args: check.args,
+                    display,
+                    reason,
+                  });
+
+                  const decision = await requestApproval(
+                    {
+                      id: call.id,
+                      workspaceId: workspace,
+                      command: check.command,
+                      args: check.args,
+                      reason,
+                    },
+                    req.signal
+                  );
+
+                  approved = decision.approved;
+                  if (!decision.approved) declineReason = decision.reason;
+
+                  send({
+                    type: "approval_resolved",
+                    id: call.id,
+                    approved,
+                  });
+                }
+
+                if (!approved) {
+                  result = {
+                    ok: false,
+                    content:
+                      `The command was not run. ${declineReason} ` +
+                      `Do not retry it — explain what you were trying to do, ` +
+                      `or suggest a different approach.`,
+                    summary: `Skipped: ${display}`,
+                  };
+                } else {
+                  const run = await runCommand(
+                    workspace,
+                    check.command,
+                    check.args,
+                    req.signal
+                  );
+                  result = {
+                    ok: run.exitCode === 0 && !run.timedOut,
+                    content: formatRunResult(run),
+                    summary: run.timedOut
+                      ? `Timed out: ${display}`
+                      : `${run.exitCode === 0 ? "Ran" : "Failed"}: ${display}`,
+                  };
+                }
+              }
+            } else {
+              result = await runTool(
+                workspace,
+                call.function.name,
+                parsed.value
+              );
+            }
 
             transcript.push({
               role: "tool",

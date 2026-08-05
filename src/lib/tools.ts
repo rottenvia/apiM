@@ -114,6 +114,44 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "run_command",
+      description:
+        "Run a program in the workspace and get its output back, so you can " +
+        "check whether your code actually works. Use this after writing code: " +
+        "run it, read any error, fix the file, run it again. The user has to " +
+        "approve each command before it runs. Only real interpreters are " +
+        "available (python, node, npm, pip and similar) — there is no shell, " +
+        "so pass arguments as a list rather than one string. Commands are " +
+        "stopped after 30 seconds, so never start a server or anything that " +
+        "waits for input.",
+      parameters: {
+        type: "object",
+        properties: {
+          command: {
+            type: "string",
+            description:
+              "Program to run, e.g. \"python3\", \"node\", \"npm\". Not a shell.",
+          },
+          args: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              'Arguments as separate items, e.g. ["app.py"] or ["install", "requests"].',
+          },
+          reason: {
+            type: "string",
+            description:
+              "One short line telling the user why this needs to run. Shown " +
+              "on the approval prompt.",
+          },
+        },
+        required: ["command", "args"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "delete_file",
       description:
         "Delete a file from the workspace. Only use when the user explicitly asks for it.",
