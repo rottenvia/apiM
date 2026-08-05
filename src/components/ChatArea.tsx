@@ -626,7 +626,6 @@ export function ChatArea({
             onOpenSettings={onOpenSettings}
             workspaceEnabled={workspaceEnabled}
             onEnableWorkspace={() => onSetWorkspaceEnabled(true)}
-            columnWidth={columnWidth}
           />
         ) : (
           <div
@@ -926,20 +925,15 @@ function EmptyState({
   onOpenSettings,
   workspaceEnabled,
   onEnableWorkspace,
-  columnWidth,
 }: {
   hasKeys: boolean;
   onOpenSettings: () => void;
   workspaceEnabled: boolean;
   onEnableWorkspace: () => void;
-  /** Shared with the composer, so the card lines up with the input below. */
-  columnWidth: string;
 }) {
   return (
-    <div className="flex h-full items-center justify-center px-4 sm:px-6">
-      <div
-        className={`mx-auto w-full text-center animate-fade-in transition-[max-width] duration-300 ${columnWidth}`}
-      >
+    <div className="flex h-full flex-col items-center justify-center px-4 pb-16 sm:px-6">
+      <div className="flex w-full max-w-xl flex-col items-center text-center animate-fade-in">
         <h1 className="font-serif text-[30px] sm:text-4xl font-medium leading-tight tracking-[-0.01em] text-text-primary">
           How can I help you today?
         </h1>
@@ -950,9 +944,10 @@ function EmptyState({
               Type a message below to start a conversation.
             </p>
 
-            {/* States the capability up front, rather than leaving it buried
-                in a popover the user has no reason to open. */}
-            <div className="mt-6 flex items-center gap-2.5 rounded-xl border border-border px-3 py-2.5 text-left">
+            {/* Sized to its own content and centred under the heading. A
+                one-line hint stretched to the full column reads as a banner
+                rather than as a note. */}
+            <div className="mt-7 inline-flex max-w-full items-center gap-2.5 rounded-full border border-border px-3.5 py-2 text-left">
               <span
                 className={`flex-none ${
                   workspaceEnabled ? "text-accent-light" : "text-text-muted"
@@ -974,7 +969,7 @@ function EmptyState({
                   />
                 </svg>
               </span>
-              <p className="min-w-0 flex-1 text-[12px] leading-4 text-text-muted">
+              <p className="min-w-0 text-[12px] leading-4 text-text-muted">
                 {workspaceEnabled ? (
                   <>
                     <span className="text-text-secondary">Workspace is on.</span>{" "}

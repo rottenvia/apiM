@@ -58,6 +58,27 @@ export function WorkspaceSidePanel({
 
   const changed = new Set(recentlyChanged ?? []);
 
+  // Paths that have already been rendered once. The entry animation keys off
+  // this rather than off `changed`, so it plays when a file first appears and
+  // not again on every edit — replaying it turned a working panel into a
+  // flicker.
+  const [seen, setSeen] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    const paths = files.map((f) => f.path);
+    // Deferred past paint so the row that just animated counts as seen only
+    // from the next render, and skipped entirely when nothing is new.
+    const timer = setTimeout(() => {
+      setSeen((prev) => {
+        const missing = paths.filter((p) => !prev.has(p));
+        if (missing.length === 0) return prev;
+        const next = new Set(prev);
+        for (const p of missing) next.add(p);
+        return next;
+      });
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [files]);
+
   const loadHistory = useCallback(async () => {
     if (!workspaceId) return;
     try {
@@ -129,7 +150,7 @@ export function WorkspaceSidePanel({
 
   return (
     <aside className="hidden w-[17.5rem] flex-none flex-col border-l border-border bg-bg-secondary/40 lg:flex">
-      <div className="flex items-center justify-between gap-2 px-3.5 pt-3.5">
+      <div className="flex items-center justify-between gap-2 px-3 pt-3.5">
         <span className="text-[12.5px] font-medium text-text-secondary">
           Workspace
         </span>
@@ -209,7 +230,7 @@ export function WorkspaceSidePanel({
       </div>
 
       {/* Usage. Quiet by design — it is reassurance, not a headline. */}
-      <div className="px-3.5 pb-2.5 pt-2">
+      <div className="px-3 pb-2.5 pt-2">
         <div className="flex items-center justify-between text-[10.5px] text-text-muted">
           <span>
             {formatBytes(totalBytes)} / {formatBytes(CAPACITY_BYTES)}
@@ -229,9 +250,9 @@ export function WorkspaceSidePanel({
       </div>
 
       {showHistory ? (
-        <div className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-3">
+        <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
           {history.length === 0 ? (
-            <p className="px-2 py-6 text-center text-[11.5px] leading-relaxed text-text-muted">
+            <p className="py-6 text-center text-[11.5px] leading-relaxed text-text-muted">
               No earlier versions yet.
               <br />
               One is saved before each message.
@@ -240,7 +261,7 @@ export function WorkspaceSidePanel({
             history.map((snapshot) => (
               <div
                 key={snapshot.id}
-                className="group rounded-lg px-2 py-1.5 transition-colors hover:bg-bg-hover"
+                className="group rounded-lg px-2 py-1.5 -mx-2 transition-colors hover:bg-bg-hover"
               >
                 <p
                   className="truncate text-[11.5px] text-text-secondary"
@@ -271,9 +292,9 @@ export function WorkspaceSidePanel({
           )}
         </div>
       ) : (
-      <div className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-3">
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
         {files.length === 0 ? (
-          <p className="px-2 py-6 text-center text-[11.5px] leading-relaxed text-text-muted">
+          <p className="py-6 text-center text-[11.5px] leading-relaxed text-text-muted">
             No files yet.
             <br />
             Ask for one and it appears here.
@@ -284,7 +305,9 @@ export function WorkspaceSidePanel({
               key={file.path}
               onClick={() => onOpenFile(file.path)}
               title={file.path}
-              className="group flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-bg-hover"
+              className={`group flex w-full items-center gap-2 rounded-lg px-2 py-1.5 -mx-2 text-left transition-colors hover:bg-bg-hover ${
+                seen.has(file.path) ? "" : "animate-file-in"
+              }`}
             >
               <span className="w-5 flex-none text-center font-mono text-[9px] uppercase text-text-muted">
                 {fileGlyph(file.path)}
