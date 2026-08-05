@@ -250,14 +250,14 @@ export function Sidebar({
             <button
               onClick={() => setShowArchived(false)}
               data-active={!showArchived}
-              className="flex-1 rounded-lg px-2 py-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-text-muted transition-colors hover:bg-bg-tertiary/50 hover:text-text-secondary data-[active=true]:bg-bg-tertiary data-[active=true]:text-text-primary"
+              className="flex-1 rounded-lg px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-text-muted transition-colors hover:bg-bg-tertiary/50 hover:text-text-secondary data-[active=true]:bg-bg-tertiary data-[active=true]:text-text-primary"
             >
               Chats{active.length ? ` · ${active.length}` : ""}
             </button>
             <button
               onClick={() => setShowArchived(true)}
               data-active={showArchived}
-              className="flex-1 rounded-lg px-2 py-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-text-muted transition-colors hover:bg-bg-tertiary/50 hover:text-text-secondary data-[active=true]:bg-bg-tertiary data-[active=true]:text-text-primary"
+              className="flex-1 rounded-lg px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-text-muted transition-colors hover:bg-bg-tertiary/50 hover:text-text-secondary data-[active=true]:bg-bg-tertiary data-[active=true]:text-text-primary"
             >
               Archive{archived.length ? ` · ${archived.length}` : ""}
             </button>
@@ -265,7 +265,7 @@ export function Sidebar({
         )}
 
         {/* List */}
-        <div className="flex-1 space-y-0.5 overflow-y-auto px-2 pb-2">
+        <div className="flex-1 space-y-1 overflow-y-auto px-3 pb-2">
           {visible.map((conv) => {
             const isCurrent = currentConvId === conv.id;
             const menuOpen = menuFor === conv.id;
@@ -273,10 +273,10 @@ export function Sidebar({
             return (
               <div
                 key={conv.id}
-                className={`group relative mb-1 flex items-center gap-1 rounded-xl border px-2.5 py-2 transition-colors duration-150 ${
+                className={`group relative flex items-center gap-1 rounded-xl border px-3 py-2 transition-colors duration-150 ${
                   isCurrent
                     ? "border-accent/40 bg-bg-elevated text-text-primary"
-                    : "border-border/60 text-text-secondary hover:border-border-light hover:bg-bg-tertiary hover:text-text-primary"
+                    : "border-transparent text-text-secondary hover:border-border hover:bg-bg-tertiary hover:text-text-primary"
                 }`}
               >
                 {editingId === conv.id ? (

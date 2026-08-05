@@ -626,6 +626,7 @@ export function ChatArea({
             onOpenSettings={onOpenSettings}
             workspaceEnabled={workspaceEnabled}
             onEnableWorkspace={() => onSetWorkspaceEnabled(true)}
+            columnWidth={columnWidth}
           />
         ) : (
           <div
@@ -925,15 +926,20 @@ function EmptyState({
   onOpenSettings,
   workspaceEnabled,
   onEnableWorkspace,
+  columnWidth,
 }: {
   hasKeys: boolean;
   onOpenSettings: () => void;
   workspaceEnabled: boolean;
   onEnableWorkspace: () => void;
+  /** Shared with the composer, so the card lines up with the input below. */
+  columnWidth: string;
 }) {
   return (
-    <div className="flex h-full items-center justify-center px-6">
-      <div className="max-w-md text-center animate-fade-in">
+    <div className="flex h-full items-center justify-center px-4 sm:px-6">
+      <div
+        className={`mx-auto w-full text-center animate-fade-in transition-[max-width] duration-300 ${columnWidth}`}
+      >
         <h1 className="font-serif text-[30px] sm:text-4xl font-medium leading-tight tracking-[-0.01em] text-text-primary">
           How can I help you today?
         </h1>
