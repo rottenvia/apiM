@@ -342,7 +342,7 @@ function MessageBubbleImpl({
         className={`max-w-[85%] md:max-w-[75%] ${
           isUser
             ? "rounded-[20px] bg-bg-elevated px-4 py-2.5"
-            : "bg-transparent"
+            : "bg-transparent px-4"
         }`}
       >
         {/* User message */}
