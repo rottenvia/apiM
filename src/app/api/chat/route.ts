@@ -475,7 +475,7 @@ export async function POST(req: NextRequest) {
               visionApiKey
                 ? " You can also view_image to look at a screenshot or mockup saved in the workspace."
                 : ""
-            }` + workspaceFiles
+            }`
           : "";
 
         // A structured transcript, not bare {role, content}. Tool calls and
@@ -493,9 +493,44 @@ export async function POST(req: NextRequest) {
               searchSummary +
               clarifyInstruction +
               workspaceInstruction +
+              workspaceFiles +
               pluginDirectives,
           },
         ];
+
+        /**
+         * Rewrite the file tree inside the system message.
+         *
+         * It was built once before the loop and never touched again, so after
+         * the agent deleted a file on round three, rounds four onward still
+         * listed it as present — which is why replies could name files that
+         * no longer existed, or recreate one just deleted. The tree is the
+         * only volatile part of the prompt, so only it is replaced.
+         */
+        let currentFileTree = workspaceFiles;
+        const refreshFileTree = async () => {
+          if (!workspaceEnabled) return;
+          let next = "";
+          try {
+            next = await buildWorkspaceContext(workspace);
+          } catch {
+            return; // Keep the last known tree rather than blanking it.
+          }
+          if (next === currentFileTree) return;
+
+          const system = transcript[0];
+          if (system.role !== "system") return;
+          system.content =
+            system.content.slice(
+              0,
+              system.content.length -
+                currentFileTree.length -
+                pluginDirectives.length
+            ) +
+            next +
+            pluginDirectives;
+          currentFileTree = next;
+        };
         for (const msg of conversationHistory.slice(-20)) {
           if (!msg.content?.trim()) continue;
           transcript.push(
@@ -1090,6 +1125,10 @@ export async function POST(req: NextRequest) {
               summary: result.summary,
             });
           }
+
+          // The next round must see the workspace as it is now, not as it was
+          // before these tools ran.
+          await refreshFileTree();
 
           if (req.signal.aborted) break;
         }

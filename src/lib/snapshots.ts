@@ -34,9 +34,10 @@ interface SnapshotManifest {
 }
 
 function snapshotRoot(workspaceId: string): string {
-  // Beside the workspace, not inside it — otherwise snapshots would appear in
-  // listings, be fed to the model as real files, and end up inside each other.
-  return `${workspaceDirectory(workspaceId)}.snapshots`;
+  // Inside the workspace, so everything for it lives in one folder, but
+  // dot-prefixed and listed in INTERNAL_DIRS so it never appears in listings,
+  // reaches the model as a real file, or ends up inside another snapshot.
+  return path.join(workspaceDirectory(workspaceId), ".snapshots");
 }
 
 function snapshotDir(workspaceId: string, snapshotId: string): string {
