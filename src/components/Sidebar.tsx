@@ -193,7 +193,7 @@ export function Sidebar({
     >
       <div className="flex h-full min-w-[288px] flex-col">
         {/* New chat */}
-        <div className="flex h-[60px] flex-none items-center gap-2 px-3">
+        <div className="flex h-[56px] flex-none items-center gap-1.5 px-3">
           <button onClick={onNew} className="new-chat-btn">
             <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 5v14M5 12h14" />
@@ -217,9 +217,9 @@ export function Sidebar({
             onClick={() => importRef.current?.click()}
             title="Import a chat from a JSON export"
             aria-label="Import chat"
-            className="flex h-10 w-10 flex-none items-center justify-center rounded-xl border border-border text-text-secondary transition-colors hover:border-border-light hover:bg-bg-hover hover:text-text-primary"
+            className="sidebar-icon-btn"
           >
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} aria-hidden="true">
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 15V3m0 12l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" />
             </svg>
           </button>
@@ -228,9 +228,9 @@ export function Sidebar({
             onClick={onOpenSearch}
             title="Search chats  (Ctrl+K)"
             aria-label="Search chats"
-            className="flex h-10 w-10 flex-none items-center justify-center rounded-xl border border-border text-text-secondary transition-colors hover:border-border-light hover:bg-bg-hover hover:text-text-primary"
+            className="sidebar-icon-btn"
           >
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} aria-hidden="true">
               <circle cx="11" cy="11" r="8" />
               <path strokeLinecap="round" d="M21 21l-4.35-4.35" />
             </svg>
@@ -246,21 +246,33 @@ export function Sidebar({
 
         {/* Active / Archived switch */}
         {(active.length > 0 || archived.length > 0) && (
-          <div className="flex items-center gap-1 px-3 pb-1.5 pt-1">
-            <button
-              onClick={() => setShowArchived(false)}
-              data-active={!showArchived}
-              className="flex-1 rounded-lg px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-text-muted transition-colors hover:bg-bg-tertiary/50 hover:text-text-secondary data-[active=true]:bg-bg-tertiary data-[active=true]:text-text-primary"
-            >
-              Chats{active.length ? ` · ${active.length}` : ""}
-            </button>
-            <button
-              onClick={() => setShowArchived(true)}
-              data-active={showArchived}
-              className="flex-1 rounded-lg px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-text-muted transition-colors hover:bg-bg-tertiary/50 hover:text-text-secondary data-[active=true]:bg-bg-tertiary data-[active=true]:text-text-primary"
-            >
-              Archive{archived.length ? ` · ${archived.length}` : ""}
-            </button>
+          <div className="px-3 pb-2 pt-0.5">
+            <div className="segmented" role="tablist" aria-label="Chat list">
+              <button
+                role="tab"
+                aria-selected={!showArchived}
+                onClick={() => setShowArchived(false)}
+                data-active={!showArchived}
+                className="segmented-item"
+              >
+                Chats
+                {active.length > 0 && (
+                  <span className="segmented-count">{active.length}</span>
+                )}
+              </button>
+              <button
+                role="tab"
+                aria-selected={showArchived}
+                onClick={() => setShowArchived(true)}
+                data-active={showArchived}
+                className="segmented-item"
+              >
+                Archive
+                {archived.length > 0 && (
+                  <span className="segmented-count">{archived.length}</span>
+                )}
+              </button>
+            </div>
           </div>
         )}
 
@@ -273,7 +285,7 @@ export function Sidebar({
             return (
               <div
                 key={conv.id}
-                className={`group relative flex items-center gap-1 rounded-xl border px-3 py-2 transition-colors duration-150 ${
+                className={`group relative flex items-center gap-1 rounded-[10px] border px-3 py-2 transition-colors duration-150 ${
                   isCurrent
                     ? "border-accent/40 bg-bg-elevated text-text-primary"
                     : "border-transparent text-text-secondary hover:border-border hover:bg-bg-tertiary hover:text-text-primary"
@@ -330,7 +342,7 @@ export function Sidebar({
                       onClick={() => onSelect(conv.id)}
                       onDoubleClick={() => startRename(conv)}
                       aria-label={conv.title}
-                      className="absolute inset-0 rounded-xl"
+                      className="absolute inset-0 rounded-[10px]"
                     />
                     <span
                       className="pointer-events-none relative min-w-0 flex-1 truncate text-left text-sm leading-5"
