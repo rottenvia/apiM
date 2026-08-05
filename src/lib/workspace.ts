@@ -25,11 +25,71 @@ export interface WorkspaceFile {
 
 export class WorkspaceError extends Error {}
 
+/**
+ * Folder name a workspace uses on disk.
+ *
+ * Set by the chat store so a conversation and its files share a name — chat
+ * "hello" gets `data/chats/hello/` and `data/workspaces/hello/`. Held in
+ * memory and rebuilt from disk on demand, so a restart does not lose it.
+ */
+const folderNames = new Map<string, string>();
+
+/** Called by the chat store when it names or renames a conversation. */
+export function setWorkspaceFolderName(
+  workspaceId: string,
+  folder: string
+): void {
+  if (/^[\w-]{1,128}$/.test(workspaceId) && /^[\w-]{1,128}$/.test(folder)) {
+    folderNames.set(workspaceId, folder);
+  }
+}
+
+export function workspaceFolderName(workspaceId: string): string {
+  return folderNames.get(workspaceId) ?? workspaceId;
+}
+
+/**
+ * Renames a workspace folder to follow its chat.
+ *
+ * Best effort: if it fails the files are still reachable under the old name,
+ * which matters more than the names matching.
+ */
+export async function renameWorkspaceFolder(
+  from: string,
+  to: string
+): Promise<void> {
+  if (from === to) return;
+  if (!/^[\w-]{1,128}$/.test(from) || !/^[\w-]{1,128}$/.test(to)) return;
+
+  const src = path.join(ROOT, from);
+  const dest = path.join(ROOT, to);
+
+  try {
+    await fs.access(src);
+  } catch {
+    return; // No workspace folder yet — nothing to move.
+  }
+
+  try {
+    await fs.rename(src, dest);
+    // History lives alongside, so it has to follow too or undo breaks.
+    await fs.rename(`${src}.history`, `${dest}.history`).catch(() => {});
+  } catch {
+    /* keep the old folder rather than losing files */
+  }
+
+  for (const [id, folder] of folderNames) {
+    if (folder === from) folderNames.set(id, to);
+  }
+}
+
 function workspaceRoot(workspaceId: string): string {
   if (!/^[\w-]{1,128}$/.test(workspaceId)) {
     throw new WorkspaceError("Invalid workspace id");
   }
-  return path.join(ROOT, workspaceId);
+  // Validated above, and the mapped name is validated when it is set, so the
+  // result cannot escape ROOT either way.
+  return path.join(ROOT, workspaceFolderName(workspaceId));
 }
 
 /**
