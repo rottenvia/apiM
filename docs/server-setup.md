@@ -12,7 +12,7 @@ Start to finish, about 20 minutes. Every command is copy-pasteable.
 
 - **Location:** Falkenstein (Germany) — ~30-40 ms from Ukraine
 - **Image:** Ubuntu 24.04
-- **Type:** Shared vCPU → **Cost-Optimized** → **CX33** (€6.49/mo)
+- **Type:** Shared vCPU → **Cost-Optimized** → **CX33** (€8.49/mo excl. VAT)
 - **Networking:** leave IPv4 ticked (+€0.50)
 - **SSH key:** add one if you have it, otherwise Hetzner emails a password
 - Everything else: leave alone
