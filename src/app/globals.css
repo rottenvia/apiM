@@ -611,3 +611,86 @@ input:focus-visible {
     animation: none;
   }
 }
+
+/* Settings group rail. Same 10px radius as the sidebar controls, so the two
+ * navigation surfaces in the app read as the same kind of thing. */
+.settings-tab {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 10px;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 12.5px;
+  font-weight: 500;
+  text-align: left;
+  transition:
+    color 0.15s ease,
+    background-color 0.15s ease;
+}
+.settings-tab:hover {
+  color: var(--color-text-secondary);
+  background: var(--color-bg-tertiary);
+}
+.settings-tab[data-active='true'] {
+  color: var(--color-text-primary);
+  background: var(--color-bg-elevated);
+}
+
+/* ---------------------------------------------------------------------------
+   Thinking panel
+--------------------------------------------------------------------------- */
+
+/* The panel arriving.
+ *
+ * Reasoning used to appear fully formed the instant the first token landed,
+ * which read as a glitch rather than as the model starting to think. Fading
+ * and settling makes the start of thinking legible as an event. */
+@keyframes thinking-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.thinking-panel {
+  animation: thinking-enter 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Expanding to reveal the text.
+ *
+ * A grid row from 0fr to 1fr animates to the content's real height without
+ * anyone having to measure it, so the panel grows rather than snapping open.
+ * max-height would need a guessed ceiling and would ease wrongly whenever the
+ * guess was too large. */
+.thinking-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition:
+    grid-template-rows 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.22s ease;
+  opacity: 0;
+}
+.thinking-body[data-open='true'] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+.thinking-body > * {
+  min-height: 0;
+  overflow: hidden;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thinking-panel {
+    animation: none;
+  }
+  .thinking-body {
+    transition: none;
+  }
+}
