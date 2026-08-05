@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { DiffView } from "@/components/DiffView";
 
 export interface WorkspaceFile {
   path: string;
@@ -60,6 +61,9 @@ export function WorkspacePanel({
   const [files, setFiles] = useState<WorkspaceFile[]>([]);
   const [directory, setDirectory] = useState("");
   const [selected, setSelected] = useState<string | null>(highlightPath ?? null);
+  const [tab, setTab] = useState<"file" | "changes">("file");
+  const [previous, setPrevious] = useState<string | null>(null);
+  const [reverting, setReverting] = useState(false);
   const [content, setContent] = useState("");
   const [draft, setDraft] = useState("");
   const [truncated, setTruncated] = useState(false);
@@ -131,6 +135,7 @@ export function WorkspacePanel({
     async (filePath: string) => {
       if (dirty && !window.confirm("Discard unsaved changes?")) return;
       setSelected(filePath);
+      setTab("file");
       setError(null);
       try {
         const res = await fetch(
@@ -145,10 +150,23 @@ export function WorkspacePanel({
         setContent(data.content ?? "");
         setDraft(data.content ?? "");
         setTruncated(Boolean(data.truncated));
+
+        // Fetched alongside the file so the Changes tab is instant rather
+        // than flashing a spinner when clicked.
+        try {
+          const h = await fetch(
+            `/api/workspace/${workspaceId}/history?path=${encodeURIComponent(filePath)}`
+          );
+          const hist = (await h.json()) as { previous?: string | null };
+          setPrevious(h.ok ? (hist.previous ?? null) : null);
+        } catch {
+          setPrevious(null);
+        }
       } catch (err) {
         setError(err instanceof Error ? err.message : "Couldn't open that file");
         setContent("");
         setDraft("");
+        setPrevious(null);
       }
     },
     [workspaceId, dirty]
@@ -182,6 +200,40 @@ export function WorkspacePanel({
       setSaving(false);
     }
   }, [workspaceId, selected, draft, saving, loadList]);
+
+  const revert = useCallback(async () => {
+    if (!selected || reverting) return;
+    if (
+      !window.confirm(
+        `Restore the previous version of ${selected}? The current contents ` +
+          `become the new undo point, so this can be undone again.`
+      )
+    ) {
+      return;
+    }
+
+    setReverting(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/workspace/${workspaceId}/history`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: selected }),
+      });
+      const data = (await res.json()) as { error?: string };
+      if (!res.ok) throw new Error(data.error ?? "Couldn't restore");
+
+      // Re-open so the editor, the diff and the file list all reflect the
+      // restore, rather than showing the version that was just replaced.
+      await openFile(selected);
+      void loadList();
+      setTab("file");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Couldn't restore");
+    } finally {
+      setReverting(false);
+    }
+  }, [workspaceId, selected, reverting, openFile, loadList]);
 
   const remove = useCallback(
     async (filePath: string) => {
@@ -357,6 +409,44 @@ export function WorkspacePanel({
                   </div>
                 </div>
 
+                {/* Only shown when there is a previous version — a brand-new
+                    file has nothing to compare against or undo to. */}
+                {previous !== null && (
+                  <div className="flex items-center gap-1.5 border-b border-border px-3 py-1.5">
+                    <button
+                      onClick={() => setTab("file")}
+                      className="chip"
+                      data-active={tab === "file"}
+                    >
+                      <span>File</span>
+                    </button>
+                    <button
+                      onClick={() => setTab("changes")}
+                      className="chip"
+                      data-active={tab === "changes"}
+                      title="What the last write changed"
+                    >
+                      <span>Changes</span>
+                    </button>
+
+                    <button
+                      onClick={() => void revert()}
+                      disabled={reverting}
+                      className="chip ml-auto"
+                      title="Restore the version from before the last write"
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          d="M3 10h11a4 4 0 010 8h-1M3 10l4-4M3 10l4 4"
+                        />
+                      </svg>
+                      <span>{reverting ? "Undoing…" : "Undo write"}</span>
+                    </button>
+                  </div>
+                )}
+
                 {truncated && (
                   <div className="border-b border-border bg-bg-hover/40 px-3 py-1.5 text-[11px] text-text-muted">
                     This file is too large to show in full — only the beginning
@@ -364,13 +454,17 @@ export function WorkspacePanel({
                   </div>
                 )}
 
-                <textarea
-                  value={draft}
-                  onChange={(e) => setDraft(e.target.value)}
-                  readOnly={truncated}
-                  spellCheck={false}
-                  className="min-h-0 flex-1 resize-none bg-bg-primary p-3 font-mono text-[12.5px] leading-relaxed text-text-secondary outline-none"
-                />
+                {tab === "changes" && previous !== null ? (
+                  <DiffView previous={previous} current={content} />
+                ) : (
+                  <textarea
+                    value={draft}
+                    onChange={(e) => setDraft(e.target.value)}
+                    readOnly={truncated}
+                    spellCheck={false}
+                    className="min-h-0 flex-1 resize-none bg-bg-primary p-3 font-mono text-[12.5px] leading-relaxed text-text-secondary outline-none"
+                  />
+                )}
               </>
             ) : (
               <div className="flex flex-1 items-center justify-center px-6 text-center text-[12.5px] leading-relaxed text-text-muted">

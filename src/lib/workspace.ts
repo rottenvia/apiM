@@ -167,6 +167,52 @@ export async function readFile(
   };
 }
 
+/**
+ * Where the previous version of each file is kept.
+ *
+ * A model overwriting a file is normal and often wrong, so the version it
+ * replaced has to survive somewhere. Sits outside the workspace root so it
+ * never shows up in listings or gets fed back to the model as a real file.
+ */
+function historyPathFor(workspaceId: string, relative: string): string {
+  const root = workspaceRoot(workspaceId);
+  // Flatten the path into one filename so nested directories don't need
+  // recreating inside the history folder.
+  const flat = relative.replace(/[\\/]/g, "__");
+  return path.join(`${root}.history`, `${flat}.prev`);
+}
+
+/** The version replaced by the last write, if there is one. */
+export async function previousVersion(
+  workspaceId: string,
+  relative: string
+): Promise<string | null> {
+  // Validates the path, so a crafted name can't read outside the history dir.
+  resolveInside(workspaceId, relative);
+  try {
+    return await fs.readFile(historyPathFor(workspaceId, relative), "utf8");
+  } catch {
+    return null;
+  }
+}
+
+/** Records the current contents before they are overwritten. */
+async function saveHistory(
+  workspaceId: string,
+  relative: string,
+  target: string
+): Promise<void> {
+  try {
+    const current = await fs.readFile(target, "utf8");
+    const dest = historyPathFor(workspaceId, relative);
+    await fs.mkdir(path.dirname(dest), { recursive: true });
+    await fs.writeFile(dest, current, "utf8");
+  } catch {
+    // No existing file, or it isn't text. Either way there is nothing worth
+    // keeping, and failing to save history must never block the write.
+  }
+}
+
 export async function writeFile(
   workspaceId: string,
   relative: string,
@@ -186,6 +232,10 @@ export async function writeFile(
     .access(target)
     .then(() => true)
     .catch(() => false);
+
+  // Before overwriting, keep what was there so it can be shown as a diff and
+  // restored. Only on overwrite: a new file has no previous version.
+  if (existed) await saveHistory(workspaceId, relative, target);
 
   await fs.mkdir(path.dirname(target), { recursive: true });
 
@@ -255,6 +305,8 @@ export async function deleteFile(
   relative: string
 ): Promise<{ path: string; deleted: boolean }> {
   const target = resolveInside(workspaceId, relative);
+  // Keep a copy first, so a deletion by the model is recoverable too.
+  await saveHistory(workspaceId, relative, target);
   try {
     await fs.unlink(target);
     return { path: relative, deleted: true };
