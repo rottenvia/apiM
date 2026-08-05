@@ -277,12 +277,21 @@ function MessageBubbleImpl({
       parts.push(`${message.searchRounds} rounds`);
     }
     if (message.searchStopReason) parts.push(message.searchStopReason);
+    if (message.searchCacheHits) {
+      parts.push(`${message.searchCacheHits} reused from cache`);
+    }
     return parts.join(" · ") || undefined;
-  }, [message.searchReason, message.searchRounds, message.searchStopReason]);
+  }, [
+    message.searchReason,
+    message.searchRounds,
+    message.searchStopReason,
+    message.searchCacheHits,
+  ]);
   const hasMeta = Boolean(
     (message.thinkingEffort && message.thinkingEffort !== "none") ||
       message.tokenCount ||
-      message.durationMs
+      message.durationMs ||
+      message.searchUsd
   );
 
   // Detect a code fence that has been opened but not yet closed. An odd number
@@ -558,6 +567,21 @@ function MessageBubbleImpl({
                     {formatCost(cost)}
                   </span>
                 )}
+
+                {/* Search is billed separately from the model, so it gets its
+                    own figure rather than being folded into the token cost. */}
+                {message.searchUsd ? (
+                  <span
+                    className="text-[10px] text-[#6d685d]"
+                    title={
+                      message.searchCacheHits
+                        ? `Web search, estimated · ${message.searchCacheHits} query(s) reused from cache at no cost`
+                        : "Web search, estimated"
+                    }
+                  >
+                    +{formatCost(message.searchUsd)} search
+                  </span>
+                ) : null}
 
                 {message.durationMs ? (
                   <span

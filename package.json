@@ -22,7 +22,9 @@
     "test:agent": "tsx scripts/test-agent.mjs",
     "test:processes": "tsx scripts/test-processes.mjs",
     "test:zip": "tsx scripts/test-zip.mjs",
-    "test:snapshots": "tsx scripts/test-snapshots.mjs"
+    "test:snapshots": "tsx scripts/test-snapshots.mjs",
+    "test:budget": "tsx scripts/test-search-budget.mjs",
+    "test:search": "tsx scripts/test-search-live.mjs"
   },
   "dependencies": {
     "@types/uuid": "^10.0.0",
