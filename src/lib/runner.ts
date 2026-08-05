@@ -13,7 +13,28 @@ import { workspaceDirectory } from "@/lib/workspace";
  * mistake is survivable, not so approval can be skipped.
  */
 
-export const MAX_RUN_MS = 30_000;
+/**
+ * Wall-clock limit per command.
+ *
+ * 30s was too short for real work: `npm install` and `pip install` on
+ * anything substantial exceed it, and the model reads the kill as a failure
+ * and starts "fixing" code that was never broken. Installs get longer since
+ * they are the common slow case; everything else stays tight so a runaway
+ * loop is caught quickly.
+ */
+export const MAX_RUN_MS = 60_000;
+export const MAX_INSTALL_MS = 300_000;
+
+/** Package managers, where a slow run is normal rather than a hang. */
+const SLOW_COMMANDS = new Set(["npm", "npx", "pip", "pip3", "cargo", "go", "dotnet"]);
+
+export function timeoutFor(command: string, args: string[]): number {
+  if (!SLOW_COMMANDS.has(command)) return MAX_RUN_MS;
+  const installing = args.some((a) =>
+    ["install", "i", "add", "ci", "get", "restore", "build", "mod"].includes(a)
+  );
+  return installing ? MAX_INSTALL_MS : MAX_RUN_MS;
+}
 /** Truncate output so one runaway loop can't fill the context window. */
 export const MAX_OUTPUT_CHARS = 20_000;
 
@@ -204,6 +225,8 @@ export async function runCommand(
       } as unknown as NodeJS.ProcessEnv,
     });
 
+    const limitMs = timeoutFor(check.command, check.args);
+
     let stdout = "";
     let stderr = "";
     let timedOut = false;
@@ -245,7 +268,7 @@ export async function runCommand(
       // Resolve even if the process ignores the signal, so an unkillable
       // child can't leave the request hanging forever.
       setTimeout(() => finish(null), 500);
-    }, MAX_RUN_MS);
+    }, limitMs);
 
     const onAbort = () => {
       kill();
@@ -280,7 +303,9 @@ export function formatRunResult(result: RunResult): string {
 
   if (result.timedOut) {
     parts.push(
-      `\nTimed out after ${Math.round(MAX_RUN_MS / 1000)}s and was stopped. ` +
+      `\nTimed out after ${Math.round(
+        timeoutFor(result.command, result.args) / 1000
+      )}s and was stopped. ` +
         `If this was an interactive program or a server, it will never finish ` +
         `on its own — run something that exits.`
     );

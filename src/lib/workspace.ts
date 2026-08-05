@@ -191,6 +191,117 @@ export async function listFiles(
   return out;
 }
 
+export interface SearchHit {
+  path: string;
+  line: number;
+  text: string;
+}
+
+/** Cap the work and the output so one broad search can't stall a reply. */
+export const MAX_SEARCH_HITS = 60;
+const MAX_SEARCHABLE_BYTES = 512 * 1024;
+
+/**
+ * Finds text across the workspace.
+ *
+ * Without this, locating a function in a twenty-file project costs one round
+ * per file read — the whole tool budget spent looking rather than working.
+ */
+export async function searchFiles(
+  workspaceId: string,
+  query: string,
+  options: { regex?: boolean; caseSensitive?: boolean; glob?: string } = {}
+): Promise<{ hits: SearchHit[]; truncated: boolean; filesSearched: number }> {
+  const needle = String(query ?? "");
+  if (!needle.trim()) {
+    throw new WorkspaceError("A search query is required");
+  }
+
+  let matcher: (line: string) => boolean;
+
+  if (options.regex) {
+    let re: RegExp;
+    try {
+      re = new RegExp(needle, options.caseSensitive ? "" : "i");
+    } catch (err) {
+      // Report the syntax error back rather than throwing an unhandled one —
+      // a model writing a bad pattern should be able to correct it.
+      throw new WorkspaceError(
+        `Invalid regular expression: ${
+          err instanceof Error ? err.message : "bad pattern"
+        }`
+      );
+    }
+    matcher = (line) => re.test(line);
+  } else {
+    const lower = needle.toLowerCase();
+    matcher = options.caseSensitive
+      ? (line) => line.includes(needle)
+      : (line) => line.toLowerCase().includes(lower);
+  }
+
+  // A simple glob: * matches anything within a path segment-free sense,
+  // which is enough for "*.py" without pulling in a dependency.
+  let globRe: RegExp | null = null;
+  if (options.glob?.trim()) {
+    const escaped = options.glob
+      .trim()
+      .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+      .replace(/\*/g, ".*")
+      .replace(/\?/g, ".");
+    try {
+      globRe = new RegExp(`^${escaped}$`, "i");
+    } catch {
+      globRe = null;
+    }
+  }
+
+  const files = await listFiles(workspaceId);
+  const hits: SearchHit[] = [];
+  let filesSearched = 0;
+  let truncated = false;
+
+  for (const file of files) {
+    if (hits.length >= MAX_SEARCH_HITS) {
+      truncated = true;
+      break;
+    }
+    if (globRe && !globRe.test(file.path)) continue;
+    // Skip anything large enough to be data rather than source; reading it
+    // would cost more than the match is worth.
+    if (file.size > MAX_SEARCHABLE_BYTES) continue;
+
+    let content: string;
+    try {
+      content = await fs.readFile(resolveInside(workspaceId, file.path), "utf8");
+    } catch {
+      continue; // Binary, vanished, or unreadable.
+    }
+
+    // A NUL byte means binary; matching inside it produces noise.
+    if (content.includes("\0")) continue;
+
+    filesSearched++;
+
+    const lines = content.split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      if (!matcher(lines[i])) continue;
+      hits.push({
+        path: file.path,
+        line: i + 1,
+        // Trim so one minified line can't dominate the entire result.
+        text: lines[i].trim().slice(0, 200),
+      });
+      if (hits.length >= MAX_SEARCH_HITS) {
+        truncated = true;
+        break;
+      }
+    }
+  }
+
+  return { hits, truncated, filesSearched };
+}
+
 export interface ReadResult {
   path: string;
   content: string;
