@@ -235,7 +235,7 @@ If a repair upgrade is more than you want to take on for a side project, that
 is a completely reasonable call. The sandbox does not have to run on this
 machine.
 
-A Linux VPS — Hetzner CX33, about €6.50/month — has a working Docker in about
+A Linux VPS — Hetzner CX33, about €8.49/month excl. VAT — has a working Docker in about
 five minutes, with none of this. It also removes the "does my gaming PC take a
 2-5% hit" question entirely, since nothing runs locally.
 

@@ -115,7 +115,7 @@ and it is what makes auth mandatory — anyone who can reach the app can read an
 write files in `data/workspaces/`, and step 1 makes that far more dangerous.
 
 Running locally you are the only one who can reach `localhost`, so auth stays
-optional until then. Hosting, if wanted: Hetzner CX33, about €6.50/month.
+optional until then. Hosting, if wanted: Hetzner CX33, about €8.49/month excl. VAT — see which-server.md.
 
 ### 3. Live preview
 
