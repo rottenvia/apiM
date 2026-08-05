@@ -25,7 +25,8 @@
     "test:snapshots": "tsx scripts/test-snapshots.mjs",
     "test:budget": "tsx scripts/test-search-budget.mjs",
     "test:search": "tsx scripts/test-search-live.mjs",
-    "test:resilience": "tsx scripts/test-resilience.mjs"
+    "test:resilience": "tsx scripts/test-resilience.mjs",
+    "test:plugins": "tsx scripts/test-plugins.mjs"
   },
   "dependencies": {
     "@types/uuid": "^10.0.0",

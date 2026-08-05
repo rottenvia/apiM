@@ -9,7 +9,11 @@ import {
 import type { StoredMessage } from "@/lib/store";
 import { smartSearch, autoThinkingEffort, decideSearch } from "@/lib/smart-search";
 import type { SmartSearchContext } from "@/lib/smart-search";
-import { AVAILABLE_PLUGINS, buildSystemPrompt } from "@/lib/plugins";
+import {
+  AVAILABLE_PLUGINS,
+  BASE_PROMPT,
+  buildPluginDirectives,
+} from "@/lib/plugins";
 import { WORKSPACE_TOOLS, runTool } from "@/lib/tools";
 import { buildWorkspaceContext } from "@/lib/workspace-context";
 import { createSnapshot } from "@/lib/snapshots";
@@ -305,12 +309,16 @@ export async function POST(req: NextRequest) {
         } catch (e) {
           console.error("Failed to load custom plugins:", e);
         }
-        const systemPrompt = buildSystemPrompt(
+        // Built as its own block rather than folded into the persona, so it
+        // can be placed last — see buildPluginDirectives for why position
+        // decided whether these were obeyed at all.
+        const pluginDirectives = buildPluginDirectives(
           [...AVAILABLE_PLUGINS, ...customPlugins].map((p) => ({
             ...p,
             enabled: enabledPluginIds.includes(p.id),
           }))
         );
+        const systemPrompt = BASE_PROMPT;
 
         // Regenerate: drop the previous reply (and anything after it) so the
         // new one replaces it rather than appending a duplicate.
@@ -471,11 +479,16 @@ export async function POST(req: NextRequest) {
         const transcript: TranscriptMessage[] = [
           {
             role: "system",
+            // The user's standing orders go last on purpose: the workspace
+            // rules and file tree that precede them run to several thousand
+            // characters, and whatever sits after that block is what the
+            // model weighs most heavily.
             content:
               systemPrompt +
               searchSummary +
               clarifyInstruction +
-              workspaceInstruction,
+              workspaceInstruction +
+              pluginDirectives,
           },
         ];
         for (const msg of conversationHistory.slice(-20)) {
