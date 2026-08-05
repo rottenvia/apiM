@@ -443,6 +443,25 @@ export async function POST(req: NextRequest) {
           summary?: string;
           changedPath?: string;
         }[] = [];
+
+        /**
+         * What happened, in order.
+         *
+         * The model narrates between tool calls, so the raw stream already
+         * alternates text and actions. Concatenating the text loses which
+         * sentence went with which action, which is the only interesting
+         * part — so the order is recorded rather than flattened.
+         */
+        const timeline: (
+          | { kind: "text"; text: string }
+          | { kind: "tool"; id: string }
+        )[] = [];
+
+        const appendTimelineText = (text: string) => {
+          const last = timeline[timeline.length - 1];
+          if (last && last.kind === "text") last.text += text;
+          else timeline.push({ kind: "text", text });
+        };
         let usage: unknown = null;
         let announcedWriting = false;
         const toolSummaries: { name: string; ok: boolean; summary: string }[] =
@@ -570,6 +589,7 @@ export async function POST(req: NextRequest) {
                 pluginsUsed: enabledPluginIds.length ? enabledPluginIds : null,
                 tokenCount: null,
                 toolEvents: toolEvents.length ? toolEvents : null,
+                timeline: timeline.length ? timeline : null,
                 createdAt: new Date().toISOString(),
                 incomplete: true,
               });
@@ -648,6 +668,7 @@ export async function POST(req: NextRequest) {
                 }
                 assistantContent += delta.content;
                 roundContent += delta.content;
+                appendTimelineText(delta.content);
                 send({ type: "content", delta: delta.content });
                 void checkpoint();
               }
@@ -701,6 +722,7 @@ export async function POST(req: NextRequest) {
               name: call.function.name,
               args: call.function.arguments,
             });
+            timeline.push({ kind: "tool", id: call.id });
 
             const parsed = parseToolArguments(call.function.arguments);
 
@@ -870,6 +892,7 @@ export async function POST(req: NextRequest) {
             model,
             durationMs: Date.now() - startedAt,
             toolEvents: toolEvents.length ? toolEvents : null,
+            timeline: timeline.length ? timeline : null,
             createdAt: new Date().toISOString(),
             incomplete: false,
           });
