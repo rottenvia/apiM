@@ -724,6 +724,10 @@ export default function Home() {
             regenerateFromId,
             workspaceEnabled,
             autoRunCommands,
+            // Lets the agent look at images saved in the workspace, not just
+            // ones attached to a message.
+            visionApiKey: visionKey || undefined,
+            visionModel,
             // A new chat has no id yet; the server falls back to the
             // conversation id it creates, which is what we adopt below.
             workspaceId: currentConvId ?? undefined,
@@ -1006,6 +1010,8 @@ export default function Home() {
       refreshConversations,
       workspaceEnabled,
       autoRunCommands,
+      visionKey,
+      visionModel,
       refreshWorkspaceFiles,
     ]
   );
