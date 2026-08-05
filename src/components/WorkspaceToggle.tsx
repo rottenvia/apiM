@@ -59,7 +59,7 @@ export function WorkspaceToggle({
         </svg>
         <span>
           Files
-          {enabled && fileCount > 0 ? ` · ${fileCount}` : enabled ? " on" : ""}
+          {enabled && fileCount > 0 ? ` · ${fileCount}` : ""}
         </span>
       </button>
 

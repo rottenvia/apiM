@@ -18,7 +18,7 @@ import type { Attachment } from "@/lib/attachments";
 import { Dots, MessageBubble } from "@/components/MessageBubble";
 import { ThinkingEffortSelector } from "@/components/ThinkingEffortSelector";
 import { ModelSelector } from "@/components/ModelSelector";
-import { SearchModeSelector } from "@/components/SearchModeSelector";
+import { WebSearchToggle } from "@/components/WebSearchToggle";
 import { WorkspaceToggle } from "@/components/WorkspaceToggle";
 import { WorkspaceBar } from "@/components/WorkspaceBar";
 import { WorkspaceDock } from "@/components/WorkspaceDock";
@@ -833,7 +833,7 @@ export function ChatArea({
                   onChange={onSetThinkingEffort}
                 />
 
-                <SearchModeSelector
+                <WebSearchToggle
                   value={webSearchMode}
                   onChange={onSetSearchMode}
                 />
