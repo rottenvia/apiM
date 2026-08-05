@@ -612,6 +612,64 @@ input:focus-visible {
   }
 }
 
+/* A row in the chat list.
+ *
+ * Two things made hovering down the list feel laggy and made the highlight
+ * appear to skip pixels.
+ *
+ * The rows were separated by a 4px flex gap that belonged to no row, so the
+ * pointer passed through dead space at every boundary and the highlight went
+ * on, off, then on again. The gap is now transparent margin inside the row's
+ * own box: the rows visually sit apart but their hit areas touch, so the
+ * highlight hands straight from one to the next with nothing in between.
+ *
+ * And `transition-colors` eased the hover *in* as well as out, so there were
+ * 150ms before a row looked hovered and another 150ms fading — crossing a gap
+ * fired both. Hover now applies instantly and only the fade-out is eased,
+ * which reads as responsive without hard flicker. Only background-color is
+ * animated; border-color and color are left to snap, since interpolating
+ * alpha on every row in a list is what makes the whole thing feel heavy. */
+.conv-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  /* Vertical margin, not a parent gap, so the gap belongs to a hit area. */
+  margin: 2px 0;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  color: var(--color-text-secondary);
+  /* Out only. The hovered state is applied with no delay below. */
+  transition: background-color 0.14s ease-out;
+}
+.conv-row:hover {
+  background: var(--color-bg-tertiary);
+  border-color: var(--color-border);
+  color: var(--color-text-primary);
+  transition: none;
+}
+.conv-row.is-current {
+  background: var(--color-bg-elevated);
+  border-color: color-mix(in oklab, var(--color-accent) 40%, transparent);
+  color: var(--color-text-primary);
+}
+
+/* A row in the workspace file list and the history list.
+ *
+ * Same reasoning as .conv-row: hover applies instantly and only the fade-out
+ * is eased, so running the pointer down a list of files feels immediate. */
+.list-row {
+  border-radius: 8px;
+  margin: 0 -8px;
+  padding: 6px 8px;
+  transition: background-color 0.14s ease-out;
+}
+.list-row:hover {
+  background: var(--color-bg-hover);
+  transition: none;
+}
+
 /* Settings group rail. Same 10px radius as the sidebar controls, so the two
  * navigation surfaces in the app read as the same kind of thing. */
 .settings-tab {
