@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { AVAILABLE_PLUGINS } from "@/lib/plugins";
+import { AVAILABLE_PLUGINS, LEGACY_PLUGINS } from "@/lib/plugins";
 import type { Plugin } from "@/lib/plugins";
 
 interface CustomPlugin extends Plugin {
@@ -362,6 +362,22 @@ export function PluginsModal({
               </p>
               <div className="space-y-2">
                 {AVAILABLE_PLUGINS.map((p) => renderCard(p, false))}
+              </div>
+            </div>
+
+            {/* Listed apart from the current versions, or the near-duplicate
+                names read as a mistake rather than as a choice. */}
+            <div>
+              <p className="mb-1 text-[10px] font-semibold uppercase tracking-[0.1em] text-text-muted">
+                Classic
+              </p>
+              <p className="mb-2 text-[11px] leading-4 text-text-muted">
+                The original wording, kept so an older chat can be continued in
+                the voice it was written in. These sit earlier in the prompt
+                than the current versions, so they carry less weight.
+              </p>
+              <div className="space-y-2">
+                {LEGACY_PLUGINS.map((p) => renderCard(p, false))}
               </div>
             </div>
           </div>
