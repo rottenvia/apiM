@@ -261,7 +261,7 @@ export function WorkspaceSidePanel({
             history.map((snapshot) => (
               <div
                 key={snapshot.id}
-                className="group rounded-lg px-2 py-1.5 -mx-2 transition-colors hover:bg-bg-hover"
+                className="list-row group"
               >
                 <p
                   className="truncate text-[11.5px] text-text-secondary"
@@ -305,7 +305,7 @@ export function WorkspaceSidePanel({
               key={file.path}
               onClick={() => onOpenFile(file.path)}
               title={file.path}
-              className={`group flex w-full items-center gap-2 rounded-lg px-2 py-1.5 -mx-2 text-left transition-colors hover:bg-bg-hover ${
+              className={`list-row group flex w-full items-center gap-2 text-left ${
                 seen.has(file.path) ? "" : "animate-file-in"
               }`}
             >
