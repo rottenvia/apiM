@@ -1,6 +1,15 @@
 import { diffLines, diffStats, diffHunks } from "@/lib/diff";
 import { describeImage } from "@/lib/vision";
 import {
+  startProcess,
+  stopProcess,
+  stopAll,
+  getProcess,
+  listProcesses,
+  describeProcess,
+  isRunning,
+} from "@/lib/processes";
+import {
   deleteFile,
   editFile,
   listFiles,
@@ -237,6 +246,82 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "start_process",
+      description:
+        "Start something that keeps running — a dev server, a watcher, a bot. " +
+        "Use this instead of run_command for anything that does not exit on " +
+        "its own, because run_command waits for the process to finish and " +
+        "will kill it. Returns immediately with an id and the first few " +
+        "seconds of output, so you can tell whether it actually started. " +
+        "Read its output later with read_process, and stop it with " +
+        "stop_process.",
+      parameters: {
+        type: "object",
+        properties: {
+          command: {
+            type: "string",
+            description: 'Program to run, e.g. "npm", "python3", "node".',
+          },
+          args: {
+            type: "array",
+            items: { type: "string" },
+            description: 'Arguments as separate items, e.g. ["run", "dev"].',
+          },
+          reason: {
+            type: "string",
+            description: "One short line explaining why, shown to the user.",
+          },
+        },
+        required: ["command", "args"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "read_process",
+      description:
+        "Read the output a background process has produced so far, and " +
+        "whether it is still running. Use this after start_process to check " +
+        "for startup errors, and after making a change to see what a watcher " +
+        "reported.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: {
+            type: "string",
+            description:
+              "Process id from start_process. Omit to list every process " +
+              "in this workspace.",
+          },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "stop_process",
+      description:
+        "Stop a background process. Always stop anything you started once " +
+        "you are finished with it, so it does not keep running and holding " +
+        "a port.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: {
+            type: "string",
+            description: 'Process id, or "all" to stop everything.',
+          },
+        },
+        required: ["id"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "delete_file",
       description:
         "Delete a file from the workspace. Only use when the user explicitly asks for it.",
@@ -400,6 +485,123 @@ export async function runTool(
           summary: `${result.hits.length} match${
             result.hits.length === 1 ? "" : "es"
           }`,
+        };
+      }
+
+      case "start_process": {
+        const result = await startProcess(
+          workspaceId,
+          str(args, "command"),
+          Array.isArray(args.args) ? args.args.map((a) => String(a)) : []
+        );
+
+        if (!result.ok) {
+          return {
+            ok: false,
+            content: `Error: ${result.reason}`,
+            summary: "Could not start process",
+          };
+        }
+
+        const { process: proc, diedImmediately } = result;
+        const log = proc.log.trim();
+
+        if (diedImmediately) {
+          // Reported as a failure on purpose: "started successfully" for
+          // something already dead would send the model off building on a
+          // false premise.
+          return {
+            ok: false,
+            content:
+              `${proc.display} exited immediately (code ${proc.exitCode ?? "unknown"}).\n\n` +
+              `${log || "(no output)"}\n\n` +
+              `Fix the cause before trying again.`,
+            summary: `Failed to start: ${proc.display}`,
+          };
+        }
+
+        return {
+          ok: true,
+          content:
+            `Started ${proc.display} — id ${proc.id}, still running.\n\n` +
+            `${log || "(no output yet)"}\n\n` +
+            `Read more with read_process, and stop it with stop_process when done.`,
+          summary: `Started ${proc.display}`,
+        };
+      }
+
+      case "read_process": {
+        const id = typeof args.id === "string" ? args.id.trim() : "";
+
+        if (!id) {
+          const all = listProcesses(workspaceId);
+          if (all.length === 0) {
+            return {
+              ok: true,
+              content: "No background processes in this workspace.",
+              summary: "No processes",
+            };
+          }
+          return {
+            ok: true,
+            content: all.map(describeProcess).join("\n"),
+            summary: `${all.length} process${all.length === 1 ? "" : "es"}`,
+          };
+        }
+
+        const proc = getProcess(id);
+        // Scoped to the workspace, so one chat cannot read another's output.
+        if (!proc || proc.workspaceId !== workspaceId) {
+          return {
+            ok: false,
+            content: `No process with id "${id}" in this workspace.`,
+            summary: "Unknown process",
+          };
+        }
+
+        const note = proc.truncated
+          ? "\n\n[earlier output dropped — only the most recent is kept]"
+          : "";
+
+        return {
+          ok: true,
+          content:
+            `${describeProcess(proc)}\n\n${proc.log.trim() || "(no output)"}${note}`,
+          summary: isRunning(proc)
+            ? `Read ${proc.display}`
+            : `${proc.display} has stopped`,
+        };
+      }
+
+      case "stop_process": {
+        const id = str(args, "id").trim();
+
+        if (id === "all") {
+          const stopped = stopAll(workspaceId);
+          return {
+            ok: true,
+            content:
+              stopped === 0
+                ? "Nothing was running."
+                : `Stopped ${stopped} process${stopped === 1 ? "" : "es"}.`,
+            summary: `Stopped ${stopped}`,
+          };
+        }
+
+        const proc = getProcess(id);
+        if (!proc || proc.workspaceId !== workspaceId) {
+          return {
+            ok: false,
+            content: `No process with id "${id}" in this workspace.`,
+            summary: "Unknown process",
+          };
+        }
+
+        stopProcess(id);
+        return {
+          ok: true,
+          content: `Stopped ${proc.display}.`,
+          summary: `Stopped ${proc.display}`,
         };
       }
 

@@ -22,6 +22,7 @@ import { SearchModeSelector } from "@/components/SearchModeSelector";
 import { WorkspaceToggle } from "@/components/WorkspaceToggle";
 import { WorkspaceBar } from "@/components/WorkspaceBar";
 import { WorkspaceDock } from "@/components/WorkspaceDock";
+import { ProcessDock } from "@/components/ProcessDock";
 import type { WorkspaceFileInfo } from "@/components/WorkspaceBar";
 import type { Message, StatusStage } from "@/app/page";
 
@@ -63,6 +64,9 @@ interface ChatAreaProps {
   /** Opens the file panel, optionally jumping straight to one file. */
   onOpenWorkspace: (path?: string) => void;
   onDecideCommand: (id: string, approved: boolean, remember: boolean) => void;
+  /** Current workspace id, for the background-process dock. */
+  workspaceId: string | null;
+  onProcessesChanged?: () => void;
 }
 
 export function ChatArea({
@@ -95,6 +99,8 @@ export function ChatArea({
   onSetWorkspaceEnabled,
   onOpenWorkspace,
   onDecideCommand,
+  workspaceId,
+  onProcessesChanged,
 }: ChatAreaProps) {
   const [input, setInput] = useState("");
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -490,6 +496,11 @@ export function ChatArea({
         </div>
 
         <div className="flex items-center gap-1.5">
+          <ProcessDock
+            workspaceId={workspaceEnabled ? workspaceId : null}
+            onChanged={onProcessesChanged}
+          />
+
           <WorkspaceDock
             enabled={workspaceEnabled}
             files={workspaceFiles}

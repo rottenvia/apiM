@@ -1195,6 +1195,8 @@ export default function Home() {
         onSetWorkspaceEnabled={setWorkspaceEnabled}
         onOpenWorkspace={openWorkspace}
         onDecideCommand={decideCommand}
+        workspaceId={currentConvId}
+        onProcessesChanged={() => void refreshWorkspaceFiles()}
       />
 
       {/* Modals */}
