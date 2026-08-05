@@ -182,6 +182,8 @@ export default function Home() {
   // Workspace. The id follows the conversation so each chat gets its own
   // folder; `pendingWorkspaceId` covers a brand-new chat that has no id yet.
   const [workspaceEnabled, setWorkspaceEnabled] = useState(false);
+  /** When on, commands run without asking. Off by default, deliberately. */
+  const [autoRunCommands, setAutoRunCommands] = useState(false);
   const [showWorkspace, setShowWorkspace] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [renameError, setRenameError] = useState<string | null>(null);
@@ -241,6 +243,9 @@ export default function Home() {
             if (s.enabledPlugins) setEnabledPlugins(s.enabledPlugins);
             if (s.webSearchMode) setWebSearchMode(s.webSearchMode);
             if (s.workspaceEnabled) setWorkspaceEnabled(true);
+            // Only a literal true switches this on, so a corrupted or
+            // half-written settings blob can never silently enable it.
+            if (s.autoRunCommands === true) setAutoRunCommands(true);
             // Clamped on read as well as write: a hand-edited or older
             // localStorage value must not produce an un-closable dialog.
             if (s.deleteDelay !== undefined) {
@@ -270,6 +275,7 @@ export default function Home() {
           enabledPlugins,
           webSearchMode,
           workspaceEnabled,
+          autoRunCommands,
           deleteDelay,
         })
       );
@@ -284,6 +290,7 @@ export default function Home() {
     enabledPlugins,
     webSearchMode,
     workspaceEnabled,
+    autoRunCommands,
     deleteDelay,
   ]);
 
@@ -672,6 +679,7 @@ export default function Home() {
             conversationHistory: historyForApi,
             regenerateFromId,
             workspaceEnabled,
+            autoRunCommands,
             // A new chat has no id yet; the server falls back to the
             // conversation id it creates, which is what we adopt below.
             workspaceId: currentConvId ?? undefined,
@@ -943,6 +951,7 @@ export default function Home() {
       messages,
       refreshConversations,
       workspaceEnabled,
+      autoRunCommands,
       refreshWorkspaceFiles,
     ]
   );
@@ -1145,6 +1154,8 @@ export default function Home() {
           onDefaultEffortChange={setThinkingEffort}
           deleteDelay={deleteDelay}
           onDeleteDelayChange={setDeleteDelay}
+          autoRunCommands={autoRunCommands}
+          onAutoRunCommandsChange={setAutoRunCommands}
           onClose={() => setShowSettings(false)}
         />
       )}

@@ -108,5 +108,18 @@ const res7 = await R.runCommand(WS, "python3", ["where.py"]);
 check("the working directory is the workspace",
   res7.stdout.trim().includes(WS), res7.stdout.trim());
 
+console.log("\n11. The auto-run setting defaults to asking");
+// A request that omits the field must not run commands unattended — the
+// dangerous mode has to be opted into, never inherited or assumed.
+const routeSrc = await readFile(path.join(ROOT, "src/app/api/chat/route.ts"), "utf8");
+check("autoRunCommands defaults to false in the route",
+  /autoRunCommands\s*=\s*false/.test(routeSrc));
+check("approval is skipped only when it is explicitly true",
+  /autoRunCommands\s*\|\|\s*\n?\s*isRemembered/.test(routeSrc));
+
+const pageSrc = await readFile(path.join(ROOT, "src/app/page.tsx"), "utf8");
+check("the client only enables it on a literal true",
+  /s\.autoRunCommands === true/.test(pageSrc));
+
 console.log("\n" + (fail === 0 ? g(`All ${pass} checks passed.`) : r(`${fail} of ${pass + fail} failed.`)) + "\n");
 process.exit(fail === 0 ? 0 : 1);

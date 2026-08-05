@@ -101,6 +101,8 @@ interface ChatRequestBody {
   workspaceEnabled?: boolean;
   /** Which workspace the tools operate on. Defaults to the conversation id. */
   workspaceId?: string;
+  /** Skip the per-command approval prompt. Off unless explicitly enabled. */
+  autoRunCommands?: boolean;
 }
 
 /** One frame of our own SSE protocol (deliberately simpler than DeepSeek's). */
@@ -185,6 +187,9 @@ export async function POST(req: NextRequest) {
     attachments,
     workspaceEnabled = false,
     workspaceId,
+    // Defaults to false, so a request that omits it asks rather than runs.
+    // The dangerous setting has to be opted into explicitly, never inherited.
+    autoRunCommands = false,
   } = body;
 
   if (!message || !deepseekApiKey) {
@@ -737,11 +742,9 @@ export async function POST(req: NextRequest) {
                     ? args.reason.trim()
                     : "";
 
-                const preApproved = isRemembered(
-                  workspace,
-                  check.command,
-                  check.args
-                );
+                const preApproved =
+                  autoRunCommands ||
+                  isRemembered(workspace, check.command, check.args);
 
                 let approved = true;
                 let declineReason = "";
