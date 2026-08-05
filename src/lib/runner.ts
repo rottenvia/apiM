@@ -184,6 +184,195 @@ function clip(text: string): { text: string; truncated: boolean } {
 }
 
 /**
+ * Where packages go.
+ *
+ * Installing into the system interpreter would put the model's dependencies
+ * on the user's machine permanently, which is exactly what "it only touches
+ * the workspace" is supposed to rule out. Pointing the tool caches inside the
+ * workspace keeps an install local to the project that asked for it, so
+ * deleting the workspace really does undo it.
+ */
+export const PACKAGE_DIR = ".packages";
+
+/**
+ * The environment a spawned command sees.
+ *
+ * Deliberately small — passing the real environment would hand every API key
+ * in .env to anything the model runs. But it was previously *too* small:
+ * HOME, TEMP and TMP all pointed at the workspace while the variables Windows
+ * actually uses were absent, so pip could not find a cache, a config, or a
+ * writable temp directory, and Python could not load its socket and TLS DLLs
+ * without SYSTEMROOT. `pip install` failed for environment reasons that had
+ * nothing to do with the allow-list.
+ */
+function baseEnv(cwd: string): NodeJS.ProcessEnv {
+  const local = path.join(cwd, ...[PACKAGE_DIR]);
+
+  const env: Record<string, string> = {
+    PATH: process.env.PATH ?? "",
+    HOME: cwd,
+    TEMP: cwd,
+    TMP: cwd,
+
+    // Unbuffered, or a crashing script's output never arrives.
+    PYTHONUNBUFFERED: "1",
+    NO_COLOR: "1",
+    CI: "1",
+
+    // Install into the workspace rather than the system interpreter, and put
+    // them on the import path so the very next `python` run can use them.
+    PYTHONUSERBASE: local,
+    PYTHONPATH: local,
+    PIP_CACHE_DIR: path.join(local, "pip-cache"),
+    // Nothing here is a shell, so pip's "you should add this to PATH" notice
+    // is noise the model would otherwise try to act on.
+    PIP_DISABLE_PIP_VERSION_CHECK: "1",
+    PIP_NO_WARN_SCRIPT_LOCATION: "1",
+
+    // npm equivalents, so `npm install -g` is contained too.
+    npm_config_cache: path.join(local, "npm-cache"),
+    npm_config_prefix: local,
+  };
+
+  // Windows needs these or Python cannot load the DLLs behind socket and ssl,
+  // which is a network failure that looks like PyPI being unreachable.
+  for (const key of [
+    "SYSTEMROOT",
+    "SystemRoot",
+    "windir",
+    "COMSPEC",
+    "PATHEXT",
+    "SYSTEMDRIVE",
+    "PROCESSOR_ARCHITECTURE",
+    "NUMBER_OF_PROCESSORS",
+  ]) {
+    const value = process.env[key];
+    if (value) env[key] = value;
+  }
+
+  // Deliberately still absent: APPDATA, USERPROFILE and LOCALAPPDATA. Those
+  // point at the real user profile, and the whole aim is that an install
+  // lands in the workspace instead. PYTHONUSERBASE covers what pip needs.
+  return env as unknown as NodeJS.ProcessEnv;
+}
+
+/**
+ * The base environment, plus the workspace venv when one applies.
+ *
+ * Putting the venv's bin directory first on PATH and setting VIRTUAL_ENV is
+ * exactly what `activate` does, so pip installs into it and the next python
+ * run imports from it without the model needing to know it exists.
+ */
+function childEnv(cwd: string, venvPath: string | null): NodeJS.ProcessEnv {
+  const env = baseEnv(cwd);
+  if (!venvPath) return env;
+
+  const sep = process.platform === "win32" ? ";" : ":";
+  return {
+    ...env,
+    VIRTUAL_ENV: path.dirname(venvPath),
+    PATH: `${venvPath}${sep}${env.PATH ?? ""}`,
+    // PYTHONPATH pointing at the user-base would shadow the venv's own
+    // site-packages and reintroduce the split it exists to avoid.
+    PYTHONPATH: undefined,
+    PYTHONUSERBASE: undefined,
+  } as unknown as NodeJS.ProcessEnv;
+}
+
+/** Interpreters whose packages belong in the workspace venv. */
+const PYTHON_COMMANDS = new Set(["python", "python3", "pip", "pip3", "pytest"]);
+
+/**
+ * Platform-specific location of the venv's executables.
+ *
+ * The path segments are joined from an array rather than passed as literals
+ * because Turbopack resolves a literal `path.join` at build time, records the
+ * directory as a dependency, and walks it. A virtualenv holds an absolute
+ * symlink to the system interpreter, which it reads as escaping the project
+ * root and panics on — so a build would fail purely because a package had
+ * been installed.
+ */
+function venvDir(cwd: string): string {
+  return path.join(cwd, ...[PACKAGE_DIR, "venv"]);
+}
+
+function venvBin(cwd: string): string {
+  return path.join(
+    venvDir(cwd),
+    ...[process.platform === "win32" ? "Scripts" : "bin"]
+  );
+}
+
+/**
+ * Ensure a virtualenv exists for this workspace, and return its bin directory.
+ *
+ * Since PEP 668, Debian, Ubuntu, Fedora and Homebrew Python all refuse a
+ * plain `pip install` with "externally-managed-environment" — they will not
+ * let anything write into the interpreter the OS depends on. The usual
+ * workaround, --break-system-packages, does exactly what its name says and
+ * installs system-wide, which is the opposite of keeping the agent inside the
+ * workspace.
+ *
+ * A venv in the workspace solves both at once: pip is satisfied, and the
+ * packages live in a folder that disappears with the workspace. Created on
+ * first use rather than up front, so a workspace that never installs anything
+ * never pays for it.
+ *
+ * Returns null when a venv cannot be made, in which case the command runs
+ * against the system interpreter exactly as before.
+ */
+async function ensureVenv(cwd: string): Promise<string | null> {
+  const bin = venvBin(cwd);
+  const marker = path.join(
+    bin,
+    ...[process.platform === "win32" ? "python.exe" : "python"]
+  );
+
+  try {
+    await fs.access(marker);
+    return bin;
+  } catch {
+    /* not created yet */
+  }
+
+  const created = await new Promise<boolean>((resolve) => {
+    const child = spawn(
+      process.platform === "win32" ? "python" : "python3",
+      ["-m", "venv", venvDir(cwd)],
+      {
+        cwd,
+        shell: false,
+        windowsHide: true,
+        stdio: "ignore",
+        env: baseEnv(cwd),
+      }
+    );
+    // Creating a venv copies the interpreter, so allow more than a trivial
+    // command but far less than an install.
+    const timer = setTimeout(() => {
+      child.kill();
+      resolve(false);
+    }, 120_000);
+    child.on("error", () => {
+      clearTimeout(timer);
+      resolve(false);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve(code === 0);
+    });
+  });
+
+  if (!created) return null;
+  try {
+    await fs.access(marker);
+    return bin;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Actually runs it.
  *
  * `shell: false` is the important line — arguments are handed to the OS as a
@@ -201,28 +390,39 @@ export async function runCommand(
   const cwd = workspaceDirectory(workspaceId);
   await fs.mkdir(cwd, { recursive: true });
 
+  // Python work runs inside a workspace-local virtualenv. Created on first
+  // use; if it cannot be created we fall through to the system interpreter
+  // rather than failing the command outright.
+  const venvPath = PYTHON_COMMANDS.has(check.command)
+    ? await ensureVenv(cwd)
+    : null;
+
+  // Spawn the venv's own executable. Relying on PATH alone is not enough on
+  // Windows, where a bare "python" can still resolve elsewhere.
+  const executable = venvPath
+    ? path.join(
+        venvPath,
+        ...[process.platform === "win32" ? `${check.command}.exe` : check.command]
+      )
+    : check.command;
+  const resolved = venvPath
+    ? await fs
+        .access(executable)
+        .then(() => executable)
+        .catch(() => check.command)
+    : check.command;
+
   const started = Date.now();
 
   return new Promise<RunResult>((resolve) => {
     // The env is cast because Next augments ProcessEnv with required keys,
     // and passing a deliberately minimal environment is the point here.
-    const child = spawn(check.command, check.args, {
+    const child = spawn(resolved, check.args, {
       cwd,
       shell: false,
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
-      env: {
-        // A deliberately small environment. Passing the real one leaks API
-        // keys and tokens into any process the model runs.
-        PATH: process.env.PATH ?? "",
-        HOME: cwd,
-        TEMP: cwd,
-        TMP: cwd,
-        // Unbuffered, or a crashing script's output never arrives.
-        PYTHONUNBUFFERED: "1",
-        NO_COLOR: "1",
-        CI: "1",
-      } as unknown as NodeJS.ProcessEnv,
+      env: childEnv(cwd, venvPath),
     });
 
     const limitMs = timeoutFor(check.command, check.args);

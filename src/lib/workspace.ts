@@ -10,7 +10,20 @@ import path from "node:path";
  * a hallucinated "../../.ssh/id_rsa" must fail rather than succeed.
  */
 
-const ROOT = path.resolve(process.cwd(), "data", "workspaces");
+/**
+ * Root of all workspaces.
+ *
+ * Assembled from parts rather than written as one literal on purpose.
+ * Turbopack statically analyses `path.resolve(process.cwd(), "data", ...)`,
+ * treats the result as a directory the module depends on, and walks it at
+ * build time. A Python virtualenv contains an absolute symlink to the system
+ * interpreter, which the bundler reads as pointing outside the project root
+ * and panics on — so `npm run build` would fail purely because the user had
+ * installed a package. Keeping the path out of reach of static analysis stops
+ * it being traced at all.
+ */
+const DATA_DIR = ["data", "workspaces"].join(path.sep);
+const ROOT = path.resolve(process.cwd(), DATA_DIR);
 
 export const MAX_FILE_BYTES = 2 * 1024 * 1024;
 export const MAX_FILES_PER_WORKSPACE = 500;
@@ -186,9 +199,20 @@ async function ensureRoot(workspaceId: string): Promise<string> {
  */
 export const INTERNAL_DIRS = [".history", ".snapshots"] as const;
 
+/**
+ * Where `pip install` and `npm install` put things.
+ *
+ * Hidden for the same reason as node_modules: a few thousand vendored files
+ * would swamp the file tree and crowd out the code the user actually wrote.
+ * Not in INTERNAL_DIRS because it never existed as a sibling folder, so
+ * there is nothing to migrate.
+ */
+const PACKAGE_DIR = ".packages";
+
 /** Directories never worth showing the model. */
 const IGNORED = new Set([
   ...INTERNAL_DIRS,
+  PACKAGE_DIR,
   "node_modules",
   ".git",
   ".next",
