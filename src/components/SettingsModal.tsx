@@ -23,6 +23,8 @@ interface SettingsModalProps {
   onDefaultEffortChange: (effort: string) => void;
   deleteDelay: number;
   onDeleteDelayChange: (seconds: number) => void;
+  autoRunCommands: boolean;
+  onAutoRunCommandsChange: (enabled: boolean) => void;
   onClose: () => void;
 }
 
@@ -41,6 +43,8 @@ export function SettingsModal({
   onDefaultEffortChange,
   deleteDelay,
   onDeleteDelayChange,
+  autoRunCommands,
+  onAutoRunCommandsChange,
   onClose,
 }: SettingsModalProps) {
   const [showDsKey, setShowDsKey] = useState(false);
@@ -327,6 +331,99 @@ export function SettingsModal({
                 </button>
               ))}
             </div>
+          </div>
+
+          {/* Command approval */}
+          <div>
+            <label className="block text-sm font-semibold text-text-primary mb-2">
+              Running commands
+            </label>
+            <p className="mb-2.5 text-[12px] leading-relaxed text-text-secondary">
+              When the assistant writes code, it can run it to check whether it
+              works — and fix its own mistakes from the error.
+            </p>
+
+            <div className="flex flex-col gap-1.5">
+              <button
+                onClick={() => onAutoRunCommandsChange(false)}
+                className="option-item"
+                data-active={!autoRunCommands}
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <span
+                      className={`text-[13px] font-medium leading-5 ${
+                        !autoRunCommands ? "text-accent-light" : "text-text-primary"
+                      }`}
+                    >
+                      Ask me first
+                    </span>
+                    {!autoRunCommands && (
+                      <span className="text-[11px] text-accent-light">
+                        Recommended
+                      </span>
+                    )}
+                  </div>
+                  <p className="mt-0.5 text-[11px] leading-4 text-text-muted">
+                    You see each command and click Run or Skip before anything
+                    happens.
+                  </p>
+                </div>
+              </button>
+
+              <button
+                onClick={() => onAutoRunCommandsChange(true)}
+                className="option-item"
+                data-active={autoRunCommands}
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <span
+                      className={`text-[13px] font-medium leading-5 ${
+                        autoRunCommands ? "text-accent-light" : "text-text-primary"
+                      }`}
+                    >
+                      Run automatically
+                    </span>
+                  </div>
+                  <p className="mt-0.5 text-[11px] leading-4 text-text-muted">
+                    Faster, and closer to how Arena feels. Nothing pauses to
+                    ask.
+                  </p>
+                </div>
+              </button>
+            </div>
+
+            {/* Shown only when it's on: a warning nobody has agreed to yet is
+                just noise, but one describing your current state is not. */}
+            {autoRunCommands && (
+              <div className="mt-2.5 flex items-start gap-2 rounded-xl border border-[#cfa25a]/30 bg-[#cfa25a]/[0.07] px-3 py-2.5">
+                <span className="mt-0.5 flex-none text-[#cfa25a]">
+                  <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth={1.8}
+                    aria-hidden="true"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"
+                    />
+                  </svg>
+                </span>
+                <p className="text-[11.5px] leading-4 text-text-secondary">
+                  Code the assistant writes will run on this computer without
+                  asking. It can only start real interpreters, never a shell,
+                  and each command is stopped after 30 seconds — but a program
+                  it runs has the same access to your files that you do. Keep a
+                  restore point.
+                </p>
+              </div>
+            )}
           </div>
 
           {/* Delete confirmation delay */}
