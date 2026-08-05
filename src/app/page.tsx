@@ -48,6 +48,10 @@ export interface Message {
   /** How many search rounds ran, and why the loop stopped. */
   searchRounds?: number;
   searchStopReason?: string;
+  /** Searches answered from cache, which cost nothing. */
+  searchCacheHits?: number;
+  /** Estimated search spend for this reply, in USD. */
+  searchUsd?: number;
   /**
    * Previous versions of this reply, kept when a message is edited or
    * regenerated so the two can be compared side by side.
@@ -118,6 +122,8 @@ type StreamEvent =
       searchResults: { title: string; url: string; domain: string }[] | null;
       searchQueries: string[] | null;
       searchesPerformed: number;
+      searchCacheHits: number;
+      searchUsd: number;
     }
   | { type: "reasoning"; delta: string }
   | { type: "tool_start"; id: string; name: string; args: string }
@@ -200,6 +206,10 @@ export default function Home() {
   const [workspaceEnabled, setWorkspaceEnabled] = useState(false);
   /** When on, commands run without asking. Off by default, deliberately. */
   const [autoRunCommands, setAutoRunCommands] = useState(false);
+  // Defaults to the balanced profile: the opening round skims and only the
+  // gap the sufficiency check finds is worth a full-page read. "quality"
+  // reproduces the original always-deep behaviour if this ever reads thin.
+  const [searchProfile, setSearchProfile] = useState("balanced");
   const [showWorkspace, setShowWorkspace] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [renameError, setRenameError] = useState<string | null>(null);
@@ -264,6 +274,9 @@ export default function Home() {
             // Only a literal true switches this on, so a corrupted or
             // half-written settings blob can never silently enable it.
             if (s.autoRunCommands === true) setAutoRunCommands(true);
+            if (typeof s.searchProfile === "string") {
+              setSearchProfile(s.searchProfile);
+            }
             if (s.sidePanelOpen === false) setSidePanelOpen(false);
             // Clamped on read as well as write: a hand-edited or older
             // localStorage value must not produce an un-closable dialog.
@@ -295,6 +308,7 @@ export default function Home() {
           webSearchMode,
           workspaceEnabled,
           autoRunCommands,
+          searchProfile,
           sidePanelOpen,
           deleteDelay,
         })
@@ -311,6 +325,7 @@ export default function Home() {
     webSearchMode,
     workspaceEnabled,
     autoRunCommands,
+    searchProfile,
     sidePanelOpen,
     deleteDelay,
   ]);
@@ -764,6 +779,7 @@ export default function Home() {
             regenerateFromId,
             workspaceEnabled,
             autoRunCommands,
+            searchProfile,
             // Lets the agent look at images saved in the workspace, not just
             // ones attached to a message.
             visionApiKey: visionKey || undefined,
@@ -841,6 +857,8 @@ export default function Home() {
                   searchResults: evt.searchResults,
                   searchQueries: evt.searchQueries ?? undefined,
                   searchesPerformed: evt.searchesPerformed,
+                  searchCacheHits: evt.searchCacheHits,
+                  searchUsd: evt.searchUsd,
                 };
                 if (!currentConvId && evt.conversationId) {
                   // Ref first: `finally` reads it to refresh the file count,
@@ -1094,6 +1112,7 @@ export default function Home() {
       refreshConversations,
       workspaceEnabled,
       autoRunCommands,
+      searchProfile,
       visionKey,
       visionModel,
       refreshWorkspaceFiles,
@@ -1318,6 +1337,8 @@ export default function Home() {
           onDeleteDelayChange={setDeleteDelay}
           autoRunCommands={autoRunCommands}
           onAutoRunCommandsChange={setAutoRunCommands}
+          searchProfile={searchProfile}
+          onSearchProfileChange={setSearchProfile}
           onClose={() => setShowSettings(false)}
         />
       )}

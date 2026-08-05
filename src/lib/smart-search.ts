@@ -15,6 +15,20 @@ const DEEPSEEK_BASE_URL =
 const TAVILY_BASE_URL =
   process.env.TAVILY_BASE_URL ?? "https://api.tavily.com";
 
+import type {
+  ProfileSettings,
+  SearchDepth,
+  SearchResultItem,
+} from "@/lib/search-types";
+import { profileSettings } from "@/lib/search-types";
+import { readCache, writeCache } from "@/lib/search-cache";
+import {
+  PROVIDERS,
+  recordCacheHit,
+  recordQuestion,
+  recordRequest,
+} from "@/lib/search-usage";
+
 /**
  * Combine an external abort signal with a per-request timeout, so a request
  * ends on whichever happens first. Previously only the timeout was honoured,
@@ -27,15 +41,7 @@ function withTimeout(signal: AbortSignal | undefined, ms: number): AbortSignal {
   return AbortSignal.any([signal, timeout]);
 }
 
-export interface SearchResultItem {
-  title: string;
-  url: string;
-  content: string;
-  score: number;
-  domain: string;
-  /** Publication date, when Tavily supplies one. */
-  publishedDate?: string;
-}
+export type { SearchResultItem } from "@/lib/search-types";
 
 export interface SmartSearchContext {
   results: SearchResultItem[];
@@ -47,6 +53,10 @@ export interface SmartSearchContext {
   rounds: number;
   /** Why the loop stopped, surfaced in the UI. */
   stopReason: string;
+  /** Requests answered from cache, which cost nothing. */
+  cacheHits: number;
+  /** Estimated spend for this question, in USD. */
+  estimatedUsd: number;
 }
 
 /**
@@ -361,14 +371,46 @@ async function tavilySearch(
     timeRange?: string;
     includeDomains?: string[];
     signal?: AbortSignal;
+    depth?: SearchDepth;
+    /** Reuse a stored result for this query when one is fresh enough. */
+    useCache?: boolean;
+    /** Counts cache hits back to the caller. */
+    onCacheHit?: () => void;
   } = {}
 ): Promise<Omit<SearchResultItem, "domain">[]> {
-  const { maxResults = 5, timeRange, includeDomains, signal } = options;
+  const {
+    maxResults = 10,
+    timeRange,
+    includeDomains,
+    signal,
+    depth = "advanced",
+    useCache = true,
+    onCacheHit,
+  } = options;
+
+  // Time-ranged queries are asking for what changed recently, so a day-old
+  // answer is exactly the wrong thing to hand back.
+  const cacheable = useCache && !timeRange;
+  const cacheKey = {
+    query,
+    provider: "tavily",
+    depth,
+    maxResults,
+  };
+
+  if (cacheable) {
+    const hit = await readCache(cacheKey);
+    if (hit) {
+      onCacheHit?.();
+      void recordCacheHit("tavily");
+      return hit;
+    }
+  }
 
   try {
     const body: Record<string, unknown> = {
       query,
-      search_depth: "advanced",
+      search_depth: depth,
       max_results: maxResults,
       include_answer: true,
       chunks_per_source: 3,
@@ -394,9 +436,14 @@ async function tavilySearch(
       signal: withTimeout(signal, 45_000),
     });
 
+    // Billed on send, not on success: a request that returns an error status
+    // has still been counted by the provider in most cases, and undercounting
+    // is the failure mode that leads to a surprise quota error.
+    void recordRequest("tavily", depth);
+
     if (response.ok) {
       const data = await response.json();
-      return (data?.results ?? []).map((r: Record<string, unknown>) => {
+      const mapped = (data?.results ?? []).map((r: Record<string, unknown>) => {
         const snippet = String(r.content ?? "");
         const full = String(r.raw_content ?? "");
         // Prefer the full page, but fall back to the snippet when extraction
@@ -412,6 +459,9 @@ async function tavilySearch(
             : undefined,
         };
       });
+
+      if (cacheable) await writeCache(cacheKey, mapped);
+      return mapped;
     }
   } catch (error) {
     // AbortError just means the user pressed Stop.
@@ -518,8 +568,10 @@ export async function smartSearch(
   context: string,
   deepseekKey: string,
   tavilyKey: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  profileName?: string
 ): Promise<SmartSearchContext> {
+  const profile: ProfileSettings = profileSettings(profileName);
   const plan = await generateSearchQueries(message, context, deepseekKey, signal);
 
   const seenUrls = new Set<string>();
@@ -527,8 +579,13 @@ export async function smartSearch(
   const collected: SearchResultItem[] = [];
   const allQueries: string[] = [];
   let searchesPerformed = 0;
+  let cacheHits = 0;
+  let billedBasic = 0;
+  let billedAdvanced = 0;
   let rounds = 0;
   let stopReason = "";
+
+  void recordQuestion();
 
   // Rank trusted sources above general ones. Tavily's score reflects textual
   // relevance only, so an SEO blog can outrank official documentation.
@@ -541,6 +598,7 @@ export async function smartSearch(
 
   const runQueries = async (
     queries: string[],
+    depth: SearchDepth,
     timeRange?: string,
     includeDomains?: string[]
   ) => {
@@ -553,9 +611,25 @@ export async function smartSearch(
     allQueries.push(...fresh);
 
     const settled = await Promise.all(
-      fresh.map((query) =>
-        tavilySearch(query, tavilyKey, { timeRange, includeDomains, signal })
-      )
+      fresh.map((query) => {
+        let hit = false;
+        return tavilySearch(query, tavilyKey, {
+          timeRange,
+          includeDomains,
+          signal,
+          depth,
+          maxResults: profile.resultsPerQuery,
+          useCache: profile.useCache,
+          onCacheHit: () => {
+            hit = true;
+          },
+        }).then((results) => {
+          if (hit) cacheHits += 1;
+          else if (depth === "advanced") billedAdvanced += 1;
+          else billedBasic += 1;
+          return results;
+        });
+      })
     );
 
     for (const results of settled) {
@@ -569,9 +643,17 @@ export async function smartSearch(
     }
   };
 
-  // Round 1 — the planned queries.
+  // Round 1 — the planned queries, cast wide and shallow. The sufficiency
+  // check below decides whether anything here is worth a deeper read, so
+  // paying deep-parse prices up front only helps the questions that would
+  // have settled either way.
   rounds += 1;
-  await runQueries(plan.queries.slice(0, 4), plan.timeRange, plan.includeDomains);
+  await runQueries(
+    plan.queries.slice(0, profile.firstRoundQueries),
+    profile.firstRoundDepth,
+    plan.timeRange,
+    plan.includeDomains
+  );
 
   // Escalate only while something concrete is still missing. Most questions
   // stop here; the cap exists so a stuck judge cannot loop forever.
@@ -601,10 +683,13 @@ export async function smartSearch(
       signal
     );
 
+    // The judge found a concrete gap, so this round is the one that earns a
+    // deeper read: the answer is somewhere past a snippet boundary.
     const before = collected.length;
     rounds += 1;
     await runQueries(
-      followUp.queries.slice(0, 3),
+      followUp.queries.slice(0, profile.followUpQueries),
+      profile.followUpDepth,
       followUp.timeRange ?? plan.timeRange,
       followUp.includeDomains
     );
@@ -632,6 +717,9 @@ export async function smartSearch(
     })
     .join("\n");
 
+  const rate = PROVIDERS.tavily.costPerRequest;
+  const estimatedUsd = billedBasic * rate + billedAdvanced * rate * 2;
+
   return {
     results: topResults,
     queries: allQueries,
@@ -640,5 +728,7 @@ export async function smartSearch(
     sourcesUsed: topResults.length,
     rounds,
     stopReason,
+    cacheHits,
+    estimatedUsd,
   };
 }

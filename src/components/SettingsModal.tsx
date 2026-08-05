@@ -7,6 +7,7 @@ import {
   MIN_DELETE_DELAY,
   MAX_DELETE_DELAY,
 } from "@/components/DeleteChatDialog";
+import { SearchBudget } from "@/components/SearchBudget";
 
 interface SettingsModalProps {
   deepseekKey: string;
@@ -25,6 +26,8 @@ interface SettingsModalProps {
   onDeleteDelayChange: (seconds: number) => void;
   autoRunCommands: boolean;
   onAutoRunCommandsChange: (enabled: boolean) => void;
+  searchProfile: string;
+  onSearchProfileChange: (profile: string) => void;
   onClose: () => void;
 }
 
@@ -45,6 +48,8 @@ export function SettingsModal({
   onDeleteDelayChange,
   autoRunCommands,
   onAutoRunCommandsChange,
+  searchProfile,
+  onSearchProfileChange,
   onClose,
 }: SettingsModalProps) {
   const [showDsKey, setShowDsKey] = useState(false);
@@ -332,6 +337,12 @@ export function SettingsModal({
               ))}
             </div>
           </div>
+
+          {/* Search cost */}
+          <SearchBudget
+            searchProfile={searchProfile}
+            onSearchProfileChange={onSearchProfileChange}
+          />
 
           {/* Command approval */}
           <div>

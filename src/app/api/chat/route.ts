@@ -105,6 +105,11 @@ interface ChatRequestBody {
   workspaceId?: string;
   /** Skip the per-command approval prompt. Off unless explicitly enabled. */
   autoRunCommands?: boolean;
+  /**
+   * How aggressively to spend on search: "quality" | "balanced" | "cheap".
+   * Omitted requests get the default profile.
+   */
+  searchProfile?: string;
   /** Vision provider key, so the agent can look at images in the workspace. */
   visionApiKey?: string;
   visionModel?: string;
@@ -129,6 +134,10 @@ type StreamEvent =
       searchResults: { title: string; url: string; domain: string }[] | null;
       searchQueries: string[] | null;
       searchesPerformed: number;
+      /** Queries answered from cache, which cost nothing. */
+      searchCacheHits: number;
+      /** Estimated search spend for this turn, in USD. */
+      searchUsd: number;
     }
   | { type: "reasoning"; delta: string }
   | { type: "tool_start"; id: string; name: string; args: string }
@@ -206,6 +215,7 @@ export async function POST(req: NextRequest) {
     autoRunCommands = false,
     visionApiKey,
     visionModel,
+    searchProfile,
   } = body;
 
   if (!message || !deepseekApiKey) {
@@ -363,7 +373,8 @@ export async function POST(req: NextRequest) {
               recentContext,
               deepseekApiKey,
               tavilyApiKey as string,
-              req.signal
+              req.signal,
+              searchProfile
             );
           } catch (searchError) {
             // A failed search shouldn't kill the answer — carry on without it.
@@ -400,6 +411,8 @@ export async function POST(req: NextRequest) {
             })) ?? null,
           searchQueries: searchContext?.queries ?? null,
           searchesPerformed: searchContext?.searchesPerformed ?? 0,
+          searchCacheHits: searchContext?.cacheHits ?? 0,
+          searchUsd: searchContext?.estimatedUsd ?? 0,
         });
 
         // ---------------- Build the request ----------------
