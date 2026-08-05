@@ -135,3 +135,74 @@ that retries the next one on a quota error.
 **Do not build:** a self-hosted index. SearXNG gets fingerprinted and blocked
 by Google within a handful of queries, and a real index is a datacentre
 problem, not a weekend one.
+
+---
+
+# Resilience and context (added later)
+
+## Retry
+
+`src/lib/retry.ts`. Wraps the DeepSeek call in the agent loop.
+
+Before, any failure ended the run:
+
+```
+send({ type: "error", ... }); close(); return;
+```
+
+One dropped connection on round thirty-two of a forty-round task discarded
+everything, including the tokens already paid for on the previous
+thirty-one rounds.
+
+Now: 3 attempts, exponential backoff from 700ms capped at 8s, with jitter.
+
+- **Retried:** 408, 409, 425, 429, all 5xx, dropped connections, timeouts
+- **Not retried:** 400, 401, 402, 403, 404, 422 — a rejected key or an empty
+  balance fails identically every time, so retrying only delays an error the
+  user needs to see
+- `Retry-After` is honoured when the server sends one; ignoring it tends to
+  earn a longer ban
+- Pressing Stop aborts the backoff immediately rather than waiting it out
+- Each retry emits a `retrying` event, shown under the loading dots — an
+  unexplained 8-second pause reads as a freeze
+
+## Pruning
+
+`src/lib/prune.ts`. Applied to the copy sent upstream only; the stored
+transcript keeps everything.
+
+Every round resends the whole conversation, so the full text of a file read on
+round three is paid for again on rounds four through forty. Once the model has
+acted on it, that text is dead weight — but the fact the read happened still
+matters.
+
+So old results are **collapsed, not dropped**:
+
+```
+[earlier read_file result, 240 lines / 8,120 chars, collapsed to save
+ context — def main(): ... . Call the tool again if you need the full output.]
+```
+
+- Last **12** results stay verbatim — the model is usually working with what
+  it just read
+- Only results over **400 chars** are collapsed; below that the placeholder is
+  bigger than the content
+- Nothing happens below **24,000 chars** total
+- Measured: **53% smaller** on a 30-round transcript
+
+### The trade-off
+
+If the model needs content from an old result it must re-read the file, which
+costs one extra round. That is the deal: rare re-reads in exchange for every
+long run being roughly half price.
+
+### Invariants
+
+All three produce a 400 from DeepSeek if broken, and all three are asserted in
+`npm run test:resilience`:
+
+- every `tool_call` keeps a matching `tool` reply, including parallel calls
+- `reasoning_content` stays verbatim on tool-calling assistant turns
+- the system prompt and the user's question are never touched
+
+Message count is unchanged — only the content of old tool replies shrinks.
