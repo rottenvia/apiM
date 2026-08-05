@@ -614,10 +614,32 @@ export default function Home() {
       // Drop errors and any reply that was cut short with no content: sending
       // a blank assistant turn makes the model continue the abandoned answer
       // rather than respond to the new question.
+      // Tool calls were previously stripped here, so on the next message the
+      // model knew it had *said* "I created main.py" but not that it had done
+      // it — and would offer to create the file again. A short note of what
+      // each reply actually did is appended instead. Full tool calls can't be
+      // replayed: DeepSeek requires reasoning_content alongside them, and
+      // that isn't kept once a reply is finished.
       const historyForApi = sourceHistory
         .filter((m) => m.content.trim() && !m.isError)
         .slice(-20)
-        .map((m) => ({ role: m.role, content: m.content }));
+        .map((m) => {
+          const done = (m.toolEvents ?? [])
+            .filter((t) => t.ok && t.summary)
+            .map((t) => t.summary as string);
+
+          if (m.role !== "assistant" || done.length === 0) {
+            return { role: m.role, content: m.content };
+          }
+
+          // Deduplicated: reading the same file three times while working is
+          // normal and repeating it adds nothing.
+          const unique = [...new Set(done)];
+          return {
+            role: m.role,
+            content: `${m.content}\n\n[Actions taken: ${unique.join("; ")}]`,
+          };
+        });
 
       const controller = new AbortController();
       abortRef.current = controller;

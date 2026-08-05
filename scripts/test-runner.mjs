@@ -108,7 +108,19 @@ const res7 = await R.runCommand(WS, "python3", ["where.py"]);
 check("the working directory is the workspace",
   res7.stdout.trim().includes(WS), res7.stdout.trim());
 
-console.log("\n11. The auto-run setting defaults to asking");
+console.log("\n11. Timeouts match how long a command actually takes");
+// A short limit on installs makes the model read a kill as a failure and
+// start "fixing" code that was never broken.
+for (const [cmd, args, want, label] of [
+  ["python3", ["app.py"], R.MAX_RUN_MS, "an ordinary script gets the short limit"],
+  ["npm", ["install"], R.MAX_INSTALL_MS, "npm install gets the long limit"],
+  ["pip", ["install", "requests"], R.MAX_INSTALL_MS, "pip install gets the long limit"],
+  ["npm", ["test"], R.MAX_RUN_MS, "npm test stays short, so a hanging test is caught"],
+]) {
+  check(label, R.timeoutFor(cmd, args) === want, `${R.timeoutFor(cmd, args) / 1000}s`);
+}
+
+console.log("\n12. The auto-run setting defaults to asking");
 // A request that omits the field must not run commands unattended — the
 // dangerous mode has to be opted into, never inherited or assumed.
 const routeSrc = await readFile(path.join(ROOT, "src/app/api/chat/route.ts"), "utf8");

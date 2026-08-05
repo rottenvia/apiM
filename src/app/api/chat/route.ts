@@ -11,6 +11,7 @@ import { smartSearch, autoThinkingEffort, decideSearch } from "@/lib/smart-searc
 import type { SmartSearchContext } from "@/lib/smart-search";
 import { AVAILABLE_PLUGINS, buildSystemPrompt } from "@/lib/plugins";
 import { WORKSPACE_TOOLS, runTool } from "@/lib/tools";
+import { buildWorkspaceContext } from "@/lib/workspace-context";
 import {
   runCommand,
   validateCommand,
@@ -392,8 +393,14 @@ export async function POST(req: NextRequest) {
           : "";
 
         const workspace = workspaceId ?? convId;
+        // The model is otherwise blind to what already exists, and will
+        // happily create a second copy of a file it never knew was there.
+        const workspaceFiles = workspaceEnabled
+          ? await buildWorkspaceContext(workspace)
+          : "";
+
         const workspaceInstruction = workspaceEnabled
-          ? `\n\nYou have a workspace on the user's machine and tools to work in it. Prefer creating real files over printing code in chat: the user wants working files, not snippets to copy. List or read before editing so your replacements match exactly.\n\nYou can also run code with run_command. After writing something runnable, run it and check the output rather than assuming it works. If it fails, read the error, fix the file, and run it again. Each command needs the user's approval, so keep them few and purposeful, and say briefly why in the reason field. There is no shell and commands are stopped after 30 seconds, so never start a server or anything interactive. When you are done, briefly say what you changed and whether it ran.`
+          ? `\n\nYou have a workspace on the user's machine and tools to work in it. Prefer creating real files over printing code in chat: the user wants working files, not snippets to copy. List or read before editing so your replacements match exactly.\n\nYou can also run code with run_command. After writing something runnable, run it and check the output rather than assuming it works. If it fails, read the error, fix the file, and run it again. Each command needs the user's approval, so keep them few and purposeful, and say briefly why in the reason field. There is no shell and commands are stopped after 30 seconds, so never start a server or anything interactive. When you are done, briefly say what you changed and whether it ran.\n\nUse search_files to find where something lives rather than opening files one at a time, and read_files when you already know you need several — each separate call costs a whole round.` + workspaceFiles
           : "";
 
         // A structured transcript, not bare {role, content}. Tool calls and
@@ -423,9 +430,10 @@ export async function POST(req: NextRequest) {
         // Without tools this runs exactly once. With them, each pass may end
         // in tool calls, which are executed and fed back as `role: "tool"`
         // messages before the next pass.
-        // Higher than the file-only limit: write, run, read the error, fix,
-        // run again is four rounds for one bug, and real work has several.
-        const MAX_TOOL_ROUNDS = 20;
+        // Write, run, read the error, fix, run again is four rounds for a
+        // single bug. Real work is several of those plus the reading it takes
+        // to find the right file, so 20 ran out mid-task.
+        const MAX_TOOL_ROUNDS = 40;
         let round = 0;
         let toolRounds = 0;
 
