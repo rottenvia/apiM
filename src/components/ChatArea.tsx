@@ -21,6 +21,7 @@ import { ModelSelector } from "@/components/ModelSelector";
 import { SearchModeSelector } from "@/components/SearchModeSelector";
 import { WorkspaceToggle } from "@/components/WorkspaceToggle";
 import { WorkspaceBar } from "@/components/WorkspaceBar";
+import { WorkspaceDock } from "@/components/WorkspaceDock";
 import type { WorkspaceFileInfo } from "@/components/WorkspaceBar";
 import type { Message, StatusStage } from "@/app/page";
 
@@ -299,6 +300,34 @@ export function ChatArea({
       document.removeEventListener("fullscreenchange", handleChange);
   }, []);
 
+  /**
+   * F11 is the browser's own fullscreen, not the Fullscreen API.
+   *
+   * It never sets document.fullscreenElement and never fires
+   * fullscreenchange, so the layout stayed narrow while the window was
+   * actually maximised. Detect it by comparing the window to the screen
+   * instead — that is the only signal F11 leaves behind.
+   */
+  useEffect(() => {
+    const check = () => {
+      // The API case is already handled above; only take over when it is not
+      // in play, or the two would fight over the same state.
+      if (document.fullscreenElement) return;
+
+      // A small tolerance: some browsers leave a pixel or two, and a maximised
+      // window with no chrome is within a few pixels of the screen height.
+      const borderless =
+        Math.abs(window.innerHeight - window.screen.height) <= 4 &&
+        Math.abs(window.innerWidth - window.screen.width) <= 4;
+
+      setIsFullscreen(borderless);
+    };
+
+    check();
+    window.addEventListener("resize", check);
+    return () => window.removeEventListener("resize", check);
+  }, []);
+
   const toggleFullscreen = useCallback(() => {
     if (document.fullscreenElement) {
       void document.exitFullscreen().catch(() => {});
@@ -460,7 +489,16 @@ export function ChatArea({
           )}
         </div>
 
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1.5">
+          <WorkspaceDock
+            enabled={workspaceEnabled}
+            files={workspaceFiles}
+            recentlyChanged={recentlyChanged}
+            onEnable={() => onSetWorkspaceEnabled(true)}
+            onOpen={() => onOpenWorkspace()}
+            onOpenFile={openWorkspaceFile}
+          />
+
           <button
             onClick={() => setFindOpen((v) => !v)}
             className="icon-btn"
@@ -574,6 +612,9 @@ export function ChatArea({
               </div>
             )}
 
+            {/* The dock in the header covers the "what files exist" job, so
+                this only remains as the nudge to switch the workspace on. */}
+            {!workspaceEnabled && (
             <WorkspaceBar
               enabled={workspaceEnabled}
               files={workspaceFiles}
@@ -582,6 +623,7 @@ export function ChatArea({
               onOpen={() => onOpenWorkspace()}
               onOpenFile={openWorkspaceFile}
             />
+            )}
 
             <div className="space-y-6">
               <MessageList
