@@ -1,5 +1,10 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { slugify, uniqueSlug } from "@/lib/slug";
+import {
+  renameWorkspaceFolder,
+  setWorkspaceFolderName,
+} from "@/lib/workspace";
 
 /**
  * File-backed conversation store.
@@ -74,27 +79,187 @@ async function ensureDir(): Promise<void> {
  * Reject anything that isn't a plain id, so a crafted value can never escape
  * the data directory (e.g. "../../etc/passwd").
  */
-function fileFor(id: string): string {
+function assertId(id: string): void {
   if (!/^[\w-]{1,128}$/.test(id)) {
     throw new Error("Invalid conversation id");
   }
-  return path.join(DATA_DIR, `${id}.json`);
+}
+
+/**
+ * Maps conversation id to folder name.
+ *
+ * Chats live in `data/chats/<slug>/chat.json`, where the slug comes from the
+ * title — so the folder is readable rather than a UUID. The id remains the
+ * identity: the folder is only a label, because a title can change and two
+ * chats can share one.
+ *
+ * Built by scanning on demand rather than kept in a file, since a stale index
+ * and the real directory disagreeing is worse than the scan cost at this size.
+ */
+/**
+ * Moves chats saved in the old flat layout into folders.
+ *
+ * Earlier versions stored `data/chats/<uuid>.json`. Those would simply stop
+ * appearing once listing only looks at directories, so they are migrated in
+ * place the first time the directory is read. Runs once per process.
+ */
+let migrated = false;
+
+async function migrateFlatFiles(): Promise<void> {
+  if (migrated) return;
+  migrated = true;
+
+  let names: string[];
+  try {
+    names = await fs.readdir(DATA_DIR);
+  } catch {
+    return;
+  }
+
+  const taken = new Set<string>();
+  for (const name of names) {
+    if (!name.endsWith(".json")) taken.add(name);
+  }
+
+  for (const name of names) {
+    if (!name.endsWith(".json")) continue;
+
+    const oldPath = path.join(DATA_DIR, name);
+    try {
+      const raw = await fs.readFile(oldPath, "utf8");
+      const conv = JSON.parse(raw) as { id?: string; title?: string };
+      if (!conv.id) continue;
+
+      const folder = uniqueSlug(conv.title ?? "", taken, conv.id);
+      taken.add(folder);
+
+      const dir = path.join(DATA_DIR, folder);
+      await fs.mkdir(dir, { recursive: true });
+      await fs.rename(oldPath, path.join(dir, "chat.json"));
+
+      // The workspace was named by id before, so move it to match.
+      await renameWorkspaceFolder(conv.id, folder);
+      setWorkspaceFolderName(conv.id, folder);
+    } catch {
+      // Leave anything unreadable where it is rather than losing it.
+    }
+  }
+}
+
+async function folderIndex(): Promise<Map<string, string>> {
+  await ensureDir();
+  await migrateFlatFiles();
+  const index = new Map<string, string>();
+
+  let entries;
+  try {
+    entries = await fs.readdir(DATA_DIR, { withFileTypes: true });
+  } catch {
+    return index;
+  }
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    try {
+      const raw = await fs.readFile(
+        path.join(DATA_DIR, entry.name, "chat.json"),
+        "utf8"
+      );
+      const conv = JSON.parse(raw) as { id?: string };
+      if (conv.id) {
+        index.set(conv.id, entry.name);
+        // Rebuilds the workspace mapping too. Without this, a restart would
+        // leave the workspace resolving to the raw id while the chat used its
+        // slug, and the two would point at different folders.
+        setWorkspaceFolderName(conv.id, entry.name);
+      }
+    } catch {
+      // A directory without a readable chat.json isn't ours.
+    }
+  }
+
+  return index;
+}
+
+/** Existing folder for a conversation, or null if it has none yet. */
+async function folderFor(id: string): Promise<string | null> {
+  assertId(id);
+  return (await folderIndex()).get(id) ?? null;
+}
+
+/** Path to a conversation's file, given its folder. */
+function fileIn(folder: string): string {
+  return path.join(DATA_DIR, folder, "chat.json");
+}
+
+/**
+ * Picks the folder for a conversation, creating or renaming as needed.
+ *
+ * When the title changes the folder is renamed to match, which is the whole
+ * point — otherwise a chat renamed to "Budget" keeps a folder called
+ * "untitled". A failed rename is not fatal: the old folder still holds the
+ * data and the id still resolves.
+ */
+async function resolveFolder(
+  id: string,
+  title: string
+): Promise<string> {
+  assertId(id);
+  const index = await folderIndex();
+  const existing = index.get(id);
+
+  const taken = new Set(index.values());
+  if (existing) taken.delete(existing);
+
+  const desired = uniqueSlug(title, taken, id);
+
+  if (!existing) {
+    await fs.mkdir(path.join(DATA_DIR, desired), { recursive: true });
+    setWorkspaceFolderName(id, desired);
+    return desired;
+  }
+
+  // Already correct, or differs only by the numeric suffix we appended to
+  // avoid a collision — renaming then would churn folders on every save.
+  if (existing === desired) {
+    setWorkspaceFolderName(id, existing);
+    return existing;
+  }
+  if (existing.replace(/-\d+$/, "") === slugify(title)) {
+    setWorkspaceFolderName(id, existing);
+    return existing;
+  }
+
+  try {
+    await fs.rename(
+      path.join(DATA_DIR, existing),
+      path.join(DATA_DIR, desired)
+    );
+    // The workspace folder follows the chat, so both stay in step.
+    await renameWorkspaceFolder(existing, desired);
+    setWorkspaceFolderName(id, desired);
+    return desired;
+  } catch {
+    setWorkspaceFolderName(id, existing);
+    return existing;
+  }
 }
 
 export async function listConversations(): Promise<ConversationSummary[]> {
   await ensureDir();
-  let names: string[];
+  await migrateFlatFiles();
+  let entries;
   try {
-    names = await fs.readdir(DATA_DIR);
+    entries = await fs.readdir(DATA_DIR, { withFileTypes: true });
   } catch {
     return [];
   }
 
   const out: ConversationSummary[] = [];
-  for (const name of names) {
-    if (!name.endsWith(".json")) continue;
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
     try {
-      const raw = await fs.readFile(path.join(DATA_DIR, name), "utf8");
+      const raw = await fs.readFile(fileIn(entry.name), "utf8");
       const conv = JSON.parse(raw) as StoredConversation;
       const { messages, ...rest } = conv;
       out.push({ ...rest, messageCount: messages?.length ?? 0 });
@@ -111,7 +276,9 @@ export async function getConversation(
   id: string
 ): Promise<StoredConversation | null> {
   try {
-    const raw = await fs.readFile(fileFor(id), "utf8");
+    const folder = await folderFor(id);
+    if (!folder) return null;
+    const raw = await fs.readFile(fileIn(folder), "utf8");
     return JSON.parse(raw) as StoredConversation;
   } catch {
     return null;
@@ -158,7 +325,10 @@ async function writeConversation(conv: StoredConversation): Promise<void> {
     if (deletedIds.has(conv.id)) return;
 
     await ensureDir();
-    const target = fileFor(conv.id);
+    // Resolves the folder from the current title, renaming it if the title
+    // changed. Inside the write queue so a rename can't race a save.
+    const folder = await resolveFolder(conv.id, conv.title);
+    const target = fileIn(folder);
     // Unique suffix so two writers can never collide on the same temp path.
     const tmp = `${target}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
     try {
@@ -269,7 +439,8 @@ export async function updateConversation(
 
 export async function deleteConversation(id: string): Promise<boolean> {
   // Validate before marking, so a bad id can't poison the tombstone set.
-  const target = fileFor(id);
+  assertId(id);
+  const folder = await folderFor(id);
 
   // Tombstone first: this stops writes that are already queued, and any the
   // in-flight reply issues from here on.
@@ -278,27 +449,19 @@ export async function deleteConversation(id: string): Promise<boolean> {
   let removed = false;
   // Queued like a write, so it can never overtake or be overtaken by one.
   await enqueue(id, async () => {
+    if (!folder) return;
     try {
-      await fs.unlink(target);
+      // Removes the folder and anything in it, including temp files a racing
+      // write may have left behind.
+      await fs.rm(path.join(DATA_DIR, folder), {
+        recursive: true,
+        force: true,
+      });
       removed = true;
     } catch {
       removed = false;
     }
   });
-
-  // Sweep any temp file a racing write left behind, so the directory doesn't
-  // accumulate orphans that a later readdir would trip over.
-  try {
-    const dir = path.dirname(target);
-    const base = `${id}.json.`;
-    for (const name of await fs.readdir(dir)) {
-      if (name.startsWith(base) && name.endsWith(".tmp")) {
-        await fs.unlink(path.join(dir, name)).catch(() => {});
-      }
-    }
-  } catch {
-    /* best effort */
-  }
 
   return removed;
 }
