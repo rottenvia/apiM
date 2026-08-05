@@ -67,6 +67,8 @@ interface ChatAreaProps {
   /** Current workspace id, for the background-process dock. */
   workspaceId: string | null;
   onProcessesChanged?: () => void;
+  sidePanelOpen: boolean;
+  onToggleSidePanel: () => void;
 }
 
 export function ChatArea({
@@ -101,6 +103,8 @@ export function ChatArea({
   onDecideCommand,
   workspaceId,
   onProcessesChanged,
+  sidePanelOpen,
+  onToggleSidePanel,
 }: ChatAreaProps) {
   const [input, setInput] = useState("");
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -501,14 +505,35 @@ export function ChatArea({
             onChanged={onProcessesChanged}
           />
 
-          <WorkspaceDock
-            enabled={workspaceEnabled}
-            files={workspaceFiles}
-            recentlyChanged={recentlyChanged}
-            onEnable={() => onSetWorkspaceEnabled(true)}
-            onOpen={() => onOpenWorkspace()}
-            onOpenFile={openWorkspaceFile}
-          />
+          {/* Hidden while the pinned panel is showing the same thing, so the
+              header isn't duplicating what's already on screen. */}
+          {!(workspaceEnabled && sidePanelOpen) && (
+            <WorkspaceDock
+              enabled={workspaceEnabled}
+              files={workspaceFiles}
+              recentlyChanged={recentlyChanged}
+              onEnable={() => {
+                onSetWorkspaceEnabled(true);
+                if (!sidePanelOpen) onToggleSidePanel();
+              }}
+              onOpen={() => onOpenWorkspace()}
+              onOpenFile={openWorkspaceFile}
+            />
+          )}
+
+          {workspaceEnabled && !sidePanelOpen && (
+            <button
+              onClick={onToggleSidePanel}
+              className="icon-btn"
+              title="Show the workspace panel"
+              aria-label="Show workspace panel"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6}>
+                <rect x="3" y="4" width="18" height="16" rx="2" />
+                <path d="M15 4v16" />
+              </svg>
+            </button>
+          )}
 
           <button
             onClick={() => setFindOpen((v) => !v)}
