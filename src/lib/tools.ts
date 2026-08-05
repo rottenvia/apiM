@@ -246,6 +246,41 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "ask_user",
+      description:
+        "Ask the user a question and wait for their answer. Use this when a " +
+        "decision genuinely changes what you build — which database, which " +
+        "framework, whether to overwrite something — rather than guessing " +
+        "and possibly doing the wrong work. Do not use it for things you can " +
+        "decide yourself or find out by reading a file; every question " +
+        "interrupts the user.",
+      parameters: {
+        type: "object",
+        properties: {
+          question: {
+            type: "string",
+            description: "The question, in one clear sentence.",
+          },
+          options: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Up to 4 choices to offer as buttons. Omit for an open question.",
+          },
+          context: {
+            type: "string",
+            description:
+              "Optional: one line on why this matters, so the user can answer " +
+              "without reading back through the conversation.",
+          },
+        },
+        required: ["question"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "start_process",
       description:
         "Start something that keeps running — a dev server, a watcher, a bot. " +

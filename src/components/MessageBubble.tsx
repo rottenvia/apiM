@@ -14,6 +14,7 @@ import type { ReactElement, ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import { ToolActivity } from "@/components/ToolActivity";
 import { ApprovalPrompt } from "@/components/ApprovalPrompt";
+import { QuestionPrompt } from "@/components/QuestionPrompt";
 import { MessageTimeline } from "@/components/MessageTimeline";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -187,6 +188,8 @@ interface MessageBubbleProps {
   onOpenWorkspaceFile?: (path: string) => void;
   /** Answers a pending command approval. */
   onDecideCommand?: (id: string, approved: boolean, remember: boolean) => void;
+  /** Answers a question the model asked. */
+  onAnswerQuestion?: (id: string, answer: string) => void;
 }
 
 function MessageBubbleImpl({
@@ -200,6 +203,7 @@ function MessageBubbleImpl({
   activeMatchIndex = -1,
   onOpenWorkspaceFile,
   onDecideCommand,
+  onAnswerQuestion,
 }: MessageBubbleProps) {
   const [showThinking, setShowThinking] = useState(false);
   const [showSources, setShowSources] = useState(false);
@@ -704,6 +708,13 @@ function MessageBubbleImpl({
                 />
               )}
 
+            {message.pendingQuestion && onAnswerQuestion && (
+              <QuestionPrompt
+                pending={message.pendingQuestion}
+                onAnswer={onAnswerQuestion}
+              />
+            )}
+
             {message.pendingCommand && onDecideCommand && (
               <ApprovalPrompt
                 pending={message.pendingCommand}
@@ -904,6 +915,7 @@ export const MessageBubble = memo(MessageBubbleImpl, (prev, next) => {
     a.toolEvents === b.toolEvents &&
     a.timeline === b.timeline &&
     a.pendingCommand === b.pendingCommand &&
+    a.pendingQuestion === b.pendingQuestion &&
     prev.isLast === next.isLast &&
     prev.onRegenerate === next.onRegenerate &&
     prev.onEdit === next.onEdit &&
@@ -912,6 +924,7 @@ export const MessageBubble = memo(MessageBubbleImpl, (prev, next) => {
     prev.searchWholeWord === next.searchWholeWord &&
     prev.activeMatchIndex === next.activeMatchIndex &&
     prev.onOpenWorkspaceFile === next.onOpenWorkspaceFile &&
-    prev.onDecideCommand === next.onDecideCommand
+    prev.onDecideCommand === next.onDecideCommand &&
+    prev.onAnswerQuestion === next.onAnswerQuestion
   );
 });

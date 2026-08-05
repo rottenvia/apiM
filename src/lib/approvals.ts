@@ -128,3 +128,60 @@ export function decide(id: string, decision: Decision): boolean {
 export function pendingCount(): number {
   return pending.size;
 }
+
+/* ------------------------------------------------------------------------
+   Questions from the model.
+
+   Same shape as approvals: the reply has to stop while a decision arrives on
+   a separate request. Kept apart from approvals so a question can never be
+   answered by an approval id, and so the timeouts can differ — a question is
+   worth waiting longer for than a command prompt.
+   ------------------------------------------------------------------------ */
+
+export const QUESTION_TIMEOUT_MS = 15 * 60 * 1000;
+
+interface PendingQuestion {
+  id: string;
+  resolve: (answer: string | null) => void;
+}
+
+const questions = new Map<string, PendingQuestion>();
+
+/**
+ * Registers a question and waits for the answer.
+ *
+ * Resolves with null rather than rejecting on timeout or abort, so an ignored
+ * question ends the tool call cleanly instead of killing the whole reply.
+ */
+export function askQuestion(
+  id: string,
+  signal?: AbortSignal
+): Promise<string | null> {
+  return new Promise<string | null>((resolve) => {
+    let settled = false;
+
+    const done = (answer: string | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      questions.delete(id);
+      resolve(answer);
+    };
+
+    const timer = setTimeout(() => done(null), QUESTION_TIMEOUT_MS);
+
+    const onAbort = () => done(null);
+    signal?.addEventListener("abort", onAbort, { once: true });
+
+    questions.set(id, { id, resolve: done });
+  });
+}
+
+/** Applies the user's answer. Returns false if nothing was waiting. */
+export function answerQuestion(id: string, answer: string): boolean {
+  const entry = questions.get(id);
+  if (!entry) return false;
+  entry.resolve(answer);
+  return true;
+}
