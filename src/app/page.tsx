@@ -11,6 +11,7 @@ import { WorkspacePanel } from "@/components/WorkspacePanel";
 import type { WorkspaceFileInfo } from "@/components/WorkspaceBar";
 import type { ToolEvent } from "@/components/ToolActivity";
 import type { PendingCommand } from "@/components/ApprovalPrompt";
+import type { TimelineEntry } from "@/components/MessageTimeline";
 import { clampDeleteDelay, DEFAULT_DELETE_DELAY } from "@/components/DeleteChatDialog";
 
 export interface Message {
@@ -50,6 +51,8 @@ export interface Message {
    * regenerated so the two can be compared side by side.
    */
   previousVersions?: { content: string; model?: string; createdAt?: string }[];
+  /** Text and actions in the order they happened, for the split view. */
+  timeline?: TimelineEntry[];
   /** File operations the model ran while producing this reply. */
   toolEvents?: ToolEvent[];
   /** A command waiting on the user's Run / Skip decision. */
@@ -432,6 +435,9 @@ export default function Home() {
           toolEvents: Array.isArray(m.toolEvents)
             ? (m.toolEvents as ToolEvent[])
             : undefined,
+          timeline: Array.isArray(m.timeline)
+            ? (m.timeline as TimelineEntry[])
+            : undefined,
         };
       });
 
@@ -630,15 +636,31 @@ export default function Home() {
         pendingContent = "";
         pendingReasoning = "";
         setMessages((prev) =>
-          prev.map((m) =>
-            m.id === streamingId
-              ? {
-                  ...m,
-                  content: m.content + c,
-                  reasoningContent: (m.reasoningContent ?? "") + r,
-                }
-              : m
-          )
+          prev.map((m) => {
+            if (m.id !== streamingId) return m;
+
+            // Appended to the trailing text entry rather than pushed, so a
+            // paragraph split across frames stays one block instead of
+            // fragmenting into dozens of rows.
+            let timeline = m.timeline;
+            if (c) {
+              const list = [...(timeline ?? [])];
+              const last = list[list.length - 1];
+              if (last && last.kind === "text") {
+                list[list.length - 1] = { kind: "text", text: last.text + c };
+              } else {
+                list.push({ kind: "text", text: c });
+              }
+              timeline = list;
+            }
+
+            return {
+              ...m,
+              content: m.content + c,
+              reasoningContent: (m.reasoningContent ?? "") + r,
+              timeline,
+            };
+          })
         );
       };
       const scheduleFlush = () => {
@@ -780,7 +802,17 @@ export default function Home() {
                 setMessages((prev) =>
                   prev.map((m) =>
                     m.id === streamingId
-                      ? { ...m, toolEvents: [...(m.toolEvents ?? []), started] }
+                      ? {
+                          ...m,
+                          toolEvents: [...(m.toolEvents ?? []), started],
+                          // Records that this action came after whatever text
+                          // has arrived so far, which is what the two-column
+                          // view lines up on.
+                          timeline: [
+                            ...(m.timeline ?? []),
+                            { kind: "tool", id: evt.id },
+                          ],
+                        }
                       : m
                   )
                 );

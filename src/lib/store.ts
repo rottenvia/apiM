@@ -46,6 +46,11 @@ export interface StoredMessage {
    * a retry instead of silently showing a truncated message as final.
    */
   incomplete?: boolean;
+  /** Text and actions in the order they happened, for the split view. */
+  timeline?: (
+    | { kind: "text"; text: string }
+    | { kind: "tool"; id: string }
+  )[] | null;
   /** File operations run during this reply, so they survive a reload. */
   toolEvents?: {
     id: string;

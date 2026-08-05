@@ -14,6 +14,7 @@ import type { ReactElement, ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import { ToolActivity } from "@/components/ToolActivity";
 import { ApprovalPrompt } from "@/components/ApprovalPrompt";
+import { MessageTimeline } from "@/components/MessageTimeline";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Message, MessageAttachment } from "@/app/page";
@@ -213,6 +214,21 @@ function MessageBubbleImpl({
   const [draft, setDraft] = useState("");
   const thinkingRef = useRef<HTMLDivElement>(null);
   const isUser = message.role === "user";
+
+  /**
+   * Whether to show the split view.
+   *
+   * Only worth it when actions and narration are actually interleaved — a
+   * reply that is purely prose, or one where every tool ran before a single
+   * closing paragraph, reads better as one column. Searching also falls back,
+   * since highlighting is applied by the flat renderer.
+   */
+  const useTimeline = Boolean(
+    message.timeline &&
+      message.timeline.length > 1 &&
+      message.toolEvents?.length &&
+      !searchQuery
+  );
 
   // Label-only signal that reasoning is still in progress. The panel itself
   // stays closed unless the user opens it, so nothing expands and collapses
@@ -676,13 +692,17 @@ function MessageBubbleImpl({
             )}
 
             {/* File operations, above the reply: they happen before the
-                model summarises them, so this matches the real order. */}
-            {message.toolEvents && message.toolEvents.length > 0 && (
-              <ToolActivity
-                events={message.toolEvents}
-                onOpenFile={onOpenWorkspaceFile}
-              />
-            )}
+                model summarises them, so this matches the real order.
+                Skipped when a timeline exists, which renders them in place
+                beside the sentence each one belongs to. */}
+            {!useTimeline &&
+              message.toolEvents &&
+              message.toolEvents.length > 0 && (
+                <ToolActivity
+                  events={message.toolEvents}
+                  onOpenFile={onOpenWorkspaceFile}
+                />
+              )}
 
             {message.pendingCommand && onDecideCommand && (
               <ApprovalPrompt
@@ -691,10 +711,20 @@ function MessageBubbleImpl({
               />
             )}
 
+            {useTimeline && (
+              <MessageTimeline
+                timeline={message.timeline ?? []}
+                toolEvents={message.toolEvents ?? []}
+                onOpenFile={onOpenWorkspaceFile}
+                markdownComponents={markdownComponents}
+              />
+            )}
+
             {/* Main content. While streaming, an unterminated ``` fence is
                 replaced by a placeholder card — watching code type itself line
                 by line is noisy, and half-written markup renders as garbage. */}
-            {(displayContent || !message.isStreaming) &&
+            {!useTimeline &&
+              (displayContent || !message.isStreaming) &&
               !(message.incomplete && !message.isStreaming && !showInterrupted) && (
               <div
                 className={`prose-chat text-[15px] leading-relaxed ${
@@ -872,6 +902,7 @@ export const MessageBubble = memo(MessageBubbleImpl, (prev, next) => {
     // New array identity on every tool frame, so this is what makes the
     // "Writing app.py" lines appear as they happen.
     a.toolEvents === b.toolEvents &&
+    a.timeline === b.timeline &&
     a.pendingCommand === b.pendingCommand &&
     prev.isLast === next.isLast &&
     prev.onRegenerate === next.onRegenerate &&
