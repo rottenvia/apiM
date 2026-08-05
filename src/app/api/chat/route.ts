@@ -405,7 +405,7 @@ export async function POST(req: NextRequest) {
           : "";
 
         const workspaceInstruction = workspaceEnabled
-          ? `\n\nYou have a workspace on the user's machine and tools to work in it. Prefer creating real files over printing code in chat: the user wants working files, not snippets to copy. List or read before editing so your replacements match exactly.\n\nYou can also run code with run_command. After writing something runnable, run it and check the output rather than assuming it works. If it fails, read the error, fix the file, and run it again. Each command needs the user's approval, so keep them few and purposeful, and say briefly why in the reason field. There is no shell and commands are stopped after 30 seconds, so never start a server or anything interactive. When you are done, briefly say what you changed and whether it ran.\n\nUse search_files to find where something lives rather than opening files one at a time, and read_files when you already know you need several — each separate call costs a whole round.${
+          ? `\n\nYou have a workspace on the user's machine and tools to work in it. Prefer creating real files over printing code in chat: the user wants working files, not snippets to copy. List or read before editing so your replacements match exactly.\n\nYou can also run code with run_command. After writing something runnable, run it and check the output rather than assuming it works. If it fails, read the error, fix the file, and run it again. Each command needs the user's approval, so keep them few and purposeful, and say briefly why in the reason field. There is no shell. run_command waits for the program to finish, so use it only for things that exit — scripts, tests, installs. For anything that keeps running, such as a dev server or a watcher, use start_process instead: it returns straight away, and you can read its output with read_process and stop it with stop_process. Always stop what you started once you are done with it. When you are done, briefly say what you changed and whether it ran.\n\nUse search_files to find where something lives rather than opening files one at a time, and read_files when you already know you need several — each separate call costs a whole round.${
               visionApiKey
                 ? " You can also view_image to look at a screenshot or mockup saved in the workspace."
                 : ""
@@ -770,9 +770,15 @@ export async function POST(req: NextRequest) {
                 content: `Error: arguments were not valid JSON (${parsed.error})`,
                 summary: "Invalid tool arguments",
               };
-            } else if (call.function.name === "run_command") {
-              // Handled here rather than in runTool: it is the only tool that
-              // has to pause and wait for the user.
+            } else if (
+              call.function.name === "run_command" ||
+              call.function.name === "start_process"
+            ) {
+              // Handled here rather than in runTool: these are the tools that
+              // have to pause and wait for the user. start_process runs the
+              // same class of thing as run_command, so it needs the same
+              // consent — leaving it ungated would be a way around approval.
+              const isBackground = call.function.name === "start_process";
               const args = parsed.value as {
                 command?: unknown;
                 args?: unknown;
@@ -842,6 +848,15 @@ export async function POST(req: NextRequest) {
                       `or suggest a different approach.`,
                     summary: `Skipped: ${display}`,
                   };
+                } else if (isBackground) {
+                  // Left running deliberately: waiting for a dev server to
+                  // exit is what the timeout was fighting in the first place.
+                  result = await runTool(
+                    workspace,
+                    "start_process",
+                    parsed.value,
+                    { visionKey: visionApiKey, visionModel }
+                  );
                 } else {
                   const run = await runCommand(
                     workspace,

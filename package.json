@@ -19,7 +19,8 @@
     "test:folders": "tsx scripts/test-folders.mjs",
     "test:titles": "tsx scripts/test-titles.mjs",
     "test:timeline": "tsx scripts/test-timeline.mjs",
-    "test:agent": "tsx scripts/test-agent.mjs"
+    "test:agent": "tsx scripts/test-agent.mjs",
+    "test:processes": "tsx scripts/test-processes.mjs"
   },
   "dependencies": {
     "@types/uuid": "^10.0.0",
