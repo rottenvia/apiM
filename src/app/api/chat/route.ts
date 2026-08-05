@@ -10,8 +10,9 @@ import type { StoredMessage } from "@/lib/store";
 import { smartSearch, autoThinkingEffort, decideSearch } from "@/lib/smart-search";
 import type { SmartSearchContext } from "@/lib/smart-search";
 import {
-  AVAILABLE_PLUGINS,
+  ALL_PLUGINS,
   BASE_PROMPT,
+  buildLegacyPrompt,
   buildPluginDirectives,
 } from "@/lib/plugins";
 import { WORKSPACE_TOOLS, runTool } from "@/lib/tools";
@@ -309,16 +310,20 @@ export async function POST(req: NextRequest) {
         } catch (e) {
           console.error("Failed to load custom plugins:", e);
         }
-        // Built as its own block rather than folded into the persona, so it
-        // can be placed last — see buildPluginDirectives for why position
-        // decided whether these were obeyed at all.
-        const pluginDirectives = buildPluginDirectives(
-          [...AVAILABLE_PLUGINS, ...customPlugins].map((p) => ({
-            ...p,
-            enabled: enabledPluginIds.includes(p.id),
-          }))
+        const pluginsWithState = [...ALL_PLUGINS, ...customPlugins].map(
+          (p) => ({ ...p, enabled: enabledPluginIds.includes(p.id) })
         );
-        const systemPrompt = BASE_PROMPT;
+
+        // Current plugins get their own block, placed last — see
+        // buildPluginDirectives for why position decided whether these were
+        // obeyed at all.
+        const pluginDirectives = buildPluginDirectives(pluginsWithState);
+
+        // Classic plugins are appended to the persona instead, which is
+        // exactly where they used to sit. Reproducing the old placement is
+        // the point: it is what makes an old conversation read the way it
+        // did when it was written.
+        const systemPrompt = BASE_PROMPT + buildLegacyPrompt(pluginsWithState);
 
         // Regenerate: drop the previous reply (and anything after it) so the
         // new one replaces it rather than appending a duplicate.
