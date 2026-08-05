@@ -6,6 +6,7 @@ import {
   setWorkspaceFolderName,
 } from "@/lib/workspace";
 import { stopAll } from "@/lib/processes";
+import { deleteAllSnapshots } from "@/lib/snapshots";
 
 /**
  * File-backed conversation store.
@@ -522,8 +523,9 @@ export async function deleteConversation(id: string): Promise<boolean> {
   deletedIds.add(id);
 
   // A deleted chat must not leave a dev server running against files that no
-  // longer exist.
+  // longer exist, nor snapshots of a workspace nobody can reach.
   stopAll(id);
+  void deleteAllSnapshots(id);
 
   let removed = false;
   // Queued like a write, so it can never overtake or be overtaken by one.

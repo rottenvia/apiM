@@ -1,7 +1,8 @@
 "use client";
 
-import { useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { WorkspaceFileInfo } from "@/components/WorkspaceBar";
+import type { SnapshotInfo } from "@/lib/snapshots";
 
 /** Two-letter type badge, so a list of names is scannable at a glance. */
 function fileGlyph(filePath: string): string {
@@ -41,14 +42,72 @@ export function WorkspaceSidePanel({
   recentlyChanged,
   onOpenFile,
   onClose,
+  onRestored,
 }: {
   workspaceId: string | null;
   files: WorkspaceFileInfo[];
   recentlyChanged?: string[];
   onOpenFile: (path: string) => void;
   onClose: () => void;
+  /** Called after a restore, so the file list reflects the change. */
+  onRestored?: () => void;
 }) {
+  const [history, setHistory] = useState<SnapshotInfo[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
+  const [busy, setBusy] = useState(false);
+
   const changed = new Set(recentlyChanged ?? []);
+
+  const loadHistory = useCallback(async () => {
+    if (!workspaceId) return;
+    try {
+      const res = await fetch(`/api/workspace/${workspaceId}/snapshots`);
+      if (!res.ok) return;
+      const data = (await res.json()) as { snapshots?: SnapshotInfo[] };
+      setHistory(data.snapshots ?? []);
+    } catch {
+      /* cosmetic — keep whatever was last known */
+    }
+  }, [workspaceId]);
+
+  // Refreshed whenever the files change, so the list is current the moment
+  // it is opened rather than a snapshot of when the panel mounted.
+  useEffect(() => {
+    if (showHistory) queueMicrotask(() => void loadHistory());
+  }, [showHistory, loadHistory, files.length]);
+
+  const restore = useCallback(
+    async (snapshot: SnapshotInfo) => {
+      if (!workspaceId || busy) return;
+      const when = new Date(snapshot.createdAt).toLocaleString();
+      if (
+        !window.confirm(
+          `Put the workspace back to how it was at ${when}?\n\n` +
+            `Files changed since will be reverted and files created since ` +
+            `will be removed. The current state is saved first, so this can ` +
+            `be undone.`
+        )
+      ) {
+        return;
+      }
+
+      setBusy(true);
+      try {
+        await fetch(`/api/workspace/${workspaceId}/snapshots`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ snapshot: snapshot.id }),
+        });
+        await loadHistory();
+        onRestored?.();
+      } catch {
+        /* the refresh reflects whatever actually happened */
+      } finally {
+        setBusy(false);
+      }
+    },
+    [workspaceId, busy, loadHistory, onRestored]
+  );
   const totalBytes = useMemo(
     () => files.reduce((sum, f) => sum + f.size, 0),
     [files]
@@ -76,6 +135,30 @@ export function WorkspaceSidePanel({
         </span>
 
         <div className="flex items-center gap-0.5">
+          <button
+            onClick={() => setShowHistory((v) => !v)}
+            className="rounded-md p-1 text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
+            data-active={showHistory}
+            title="Earlier versions of this workspace"
+            aria-label="Workspace history"
+          >
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={1.7}
+              aria-hidden="true"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M3 12a9 9 0 109-9 9 9 0 00-7 3.3M3 4v4h4M12 7v5l3 2"
+              />
+            </svg>
+          </button>
+
           <button
             onClick={download}
             disabled={files.length === 0}
@@ -145,6 +228,49 @@ export function WorkspaceSidePanel({
         </div>
       </div>
 
+      {showHistory ? (
+        <div className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-3">
+          {history.length === 0 ? (
+            <p className="px-2 py-6 text-center text-[11.5px] leading-relaxed text-text-muted">
+              No earlier versions yet.
+              <br />
+              One is saved before each message.
+            </p>
+          ) : (
+            history.map((snapshot) => (
+              <div
+                key={snapshot.id}
+                className="group rounded-lg px-2 py-1.5 transition-colors hover:bg-bg-hover"
+              >
+                <p
+                  className="truncate text-[11.5px] text-text-secondary"
+                  title={snapshot.label}
+                >
+                  {snapshot.label}
+                </p>
+                <div className="mt-0.5 flex items-center gap-2">
+                  <span className="flex-1 text-[10px] text-text-muted">
+                    {new Date(snapshot.createdAt).toLocaleTimeString([], {
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    })}
+                    {" · "}
+                    {snapshot.fileCount} file
+                    {snapshot.fileCount === 1 ? "" : "s"}
+                  </span>
+                  <button
+                    onClick={() => void restore(snapshot)}
+                    disabled={busy}
+                    className="rounded-md border border-border px-1.5 py-0.5 text-[10.5px] text-text-secondary opacity-0 transition-all hover:border-accent/40 hover:text-text-primary focus:opacity-100 group-hover:opacity-100 disabled:opacity-40"
+                  >
+                    Restore
+                  </button>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      ) : (
       <div className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-3">
         {files.length === 0 ? (
           <p className="px-2 py-6 text-center text-[11.5px] leading-relaxed text-text-muted">
@@ -179,6 +305,7 @@ export function WorkspaceSidePanel({
           ))
         )}
       </div>
+      )}
     </aside>
   );
 }

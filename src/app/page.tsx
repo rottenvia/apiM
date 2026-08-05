@@ -12,6 +12,7 @@ import { WorkspaceSidePanel } from "@/components/WorkspaceSidePanel";
 import type { WorkspaceFileInfo } from "@/components/WorkspaceBar";
 import type { ToolEvent } from "@/components/ToolActivity";
 import type { PendingCommand } from "@/components/ApprovalPrompt";
+import type { PendingQuestion } from "@/components/QuestionPrompt";
 import type { TimelineEntry } from "@/components/MessageTimeline";
 import { clampDeleteDelay, DEFAULT_DELETE_DELAY } from "@/components/DeleteChatDialog";
 
@@ -58,6 +59,8 @@ export interface Message {
   toolEvents?: ToolEvent[];
   /** A command waiting on the user's Run / Skip decision. */
   pendingCommand?: PendingCommand | null;
+  /** A question the model asked, waiting on an answer. */
+  pendingQuestion?: PendingQuestion | null;
 }
 
 /** Lightweight record of an attachment, for display only. */
@@ -127,6 +130,15 @@ type StreamEvent =
       reason: string;
     }
   | { type: "approval_resolved"; id: string; approved: boolean }
+  | {
+      type: "question";
+      id: string;
+      question: string;
+      options: string[];
+      context: string;
+    }
+  | { type: "question_resolved"; id: string; answered: boolean }
+  | { type: "usage"; usage: Record<string, number>; model: string }
   | {
       type: "tool_result";
       id: string;
@@ -326,6 +338,26 @@ export default function Home() {
     []
   );
 
+  /** Sends the user's answer back to the waiting request. */
+  const answerQuestion = useCallback(async (id: string, answer: string) => {
+    // Cleared immediately: the server confirms separately, and leaving the
+    // input live invites a second submit that would 404.
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.pendingQuestion?.id === id ? { ...m, pendingQuestion: null } : m
+      )
+    );
+    try {
+      await fetch("/api/chat/answer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, answer }),
+      });
+    } catch {
+      /* the request times out on its own if this never lands */
+    }
+  }, []);
+
   /**
    * Stable identity so it can be passed down to memoized message bubbles
    * without giving them a new prop on every render.
@@ -438,6 +470,8 @@ export default function Home() {
           attachments: Array.isArray(m.attachments)
             ? (m.attachments as Message["attachments"])
             : undefined,
+          // Deliberately not restored: a question from a finished reply has
+          // nothing listening for the answer any more.
           toolEvents: Array.isArray(m.toolEvents)
             ? (m.toolEvents as ToolEvent[])
             : undefined,
@@ -880,6 +914,50 @@ export default function Home() {
                 break;
               }
 
+              case "usage": {
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === streamingId
+                      ? {
+                          ...m,
+                          usage: evt.usage,
+                          tokenCount: evt.usage.total_tokens,
+                          model: evt.model,
+                        }
+                      : m
+                  )
+                );
+                break;
+              }
+
+              case "question": {
+                const asked: PendingQuestion = {
+                  id: evt.id,
+                  question: evt.question,
+                  options: evt.options,
+                  context: evt.context,
+                };
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === streamingId ? { ...m, pendingQuestion: asked } : m
+                  )
+                );
+                break;
+              }
+
+              case "question_resolved": {
+                // Cleared however it ended — answered, timed out, or stopped —
+                // so a dead prompt is never left on screen.
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === streamingId && m.pendingQuestion?.id === evt.id
+                      ? { ...m, pendingQuestion: null }
+                      : m
+                  )
+                );
+                break;
+              }
+
               case "tool_result": {
                 const isWrite =
                   evt.ok &&
@@ -1201,6 +1279,7 @@ export default function Home() {
         onSetWorkspaceEnabled={setWorkspaceEnabled}
         onOpenWorkspace={openWorkspace}
         onDecideCommand={decideCommand}
+        onAnswerQuestion={answerQuestion}
         workspaceId={currentConvId}
         onProcessesChanged={() => void refreshWorkspaceFiles()}
         sidePanelOpen={sidePanelOpen}
@@ -1216,6 +1295,7 @@ export default function Home() {
           recentlyChanged={recentlyChanged}
           onOpenFile={openWorkspace}
           onClose={() => setSidePanelOpen(false)}
+          onRestored={() => void refreshWorkspaceFiles()}
         />
       )}
 

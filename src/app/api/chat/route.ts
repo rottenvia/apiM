@@ -12,13 +12,14 @@ import type { SmartSearchContext } from "@/lib/smart-search";
 import { AVAILABLE_PLUGINS, buildSystemPrompt } from "@/lib/plugins";
 import { WORKSPACE_TOOLS, runTool } from "@/lib/tools";
 import { buildWorkspaceContext } from "@/lib/workspace-context";
+import { createSnapshot } from "@/lib/snapshots";
 import {
   runCommand,
   validateCommand,
   describeCommand,
   formatRunResult,
 } from "@/lib/runner";
-import { requestApproval, isRemembered } from "@/lib/approvals";
+import { requestApproval, isRemembered, askQuestion } from "@/lib/approvals";
 import {
   ToolCallAccumulator,
   parseToolArguments,
@@ -140,6 +141,15 @@ type StreamEvent =
       reason: string;
     }
   | { type: "approval_resolved"; id: string; approved: boolean }
+  | {
+      type: "question";
+      id: string;
+      question: string;
+      options: string[];
+      context: string;
+    }
+  | { type: "question_resolved"; id: string; answered: boolean }
+  | { type: "usage"; usage: Record<string, number>; model: string }
   | {
       type: "tool_result";
       id: string;
@@ -404,8 +414,22 @@ export async function POST(req: NextRequest) {
           ? await buildWorkspaceContext(workspace)
           : "";
 
+        // A restore point for the state before this reply. Per-file undo only
+        // goes back one step, which does not help when a reply changed four
+        // files. Failure here must not block the reply.
+        if (workspaceEnabled) {
+          try {
+            await createSnapshot(
+              workspace,
+              (displayContent?.trim() || message).slice(0, 80)
+            );
+          } catch (e) {
+            console.error("Snapshot failed:", e);
+          }
+        }
+
         const workspaceInstruction = workspaceEnabled
-          ? `\n\nYou have a workspace on the user's machine and tools to work in it. Prefer creating real files over printing code in chat: the user wants working files, not snippets to copy. List or read before editing so your replacements match exactly.\n\nYou can also run code with run_command. After writing something runnable, run it and check the output rather than assuming it works. If it fails, read the error, fix the file, and run it again. Each command needs the user's approval, so keep them few and purposeful, and say briefly why in the reason field. There is no shell. run_command waits for the program to finish, so use it only for things that exit — scripts, tests, installs. For anything that keeps running, such as a dev server or a watcher, use start_process instead: it returns straight away, and you can read its output with read_process and stop it with stop_process. Always stop what you started once you are done with it. When you are done, briefly say what you changed and whether it ran.\n\nUse search_files to find where something lives rather than opening files one at a time, and read_files when you already know you need several — each separate call costs a whole round.${
+          ? `\n\nYou have a workspace on the user's machine and tools to work in it. Prefer creating real files over printing code in chat: the user wants working files, not snippets to copy. List or read before editing so your replacements match exactly.\n\nYou can also run code with run_command. After writing something runnable, run it and check the output rather than assuming it works. If it fails, read the error, fix the file, and run it again. Each command needs the user's approval, so keep them few and purposeful, and say briefly why in the reason field. There is no shell. run_command waits for the program to finish, so use it only for things that exit — scripts, tests, installs. For anything that keeps running, such as a dev server or a watcher, use start_process instead: it returns straight away, and you can read its output with read_process and stop it with stop_process. Always stop what you started once you are done with it. If a decision would genuinely change what you build and you cannot settle it by reading a file, use ask_user rather than guessing — but sparingly, since every question interrupts the user. When you are done, briefly say what you changed and whether it ran.\n\nUse search_files to find where something lives rather than opening files one at a time, and read_files when you already know you need several — each separate call costs a whole round.${
               visionApiKey
                 ? " You can also view_image to look at a screenshot or mockup saved in the workspace."
                 : ""
@@ -480,6 +504,14 @@ export async function POST(req: NextRequest) {
           else timeline.push({ kind: "text", text });
         };
         let usage: unknown = null;
+        /**
+         * Tokens across every round of the agent loop.
+         *
+         * `usage` is replaced each round, so on its own it reports the last
+         * round rather than the task. Without this a long loop looks cheap
+         * right up until the final total lands.
+         */
+        const totalUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
         let announcedWriting = false;
         const toolSummaries: { name: string; ok: boolean; summary: string }[] =
           [];
@@ -672,7 +704,18 @@ export async function POST(req: NextRequest) {
                 continue; // ignore malformed frames rather than aborting
               }
 
-              if (chunk.usage) usage = chunk.usage;
+              if (chunk.usage) {
+                usage = chunk.usage;
+                const u = chunk.usage as Record<string, number>;
+                totalUsage.prompt_tokens += u.prompt_tokens ?? 0;
+                totalUsage.completion_tokens += u.completion_tokens ?? 0;
+                totalUsage.total_tokens += u.total_tokens ?? 0;
+                send({
+                  type: "usage",
+                  usage: { ...totalUsage },
+                  model,
+                });
+              }
 
               const delta = chunk.choices?.[0]?.delta;
               if (!delta) continue;
@@ -770,6 +813,62 @@ export async function POST(req: NextRequest) {
                 content: `Error: arguments were not valid JSON (${parsed.error})`,
                 summary: "Invalid tool arguments",
               };
+            } else if (call.function.name === "ask_user") {
+              // Pauses the reply the same way approval does, so the model can
+              // get a real answer instead of guessing and building the wrong
+              // thing.
+              const qArgs = parsed.value as {
+                question?: unknown;
+                options?: unknown;
+                context?: unknown;
+              };
+              const question =
+                typeof qArgs.question === "string" ? qArgs.question.trim() : "";
+
+              if (!question) {
+                result = {
+                  ok: false,
+                  content: "Error: a question is required.",
+                  summary: "Empty question",
+                };
+              } else {
+                const options = Array.isArray(qArgs.options)
+                  ? qArgs.options.slice(0, 4).map((o) => String(o).slice(0, 120))
+                  : [];
+                const context =
+                  typeof qArgs.context === "string" ? qArgs.context.trim() : "";
+
+                send({
+                  type: "question",
+                  id: call.id,
+                  question,
+                  options,
+                  context,
+                });
+
+                const answer = await askQuestion(call.id, req.signal);
+
+                send({
+                  type: "question_resolved",
+                  id: call.id,
+                  answered: answer !== null,
+                });
+
+                result =
+                  answer === null
+                    ? {
+                        ok: false,
+                        content:
+                          "The user did not answer. Make a sensible default " +
+                          "choice, say which you picked and why, and carry on.",
+                        summary: "No answer",
+                      }
+                    : {
+                        ok: true,
+                        content: `The user answered: ${answer}`,
+                        summary: `Asked: ${question.slice(0, 60)}`,
+                      };
+              }
             } else if (
               call.function.name === "run_command" ||
               call.function.name === "start_process"
@@ -933,9 +1032,8 @@ export async function POST(req: NextRequest) {
               })) ?? null,
             searchQueries: searchContext?.queries ?? null,
             pluginsUsed: enabledPluginIds.length ? enabledPluginIds : null,
-            tokenCount:
-              (usage as { total_tokens?: number } | null)?.total_tokens ?? null,
-            usage: (usage as Record<string, number> | null) ?? null,
+            tokenCount: totalUsage.total_tokens || null,
+            usage: totalUsage.total_tokens ? { ...totalUsage } : null,
             model,
             durationMs: Date.now() - startedAt,
             toolEvents: toolEvents.length ? toolEvents : null,

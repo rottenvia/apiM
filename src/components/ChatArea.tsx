@@ -64,6 +64,7 @@ interface ChatAreaProps {
   /** Opens the file panel, optionally jumping straight to one file. */
   onOpenWorkspace: (path?: string) => void;
   onDecideCommand: (id: string, approved: boolean, remember: boolean) => void;
+  onAnswerQuestion: (id: string, answer: string) => void;
   /** Current workspace id, for the background-process dock. */
   workspaceId: string | null;
   onProcessesChanged?: () => void;
@@ -101,6 +102,7 @@ export function ChatArea({
   onSetWorkspaceEnabled,
   onOpenWorkspace,
   onDecideCommand,
+  onAnswerQuestion,
   workspaceId,
   onProcessesChanged,
   sidePanelOpen,
@@ -674,6 +676,7 @@ export function ChatArea({
                 revealAll={findOpen && findQuery.trim().length > 0}
                 onOpenWorkspaceFile={openWorkspaceFile}
                 onDecideCommand={onDecideCommand}
+                onAnswerQuestion={onAnswerQuestion}
               />
 
               {/* Only shown before the first token lands; afterwards the
@@ -1041,6 +1044,7 @@ const MessageList = memo(function MessageList({
   revealAll,
   onOpenWorkspaceFile,
   onDecideCommand,
+  onAnswerQuestion,
 }: {
   messages: Message[];
   onRegenerate: (assistantId: string) => void;
@@ -1048,6 +1052,7 @@ const MessageList = memo(function MessageList({
   onDeleteMessage: (messageId: string) => void;
   onOpenWorkspaceFile: (path: string) => void;
   onDecideCommand: (id: string, approved: boolean, remember: boolean) => void;
+  onAnswerQuestion: (id: string, answer: string) => void;
   searchQuery?: string;
   searchWholeWord: boolean;
   searchIndex: ChatSearchIndex;
@@ -1133,6 +1138,7 @@ const MessageList = memo(function MessageList({
             activeMatchIndex={localActive}
             onOpenWorkspaceFile={onOpenWorkspaceFile}
             onDecideCommand={onDecideCommand}
+            onAnswerQuestion={onAnswerQuestion}
           />
         );
       })}

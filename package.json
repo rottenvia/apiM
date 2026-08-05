@@ -21,7 +21,8 @@
     "test:timeline": "tsx scripts/test-timeline.mjs",
     "test:agent": "tsx scripts/test-agent.mjs",
     "test:processes": "tsx scripts/test-processes.mjs",
-    "test:zip": "tsx scripts/test-zip.mjs"
+    "test:zip": "tsx scripts/test-zip.mjs",
+    "test:snapshots": "tsx scripts/test-snapshots.mjs"
   },
   "dependencies": {
     "@types/uuid": "^10.0.0",
