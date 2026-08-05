@@ -61,6 +61,7 @@ interface ChatAreaProps {
   onSetWorkspaceEnabled: (enabled: boolean) => void;
   /** Opens the file panel, optionally jumping straight to one file. */
   onOpenWorkspace: (path?: string) => void;
+  onDecideCommand: (id: string, approved: boolean, remember: boolean) => void;
 }
 
 export function ChatArea({
@@ -92,6 +93,7 @@ export function ChatArea({
   recentlyChanged,
   onSetWorkspaceEnabled,
   onOpenWorkspace,
+  onDecideCommand,
 }: ChatAreaProps) {
   const [input, setInput] = useState("");
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -593,6 +595,7 @@ export function ChatArea({
                 activeMatch={activeMatch}
                 revealAll={findOpen && findQuery.trim().length > 0}
                 onOpenWorkspaceFile={openWorkspaceFile}
+                onDecideCommand={onDecideCommand}
               />
 
               {/* Only shown before the first token lands; afterwards the
@@ -959,12 +962,14 @@ const MessageList = memo(function MessageList({
   activeMatch,
   revealAll,
   onOpenWorkspaceFile,
+  onDecideCommand,
 }: {
   messages: Message[];
   onRegenerate: (assistantId: string) => void;
   onEdit: (messageId: string, newContent: string) => void;
   onDeleteMessage: (messageId: string) => void;
   onOpenWorkspaceFile: (path: string) => void;
+  onDecideCommand: (id: string, approved: boolean, remember: boolean) => void;
   searchQuery?: string;
   searchWholeWord: boolean;
   searchIndex: ChatSearchIndex;
@@ -1049,6 +1054,7 @@ const MessageList = memo(function MessageList({
             searchWholeWord={searchWholeWord}
             activeMatchIndex={localActive}
             onOpenWorkspaceFile={onOpenWorkspaceFile}
+            onDecideCommand={onDecideCommand}
           />
         );
       })}

@@ -10,6 +10,7 @@ import { SearchModal } from "@/components/SearchModal";
 import { WorkspacePanel } from "@/components/WorkspacePanel";
 import type { WorkspaceFileInfo } from "@/components/WorkspaceBar";
 import type { ToolEvent } from "@/components/ToolActivity";
+import type { PendingCommand } from "@/components/ApprovalPrompt";
 import { clampDeleteDelay, DEFAULT_DELETE_DELAY } from "@/components/DeleteChatDialog";
 
 export interface Message {
@@ -51,6 +52,8 @@ export interface Message {
   previousVersions?: { content: string; model?: string; createdAt?: string }[];
   /** File operations the model ran while producing this reply. */
   toolEvents?: ToolEvent[];
+  /** A command waiting on the user's Run / Skip decision. */
+  pendingCommand?: PendingCommand | null;
 }
 
 /** Lightweight record of an attachment, for display only. */
@@ -111,6 +114,15 @@ type StreamEvent =
     }
   | { type: "reasoning"; delta: string }
   | { type: "tool_start"; id: string; name: string; args: string }
+  | {
+      type: "approval_request";
+      id: string;
+      command: string;
+      args: string[];
+      display: string;
+      reason: string;
+    }
+  | { type: "approval_resolved"; id: string; approved: boolean }
   | {
       type: "tool_result";
       id: string;
@@ -271,6 +283,29 @@ export default function Home() {
     workspaceEnabled,
     deleteDelay,
   ]);
+
+  /** Sends the user's Run / Skip answer back to the waiting request. */
+  const decideCommand = useCallback(
+    async (id: string, approved: boolean, remember: boolean) => {
+      // Clear immediately: the server confirms separately, and leaving the
+      // buttons live invites a second click that would 404.
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.pendingCommand?.id === id ? { ...m, pendingCommand: null } : m
+        )
+      );
+      try {
+        await fetch("/api/chat/approve", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id, approved, remember }),
+        });
+      } catch {
+        /* the request times out on its own if this never lands */
+      }
+    },
+    []
+  );
 
   /**
    * Stable identity so it can be passed down to memoized message bubbles
@@ -719,9 +754,43 @@ export default function Home() {
                 break;
               }
 
+              case "approval_request": {
+                const request: PendingCommand = {
+                  id: evt.id,
+                  command: evt.command,
+                  args: evt.args,
+                  display: evt.display,
+                  reason: evt.reason,
+                };
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === streamingId ? { ...m, pendingCommand: request } : m
+                  )
+                );
+                break;
+              }
+
+              case "approval_resolved": {
+                // Clear the prompt whoever resolved it — the user clicking,
+                // a timeout, or Stop — so a dead prompt is never left behind.
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === streamingId && m.pendingCommand?.id === evt.id
+                      ? { ...m, pendingCommand: null }
+                      : m
+                  )
+                );
+                break;
+              }
+
               case "tool_result": {
                 const isWrite =
-                  evt.ok && evt.name !== "read_file" && evt.name !== "list_files";
+                  evt.ok &&
+                  evt.name !== "read_file" &&
+                  evt.name !== "list_files";
+                // A command can create files too (pip install, a build step),
+                // so the file list has to refresh after one runs.
+                if (evt.name === "run_command") sawToolWrite = true;
                 sawToolWrite ||= isWrite;
                 if (isWrite && evt.changedPath) {
                   changedPaths.add(evt.changedPath);
@@ -1027,6 +1096,7 @@ export default function Home() {
         recentlyChanged={recentlyChanged}
         onSetWorkspaceEnabled={setWorkspaceEnabled}
         onOpenWorkspace={openWorkspace}
+        onDecideCommand={decideCommand}
       />
 
       {/* Modals */}
