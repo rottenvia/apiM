@@ -27,7 +27,8 @@
     "test:search": "tsx scripts/test-search-live.mjs",
     "test:resilience": "tsx scripts/test-resilience.mjs",
     "test:plugins": "tsx scripts/test-plugins.mjs",
-    "test:layout": "tsx scripts/test-layout.mjs"
+    "test:layout": "tsx scripts/test-layout.mjs",
+    "test:install": "tsx scripts/test-install.mjs"
   },
   "dependencies": {
     "@types/uuid": "^10.0.0",
