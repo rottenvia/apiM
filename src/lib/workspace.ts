@@ -71,9 +71,15 @@ export async function renameWorkspaceFolder(
   }
 
   try {
+    // History and snapshots live inside the folder now, so they move with it.
     await fs.rename(src, dest);
-    // History lives alongside, so it has to follow too or undo breaks.
-    await fs.rename(`${src}.history`, `${dest}.history`).catch(() => {});
+    // Older layouts kept them as siblings; carry those across too, or undo
+    // and restore break for any workspace created before the change.
+    for (const suffix of [".history", ".snapshots"]) {
+      await fs
+        .rename(`${src}${suffix}`, path.join(dest, suffix))
+        .catch(() => {});
+    }
   } catch {
     /* keep the old folder rather than losing files */
   }
@@ -124,14 +130,65 @@ export function resolveInside(workspaceId: string, relative: string): string {
   return target;
 }
 
+/**
+ * Fold pre-existing sibling folders into the workspace.
+ *
+ * Anyone who used the app before this change has "<ws>.history" and
+ * "<ws>.snapshots" sitting next to "<ws>". Left alone their undo history and
+ * restore points would silently stop working, so they are moved inside on
+ * first touch. Runs at most once per workspace per process, and a failure is
+ * survivable — the worst case is the old folders stay where they are.
+ */
+const migrated = new Set<string>();
+
+async function migrateLayout(root: string): Promise<void> {
+  if (migrated.has(root)) return;
+  migrated.add(root);
+
+  for (const suffix of INTERNAL_DIRS) {
+    const old = `${root}${suffix}`;
+    const dest = path.join(root, suffix);
+    try {
+      await fs.access(old);
+    } catch {
+      continue; // Nothing from the old layout.
+    }
+    try {
+      await fs.access(dest);
+      continue; // Already migrated; leave the stray folder rather than merge.
+    } catch {
+      /* destination is free */
+    }
+    try {
+      await fs.mkdir(root, { recursive: true });
+      await fs.rename(old, dest);
+    } catch {
+      /* keep the old folder rather than losing history */
+    }
+  }
+}
+
 async function ensureRoot(workspaceId: string): Promise<string> {
   const root = workspaceRoot(workspaceId);
   await fs.mkdir(root, { recursive: true });
+  await migrateLayout(root);
   return root;
 }
 
+/**
+ * Internal subdirectories, kept inside the workspace but hidden from it.
+ *
+ * They were siblings — "<ws>.history" beside "<ws>" — which meant one
+ * workspace occupied three folders in data/workspaces. Moving them inside
+ * keeps everything for a workspace in one place; IGNORED then stops them
+ * appearing in listings, being fed to the model, or ending up inside each
+ * other.
+ */
+export const INTERNAL_DIRS = [".history", ".snapshots"] as const;
+
 /** Directories never worth showing the model. */
 const IGNORED = new Set([
+  ...INTERNAL_DIRS,
   "node_modules",
   ".git",
   ".next",
@@ -350,7 +407,7 @@ function historyPathFor(workspaceId: string, relative: string): string {
   // Flatten the path into one filename so nested directories don't need
   // recreating inside the history folder.
   const flat = relative.replace(/[\\/]/g, "__");
-  return path.join(`${root}.history`, `${flat}.prev`);
+  return path.join(root, ".history", `${flat}.prev`);
 }
 
 /** The version replaced by the last write, if there is one. */

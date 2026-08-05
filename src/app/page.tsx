@@ -1012,6 +1012,14 @@ export default function Home() {
                 if (isWrite && evt.changedPath) {
                   changedPaths.add(evt.changedPath);
                 }
+                // Refresh as each tool finishes, not only once the whole
+                // reply ends. The panel used to sit unchanged for the length
+                // of a long agent run, so a file deleted on round three still
+                // showed until the very end and the workspace looked frozen.
+                if (isWrite) {
+                  setRecentlyChanged([...changedPaths]);
+                  void refreshWorkspaceFiles();
+                }
                 setMessages((prev) =>
                   prev.map((m) =>
                     m.id === streamingId
