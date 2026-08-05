@@ -8,6 +8,7 @@ import { PluginsModal } from "@/components/PluginsModal";
 import { ArtifactProvider } from "@/components/ArtifactContext";
 import { SearchModal } from "@/components/SearchModal";
 import { WorkspacePanel } from "@/components/WorkspacePanel";
+import { WorkspaceSidePanel } from "@/components/WorkspaceSidePanel";
 import type { WorkspaceFileInfo } from "@/components/WorkspaceBar";
 import type { ToolEvent } from "@/components/ToolActivity";
 import type { PendingCommand } from "@/components/ApprovalPrompt";
@@ -190,6 +191,8 @@ export default function Home() {
   const [showWorkspace, setShowWorkspace] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [renameError, setRenameError] = useState<string | null>(null);
+  /** The pinned workspace panel. Open by default once files exist. */
+  const [sidePanelOpen, setSidePanelOpen] = useState(true);
   const [workspaceHighlight, setWorkspaceHighlight] = useState<string | null>(null);
   const [workspaceFiles, setWorkspaceFiles] = useState<WorkspaceFileInfo[]>([]);
   /** Paths the last reply touched, highlighted in the workspace bar. */
@@ -249,6 +252,7 @@ export default function Home() {
             // Only a literal true switches this on, so a corrupted or
             // half-written settings blob can never silently enable it.
             if (s.autoRunCommands === true) setAutoRunCommands(true);
+            if (s.sidePanelOpen === false) setSidePanelOpen(false);
             // Clamped on read as well as write: a hand-edited or older
             // localStorage value must not produce an un-closable dialog.
             if (s.deleteDelay !== undefined) {
@@ -279,6 +283,7 @@ export default function Home() {
           webSearchMode,
           workspaceEnabled,
           autoRunCommands,
+          sidePanelOpen,
           deleteDelay,
         })
       );
@@ -294,6 +299,7 @@ export default function Home() {
     webSearchMode,
     workspaceEnabled,
     autoRunCommands,
+    sidePanelOpen,
     deleteDelay,
   ]);
 
@@ -1197,7 +1203,21 @@ export default function Home() {
         onDecideCommand={decideCommand}
         workspaceId={currentConvId}
         onProcessesChanged={() => void refreshWorkspaceFiles()}
+        sidePanelOpen={sidePanelOpen}
+        onToggleSidePanel={() => setSidePanelOpen((v) => !v)}
       />
+
+      {/* Only while the workspace is on: an empty rail beside every ordinary
+          conversation would be dead space. */}
+      {workspaceEnabled && sidePanelOpen && (
+        <WorkspaceSidePanel
+          workspaceId={currentConvId}
+          files={workspaceFiles}
+          recentlyChanged={recentlyChanged}
+          onOpenFile={openWorkspace}
+          onClose={() => setSidePanelOpen(false)}
+        />
+      )}
 
       {/* Modals */}
       {showSettings && (
