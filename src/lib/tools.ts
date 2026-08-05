@@ -1,8 +1,11 @@
+import { diffLines, diffStats, diffHunks } from "@/lib/diff";
+import { describeImage } from "@/lib/vision";
 import {
   deleteFile,
   editFile,
   listFiles,
   readFile,
+  readImageAsDataUrl,
   searchFiles,
   writeFile,
   WorkspaceError,
@@ -169,6 +172,33 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "view_image",
+      description:
+        "Look at an image file in the workspace — a screenshot, a mockup, a " +
+        "diagram. Returns a detailed description including any text in it. " +
+        "Use this when the user refers to an image they saved, or when you " +
+        "have generated or downloaded one and need to check it.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description: "Path to the image, e.g. \"mockup.png\".",
+          },
+          question: {
+            type: "string",
+            description:
+              "Optional: what you specifically need to know about it, so the " +
+              "description focuses there.",
+          },
+        },
+        required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "run_command",
       description:
         "Run a program in the workspace and get its output back, so you can " +
@@ -246,10 +276,17 @@ function str(args: Record<string, unknown>, key: string): string {
  * see "that path doesn't exist" so it can correct itself, and a thrown error
  * would abandon the whole turn instead.
  */
+export interface ToolContext {
+  /** Vision provider key. Absent means view_image is unavailable. */
+  visionKey?: string;
+  visionModel?: string;
+}
+
 export async function runTool(
   workspaceId: string,
   name: string,
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
+  context: ToolContext = {}
 ): Promise<ToolResult> {
   try {
     switch (name) {
@@ -366,6 +403,44 @@ export async function runTool(
         };
       }
 
+      case "view_image": {
+        if (!context.visionKey) {
+          // Reported as a tool result rather than an error, so the model can
+          // tell the user what to do instead of retrying forever.
+          return {
+            ok: false,
+            content:
+              "No vision key is configured, so images cannot be viewed. " +
+              "Tell the user to add one in Settings.",
+            summary: "Vision not configured",
+          };
+        }
+
+        const imagePath = str(args, "path");
+        const image = await readImageAsDataUrl(workspaceId, imagePath);
+
+        const result = await describeImage(
+          image.dataUrl,
+          context.visionKey,
+          context.visionModel,
+          typeof args.question === "string" ? args.question : undefined
+        );
+
+        if (result.error) {
+          return {
+            ok: false,
+            content: `Could not read ${imagePath}: ${result.error}`,
+            summary: `Couldn't view ${imagePath}`,
+          };
+        }
+
+        return {
+          ok: true,
+          content: `${imagePath}:\n\n${result.description ?? "(no description)"}`,
+          summary: `Viewed ${imagePath}`,
+        };
+      }
+
       case "write_file": {
         const result = await writeFile(
           workspaceId,
@@ -381,15 +456,55 @@ export async function runTool(
       }
 
       case "edit_file": {
+        const filePath = str(args, "path");
+
+        // Captured before the edit so the result can show what actually
+        // changed. Without it the model is told only "Edited main.py" and
+        // cannot tell a correct edit from one that landed in the wrong place.
+        let before: string | null = null;
+        try {
+          before = (await readFile(workspaceId, filePath)).content;
+        } catch {
+          before = null;
+        }
+
         const result = await editFile(
           workspaceId,
-          str(args, "path"),
+          filePath,
           str(args, "old_text"),
           str(args, "new_text")
         );
+
+        let confirmation = `Edited ${result.path}.`;
+        if (before !== null) {
+          try {
+            const after = (await readFile(workspaceId, filePath)).content;
+            const changed = diffLines(before, after);
+            const stats = diffStats(changed);
+            const hunks = diffHunks(changed, 2);
+
+            // Show the surrounding lines, so the model can see whether the
+            // replacement sits where it intended rather than assuming it does.
+            const preview = hunks
+              .flatMap((h) => h.lines)
+              .slice(0, 40)
+              .map((l) =>
+                `${l.kind === "added" ? "+" : l.kind === "removed" ? "-" : " "} ${l.text}`
+              )
+              .join("\n");
+
+            confirmation =
+              `Edited ${result.path} (+${stats.added} -${stats.removed}).\n\n` +
+              `${preview}\n\n` +
+              `Check this is the change you intended before moving on.`;
+          } catch {
+            /* fall back to the plain confirmation */
+          }
+        }
+
         return {
           ok: true,
-          content: `Edited ${result.path}.`,
+          content: confirmation,
           summary: `Edited ${result.path}`,
           changedPath: result.path,
         };

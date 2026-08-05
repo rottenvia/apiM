@@ -384,6 +384,59 @@ async function saveHistory(
   }
 }
 
+/**
+ * Reads an image as a data URL, for the vision model.
+ *
+ * Separate from readFile because that decodes UTF-8, which corrupts binary
+ * data. Images have to be passed through as bytes.
+ */
+export async function readImageAsDataUrl(
+  workspaceId: string,
+  relative: string
+): Promise<{ path: string; dataUrl: string; bytes: number }> {
+  const target = resolveInside(workspaceId, relative);
+
+  const ext = path.extname(relative).toLowerCase();
+  const mime =
+    ext === ".png"
+      ? "image/png"
+      : ext === ".jpg" || ext === ".jpeg"
+        ? "image/jpeg"
+        : ext === ".webp"
+          ? "image/webp"
+          : ext === ".gif"
+            ? "image/gif"
+            : ext === ".bmp"
+              ? "image/bmp"
+              : null;
+
+  if (!mime) {
+    throw new WorkspaceError(
+      `${relative} is not an image (expected .png, .jpg, .webp, .gif or .bmp)`
+    );
+  }
+
+  let stat;
+  try {
+    stat = await fs.stat(target);
+  } catch {
+    throw new WorkspaceError(`No such file: ${relative}`);
+  }
+  if (!stat.isFile()) throw new WorkspaceError(`Not a file: ${relative}`);
+  if (stat.size > MAX_FILE_BYTES) {
+    throw new WorkspaceError(
+      `${relative} is too large to read (${Math.round(stat.size / 1024)}KB)`
+    );
+  }
+
+  const buffer = await fs.readFile(target);
+  return {
+    path: relative,
+    dataUrl: `data:${mime};base64,${buffer.toString("base64")}`,
+    bytes: stat.size,
+  };
+}
+
 export async function writeFile(
   workspaceId: string,
   relative: string,

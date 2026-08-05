@@ -104,6 +104,9 @@ interface ChatRequestBody {
   workspaceId?: string;
   /** Skip the per-command approval prompt. Off unless explicitly enabled. */
   autoRunCommands?: boolean;
+  /** Vision provider key, so the agent can look at images in the workspace. */
+  visionApiKey?: string;
+  visionModel?: string;
 }
 
 /** One frame of our own SSE protocol (deliberately simpler than DeepSeek's). */
@@ -191,6 +194,8 @@ export async function POST(req: NextRequest) {
     // Defaults to false, so a request that omits it asks rather than runs.
     // The dangerous setting has to be opted into explicitly, never inherited.
     autoRunCommands = false,
+    visionApiKey,
+    visionModel,
   } = body;
 
   if (!message || !deepseekApiKey) {
@@ -400,7 +405,11 @@ export async function POST(req: NextRequest) {
           : "";
 
         const workspaceInstruction = workspaceEnabled
-          ? `\n\nYou have a workspace on the user's machine and tools to work in it. Prefer creating real files over printing code in chat: the user wants working files, not snippets to copy. List or read before editing so your replacements match exactly.\n\nYou can also run code with run_command. After writing something runnable, run it and check the output rather than assuming it works. If it fails, read the error, fix the file, and run it again. Each command needs the user's approval, so keep them few and purposeful, and say briefly why in the reason field. There is no shell and commands are stopped after 30 seconds, so never start a server or anything interactive. When you are done, briefly say what you changed and whether it ran.\n\nUse search_files to find where something lives rather than opening files one at a time, and read_files when you already know you need several — each separate call costs a whole round.` + workspaceFiles
+          ? `\n\nYou have a workspace on the user's machine and tools to work in it. Prefer creating real files over printing code in chat: the user wants working files, not snippets to copy. List or read before editing so your replacements match exactly.\n\nYou can also run code with run_command. After writing something runnable, run it and check the output rather than assuming it works. If it fails, read the error, fix the file, and run it again. Each command needs the user's approval, so keep them few and purposeful, and say briefly why in the reason field. There is no shell and commands are stopped after 30 seconds, so never start a server or anything interactive. When you are done, briefly say what you changed and whether it ran.\n\nUse search_files to find where something lives rather than opening files one at a time, and read_files when you already know you need several — each separate call costs a whole round.${
+              visionApiKey
+                ? " You can also view_image to look at a screenshot or mockup saved in the workspace."
+                : ""
+            }` + workspaceFiles
           : "";
 
         // A structured transcript, not bare {role, content}. Tool calls and
@@ -502,7 +511,14 @@ export async function POST(req: NextRequest) {
           }
 
           if (workspaceEnabled) {
-            dsRequestBody.tools = WORKSPACE_TOOLS;
+            // view_image is withheld without a key, so the model never calls
+            // a tool that can only fail — it would waste a round and then
+            // apologise instead of just working around it.
+            dsRequestBody.tools = visionApiKey
+              ? WORKSPACE_TOOLS
+              : WORKSPACE_TOOLS.filter(
+                  (t) => t.function.name !== "view_image"
+                );
             dsRequestBody.tool_choice = "auto";
           }
 
@@ -701,13 +717,20 @@ export async function POST(req: NextRequest) {
           if (calls.length === 0) break;
 
           if (toolRounds >= MAX_TOOL_ROUNDS) {
-            // Guard against a model that keeps calling tools forever.
-            transcript.push({
-              role: "tool",
-              tool_call_id: calls[0].id,
-              content:
-                "Tool limit reached for this message. Summarise what you have done so far and stop.",
-            });
+            // Guard against a model that keeps calling tools forever. Every
+            // pending call needs a reply or the next request is a 400, so all
+            // of them are answered rather than only the first.
+            for (const call of calls) {
+              transcript.push({
+                role: "tool",
+                tool_call_id: call.id,
+                content:
+                  `Tool limit reached for this message (${MAX_TOOL_ROUNDS} rounds). ` +
+                  `Stop here and tell the user: what you finished, what is ` +
+                  `left, and the exact next step so they can say "continue". ` +
+                  `Do not pretend the task is complete.`,
+              });
+            }
             send({ type: "status", stage: "writing" });
             continue;
           }
@@ -839,7 +862,8 @@ export async function POST(req: NextRequest) {
               result = await runTool(
                 workspace,
                 call.function.name,
-                parsed.value
+                parsed.value,
+                { visionKey: visionApiKey, visionModel }
               );
             }
 

@@ -94,7 +94,39 @@ for (const n of ["search_files", "read_files", "run_command", "write_file", "edi
   check(`${n} is exposed`, names.includes(n));
 }
 
-console.log("\n5. Search can't escape the workspace");
+console.log("\n5. Edits report what actually changed");
+await ws.writeFile(WS, "edit.py", "def a():\n    return 1\n\ndef b():\n    return 2\n");
+let edited = await runTool(WS, "edit_file", {
+  path: "edit.py",
+  old_text: "return 1",
+  new_text: "return 99",
+});
+check("the edit succeeds", edited.ok);
+check("it reports the counts", /\+1 -1/.test(edited.content), edited.content.split("\n")[0]);
+check("it shows the removed line", /-\s+return 1/.test(edited.content));
+check("it shows the added line", /\+\s+return 99/.test(edited.content));
+check("it shows surrounding context so placement is checkable",
+  /def a\(\)/.test(edited.content));
+check("it tells the model to verify", /intended/i.test(edited.content));
+
+edited = await runTool(WS, "edit_file", {
+  path: "edit.py",
+  old_text: "not in this file anywhere",
+  new_text: "x",
+});
+check("a non-matching edit is refused with guidance",
+  !edited.ok && /not found/i.test(edited.content));
+
+console.log("\n6. Viewing images");
+let viewed = await runTool(WS, "view_image", { path: "shot.png" }, {});
+check("without a vision key it says so instead of failing silently",
+  !viewed.ok && /vision key/i.test(viewed.content));
+
+viewed = await runTool(WS, "view_image", { path: "notes.txt" }, { visionKey: "sk-x" });
+check("a non-image path is rejected",
+  !viewed.ok || /not an image/i.test(viewed.content));
+
+console.log("\n7. Search can't escape the workspace");
 await ws.writeFile("agenttest-other", "secret.txt", "PRIVATE DATA\n");
 res = await runTool(WS, "search_files", { query: "PRIVATE" });
 check("another workspace is not searched", res.content.includes("No matches"));
