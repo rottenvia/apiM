@@ -70,6 +70,49 @@ writes, and if it writes something with an x86-only dependency, an ARM box
 fails in a way that looks like the code is wrong. Not worth introducing for a
 negative saving.
 
+## If you'd rather not upload an ID
+
+Hetzner asks some new accounts for ID via iDenfy. It is legitimate — Hetzner
+staff confirm it publicly — but it is not the only option, and these are real
+alternatives rather than consolation prizes.
+
+| Provider | Specs at ~€7-9 | ID usually asked? | Notes |
+|---|---|---|---|
+| **Contabo** (DE) | 4 vCPU, 8 GB, **200 GB** | Sometimes | Most hardware per euro |
+| **Netcup** (DE) | 4 vCPU, 8 GB | **Rarely** — prepay avoids it | Best if avoiding ID is the goal |
+| Hostinger | 2 vCPU, 8 GB, 100 GB NVMe | No | Card only, easiest signup |
+| Hetzner | 4 vCPU, 8 GB, 80 GB | **Often** | Best disk and support |
+| DigitalOcean | 4 vCPU, 8 GB | No | ~$48 — five times the price |
+
+**Netcup** is the pick if the ID is the reason you are switching. Multiple
+users report that paying in advance skips verification entirely, and it is a
+long-established German host.
+
+**Contabo** gives the most for the money — 200 GB of storage against Hetzner's
+80 GB at a similar price. Two honest caveats: slower SATA SSDs rather than
+NVMe, and a setup fee unless you commit to three months. Its KYC is also
+inconsistent; some people are asked for more than Hetzner wants.
+
+**Hostinger** is the least friction — card only, no ID reported — but 2 vCPU
+instead of 4.
+
+### What actually differs
+
+Not much that matters here. Every one of them is Ubuntu plus Docker, and
+nothing in this project is provider-specific. `docs/server-setup.md` works
+unchanged on all of them; only the control panel you click through differs.
+
+What you give up leaving Hetzner:
+
+- **Hourly billing.** Hetzner charges by the hour, so a server deleted after
+  ten days costs about a third of a month. Contabo and Netcup bill monthly, so
+  trying it out costs a full month.
+- **Faster disks.** Hetzner uses NVMe; Contabo uses SATA SSD. Irrelevant for
+  this workload.
+- **Better support response**, by most accounts.
+
+None of that is worth uploading an ID you would rather not upload.
+
 ## Avoid CCX entirely
 
 The dedicated-CPU line went up **over 200%** in June — CCX13 went from €15.99

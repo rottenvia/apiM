@@ -6,6 +6,11 @@ Start to finish, about 20 minutes. Every command is copy-pasteable.
 
 ---
 
+> **Any provider works.** These steps are Ubuntu plus Docker — nothing here is
+> Hetzner-specific. Netcup, Contabo, Hostinger, DigitalOcean: only step 1
+> differs. See [which-server.md](./which-server.md) for the comparison,
+> including which ones don't ask for ID.
+
 ## 1. Order it
 
 [console.hetzner.cloud](https://console.hetzner.cloud) → **New Server**
