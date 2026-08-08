@@ -1381,7 +1381,6 @@ export default function Home() {
         <SearchModal
           onSelect={loadConversation}
           onClose={() => setShowSearch(false)}
-          sidebarOpen={sidebarOpen}
         />
       )}
 

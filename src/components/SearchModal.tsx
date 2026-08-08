@@ -53,12 +53,9 @@ function timeAgo(iso: string): string {
 export function SearchModal({
   onSelect,
   onClose,
-  sidebarOpen,
 }: {
   onSelect: (id: string) => void;
   onClose: () => void;
-  /** Offsets the panel so it centres over the chat area, not the window. */
-  sidebarOpen: boolean;
 }) {
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<SearchHit[]>([]);
@@ -138,10 +135,11 @@ export function SearchModal({
   };
 
   return (
-    <div
-      className="fixed inset-y-0 right-0 z-[70] flex items-start justify-center px-4 pr-8 pt-[12vh] transition-[left] duration-300 ease-in-out sm:px-6 sm:pr-10"
-      style={{ left: sidebarOpen ? "18rem" : 0 }}
-    >
+    // Centred in the window, like every other dialog. It used to be inset
+    // from the left by the sidebar's width and carry more padding on the
+    // right than the left — 32px against 16px — so the panel sat left of
+    // centre and shifted sideways whenever the sidebar was toggled.
+    <div className="fixed inset-0 z-[70] flex items-start justify-center p-4 pt-[12vh]">
       <div
         onClick={close}
         className={`fixed inset-0 bg-black/60 backdrop-blur-[3px] transition-opacity duration-150 ${
@@ -151,7 +149,7 @@ export function SearchModal({
 
       <div
         onKeyDown={onKeyDown}
-        className={`relative flex w-full max-w-3xl xl:max-w-4xl flex-col overflow-hidden rounded-2xl border border-[#403c34] bg-[#201e1b] shadow-[0_28px_70px_rgba(0,0,0,0.55)] transition-all duration-150 ${
+        className={`relative flex w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-border-light bg-bg-secondary shadow-2xl shadow-black/50 transition-all duration-150 ${
           visible ? "translate-y-0 opacity-100" : "-translate-y-2 opacity-0"
         }`}
         role="dialog"
