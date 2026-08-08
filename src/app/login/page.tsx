@@ -63,7 +63,7 @@ function LoginForm() {
     <div className="flex min-h-dvh items-center justify-center bg-bg-primary px-4">
       <div className="w-full max-w-[22rem]">
         <div className="mb-7 text-center">
-          <h1 className="font-serif text-[26px] font-medium leading-tight tracking-[-0.01em] text-text-primary">
+          <h1 className="font-serif text-[30px] font-medium leading-tight tracking-[-0.01em] text-text-primary">
             apiM
           </h1>
           <p className="mt-1.5 text-[13px] leading-5 text-text-secondary">
@@ -81,11 +81,11 @@ function LoginForm() {
             autoComplete="current-password"
             aria-label="Password"
             aria-invalid={Boolean(error)}
-            className="h-11 w-full rounded-xl border border-border bg-bg-secondary px-3.5 text-[14px] text-text-primary outline-none transition-colors placeholder:text-text-muted focus:border-border-light"
+            className="h-11 w-full rounded-xl border border-border bg-bg-secondary px-3.5 text-[15px] text-text-primary outline-none transition-colors placeholder:text-text-muted focus:border-border-light"
           />
 
           {error && (
-            <p role="alert" className="text-[12.5px] leading-4 text-danger">
+            <p role="alert" className="text-[13px] leading-4 text-danger">
               {error}
             </p>
           )}
@@ -99,7 +99,7 @@ function LoginForm() {
           </button>
         </form>
 
-        <p className="mt-5 text-center text-[11.5px] leading-4 text-text-muted">
+        <p className="mt-5 text-center text-[12px] leading-4 text-text-muted">
           This app can create and edit files, and uses your API keys.
           That&apos;s why it&apos;s behind a password.
         </p>

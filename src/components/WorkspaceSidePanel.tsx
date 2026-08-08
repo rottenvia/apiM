@@ -151,14 +151,14 @@ export function WorkspaceSidePanel({
   return (
     <aside className="hidden w-[17.5rem] flex-none flex-col border-l border-border bg-bg-secondary/40 lg:flex">
       <div className="flex items-center justify-between gap-2 px-3 pt-3.5">
-        <span className="text-[12.5px] font-medium text-text-secondary">
+        <span className="text-[13px] font-medium text-text-secondary">
           Workspace
         </span>
 
         <div className="flex items-center gap-0.5">
           <button
             onClick={() => setShowHistory((v) => !v)}
-            className="rounded-md p-1 text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
+            className="rounded-lg p-1 text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
             data-active={showHistory}
             title="Earlier versions of this workspace"
             aria-label="Workspace history"
@@ -183,7 +183,7 @@ export function WorkspaceSidePanel({
           <button
             onClick={download}
             disabled={files.length === 0}
-            className="rounded-md p-1 text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-40"
+            className="rounded-lg p-1 text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-40"
             title={
               files.length === 0
                 ? "Nothing to download yet"
@@ -210,7 +210,7 @@ export function WorkspaceSidePanel({
 
           <button
             onClick={onClose}
-            className="rounded-md p-1 text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
+            className="rounded-lg p-1 text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
             title="Hide the workspace panel"
             aria-label="Hide workspace panel"
           >
@@ -231,7 +231,7 @@ export function WorkspaceSidePanel({
 
       {/* Usage. Quiet by design — it is reassurance, not a headline. */}
       <div className="px-3 pb-2.5 pt-2">
-        <div className="flex items-center justify-between text-[10.5px] text-text-muted">
+        <div className="flex items-center justify-between text-[11px] text-text-muted">
           <span>
             {formatBytes(totalBytes)} / {formatBytes(CAPACITY_BYTES)}
           </span>
@@ -252,7 +252,7 @@ export function WorkspaceSidePanel({
       {showHistory ? (
         <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
           {history.length === 0 ? (
-            <p className="py-6 text-center text-[11.5px] leading-relaxed text-text-muted">
+            <p className="py-6 text-center text-[12px] leading-relaxed text-text-muted">
               No earlier versions yet.
               <br />
               One is saved before each message.
@@ -264,13 +264,13 @@ export function WorkspaceSidePanel({
                 className="list-row group"
               >
                 <p
-                  className="truncate text-[11.5px] text-text-secondary"
+                  className="truncate text-[12px] text-text-secondary"
                   title={snapshot.label}
                 >
                   {snapshot.label}
                 </p>
                 <div className="mt-0.5 flex items-center gap-2">
-                  <span className="flex-1 text-[10px] text-text-muted">
+                  <span className="flex-1 text-[11px] text-text-muted">
                     {new Date(snapshot.createdAt).toLocaleTimeString([], {
                       hour: "2-digit",
                       minute: "2-digit",
@@ -282,7 +282,7 @@ export function WorkspaceSidePanel({
                   <button
                     onClick={() => void restore(snapshot)}
                     disabled={busy}
-                    className="rounded-md border border-border px-1.5 py-0.5 text-[10.5px] text-text-secondary opacity-0 transition-all hover:border-accent/40 hover:text-text-primary focus:opacity-100 group-hover:opacity-100 disabled:opacity-40"
+                    className="rounded-lg border border-border px-1.5 py-0.5 text-[11px] text-text-secondary opacity-0 transition-all hover:border-accent/40 hover:text-text-primary focus:opacity-100 group-hover:opacity-100 disabled:opacity-40"
                   >
                     Restore
                   </button>
@@ -294,7 +294,7 @@ export function WorkspaceSidePanel({
       ) : (
       <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
         {files.length === 0 ? (
-          <p className="py-6 text-center text-[11.5px] leading-relaxed text-text-muted">
+          <p className="py-6 text-center text-[12px] leading-relaxed text-text-muted">
             No files yet.
             <br />
             Ask for one and it appears here.
@@ -313,7 +313,7 @@ export function WorkspaceSidePanel({
                 {fileGlyph(file.path)}
               </span>
               <span
-                className={`min-w-0 flex-1 truncate font-mono text-[11.5px] ${
+                className={`min-w-0 flex-1 truncate font-mono text-[12px] ${
                   changed.has(file.path)
                     ? "text-accent-light"
                     : "text-text-secondary group-hover:text-text-primary"
@@ -321,7 +321,7 @@ export function WorkspaceSidePanel({
               >
                 {file.path}
               </span>
-              <span className="flex-none text-[10px] text-text-muted opacity-0 transition-opacity group-hover:opacity-100">
+              <span className="flex-none text-[11px] text-text-muted opacity-0 transition-opacity group-hover:opacity-100">
                 {formatBytes(file.size)}
               </span>
             </button>

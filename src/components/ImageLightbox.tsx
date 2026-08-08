@@ -69,13 +69,13 @@ export function ImageLightbox({
     >
       <div
         onClick={handleClose}
-        className={`absolute inset-0 bg-black/75 backdrop-blur-sm transition-opacity duration-200 ${
+        className={`absolute inset-0 bg-black/75 backdrop-blur-sm transition-opacity duration-150 ${
           visible ? "opacity-100" : "opacity-0"
         }`}
       />
 
       <div
-        className={`relative flex max-h-full max-w-full flex-col overflow-hidden rounded-2xl border border-[#403c34] bg-[#141210] shadow-[0_28px_80px_rgba(0,0,0,0.6)] transition-all duration-200 ${
+        className={`relative flex max-h-full max-w-full flex-col overflow-hidden rounded-2xl border border-[#403c34] bg-[#141210] shadow-[0_28px_80px_rgba(0,0,0,0.6)] transition-all duration-150 ${
           visible ? "scale-100 opacity-100" : "scale-[0.97] opacity-0"
         }`}
       >
@@ -141,7 +141,7 @@ export function ImageLightbox({
 
           {showText && description && (
             <div className="max-h-56 min-h-0 shrink-0 overflow-y-auto border-t border-[#2c2924] bg-[#141210] p-3.5 md:max-h-none md:w-80 md:border-l md:border-t-0 [overscroll-behavior:contain]">
-              <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.1em] text-[#6d685d]">
+              <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.1em] text-[#6d685d]">
                 What the assistant receives
               </p>
               <pre className="whitespace-pre-wrap break-words font-mono text-[12px] leading-relaxed text-[#a29d92]">

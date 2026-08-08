@@ -227,7 +227,7 @@ export function SearchBudget({ searchProfile, onSearchProfileChange }: Props) {
             </p>
           )}
 
-          <p className="mt-1.5 text-[10.5px] leading-4 text-text-muted">
+          <p className="mt-1.5 text-[11px] leading-4 text-text-muted">
             Counted here rather than read from the provider, so treat it as an
             estimate. It is accurate as long as this app is the only thing using
             the key.
@@ -262,7 +262,7 @@ function Stat({ label, value }: { label: string; value: string }) {
       <div className="truncate text-[13px] font-medium tabular-nums text-text-primary">
         {value}
       </div>
-      <div className="truncate text-[10.5px] text-text-muted">{label}</div>
+      <div className="truncate text-[11px] text-text-muted">{label}</div>
     </div>
   );
 }

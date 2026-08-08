@@ -125,7 +125,7 @@ export function WorkspaceBar({
           <button
             onClick={() => setWantExpanded((v) => !v)}
             aria-expanded={expanded}
-            className="flex flex-none items-center gap-1 rounded-lg px-2 py-1 text-[11.5px] text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
+            className="flex flex-none items-center gap-1 rounded-lg px-2 py-1 text-[12px] text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
           >
             {expanded ? "Hide" : "Show"}
             <svg
@@ -159,13 +159,13 @@ export function WorkspaceBar({
               key={file.path}
               onClick={() => onOpenFile(file.path)}
               title={file.path}
-              className={`flex max-w-[14rem] items-center gap-1.5 rounded-lg border px-2 py-1 text-[11.5px] transition-colors ${
+              className={`flex max-w-[14rem] items-center gap-1.5 rounded-lg border px-2 py-1 text-[12px] transition-colors ${
                 changed.has(file.path)
                   ? "border-accent/40 bg-accent/10 text-accent-light"
                   : "border-border bg-bg-primary/40 text-text-secondary hover:border-border-light hover:text-text-primary"
               }`}
             >
-              <span className="flex-none font-mono text-[9.5px] uppercase opacity-60">
+              <span className="flex-none font-mono text-[9px] uppercase opacity-60">
                 {fileGlyph(file.path)}
               </span>
               <span className="truncate font-mono">{file.path}</span>
@@ -175,7 +175,7 @@ export function WorkspaceBar({
           {!expanded && overflow > 0 && (
             <button
               onClick={() => setWantExpanded(true)}
-              className="rounded-lg px-2 py-1 text-[11.5px] text-text-muted transition-colors hover:text-text-primary"
+              className="rounded-lg px-2 py-1 text-[12px] text-text-muted transition-colors hover:text-text-primary"
             >
               +{overflow} more
             </button>

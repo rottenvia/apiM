@@ -300,7 +300,7 @@ export function Sidebar({
                         if (e.key === "Escape") setEditingId(null);
                       }}
                       aria-invalid={Boolean(duplicateOf)}
-                      className={`w-full rounded-md border bg-bg-primary px-1.5 py-0.5 text-sm text-text-primary outline-none ${
+                      className={`w-full rounded-lg border bg-bg-primary px-1.5 py-0.5 text-sm text-text-primary outline-none ${
                         duplicateOf ? "border-danger/60" : "border-accent/40"
                       }`}
                     />
@@ -338,7 +338,7 @@ export function Sidebar({
                       onClick={() => onSelect(conv.id)}
                       onDoubleClick={() => startRename(conv)}
                       aria-label={conv.title}
-                      className="absolute inset-0 rounded-[10px]"
+                      className="absolute inset-0 rounded-lg"
                     />
                     <span
                       className="pointer-events-none relative min-w-0 flex-1 truncate text-left text-sm leading-5"
@@ -360,7 +360,7 @@ export function Sidebar({
                     }}
                     aria-label="Conversation options"
                     data-open={menuOpen}
-                    className="relative z-10 flex h-6 w-6 flex-none items-center justify-center rounded-md text-text-muted opacity-0 transition-all hover:bg-bg-hover hover:text-text-primary focus-visible:opacity-100 group-hover:opacity-100 data-[open=true]:opacity-100"
+                    className="relative z-10 flex h-6 w-6 flex-none items-center justify-center rounded-lg text-text-muted opacity-0 transition-all hover:bg-bg-hover hover:text-text-primary focus-visible:opacity-100 group-hover:opacity-100 data-[open=true]:opacity-100"
                   >
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                       <circle cx="12" cy="5" r="1.6" />
@@ -395,7 +395,7 @@ export function Sidebar({
                       <svg
                         width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                         strokeWidth={2} aria-hidden="true"
-                        className={`ml-auto flex-none transition-transform duration-200 ${exportFor === conv.id ? "rotate-90" : ""}`}
+                        className={`ml-auto flex-none transition-transform duration-150 ${exportFor === conv.id ? "rotate-90" : ""}`}
                       >
                         <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
                       </svg>
@@ -410,7 +410,7 @@ export function Sidebar({
                             className="flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-left text-[12px] text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
                           >
                             {f.label}
-                            <span className="font-mono text-[10px] text-text-muted">{f.ext}</span>
+                            <span className="font-mono text-[11px] text-text-muted">{f.ext}</span>
                           </button>
                         ))}
                       </div>

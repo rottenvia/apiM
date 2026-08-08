@@ -137,7 +137,7 @@ export function ProcessDock({
               {running.length > 0 && (
                 <button
                   onClick={() => void stop("all")}
-                  className="flex-none rounded-lg border border-danger/40 px-2 py-1 text-[11.5px] text-danger transition-colors hover:bg-danger/10"
+                  className="flex-none rounded-lg border border-danger/40 px-2 py-1 text-[12px] text-danger transition-colors hover:bg-danger/10"
                 >
                   Stop all
                 </button>
@@ -175,12 +175,12 @@ export function ProcessDock({
                     {proc.running ? (
                       <button
                         onClick={() => void stop(proc.id)}
-                        className="flex-none rounded-md border border-border px-2 py-0.5 text-[11px] text-text-secondary transition-colors hover:border-danger/40 hover:text-danger"
+                        className="flex-none rounded-lg border border-border px-2 py-0.5 text-[11px] text-text-secondary transition-colors hover:border-danger/40 hover:text-danger"
                       >
                         Stop
                       </button>
                     ) : (
-                      <span className="flex-none text-[10.5px] text-text-muted">
+                      <span className="flex-none text-[11px] text-text-muted">
                         {proc.stoppedByUser
                           ? "stopped"
                           : `exit ${proc.exitCode ?? "?"}`}

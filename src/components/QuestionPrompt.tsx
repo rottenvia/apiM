@@ -62,7 +62,7 @@ export function QuestionPrompt({
             {pending.question}
           </p>
           {pending.context && (
-            <p className="mt-0.5 text-[11.5px] leading-4 text-text-muted">
+            <p className="mt-0.5 text-[12px] leading-4 text-text-muted">
               {pending.context}
             </p>
           )}
@@ -75,7 +75,7 @@ export function QuestionPrompt({
             <button
               key={option}
               onClick={() => onAnswer(pending.id, option)}
-              className="rounded-lg border border-border bg-bg-primary px-2.5 py-1.5 text-[12.5px] text-text-secondary transition-colors hover:border-accent/40 hover:text-text-primary"
+              className="rounded-lg border border-border bg-bg-primary px-2.5 py-1.5 text-[13px] text-text-secondary transition-colors hover:border-accent/40 hover:text-text-primary"
             >
               {option}
             </button>
@@ -100,12 +100,12 @@ export function QuestionPrompt({
               : "Type your answer…"
           }
           aria-label="Your answer"
-          className="min-w-0 flex-1 rounded-lg border border-border bg-bg-primary px-2.5 py-1.5 text-[12.5px] text-text-primary outline-none transition-colors placeholder:text-text-muted focus:border-border-light"
+          className="min-w-0 flex-1 rounded-lg border border-border bg-bg-primary px-2.5 py-1.5 text-[13px] text-text-primary outline-none transition-colors placeholder:text-text-muted focus:border-border-light"
         />
         <button
           onClick={submit}
           disabled={!text.trim()}
-          className="flex-none rounded-lg bg-accent px-3 py-1.5 text-[12.5px] font-medium text-white transition-colors hover:bg-accent-light disabled:cursor-not-allowed disabled:opacity-40"
+          className="flex-none rounded-lg bg-accent px-3 py-1.5 text-[13px] font-medium text-white transition-colors hover:bg-accent-light disabled:cursor-not-allowed disabled:opacity-40"
         >
           Send
         </button>

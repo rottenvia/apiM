@@ -270,7 +270,7 @@ export function WorkspacePanel({
     <div className="fixed inset-0 z-[70] flex justify-end">
       <div
         onClick={handleClose}
-        className={`absolute inset-0 bg-black/50 transition-opacity duration-200 ${
+        className={`absolute inset-0 bg-black/50 transition-opacity duration-150 ${
           visible ? "opacity-100" : "opacity-0"
         }`}
       />
@@ -278,7 +278,7 @@ export function WorkspacePanel({
       <div
         role="dialog"
         aria-label="Workspace files"
-        className={`relative flex h-full w-[min(46rem,100vw)] flex-col border-l border-border bg-bg-secondary transition-transform duration-200 ${
+        className={`relative flex h-full w-[min(46rem,100vw)] flex-col border-l border-border bg-bg-secondary transition-transform duration-150 ${
           visible ? "translate-x-0" : "translate-x-full"
         }`}
       >
@@ -346,7 +346,7 @@ export function WorkspacePanel({
                       >
                         {file.path}
                       </div>
-                      <div className="mt-0.5 text-[10.5px] text-text-muted">
+                      <div className="mt-0.5 text-[11px] text-text-muted">
                         {formatSize(file.size)}
                       </div>
                     </button>
@@ -462,12 +462,12 @@ export function WorkspacePanel({
                     onChange={(e) => setDraft(e.target.value)}
                     readOnly={truncated}
                     spellCheck={false}
-                    className="min-h-0 flex-1 resize-none bg-bg-primary p-3 font-mono text-[12.5px] leading-relaxed text-text-secondary outline-none"
+                    className="min-h-0 flex-1 resize-none bg-bg-primary p-3 font-mono text-[13px] leading-relaxed text-text-secondary outline-none"
                   />
                 )}
               </>
             ) : (
-              <div className="flex flex-1 items-center justify-center px-6 text-center text-[12.5px] leading-relaxed text-text-muted">
+              <div className="flex flex-1 items-center justify-center px-6 text-center text-[13px] leading-relaxed text-text-muted">
                 Select a file to view and edit it.
               </div>
             )}

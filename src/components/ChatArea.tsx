@@ -747,10 +747,10 @@ export function ChatArea({
               void addFiles(e.dataTransfer.files);
             }}
             data-dragging={isDragging}
-            className="relative rounded-[22px] border border-border bg-bg-tertiary shadow-[0_6px_28px_rgba(0,0,0,0.28)] transition-colors focus-within:border-border-light data-[dragging=true]:border-accent data-[dragging=true]:bg-accent/[0.06]"
+            className="relative rounded-2xl border border-border bg-bg-tertiary shadow-[0_6px_28px_rgba(0,0,0,0.28)] transition-colors focus-within:border-border-light data-[dragging=true]:border-accent data-[dragging=true]:bg-accent/[0.06]"
           >
             {isDragging && (
-              <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-[22px] bg-bg-tertiary/85 backdrop-blur-[1px]">
+              <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-2xl bg-bg-tertiary/85 backdrop-blur-[1px]">
                 <span className="flex items-center gap-2 text-sm font-medium text-accent-light">
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M12 16V4m0 0L8 8m4-4l4 4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" />

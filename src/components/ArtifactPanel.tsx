@@ -114,7 +114,7 @@ export function ArtifactPanel({
       {/* Scrim */}
       <div
         onClick={handleClose}
-        className={`absolute inset-0 bg-black/50 backdrop-blur-[2px] transition-opacity duration-200 ${
+        className={`absolute inset-0 bg-black/50 backdrop-blur-[2px] transition-opacity duration-150 ${
           visible ? "opacity-100" : "opacity-0"
         }`}
       />

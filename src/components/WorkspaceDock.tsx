@@ -120,7 +120,7 @@ export function WorkspaceDock({
                   onOpen();
                   setOpen(false);
                 }}
-                className="flex-none rounded-lg border border-border px-2 py-1 text-[11.5px] text-text-secondary transition-colors hover:border-border-light hover:text-text-primary"
+                className="flex-none rounded-lg border border-border px-2 py-1 text-[12px] text-text-secondary transition-colors hover:border-border-light hover:text-text-primary"
               >
                 Open
               </button>
@@ -144,7 +144,7 @@ export function WorkspaceDock({
                     title={file.path}
                     className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-bg-hover"
                   >
-                    <span className="w-6 flex-none text-center font-mono text-[9.5px] uppercase text-text-muted">
+                    <span className="w-6 flex-none text-center font-mono text-[9px] uppercase text-text-muted">
                       {fileGlyph(file.path)}
                     </span>
                     <span
@@ -156,7 +156,7 @@ export function WorkspaceDock({
                     >
                       {file.path}
                     </span>
-                    <span className="flex-none text-[10.5px] text-text-muted">
+                    <span className="flex-none text-[11px] text-text-muted">
                       {formatSize(file.size)}
                     </span>
                   </button>

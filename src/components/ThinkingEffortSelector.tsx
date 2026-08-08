@@ -107,7 +107,7 @@ export function ThinkingEffortSelector({
         <span>{current.label}</span>
         <svg
           style={{ width: 11, height: 11 }}
-          className={`opacity-60 transition-transform duration-200 ${isOpen ? "rotate-180" : ""}`}
+          className={`opacity-60 transition-transform duration-150 ${isOpen ? "rotate-180" : ""}`}
           viewBox="0 0 24 24"
           fill="none"
           stroke="currentColor"
