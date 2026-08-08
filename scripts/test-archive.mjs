@@ -242,8 +242,14 @@ check(
   "rather than 'appears to be binary'"
 );
 check(
-  "a .docx suggests what to do instead",
-  /save as \.txt/i.test(AT.binaryFormatNote("notes.docx") ?? "")
+  "a .docx is no longer refused — it is read",
+  AT.binaryFormatNote("notes.docx") === null,
+  "office documents are zips of xml, so their text can be extracted"
+);
+check(
+  "the older .doc format still says what to do instead",
+  /save as \.docx/i.test(AT.binaryFormatNote("old.doc") ?? ""),
+  "it is a different, binary format with no open layout"
 );
 check(
   "a plain binary is named for what it is",

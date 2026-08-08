@@ -1,5 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { documentKind, readDocument } from "@/lib/documents";
 
 /**
  * Workspace filesystem.
@@ -429,6 +430,28 @@ export async function readFile(
     throw new WorkspaceError(
       `${relative} is too large to read (${Math.round(stat.size / 1024)}KB)`
     );
+  }
+
+  // A document in the workspace should be as readable as one attached to a
+  // message — otherwise the agent can be handed a .docx it cannot open, and
+  // has to tell the user to convert a file that is right there.
+  const kind = documentKind(relative);
+  if (kind) {
+    try {
+      const doc = await readDocument(kind, new Uint8Array(await fs.readFile(target)));
+      return {
+        path: relative,
+        content: doc.text,
+        truncated: doc.truncated,
+        size: stat.size,
+      };
+    } catch (error) {
+      throw new WorkspaceError(
+        `Couldn't read ${relative}: ${
+          error instanceof Error ? error.message : "unreadable document"
+        }`
+      );
+    }
   }
 
   const raw = await fs.readFile(target, "utf8");

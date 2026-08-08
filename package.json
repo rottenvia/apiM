@@ -7,14 +7,14 @@
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test:workspace": "node --no-warnings --experimental-strip-types scripts/test-workspace.mjs",
+    "test:workspace": "tsx scripts/test-workspace.mjs",
     "mock:deepseek": "node scripts/mock-deepseek.mjs",
     "dev:mock": "node scripts/dev-mock.mjs",
-    "test:real": "node --no-warnings --experimental-strip-types scripts/test-real.mjs",
+    "test:real": "tsx scripts/test-real.mjs",
     "test:delete": "tsx scripts/test-delete.mjs",
     "check:docker": "node --no-warnings scripts/check-docker.mjs",
-    "test:auth": "node --no-warnings --experimental-strip-types scripts/test-auth.mjs",
-    "test:diff": "node --no-warnings --experimental-strip-types scripts/test-diff.mjs",
+    "test:auth": "tsx scripts/test-auth.mjs",
+    "test:diff": "tsx scripts/test-diff.mjs",
     "test:runner": "tsx scripts/test-runner.mjs",
     "test:folders": "tsx scripts/test-folders.mjs",
     "test:titles": "tsx scripts/test-titles.mjs",
@@ -30,7 +30,8 @@
     "test:layout": "tsx scripts/test-layout.mjs",
     "test:install": "tsx scripts/test-install.mjs",
     "test:design": "tsx scripts/test-design.mjs",
-    "test:archive": "tsx scripts/test-archive.mjs"
+    "test:archive": "tsx scripts/test-archive.mjs",
+    "test:documents": "tsx scripts/test-documents.mjs"
   },
   "dependencies": {
     "@types/uuid": "^10.0.0",
