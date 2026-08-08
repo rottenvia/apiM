@@ -953,13 +953,54 @@ export async function POST(req: NextRequest) {
               detail = errText.slice(0, 200);
             }
 
+            /*
+             * Keep the work before giving up.
+             *
+             * This path is hit when the balance runs out, the key is
+             * rejected, or DeepSeek rate-limits — and it used to return
+             * without saving anything, so a run that had already spent
+             * twenty rounds and written several files left a bare error
+             * bubble with no way to continue it. Exactly the case that
+             * prompted this: the money ran out mid-task and the task was
+             * unrecoverable.
+             *
+             * Anything already produced is checkpointed with its resume
+             * state first, so topping up and pressing Continue picks up
+             * where it stopped instead of starting over.
+             */
+            if (assistantContent || toolEvents.length || reasoningContent) {
+              try {
+                await upsertMessage(convId, title, {
+                  id: assistantMsgId,
+                  role: "assistant",
+                  content: assistantContent,
+                  reasoningContent: reasoningContent || null,
+                  thinkingEffort: resolvedEffort,
+                  model,
+                  tokenCount: totalUsage.total_tokens || null,
+                  usage: totalUsage.total_tokens ? { ...totalUsage } : null,
+                  toolEvents: toolEvents.length ? toolEvents : null,
+                  timeline: timeline.length ? timeline : null,
+                  createdAt: new Date().toISOString(),
+                  incomplete: true,
+                  resumeState: {
+                    toolRounds,
+                    continuations,
+                    messages: transcript,
+                  },
+                });
+              } catch (e) {
+                console.error("Could not save work before failing:", e);
+              }
+            }
+
             send({
               type: "error",
               error:
                 dsResponse.status === 401
                   ? "Your DeepSeek API key was rejected. Check it in Settings."
                   : dsResponse.status === 402
-                    ? "Your DeepSeek account has insufficient balance."
+                    ? "Your DeepSeek account has insufficient balance. Everything done so far is saved — add credit and press Continue on the reply above."
                     : dsResponse.status === 429
                       ? "Rate limited by DeepSeek. Please wait a moment and try again."
                       : `DeepSeek API error (${dsResponse.status})${detail ? `: ${detail}` : ""}`,
