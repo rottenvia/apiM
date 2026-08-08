@@ -13,9 +13,32 @@ import {
 } from "@/lib/archive";
 import { documentKind, readDocument } from "@/lib/documents";
 
+/**
+ * What a file is doing while it is being read.
+ *
+ * Archives and documents take long enough to notice — unpacking a project or
+ * pulling text out of a spreadsheet is real work — and until now nothing
+ * appeared until it was finished, so a large zip looked like a dropped file
+ * that had been ignored.
+ */
+export type AttachStage =
+  | "reading"
+  | "unpacking"
+  | "extracting"
+  | "analyzing";
+
+export const STAGE_LABELS: Record<AttachStage, string> = {
+  reading: "Reading",
+  unpacking: "Unpacking",
+  extracting: "Extracting text",
+  analyzing: "Looking at image",
+};
+
 export interface Attachment {
   id: string;
   name: string;
+  /** Set while the file is still being read; cleared when it lands. */
+  stage?: AttachStage;
   /** Archives only: how many files came out of it, shown on the chip. */
   fileCount?: number;
   /** Size of the original file in bytes. */
@@ -149,6 +172,9 @@ export interface ReadResult {
   error?: string;
 }
 
+/** Reports progress while a file is read, so the chip can say what is happening. */
+export type ProgressFn = (stage: AttachStage) => void;
+
 /** Read an image as a data URL so it can be previewed and sent for analysis. */
 export async function readImageFile(file: File): Promise<ReadResult> {
   if (file.size > MAX_IMAGE_BYTES) {
@@ -180,7 +206,10 @@ export async function readImageFile(file: File): Promise<ReadResult> {
   };
 }
 
-export async function readTextFile(file: File): Promise<ReadResult> {
+export async function readTextFile(
+  file: File,
+  onProgress?: ProgressFn
+): Promise<ReadResult> {
   const cap =
     isArchive(file.name) || documentKind(file.name)
       ? MAX_ARCHIVE_BYTES
@@ -199,7 +228,11 @@ export async function readTextFile(file: File): Promise<ReadResult> {
 
   if (isArchive(file.name)) {
     try {
+      onProgress?.("unpacking");
       const data = new Uint8Array(await file.arrayBuffer());
+      // Yield once so the "Unpacking" state paints before the main thread is
+      // busy inflating; otherwise the label only appears after the work.
+      await new Promise((r) => setTimeout(r, 0));
       const result = await readArchive(file.name, data);
       if (result.entries.length === 0) {
         return { error: `${file.name} had no readable text files in it` };
@@ -232,7 +265,9 @@ export async function readTextFile(file: File): Promise<ReadResult> {
   const kind = documentKind(file.name);
   if (kind) {
     try {
+      onProgress?.("extracting");
       const data = new Uint8Array(await file.arrayBuffer());
+      await new Promise((r) => setTimeout(r, 0));
       const doc = await readDocument(kind, data);
       return {
         attachment: {
@@ -267,6 +302,8 @@ export async function readTextFile(file: File): Promise<ReadResult> {
   // 8000 characters checked, then had 200k kept and the rest discarded. On
   // the main thread, that decode is the freeze. Worse, it happened even for
   // files that were then rejected as binary.
+  onProgress?.("reading");
+
   let head: Uint8Array;
   try {
     head = new Uint8Array(

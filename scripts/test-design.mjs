@@ -366,6 +366,25 @@ check(
   "short rather than edge-to-edge, so it reads as a new section not a page break"
 );
 
+// Attachment progress
+const chips = files.find((f) => f.file.endsWith("AttachmentChips.tsx"))?.text ?? "";
+const chatArea2 = files.find((f) => f.file.endsWith("ChatArea.tsx"))?.text ?? "";
+
+check(
+  "a chip appears before the file has been read",
+  /id: `pending-/.test(chatArea2),
+  "otherwise dropping a large zip looks like nothing happened"
+);
+check(
+  "the chip says which stage it is at",
+  /STAGE_LABELS\[file\.stage\]/.test(chips),
+  "'loading' for both unpacking and extracting tells the user nothing"
+);
+check(
+  "there is a spinner, not just text",
+  /animate-spin/.test(chips)
+);
+
 check(
   "reduced motion is honoured",
   /@media \(prefers-reduced-motion: reduce\)/.test(css),
