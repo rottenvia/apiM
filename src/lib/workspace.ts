@@ -41,8 +41,15 @@ const ROOT = path.resolve(process.cwd(), DATA_DIR);
  */
 export const MAX_FILE_BYTES = 512 * 1024 * 1024;
 export const MAX_FILES_PER_WORKSPACE = 100_000;
-/** Truncate oversized reads so one file can't swamp the context window. */
-export const MAX_READ_CHARS = 100_000;
+/**
+ * Truncate oversized reads so one file can't swamp the context window.
+ *
+ * Lower than the attachment cap on purpose: the agent reads files inside a
+ * loop that may run forty rounds, and every earlier read is resent on each
+ * one. A file it attaches once can afford to be larger than a file it might
+ * read repeatedly.
+ */
+export const MAX_READ_CHARS = 400_000;
 
 export interface WorkspaceFile {
   path: string;

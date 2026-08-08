@@ -226,7 +226,13 @@ if (!zipAvailable) {
 
 console.log("\n7. Limits and failure");
 
-check("a character cap exists", D.MAX_DOC_CHARS > 0 && D.MAX_DOC_CHARS <= 500_000);
+check(
+  "a character cap exists, sized for the model in use",
+  D.MAX_DOC_CHARS >= 500_000,
+  `${D.MAX_DOC_CHARS.toLocaleString()} chars — about ${Math.round(
+    D.MAX_DOC_CHARS / 3.6 / 1000
+  )}k tokens of a 1M window`
+);
 
 let threw = false;
 try {
