@@ -25,9 +25,7 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-/** Matches the workspace limits, so the meter means something real. */
-const CAPACITY_BYTES = 128 * 1024 * 1024;
-const CAPACITY_FILES = 10_000;
+
 
 /**
  * The workspace, pinned beside the conversation.
@@ -134,7 +132,6 @@ export function WorkspaceSidePanel({
     [files]
   );
 
-  const usedPercent = Math.min(100, (totalBytes / CAPACITY_BYTES) * 100);
 
   const download = () => {
     if (!workspaceId) return;
@@ -149,11 +146,21 @@ export function WorkspaceSidePanel({
   };
 
   return (
-    <aside className="hidden w-[17.5rem] flex-none flex-col border-l border-border bg-bg-secondary/40 lg:flex">
-      <div className="flex items-center justify-between gap-2 px-3 pt-3.5">
-        <span className="text-[13px] font-medium text-text-secondary">
-          Workspace
-        </span>
+    <aside className="hidden w-[17.5rem] flex-none flex-col border-l border-border bg-bg-secondary lg:flex">
+      {/* A defined header strip rather than text floating above a list, so
+          the panel reads as its own surface and matches the 56px headers on
+          the sidebar and the chat area. */}
+      <div className="flex h-[56px] flex-none items-center justify-between gap-2 border-b border-border px-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="flex-none text-text-muted">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" />
+            </svg>
+          </span>
+          <span className="truncate text-[13px] font-medium text-text-primary">
+            Workspace
+          </span>
+        </div>
 
         <div className="flex items-center gap-0.5">
           <button
@@ -229,24 +236,23 @@ export function WorkspaceSidePanel({
         </div>
       </div>
 
-      {/* Usage. Quiet by design — it is reassurance, not a headline. */}
-      <div className="px-3 pb-2.5 pt-2">
-        <div className="flex items-center justify-between text-[11px] text-text-muted">
-          <span>
-            {formatBytes(totalBytes)} / {formatBytes(CAPACITY_BYTES)}
-          </span>
-          <span>
-            {files.length.toLocaleString()} / {CAPACITY_FILES.toLocaleString()} files
-          </span>
-        </div>
-        <div className="mt-1.5 h-[3px] w-full overflow-hidden rounded-full bg-border">
-          <div
-            className="h-full rounded-full bg-accent/70 transition-[width] duration-300"
-            // Always show a sliver once anything exists, or a small workspace
-            // looks identical to an empty one.
-            style={{ width: `${totalBytes > 0 ? Math.max(1.5, usedPercent) : 0}%` }}
-          />
-        </div>
+      {/* What is here, not what is left.
+          
+          This was a progress bar against 128MB and 10,000 files, which are a
+          hosted service's numbers. Everything lives on the user's own disk,
+          so there is no quota to fill and a bar creeping toward a limit that
+          does not exist is worse than no bar at all. */}
+      <div className="flex items-baseline gap-1.5 px-3 pb-2 pt-3 text-[11px] text-text-muted">
+        <span className="tabular-nums text-text-secondary">
+          {files.length.toLocaleString()}
+        </span>
+        <span>{files.length === 1 ? "file" : "files"}</span>
+        {totalBytes > 0 && (
+          <>
+            <span className="opacity-40">·</span>
+            <span className="tabular-nums">{formatBytes(totalBytes)}</span>
+          </>
+        )}
       </div>
 
       {showHistory ? (
@@ -309,7 +315,7 @@ export function WorkspaceSidePanel({
                 seen.has(file.path) ? "" : "animate-file-in"
               }`}
             >
-              <span className="w-5 flex-none text-center font-mono text-[9px] uppercase text-text-muted">
+              <span className="flex h-[18px] w-[22px] flex-none items-center justify-center rounded border border-border bg-bg-tertiary font-mono text-[9px] uppercase tracking-tight text-text-muted transition-colors group-hover:border-border-light">
                 {fileGlyph(file.path)}
               </span>
               <span

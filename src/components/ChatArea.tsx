@@ -19,7 +19,6 @@ import { Dots, MessageBubble } from "@/components/MessageBubble";
 import { ThinkingEffortSelector } from "@/components/ThinkingEffortSelector";
 import { ModelSelector } from "@/components/ModelSelector";
 import { WebSearchToggle } from "@/components/WebSearchToggle";
-import { WorkspaceToggle } from "@/components/WorkspaceToggle";
 import { WorkspaceBar } from "@/components/WorkspaceBar";
 import { WorkspaceDock } from "@/components/WorkspaceDock";
 import { ProcessDock } from "@/components/ProcessDock";
@@ -62,7 +61,6 @@ interface ChatAreaProps {
   workspaceFiles: WorkspaceFileInfo[];
   /** Paths the most recent reply changed. */
   recentlyChanged: string[];
-  onSetWorkspaceEnabled: (enabled: boolean) => void;
   /** Opens the file panel, optionally jumping straight to one file. */
   onOpenWorkspace: (path?: string) => void;
   onDecideCommand: (id: string, approved: boolean, remember: boolean) => void;
@@ -102,7 +100,6 @@ export function ChatArea({
   workspaceEnabled,
   workspaceFiles,
   recentlyChanged,
-  onSetWorkspaceEnabled,
   onOpenWorkspace,
   onDecideCommand,
   onAnswerQuestion,
@@ -506,19 +503,18 @@ export function ChatArea({
 
         <div className="flex items-center gap-1.5">
           <ProcessDock
-            workspaceId={workspaceEnabled ? workspaceId : null}
+            workspaceId={workspaceId}
             onChanged={onProcessesChanged}
           />
 
           {/* Hidden while the pinned panel is showing the same thing, so the
               header isn't duplicating what's already on screen. */}
-          {!(workspaceEnabled && sidePanelOpen) && (
+          {!sidePanelOpen && (
             <WorkspaceDock
-              enabled={workspaceEnabled}
+              enabled
               files={workspaceFiles}
               recentlyChanged={recentlyChanged}
               onEnable={() => {
-                onSetWorkspaceEnabled(true);
                 if (!sidePanelOpen) onToggleSidePanel();
               }}
               onOpen={() => onOpenWorkspace()}
@@ -526,7 +522,7 @@ export function ChatArea({
             />
           )}
 
-          {workspaceEnabled && !sidePanelOpen && (
+          {!sidePanelOpen && (
             <button
               onClick={onToggleSidePanel}
               className="icon-btn"
@@ -621,12 +617,7 @@ export function ChatArea({
         className="relative flex-1 overflow-y-auto"
       >
         {messages.length === 0 ? (
-          <EmptyState
-            hasKeys={hasKeys}
-            onOpenSettings={onOpenSettings}
-            workspaceEnabled={workspaceEnabled}
-            onEnableWorkspace={() => onSetWorkspaceEnabled(true)}
-          />
+          <EmptyState hasKeys={hasKeys} onOpenSettings={onOpenSettings} />
         ) : (
           <div
             className={`mx-auto w-full px-4 sm:px-6 py-6 transition-[max-width] duration-300 ${columnWidth}`}
@@ -660,7 +651,7 @@ export function ChatArea({
               enabled={workspaceEnabled}
               files={workspaceFiles}
               recentlyChanged={recentlyChanged}
-              onEnable={() => onSetWorkspaceEnabled(true)}
+              onEnable={() => {}}
               onOpen={() => onOpenWorkspace()}
               onOpenFile={openWorkspaceFile}
             />
@@ -838,13 +829,6 @@ export function ChatArea({
                   onChange={onSetSearchMode}
                 />
 
-                <WorkspaceToggle
-                  enabled={workspaceEnabled}
-                  fileCount={workspaceFiles.length}
-                  onToggle={onSetWorkspaceEnabled}
-                  onOpenFiles={() => onOpenWorkspace()}
-                />
-
                 <button
                   onClick={onOpenPlugins}
                   className="chip"
@@ -923,13 +907,9 @@ export function ChatArea({
 function EmptyState({
   hasKeys,
   onOpenSettings,
-  workspaceEnabled,
-  onEnableWorkspace,
 }: {
   hasKeys: boolean;
   onOpenSettings: () => void;
-  workspaceEnabled: boolean;
-  onEnableWorkspace: () => void;
 }) {
   return (
     <div className="flex h-full flex-col items-center justify-center px-4 pb-16 sm:px-6">
@@ -944,15 +924,11 @@ function EmptyState({
               Type a message below to start a conversation.
             </p>
 
-            {/* Sized to its own content and centred under the heading. A
-                one-line hint stretched to the full column reads as a banner
-                rather than as a note. */}
+            {/* States the capability rather than offering a switch. The
+                workspace is always on now, so a control here would have one
+                position. */}
             <div className="mt-7 inline-flex max-w-full items-center gap-2.5 rounded-full border border-border px-3.5 py-2 text-left">
-              <span
-                className={`flex-none ${
-                  workspaceEnabled ? "text-accent-light" : "text-text-muted"
-                }`}
-              >
+              <span className="flex-none text-accent-light">
                 <svg
                   width="16"
                   height="16"
@@ -970,26 +946,8 @@ function EmptyState({
                 </svg>
               </span>
               <p className="min-w-0 text-[12px] leading-4 text-text-muted">
-                {workspaceEnabled ? (
-                  <>
-                    <span className="text-text-secondary">Workspace is on.</span>{" "}
-                    Ask for a file and it gets written to disk.
-                  </>
-                ) : (
-                  <>
-                    <span className="text-text-secondary">Workspace is off.</span>{" "}
-                    Turn it on to have files written instead of printed.
-                  </>
-                )}
+                Ask for a file and it gets written to disk.
               </p>
-              {!workspaceEnabled && (
-                <button
-                  onClick={onEnableWorkspace}
-                  className="flex-none rounded-lg border border-border px-2.5 py-1 text-[12px] font-medium text-text-secondary transition-colors hover:border-border-light hover:bg-bg-hover hover:text-text-primary"
-                >
-                  Turn on
-                </button>
-              )}
             </div>
           </>
         ) : (

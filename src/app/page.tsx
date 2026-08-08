@@ -215,7 +215,10 @@ export default function Home() {
 
   // Workspace. The id follows the conversation so each chat gets its own
   // folder; `pendingWorkspaceId` covers a brand-new chat that has no id yet.
-  const [workspaceEnabled, setWorkspaceEnabled] = useState(false);
+  // Always on. Every command still goes through the approval gate, and the
+  // model only reaches for a file when a file is the answer — so switching
+  // this off just meant code printed in chat for the user to save by hand.
+  const workspaceEnabled = true;
   /** When on, commands run without asking. Off by default, deliberately. */
   const [autoRunCommands, setAutoRunCommands] = useState(false);
   // Defaults to the balanced profile: the opening round skims and only the
@@ -282,7 +285,6 @@ export default function Home() {
             if (s.thinkingEffort) setThinkingEffort(s.thinkingEffort);
             if (s.enabledPlugins) setEnabledPlugins(s.enabledPlugins);
             if (s.webSearchMode) setWebSearchMode(s.webSearchMode);
-            if (s.workspaceEnabled) setWorkspaceEnabled(true);
             // Only a literal true switches this on, so a corrupted or
             // half-written settings blob can never silently enable it.
             if (s.autoRunCommands === true) setAutoRunCommands(true);
@@ -318,7 +320,6 @@ export default function Home() {
           thinkingEffort,
           enabledPlugins,
           webSearchMode,
-          workspaceEnabled,
           autoRunCommands,
           searchProfile,
           sidePanelOpen,
@@ -335,7 +336,6 @@ export default function Home() {
     thinkingEffort,
     enabledPlugins,
     webSearchMode,
-    workspaceEnabled,
     autoRunCommands,
     searchProfile,
     sidePanelOpen,
@@ -1329,7 +1329,6 @@ export default function Home() {
         workspaceEnabled={workspaceEnabled}
         workspaceFiles={workspaceFiles}
         recentlyChanged={recentlyChanged}
-        onSetWorkspaceEnabled={setWorkspaceEnabled}
         onOpenWorkspace={openWorkspace}
         onDecideCommand={decideCommand}
         onAnswerQuestion={answerQuestion}
