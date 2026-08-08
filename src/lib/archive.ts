@@ -74,6 +74,23 @@ export const MAX_ENTRY_CHARS = 300_000;
 /** Across the whole archive. */
 export const MAX_TOTAL_CHARS = 1_500_000;
 
+/**
+ * A folder name for an unpacked archive.
+ *
+ * Derived from the archive's own name so the workspace reads as a list of
+ * what was uploaded, and stripped of anything that could change the path —
+ * an archive is user-supplied and "../" in a folder name would escape the
+ * uploads directory.
+ */
+export function archiveFolderName(name: string): string {
+  const base = name
+    .replace(/\.(tar\.gz|tgz|tar|zip)$/i, "")
+    .replace(/[^\w.-]+/g, "-")
+    .replace(/^[.-]+|[.-]+$/g, "")
+    .slice(0, 60);
+  return base || "archive";
+}
+
 export function isArchive(name: string): boolean {
   const lower = name.toLowerCase();
   return (
@@ -390,6 +407,42 @@ export async function readArchive(
  * any of it, then each file fenced with its path. Skipped files are counted
  * rather than listed — forty "binary file" lines would push out the code.
  */
+/**
+ * Render an archive that has been written to the workspace.
+ *
+ * Only the manifest, because the files themselves are on disk now. Inlining
+ * them as well would send everything twice — once here and again whenever
+ * the model reads one — and would put a whole project into a single message
+ * that is discarded when the turn ends.
+ */
+export function formatArchiveManifest(
+  name: string,
+  dir: string,
+  result: ArchiveResult
+): string {
+  const { entries, skipped, hitLimit } = result;
+
+  const tree = entries
+    .map((e) => `  ${dir}/${e.path}${e.truncated ? "  (truncated)" : ""}`)
+    .join("\n");
+
+  const notes: string[] = [];
+  if (skipped.length > 0) {
+    notes.push(`${skipped.length} skipped (binaries, dependencies)`);
+  }
+  if (hitLimit) notes.push(`only the first ${entries.length} were unpacked`);
+
+  return [
+    `${name} was unpacked into the workspace at ${dir}/ — ${entries.length} file(s)${
+      notes.length ? `, ${notes.join(", ")}` : ""
+    }.`,
+    "",
+    tree,
+    "",
+    "These are real files on disk. Read the ones you need with read_file, or search across them with search_files — do not ask for the archive to be re-sent.",
+  ].join("\n");
+}
+
 export function formatArchive(name: string, result: ArchiveResult): string {
   const { entries, skipped, hitLimit } = result;
 
