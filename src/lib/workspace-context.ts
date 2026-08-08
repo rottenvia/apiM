@@ -80,6 +80,10 @@ export async function buildWorkspaceContext(
   let files: { path: string; size: number }[];
   try {
     files = await listFiles(workspaceId);
+    // The lessons file is already injected into the system prompt as text.
+    // Listing it here as well invites the model to read it a second time,
+    // paying for the same content twice in one request.
+    files = files.filter((f) => f.path !== "LESSONS.md");
   } catch {
     // A missing or unreadable workspace is not worth failing the request
     // over — the model still has list_files if it wants to look.

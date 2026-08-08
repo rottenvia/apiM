@@ -86,6 +86,8 @@ interface SettingsModalProps {
   deleteDelay: number;
   onDeleteDelayChange: (seconds: number) => void;
   autoRunCommands: boolean;
+  lessonsEnabled: boolean;
+  onLessonsEnabledChange: (v: boolean) => void;
   onAutoRunCommandsChange: (enabled: boolean) => void;
   searchProfile: string;
   onSearchProfileChange: (profile: string) => void;
@@ -108,6 +110,8 @@ export function SettingsModal({
   deleteDelay,
   onDeleteDelayChange,
   autoRunCommands,
+  lessonsEnabled,
+  onLessonsEnabledChange,
   onAutoRunCommandsChange,
   searchProfile,
   onSearchProfileChange,
@@ -458,6 +462,51 @@ export function SettingsModal({
 
             {tab === "misc" && (
               <>
+              {/* Learning from what happened */}
+              <div>
+                <label className="block text-sm font-semibold text-text-primary mb-2">
+                  Learn from this project
+                </label>
+                <p className="mb-2.5 text-[12px] leading-relaxed text-text-secondary">
+                  After a task, the assistant writes down what it proved — a
+                  command that failed, a path that did not exist — into a{" "}
+                  <code className="rounded bg-bg-tertiary px-1 py-0.5 text-[11px]">
+                    LESSONS.md
+                  </code>{" "}
+                  in the workspace, and reads it back next time so it does not
+                  repeat the same wrong turn. Only facts with evidence behind
+                  them are kept, and one is corrected automatically when a
+                  later run disproves it.
+                </p>
+
+                <button
+                  onClick={() => onLessonsEnabledChange(!lessonsEnabled)}
+                  role="switch"
+                  aria-checked={lessonsEnabled}
+                  className="flex w-full items-center justify-between rounded-xl border border-border bg-bg-tertiary px-3 py-2.5 text-left transition-colors hover:border-border-light"
+                >
+                  <span className="min-w-0">
+                    <span className="block text-[13px] font-medium text-text-primary">
+                      {lessonsEnabled ? "On" : "Off"}
+                    </span>
+                    <span className="block text-[11px] text-text-secondary">
+                      {lessonsEnabled
+                        ? "Adds a few hundred tokens per task; the file is yours to edit"
+                        : "Nothing is recorded between tasks"}
+                    </span>
+                  </span>
+                  <span
+                    data-on={lessonsEnabled}
+                    className="relative h-5 w-9 flex-none rounded-full bg-border transition-colors data-[on=true]:bg-accent"
+                  >
+                    <span
+                      data-on={lessonsEnabled}
+                      className="absolute top-0.5 left-0.5 h-4 w-4 rounded-full bg-white transition-transform data-[on=true]:translate-x-4"
+                    />
+                  </span>
+                </button>
+              </div>
+
               {/* Command approval */}
               <div>
                 <label className="block text-sm font-semibold text-text-primary mb-2">
