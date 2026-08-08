@@ -186,9 +186,27 @@ check(
   Number.isFinite(W.MAX_FILE_BYTES) && W.MAX_FILE_BYTES > 0
 );
 
-// ------------------------------------------------------------ copy files
+// ------------------------------------------------------- reads don't write
 
-console.log("\n7. Copying files from another chat");
+console.log("\n7. Looking at a workspace does not create it");
+
+await fs.rm(WSROOT, { recursive: true, force: true });
+const empty = await W.listFiles("never-written-to");
+check("listing a missing workspace returns nothing", empty.length === 0);
+
+const created = await fs
+  .readdir(WSROOT)
+  .then((d) => d.length)
+  .catch(() => 0);
+check(
+  "and creates no folder for it",
+  created === 0,
+  "listFiles used to call ensureRoot, so every glance left an empty folder"
+);
+
+// ----------------------------------------------------------- copy files
+
+console.log("\n8. Copying files from another chat");
 
 await fs.rm(WSROOT, { recursive: true, force: true });
 await W.writeFile("src-chat", "main.py", "print(1)\n");
@@ -230,7 +248,7 @@ await fs.rm(WSROOT, { recursive: true, force: true });
 
 // -------------------------------------------------------------- migration
 
-console.log("\n6. Migrating the old three-folder layout");
+console.log("\n9. Migrating the old three-folder layout");
 
 await fs.rm(WSROOT, { recursive: true, force: true });
 await fs.mkdir(path.join(WSROOT, "old"), { recursive: true });
