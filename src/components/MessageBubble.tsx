@@ -742,7 +742,11 @@ function MessageBubbleImpl({
                   onClick={() => setShowInterrupted((v) => !v)}
                   className="min-w-0 flex-1 text-left text-[12px] leading-snug text-[#cfa25a] hover:underline"
                 >
-                  This reply was interrupted
+                  {/* The reason, when there is one. "Insufficient balance"
+                      is far more use than a generic "interrupted", and it
+                      tells the user the one thing they have to fix before
+                      Continue will work. */}
+                  {message.errorNotice ?? "This reply was interrupted"}
                   {message.content ? (
                     <span className="ml-1 opacity-70">
                       · {showInterrupted ? "hide" : "show"} what arrived
@@ -988,6 +992,8 @@ export const MessageBubble = memo(MessageBubbleImpl, (prev, next) => {
     a.isStreaming === b.isStreaming &&
     a.isError === b.isError &&
     a.incomplete === b.incomplete &&
+    a.canResume === b.canResume &&
+    a.errorNotice === b.errorNotice &&
     a.tokenCount === b.tokenCount &&
     a.thinkingEffort === b.thinkingEffort &&
     a.searchResults === b.searchResults &&

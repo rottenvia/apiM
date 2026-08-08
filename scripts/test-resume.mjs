@@ -260,6 +260,46 @@ check(
   "requiring resumeState hid the option on every existing chat"
 );
 
+// ------------------------------------------------------- task 3c
+console.log("\n3c. Running out of balance mid-task keeps the work");
+
+/*
+ * The case that started this. A 402 (or 401/429) returned immediately without
+ * saving anything, so a run that had already written files left only an error
+ * bubble — the whole task was unrecoverable and had to be bought again.
+ */
+check(
+  "work is checkpointed before the API error is surfaced",
+  route.indexOf("Could not save work before failing") <
+    route.indexOf("Your DeepSeek API key was rejected"),
+  "it returned first and saved nothing"
+);
+check(
+  "the checkpoint includes resume state",
+  /Could not save work before failing[\s\S]{0,80}/.test(route) &&
+    /if \(assistantContent \|\| toolEvents\.length \|\| reasoningContent\)/.test(route)
+);
+check(
+  "the balance message says the work is safe",
+  /add credit and press Continue/.test(route),
+  "otherwise the user assumes it is all gone"
+);
+check(
+  "the error does not overwrite a reply that had progress",
+  /hadWork\s*\?\s*\{ incomplete: true, canResume: true/.test(page),
+  "replacing the content with the error destroyed what had been written"
+);
+check(
+  "a reply with nothing in it still shows a plain error",
+  /: \{ content: `⚠️ \$\{evt\.error\}`, isError: true \}/.test(page),
+  "an empty failure should not pretend to be resumable"
+);
+check(
+  "the banner shows why it stopped",
+  /message\.errorNotice \?\? "This reply was interrupted"/.test(bubble),
+  "'insufficient balance' is more use than 'interrupted'"
+);
+
 // -------------------------------------------------------------- task 4
 console.log("\n4. The prompt cache is not thrown away on every write");
 

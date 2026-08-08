@@ -44,6 +44,12 @@ export interface Message {
    * resumed, and the UI must not promise otherwise.
    */
   canResume?: boolean;
+  /**
+   * Why an otherwise-resumable reply stopped, e.g. the balance running out.
+   * Shown on the interrupted banner so the reason is visible without
+   * discarding the work that was already done.
+   */
+  errorNotice?: string;
   /** Why auto-search did or didn't run, shown as a tooltip. */
   searchReason?: string;
   /** Files sent with this message, rendered as chips on the bubble. */
@@ -1140,10 +1146,30 @@ export default function Home() {
                 break;
               }
 
-              case "error":
+              case "error": {
                 sawError = true;
-                finish({ content: `⚠️ ${evt.error}`, isError: true });
+                /*
+                 * Don't throw away a half-finished reply to show the error.
+                 *
+                 * Replacing the content meant a run that had already written
+                 * files and produced text vanished the moment the balance ran
+                 * out, leaving only "insufficient balance" and no way back to
+                 * it. The server has saved that work; the bubble has to keep
+                 * showing it, marked incomplete, so Continue is offered.
+                 */
+                const current = messagesRef.current.find(
+                  (m) => m.id === streamingId
+                );
+                const hadWork = Boolean(
+                  current?.content?.trim() || current?.toolEvents?.length
+                );
+                finish(
+                  hadWork
+                    ? { incomplete: true, canResume: true, errorNotice: evt.error }
+                    : { content: `⚠️ ${evt.error}`, isError: true }
+                );
                 break;
+              }
             }
           }
         }
