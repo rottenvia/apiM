@@ -1,9 +1,30 @@
 "use client";
 
 import { useState } from "react";
-import { formatBytes } from "@/lib/attachments";
+import { formatBytes, STAGE_LABELS } from "@/lib/attachments";
 import type { Attachment } from "@/lib/attachments";
 import { ImageLightbox } from "@/components/ImageLightbox";
+
+function Spinner() {
+  return (
+    <svg
+      width="11"
+      height="11"
+      viewBox="0 0 24 24"
+      fill="none"
+      className="flex-none animate-spin"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth={3} opacity={0.25} />
+      <path
+        d="M21 12a9 9 0 00-9-9"
+        stroke="currentColor"
+        strokeWidth={3}
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
 
 export function AttachmentChips({
   attachments,
@@ -57,9 +78,12 @@ export function AttachmentChips({
                 className="h-16 w-16 object-cover transition-transform duration-150 group-hover:scale-105"
               />
 
-              {file.analyzing && (
-                <span className="absolute inset-0 flex items-center justify-center bg-black/65 text-[9px] font-medium text-white">
-                  Reading…
+              {(file.analyzing || file.stage) && (
+                <span className="absolute inset-0 flex flex-col items-center justify-center gap-1 bg-black/65 text-[9px] font-medium text-white">
+                  <Spinner />
+                  <span className="animate-thinking">
+                    {file.stage ? STAGE_LABELS[file.stage] : "Reading"}…
+                  </span>
                 </span>
               )}
 
@@ -126,18 +150,30 @@ export function AttachmentChips({
             <span className="block truncate text-xs leading-4 text-text-primary">
               {file.name}
             </span>
-            <span className="block text-[11px] leading-3 text-text-muted">
-              {formatBytes(file.size)}
-              {file.fileCount !== undefined && (
-                <span className="text-accent-light">
-                  {" "}
-                  · {file.fileCount} file{file.fileCount === 1 ? "" : "s"}
+            {/* While a file is being read the stage replaces the size, since
+                the size is known but uninteresting and the stage is the only
+                thing that changes. */}
+            {file.stage ? (
+              <span className="flex items-center gap-1.5 text-[11px] leading-3 text-accent-light">
+                <Spinner />
+                <span className="animate-thinking">
+                  {STAGE_LABELS[file.stage]}…
                 </span>
-              )}
-              {file.truncated && (
-                <span className="text-warning"> · truncated</span>
-              )}
-            </span>
+              </span>
+            ) : (
+              <span className="block text-[11px] leading-3 text-text-muted">
+                {formatBytes(file.size)}
+                {file.fileCount !== undefined && (
+                  <span className="text-accent-light">
+                    {" "}
+                    · {file.fileCount} file{file.fileCount === 1 ? "" : "s"}
+                  </span>
+                )}
+                {file.truncated && (
+                  <span className="text-warning"> · truncated</span>
+                )}
+              </span>
+            )}
           </span>
 
           <button

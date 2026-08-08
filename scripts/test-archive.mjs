@@ -285,6 +285,58 @@ check(
   `${AT.SNIFF_BYTES} bytes — the old path decoded the entire file first`
 );
 
+// ------------------------------------------------------------- progress
+
+console.log("\n8. Progress while a file is read");
+
+check(
+  "every stage has a label",
+  ["reading", "unpacking", "extracting", "analyzing"].every(
+    (k) => typeof AT.STAGE_LABELS[k] === "string" && AT.STAGE_LABELS[k].length > 0
+  ),
+  Object.values(AT.STAGE_LABELS).join(" / ")
+);
+check(
+  "the labels say what is happening, not just 'loading'",
+  AT.STAGE_LABELS.unpacking !== AT.STAGE_LABELS.extracting &&
+    AT.STAGE_LABELS.unpacking !== AT.STAGE_LABELS.reading,
+  "unpacking a zip and pulling text out of a docx are different waits"
+);
+
+if (await have("zip")) {
+  // A File stand-in, enough of the interface for readTextFile.
+  const asFile = (name, buf) => ({
+    name,
+    size: buf.length,
+    type: "",
+    arrayBuffer: async () =>
+      buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length),
+    slice: (a = 0, b = buf.length) => asFile(name, buf.subarray(a, b)),
+    text: async () => buf.toString("utf8"),
+  });
+
+  const zipBuf = await fs.readFile(path.join(tmp, "proj.zip"));
+  const zipStages = [];
+  const zipRes = await AT.readTextFile(asFile("proj.zip", zipBuf), (st) =>
+    zipStages.push(st)
+  );
+  check(
+    "an archive reports that it is unpacking",
+    zipStages.includes("unpacking"),
+    zipStages.join(" -> ") || "(none)"
+  );
+  check("and still produces an attachment", Boolean(zipRes.attachment));
+
+  const txt = Buffer.from("just some text\n");
+  const txtStages = [];
+  await AT.readTextFile(asFile("notes.txt", txt), (st) => txtStages.push(st));
+  check(
+    "a plain file reports reading, not unpacking",
+    txtStages.includes("reading") && !txtStages.includes("unpacking"),
+    txtStages.join(" -> ")
+  );
+}
+
 await fs.rm(tmp, { recursive: true, force: true });
 
 console.log(

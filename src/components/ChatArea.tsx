@@ -189,10 +189,61 @@ export function ChatArea({
     const accepted: Attachment[] = [];
     const errors: string[] = [];
 
-    for (const file of list) {
+    // A placeholder per file, shown before any reading starts.
+    //
+    // Chips used to appear only once a file had finished being read, so
+    // dropping a large zip looked like nothing had happened — the work is
+    // real (unpack, decompress, decode) and it was completely invisible.
+    // These are replaced by the finished attachment, or removed on failure.
+    const pending: Attachment[] = list.map((file, i) => ({
+      id: `pending-${Date.now().toString(36)}-${i}`,
+      name: file.name,
+      size: file.size,
+      content: "",
+      truncated: false,
+      kind: isImageFile(file) ? "image" : "text",
+      stage: "reading",
+    }));
+    let room = 0;
+    setAttachments((prev) => {
+      room = Math.max(0, MAX_FILES - prev.length);
+      if (room === 0) {
+        errors.push(`You can attach up to ${MAX_FILES} files`);
+        return prev;
+      }
+      if (pending.length > room) {
+        errors.push(`Only the first ${room} file(s) were added`);
+      }
+      return [...prev, ...pending.slice(0, room)];
+    });
+
+    const setStage = (id: string, stage: Attachment["stage"]) => {
+      setAttachments((prev) =>
+        prev.map((a) => (a.id === id ? { ...a, stage } : a))
+      );
+    };
+
+    for (let i = 0; i < list.length; i++) {
+      const placeholder = pending[i];
+      // Beyond the cap the placeholder was never added, so there is nothing
+      // to read into.
+      if (i >= room) break;
+      const file = list[i];
+
       const { attachment, error } = isImageFile(file)
         ? await readImageFile(file)
-        : await readTextFile(file);
+        : await readTextFile(file, (stage) => setStage(placeholder.id, stage));
+
+      // Swap the placeholder for the real thing, or drop it if it failed.
+      setAttachments((prev) => {
+        const at = prev.findIndex((a) => a.id === placeholder.id);
+        if (at === -1) return prev;
+        const next = [...prev];
+        if (attachment) next[at] = attachment;
+        else next.splice(at, 1);
+        return next;
+      });
+
       if (attachment) accepted.push(attachment);
       else if (error) errors.push(error);
     }
@@ -201,20 +252,6 @@ export function ChatArea({
     // so kick that off as soon as they are attached rather than at send time.
     for (const image of accepted.filter((a) => a.kind === "image")) {
       void analyzeImage(image);
-    }
-
-    if (accepted.length > 0) {
-      setAttachments((prev) => {
-        const room = MAX_FILES - prev.length;
-        if (room <= 0) {
-          errors.push(`You can attach up to ${MAX_FILES} files`);
-          return prev;
-        }
-        if (accepted.length > room) {
-          errors.push(`Only the first ${room} file(s) were added`);
-        }
-        return [...prev, ...accepted.slice(0, room)];
-      });
     }
 
     if (errors.length > 0) setAttachError(errors.join(" · "));
