@@ -772,20 +772,27 @@ input:focus-visible {
 /* Progress under the label.
  *
  * Bouncing dots repeat forever, which reads as a stalled spinner — the eye
- * learns the loop and stops believing anything is happening. A bar that
- * sweeps once, fades, and sweeps again says the work is ongoing without
- * pretending to know how far along it is. */
+ * learns the loop and stops believing anything is happening. A travelling
+ * highlight says the work is ongoing without pretending to know how far
+ * along it is.
+ *
+ * The previous version scaled the element itself with `transform: scaleX()`
+ * from 0 to 1. That is why it looked like "a tiny line": for most of every
+ * cycle the element genuinely was a few pixels wide, growing from the left
+ * edge, and any glance — or screenshot — caught it as a stub rather than a
+ * rule. It also faded to nothing at both ends, so the panel header had a
+ * gap under it that flickered in and out.
+ *
+ * The element is now always the full width of the panel. Only the highlight
+ * inside it travels, by moving the gradient rather than resizing the box, so
+ * the line reads as a continuous rule with a glint passing along it and the
+ * layout never changes. */
 @keyframes thinking-sweep {
-  0% {
-    transform: scaleX(0);
-    opacity: 0;
+  from {
+    background-position: 200% 0;
   }
-  25% {
-    opacity: 1;
-  }
-  100% {
-    transform: scaleX(1);
-    opacity: 0;
+  to {
+    background-position: -200% 0;
   }
 }
 
@@ -793,21 +800,29 @@ input:focus-visible {
   display: block;
   height: 1px;
   width: 100%;
-  transform-origin: left;
-  background: linear-gradient(
+  /* A dim constant rule, so there is always a line, plus a brighter band
+     that travels along it. */
+  background-image: linear-gradient(
     90deg,
-    transparent,
-    color-mix(in oklab, #cfa25a 55%, transparent),
-    transparent
+    color-mix(in oklab, #cfa25a 14%, transparent) 0%,
+    color-mix(in oklab, #cfa25a 14%, transparent) 35%,
+    color-mix(in oklab, #cfa25a 70%, transparent) 50%,
+    color-mix(in oklab, #cfa25a 14%, transparent) 65%,
+    color-mix(in oklab, #cfa25a 14%, transparent) 100%
   );
-  animation: thinking-sweep 1.5s ease-in-out infinite;
+  background-size: 200% 100%;
+  background-repeat: no-repeat;
+  animation: thinking-sweep 1.5s linear infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
   .thinking-line {
     animation: none;
-    opacity: 0.6;
-    transform: none;
+    background-image: linear-gradient(
+      90deg,
+      color-mix(in oklab, #cfa25a 22%, transparent),
+      color-mix(in oklab, #cfa25a 22%, transparent)
+    );
   }
   .thinking-shell,
   .thinking-toggle,
@@ -821,29 +836,62 @@ input:focus-visible {
  * A grid row from 0fr to 1fr animates to the content's real height without
  * anyone having to measure it, so the panel grows rather than snapping open.
  * max-height would need a guessed ceiling and would ease wrongly whenever the
- * guess was too large. */
+ * guess was too large.
+ *
+ * What made the old version look wrong was fading the whole block over the
+ * same 0.3s as the height. Two things changed at once on the same clock: the
+ * box scaled open while the text it contained was still half transparent, so the
+ * words appeared to smear upward out of nothing instead of being uncovered.
+ *
+ * Now the height is the only thing that moves the layout, and it uses a
+ * gentle ease-out so it decelerates into place rather than stopping dead.
+ * The text is handled separately below: it is fully opaque almost
+ * immediately, so what you see is a panel sliding open over finished text —
+ * a reveal, not a fade. */
 .thinking-body {
   display: grid;
   grid-template-rows: 0fr;
-  transition:
-    grid-template-rows 0.3s cubic-bezier(0.22, 1, 0.36, 1),
-    opacity 0.3s ease;
-  opacity: 0;
+  transition: grid-template-rows 0.3s cubic-bezier(0.32, 0.72, 0, 1);
 }
 .thinking-body[data-open='true'] {
   grid-template-rows: 1fr;
-  opacity: 1;
 }
 .thinking-body > * {
   min-height: 0;
   overflow: hidden;
 }
 
+/* The text being uncovered.
+ *
+ * A short rise with the fade, on the faster tier so it settles while the box
+ * is still opening. Closing uses the same quick timing with no delay — a
+ * lingering fade on the way out is what makes a collapse feel sticky. */
+.thinking-body .thinking-body-text {
+  opacity: 0;
+  transform: translateY(-2px);
+  transition:
+    opacity 0.15s ease,
+    transform 0.15s ease;
+}
+.thinking-body[data-open='true'] .thinking-body-text {
+  opacity: 1;
+  transform: translateY(0);
+  transition:
+    opacity 0.15s ease 0.05s,
+    transform 0.3s cubic-bezier(0.32, 0.72, 0, 1) 0.05s;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .thinking-panel {
     animation: none;
   }
-  .thinking-body {
+  .thinking-body,
+  .thinking-body .thinking-body-text,
+  .thinking-body[data-open='true'] .thinking-body-text {
     transition: none;
+  }
+  /* Still hidden when shut, just without the movement. */
+  .thinking-body .thinking-body-text {
+    transform: none;
   }
 }

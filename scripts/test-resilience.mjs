@@ -166,7 +166,7 @@ console.log("\n3. Pruning a long transcript");
 
 const bigOutput = (n) => `line one of output\n${"x".repeat(n)}`;
 
-function buildTranscript(rounds) {
+function buildTranscript(rounds, size = 1500) {
   const msgs = [
     { role: "system", content: "You are a helpful assistant." },
     { role: "user", content: "Please refactor the project." },
@@ -184,7 +184,7 @@ function buildTranscript(rounds) {
         },
       ],
     });
-    msgs.push({ role: "tool", tool_call_id: `call_${i}`, content: bigOutput(1500) });
+    msgs.push({ role: "tool", tool_call_id: `call_${i}`, content: bigOutput(size) });
   }
   return msgs;
 }
@@ -197,7 +197,31 @@ check(
   "pruning it would save nothing and risk dropping context"
 );
 
-const long = buildTranscript(30);
+/*
+ * Reading a whole project must survive intact.
+ *
+ * This is the regression that made the agent look like it gave up. Pruning
+ * used to begin at 24_000 characters — under 1% of DeepSeek v4's window — so
+ * a transcript that had read forty files arrived with all but the last
+ * twelve replaced by "[earlier read_file result … collapsed]". The model
+ * then described the handful it could still see and reported the rest as
+ * missing. Forty reads of a real source file is an ordinary request and must
+ * not lose anything.
+ */
+const wholeProject = buildTranscript(40);
+const untouched = P.pruneTranscript(wholeProject);
+check(
+  "reading forty files keeps every one of them",
+  untouched.stats.collapsed === 0,
+  `${untouched.stats.collapsed} collapsed — the agent can describe all 40`
+);
+
+// Big enough to actually exceed the threshold, so the collapse path is still
+// covered. Sized from the constant rather than hardcoded, so raising the
+// budget again does not silently stop testing this.
+const perRound = 12_000;
+const rounds = Math.ceil((P.PRUNE_THRESHOLD_CHARS / perRound) * 1.6);
+const long = buildTranscript(rounds, perRound);
 res = P.pruneTranscript(long);
 
 check("a long run does get pruned", res.stats.collapsed > 0, `${res.stats.collapsed} collapsed`);
@@ -211,7 +235,8 @@ check(
 );
 check(
   "exactly the older ones were collapsed",
-  res.stats.collapsed === 30 - P.KEEP_VERBATIM_RESULTS
+  res.stats.collapsed === rounds - P.KEEP_VERBATIM_RESULTS,
+  `${rounds} rounds, keeping ${P.KEEP_VERBATIM_RESULTS}`
 );
 
 // The three invariants that would otherwise produce a 400.
@@ -270,9 +295,12 @@ check(
 
 const before = P.transcriptChars(long);
 const after = P.transcriptChars(res.messages);
+// A third off. The ceiling is set by KEEP_VERBATIM_RESULTS: eighty recent
+// reads are deliberately kept whole, so on a transcript only 60% longer than
+// the threshold most of what remains is content we chose not to touch.
 check(
   "the saving is substantial",
-  after < before * 0.6,
+  after < before * 0.7,
   `${before.toLocaleString()} -> ${after.toLocaleString()} chars, ${Math.round((1 - after / before) * 100)}% smaller`
 );
 check(
@@ -297,7 +325,13 @@ const parallel = [
   { role: "system", content: "s" },
   { role: "user", content: "u" },
 ];
-for (let i = 0; i < 20; i++) {
+// Enough rounds to clear the threshold and still leave older results to
+// collapse once the eighty most recent are kept.
+const parallelRounds = P.KEEP_VERBATIM_RESULTS + 40;
+const parallelSize = Math.ceil(
+  (P.PRUNE_THRESHOLD_CHARS * 1.6) / (parallelRounds * 2)
+);
+for (let i = 0; i < parallelRounds; i++) {
   parallel.push({
     role: "assistant",
     content: null,
@@ -307,14 +341,14 @@ for (let i = 0; i < 20; i++) {
       { id: `b_${i}`, type: "function", function: { name: "list_files", arguments: "{}" } },
     ],
   });
-  parallel.push({ role: "tool", tool_call_id: `a_${i}`, content: bigOutput(1200) });
-  parallel.push({ role: "tool", tool_call_id: `b_${i}`, content: bigOutput(1200) });
+  parallel.push({ role: "tool", tool_call_id: `a_${i}`, content: bigOutput(parallelSize) });
+  parallel.push({ role: "tool", tool_call_id: `b_${i}`, content: bigOutput(parallelSize) });
 }
 res = P.pruneTranscript(parallel);
 check(
   "parallel tool calls in one round stay balanced after pruning",
   P.toolCallsAreBalanced(res.messages),
-  "40 calls across 20 rounds"
+  `${parallelRounds * 2} calls across ${parallelRounds} rounds`
 );
 check("parallel calls still got pruned", res.stats.collapsed > 0);
 

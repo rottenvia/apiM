@@ -1,4 +1,4 @@
-import { promises as fs } from "node:fs";
+import fsSync, { promises as fs } from "node:fs";
 import path from "node:path";
 import { documentKind, readDocument } from "@/lib/documents";
 
@@ -68,18 +68,210 @@ export class WorkspaceError extends Error {}
  */
 const folderNames = new Map<string, string>();
 
+/**
+ * The same mapping, on disk.
+ *
+ * The in-memory map alone was the cause of uploads disappearing. It is only
+ * populated when something reads the chat store, and the requests do not
+ * arrive in that order: dropping a zip on a chat hits the upload route
+ * first, on a freshly started (or hot-reloaded) server where nothing has
+ * touched the store yet. `workspaceFolderName` then fell back to the raw
+ * conversation id, so the archive was written to `data/workspaces/<uuid>/`
+ * while the chat's real files lived in `data/workspaces/<slug>/`.
+ *
+ * Nothing was lost — but the next request went through the chat route, which
+ * *does* read the store, so by the time the agent looked the id resolved to
+ * the slug folder and the upload was in the other one. That is exactly the
+ * reported symptom: the model analyses the archive on the turn it arrives
+ * (it is inlined in that message), then reports "No ZIP in the workspace"
+ * forever after.
+ *
+ * A one-line marker inside each workspace fixes the ordering problem for
+ * good: any process can recover the mapping from disk without needing the
+ * store to have been read first.
+ */
+const MAPPING_FILE = ".workspace-id";
+
+/**
+ * Ids already reconciled in this process, so the disk scan happens once
+ * rather than on every path resolution.
+ */
+let diskMappingLoaded = false;
+
+/**
+ * Rebuild the id → folder mapping by reading the marker in each workspace.
+ *
+ * Synchronous on purpose. Every path in this module resolves through
+ * `workspaceRoot`, which is used by synchronous callers too, and an async
+ * lookup there would change every signature in the file. The scan is one
+ * readdir over a handful of small folders and happens once per process.
+ */
+function loadDiskMapping(): void {
+  if (diskMappingLoaded) return;
+  diskMappingLoaded = true;
+
+  let entries: string[];
+  try {
+    entries = fsSync.readdirSync(ROOT);
+  } catch {
+    return; // No workspaces yet.
+  }
+
+  for (const name of entries) {
+    try {
+      const id = fsSync
+        .readFileSync(path.join(ROOT, name, MAPPING_FILE), "utf8")
+        .trim();
+      // Only fill gaps. An explicit setWorkspaceFolderName from the store is
+      // the more recent truth and must win over a stale marker.
+      if (id && !folderNames.has(id) && /^[\w-]{1,128}$/.test(id)) {
+        folderNames.set(id, name);
+      }
+    } catch {
+      // Not a workspace, or no marker — nothing to recover.
+    }
+  }
+}
+
+/** Record which id a folder belongs to, so a cold process can find it again. */
+async function writeMarker(workspaceId: string, root: string): Promise<void> {
+  try {
+    await fs.writeFile(path.join(root, MAPPING_FILE), workspaceId, "utf8");
+  } catch {
+    // Best effort: the in-memory map still works for this process.
+  }
+}
+
 /** Called by the chat store when it names or renames a conversation. */
 export function setWorkspaceFolderName(
   workspaceId: string,
   folder: string
 ): void {
   if (/^[\w-]{1,128}$/.test(workspaceId) && /^[\w-]{1,128}$/.test(folder)) {
+    const previous = folderNames.get(workspaceId);
+    if (previous && previous !== folder) verifiedFolders.delete(previous);
     folderNames.set(workspaceId, folder);
+
+    // Keep the marker in step, or a restart would resurrect the old name.
+    // Only if the folder is already there — writing it would otherwise
+    // create an empty workspace for a chat that has no files yet, which is
+    // the "reading must not create" rule listFiles exists to honour.
+    void fs
+      .access(path.join(ROOT, folder))
+      .then(() =>
+        fs.writeFile(path.join(ROOT, folder, MAPPING_FILE), workspaceId, "utf8")
+      )
+      .catch(() => {});
   }
 }
 
+/**
+ * Folders confirmed to exist, so the check below costs one stat per folder
+ * per process rather than one per file operation.
+ */
+const verifiedFolders = new Set<string>();
+
 export function workspaceFolderName(workspaceId: string): string {
-  return folderNames.get(workspaceId) ?? workspaceId;
+  const known = folderNames.get(workspaceId);
+
+  if (known) {
+    // A cached name can go stale: another process may have renamed the
+    // folder when the chat was titled. Pointing at a folder that no longer
+    // exists reports the workspace as empty, which looks exactly like the
+    // bug this map was added to fix.
+    if (verifiedFolders.has(known)) return known;
+    if (fsSync.existsSync(path.join(ROOT, known))) {
+      verifiedFolders.add(known);
+      return known;
+    }
+
+    // The name does not exist on disk. That is normal and correct for a
+    // workspace nobody has written to yet — the chat store names the folder
+    // before any file is created, and honouring that name is how the first
+    // write lands in the right place. It is only wrong if the files turn up
+    // somewhere else, so look for a folder that claims this id and prefer
+    // that; otherwise keep the name we were given.
+    const elsewhere = findFolderOnDisk(workspaceId);
+    if (elsewhere && elsewhere !== known) {
+      folderNames.set(workspaceId, elsewhere);
+      return elsewhere;
+    }
+    return known;
+  }
+
+  // Cold process: recover the mapping from disk before falling back to the
+  // raw id, which is what used to split one workspace across two folders.
+  loadDiskMapping();
+  const recovered = folderNames.get(workspaceId);
+  if (recovered) return recovered;
+
+  // About to fall back to the raw id. That is right for a workspace nobody
+  // has created yet, but wrong if this id was renamed by another process
+  // since the last scan — the id-named folder is gone and the files sit
+  // under the new name. Only worth rescanning when the fallback itself does
+  // not exist, so the common path still costs nothing.
+  if (!fsSync.existsSync(path.join(ROOT, workspaceId))) {
+    const found = findFolderOnDisk(workspaceId);
+    if (found) {
+      folderNames.set(workspaceId, found);
+      return found;
+    }
+  }
+
+  return workspaceId;
+}
+
+/** Rescan for the folder whose marker claims this id. */
+function findFolderOnDisk(workspaceId: string): string | null {
+  diskMappingLoaded = false;
+  const before = folderNames.get(workspaceId);
+  folderNames.delete(workspaceId);
+  loadDiskMapping();
+  const found = folderNames.get(workspaceId) ?? null;
+  // loadDiskMapping only fills gaps, so restore what was there if the scan
+  // found nothing — the caller decides whether to keep using it.
+  if (!found && before) folderNames.set(workspaceId, before);
+  return found;
+}
+
+/**
+ * Move everything in `src` into `dest`, then remove `src`.
+ *
+ * Used when a workspace ended up split across two folders. Existing files in
+ * `dest` win: they are the ones the chat has been using, and silently
+ * overwriting them with an older copy would be worse than skipping.
+ */
+async function mergeInto(src: string, dest: string): Promise<void> {
+  let entries;
+  try {
+    entries = await fs.readdir(src, { withFileTypes: true });
+  } catch {
+    return;
+  }
+
+  for (const entry of entries) {
+    const from = path.join(src, entry.name);
+    const to = path.join(dest, entry.name);
+
+    if (entry.isDirectory()) {
+      await fs.mkdir(to, { recursive: true }).catch(() => {});
+      await mergeInto(from, to);
+      continue;
+    }
+
+    // Never clobber a file the chat is already using.
+    const taken = await fs
+      .access(to)
+      .then(() => true)
+      .catch(() => false);
+    if (taken) continue;
+
+    await fs.rename(from, to).catch(() => {});
+  }
+
+  // Only succeeds once everything has been moved out, which is the check we
+  // want: a leftover file means something was skipped and is worth keeping.
+  await fs.rmdir(src).catch(() => {});
 }
 
 /**
@@ -104,9 +296,24 @@ export async function renameWorkspaceFolder(
     return; // No workspace folder yet — nothing to move.
   }
 
+  // Does the destination already exist? A plain rename onto a non-empty
+  // directory fails, and that failure is the second half of the vanishing
+  // upload: the chat already had a slug folder, the zip landed in a
+  // uuid-named one, and moving the second onto the first was refused — so
+  // the files stayed somewhere nothing would ever look again.
+  const destExists = await fs
+    .access(dest)
+    .then(() => true)
+    .catch(() => false);
+
   try {
-    // History and snapshots live inside the folder now, so they move with it.
-    await fs.rename(src, dest);
+    if (destExists) {
+      // Fold the stray folder into the real one instead of giving up.
+      await mergeInto(src, dest);
+    } else {
+      // History and snapshots live inside the folder now, so they move with it.
+      await fs.rename(src, dest);
+    }
     // Older layouts kept them as siblings; carry those across too, or undo
     // and restore break for any workspace created before the change.
     for (const suffix of [".history", ".snapshots"]) {
@@ -118,8 +325,23 @@ export async function renameWorkspaceFolder(
     /* keep the old folder rather than losing files */
   }
 
+  // The old name is gone, so anything that cached it as "exists" is wrong.
+  verifiedFolders.delete(from);
+  verifiedFolders.delete(to);
+
   for (const [id, folder] of folderNames) {
     if (folder === from) folderNames.set(id, to);
+  }
+
+  // The marker travelled with the folder, but it may name the id whose
+  // mapping just changed — rewrite it so a cold process agrees.
+  for (const [id, folder] of folderNames) {
+    if (folder === to) {
+      await fs
+        .writeFile(path.join(dest, MAPPING_FILE), id, "utf8")
+        .catch(() => {});
+      break;
+    }
   }
 }
 
@@ -206,6 +428,10 @@ async function ensureRoot(workspaceId: string): Promise<string> {
   const root = workspaceRoot(workspaceId);
   await fs.mkdir(root, { recursive: true });
   await migrateLayout(root);
+  // Stamp the folder with the id that owns it. This is what lets a later,
+  // colder process resolve the same id to the same folder instead of
+  // inventing a second one next to it.
+  await writeMarker(workspaceId, root);
   return root;
 }
 
@@ -234,6 +460,9 @@ const PACKAGE_DIR = ".packages";
 const IGNORED = new Set([
   ...INTERNAL_DIRS,
   PACKAGE_DIR,
+  // Bookkeeping, not the user's file — it must never reach the model or the
+  // file panel, or every workspace would appear to contain a stray dotfile.
+  MAPPING_FILE,
   "node_modules",
   ".git",
   ".next",
