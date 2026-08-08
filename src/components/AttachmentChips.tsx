@@ -128,6 +128,12 @@ export function AttachmentChips({
             </span>
             <span className="block text-[11px] leading-3 text-text-muted">
               {formatBytes(file.size)}
+              {file.fileCount !== undefined && (
+                <span className="text-accent-light">
+                  {" "}
+                  · {file.fileCount} file{file.fileCount === 1 ? "" : "s"}
+                </span>
+              )}
               {file.truncated && (
                 <span className="text-warning"> · truncated</span>
               )}

@@ -5,9 +5,18 @@
  * uploaded anywhere and no server-side storage is involved.
  */
 
+import {
+  formatArchive,
+  isArchive,
+  readArchive,
+  unsupportedArchiveNote,
+} from "@/lib/archive";
+
 export interface Attachment {
   id: string;
   name: string;
+  /** Archives only: how many files came out of it, shown on the chip. */
+  fileCount?: number;
   /** Size of the original file in bytes. */
   size: number;
   content: string;
@@ -28,6 +37,14 @@ export interface Attachment {
 export const MAX_CHARS = 200_000;
 /** Reject anything over this outright rather than reading it into memory. */
 export const MAX_BYTES = 5 * 1024 * 1024;
+/**
+ * Archives get a larger cap.
+ *
+ * They are compressed and hold a whole project, so the single-file limit
+ * would refuse ordinary repositories. What actually bounds the cost is
+ * MAX_TOTAL_CHARS on the extracted text, not the size of the container.
+ */
+export const MAX_ARCHIVE_BYTES = 50 * 1024 * 1024;
 export const MAX_FILES = 10;
 /** Images are capped separately — they are sent to the vision model whole. */
 export const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
@@ -140,10 +157,45 @@ export async function readImageFile(file: File): Promise<ReadResult> {
 }
 
 export async function readTextFile(file: File): Promise<ReadResult> {
-  if (file.size > MAX_BYTES) {
+  const cap = isArchive(file.name) ? MAX_ARCHIVE_BYTES : MAX_BYTES;
+  if (file.size > cap) {
     return {
-      error: `${file.name} is ${formatBytes(file.size)} — the limit is ${formatBytes(MAX_BYTES)}`,
+      error: `${file.name} is ${formatBytes(file.size)} — the limit is ${formatBytes(cap)}`,
     };
+  }
+
+  // Archives are unpacked rather than rejected. Attaching a project used to
+  // mean selecting its files one at a time, which is tedious for five and
+  // impossible for fifty — so people pasted two and described the rest.
+  const unsupported = unsupportedArchiveNote(file.name);
+  if (unsupported) return { error: unsupported };
+
+  if (isArchive(file.name)) {
+    try {
+      const data = new Uint8Array(await file.arrayBuffer());
+      const result = await readArchive(file.name, data);
+      if (result.entries.length === 0) {
+        return { error: `${file.name} had no readable text files in it` };
+      }
+      return {
+        attachment: {
+          id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+          name: file.name,
+          size: file.size,
+          content: formatArchive(file.name, result),
+          truncated: result.hitLimit || result.entries.some((e) => e.truncated),
+          kind: "text",
+          fileCount: result.entries.length,
+        },
+      };
+    } catch (error) {
+      return {
+        error:
+          error instanceof Error
+            ? `Couldn't open ${file.name}: ${error.message}`
+            : `Couldn't open ${file.name}`,
+      };
+    }
   }
 
   if (!isTextFile(file)) {

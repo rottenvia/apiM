@@ -746,7 +746,7 @@ export function ChatArea({
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M12 16V4m0 0L8 8m4-4l4 4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" />
                   </svg>
-                  Drop text files to attach
+                  Drop files or a .zip to attach
                 </span>
               </div>
             )}
@@ -808,7 +808,7 @@ export function ChatArea({
                   onClick={() => fileInputRef.current?.click()}
                   className="chip"
                   data-active={attachments.length > 0}
-                  title="Attach text files"
+                  title="Attach files, or a .zip / .tar.gz of a whole project"
                   aria-label="Attach files"
                 >
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
