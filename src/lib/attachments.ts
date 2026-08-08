@@ -11,6 +11,7 @@ import {
   readArchive,
   unsupportedArchiveNote,
 } from "@/lib/archive";
+import { documentKind, readDocument } from "@/lib/documents";
 
 export interface Attachment {
   id: string;
@@ -81,11 +82,8 @@ export const SNIFF_BYTES = 8_000;
  */
 const BINARY_FORMATS: Record<string, string> = {
   pdf: "PDFs need a parser this app doesn't have yet — copy the text out, or say the word and I'll add one.",
-  docx: "Word documents aren't readable yet. Save as .txt or .md and it will work.",
-  doc: "Word documents aren't readable yet. Save as .txt or .md and it will work.",
-  xlsx: "Spreadsheets aren't readable yet. Export as .csv and it will work.",
-  xls: "Spreadsheets aren't readable yet. Export as .csv and it will work.",
-  pptx: "Slides aren't readable yet. Export the text or save as .pdf.",
+  doc: "The old .doc format isn't readable. Save as .docx and it will work.",
+  xls: "The old .xls format isn't readable. Save as .xlsx or .csv and it will work.",
   exe: "an executable",
   dll: "a library",
   so: "a library",
@@ -183,7 +181,10 @@ export async function readImageFile(file: File): Promise<ReadResult> {
 }
 
 export async function readTextFile(file: File): Promise<ReadResult> {
-  const cap = isArchive(file.name) ? MAX_ARCHIVE_BYTES : MAX_BYTES;
+  const cap =
+    isArchive(file.name) || documentKind(file.name)
+      ? MAX_ARCHIVE_BYTES
+      : MAX_BYTES;
   if (file.size > cap) {
     return {
       error: `${file.name} is ${formatBytes(file.size)} — the limit is ${formatBytes(cap)}`,
@@ -220,6 +221,36 @@ export async function readTextFile(file: File): Promise<ReadResult> {
           error instanceof Error
             ? `Couldn't open ${file.name}: ${error.message}`
             : `Couldn't open ${file.name}`,
+      };
+    }
+  }
+
+  // Office documents are ZIP archives of XML, so their text can be pulled
+  // out with the reader that already exists. Handled before the binary
+  // refusal below, since as files they are binary — the point is that the
+  // words inside them are not.
+  const kind = documentKind(file.name);
+  if (kind) {
+    try {
+      const data = new Uint8Array(await file.arrayBuffer());
+      const doc = await readDocument(kind, data);
+      return {
+        attachment: {
+          id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+          name: file.name,
+          size: file.size,
+          content: doc.text,
+          truncated: doc.truncated,
+          kind: "text",
+          fileCount: doc.sections > 1 ? doc.sections : undefined,
+        },
+      };
+    } catch (error) {
+      return {
+        error:
+          error instanceof Error
+            ? `Couldn't read ${file.name}: ${error.message}`
+            : `Couldn't read ${file.name}`,
       };
     }
   }

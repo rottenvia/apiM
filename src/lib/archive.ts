@@ -142,6 +142,69 @@ async function gunzip(data: Uint8Array): Promise<Uint8Array | null> {
  * local headers from the front breaks on archives written by streaming
  * writers, which leave sizes as zero and put them in a trailing descriptor.
  */
+/**
+ * Every member of a ZIP, as raw bytes.
+ *
+ * Split out from readZip because Office documents are ZIPs with a known
+ * internal layout — DOCX is word/document.xml, XLSX is a set of sheet parts —
+ * so they need the same central-directory walk without the text filtering
+ * that a user-supplied archive gets.
+ */
+export async function zipMembers(
+  buf: Uint8Array,
+  wanted?: (path: string) => boolean
+): Promise<Map<string, Uint8Array>> {
+  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  const out = new Map<string, Uint8Array>();
+
+  let eocd = -1;
+  for (let i = buf.length - 22; i >= 0 && i > buf.length - 66_000; i--) {
+    if (view.getUint32(i, true) === 0x06054b50) {
+      eocd = i;
+      break;
+    }
+  }
+  if (eocd === -1) throw new Error("Not a valid .zip file");
+
+  const count = view.getUint16(eocd + 10, true);
+  let offset = view.getUint32(eocd + 16, true);
+
+  for (let n = 0; n < count; n++) {
+    if (offset + 46 > buf.length) break;
+    if (view.getUint32(offset, true) !== 0x02014b50) break;
+
+    const method = view.getUint16(offset + 10, true);
+    const compressedSize = view.getUint32(offset + 20, true);
+    const nameLen = view.getUint16(offset + 28, true);
+    const extraLen = view.getUint16(offset + 30, true);
+    const commentLen = view.getUint16(offset + 32, true);
+    const localOffset = view.getUint32(offset + 42, true);
+
+    const name = new TextDecoder().decode(
+      buf.subarray(offset + 46, offset + 46 + nameLen)
+    );
+    offset += 46 + nameLen + extraLen + commentLen;
+
+    if (name.endsWith("/")) continue;
+    if (wanted && !wanted(name)) continue;
+    if (localOffset + 30 > buf.length) continue;
+
+    const localNameLen = view.getUint16(localOffset + 26, true);
+    const localExtraLen = view.getUint16(localOffset + 28, true);
+    const dataStart = localOffset + 30 + localNameLen + localExtraLen;
+    const raw = buf.subarray(dataStart, dataStart + compressedSize);
+
+    let bytes: Uint8Array | null;
+    if (method === 0) bytes = raw;
+    else if (method === 8) bytes = await inflateRaw(raw);
+    else continue;
+
+    if (bytes) out.set(name, bytes);
+  }
+
+  return out;
+}
+
 async function readZip(buf: Uint8Array): Promise<ArchiveResult> {
   const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   const entries: ArchiveEntry[] = [];
