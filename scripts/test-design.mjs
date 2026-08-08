@@ -385,6 +385,21 @@ check(
   /animate-spin/.test(chips)
 );
 
+// A placeholder that is never replaced spins forever, which is worse than
+// having shown nothing at all.
+check(
+  "the file-count cap is not read out of a state updater",
+  !/let room = 0;[\s\S]{0,200}setAttachments\(\(prev\) => \{[\s\S]{0,120}room =/.test(
+    chatArea2
+  ),
+  "React defers the updater, so the value read afterwards is still the initial one"
+);
+check(
+  "a reader that throws cannot strand its placeholder",
+  /catch \(e\)[\s\S]{0,300}Couldn't read/.test(chatArea2),
+  "the chip is removed on failure rather than left spinning"
+);
+
 check(
   "reduced motion is honoured",
   /@media \(prefers-reduced-motion: reduce\)/.test(css),

@@ -113,6 +113,12 @@ export function ChatArea({
 
   // Text attachments, read in the browser and inlined into the message.
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  // Mirrors the state so addFiles can read the current count without
+  // depending on it, which would rebuild the callback on every attachment.
+  const attachmentsRef = useRef<Attachment[]>([]);
+  useEffect(() => {
+    attachmentsRef.current = attachments;
+  }, [attachments]);
   const [attachError, setAttachError] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -204,18 +210,24 @@ export function ChatArea({
       kind: isImageFile(file) ? "image" : "text",
       stage: "reading",
     }));
-    let room = 0;
-    setAttachments((prev) => {
-      room = Math.max(0, MAX_FILES - prev.length);
-      if (room === 0) {
-        errors.push(`You can attach up to ${MAX_FILES} files`);
-        return prev;
-      }
-      if (pending.length > room) {
-        errors.push(`Only the first ${room} file(s) were added`);
-      }
-      return [...prev, ...pending.slice(0, room)];
-    });
+    // Room is computed here, not inside the updater below.
+    //
+    // React does not run a functional updater synchronously, so reading a
+    // value out of one and using it later in the same tick gets whatever the
+    // variable was initialised to — which meant `room` was still 0 when the
+    // loop below checked it, the loop broke immediately, and the placeholder
+    // chip spun forever because nothing ever replaced it.
+    const room = Math.max(0, MAX_FILES - attachmentsRef.current.length);
+    if (room === 0) {
+      setAttachError(`You can attach up to ${MAX_FILES} files`);
+      return;
+    }
+    if (pending.length > room) {
+      errors.push(`Only the first ${room} file(s) were added`);
+    }
+
+    const shown = pending.slice(0, room);
+    setAttachments((prev) => [...prev, ...shown]);
 
     const setStage = (id: string, stage: Attachment["stage"]) => {
       setAttachments((prev) =>
@@ -230,9 +242,22 @@ export function ChatArea({
       if (i >= room) break;
       const file = list[i];
 
-      const { attachment, error } = isImageFile(file)
-        ? await readImageFile(file)
-        : await readTextFile(file, (stage) => setStage(placeholder.id, stage));
+      let attachment: Attachment | undefined;
+      let error: string | undefined;
+      try {
+        ({ attachment, error } = isImageFile(file)
+          ? await readImageFile(file)
+          : await readTextFile(file, (stage) =>
+              setStage(placeholder.id, stage)
+            ));
+      } catch (e) {
+        // A reader that throws rather than returning an error would otherwise
+        // leave its placeholder spinning with nothing to replace it.
+        error =
+          e instanceof Error
+            ? `Couldn't read ${file.name}: ${e.message}`
+            : `Couldn't read ${file.name}`;
+      }
 
       // Swap the placeholder for the real thing, or drop it if it failed.
       setAttachments((prev) => {
