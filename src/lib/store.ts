@@ -430,7 +430,23 @@ export async function upsertMessage(
   if (index === -1) {
     conv.messages.push(message);
   } else {
-    conv.messages[index] = message;
+    /*
+     * `resumeState` is preserved when the update omits it.
+     *
+     * It is by far the largest field — around a megabyte on a long agent run
+     * — so it is deliberately not resent on every checkpoint. Replacing the
+     * message wholesale would therefore erase it a few seconds after it was
+     * written, and the reply would look resumable while having nothing to
+     * resume from.
+     *
+     * `null` still clears it, which is how a finished reply drops it. Only
+     * `undefined` — the field being absent — means "leave what is there".
+     */
+    const previous = conv.messages[index];
+    conv.messages[index] =
+      message.resumeState === undefined && previous.resumeState
+        ? { ...message, resumeState: previous.resumeState }
+        : message;
   }
 
   conv.updatedAt = now;
