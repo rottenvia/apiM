@@ -902,6 +902,13 @@ export async function POST(req: NextRequest) {
          * right up until the final total lands.
          */
         const totalUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+        /**
+         * Last tool round whose full transcript was persisted.
+         *
+         * Resume state is a megabyte on a long run, so it is written once per
+         * round rather than on every 2.5-second checkpoint.
+         */
+        let lastResumeRound = -1;
         let announcedWriting = false;
         const toolSummaries: { name: string; ok: boolean; summary: string }[] =
           [];
@@ -1136,15 +1143,30 @@ export async function POST(req: NextRequest) {
                 timeline: timeline.length ? timeline : null,
                 createdAt: new Date().toISOString(),
                 incomplete: true,
-                // Everything needed to carry on instead of starting over.
-                // Saved on each checkpoint, so even a killed process leaves a
-                // resumable reply rather than a dead one.
-                resumeState: {
-                  toolRounds,
-                  continuations,
-                  messages: transcript,
-                },
+                /*
+                 * Everything needed to carry on instead of starting over —
+                 * but not on every checkpoint.
+                 *
+                 * Checkpoints fire every 2.5 seconds while text streams, and
+                 * the transcript of a long agent run is around a megabyte of
+                 * JSON. Serialising and writing that continuously, purely so
+                 * a crash in the next few seconds would be resumable, costs
+                 * far more than it protects: it slows the stream the user is
+                 * watching and hammers the disk.
+                 *
+                 * Written once per tool round instead. A round is where the
+                 * expensive, hard-to-redo work happens, so that is the
+                 * granularity worth protecting; the prose since the last
+                 * round is checkpointed as before and simply re-generated.
+                 */
+                resumeState:
+                  toolRounds > lastResumeRound
+                    ? { toolRounds, continuations, messages: transcript }
+                    : undefined,
               });
+              // Recorded after a successful write, so a failed checkpoint
+              // retries rather than skipping the round entirely.
+              if (toolRounds > lastResumeRound) lastResumeRound = toolRounds;
             } catch (e) {
               console.error("Checkpoint failed:", e);
             } finally {

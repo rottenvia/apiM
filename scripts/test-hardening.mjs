@@ -183,6 +183,48 @@ check(
   "toolEvents is pre-seeded on resume, so index pairing attached the wrong command to the wrong result"
 );
 
+// ------------------------------------------------------------------
+console.log("\n7. Resume state is not rewritten every 2.5 seconds");
+
+/*
+ * A long agent run's transcript is around a megabyte of JSON. Writing it on
+ * every stream checkpoint slowed the stream the user is watching and hammered
+ * the disk, purely to protect against a crash in the next few seconds.
+ */
+check(
+  "it is written once per tool round, not per checkpoint",
+  /toolRounds > lastResumeRound/.test(route),
+  "a megabyte of JSON every 2.5s costs more than it protects"
+);
+
+const KEEP = "hardkeep";
+const base = {
+  id: "a1",
+  role: "assistant",
+  content: "partial",
+  createdAt: new Date().toISOString(),
+};
+await store.upsertMessage(KEEP, "t", {
+  ...base,
+  incomplete: true,
+  resumeState: { toolRounds: 3, continuations: 0, messages: [{ role: "user", content: "q" }] },
+});
+await store.upsertMessage(KEEP, "t", { ...base, content: "partial + more", incomplete: true });
+const keptMsg = (await store.getConversation(KEEP)).messages[0];
+check(
+  "a checkpoint that omits it does not erase it",
+  Boolean(keptMsg.resumeState),
+  "otherwise the reply looks resumable with nothing to resume from"
+);
+check("but the text still updates", keptMsg.content === "partial + more");
+
+await store.upsertMessage(KEEP, "t", { ...base, content: "done", resumeState: null });
+check(
+  "an explicit null still clears it when the reply finishes",
+  (await store.getConversation(KEEP)).messages[0].resumeState === null,
+  "it is the largest field in the record"
+);
+
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
 );
