@@ -9,9 +9,21 @@ import { listFiles } from "@/lib/workspace";
  * removes an entire class of wrong-file mistakes.
  */
 
-/** Keep the summary well under the point where it crowds out the reply. */
-export const MAX_CONTEXT_FILES = 120;
-export const MAX_CONTEXT_CHARS = 4_000;
+/**
+ * Keep the summary well under the point where it crowds out the reply.
+ *
+ * These were 120 files / 4_000 chars, sized for a small context window. On a
+ * real project that meant the model was shown a partial tree — a 203-file
+ * extension listed 120 of them and the rest became "… and 83 more". Asked for
+ * "the full structure" it answered from the truncated list, because that list
+ * was the only structure it had ever been given.
+ *
+ * A tree is cheap: it is one line per file, no contents. 2000 files at 60_000
+ * characters is under 2% of DeepSeek v4's window and covers essentially every
+ * project someone drops into a chat.
+ */
+export const MAX_CONTEXT_FILES = 2_000;
+export const MAX_CONTEXT_CHARS = 60_000;
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes}B`;

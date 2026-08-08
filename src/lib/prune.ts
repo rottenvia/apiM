@@ -26,8 +26,21 @@ import type { TranscriptMessage } from "@/lib/transcript";
  *
  * The model is usually working with what it just read, so collapsing the last
  * few results would force an immediate re-read and cost more than it saved.
+ *
+ * This was 12, which quietly capped how much of a project the agent could
+ * describe at once. Asked "what is in this zip and what is its full
+ * structure", it would read thirty or forty files, and by the time it came
+ * to answer, everything but the last twelve had been replaced with
+ * "[earlier read_file result … collapsed]". The model was not being lazy and
+ * had not lost the thread: the content really was gone from the request, so
+ * it answered about the handful it could still see. Worse, it then had no
+ * reason to believe the files existed at all, which is how a follow-up
+ * question ended in "No ZIP in the workspace".
+ *
+ * 80 is sized for the model actually in use. DeepSeek v4 has a 1M-token
+ * window; eighty reads of a few thousand characters is a few percent of it.
  */
-export const KEEP_VERBATIM_RESULTS = 12;
+export const KEEP_VERBATIM_RESULTS = 80;
 
 /**
  * Only results above this size are worth collapsing.
@@ -42,8 +55,18 @@ export const MIN_COLLAPSE_CHARS = 400;
  *
  * Pruning a short conversation saves nothing and only risks dropping context
  * the model still wants.
+ *
+ * 24_000 chars is about 6.7k tokens — two thirds of one percent of DeepSeek
+ * v4's million-token window. It was sized for a 128k model and never revised,
+ * so in practice pruning was always on: any conversation that read more than
+ * a couple of files immediately started losing them. Reading a medium source
+ * file could trip it on its own.
+ *
+ * 900_000 chars is ~250k tokens, a quarter of the window. Below that the
+ * whole transcript is sent verbatim, which is what makes "read all of these
+ * and compare them" work at all.
  */
-export const PRUNE_THRESHOLD_CHARS = 24_000;
+export const PRUNE_THRESHOLD_CHARS = 900_000;
 
 export interface PruneStats {
   /** Tool results replaced with a placeholder. */

@@ -38,6 +38,15 @@ export interface ToolDefinition {
   };
 }
 
+/**
+ * How many files one read_files call may return.
+ *
+ * Sized against the model's context, not against a guess: 60 files of a few
+ * thousand characters is a small fraction of a 1M-token window, and it is
+ * roughly the size of the projects people actually drop in as a zip.
+ */
+export const MAX_READ_FILES = 60;
+
 export const WORKSPACE_TOOLS: ToolDefinition[] = [
   {
     type: "function",
@@ -171,7 +180,7 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
           paths: {
             type: "array",
             items: { type: "string" },
-            description: "File paths to read, up to 10.",
+            description: `File paths to read, up to ${MAX_READ_FILES}.`,
           },
         },
         required: ["paths"],
@@ -453,7 +462,14 @@ export async function runTool(
         }
 
         // Capped so one call can't pull the whole workspace into context.
-        const paths = raw.slice(0, 10).map((p) => String(p));
+        //
+        // Was 10, which is fewer files than a small project has. Asked to
+        // describe a whole codebase the model would request thirty paths in
+        // one call, twenty were dropped with a note it did not always act
+        // on, and the answer covered a third of the project. The cap exists
+        // to stop a runaway call, not to ration ordinary reading, so it is
+        // set where a real request will not hit it.
+        const paths = raw.slice(0, MAX_READ_FILES).map((p) => String(p));
         const parts: string[] = [];
         let read = 0;
 
@@ -477,7 +493,17 @@ export async function runTool(
         }
 
         if (raw.length > paths.length) {
-          parts.push(`[${raw.length - paths.length} more paths ignored — limit is 10 per call]`);
+          // Named explicitly, with an instruction. A bare "ignored" note was
+          // treated as commentary: the model carried on and answered as if it
+          // had read everything, so files silently missing from the answer
+          // looked like the agent giving up early.
+          const dropped = raw.slice(paths.length).map((p) => String(p));
+          parts.push(
+            `[NOT READ — ${dropped.length} path(s) exceeded the ${MAX_READ_FILES}-per-call limit: ` +
+              `${dropped.join(", ")}. ` +
+              `Call read_files again with these before you answer. Do not ` +
+              `describe them as if you had read them.]`
+          );
         }
 
         return {
@@ -771,7 +797,79 @@ export async function runTool(
         : error instanceof Error
           ? error.message
           : "Tool failed";
+
+    // A wrong path used to be a dead end. The model asked for
+    // "EXT-—-Faceit-Intelligence-Chrome/content.js", got a bare
+    // "No such file", listed the workspace, could not match the two by eye,
+    // and concluded the archive was not there — while the file sat on disk
+    // under a very slightly different name. Suggesting the real candidates
+    // turns that dead end into a correction it can act on.
+    if (/^No such file/.test(message)) {
+      const wanted = typeof args.path === "string" ? args.path : "";
+      const hint = await suggestPaths(workspaceId, wanted);
+      if (hint) {
+        return {
+          ok: false,
+          content: `Error: ${message}\n\n${hint}`,
+          summary: message,
+        };
+      }
+    }
+
     // Surfaced to the model so it can retry with a corrected path.
     return { ok: false, content: `Error: ${message}`, summary: message };
   }
+}
+
+/**
+ * Nearest real paths to one the model got wrong.
+ *
+ * Matching is on the basename first, because that is the part it almost
+ * always has right — the directory prefix is where a remembered path drifts,
+ * especially when a folder name contains an em dash or other punctuation
+ * that gets normalised on the way to disk.
+ */
+async function suggestPaths(
+  workspaceId: string,
+  wanted: string
+): Promise<string> {
+  if (!wanted) return "";
+
+  let files: { path: string }[];
+  try {
+    files = await listFiles(workspaceId);
+  } catch {
+    return "";
+  }
+  if (files.length === 0) return "";
+
+  const base = wanted.split("/").pop()?.toLowerCase() ?? "";
+  const simplify = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const wantedSimple = simplify(wanted);
+
+  const exact = files.filter(
+    (f) => (f.path.split("/").pop() ?? "").toLowerCase() === base
+  );
+  const fuzzy = files.filter((f) => {
+    const s = simplify(f.path);
+    return s.includes(wantedSimple) || wantedSimple.includes(s);
+  });
+
+  const candidates = [...new Set([...exact, ...fuzzy].map((f) => f.path))].slice(
+    0,
+    10
+  );
+
+  if (candidates.length === 0) {
+    return (
+      `The workspace has ${files.length} file(s) but none match that path. ` +
+      `Call list_files to see them, and use a path exactly as listed.`
+    );
+  }
+
+  return (
+    `Did you mean one of these? Paths must match exactly, including ` +
+    `punctuation:\n${candidates.map((p) => `  ${p}`).join("\n")}\n` +
+    `Retry with the correct path — do not tell the user the file is missing.`
+  );
 }

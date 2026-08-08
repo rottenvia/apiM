@@ -664,7 +664,17 @@ function MessageBubbleImpl({
                     <span className="truncate">Thinking</span>
                   </button>
 
-                  {showThinking && message.isStreaming && (
+                  {/* Only while reasoning is actually arriving.
+                      
+                      It used to be tied to `message.isStreaming`, so it stayed
+                      on screen through the whole reply — long after the
+                      reasoning had stopped updating. Toggling it then did
+                      nothing at all, which is what made it feel broken: the
+                      control was live but the thing it controlled had
+                      finished. The right-hand margin also read as misaligned
+                      because it was 8px against the label's 12px padding; both
+                      edges now match. */}
+                  {showThinking && isThinkingPhase && (
                     <button
                       onClick={() => setFollowThinking((v) => !v)}
                       title={
@@ -673,7 +683,7 @@ function MessageBubbleImpl({
                           : "Scrolling freely — click to follow the text"
                       }
                       aria-pressed={followThinking}
-                      className={`mr-2 flex h-6 flex-none items-center gap-1 rounded-lg px-2 text-[11px] font-medium transition-colors ${
+                      className={`mr-3 flex h-6 flex-none items-center gap-1 rounded-lg px-2 text-[11px] font-medium transition-colors ${
                         followThinking
                           ? "bg-[#cfa25a]/20 text-[#cfa25a]"
                           : "text-[#cfa25a]/55 hover:bg-[#cfa25a]/10 hover:text-[#cfa25a]"
