@@ -1,0 +1,253 @@
+/**
+ * Finishing what was started, and not paying for it twice.
+ *
+ * Run:  npm run test:resume
+ *
+ * Four reported problems, all about work being thrown away:
+ *
+ *   1. A reply that hit the output ceiling was silently treated as finished.
+ *      finish_reason was never read anywhere in the app, so nothing could
+ *      tell "done" from "cut off mid-sentence".
+ *   2. A write_file cut off by that ceiling produced unparseable arguments,
+ *      the file never landed, and the model was told only "invalid tool
+ *      arguments" — so it moved on instead of finishing the file.
+ *   3. "Try again" discarded every tool result the model had gathered and
+ *      re-ran the whole task from the first token, at full price.
+ *   4. Rewriting the file tree inside the system message invalidated
+ *      DeepSeek's prefix cache on every file change, at 120x the cached rate.
+ */
+import path from "node:path";
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const ROOT = path.resolve(import.meta.dirname, "..");
+const read = (p) => readFileSync(path.join(ROOT, p), "utf8");
+const load = (p) => import(pathToFileURL(path.join(ROOT, p)).href);
+
+const { toolCallsAreBalanced } = await load("src/lib/prune.ts");
+
+const COLOR = process.stdout.isTTY && !process.env.NO_COLOR;
+const g = (s) => (COLOR ? `\x1b[32m${s}\x1b[0m` : s);
+const r = (s) => (COLOR ? `\x1b[31m${s}\x1b[0m` : s);
+const d = (s) => (COLOR ? `\x1b[2m${s}\x1b[0m` : s);
+
+let pass = 0, fail = 0;
+const check = (label, ok, detail = "") => {
+  console.log(`  ${ok ? g("PASS") : r("FAIL")}  ${label}${detail ? d("  " + detail) : ""}`);
+  ok ? pass++ : fail++;
+};
+
+const route = read("src/app/api/chat/route.ts");
+const store = read("src/lib/store.ts");
+const bubble = read("src/components/MessageBubble.tsx");
+const panel = read("src/components/WorkspaceSidePanel.tsx");
+const page = read("src/app/page.tsx");
+const convRoute = read("src/app/api/conversations/[id]/route.ts");
+
+console.log("\napiM resume / output-limit / cache checks\n");
+
+// -------------------------------------------------------------- task 1
+console.log("1. The app notices when the model ran out of room");
+
+check(
+  "finish_reason is read from the stream",
+  /finish_reason/.test(route),
+  "it was never read anywhere — 'done' and 'cut off' looked identical"
+);
+check(
+  "it is captured before the empty-delta guard",
+  route.indexOf("roundFinishReason = reason") <
+    route.indexOf("if (!delta) continue"),
+  "it arrives on a frame with no delta, so reading it after would miss it"
+);
+check(
+  "hitting the limit triggers a continuation, not a stop",
+  /truncated && calls\.length === 0/.test(route) &&
+    /continuations < MAX_CONTINUATIONS/.test(route)
+);
+check(
+  "the continuation tells the model not to repeat itself",
+  /do not repeat anything you\s*\+?\s*"?\s*already wrote/s.test(route) ||
+    /do not repeat anything you already wrote/.test(route.replace(/"\s*\+\s*"/g, ""))
+);
+check(
+  "continuations are capped so a stuck model cannot loop",
+  /MAX_CONTINUATIONS = \d+/.test(route),
+  (route.match(/MAX_CONTINUATIONS = \d+/) ?? [""])[0]
+);
+check(
+  "a reply stopped at the ceiling is not saved as complete",
+  /incomplete: hitOutputCeiling/.test(route),
+  "marked complete it looked finished while ending mid-sentence"
+);
+
+// -------------------------------------------------------------- task 2
+console.log("\n2. A file cut off mid-write is finished, not abandoned");
+
+check(
+  "a truncated tool call is recognised as such",
+  /looksTruncated/.test(route) && /Unterminated|Unexpected end/.test(route),
+  "arguments are valid JSON right up to where the budget ran out"
+);
+check(
+  "the model is told the call was cut off, not malformed",
+  /cut off by the\s*\+?\s*.?output limit/s.test(route.replace(/"\s*\+\s*"/g, "")) ||
+    /was cut off by the output limit/.test(route.replace(/"\s*\+\s*\n?\s*"/g, ""))
+);
+check(
+  "and told to split the file rather than resend it whole",
+  /Do NOT resend it/.test(route.replace(/"\s*\+\s*\n?\s*"/g, "")) &&
+    /edit_file/.test(route)
+);
+
+// -------------------------------------------------------------- task 3
+console.log("\n3. Resuming keeps the work already paid for");
+
+check(
+  "tool results are persisted, not just the fact a tool ran",
+  /resumeState/.test(store) && /messages: unknown\[\]/.test(store),
+  "toolEvents recorded THAT a file was read, never what it said"
+);
+check(
+  "the route accepts a resume request",
+  /resumeMessageId/.test(route)
+);
+check(
+  "a resumed reply reuses its own id instead of adding a second bubble",
+  /const assistantMsgId = resumeMessageId \?\? uuidv4\(\)/.test(route)
+);
+check(
+  "the saved transcript replaces the freshly built one",
+  /transcript\.length = 0/.test(route) && /transcript\.push\(\.\.\.resumed\.messages\)/.test(route)
+);
+check(
+  "rounds already spent count against the limit",
+  /toolRounds = resumed\?\.toolRounds \?\? 0/.test(route),
+  "resuming with a fresh budget would let a task run forever"
+);
+check(
+  "continuations already used carry over too",
+  /continuations = resumed\?\.continuations \?\? 0/.test(route)
+);
+check(
+  "text already shown is kept, so the reply extends",
+  /assistantContent = resumedContent/.test(route)
+);
+check(
+  "the thinking and the actions carry over as well",
+  /reasoningContent = resumedReasoning/.test(route) &&
+    /\[\.\.\.resumedToolEvents\]/.test(route) &&
+    /\[\.\.\.resumedTimeline\]/.test(route),
+  "the user asked to see the thinking process on resume"
+);
+check(
+  "the stale file tree inside the saved transcript is dropped",
+  /Current workspace contents/.test(route) && /transcript\.splice\(i, 1\)/.test(route),
+  "the workspace has moved on since the reply stopped"
+);
+check(
+  "a finished reply does not keep resume state",
+  /resumeState: hitOutputCeiling/.test(route),
+  "it is the largest field in the record"
+);
+check(
+  "the saved transcript is never sent to the browser",
+  /const \{ resumeState, \.\.\.rest \} = m/.test(convRoute) &&
+    /canResume: Boolean/.test(convRoute),
+  "it can run to megabytes; the UI only needs a boolean"
+);
+check(
+  "the UI offers Continue only when there is state to resume",
+  /onResume && message\.canResume/.test(bubble)
+);
+check(
+  "Continue is the primary action, Start over the quiet one",
+  bubble.indexOf("Continue<") < bubble.indexOf("Start over") ||
+    bubble.indexOf(">\n                    Continue") < bubble.indexOf("Start over"),
+  "continuing keeps the files already written"
+);
+check(
+  "resume does not resend the reply as history",
+  /const stopBefore = regenerateFromId \?\? resumeMessageId/.test(page)
+);
+
+// -------------------------------------------------------------- task 4
+console.log("\n4. The prompt cache is not thrown away on every write");
+
+check(
+  "the file tree is no longer inside the system message",
+  !/workspaceInstruction \+\n\s*workspaceFiles/.test(route),
+  "one character changed there invalidated the whole cached prefix"
+);
+check(
+  "it is appended as its own message instead",
+  /const setFileTree = \(text: string\)/.test(route) &&
+    /Current workspace contents/.test(route)
+);
+check(
+  "the tree is a system message, not a trailing user one",
+  /transcript\.push\(\{ role: "system", content: body \}\)/.test(route),
+  "as a user message it looked like the request and buried the real question"
+);
+check(
+  "the system message no longer mentions it",
+  /systemPrompt \+[\s\S]{0,200}pluginDirectives,/.test(route) &&
+    !/workspaceFiles \+/.test(route)
+);
+
+// The refresh must never split a tool_call from its reply, which is a 400.
+const t = [{ role: "system", content: "s" }, { role: "user", content: "q" }];
+let idx = -1;
+const setTree = (v) => {
+  const body = `Current workspace contents: ${v}`;
+  if (idx === -1) { t.push({ role: "user", content: body }); idx = t.length - 1; }
+  else t[idx] = { role: "user", content: body };
+};
+const refresh = (v) => { if (idx !== -1) { t.splice(idx, 1); idx = -1; } setTree(v); };
+setTree("v0");
+for (let i = 0; i < 5; i++) {
+  t.push({
+    role: "assistant", content: null, reasoning_content: "r",
+    tool_calls: [
+      { id: `a${i}`, type: "function", function: { name: "write_file", arguments: "{}" } },
+      { id: `b${i}`, type: "function", function: { name: "read_file", arguments: "{}" } },
+    ],
+  });
+  t.push({ role: "tool", tool_call_id: `a${i}`, content: "ok" });
+  t.push({ role: "tool", tool_call_id: `b${i}`, content: "ok" });
+  refresh(`v${i + 1}`);
+}
+check("refreshing the tree keeps every tool call paired", toolCallsAreBalanced(t));
+check(
+  "only one tree message ever exists",
+  t.filter((m) => typeof m.content === "string" && m.content.startsWith("Current workspace")).length === 1
+);
+check("the tree stays the last message", t[t.length - 1].content.startsWith("Current workspace"));
+check(
+  "no tool_call is separated from its reply",
+  t.every((m, i) => !(m.role === "assistant" && m.tool_calls) || t[i + 1]?.role === "tool")
+);
+
+// -------------------------------------------------------------- task 5
+console.log("\n5. An uploaded zip arrives collapsed");
+
+check(
+  "uploads and everything under it start closed",
+  /dirPath === "uploads" \|\| dirPath\.startsWith\("uploads\/"\)/.test(panel),
+  "a project of hundreds of files buried everything else"
+);
+check(
+  "folders the agent creates still start open",
+  /const defaultClosed/.test(panel) && /allDirPaths\(tree\)/.test(panel),
+  "only uploads is collapsed, not the whole tree"
+);
+check(
+  "opening a folder by hand survives the tree rebuilding",
+  /userOpened/.test(panel) && /userClosed/.test(panel),
+  "it used to snap shut again whenever a file changed"
+);
+
+console.log(
+  `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
+);
+process.exit(fail ? 1 : 0);

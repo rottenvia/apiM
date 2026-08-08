@@ -183,24 +183,67 @@ export function WorkspaceSidePanel({
     [files]
   );
 
-  // Folders start open. A panel that opens showing three collapsed rows makes
-  // the user click to discover what they already uploaded; the tree exists to
-  // show structure, not to hide it.
-  const [closedDirs, setClosedDirs] = useState<Set<string>>(new Set());
+  /*
+   * Folders start open, except anything unpacked from an archive.
+   *
+   * Work the agent creates is worth showing: it is usually a handful of files
+   * and the point is to watch them appear. An uploaded zip is the opposite —
+   * a whole project, often hundreds of files, which unrolled in full buries
+   * everything else and turns the panel into a wall of rows.
+   *
+   * So `uploads/` and everything beneath it arrives shut. You see one folder
+   * with a count, and open it when you actually want to look inside.
+   */
+  const defaultClosed = useMemo(() => {
+    const shut = new Set<string>();
+    for (const dirPath of allDirPaths(tree)) {
+      // Chains are collapsed for display, so the row for an unpacked archive
+      // can be "uploads/EXT-Faceit" rather than a bare "uploads" — matching
+      // the segment prefix catches both.
+      if (dirPath === "uploads" || dirPath.startsWith("uploads/")) {
+        shut.add(dirPath);
+      }
+    }
+    return shut;
+  }, [tree]);
+
+  /**
+   * Folders the user has opened or closed by hand.
+   *
+   * Held separately from the default so a deliberate choice always wins: a
+   * folder opened by hand must not snap shut again when the tree is rebuilt
+   * after a file changes.
+   */
+  const [userOpened, setUserOpened] = useState<Set<string>>(new Set());
+  const [userClosed, setUserClosed] = useState<Set<string>>(new Set());
+
   const openDirs = useMemo(() => {
     const all = new Set(allDirPaths(tree));
-    for (const shut of closedDirs) all.delete(shut);
+    for (const shut of defaultClosed) if (!userOpened.has(shut)) all.delete(shut);
+    for (const shut of userClosed) all.delete(shut);
     return all;
-  }, [tree, closedDirs]);
+  }, [tree, defaultClosed, userOpened, userClosed]);
 
-  const toggleDir = useCallback((path: string) => {
-    setClosedDirs((prev) => {
-      const next = new Set(prev);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
-      return next;
-    });
-  }, []);
+  const toggleDir = useCallback(
+    (path: string) => {
+      const isOpen = openDirs.has(path);
+      // Recorded in both sets rather than one, so the choice survives the
+      // tree being rebuilt and overrides whatever the default would be.
+      setUserOpened((prev) => {
+        const next = new Set(prev);
+        if (isOpen) next.delete(path);
+        else next.add(path);
+        return next;
+      });
+      setUserClosed((prev) => {
+        const next = new Set(prev);
+        if (isOpen) next.add(path);
+        else next.delete(path);
+        return next;
+      });
+    },
+    [openDirs]
+  );
   const [busy, setBusy] = useState(false);
 
   const changed = new Set(recentlyChanged ?? []);

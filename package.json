@@ -33,7 +33,8 @@
     "test:archive": "tsx scripts/test-archive.mjs",
     "test:documents": "tsx scripts/test-documents.mjs",
     "test:tree": "tsx scripts/test-tree.mjs",
-    "test:agentloss": "tsx scripts/test-agentloss.mjs"
+    "test:agentloss": "tsx scripts/test-agentloss.mjs",
+    "test:resume": "tsx scripts/test-resume.mjs"
   },
   "dependencies": {
     "@types/uuid": "^10.0.0",

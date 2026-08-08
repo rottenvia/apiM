@@ -175,6 +175,8 @@ interface MessageBubbleProps {
   /** Only the newest reply offers regenerate, to avoid rewriting history. */
   isLast?: boolean;
   onRegenerate?: (assistantId: string) => void;
+  /** Continue an interrupted reply instead of redoing it. */
+  onResume?: (assistantId: string) => void;
   /** Resend a user message with edited text, replacing everything after it. */
   onEdit?: (messageId: string, newContent: string) => void;
   /** Remove a message and the reply that followed it. */
@@ -196,6 +198,7 @@ function MessageBubbleImpl({
   message,
   isLast,
   onRegenerate,
+  onResume,
   onEdit,
   onDelete,
   searchQuery,
@@ -746,12 +749,32 @@ function MessageBubbleImpl({
                     </span>
                   ) : null}
                 </button>
+                {/* Continue is offered first, and styled as the primary
+                    action, because it is nearly always the right one: it
+                    keeps every file already written and every result already
+                    gathered, and pays only for the rounds still left. Start
+                    over throws all of that away and buys the same work twice,
+                    so it stays available but quiet. */}
+                {onResume && message.canResume && (
+                  <button
+                    onClick={() => onResume(message.id)}
+                    title="Carry on from where it stopped, keeping the work already done"
+                    className="flex-none rounded-lg bg-[#cfa25a]/20 px-2 py-1 text-[11px] font-medium text-[#cfa25a] transition-colors hover:bg-[#cfa25a]/30"
+                  >
+                    Continue
+                  </button>
+                )}
                 {onRegenerate && (
                   <button
                     onClick={() => onRegenerate(message.id)}
+                    title={
+                      message.canResume
+                        ? "Discard what was done and answer again from scratch"
+                        : "Answer again from the beginning"
+                    }
                     className="flex-none rounded-lg border border-[#cfa25a]/30 px-2 py-1 text-[11px] font-medium text-[#cfa25a] transition-colors hover:bg-[#cfa25a]/15"
                   >
-                    Try again
+                    {message.canResume ? "Start over" : "Try again"}
                   </button>
                 )}
               </div>
@@ -980,6 +1003,7 @@ export const MessageBubble = memo(MessageBubbleImpl, (prev, next) => {
     a.pendingQuestion === b.pendingQuestion &&
     prev.isLast === next.isLast &&
     prev.onRegenerate === next.onRegenerate &&
+    prev.onResume === next.onResume &&
     prev.onEdit === next.onEdit &&
     prev.onDelete === next.onDelete &&
     prev.searchQuery === next.searchQuery &&

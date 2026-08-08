@@ -62,6 +62,27 @@ export interface StoredMessage {
     summary?: string;
     changedPath?: string;
   }[] | null;
+  /**
+   * The exact API turns this reply was built from.
+   *
+   * `toolEvents` records *that* a file was read; this records *what it said*,
+   * along with the model's reasoning and the raw tool calls. Without it a
+   * stopped reply could not be resumed: the evidence the model had gathered
+   * — sometimes dozens of rounds of it, already paid for — was thrown away,
+   * so "Try again" had no choice but to redo everything from the first token.
+   *
+   * Stored on the assistant turn it belongs to, and only while the reply is
+   * unfinished; a completed reply drops it, since resuming a finished answer
+   * is meaningless and the transcript is by far the largest thing here.
+   */
+  resumeState?: {
+    /** Rounds already spent, so a resumed reply does not get a fresh budget. */
+    toolRounds: number;
+    /** Continuations already used against the output ceiling. */
+    continuations: number;
+    /** Verbatim API messages, including reasoning and tool results. */
+    messages: unknown[];
+  } | null;
 }
 
 export interface StoredConversation {

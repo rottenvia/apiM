@@ -49,6 +49,7 @@ interface ChatAreaProps {
     }
   ) => void;
   onRegenerate: (assistantId: string) => void;
+  onResume: (assistantId: string) => void;
   onEdit: (messageId: string, newContent: string) => void;
   onDeleteMessage: (messageId: string) => void;
   onToggleSidebar: () => void;
@@ -89,6 +90,7 @@ export function ChatArea({
   sidebarOpen,
   onSend,
   onRegenerate,
+  onResume,
   onEdit,
   onDeleteMessage,
   onToggleSidebar,
@@ -769,6 +771,7 @@ export function ChatArea({
               <MessageList
                 messages={messages}
                 onRegenerate={onRegenerate}
+                onResume={onResume}
                 onEdit={onEdit}
                 onDeleteMessage={onDeleteMessage}
                 searchQuery={findOpen ? findQuery : undefined}
@@ -1105,6 +1108,7 @@ const WINDOW_STEP = 60;
 const MessageList = memo(function MessageList({
   messages,
   onRegenerate,
+  onResume,
   onEdit,
   onDeleteMessage,
   searchQuery,
@@ -1118,6 +1122,7 @@ const MessageList = memo(function MessageList({
 }: {
   messages: Message[];
   onRegenerate: (assistantId: string) => void;
+  onResume: (assistantId: string) => void;
   onEdit: (messageId: string, newContent: string) => void;
   onDeleteMessage: (messageId: string) => void;
   onOpenWorkspaceFile: (path: string) => void;
@@ -1201,6 +1206,7 @@ const MessageList = memo(function MessageList({
             message={msg}
             isLast={msg.id === lastId}
             onRegenerate={onRegenerate}
+            onResume={onResume}
             onEdit={msg.role === "user" ? onEdit : undefined}
             onDelete={msg.role === "user" ? onDeleteMessage : undefined}
             searchQuery={searchQuery}
