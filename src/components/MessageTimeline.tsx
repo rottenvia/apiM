@@ -39,7 +39,7 @@ export function MessageTimeline({
     // starts here".
     <div className="flex flex-col">
       <span
-        className="mb-3 h-px w-10 flex-none rounded-full bg-border-light"
+        className="mb-3.5 h-px w-full flex-none bg-border/60"
         aria-hidden="true"
       />
 
