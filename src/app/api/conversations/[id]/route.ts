@@ -16,7 +16,21 @@ export async function GET(
     const { id } = await params;
     const conv = await getConversation(id);
     if (!conv) return NextResponse.json({ error: "Not found" }, { status: 404 });
-    return NextResponse.json(conv);
+
+    /*
+     * The saved resume transcript never leaves the server.
+     *
+     * It holds every tool result from the interrupted reply — the full text
+     * of every file that was read — so on a real project it dwarfs the rest
+     * of the conversation. The browser only needs to know whether resuming is
+     * possible, so it gets a boolean and the payload stays small.
+     */
+    const messages = conv.messages.map((m) => {
+      const { resumeState, ...rest } = m;
+      return { ...rest, canResume: Boolean(resumeState?.messages?.length) };
+    });
+
+    return NextResponse.json({ ...conv, messages });
   } catch (error) {
     console.error("Error reading conversation:", error);
     return NextResponse.json({ error: "Failed to read" }, { status: 500 });

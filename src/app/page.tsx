@@ -37,6 +37,13 @@ export interface Message {
   isError?: boolean;
   /** Reply was cut short (tab closed / connection dropped) and can be retried. */
   incomplete?: boolean;
+  /**
+   * The interrupted reply kept everything it had worked out, so it can carry
+   * on instead of starting again. Only set when that state was saved — an
+   * older reply, from before this existed, can still be retried but not
+   * resumed, and the UI must not promise otherwise.
+   */
+  canResume?: boolean;
   /** Why auto-search did or didn't run, shown as a tooltip. */
   searchReason?: string;
   /** Files sent with this message, rendered as chips on the bubble. */
@@ -135,6 +142,7 @@ type StreamEvent =
       delayMs: number;
       reason: string;
     }
+  | { type: "continuing"; reason: string; n: number; of: number }
   | { type: "context_pruned"; collapsed: number; tokensSaved: number }
   | { type: "tool_start"; id: string; name: string; args: string }
   | {
@@ -277,6 +285,7 @@ export default function Home() {
         content: string,
         options?: {
           regenerateFromId?: string;
+          resumeMessageId?: string;
           previousVersions?: Message["previousVersions"];
         }
       ) => void)
@@ -513,6 +522,9 @@ export default function Home() {
           durationMs: m.durationMs as number | undefined,
           createdAt: m.createdAt as string | undefined,
           incomplete: m.incomplete === true,
+          // The server sends a flag, never the saved transcript itself: it
+          // can run to megabytes and the browser has no use for it.
+          canResume: m.canResume === true,
           attachments: Array.isArray(m.attachments)
             ? (m.attachments as Message["attachments"])
             : undefined,
@@ -637,6 +649,8 @@ export default function Home() {
       content: string,
       options?: {
         regenerateFromId?: string;
+        /** Continue this unfinished reply rather than sending a new one. */
+        resumeMessageId?: string;
         /** What the user actually typed, when it differs from `content`. */
         displayContent?: string;
         /** Thumbnails to show on the user's bubble. */
@@ -649,6 +663,7 @@ export default function Home() {
 
       const trimmed = content.trim();
       const regenerateFromId = options?.regenerateFromId;
+      const resumeMessageId = options?.resumeMessageId;
       const userMsg: Message = {
         id: `temp-${Date.now()}`,
         role: "user",
@@ -662,17 +677,32 @@ export default function Home() {
       // The assistant bubble is created immediately and filled in as deltas
       // arrive, so the user sees text within a second instead of staring at a
       // spinner until the whole (possibly 60K-token) answer is finished.
-      const streamingId = `stream-${Date.now()}`;
+      // Resuming keeps the reply's own id, so the server rewrites the
+      // interrupted message in place and the text already on screen is
+      // extended rather than replaced by a second bubble.
+      const existing = resumeMessageId
+        ? messagesRef.current.find((m) => m.id === resumeMessageId)
+        : undefined;
+      const streamingId = resumeMessageId ?? `stream-${Date.now()}`;
       const assistantMsg: Message = {
         id: streamingId,
         role: "assistant",
-        content: "",
-        reasoningContent: "",
+        // Carry the interrupted text forward so it does not blank out and
+        // refill as the continuation streams in.
+        content: existing?.content ?? "",
+        reasoningContent: existing?.reasoningContent ?? "",
+        timeline: existing?.timeline,
+        toolEvents: existing?.toolEvents,
         isStreaming: true,
+        incomplete: false,
         previousVersions: options?.previousVersions,
       };
 
       setMessages((prev) => {
+        // Resume swaps the interrupted reply for the streaming one, in place.
+        if (resumeMessageId) {
+          return prev.map((m) => (m.id === resumeMessageId ? assistantMsg : m));
+        }
         // Regenerate replaces the previous reply rather than appending after
         // it, so the user's original question is not duplicated either.
         const base = regenerateFromId
@@ -689,10 +719,13 @@ export default function Home() {
       setStatusStage(webSearchMode === "off" ? "thinking" : "deciding");
 
       // For a regenerate, history must stop before the reply being replaced.
-      const sourceHistory = regenerateFromId
+      // Same for a resume: the server replays the saved transcript, so the
+      // reply being continued must not also arrive as history.
+      const stopBefore = regenerateFromId ?? resumeMessageId;
+      const sourceHistory = stopBefore
         ? messages.slice(
             0,
-            Math.max(0, messages.findIndex((m) => m.id === regenerateFromId))
+            Math.max(0, messages.findIndex((m) => m.id === stopBefore))
           )
         : messages;
       // Only the recent turns are sent. The server also caps this, but
@@ -809,6 +842,7 @@ export default function Home() {
             enabledPluginIds: enabledPlugins,
             conversationHistory: historyForApi,
             regenerateFromId,
+            resumeMessageId,
             workspaceEnabled,
             autoRunCommands,
             searchProfile,
@@ -882,6 +916,15 @@ export default function Home() {
               case "retrying":
                 setRetryNotice(
                   `${evt.reason} — retrying (${evt.attempt}/${evt.attempts - 1}) in ${Math.round(evt.delayMs / 100) / 10}s`
+                );
+                break;
+
+              case "continuing":
+                // The answer was too long for one response and is being
+                // continued. Said plainly, because otherwise a long pause
+                // mid-file looks like the app has hung.
+                setRetryNotice(
+                  `Answer was longer than one response allows — continuing (${evt.n}/${evt.of})`
                 );
                 break;
 
@@ -1302,6 +1345,27 @@ export default function Home() {
     });
   }, []);
 
+  /**
+   * Carry on an interrupted reply instead of starting it again.
+   *
+   * The difference from regenerate is the whole point: regenerate throws away
+   * everything the model worked out and pays for all of it a second time.
+   * Resume replays the saved transcript — the reasoning, the tool calls and
+   * everything the tools returned — so only the rounds still outstanding are
+   * charged, and any file already written stays written.
+   */
+  const resumeReply = useCallback((assistantId: string) => {
+    const list = messagesRef.current;
+    const index = list.findIndex((m) => m.id === assistantId);
+    if (index < 1) return;
+    const prompt = list[index - 1];
+    if (prompt.role !== "user") return;
+
+    void sendMessageRef.current?.(prompt.content, {
+      resumeMessageId: assistantId,
+    });
+  }, []);
+
   return (
     <ArtifactProvider>
     <div className="flex h-dvh w-full overflow-hidden bg-bg-primary">
@@ -1339,6 +1403,7 @@ export default function Home() {
         sidebarOpen={sidebarOpen}
         onSend={sendMessage}
         onRegenerate={regenerate}
+        onResume={resumeReply}
         onEdit={editMessage}
         onDeleteMessage={deleteMessage}
         onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}

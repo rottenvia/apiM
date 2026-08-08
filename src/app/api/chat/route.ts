@@ -5,6 +5,7 @@ import {
   truncateFrom,
   upsertMessage,
   availableTitle,
+  getConversation,
 } from "@/lib/store";
 import type { StoredMessage } from "@/lib/store";
 import { smartSearch, autoThinkingEffort, decideSearch } from "@/lib/smart-search";
@@ -106,6 +107,15 @@ interface ChatRequestBody {
   conversationHistory?: ChatMessage[];
   /** When set, this message and everything after it is dropped first. */
   regenerateFromId?: string;
+  /**
+   * Continue an unfinished reply instead of starting it again.
+   *
+   * Carries the id of the assistant message to resume. The saved transcript
+   * — reasoning, tool calls and everything the tools returned — is replayed,
+   * so the model picks up with all its findings intact and only pays for the
+   * rounds still to come.
+   */
+  resumeMessageId?: string;
   /** Enables the workspace tools for this turn. */
   workspaceEnabled?: boolean;
   /** Which workspace the tools operate on. Defaults to the conversation id. */
@@ -147,6 +157,16 @@ type StreamEvent =
       searchUsd: number;
     }
   | { type: "reasoning"; delta: string }
+  | {
+      /**
+       * The model hit the output ceiling mid-answer and is being asked to
+       * carry on, rather than the reply simply stopping short.
+       */
+      type: "continuing";
+      reason: string;
+      n: number;
+      of: number;
+    }
   | {
       /** A transient upstream failure is being retried rather than surfaced. */
       type: "retrying";
@@ -227,6 +247,7 @@ export async function POST(req: NextRequest) {
     enabledPluginIds = [],
     conversationHistory = [],
     regenerateFromId,
+    resumeMessageId,
     displayContent,
     attachments,
     workspaceEnabled = false,
@@ -299,7 +320,9 @@ export async function POST(req: NextRequest) {
       const title = conversationId
         ? derivedTitle
         : await availableTitle(derivedTitle);
-      const assistantMsgId = uuidv4();
+      // Resuming rewrites the reply that was cut short, rather than adding a
+      // second one beneath it.
+      const assistantMsgId = resumeMessageId ?? uuidv4();
       let persisted = false;
 
       try {
@@ -335,14 +358,63 @@ export async function POST(req: NextRequest) {
           }
         }
 
+        /*
+         * Pick up an unfinished reply.
+         *
+         * The whole point is not paying twice. The saved transcript holds the
+         * model's reasoning, every tool call it made and everything those
+         * tools returned, so it resumes knowing what it already found rather
+         * than rediscovering it. Rounds already spent are carried over too —
+         * otherwise a reply that stopped at the round limit would resume with
+         * a fresh budget and could loop indefinitely.
+         */
+        let resumed: {
+          toolRounds: number;
+          continuations: number;
+          messages: TranscriptMessage[];
+        } | null = null;
+        let resumedContent = "";
+        let resumedReasoning = "";
+        let resumedToolEvents: NonNullable<StoredMessage["toolEvents"]> = [];
+        let resumedTimeline: NonNullable<StoredMessage["timeline"]> = [];
+
+        if (resumeMessageId) {
+          try {
+            const conv = await getConversation(convId);
+            const prior = conv?.messages.find((m) => m.id === resumeMessageId);
+            const state = prior?.resumeState;
+            if (state && Array.isArray(state.messages) && state.messages.length) {
+              resumed = {
+                toolRounds: state.toolRounds ?? 0,
+                continuations: state.continuations ?? 0,
+                messages: state.messages as TranscriptMessage[],
+              };
+              // Keep the text already shown, so resuming extends the reply
+              // rather than replacing it with only the new part.
+              resumedContent = prior?.content ?? "";
+              resumedReasoning = prior?.reasoningContent ?? "";
+              // The actions and the narration that went with them, so the
+              // finished reply reads as one continuous piece of work rather
+              // than starting abruptly at the point it was interrupted.
+              resumedToolEvents = prior?.toolEvents ?? [];
+              resumedTimeline = prior?.timeline ?? [];
+            }
+          } catch (e) {
+            console.error("Could not load resume state:", e);
+          }
+          // Nothing to resume from — fall back to answering normally rather
+          // than failing, which at worst repeats work the user asked for.
+        }
+
         // Save the user's message immediately. Previously nothing hit disk
         // until the whole reply finished, so closing the tab mid-answer lost
         // both the question and the partial answer.
         //
         // Skipped when regenerating: the question is already stored and
         // truncateFrom only removed the reply, so re-appending would duplicate
-        // it.
-        if (!regenerateFromId) try {
+        // it. Skipped when resuming too: the question is already there, and
+        // the reply being continued sits directly beneath it.
+        if (!regenerateFromId && !resumeMessageId) try {
           await appendMessages(convId, title, [
             {
               id: uuidv4(),
@@ -478,59 +550,43 @@ export async function POST(req: NextRequest) {
             }`
           : "";
 
-        // A structured transcript, not bare {role, content}. Tool calls and
-        // reasoning must survive across turns or DeepSeek rejects the next
-        // request with a 400.
+        /*
+         * A structured transcript, not bare {role, content}. Tool calls and
+         * reasoning must survive across turns or DeepSeek rejects the next
+         * request with a 400.
+         *
+         * The file tree is deliberately NOT in here.
+         *
+         * DeepSeek caches by matching a prefix from the very start of the
+         * messages array, and cached input costs $0.003625/M against
+         * $0.435/M for a miss — 120x. The system message is the first thing
+         * it compares, so a single character changed there invalidates the
+         * cache for the entire request.
+         *
+         * The tree was in the system message and was rewritten after every
+         * round that touched a file. That meant every write, every edit and
+         * every delete forced a full-price re-read of the whole conversation:
+         * a task that wrote files cost several times one that only read them,
+         * for no reason other than where the text sat. It now goes in a
+         * message appended at the end, where it can change freely while the
+         * prefix in front of it stays byte-identical.
+         */
         const transcript: TranscriptMessage[] = [
           {
             role: "system",
             // The user's standing orders go last on purpose: the workspace
-            // rules and file tree that precede them run to several thousand
-            // characters, and whatever sits after that block is what the
-            // model weighs most heavily.
+            // rules that precede them run to several thousand characters, and
+            // whatever sits after that block is what the model weighs most
+            // heavily.
             content:
               systemPrompt +
               searchSummary +
               clarifyInstruction +
               workspaceInstruction +
-              workspaceFiles +
               pluginDirectives,
           },
         ];
 
-        /**
-         * Rewrite the file tree inside the system message.
-         *
-         * It was built once before the loop and never touched again, so after
-         * the agent deleted a file on round three, rounds four onward still
-         * listed it as present — which is why replies could name files that
-         * no longer existed, or recreate one just deleted. The tree is the
-         * only volatile part of the prompt, so only it is replaced.
-         */
-        let currentFileTree = workspaceFiles;
-        const refreshFileTree = async () => {
-          if (!workspaceEnabled) return;
-          let next = "";
-          try {
-            next = await buildWorkspaceContext(workspace);
-          } catch {
-            return; // Keep the last known tree rather than blanking it.
-          }
-          if (next === currentFileTree) return;
-
-          const system = transcript[0];
-          if (system.role !== "system") return;
-          system.content =
-            system.content.slice(
-              0,
-              system.content.length -
-                currentFileTree.length -
-                pluginDirectives.length
-            ) +
-            next +
-            pluginDirectives;
-          currentFileTree = next;
-        };
         for (const msg of conversationHistory.slice(-20)) {
           if (!msg.content?.trim()) continue;
           transcript.push(
@@ -541,6 +597,130 @@ export async function POST(req: NextRequest) {
         }
         transcript.push({ role: "user", content: message });
 
+        /*
+         * The file tree, as the last message before the model replies.
+         *
+         * Kept at the end for two reasons. The cache prefix in front of it
+         * never changes, so rewriting the tree no longer invalidates the
+         * whole request. And the model weighs what it read most recently
+         * most heavily, so the current state of the workspace is the last
+         * thing it sees before deciding what to do.
+         *
+         * Index is remembered rather than searched for: the loop appends
+         * assistant and tool messages after this point, and finding it by
+         * scanning would match the wrong message once the transcript grows.
+         */
+        let fileTreeIndex = -1;
+        let currentFileTree = "";
+
+        const setFileTree = (text: string) => {
+          currentFileTree = text;
+          const body =
+            `Current workspace contents (refreshed after every action — ` +
+            `this replaces any earlier listing):${text}`;
+          // `system`, not `user`. A trailing user message is, by every
+          // convention, the thing being asked — putting a file listing there
+          // makes the listing look like the request and buries the real
+          // question above it. The self-test caught exactly this: asked to
+          // create hello.py, the model produced app.py, because the last
+          // thing addressed to it was a directory tree. As a system message
+          // it reads as context, which is what it is.
+          if (fileTreeIndex === -1) {
+            transcript.push({ role: "system", content: body });
+            fileTreeIndex = transcript.length - 1;
+          } else {
+            transcript[fileTreeIndex] = { role: "system", content: body };
+          }
+        };
+
+        if (workspaceEnabled) setFileTree(workspaceFiles);
+
+        /*
+         * Replace everything above with the saved transcript when resuming.
+         *
+         * Built fresh first and then swapped, rather than branching earlier,
+         * so the ordinary path stays exactly as it was. The tree is rebuilt
+         * from the live workspace afterwards: the files on disk have moved on
+         * since the reply stopped, and the stale listing inside the saved
+         * transcript would describe a workspace that no longer exists.
+         */
+
+
+        /**
+         * Keep the tree honest as the agent works.
+         *
+         * It was built once before the loop and never touched again, so after
+         * the agent deleted a file on round three, rounds four onward still
+         * listed it as present — which is why replies could name files that
+         * no longer existed, or recreate one just deleted.
+         *
+         * Moving it to the end costs nothing to update: only this one message
+         * changes, and everything the cache matches sits before it.
+         */
+        const refreshFileTree = async () => {
+          if (!workspaceEnabled) return;
+          let next = "";
+          try {
+            next = await buildWorkspaceContext(workspace);
+          } catch {
+            return; // Keep the last known tree rather than blanking it.
+          }
+          if (next === currentFileTree) return;
+
+          // Drop the stale copy and re-append, so the freshest listing is
+          // always the last thing before the model's next turn. Editing it in
+          // place would leave it buried behind the tool results from this
+          // round, where it reads as older than output that is actually
+          // older than it.
+          if (fileTreeIndex !== -1) {
+            transcript.splice(fileTreeIndex, 1);
+            fileTreeIndex = -1;
+          }
+          setFileTree(next);
+        };
+
+        /*
+         * Replace everything above with the saved transcript when resuming.
+         *
+         * Built fresh first and then swapped, rather than branching earlier,
+         * so the ordinary path stays exactly as it was. The tree is rebuilt
+         * from the live workspace afterwards: the files on disk have moved on
+         * since the reply stopped, and the stale listing inside the saved
+         * transcript would describe a workspace that no longer exists.
+         */
+        if (resumed) {
+          transcript.length = 0;
+          transcript.push(...resumed.messages);
+          fileTreeIndex = -1;
+          currentFileTree = "";
+
+          // Drop the tree the saved transcript carried, wherever it sits, so
+          // the refresh below appends one current listing instead of leaving
+          // two that disagree.
+          for (let i = transcript.length - 1; i >= 0; i--) {
+            const m = transcript[i];
+            if (
+              (m.role === "system" || m.role === "user") &&
+              typeof m.content === "string" &&
+              m.content.startsWith("Current workspace contents")
+            ) {
+              transcript.splice(i, 1);
+            }
+          }
+
+          transcript.push({
+            role: "user",
+            content:
+              "You were interrupted before finishing. Everything above is " +
+              "your own work so far, including what the tools returned — it " +
+              "is still valid, so do not repeat it. Continue from exactly " +
+              "where you stopped. If a file was only partly written, finish " +
+              "it with edit_file rather than rewriting it from the start.",
+          });
+
+          await refreshFileTree();
+        }
+
         // ---------------- Agent loop ----------------
         // Without tools this runs exactly once. With them, each pass may end
         // in tool calls, which are executed and fed back as `role: "tool"`
@@ -550,12 +730,31 @@ export async function POST(req: NextRequest) {
         // to find the right file, so 20 ran out mid-task.
         const MAX_TOOL_ROUNDS = 40;
         let round = 0;
-        let toolRounds = 0;
+        // Rounds already spent count against the limit. A resumed reply that
+        // started over at zero could work indefinitely by being interrupted.
+        let toolRounds = resumed?.toolRounds ?? 0;
+
+        /**
+         * Automatic "carry on" rounds after hitting the output limit.
+         *
+         * Capped so a model that ends every round at the ceiling cannot loop
+         * forever, but high enough that a genuinely long file finishes: each
+         * continuation adds another full output budget.
+         */
+        const MAX_CONTINUATIONS = 8;
+        // Carried across a resume, so continuing cannot reset the guard and
+        // spend another eight budgets on a model that never stops.
+        let continuations = resumed?.continuations ?? 0;
+        /** Set when the reply stopped because it ran out of room. */
+        let hitOutputCeiling = false;
 
         // Accumulated across every round — one displayed reply can span
         // several API turns once tools are involved.
-        let assistantContent = "";
-        let reasoningContent = "";
+        //
+        // Seeded from the interrupted reply when resuming, so the saved
+        // message grows rather than being overwritten by only the new half.
+        let assistantContent = resumedContent;
+        let reasoningContent = resumedReasoning;
         // Mirrors what the client is shown, so a reopened chat still lists
         // the files this reply touched.
         const toolEvents: {
@@ -565,7 +764,7 @@ export async function POST(req: NextRequest) {
           ok?: boolean;
           summary?: string;
           changedPath?: string;
-        }[] = [];
+        }[] = [...resumedToolEvents];
 
         /**
          * What happened, in order.
@@ -578,7 +777,7 @@ export async function POST(req: NextRequest) {
         const timeline: (
           | { kind: "text"; text: string }
           | { kind: "tool"; id: string }
-        )[] = [];
+        )[] = [...resumedTimeline];
 
         const appendTimelineText = (text: string) => {
           const last = timeline[timeline.length - 1];
@@ -603,6 +802,8 @@ export async function POST(req: NextRequest) {
           const toolAcc = new ToolCallAccumulator();
           let roundContent = "";
           let roundReasoning = "";
+          /** "stop" if the model finished, "length" if it ran out of room. */
+          let roundFinishReason = "";
 
           // Collapse old tool results before sending. The stored transcript
           // keeps everything; only the copy going upstream is reduced, so a
@@ -764,6 +965,14 @@ export async function POST(req: NextRequest) {
                 timeline: timeline.length ? timeline : null,
                 createdAt: new Date().toISOString(),
                 incomplete: true,
+                // Everything needed to carry on instead of starting over.
+                // Saved on each checkpoint, so even a killed process leaves a
+                // resumable reply rather than a dead one.
+                resumeState: {
+                  toolRounds,
+                  continuations,
+                  messages: transcript,
+                },
               });
             } catch (e) {
               console.error("Checkpoint failed:", e);
@@ -811,6 +1020,19 @@ export async function POST(req: NextRequest) {
                     function?: { name?: string; arguments?: string };
                   }[];
                 };
+                /**
+                 * Why the model stopped. "stop" means it finished its
+                 * thought; "length" means it hit max_tokens mid-sentence and
+                 * had more to say.
+                 *
+                 * This was never read. Nothing in the app could tell a
+                 * finished reply from one chopped off in the middle, which is
+                 * why a file the model was halfway through writing silently
+                 * failed to appear: the tool call was cut off, its arguments
+                 * were invalid JSON, and the failure looked like any other
+                 * bad call rather than "ran out of room, ask for the rest".
+                 */
+                finish_reason?: string | null;
                 }[];
                 usage?: unknown;
               };
@@ -832,6 +1054,12 @@ export async function POST(req: NextRequest) {
                   model,
                 });
               }
+
+              // Arrives on the final frame of the round, alongside an empty
+              // delta — so it is read before the `!delta` guard below, which
+              // would otherwise skip the one frame that carries it.
+              const reason = chunk.choices?.[0]?.finish_reason;
+              if (reason) roundFinishReason = reason;
 
               const delta = chunk.choices?.[0]?.delta;
               if (!delta) continue;
@@ -866,6 +1094,56 @@ export async function POST(req: NextRequest) {
           // A model can emit them unprompted, and acting on that would let it
           // touch files the user never opted into.
           const calls = workspaceEnabled ? toolAcc.result() : [];
+
+          /*
+           * The model ran out of room rather than finishing.
+           *
+           * `length` means max_tokens was reached mid-thought. On max
+           * thinking this is common: reasoning and the answer share one
+           * budget, so a long deliberation can leave too little room to write
+           * the file that was the whole point.
+           *
+           * The damage is worst mid-tool-call. Arguments are streamed as JSON
+           * text, so a call cut off halfway is unparseable — the file never
+           * lands, and because nothing read finish_reason it looked like an
+           * ordinary bad call. Any completed file is already on disk; only
+           * the one in flight is lost, and now it is asked for again rather
+           * than abandoned.
+           */
+          const truncated = roundFinishReason === "length";
+
+          if (truncated && calls.length === 0) {
+            // Plain prose cut short. Ask for the rest instead of stopping —
+            // the transcript already holds what arrived, so the continuation
+            // costs only the remaining tokens rather than a full retry.
+            if (continuations < MAX_CONTINUATIONS) {
+              continuations += 1;
+              transcript.push({
+                role: "assistant",
+                content: roundContent || null,
+                reasoning_content: roundReasoning || null,
+              });
+              transcript.push({
+                role: "user",
+                content:
+                  "You reached the output limit mid-answer. Continue from " +
+                  "exactly where you stopped — do not repeat anything you " +
+                  "already wrote, do not restate the plan, and do not " +
+                  "apologise. Carry straight on from the last character.",
+              });
+              send({ type: "continuing", reason: "output_limit", of: MAX_CONTINUATIONS, n: continuations });
+              continue;
+            }
+            // Out of continuations: keep what arrived and stop cleanly.
+            transcript.push({
+              role: "assistant",
+              content: roundContent || null,
+              reasoning_content: roundReasoning || null,
+            });
+            hitOutputCeiling = true;
+            break;
+          }
+
           transcript.push({
             role: "assistant",
             content: roundContent || null,
@@ -924,10 +1202,38 @@ export async function POST(req: NextRequest) {
             };
 
             if (!parsed.ok) {
+              /*
+               * Almost always a call cut off by the output limit rather than
+               * a malformed one — the arguments are valid JSON right up to
+               * the point the budget ran out.
+               *
+               * "Invalid tool arguments" told the model nothing actionable,
+               * so it would apologise or move on and the file was never
+               * written. Naming the real cause, and the way out, turns a
+               * dead end into one more round.
+               */
+              const looksTruncated =
+                truncated || /Unterminated|Unexpected end/i.test(parsed.error);
+
               result = {
                 ok: false,
-                content: `Error: arguments were not valid JSON (${parsed.error})`,
-                summary: "Invalid tool arguments",
+                content: looksTruncated
+                  ? `Error: this ${call.function.name} call was cut off by the ` +
+                    `output limit — its arguments are incomplete, so nothing ` +
+                    `was written.\n\n` +
+                    `The content was too large for one call. Do NOT resend it ` +
+                    `whole. Instead:\n` +
+                    `  1. write_file with the FIRST part only (aim for under ` +
+                    `1500 lines).\n` +
+                    `  2. Then append each following part with edit_file, ` +
+                    `using the last few lines of what you just wrote as ` +
+                    `old_text.\n` +
+                    `Keep going until the file is complete. Say nothing else ` +
+                    `until it is.`
+                  : `Error: arguments were not valid JSON (${parsed.error})`,
+                summary: looksTruncated
+                  ? `Cut off mid-call — splitting into parts`
+                  : "Invalid tool arguments",
               };
             } else if (call.function.name === "ask_user") {
               // Pauses the reply the same way approval does, so the model can
@@ -1159,7 +1465,16 @@ export async function POST(req: NextRequest) {
             toolEvents: toolEvents.length ? toolEvents : null,
             timeline: timeline.length ? timeline : null,
             createdAt: new Date().toISOString(),
-            incomplete: false,
+            // Stopping at the output ceiling is not a finished answer. Left
+            // as complete it looked done while ending mid-sentence, so the
+            // UI had nothing to offer and the work was silently abandoned.
+            incomplete: hitOutputCeiling,
+            // Kept only while there is something to resume. A finished reply
+            // drops it: it is the largest field in the record and resuming a
+            // complete answer means nothing.
+            resumeState: hitOutputCeiling
+              ? { toolRounds, continuations, messages: transcript }
+              : null,
           });
           persisted = true;
         } catch (storeError) {
