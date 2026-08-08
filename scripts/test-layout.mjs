@@ -186,6 +186,48 @@ check(
   Number.isFinite(W.MAX_FILE_BYTES) && W.MAX_FILE_BYTES > 0
 );
 
+// ------------------------------------------------------------ copy files
+
+console.log("\n7. Copying files from another chat");
+
+await fs.rm(WSROOT, { recursive: true, force: true });
+await W.writeFile("src-chat", "main.py", "print(1)\n");
+await W.writeFile("src-chat", "lib/util.py", "x = 1\n");
+await S.createSnapshot("src-chat", "a point in time");
+await W.writeFile("dst-chat", "main.py", "MINE\n");
+
+const copy = await W.copyWorkspace("src-chat", "dst-chat");
+check("files are copied", copy.copied === 1, `${copy.copied} copied`);
+check(
+  "a name that already exists is left alone",
+  copy.skipped === 1,
+  "importing must never destroy work already here"
+);
+
+const dstFiles = (await W.listFiles("dst-chat")).map((f) => f.path).sort();
+check("nested paths survive", dstFiles.includes("lib/util.py"), dstFiles.join(", "));
+
+const kept = await fs.readFile(
+  path.join(WSROOT, "dst-chat", "main.py"),
+  "utf8"
+);
+check("the existing file keeps its contents", kept.trim() === "MINE");
+
+const dstInside = await fs.readdir(path.join(WSROOT, "dst-chat"));
+check(
+  "the source's snapshots are not dragged along",
+  !dstInside.includes(".snapshots"),
+  "an undo stack for edits that never happened here"
+);
+
+const self = await W.copyWorkspace("dst-chat", "dst-chat");
+check("copying a workspace into itself does nothing", self.copied === 0);
+
+const missing = await W.copyWorkspace("does-not-exist", "dst-chat");
+check("copying from an empty or missing workspace is harmless", missing.copied === 0);
+
+await fs.rm(WSROOT, { recursive: true, force: true });
+
 // -------------------------------------------------------------- migration
 
 console.log("\n6. Migrating the old three-folder layout");

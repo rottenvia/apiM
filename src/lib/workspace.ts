@@ -634,6 +634,63 @@ export async function deleteFile(
 }
 
 /** Absolute path, shown in the UI so the user knows where files landed. */
+/**
+ * Copy every real file from one workspace into another.
+ *
+ * Starting a fresh chat is often deliberate — a clean slate for a new line of
+ * thought — but the files you were working on usually still matter. Without
+ * this the only options are carrying the whole conversation forward or
+ * recreating the files by hand.
+ *
+ * Only real files move. History, snapshots and installed packages are the
+ * previous workspace's own bookkeeping: copying them would import an undo
+ * stack for edits that never happened here, and duplicate a virtualenv that
+ * can simply be rebuilt.
+ *
+ * Existing files are never overwritten, so importing twice, or importing
+ * into a workspace that has already started, cannot destroy work.
+ */
+export async function copyWorkspace(
+  fromId: string,
+  toId: string
+): Promise<{ copied: number; skipped: number }> {
+  if (fromId === toId) return { copied: 0, skipped: 0 };
+
+  const files = await listFiles(fromId);
+  if (files.length === 0) return { copied: 0, skipped: 0 };
+
+  const destRoot = await ensureRoot(toId);
+  let copied = 0;
+  let skipped = 0;
+
+  for (const file of files) {
+    const src = resolveInside(fromId, file.path);
+    const dest = path.join(destRoot, file.path);
+
+    // Never clobber. A name that already exists here is this workspace's.
+    if (
+      await fs
+        .access(dest)
+        .then(() => true)
+        .catch(() => false)
+    ) {
+      skipped += 1;
+      continue;
+    }
+
+    try {
+      await fs.mkdir(path.dirname(dest), { recursive: true });
+      await fs.copyFile(src, dest);
+      copied += 1;
+    } catch {
+      // One unreadable file should not abandon the rest of the import.
+      skipped += 1;
+    }
+  }
+
+  return { copied, skipped };
+}
+
 export function workspaceDirectory(workspaceId: string): string {
   return workspaceRoot(workspaceId);
 }

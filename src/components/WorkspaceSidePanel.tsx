@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { ImportFilesDialog } from "@/components/ImportFilesDialog";
 import type { WorkspaceFileInfo } from "@/components/WorkspaceBar";
 import type { SnapshotInfo } from "@/lib/snapshots";
 
@@ -52,6 +53,7 @@ export function WorkspaceSidePanel({
 }) {
   const [history, setHistory] = useState<SnapshotInfo[]>([]);
   const [showHistory, setShowHistory] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const changed = new Set(recentlyChanged ?? []);
@@ -165,7 +167,7 @@ export function WorkspaceSidePanel({
         <div className="flex items-center gap-0.5">
           <button
             onClick={() => setShowHistory((v) => !v)}
-            className="rounded-lg p-1 text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
+            className="sidebar-icon-btn h-7 w-7"
             data-active={showHistory}
             title="Earlier versions of this workspace"
             aria-label="Workspace history"
@@ -188,9 +190,20 @@ export function WorkspaceSidePanel({
           </button>
 
           <button
+            onClick={() => setImporting(true)}
+            className="sidebar-icon-btn h-7 w-7"
+            title="Copy files from another chat"
+            aria-label="Copy files from another chat"
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M8 4h9a2 2 0 012 2v9M6 8h9a2 2 0 012 2v8a2 2 0 01-2 2H6a2 2 0 01-2-2v-8a2 2 0 012-2z" />
+            </svg>
+          </button>
+
+          <button
             onClick={download}
             disabled={files.length === 0}
-            className="rounded-lg p-1 text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-40"
+            className="sidebar-icon-btn h-7 w-7 disabled:cursor-not-allowed disabled:opacity-40"
             title={
               files.length === 0
                 ? "Nothing to download yet"
@@ -217,7 +230,7 @@ export function WorkspaceSidePanel({
 
           <button
             onClick={onClose}
-            className="rounded-lg p-1 text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
+            className="sidebar-icon-btn h-7 w-7"
             title="Hide the workspace panel"
             aria-label="Hide workspace panel"
           >
@@ -334,6 +347,13 @@ export function WorkspaceSidePanel({
           ))
         )}
       </div>
+      )}
+      {importing && workspaceId && (
+        <ImportFilesDialog
+          workspaceId={workspaceId}
+          onClose={() => setImporting(false)}
+          onImported={() => onRestored?.()}
+        />
       )}
     </aside>
   );

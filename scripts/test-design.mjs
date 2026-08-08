@@ -334,6 +334,38 @@ check(
   "it is always on, so the control had one position"
 );
 
+// Tool activity and the split view
+const toolActivity =
+  files.find((f) => f.file.endsWith("ToolActivity.tsx"))?.text ?? "";
+const timeline =
+  files.find((f) => f.file.endsWith("MessageTimeline.tsx"))?.text ?? "";
+
+check(
+  "an expanded step collapses when the next one starts",
+  /runningCount > lastRunning\.current/.test(toolActivity),
+  "otherwise stale panels accumulate until the reply is unreadable"
+);
+check(
+  "commands can be inspected, not just writes",
+  /parsed\.command === "string"/.test(toolActivity),
+  "the one thing most worth seeing was the only thing hidden"
+);
+check(
+  "the split has a real divider column",
+  /w-px self-stretch bg-border/.test(timeline),
+  "a border on the prose stops at the shorter side"
+);
+check(
+  "the divider is hidden where the layout stacks",
+  /hidden w-px[^"]*md:block/.test(timeline),
+  "a vertical rule across stacked content is just a line through it"
+);
+check(
+  "the agent's work is separated from what came before",
+  /h-px w-10[^"]*bg-border-light/.test(timeline),
+  "short rather than edge-to-edge, so it reads as a new section not a page break"
+);
+
 check(
   "reduced motion is honoured",
   /@media \(prefers-reduced-motion: reduce\)/.test(css),

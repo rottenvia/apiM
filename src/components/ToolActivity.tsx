@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 /** One tool the model ran, as shown in the transcript. */
 export interface ToolEvent {
@@ -35,7 +35,13 @@ function argPath(args: string): string | null {
   return null;
 }
 
-/** The file body a write/edit produced, for the expanded view. */
+/**
+ * What to show when a step is expanded.
+ *
+ * For a write that is the file body; for a command it is the command line
+ * itself, which was previously not inspectable at all — the one thing most
+ * worth seeing was the only thing hidden.
+ */
 function argContent(args: string): string | null {
   try {
     const parsed = JSON.parse(args) as {
@@ -43,13 +49,20 @@ function argContent(args: string): string | null {
       replacement?: string;
       old_text?: string;
       new_text?: string;
+      command?: string;
+      args?: unknown;
+      query?: string;
     };
-    return (
-      parsed.content ??
-      parsed.new_text ??
-      parsed.replacement ??
-      null
-    );
+
+    if (typeof parsed.command === "string") {
+      const list = Array.isArray(parsed.args) ? parsed.args : [];
+      const quoted = list.map((a) =>
+        /\s/.test(String(a)) ? JSON.stringify(String(a)) : String(a)
+      );
+      return [parsed.command, ...quoted].join(" ");
+    }
+
+    return parsed.content ?? parsed.new_text ?? parsed.replacement ?? parsed.query ?? null;
   } catch {
     return null;
   }
@@ -115,6 +128,16 @@ export function ToolActivity({
   onOpenFile?: (path: string) => void;
 }) {
   const [openId, setOpenId] = useState<string | null>(null);
+
+  // Collapse whatever is open as soon as another tool starts. An expanded
+  // panel from a finished step is stale detail competing with the live one,
+  // and left alone they accumulate until the reply is unreadable.
+  const runningCount = events.filter((e) => e.ok === undefined).length;
+  const lastRunning = useRef(runningCount);
+  useEffect(() => {
+    if (runningCount > lastRunning.current) setOpenId(null);
+    lastRunning.current = runningCount;
+  }, [runningCount]);
 
   if (!events.length) return null;
 
