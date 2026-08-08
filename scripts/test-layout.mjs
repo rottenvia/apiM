@@ -204,9 +204,73 @@ check(
   "listFiles used to call ensureRoot, so every glance left an empty folder"
 );
 
+// ------------------------------------------- files uploaded before a title
+
+console.log("\n8. Files uploaded before the chat is named");
+
+const store = await import(
+  pathToFileURL(path.join(ROOT, "src/lib/store.ts")).href
+);
+const CHROOT = path.join(ROOT, "data", "chats");
+await fs.rm(WSROOT, { recursive: true, force: true });
+await fs.rm(CHROOT, { recursive: true, force: true });
+
+// Attachments are uploaded while the composer is still empty, so they land
+// in a workspace named after the raw conversation id. Naming the chat then
+// repointed the workspace at a folder derived from the title — and because
+// nothing moved the old one, everything already uploaded was orphaned. This
+// is why a zip vanished the instant the first message was sent.
+const draftId = "aaaa1111-0000-4000-8000-bbbbcccc2222";
+await W.writeFile(draftId, "uploads/ext/EXT/content.js", "console.log(1)\n");
+await W.writeFile(draftId, "uploads/ext/EXT/manifest.json", '{"v":"3.0.8"}\n');
+
+check(
+  "the upload lands before any message exists",
+  (await W.listFiles(draftId)).length === 2
+);
+
+await store.appendMessages(draftId, "tell me whats inside the zip", [
+  { role: "user", content: "tell me whats inside the zip" },
+]);
+
+const survived = (await W.listFiles(draftId)).map((f) => f.path).sort();
+check(
+  "the files survive the chat being named",
+  survived.length === 2,
+  survived.join(", ") || "(gone — the workspace was repointed without moving)"
+);
+check(
+  "and are reachable at the same paths",
+  survived.includes("uploads/ext/EXT/manifest.json")
+);
+
+const read = await W.readFile(draftId, "uploads/ext/EXT/manifest.json").catch(
+  () => null
+);
+check(
+  "read_file finds them on the next turn",
+  read?.content.includes("3.0.8") ?? false,
+  "this is the turn where the agent used to say the workspace was empty"
+);
+
+const dirs = await fs.readdir(WSROOT);
+check(
+  "exactly one workspace folder exists",
+  dirs.length === 1,
+  dirs.join(", ")
+);
+check(
+  "named after the chat, not the raw id",
+  !dirs[0].includes(draftId),
+  dirs[0]
+);
+
+await fs.rm(WSROOT, { recursive: true, force: true });
+await fs.rm(CHROOT, { recursive: true, force: true });
+
 // ----------------------------------------------------------- copy files
 
-console.log("\n8. Copying files from another chat");
+console.log("\n9. Copying files from another chat");
 
 await fs.rm(WSROOT, { recursive: true, force: true });
 await W.writeFile("src-chat", "main.py", "print(1)\n");
@@ -248,7 +312,7 @@ await fs.rm(WSROOT, { recursive: true, force: true });
 
 // -------------------------------------------------------------- migration
 
-console.log("\n9. Migrating the old three-folder layout");
+console.log("\n10. Migrating the old three-folder layout");
 
 await fs.rm(WSROOT, { recursive: true, force: true });
 await fs.mkdir(path.join(WSROOT, "old"), { recursive: true });
