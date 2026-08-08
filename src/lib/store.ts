@@ -222,6 +222,16 @@ async function resolveFolder(
 
   if (!existing) {
     await fs.mkdir(path.join(DATA_DIR, desired), { recursive: true });
+
+    // Files can arrive before the chat is named. Attachments are uploaded
+    // while the composer is still empty, so they land in a workspace named
+    // after the raw id — and naming the chat here would silently repoint the
+    // workspace at a different folder, orphaning everything already in it.
+    // That is why an uploaded zip vanished the moment the first message was
+    // sent: the files were never lost, the app just stopped looking where it
+    // had put them.
+    await renameWorkspaceFolder(id, desired);
+
     setWorkspaceFolderName(id, desired);
     return desired;
   }
