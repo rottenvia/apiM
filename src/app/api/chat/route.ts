@@ -34,6 +34,8 @@ import {
 import type { TranscriptMessage } from "@/lib/transcript";
 import { pruneTranscript } from "@/lib/prune";
 import { compactTranscript, compactForResume } from "@/lib/compact";
+import { readLessons, applyLessons, formatLessonsForPrompt } from "@/lib/lessons";
+import { runRefine } from "@/lib/refine";
 import {
   rebuildResumeFromStored,
   rebuiltResumeInstruction,
@@ -122,6 +124,11 @@ interface ChatRequestBody {
    * rounds still to come.
    */
   resumeMessageId?: string;
+  /**
+   * Let the agent record what it learns and read it back next time.
+   * Off unless asked for: it writes a file into the workspace.
+   */
+  lessonsEnabled?: boolean;
   /** Enables the workspace tools for this turn. */
   workspaceEnabled?: boolean;
   /** Which workspace the tools operate on. Defaults to the conversation id. */
@@ -196,6 +203,13 @@ type StreamEvent =
       rounds: number;
       tokensSaved: number;
     }
+  | {
+      /** The agent recorded or corrected something it learned. */
+      type: "lessons_updated";
+      added: number;
+      revised: number;
+      total: number;
+    }
   | { type: "tool_start"; id: string; name: string; args: string }
   | {
       type: "approval_request";
@@ -266,6 +280,7 @@ export async function POST(req: NextRequest) {
     displayContent,
     attachments,
     workspaceEnabled = false,
+    lessonsEnabled = false,
     workspaceId,
     // Defaults to false, so a request that omits it asks rather than runs.
     // The dangerous setting has to be opted into explicitly, never inherited.
@@ -598,6 +613,24 @@ export async function POST(req: NextRequest) {
           : "";
 
         /*
+         * What previous tasks in this workspace proved.
+         *
+         * Placed in the system message rather than at the end, unlike the
+         * file tree: it changes at most once per task, so it does not
+         * invalidate the prompt cache the way a per-round rewrite would, and
+         * it belongs with the standing instructions.
+         */
+        let existingLessons: Awaited<ReturnType<typeof readLessons>> = [];
+        if (workspaceEnabled && lessonsEnabled) {
+          try {
+            existingLessons = await readLessons(workspace);
+          } catch (e) {
+            console.error("Could not read lessons:", e);
+          }
+        }
+        const lessonsBlock = formatLessonsForPrompt(existingLessons);
+
+        /*
          * A structured transcript, not bare {role, content}. Tool calls and
          * reasoning must survive across turns or DeepSeek rejects the next
          * request with a 400.
@@ -630,6 +663,7 @@ export async function POST(req: NextRequest) {
               searchSummary +
               clarifyInstruction +
               workspaceInstruction +
+              lessonsBlock +
               pluginDirectives,
           },
         ];
@@ -1616,6 +1650,58 @@ export async function POST(req: NextRequest) {
           persisted = true;
         } catch (storeError) {
           console.error("Failed to persist conversation:", storeError);
+        }
+
+        /*
+         * Learn from what just happened.
+         *
+         * Runs after the reply is saved, so a failure here cannot cost the
+         * user the work — the task is already complete and on disk by this
+         * point. Skipped when nothing ran, since nothing was demonstrated.
+         *
+         * On Flash with thinking disabled, reading outcomes rather than the
+         * transcript: the whole pass is a fraction of a cent, which has to
+         * stay true or the learning costs more than the mistakes it avoids.
+         */
+        if (
+          workspaceEnabled &&
+          lessonsEnabled &&
+          !hitOutputCeiling &&
+          toolSummaries.length > 0
+        ) {
+          try {
+            const refined = await runRefine(
+              toolSummaries.map((t, i) => ({
+                name: t.name,
+                args: toolEvents[i]?.args ?? "",
+                ok: t.ok,
+                summary: t.summary,
+              })),
+              existingLessons,
+              deepseekApiKey,
+              DEEPSEEK_BASE_URL,
+              req.signal
+            );
+
+            if (refined.lessons.length > 0 || refined.confirms.length > 0) {
+              const applied = await applyLessons(
+                workspace,
+                refined.lessons,
+                refined.confirms
+              );
+              if (applied.added || applied.revised) {
+                send({
+                  type: "lessons_updated",
+                  added: applied.added,
+                  revised: applied.revised,
+                  total: applied.total,
+                });
+              }
+            }
+          } catch (e) {
+            // Never allowed to affect the reply — it has already been sent.
+            console.error("Refine pass failed:", e);
+          }
         }
 
         send({

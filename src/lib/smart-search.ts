@@ -129,8 +129,28 @@ export function autoThinkingEffort(message: string): string {
 
   const complexScore = complexPatterns.filter((p) => p.test(lower)).length;
 
-  if (complexScore >= 3 || wordCount > 100) return "max";
-  if (complexScore >= 2 || wordCount > 50) return "high";
+  /*
+   * Length is not difficulty.
+   *
+   * This used to read `complexScore >= 3 || wordCount > 100`, so any message
+   * over a hundred words got maximum reasoning effort regardless of what it
+   * said. Pasting a stack trace, a config file, or a long log and asking
+   * "what is this?" is a long message and an easy question — and it was
+   * charged as the hardest kind of work there is, on the most expensive
+   * setting, on every round of the reply.
+   *
+   * Effort is now decided by what the message asks for. Length only breaks a
+   * tie: a long message that already looks hard is more likely to be hard,
+   * but a long message on its own never is.
+   */
+  const longMessage = wordCount > 120;
+
+  if (complexScore >= 3) return "max";
+  // Genuinely hard *and* substantial — the tie-break, not a rule of its own.
+  if (complexScore >= 2 && longMessage) return "max";
+  if (complexScore >= 1) return "high";
+  // Nothing about it looks difficult. A wall of pasted text is still a wall
+  // of pasted text, so this stays cheap.
   return "low";
 }
 

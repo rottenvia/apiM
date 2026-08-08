@@ -249,6 +249,7 @@ export default function Home() {
   // model only reaches for a file when a file is the answer — so switching
   // this off just meant code printed in chat for the user to save by hand.
   const workspaceEnabled = true;
+  const [lessonsEnabled, setLessonsEnabled] = useState(false);
   /** When on, commands run without asking. Off by default, deliberately. */
   const [autoRunCommands, setAutoRunCommands] = useState(false);
   // Defaults to the balanced profile: the opening round skims and only the
@@ -319,6 +320,7 @@ export default function Home() {
             // Only a literal true switches this on, so a corrupted or
             // half-written settings blob can never silently enable it.
             if (s.autoRunCommands === true) setAutoRunCommands(true);
+            if (s.lessonsEnabled === true) setLessonsEnabled(true);
             if (typeof s.searchProfile === "string") {
               setSearchProfile(s.searchProfile);
             }
@@ -352,6 +354,7 @@ export default function Home() {
           enabledPlugins,
           webSearchMode,
           autoRunCommands,
+          lessonsEnabled,
           searchProfile,
           sidePanelOpen,
           deleteDelay,
@@ -368,6 +371,7 @@ export default function Home() {
     enabledPlugins,
     webSearchMode,
     autoRunCommands,
+    lessonsEnabled,
     searchProfile,
     sidePanelOpen,
     deleteDelay,
@@ -851,6 +855,7 @@ export default function Home() {
             regenerateFromId,
             resumeMessageId,
             workspaceEnabled,
+            lessonsEnabled,
             autoRunCommands,
             searchProfile,
             // Lets the agent look at images saved in the workspace, not just
@@ -1242,6 +1247,7 @@ export default function Home() {
       refreshConversations,
       workspaceEnabled,
       autoRunCommands,
+      lessonsEnabled,
       searchProfile,
       visionKey,
       visionModel,
@@ -1488,6 +1494,8 @@ export default function Home() {
           deleteDelay={deleteDelay}
           onDeleteDelayChange={setDeleteDelay}
           autoRunCommands={autoRunCommands}
+          lessonsEnabled={lessonsEnabled}
+          onLessonsEnabledChange={setLessonsEnabled}
           onAutoRunCommandsChange={setAutoRunCommands}
           searchProfile={searchProfile}
           onSearchProfileChange={setSearchProfile}
