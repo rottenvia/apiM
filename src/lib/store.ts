@@ -6,6 +6,7 @@ import {
   setWorkspaceFolderName,
 } from "@/lib/workspace";
 import { stopAll } from "@/lib/processes";
+import { forgetWorkspace } from "@/lib/approvals";
 import { deleteAllSnapshots } from "@/lib/snapshots";
 
 /**
@@ -557,6 +558,19 @@ export async function deleteConversation(id: string): Promise<boolean> {
   // longer exist, nor snapshots of a workspace nobody can reach.
   stopAll(id);
   void deleteAllSnapshots(id);
+
+  /*
+   * Drop any commands the user approved with "always allow" here.
+   *
+   * These were kept in memory keyed by workspace and never cleared, so
+   * deleting a chat left its standing permissions behind. Ids are uuids and
+   * would not normally be reused, but a permission that outlives the thing it
+   * was granted for is the wrong default in either direction: at best it
+   * leaks a little memory for the life of the process, at worst a recreated
+   * workspace inherits consent the user gave to something that no longer
+   * exists. Consent should not survive its subject.
+   */
+  forgetWorkspace(id);
 
   let removed = false;
   // Queued like a write, so it can never overtake or be overtaken by one.

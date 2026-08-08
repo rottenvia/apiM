@@ -1,0 +1,189 @@
+/**
+ * Bugs found by auditing rather than by hitting them.
+ *
+ * Run:  npm run test:hardening
+ *
+ * Every check here is a defect that was in the code and is now fixed. None of
+ * them had been reported — they are the kind that stay invisible until a
+ * workspace gets big, a chat gets deleted, or two things happen at once.
+ */
+import path from "node:path";
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+import { rm, readdir, stat } from "node:fs/promises";
+
+const ROOT = path.resolve(import.meta.dirname, "..");
+const load = (p) => import(pathToFileURL(path.join(ROOT, p)).href);
+const read = (p) => readFileSync(path.join(ROOT, p), "utf8");
+
+const ws = await load("src/lib/workspace.ts");
+const snaps = await load("src/lib/snapshots.ts");
+const L = await load("src/lib/lessons.ts");
+const approvals = await load("src/lib/approvals.ts");
+const store = await load("src/lib/store.ts");
+const route = read("src/app/api/chat/route.ts");
+
+const COLOR = process.stdout.isTTY && !process.env.NO_COLOR;
+const g = (s) => (COLOR ? `\x1b[32m${s}\x1b[0m` : s);
+const r = (s) => (COLOR ? `\x1b[31m${s}\x1b[0m` : s);
+const d = (s) => (COLOR ? `\x1b[2m${s}\x1b[0m` : s);
+
+let pass = 0, fail = 0;
+const check = (label, ok, detail = "") => {
+  console.log(`  ${ok ? g("PASS") : r("FAIL")}  ${label}${detail ? d("  " + detail) : ""}`);
+  ok ? pass++ : fail++;
+};
+
+await rm(path.join(ROOT, "data"), { recursive: true, force: true });
+
+console.log("\napiM hardening checks\n");
+
+// ------------------------------------------------------------------
+console.log("1. Snapshots no longer copy the workspace every message");
+
+const WS = "hardsnap";
+for (let i = 0; i < 120; i++) {
+  await ws.writeFile(WS, `src/m${i}.js`, "x".repeat(4000));
+}
+
+const t1 = Date.now();
+await snaps.createSnapshot(WS, "first");
+const firstMs = Date.now() - t1;
+
+const t2 = Date.now();
+await snaps.createSnapshot(WS, "second, nothing changed");
+const secondMs = Date.now() - t2;
+
+check(
+  "an unchanged snapshot is much cheaper than the first",
+  secondMs < firstMs,
+  `${firstMs}ms then ${secondMs}ms — this runs before every single message`
+);
+
+for (let i = 0; i < 8; i++) await snaps.createSnapshot(WS, `msg ${i}`);
+
+async function dirSize(dir) {
+  let total = 0;
+  for (const e of await readdir(dir, { withFileTypes: true })) {
+    const p = path.join(dir, e.name);
+    total += e.isDirectory() ? await dirSize(p) : (await stat(p)).size;
+  }
+  return total;
+}
+const snapBytes = await dirSize(
+  path.join(ws.workspaceDirectory(WS), ".snapshots")
+);
+const workspaceBytes = 120 * 4000;
+check(
+  "ten snapshots do not cost ten copies",
+  snapBytes < workspaceBytes * 2,
+  `${(snapBytes / 1024 / 1024).toFixed(2)}MB for 10 snapshots of a ${(workspaceBytes / 1024 / 1024).toFixed(2)}MB workspace`
+);
+
+// ------------------------------------------------------------------
+console.log("\n2. Restoring still works, which is the whole point");
+
+await ws.writeFile(WS, "src/m0.js", "COMPLETELY DIFFERENT");
+await ws.writeFile(WS, "src/added-later.js", "new file");
+const list = await snaps.listSnapshots(WS);
+await snaps.restoreSnapshot(WS, list[list.length - 1].id);
+
+const restored = await ws.readFile(WS, "src/m0.js");
+check(
+  "a changed file comes back",
+  restored.content.startsWith("xxxx"),
+  "content is shared between snapshots, so this is the check that matters"
+);
+const after = (await ws.listFiles(WS)).map((f) => f.path);
+check(
+  "a file created after the snapshot is removed",
+  !after.includes("src/added-later.js"),
+  "otherwise it is not 'how it was'"
+);
+
+// ------------------------------------------------------------------
+console.log("\n3. Shared content is freed when snapshots are pruned");
+
+const objects = path.join(ws.workspaceDirectory(WS), ".snapshots", "objects");
+const before = (await readdir(objects)).length;
+
+// Rewrite everything, then take enough snapshots to push the old ones out.
+for (let i = 0; i < 120; i++) {
+  await ws.writeFile(WS, `src/m${i}.js`, "y".repeat(4000));
+}
+for (let i = 0; i < snaps.MAX_SNAPSHOTS + 4; i++) {
+  await snaps.createSnapshot(WS, `churn ${i}`);
+}
+const afterCount = (await readdir(objects)).length;
+check(
+  "orphaned content is swept, not kept forever",
+  afterCount <= before + 130,
+  `${before} objects before, ${afterCount} after replacing every file`
+);
+check(
+  "no temp files are left in the object store",
+  (await readdir(objects)).every((n) => !n.endsWith(".tmp"))
+);
+
+// ------------------------------------------------------------------
+console.log("\n4. Deleting a chat drops its standing permissions");
+
+const CONV = "perm-test-id";
+approvals.remember(CONV, "python3", ["app.py"]);
+check(
+  "an approved command is remembered while the chat exists",
+  approvals.isRemembered(CONV, "python3", ["app.py"])
+);
+await store.deleteConversation(CONV);
+check(
+  "and forgotten when the chat is deleted",
+  !approvals.isRemembered(CONV, "python3", ["app.py"]),
+  "consent should not outlive the thing it was granted for"
+);
+
+// ------------------------------------------------------------------
+console.log("\n5. Concurrent refine passes do not lose lessons");
+
+const RACE = "hardrace";
+await rm(path.join(ROOT, "data", "workspaces", RACE), {
+  recursive: true,
+  force: true,
+});
+await Promise.all(
+  Array.from({ length: 8 }, (_, i) =>
+    L.applyLessons(RACE, [
+      { text: `fact ${i}`, evidence: `cmd ${i} -> exit 0` },
+    ])
+  )
+);
+check(
+  "eight simultaneous passes all persist",
+  (await L.readLessons(RACE)).length === 8,
+  "read-modify-write without a queue silently drops all but the last"
+);
+
+const lessonsSrc = read("src/lib/lessons.ts");
+check(
+  "the lessons file is written atomically",
+  /fs\.rename\(tmp, target\)/.test(lessonsSrc),
+  "a half-written file parses into *some* lessons, which is worse than none"
+);
+
+// ------------------------------------------------------------------
+console.log("\n6. The refine pass cannot waste money");
+
+check(
+  "it does not run after the user pressed Stop",
+  /!req\.signal\.aborted &&/.test(route),
+  "reflecting on a cancelled task spends money on work the user rejected"
+);
+check(
+  "outcomes are paired by id, not by array position",
+  /const argsById = new Map/.test(route),
+  "toolEvents is pre-seeded on resume, so index pairing attached the wrong command to the wrong result"
+);
+
+console.log(
+  `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
+);
+process.exit(fail ? 1 : 0);

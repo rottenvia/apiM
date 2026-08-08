@@ -1667,16 +1667,36 @@ export async function POST(req: NextRequest) {
           workspaceEnabled &&
           lessonsEnabled &&
           !hitOutputCeiling &&
+          // Pressing Stop means stop. Spending money to reflect on a task the
+          // user just cancelled is the opposite of what they asked for, and
+          // the run is half-finished anyway, so anything learned from it
+          // would be drawn from incomplete evidence.
+          !req.signal.aborted &&
           toolSummaries.length > 0
         ) {
           try {
+            /*
+             * Paired by id, not by position.
+             *
+             * toolEvents is pre-seeded from the interrupted reply when
+             * resuming, while toolSummaries starts empty and only collects
+             * this run's calls. Zipping them by index therefore attached the
+             * wrong arguments to the wrong outcome — so a lesson could be
+             * written citing a command that never produced it. Ids are the
+             * only thing that reliably connects the two.
+             */
+            const argsById = new Map(toolEvents.map((e) => [e.id, e.args]));
+            const outcomes = toolEvents
+              .filter((e) => e.summary !== undefined)
+              .map((e) => ({
+                name: e.name,
+                args: argsById.get(e.id) ?? "",
+                ok: e.ok !== false,
+                summary: e.summary ?? "",
+              }));
+
             const refined = await runRefine(
-              toolSummaries.map((t, i) => ({
-                name: t.name,
-                args: toolEvents[i]?.args ?? "",
-                ok: t.ok,
-                summary: t.summary,
-              })),
+              outcomes,
               existingLessons,
               deepseekApiKey,
               DEEPSEEK_BASE_URL,

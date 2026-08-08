@@ -1,5 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { listFiles, resolveInside, workspaceDirectory } from "@/lib/workspace";
 
 /**
@@ -30,7 +31,12 @@ interface SnapshotManifest {
   id: string;
   label: string;
   createdAt: string;
-  files: { path: string; size: number }[];
+  /**
+   * `hash` is absent on snapshots taken before content-addressed storage.
+   * Those kept a flattened copy inside the snapshot folder, so restore has to
+   * handle both shapes or every existing snapshot would break.
+   */
+  files: { path: string; size: number; hash?: string; mtime?: string }[];
 }
 
 function snapshotRoot(workspaceId: string): string {
@@ -38,6 +44,16 @@ function snapshotRoot(workspaceId: string): string {
   // dot-prefixed and listed in INTERNAL_DIRS so it never appears in listings,
   // reaches the model as a real file, or ends up inside another snapshot.
   return path.join(workspaceDirectory(workspaceId), ".snapshots");
+}
+
+/**
+ * Shared file contents, keyed by hash.
+ *
+ * Sits beside the snapshots rather than inside any one of them, because the
+ * whole point is that several snapshots reference the same object.
+ */
+function objectDir(workspaceId: string): string {
+  return path.join(snapshotRoot(workspaceId), "objects");
 }
 
 function snapshotDir(workspaceId: string, snapshotId: string): string {
@@ -81,14 +97,99 @@ export async function createSnapshot(
     files: [],
   };
 
+  /*
+   * Files are stored once by content hash, not copied per snapshot.
+   *
+   * Every message takes a snapshot, and a snapshot used to be a full copy of
+   * the workspace. Unpack a 200-file zip and each message re-copied all of it
+   * — about 90ms and 1.6MB of pure duplication before the model was even
+   * called, twenty times over for twenty snapshots.
+   *
+   * Almost nothing changes between two consecutive messages, so the same
+   * bytes were being written again and again. Hashing the content means an
+   * unchanged file is stored once and simply referenced by every snapshot
+   * that contains it. Restores are unaffected: the manifest still names every
+   * file, it just points at shared content.
+   */
+  const objects = objectDir(workspaceId);
+  await fs.mkdir(objects, { recursive: true });
+
+  /*
+   * Reuse the previous snapshot's hash when a file has not been touched.
+   *
+   * Hashing still requires reading every byte, so without this a snapshot of
+   * an unchanged 200-file project costs a full re-read even though it writes
+   * nothing. Size and modification time together are what every build tool
+   * uses to decide a file is unchanged, and the cost of being wrong here is
+   * bounded: a snapshot would reference slightly stale content, not corrupt
+   * anything.
+   */
+  const previous = new Map<string, { hash: string; size: number; mtime: string }>();
+  try {
+    const [latest] = await listSnapshots(workspaceId);
+    if (latest) {
+      const raw = await fs.readFile(
+        path.join(snapshotDir(workspaceId, latest.id), "manifest.json"),
+        "utf8"
+      );
+      for (const f of (JSON.parse(raw) as SnapshotManifest).files) {
+        if (f.hash && f.mtime) {
+          previous.set(f.path, { hash: f.hash, size: f.size, mtime: f.mtime });
+        }
+      }
+    }
+  } catch {
+    // No usable previous snapshot; every file gets hashed the slow way.
+  }
+
   for (const file of files) {
     try {
+      const unchanged = previous.get(file.path);
+      if (
+        unchanged &&
+        unchanged.size === file.size &&
+        unchanged.mtime === file.modifiedAt
+      ) {
+        // Same size, same mtime, and the content is already in the store.
+        const stored = path.join(objects, unchanged.hash);
+        try {
+          await fs.access(stored);
+          manifest.files.push({
+            path: file.path,
+            size: file.size,
+            hash: unchanged.hash,
+            mtime: file.modifiedAt,
+          });
+          continue;
+        } catch {
+          // The object was swept or lost — fall through and rewrite it.
+        }
+      }
+
       const data = await fs.readFile(resolveInside(workspaceId, file.path));
-      // Flattened so nested directories don't need recreating; the real path
-      // lives in the manifest.
-      const stored = path.join(dir, encodeURIComponent(file.path));
-      await fs.writeFile(stored, data);
-      manifest.files.push({ path: file.path, size: data.length });
+      const hash = createHash("sha256").update(data).digest("hex");
+      const stored = path.join(objects, hash);
+
+      // Written only if this exact content has never been seen. Two files
+      // with identical contents also share one object, which is common in a
+      // project full of small config and index files.
+      try {
+        await fs.access(stored);
+      } catch {
+        // Same write-then-rename as everywhere else: a half-written object
+        // would be silently wrong, and every snapshot referencing that hash
+        // would restore corrupt data.
+        const tmp = `${stored}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+        await fs.writeFile(tmp, data);
+        await fs.rename(tmp, stored);
+      }
+
+      manifest.files.push({
+        path: file.path,
+        size: data.length,
+        hash,
+        mtime: file.modifiedAt,
+      });
     } catch {
       // Skip anything unreadable rather than abandoning the whole snapshot.
     }
@@ -187,8 +288,13 @@ export async function restoreSnapshot(
   let restored = 0;
   for (const file of manifest.files) {
     try {
+      // Content-addressed when the snapshot has a hash; the old flattened
+      // copy otherwise. Both shapes have to work, or upgrading the app would
+      // quietly break every snapshot taken before it.
       const data = await fs.readFile(
-        path.join(dir, encodeURIComponent(file.path))
+        file.hash
+          ? path.join(objectDir(workspaceId), file.hash)
+          : path.join(dir, encodeURIComponent(file.path))
       );
       const target = resolveInside(workspaceId, file.path);
       await fs.mkdir(path.dirname(target), { recursive: true });
@@ -222,6 +328,59 @@ export async function pruneSnapshots(workspaceId: string): Promise<void> {
   const all = await listSnapshots(workspaceId);
   for (const snapshot of all.slice(MAX_SNAPSHOTS)) {
     await deleteSnapshot(workspaceId, snapshot.id);
+  }
+  await collectGarbage(workspaceId);
+}
+
+/**
+ * Delete file contents no surviving snapshot refers to.
+ *
+ * Shared objects outlive the snapshot that created them, so deleting a
+ * snapshot cannot delete its files — another may still need them. Without a
+ * sweep the object store would only ever grow, which would trade one disk
+ * problem for a subtler one.
+ *
+ * Mark-and-sweep rather than reference counting: counts drift when a write is
+ * interrupted, and a drifted count either leaks forever or, far worse, frees
+ * an object a snapshot still needs. Reading the manifests is authoritative.
+ */
+async function collectGarbage(workspaceId: string): Promise<void> {
+  const objects = objectDir(workspaceId);
+
+  let stored: string[];
+  try {
+    stored = await fs.readdir(objects);
+  } catch {
+    return; // No object store yet.
+  }
+
+  const live = new Set<string>();
+  for (const snapshot of await listSnapshots(workspaceId)) {
+    try {
+      const raw = await fs.readFile(
+        path.join(snapshotDir(workspaceId, snapshot.id), "manifest.json"),
+        "utf8"
+      );
+      for (const file of (JSON.parse(raw) as SnapshotManifest).files) {
+        if (file.hash) live.add(file.hash);
+      }
+    } catch {
+      // An unreadable manifest means unknown references. Abort the sweep
+      // rather than risk deleting something it needed — leaked bytes are
+      // recoverable, a broken restore is not.
+      return;
+    }
+  }
+
+  for (const name of stored) {
+    // Leftover temp files from an interrupted write are always safe to drop.
+    if (name.endsWith(".tmp")) {
+      await fs.unlink(path.join(objects, name)).catch(() => {});
+      continue;
+    }
+    if (!live.has(name)) {
+      await fs.unlink(path.join(objects, name)).catch(() => {});
+    }
   }
 }
 
