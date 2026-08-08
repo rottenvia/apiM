@@ -25,6 +25,10 @@ const read = (p) => readFileSync(path.join(ROOT, p), "utf8");
 const load = (p) => import(pathToFileURL(path.join(ROOT, p)).href);
 
 const { toolCallsAreBalanced } = await load("src/lib/prune.ts");
+const { rebuildResumeFromStored, rebuiltResumeInstruction } = await load(
+  "src/lib/rebuild-resume.ts"
+);
+const { serializeForApi } = await load("src/lib/transcript.ts");
 
 const COLOR = process.stdout.isTTY && !process.env.NO_COLOR;
 const g = (s) => (COLOR ? `\x1b[32m${s}\x1b[0m` : s);
@@ -153,7 +157,8 @@ check(
 check(
   "the saved transcript is never sent to the browser",
   /const \{ resumeState, \.\.\.rest \} = m/.test(convRoute) &&
-    /canResume: Boolean/.test(convRoute),
+    /return \{ \.\.\.rest, canResume \}/.test(convRoute) &&
+    !/return \{ \.\.\.m,/.test(convRoute),
   "it can run to megabytes; the UI only needs a boolean"
 );
 check(
@@ -169,6 +174,90 @@ check(
 check(
   "resume does not resend the reply as history",
   /const stopBefore = regenerateFromId \?\? resumeMessageId/.test(page)
+);
+
+// ------------------------------------------------------- task 3b
+console.log("\n3b. Chats from before the fix can be resumed too");
+
+/*
+ * The first version refused these, on the grounds that the upstream
+ * transcript was never saved. That was too pessimistic: a stored reply keeps
+ * the reasoning, the partial prose, the event order, and the COMPLETE
+ * arguments of every tool call — including the whole contents of any file it
+ * wrote. Only a read's output is genuinely missing, and those files are still
+ * on disk.
+ */
+const oldReply = {
+  id: "a1",
+  role: "assistant",
+  content: "I've set up the engine. Now writing the render",
+  reasoningContent: "The user wants a game. Engine first, then rendering.",
+  incomplete: true,
+  timeline: [
+    { kind: "text", text: "I've set up the engine. " },
+    { kind: "tool", id: "c1" },
+    { kind: "tool", id: "c2" },
+    { kind: "text", text: "Now writing the render" },
+  ],
+  toolEvents: [
+    { id: "c1", name: "write_file", args: '{"path":"engine.js","content":"export class Engine {}"}', ok: true, summary: "Created engine.js" },
+    { id: "c2", name: "read_file", args: '{"path":"config.json"}', ok: true, summary: "Read config.json" },
+  ],
+  createdAt: new Date().toISOString(),
+};
+
+const rb = rebuildResumeFromStored(oldReply);
+check("an old interrupted reply can be rebuilt", Boolean(rb));
+check(
+  "the rebuilt transcript is valid for the API",
+  toolCallsAreBalanced(rb.messages) &&
+    serializeForApi(rb.messages).length === rb.messages.length,
+  "an orphaned tool call is a 400 from DeepSeek"
+);
+check(
+  "the model's own reasoning is carried over",
+  rb.messages.some((m) => m.reasoning_content?.includes("Engine first")),
+  "it was stored all along"
+);
+check(
+  "the full contents of a written file survive",
+  JSON.stringify(rb.messages).includes("export class Engine {}"),
+  "toolEvents keeps the complete arguments, not a summary"
+);
+check(
+  "a write is reported as already done",
+  rb.keptActions === 1 && /already took effect/.test(rebuiltResumeInstruction(rb)),
+  "redoing it would overwrite work that is on disk"
+);
+check(
+  "a lost read is named as lost, not faked",
+  rb.lostResults === 1 &&
+    rb.messages.some((m) => m.role === "tool" && /output was not kept/.test(m.content)),
+  "pretending it is intact makes the model describe a file it cannot see"
+);
+check(
+  "and it is told to just read the file again",
+  /call the tool again/i.test(rebuiltResumeInstruction(rb))
+);
+check(
+  "text before and after the tools keeps its order",
+  rb.messages[0].content.startsWith("I've set up") &&
+    rb.messages[rb.messages.length - 1].content === "Now writing the render",
+  "the reply narrated as it worked"
+);
+check(
+  "rounds already spent are counted, not reset",
+  /toolRounds: \(prior\.toolEvents \?\? \[\]\)\.length/.test(route),
+  "a fresh budget would let an old task run indefinitely"
+);
+check(
+  "a reply with nothing in it is not offered as resumable",
+  rebuildResumeFromStored({ id: "x", role: "assistant", content: "", createdAt: "" }) === null
+);
+check(
+  "old chats are marked resumable by the API",
+  /Boolean\(m\.toolEvents\?\.length\)/.test(convRoute),
+  "requiring resumeState hid the option on every existing chat"
 );
 
 // -------------------------------------------------------------- task 4

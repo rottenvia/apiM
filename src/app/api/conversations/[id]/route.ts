@@ -27,7 +27,22 @@ export async function GET(
      */
     const messages = conv.messages.map((m) => {
       const { resumeState, ...rest } = m;
-      return { ...rest, canResume: Boolean(resumeState?.messages?.length) };
+      /*
+       * Resumable if there is anything worth carrying forward.
+       *
+       * Not just an exact saved transcript. A reply from before that existed
+       * still holds its reasoning, its partial text and the full arguments of
+       * every tool call it made, which is enough to reconstruct a usable
+       * transcript — see lib/rebuild-resume. Requiring resumeState here made
+       * every older chat look unresumable when it was not.
+       */
+      const canResume =
+        Boolean(resumeState?.messages?.length) ||
+        (m.role === "assistant" &&
+          (Boolean(m.toolEvents?.length) ||
+            Boolean(m.reasoningContent?.trim()) ||
+            Boolean(m.content?.trim())));
+      return { ...rest, canResume };
     });
 
     return NextResponse.json({ ...conv, messages });

@@ -33,6 +33,11 @@ import {
 } from "@/lib/transcript";
 import type { TranscriptMessage } from "@/lib/transcript";
 import { pruneTranscript } from "@/lib/prune";
+import {
+  rebuildResumeFromStored,
+  rebuiltResumeInstruction,
+} from "@/lib/rebuild-resume";
+import type { RebuiltResume } from "@/lib/rebuild-resume";
 import { fetchWithRetry } from "@/lib/retry";
 import { listCustomPlugins } from "@/lib/plugin-store";
 
@@ -377,6 +382,8 @@ export async function POST(req: NextRequest) {
         let resumedReasoning = "";
         let resumedToolEvents: NonNullable<StoredMessage["toolEvents"]> = [];
         let resumedTimeline: NonNullable<StoredMessage["timeline"]> = [];
+        /** Set when the transcript was reconstructed rather than replayed. */
+        let rebuilt: RebuiltResume | null = null;
 
         if (resumeMessageId) {
           try {
@@ -389,15 +396,45 @@ export async function POST(req: NextRequest) {
                 continuations: state.continuations ?? 0,
                 messages: state.messages as TranscriptMessage[],
               };
+            } else if (prior) {
+              /*
+               * No saved transcript — a reply from before one was kept.
+               *
+               * Resuming these was refused at first, on the grounds that the
+               * upstream transcript was gone. That was too pessimistic: what
+               * is stored includes the model's reasoning, the prose it had
+               * written, the order of events, and the COMPLETE arguments of
+               * every tool call — for a write_file, the whole file. The only
+               * real gap is what a read returned, and those files are still
+               * on disk to be read again.
+               *
+               * So the transcript is reconstructed, with placeholders where a
+               * result is genuinely missing, and the model is told which is
+               * which. Far cheaper than redoing the task, and it keeps the
+               * files already written.
+               */
+              rebuilt = rebuildResumeFromStored(prior);
+              if (rebuilt) {
+                resumed = {
+                  // Unknown for an old reply. Counted from the calls that
+                  // were made, so the round budget is not silently reset.
+                  toolRounds: (prior.toolEvents ?? []).length,
+                  continuations: 0,
+                  messages: rebuilt.messages,
+                };
+              }
+            }
+
+            if (resumed && prior) {
               // Keep the text already shown, so resuming extends the reply
               // rather than replacing it with only the new part.
-              resumedContent = prior?.content ?? "";
-              resumedReasoning = prior?.reasoningContent ?? "";
+              resumedContent = prior.content ?? "";
+              resumedReasoning = prior.reasoningContent ?? "";
               // The actions and the narration that went with them, so the
               // finished reply reads as one continuous piece of work rather
               // than starting abruptly at the point it was interrupted.
-              resumedToolEvents = prior?.toolEvents ?? [];
-              resumedTimeline = prior?.timeline ?? [];
+              resumedToolEvents = prior.toolEvents ?? [];
+              resumedTimeline = prior.timeline ?? [];
             }
           } catch (e) {
             console.error("Could not load resume state:", e);
@@ -710,12 +747,17 @@ export async function POST(req: NextRequest) {
 
           transcript.push({
             role: "user",
-            content:
-              "You were interrupted before finishing. Everything above is " +
-              "your own work so far, including what the tools returned — it " +
-              "is still valid, so do not repeat it. Continue from exactly " +
-              "where you stopped. If a file was only partly written, finish " +
-              "it with edit_file rather than rewriting it from the start.",
+            // A rebuilt transcript needs a different brief: some results
+            // above are placeholders, and telling the model everything is
+            // intact is how it ends up describing a file it never saw.
+            content: rebuilt
+              ? rebuiltResumeInstruction(rebuilt)
+              : "You were interrupted before finishing. Everything above is " +
+                "your own work so far, including what the tools returned — " +
+                "it is still valid, so do not repeat it. Continue from " +
+                "exactly where you stopped. If a file was only partly " +
+                "written, finish it with edit_file rather than rewriting it " +
+                "from the start.",
           });
 
           await refreshFileTree();
