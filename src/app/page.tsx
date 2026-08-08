@@ -150,6 +150,7 @@ type StreamEvent =
     }
   | { type: "continuing"; reason: string; n: number; of: number }
   | { type: "context_pruned"; collapsed: number; tokensSaved: number }
+  | { type: "context_compacted"; rounds: number; tokensSaved: number }
   | { type: "tool_start"; id: string; name: string; args: string }
   | {
       type: "approval_request";
@@ -936,6 +937,11 @@ export default function Home() {
 
               case "context_pruned":
                 // Informational only; the reply is unaffected.
+                break;
+
+              case "context_compacted":
+                // Also informational. Not surfaced as a notice: it happens
+                // mid-task and reads as an error when it is the opposite.
                 break;
 
               case "meta":

@@ -122,7 +122,9 @@ check(
 );
 check(
   "the saved transcript replaces the freshly built one",
-  /transcript\.length = 0/.test(route) && /transcript\.push\(\.\.\.resumed\.messages\)/.test(route)
+  /transcript\.length = 0/.test(route) &&
+    /transcript\.push\(\.\.\.folded\.messages\)/.test(route),
+  "compacted on the way in — see lib/compact"
 );
 check(
   "rounds already spent count against the limit",

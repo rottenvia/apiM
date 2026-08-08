@@ -33,6 +33,7 @@ import {
 } from "@/lib/transcript";
 import type { TranscriptMessage } from "@/lib/transcript";
 import { pruneTranscript } from "@/lib/prune";
+import { compactTranscript, compactForResume } from "@/lib/compact";
 import {
   rebuildResumeFromStored,
   rebuiltResumeInstruction,
@@ -184,6 +185,15 @@ type StreamEvent =
       /** Old tool output was collapsed to keep a long run affordable. */
       type: "context_pruned";
       collapsed: number;
+      tokensSaved: number;
+    }
+  | {
+      /**
+       * Finished rounds were folded into a summary, which reclaims the
+       * reasoning attached to them — the bulk of a long transcript.
+       */
+      type: "context_compacted";
+      rounds: number;
       tokensSaved: number;
     }
   | { type: "tool_start"; id: string; name: string; args: string }
@@ -727,7 +737,30 @@ export async function POST(req: NextRequest) {
          */
         if (resumed) {
           transcript.length = 0;
-          transcript.push(...resumed.messages);
+
+          /*
+           * Compact before replaying, not after.
+           *
+           * A resume drops a whole finished attempt into one request — on max
+           * thinking, twenty rounds is ~180k tokens of reasoning alone, and
+           * that then rides along on every remaining round. Folding the older
+           * rounds first is what makes continuing cheaper than starting over
+           * rather than merely different.
+           *
+           * Done unconditionally and without quantising: the prefix is
+           * rewritten exactly once here and is stable afterwards, so there is
+           * no cache being thrashed to pay for it.
+           */
+          const folded = compactForResume(resumed.messages);
+          transcript.push(...folded.messages);
+          if (folded.stats.rounds > 0) {
+            send({
+              type: "context_compacted",
+              rounds: folded.stats.rounds,
+              tokensSaved: folded.stats.tokensSaved,
+            });
+          }
+
           fileTreeIndex = -1;
           currentFileTree = "";
 
@@ -860,9 +893,30 @@ export async function POST(req: NextRequest) {
             });
           }
 
+          /*
+           * Fold finished rounds down to a summary.
+           *
+           * Pruning handles tool results; this handles reasoning, which is
+           * the far larger share. Measured on a real twenty-round run:
+           * reasoning was 93% of the transcript and tool output 6%, because
+           * reasoning was never pruned and is resent in full every round.
+           *
+           * A round can only lose its reasoning by losing its tool calls too
+           * — the API requires the two together — so whole rounds are
+           * replaced by a plain assistant message describing what they did.
+           */
+          const compacted = compactTranscript(pruned.messages);
+          if (compacted.stats.rounds > 0) {
+            send({
+              type: "context_compacted",
+              rounds: compacted.stats.rounds,
+              tokensSaved: compacted.stats.tokensSaved,
+            });
+          }
+
           const dsRequestBody: Record<string, unknown> = {
             model,
-            messages: serializeForApi(pruned.messages),
+            messages: serializeForApi(compacted.messages),
             stream: true,
             stream_options: { include_usage: true },
             max_tokens: MAX_OUTPUT_TOKENS,
