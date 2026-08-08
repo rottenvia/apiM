@@ -449,6 +449,22 @@ check(
   "a 40px stub reads as a stray mark, not a divider"
 );
 
+// The workspace shows a tree, not a list of paths
+check(
+  "file rows show a name, not a full path",
+  !/\{file\.path\}/.test(wsPanel),
+  "printing the path on every row made an unpacked archive a column of identical truncated strings"
+);
+check(
+  "folders can be opened and closed",
+  /aria-expanded=\{open\}/.test(wsPanel)
+);
+check(
+  "nesting is indented rather than nested in containers",
+  /paddingLeft: `\$\{depth \* 12/.test(wsPanel),
+  "so every row keeps the same full-width hover area"
+);
+
 check(
   "reduced motion is honoured",
   /@media \(prefers-reduced-motion: reduce\)/.test(css),

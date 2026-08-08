@@ -31,7 +31,8 @@
     "test:install": "tsx scripts/test-install.mjs",
     "test:design": "tsx scripts/test-design.mjs",
     "test:archive": "tsx scripts/test-archive.mjs",
-    "test:documents": "tsx scripts/test-documents.mjs"
+    "test:documents": "tsx scripts/test-documents.mjs",
+    "test:tree": "tsx scripts/test-tree.mjs"
   },
   "dependencies": {
     "@types/uuid": "^10.0.0",
