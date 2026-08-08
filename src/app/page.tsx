@@ -15,6 +15,7 @@ import type { PendingCommand } from "@/components/ApprovalPrompt";
 import type { PendingQuestion } from "@/components/QuestionPrompt";
 import type { TimelineEntry } from "@/components/MessageTimeline";
 import { clampDeleteDelay, DEFAULT_DELETE_DELAY } from "@/components/DeleteChatDialog";
+import { warmRoutes } from "@/lib/warmup";
 
 export interface Message {
   id: string;
@@ -437,6 +438,10 @@ export default function Home() {
     // synchronously inside the effect body and cascade a re-render.
     queueMicrotask(() => {
       void refreshConversations();
+      // Compile the workspace-backed routes while the page is still being
+      // read. Without this the first chat click of a session pays ~600ms of
+      // one-off module compilation that every later click avoids.
+      warmRoutes();
     });
   }, [refreshConversations]);
 

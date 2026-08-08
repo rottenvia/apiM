@@ -240,7 +240,16 @@ export async function listFiles(
   workspaceId: string,
   subPath = "."
 ): Promise<WorkspaceFile[]> {
-  const root = await ensureRoot(workspaceId);
+  // Reading must not create. This used to call ensureRoot, so merely looking
+  // at a workspace that had never been written to left an empty folder
+  // behind in data/workspaces.
+  const root = workspaceRoot(workspaceId);
+  try {
+    await fs.access(root);
+  } catch {
+    return [];
+  }
+  await migrateLayout(root);
   const clean = subPath.trim();
   const start =
     !clean || clean === "." || clean === "./"
