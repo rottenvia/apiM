@@ -2,6 +2,12 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ImportFilesDialog } from "@/components/ImportFilesDialog";
+import {
+  allDirPaths,
+  buildFileTree,
+  collapseChains,
+  type TreeNode,
+} from "@/lib/file-tree";
 import type { WorkspaceFileInfo } from "@/components/WorkspaceBar";
 import type { SnapshotInfo } from "@/lib/snapshots";
 
@@ -35,6 +41,123 @@ function formatBytes(bytes: number): string {
  * stays open is what makes the workspace feel like part of the app rather
  * than something hidden behind a button.
  */
+/**
+ * One row per file or folder, indented by depth.
+ *
+ * The panel used to print the full path on every row, so an unpacked archive
+ * showed a column of identical truncated strings — the part identifying each
+ * file was the part cut off. Only the last segment is shown here; where it
+ * sits says the rest.
+ */
+function FileTree({
+  nodes,
+  openDirs,
+  onToggleDir,
+  changed,
+  seen,
+  onOpenFile,
+  depth = 0,
+}: {
+  nodes: TreeNode[];
+  openDirs: Set<string>;
+  onToggleDir: (path: string) => void;
+  changed: Set<string>;
+  seen: Set<string>;
+  onOpenFile: (path: string) => void;
+  depth?: number;
+}) {
+  return (
+    <>
+      {nodes.map((node) => {
+        // Indent with padding rather than nested containers, so every row
+        // keeps the same full-width hover area however deep it sits.
+        const indent = { paddingLeft: `${depth * 12}px` };
+
+        if (node.kind === "dir") {
+          const open = openDirs.has(node.path);
+          return (
+            <div key={node.path}>
+              <button
+                onClick={() => onToggleDir(node.path)}
+                title={node.path}
+                aria-expanded={open}
+                className="list-row group flex w-full items-center gap-1.5 text-left"
+                style={indent}
+              >
+                <svg
+                  width="11"
+                  height="11"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth={2.4}
+                  aria-hidden="true"
+                  className={`flex-none text-text-muted transition-transform duration-150 ${
+                    open ? "rotate-90" : ""
+                  }`}
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                </svg>
+                <span className="flex-none text-text-muted">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} aria-hidden="true">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" />
+                  </svg>
+                </span>
+                <span className="min-w-0 flex-1 truncate text-[12px] text-text-secondary group-hover:text-text-primary">
+                  {node.name}
+                </span>
+                <span className="flex-none text-[11px] tabular-nums text-text-muted">
+                  {node.fileCount}
+                </span>
+              </button>
+
+              {open && (
+                <FileTree
+                  nodes={node.children}
+                  openDirs={openDirs}
+                  onToggleDir={onToggleDir}
+                  changed={changed}
+                  seen={seen}
+                  onOpenFile={onOpenFile}
+                  depth={depth + 1}
+                />
+              )}
+            </div>
+          );
+        }
+
+        return (
+          <button
+            key={node.path}
+            onClick={() => onOpenFile(node.path)}
+            title={node.path}
+            className={`list-row group flex w-full items-center gap-2 text-left ${
+              seen.has(node.path) ? "" : "animate-file-in"
+            }`}
+            style={{ paddingLeft: `${depth * 12 + 8}px` }}
+          >
+            <span className="flex h-[18px] w-[22px] flex-none items-center justify-center rounded border border-border bg-bg-tertiary font-mono text-[9px] uppercase tracking-tight text-text-muted transition-colors group-hover:border-border-light">
+              {fileGlyph(node.path)}
+            </span>
+            <span
+              className={`min-w-0 flex-1 truncate font-mono text-[12px] ${
+                changed.has(node.path)
+                  ? "text-accent-light"
+                  : "text-text-secondary group-hover:text-text-primary"
+              }`}
+            >
+              {node.name}
+            </span>
+            <span className="flex-none text-[11px] text-text-muted opacity-0 transition-opacity group-hover:opacity-100">
+              {formatBytes(node.size)}
+            </span>
+          </button>
+        );
+      })}
+    </>
+  );
+}
+
 export function WorkspaceSidePanel({
   workspaceId,
   files,
@@ -54,6 +177,30 @@ export function WorkspaceSidePanel({
   const [history, setHistory] = useState<SnapshotInfo[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const [importing, setImporting] = useState(false);
+
+  const tree = useMemo(
+    () => collapseChains(buildFileTree(files)),
+    [files]
+  );
+
+  // Folders start open. A panel that opens showing three collapsed rows makes
+  // the user click to discover what they already uploaded; the tree exists to
+  // show structure, not to hide it.
+  const [closedDirs, setClosedDirs] = useState<Set<string>>(new Set());
+  const openDirs = useMemo(() => {
+    const all = new Set(allDirPaths(tree));
+    for (const shut of closedDirs) all.delete(shut);
+    return all;
+  }, [tree, closedDirs]);
+
+  const toggleDir = useCallback((path: string) => {
+    setClosedDirs((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  }, []);
   const [busy, setBusy] = useState(false);
 
   const changed = new Set(recentlyChanged ?? []);
@@ -319,32 +466,14 @@ export function WorkspaceSidePanel({
             Ask for one and it appears here.
           </p>
         ) : (
-          files.map((file) => (
-            <button
-              key={file.path}
-              onClick={() => onOpenFile(file.path)}
-              title={file.path}
-              className={`list-row group flex w-full items-center gap-2 text-left ${
-                seen.has(file.path) ? "" : "animate-file-in"
-              }`}
-            >
-              <span className="flex h-[18px] w-[22px] flex-none items-center justify-center rounded border border-border bg-bg-tertiary font-mono text-[9px] uppercase tracking-tight text-text-muted transition-colors group-hover:border-border-light">
-                {fileGlyph(file.path)}
-              </span>
-              <span
-                className={`min-w-0 flex-1 truncate font-mono text-[12px] ${
-                  changed.has(file.path)
-                    ? "text-accent-light"
-                    : "text-text-secondary group-hover:text-text-primary"
-                }`}
-              >
-                {file.path}
-              </span>
-              <span className="flex-none text-[11px] text-text-muted opacity-0 transition-opacity group-hover:opacity-100">
-                {formatBytes(file.size)}
-              </span>
-            </button>
-          ))
+          <FileTree
+            nodes={tree}
+            openDirs={openDirs}
+            onToggleDir={toggleDir}
+            changed={changed}
+            seen={seen}
+            onOpenFile={onOpenFile}
+          />
         )}
       </div>
       )}
