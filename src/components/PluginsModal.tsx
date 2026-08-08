@@ -221,7 +221,7 @@ export function PluginsModal({
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
 
-      <div className="relative flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-border-light bg-bg-secondary shadow-2xl shadow-black/50 animate-fade-in">
+      <div className="relative flex h-[min(86vh,40rem)] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-border-light bg-bg-secondary shadow-2xl shadow-black/50 animate-fade-in">
         {/* Header */}
         <div className="flex flex-none items-center justify-between border-b border-border px-6 py-4">
           <div>
@@ -247,7 +247,7 @@ export function PluginsModal({
 
         {/* Editor */}
         {draft ? (
-          <div className="flex-1 space-y-4 overflow-y-auto px-6 py-5">
+          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6 py-5">
             <div className="flex gap-3">
               <div>
                 <label className="mb-1.5 block text-xs font-semibold text-text-primary">
@@ -344,7 +344,7 @@ export function PluginsModal({
             )}
           </div>
         ) : (
-          <div className="flex-1 space-y-4 overflow-y-auto px-6 py-5">
+          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6 py-5">
             {custom.length > 0 && (
               <div>
                 <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.1em] text-text-muted">

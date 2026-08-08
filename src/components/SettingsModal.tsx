@@ -129,7 +129,7 @@ export function SettingsModal({
       />
 
       {/* Modal */}
-      <div className="relative flex max-h-[86vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-border-light bg-bg-secondary shadow-2xl shadow-black/50 animate-fade-in">
+      <div className="relative flex h-[min(86vh,40rem)] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-border-light bg-bg-secondary shadow-2xl shadow-black/50 animate-fade-in">
         {/* Header */}
         <div className="flex flex-none items-center justify-between gap-3 border-b border-border px-5 py-4">
           <div className="min-w-0">
@@ -186,9 +186,12 @@ export function SettingsModal({
             })}
           </nav>
 
+          {/* Keyed so each tab starts at the top rather than inheriting the
+              last one's scroll position. No entry animation: sliding the
+              content 8px on every switch made a stable frame feel unstable. */}
           <div
             key={tab}
-            className="min-w-0 flex-1 space-y-5 overflow-y-auto px-5 py-5 animate-fade-in"
+            className="min-h-0 min-w-0 flex-1 space-y-5 overflow-y-auto px-5 py-5"
           >
             {tab === "keys" && (
               <>

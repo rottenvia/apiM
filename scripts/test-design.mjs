@@ -263,6 +263,47 @@ check(
     "search was max-w-4xl while settings and plugins were max-w-2xl"
 );
 
+// A tabbed dialog sized with max-h is one height for a short tab and
+// another for a tall one. Because it is centred, the top edge moves with
+// it — so the rail you are aiming at slides away between looking and
+// clicking. Fixed height, content scrolls inside.
+const tabbed = files.filter((f) =>
+  /(SettingsModal|PluginsModal)\.tsx$/.test(f.file)
+);
+
+check(
+  "tabbed dialogs have a fixed height",
+  tabbed.every((f) => /className="relative flex h-\[min\(/.test(f.text)),
+  tabbed
+    .filter((f) => !/className="relative flex h-\[min\(/.test(f.text))
+    .map((f) => path.basename(f.file))
+    .join(", ") || "so switching tabs cannot resize the window"
+);
+
+check(
+  "they no longer size themselves with max-h",
+  tabbed.every((f) => !/className="relative flex max-h-\[/.test(f.text)),
+  "max-h is a maximum, not a height"
+);
+
+check(
+  "their scroll areas can actually shrink",
+  tabbed.every((f) =>
+    [...f.text.matchAll(/className="([^"]*\bflex-1[^"]*overflow-y-auto[^"]*)"/g)].every(
+      (m) => m[1].includes("min-h-0")
+    )
+  ),
+  "a flex child without min-h-0 overflows instead of scrolling"
+);
+
+check(
+  "switching tabs does not animate the content",
+  !/key=\{tab\}[\s\S]{0,120}animate-fade-in/.test(
+    files.find((f) => f.file.endsWith("SettingsModal.tsx"))?.text ?? ""
+  ),
+  "sliding the body 8px per switch makes a stable frame feel unstable"
+);
+
 check(
   "reduced motion is honoured",
   /@media \(prefers-reduced-motion: reduce\)/.test(css),
