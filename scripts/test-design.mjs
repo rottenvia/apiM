@@ -362,8 +362,8 @@ check(
 );
 check(
   "the agent's work is separated from what came before",
-  /h-px w-10[^"]*bg-border-light/.test(timeline),
-  "short rather than edge-to-edge, so it reads as a new section not a page break"
+  /h-px w-full[^"]*bg-border/.test(timeline),
+  "faint and full width, so it divides without announcing itself"
 );
 
 // Attachment progress
@@ -398,6 +398,42 @@ check(
   "a reader that throws cannot strand its placeholder",
   /catch \(e\)[\s\S]{0,300}Couldn't read/.test(chatArea2),
   "the chip is removed on failure rather than left spinning"
+);
+
+// The thinking panel
+//
+// A filled amber box with an amber label made the model's private notes the
+// loudest thing on screen, above the reply they belong to.
+const bubble = files.find((f) => f.file.endsWith("MessageBubble.tsx"))?.text ?? "";
+const panel = bubble.slice(
+  bubble.indexOf("thinking-panel overflow-hidden"),
+  bubble.indexOf("{/* Reply was cut short")
+);
+
+check(
+  "the thinking panel has no accent colour",
+  !panel.includes("cfa25a"),
+  "it is metadata, not a warning"
+);
+const panelBorders = [...new Set(panel.match(/border[-\w[\]/#.]*/g) ?? [])];
+check(
+  "and no box around it",
+  panelBorders.every((b) => b === "border-l" || b === "border-border"),
+  panelBorders.join(", ") || "only the body's left rule remains"
+);
+check(
+  "progress is a sweeping line, not repeating dots",
+  panel.includes("thinking-line") && !panel.includes("<Dots"),
+  "a loop that never advances reads as a stall"
+);
+check(
+  "the sweep fades rather than looping visibly",
+  /@keyframes thinking-sweep[\s\S]*?opacity: 0;[\s\S]*?\}/.test(css)
+);
+check(
+  "the divider above the agent's work spans the column",
+  /h-px w-full/.test(timeline),
+  "a 40px stub reads as a stray mark, not a divider"
 );
 
 check(

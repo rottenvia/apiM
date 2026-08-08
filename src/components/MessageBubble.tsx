@@ -637,26 +637,20 @@ function MessageBubbleImpl({
                 whether the panel tracks the incoming text. */}
             {message.reasoningContent && (
               <div
-                className={`thinking-panel overflow-hidden rounded-lg border transition-colors duration-300 ${
-                  showThinking
-                    ? "border-[#cfa25a]/25 bg-[#cfa25a]/[0.04]"
-                    : "border-[#cfa25a]/20"
-                }`}
+                className="thinking-panel overflow-hidden"
               >
-                {/* The header keeps identical type, padding and colour whether
-                    the body is open or shut. It used to sit on a solid tint
-                    that vanished on expand, so opening visibly moved the label
-                    and changed its background — the panel read as two
-                    different components rather than one opening. */}
-                <div
-                  className={`flex items-center gap-2 pr-1.5 transition-colors duration-300 ${
-                    showThinking ? "bg-[#cfa25a]/[0.07]" : "bg-[#cfa25a]/10"
-                  }`}
-                >
+                {/* No box and no colour.
+                    
+                    A filled amber panel with an amber label made the model's
+                    private notes the loudest thing on screen, above the reply
+                    they belong to. It is a quiet line now: the same text
+                    colour as other metadata, and the only thing marking it
+                    while it runs is a hairline that fills left to right. */}
+                <div className="flex items-center gap-2">
                   <button
                     onClick={() => setShowThinking((v) => !v)}
                     aria-expanded={showThinking}
-                    className="flex min-w-0 flex-1 items-center gap-2 px-3.5 py-2 text-left font-sans text-[13px] font-medium leading-5 text-[#cfa25a] transition-colors hover:bg-[#cfa25a]/[0.06]"
+                    className="group/th flex min-w-0 flex-1 items-center gap-1.5 py-1 text-left font-sans text-[13px] leading-5 text-text-muted transition-colors hover:text-text-secondary"
                   >
                     <svg
                       width="13" height="13" viewBox="0 0 24 24" fill="none"
@@ -666,11 +660,6 @@ function MessageBubbleImpl({
                       <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
                     </svg>
                     <span className="truncate">Thinking</span>
-                    {/* Reserved whether or not the dots are showing, so the
-                        row does not reflow when thinking finishes. */}
-                    <span className="flex h-[7px] w-[19px] flex-none items-center">
-                      {isThinkingPhase && <Dots size={4} />}
-                    </span>
                   </button>
 
                   {showThinking && message.isStreaming && (
@@ -684,8 +673,8 @@ function MessageBubbleImpl({
                       aria-pressed={followThinking}
                       className={`flex h-6 flex-none items-center gap-1 rounded-lg px-1.5 text-[11px] font-medium transition-colors ${
                         followThinking
-                          ? "bg-[#cfa25a]/20 text-[#cfa25a]"
-                          : "text-[#6d685d] hover:bg-[#33302a] hover:text-[#a29d92]"
+                          ? "bg-bg-elevated text-text-secondary"
+                          : "text-text-muted hover:bg-bg-hover hover:text-text-secondary"
                       }`}
                     >
                       <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} aria-hidden="true">
@@ -696,6 +685,20 @@ function MessageBubbleImpl({
                   )}
                 </div>
 
+                {/* A hairline under the label while reasoning is arriving.
+                    
+                    Bouncing dots read as a stalled spinner — motion that
+                    repeats forever says "waiting", not "working". A bar that
+                    sweeps once and fades is closer to progress, and because
+                    it is one pixel of low-contrast colour it registers
+                    without competing with the reply. */}
+                {isThinkingPhase && (
+                  <span
+                    className="thinking-line"
+                    aria-hidden="true"
+                  />
+                )}
+
                 {/* Always mounted, so the body can animate its height open
                     and shut. Rendering it only when open meant the text
                     appeared instantly at full size with nothing to ease. */}
@@ -704,7 +707,7 @@ function MessageBubbleImpl({
                     <div
                       ref={thinkingRef}
                       aria-hidden={!showThinking}
-                      className="max-h-80 overflow-y-auto whitespace-pre-wrap break-words border-t border-[#cfa25a]/15 px-3.5 py-2.5 font-sans text-[13px] leading-5 text-[#a29d92] [overscroll-behavior:contain]"
+                      className="mt-1 max-h-80 overflow-y-auto whitespace-pre-wrap break-words border-l border-border pl-3 font-sans text-[13px] leading-5 text-text-muted [overscroll-behavior:contain]"
                     >
                       {message.reasoningContent}
                     </div>
