@@ -29,7 +29,8 @@
     "test:plugins": "tsx scripts/test-plugins.mjs",
     "test:layout": "tsx scripts/test-layout.mjs",
     "test:install": "tsx scripts/test-install.mjs",
-    "test:design": "tsx scripts/test-design.mjs"
+    "test:design": "tsx scripts/test-design.mjs",
+    "test:archive": "tsx scripts/test-archive.mjs"
   },
   "dependencies": {
     "@types/uuid": "^10.0.0",
