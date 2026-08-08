@@ -156,6 +156,36 @@ const renamedInside = (await fs.readdir(path.join(WSROOT, afterRename[0]))).sort
 check("history followed the rename", renamedInside.includes(".history"));
 check("snapshots followed the rename", renamedInside.includes(".snapshots"));
 
+// ----------------------------------------------------------------- limits
+
+console.log("\n6. Limits are guard rails, not a quota");
+
+check(
+  "a file well past the old 2MB cap is accepted",
+  W.MAX_FILE_BYTES >= 100 * 1024 * 1024,
+  `${W.MAX_FILE_BYTES / 1024 / 1024} MB — this runs on the user's own disk`
+);
+check(
+  "the file count is not a hosted-service number",
+  W.MAX_FILES_PER_WORKSPACE >= 10_000,
+  `${W.MAX_FILES_PER_WORKSPACE.toLocaleString()} — was 500`
+);
+
+const big = "x".repeat(5 * 1024 * 1024);
+await W.writeFile(WS, "big.bin", big);
+const bigListed = (await W.listFiles(WS)).find((f) => f.path === "big.bin");
+check(
+  "a 5MB write actually succeeds",
+  Boolean(bigListed) && bigListed.size === big.length,
+  "previously refused with 'File is too large to write'"
+);
+await W.deleteFile(WS, "big.bin");
+
+check(
+  "a cap still exists, so a runaway loop is bounded",
+  Number.isFinite(W.MAX_FILE_BYTES) && W.MAX_FILE_BYTES > 0
+);
+
 // -------------------------------------------------------------- migration
 
 console.log("\n6. Migrating the old three-folder layout");

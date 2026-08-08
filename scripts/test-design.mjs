@@ -304,6 +304,36 @@ check(
   "sliding the body 8px per switch makes a stable frame feel unstable"
 );
 
+// The workspace
+//
+// The panel showed a progress bar against 128MB and 10,000 files, which are
+// a hosted service's numbers. Everything lives on the user's own disk, so a
+// bar creeping toward a limit that does not exist is worse than none.
+const wsPanel =
+  files.find((f) => f.file.endsWith("WorkspaceSidePanel.tsx"))?.text ?? "";
+
+check(
+  "the workspace panel shows no invented capacity",
+  !/CAPACITY_BYTES|CAPACITY_FILES/.test(wsPanel),
+  "there is no quota to fill"
+);
+check(
+  "and no progress bar against one",
+  !/usedPercent/.test(wsPanel)
+);
+check(
+  "its header matches the other two columns at 56px",
+  /h-\[56px\]/.test(wsPanel),
+  "sidebar, chat and workspace share one header height"
+);
+
+const chatArea = files.find((f) => f.file.endsWith("ChatArea.tsx"))?.text ?? "";
+check(
+  "the workspace has no on/off toggle",
+  !/WorkspaceToggle/.test(chatArea),
+  "it is always on, so the control had one position"
+);
+
 check(
   "reduced motion is honoured",
   /@media \(prefers-reduced-motion: reduce\)/.test(css),

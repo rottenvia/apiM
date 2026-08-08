@@ -25,8 +25,21 @@ import path from "node:path";
 const DATA_DIR = ["data", "workspaces"].join(path.sep);
 const ROOT = path.resolve(process.cwd(), DATA_DIR);
 
-export const MAX_FILE_BYTES = 2 * 1024 * 1024;
-export const MAX_FILES_PER_WORKSPACE = 500;
+/**
+ * Guard rails, not a quota.
+ *
+ * These were set to hosted-service numbers — 2MB a file, 500 files — which
+ * made sense for someone else's disk. This runs on the user's own machine,
+ * where the only real limit is how much space they have, so a build output
+ * or a downloaded dataset should not be refused.
+ *
+ * They are kept, generously, because a runaway loop writing an unbounded
+ * file is still worth stopping, and a listing of a million entries would
+ * hang the panel rather than inform anyone. The point is that nothing a
+ * person would deliberately do should hit them.
+ */
+export const MAX_FILE_BYTES = 512 * 1024 * 1024;
+export const MAX_FILES_PER_WORKSPACE = 100_000;
 /** Truncate oversized reads so one file can't swamp the context window. */
 export const MAX_READ_CHARS = 100_000;
 
