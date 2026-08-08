@@ -213,6 +213,56 @@ check(
   `px-${columnGutters.join(", px-")} — was px-3 header, px-2 list`
 );
 
+// Dialogs
+//
+// The chat-search panel was inset from the left by the sidebar width and
+// padded 32px on the right against 16px on the left, so it sat left of
+// centre and moved sideways when the sidebar was toggled. Asymmetric
+// padding on a centred box is the specific mistake worth catching.
+const dialogs = files.filter((f) =>
+  /(SearchModal|SettingsModal|PluginsModal|DeleteChatDialog)\.tsx$/.test(f.file)
+);
+
+check(
+  "every dialog centres in the window",
+  dialogs.every((f) => /fixed inset-0[^"]*justify-center/.test(f.text)),
+  dialogs
+    .filter((f) => !/fixed inset-0[^"]*justify-center/.test(f.text))
+    .map((f) => path.basename(f.file))
+    .join(", ") || `${dialogs.length} dialogs`
+);
+
+check(
+  "no dialog pads one side more than the other",
+  dialogs.every(
+    (f) => !/fixed inset-[0y][^"]*\b(pr|pl)-\d/.test(f.text)
+  ),
+  dialogs
+    .filter((f) => /fixed inset-[0y][^"]*\b(pr|pl)-\d/.test(f.text))
+    .map((f) => path.basename(f.file))
+    .join(", ") || "a centred box with uneven padding is not centred"
+);
+
+check(
+  "no dialog is offset by the sidebar",
+  dialogs.every((f) => !/style=\{\{ left:/.test(f.text)),
+  "otherwise it shifts sideways when the sidebar toggles"
+);
+
+const dialogWidths = [
+  ...new Set(
+    dialogs
+      .flatMap((f) => [...f.text.matchAll(/max-w-(\w+)/g)].map((m) => m[1]))
+      .filter((w) => /^\d?xl$|^(sm|md|lg)$/.test(w))
+  ),
+];
+check(
+  "the main dialogs share one width",
+  dialogWidths.length <= 1,
+  dialogWidths.map((w) => `max-w-${w}`).join(", ") ||
+    "search was max-w-4xl while settings and plugins were max-w-2xl"
+);
+
 check(
   "reduced motion is honoured",
   /@media \(prefers-reduced-motion: reduce\)/.test(css),
