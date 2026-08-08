@@ -36,7 +36,8 @@
     "test:agentloss": "tsx scripts/test-agentloss.mjs",
     "test:resume": "tsx scripts/test-resume.mjs",
     "test:compact": "tsx scripts/test-compact.mjs",
-    "test:lessons": "tsx scripts/test-lessons.mjs"
+    "test:lessons": "tsx scripts/test-lessons.mjs",
+    "test:hardening": "tsx scripts/test-hardening.mjs"
   },
   "dependencies": {
     "@types/uuid": "^10.0.0",

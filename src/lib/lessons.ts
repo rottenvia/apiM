@@ -158,7 +158,43 @@ async function writeLessons(
 ): Promise<void> {
   const dir = workspaceDirectory(workspaceId);
   await fs.mkdir(dir, { recursive: true });
-  await fs.writeFile(lessonsPath(workspaceId), serialise(lessons), "utf8");
+
+  // Write then rename, the same way the chat store does. A plain writeFile
+  // truncates first, so a crash — or the sandbox being reset — mid-write
+  // leaves a half-written file, and a half-written lesson file parses into
+  // *some* lessons, which is worse than none: the model would silently be
+  // working from a truncated set it believes is complete.
+  const target = lessonsPath(workspaceId);
+  const tmp = `${target}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+  try {
+    await fs.writeFile(tmp, serialise(lessons), "utf8");
+    await fs.rename(tmp, target);
+  } catch (err) {
+    await fs.unlink(tmp).catch(() => {});
+    throw err;
+  }
+}
+
+/**
+ * Serialises refine passes per workspace.
+ *
+ * `applyLessons` is read-modify-write. Two passes finishing at once — easy
+ * enough with several chats open on the same workspace — would both read the
+ * old file and the second would overwrite the first's lessons. Chaining on a
+ * per-workspace promise keeps them ordered without blocking other workspaces.
+ */
+const writeChains = new Map<string, Promise<unknown>>();
+
+function serialised<T>(workspaceId: string, task: () => Promise<T>): Promise<T> {
+  const previous = writeChains.get(workspaceId) ?? Promise.resolve();
+  const next = previous.catch(() => {}).then(task);
+  writeChains.set(workspaceId, next);
+  // Cleared when it is the last one queued, so the map does not grow for the
+  // lifetime of the process.
+  void next.catch(() => {}).finally(() => {
+    if (writeChains.get(workspaceId) === next) writeChains.delete(workspaceId);
+  });
+  return next;
 }
 
 /**
@@ -222,6 +258,18 @@ export async function applyLessons(
   workspaceId: string,
   updates: LessonUpdate[],
   confirmedIds: string[] = []
+): Promise<ApplyResult> {
+  // Queued, so two refine passes cannot both read the old file and have the
+  // second silently discard the first's lessons.
+  return serialised(workspaceId, () =>
+    applyLessonsInner(workspaceId, updates, confirmedIds)
+  );
+}
+
+async function applyLessonsInner(
+  workspaceId: string,
+  updates: LessonUpdate[],
+  confirmedIds: string[]
 ): Promise<ApplyResult> {
   const lessons = await readLessons(workspaceId);
   const byId = new Map(lessons.map((l) => [l.id, l]));
