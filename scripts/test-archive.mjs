@@ -373,6 +373,95 @@ if (await have("zip")) {
   );
 }
 
+// ------------------------------------------------- unpacking to the disk
+
+console.log("\n9. Unpacked files land in the workspace");
+
+check(
+  "an archive name becomes a folder name",
+  A.archiveFolderName("EXT-Faceit-Intelligence.zip") ===
+    "EXT-Faceit-Intelligence"
+);
+check(
+  "the extension is dropped, including two-part ones",
+  A.archiveFolderName("proj.tar.gz") === "proj"
+);
+check(
+  "traversal cannot survive the folder name",
+  !A.archiveFolderName("../../etc.zip").includes(".."),
+  A.archiveFolderName("../../etc.zip")
+);
+check(
+  "a name made only of punctuation still yields something",
+  A.archiveFolderName("....zip").length > 0,
+  A.archiveFolderName("....zip")
+);
+
+const W = await import(pathToFileURL(path.join(ROOT, "src/lib/workspace.ts")).href);
+const WSROOT = path.join(ROOT, "data", "workspaces");
+await fs.rm(path.join(WSROOT, "archtest"), { recursive: true, force: true });
+
+// An archive entry is attacker-controlled, so the path it produces has to be
+// rejected rather than trusted.
+let blocked = 0;
+for (const evil of ["../escaped.txt", "../../etc/passwd", "a/../../../out"]) {
+  try {
+    await W.writeFile("archtest", `uploads/proj/${evil}`, "x");
+  } catch {
+    blocked += 1;
+  }
+}
+check(
+  "a zip-slip path is refused",
+  blocked === 3,
+  "an archive can contain '..' and would otherwise write outside the workspace"
+);
+
+if (await have("zip")) {
+  const buf = new Uint8Array(await fs.readFile(path.join(tmp, "proj.zip")));
+  const res = await A.readArchive("proj.zip", buf);
+  const dir = `uploads/${A.archiveFolderName("proj.zip")}`;
+  for (const e of res.entries) {
+    await W.writeFile("archtest", `${dir}/${e.path}`, e.content);
+  }
+
+  const listed = (await W.listFiles("archtest")).map((f) => f.path);
+  check(
+    "every entry becomes a real file",
+    listed.length === res.entries.length,
+    listed.join(", ")
+  );
+  check(
+    "they sit under uploads/, named after the archive",
+    listed.every((f) => f.startsWith("uploads/proj/"))
+  );
+  check(
+    "nested structure is preserved",
+    listed.some((f) => f.includes("/src/")),
+    "a flat dump would lose which module a file belonged to"
+  );
+
+  const back = await W.readFile("archtest", `${dir}/proj/main.py`);
+  check(
+    "the agent can read one back later",
+    back.content === 'print("hello")\n',
+    "this is the whole point — the files outlive the message"
+  );
+
+  const manifest = A.formatArchiveManifest("proj.zip", dir, res);
+  check("the manifest names where they went", manifest.includes(dir));
+  check(
+    "the manifest does not repeat the file contents",
+    !manifest.includes('print("hello")'),
+    "they are on disk; sending them again would double the cost"
+  );
+  check(
+    "the manifest tells the model how to reach them",
+    /read_file/.test(manifest) && /search_files/.test(manifest)
+  );
+}
+
+await fs.rm(path.join(WSROOT, "archtest"), { recursive: true, force: true });
 await fs.rm(tmp, { recursive: true, force: true });
 
 console.log(

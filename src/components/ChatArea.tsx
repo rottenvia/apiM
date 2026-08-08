@@ -14,6 +14,7 @@ import {
   MAX_FILES,
 } from "@/lib/attachments";
 import { isImageFile } from "@/lib/vision";
+import { archiveFolderName, formatArchiveManifest } from "@/lib/archive";
 import type { Attachment } from "@/lib/attachments";
 import { Dots, MessageBubble } from "@/components/MessageBubble";
 import { ThinkingEffortSelector } from "@/components/ThinkingEffortSelector";
@@ -269,6 +270,51 @@ export function ChatArea({
         return next;
       });
 
+      // Unpack into the workspace rather than only into the message.
+      //
+      // The extracted text used to live in one message and nothing else, so
+      // the model could describe an archive on the turn it arrived and had
+      // no way to look at it again afterwards — the files were never
+      // anywhere. Writing them to disk makes them real: readable with
+      // read_file, searchable with search_files, and still there tomorrow.
+      if (attachment?.entries?.length && workspaceId) {
+        setStage(placeholder.id, "unpacking");
+        const dir = `uploads/${archiveFolderName(attachment.name)}`;
+        try {
+          const res = await fetch(`/api/workspace/${workspaceId}/unpack`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ dir, files: attachment.entries }),
+          });
+          if (res.ok) {
+            const { written } = (await res.json()) as { written: number };
+            if (written > 0) {
+              attachment = {
+                ...attachment,
+                unpackedTo: dir,
+                // The files are on disk now, so the message carries a map
+                // rather than a second copy of everything.
+                content: formatArchiveManifest(attachment.name, dir, {
+                  entries: attachment.entries.map((e) => ({
+                    path: e.path,
+                    content: "",
+                    bytes: e.content.length,
+                    truncated: false,
+                  })),
+                  skipped: [],
+                  hitLimit: false,
+                }),
+                entries: undefined,
+              };
+              onProcessesChanged?.();
+            }
+          }
+        } catch {
+          // Writing is an improvement, not a requirement: on failure the
+          // attachment keeps its inline contents and still works.
+        }
+      }
+
       if (attachment) accepted.push(attachment);
       else if (error) errors.push(error);
     }
@@ -280,7 +326,7 @@ export function ChatArea({
     }
 
     if (errors.length > 0) setAttachError(errors.join(" · "));
-  }, [analyzeImage]);
+  }, [analyzeImage, workspaceId, onProcessesChanged]);
 
   /** Re-run a failed description, so a transient API error isn't terminal. */
   const retryImage = useCallback(

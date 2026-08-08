@@ -41,6 +41,13 @@ export interface Attachment {
   stage?: AttachStage;
   /** Archives only: how many files came out of it, shown on the chip. */
   fileCount?: number;
+  /**
+   * Archives only: the unpacked files, so they can be written to the
+   * workspace rather than inlined into a message and lost with it.
+   */
+  entries?: { path: string; content: string }[];
+  /** Archives only: where they were written, once they have been. */
+  unpackedTo?: string;
   /** Size of the original file in bytes. */
   size: number;
   content: string;
@@ -256,10 +263,16 @@ export async function readTextFile(
           id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
           name: file.name,
           size: file.size,
+          // Replaced by a manifest once the files are on disk; kept as the
+          // full inline form as a fallback for when writing is not possible.
           content: formatArchive(file.name, result),
           truncated: result.hitLimit || result.entries.some((e) => e.truncated),
           kind: "text",
           fileCount: result.entries.length,
+          entries: result.entries.map((e) => ({
+            path: e.path,
+            content: e.content,
+          })),
         },
       };
     } catch (error) {
