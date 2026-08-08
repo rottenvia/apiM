@@ -4,9 +4,13 @@ import { SESSION_COOKIE, verifySession, authConfig } from "@/lib/auth";
 /**
  * One gate in front of everything.
  *
- * Deliberately middleware rather than a check inside each route: there are
+ * Deliberately a proxy rather than a check inside each route: there are
  * eleven API routes today and more later, and the failure mode of per-route
  * checks is forgetting one — which looks fine until someone finds it.
+ *
+ * Named `proxy` because Next 16 renamed the `middleware` file convention and
+ * warns on every dev start until you move. Same behaviour, same matcher — the
+ * function name and filename are the whole change.
  */
 
 /** Reachable without a session. Everything else requires one. */
@@ -27,7 +31,7 @@ function isPublic(pathname: string): boolean {
   );
 }
 
-export async function middleware(req: NextRequest) {
+export async function proxy(req: NextRequest) {
   const { enabled, required, secret } = authConfig();
 
   // Misconfiguration guard: if a deployment demands auth but no password is
