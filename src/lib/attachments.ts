@@ -49,58 +49,85 @@ export const MAX_FILES = 10;
 /** Images are capped separately — they are sent to the vision model whole. */
 export const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 
+
 /**
- * Extensions treated as text. Anything else is rejected, because binary
- * content inlined into a prompt is just noise that costs tokens.
+ * Heuristic binary check over raw bytes.
+ *
+ * Works on the bytes rather than a decoded string, so it can run on the first
+ * few KB of a file without decoding the rest. A NUL byte is the cheapest
+ * reliable signal; beyond that, a high proportion of control characters means
+ * this is not text whatever the extension claimed.
  */
-const TEXT_EXTENSIONS = new Set([
-  "txt", "md", "markdown", "rst", "log", "csv", "tsv",
-  "json", "jsonc", "json5", "yaml", "yml", "toml", "ini", "cfg", "conf", "env",
-  "xml", "html", "htm", "css", "scss", "sass", "less",
-  "js", "jsx", "mjs", "cjs", "ts", "tsx", "mts", "cts",
-  "py", "rb", "go", "rs", "java", "kt", "kts", "c", "h", "cpp", "hpp", "cc",
-  "cs", "swift", "php", "pl", "lua", "r", "scala", "clj", "ex", "exs", "erl",
-  "sh", "bash", "zsh", "fish", "ps1", "bat", "cmd",
-  "sql", "graphql", "gql", "proto", "dockerfile", "makefile", "gitignore",
-  "vue", "svelte", "astro", "tf", "hcl", "gradle", "properties", "diff", "patch",
-]);
-
-/** Files with no extension that are still plain text. */
-const TEXT_FILENAMES = new Set([
-  "dockerfile", "makefile", "readme", "license", "changelog",
-  ".gitignore", ".env", ".npmrc", ".editorconfig", ".prettierrc", ".eslintrc",
-]);
-
 export function extensionOf(name: string): string {
   const at = name.lastIndexOf(".");
   return at === -1 ? "" : name.slice(at + 1).toLowerCase();
 }
 
-export function isTextFile(file: File): boolean {
-  if (file.type.startsWith("text/")) return true;
-  if (
-    file.type === "application/json" ||
-    file.type === "application/xml" ||
-    file.type === "application/javascript" ||
-    file.type === "application/x-sh"
-  ) {
-    return true;
-  }
-
-  const lower = file.name.toLowerCase();
-  if (TEXT_FILENAMES.has(lower)) return true;
-
-  const ext = extensionOf(lower);
-  // A file with no extension and no MIME type is ambiguous; allow it and let
-  // the binary-content check below decide.
-  if (!ext) return file.type === "";
-  return TEXT_EXTENSIONS.has(ext);
-}
+/** How much of a file to inspect before deciding whether it is text. */
+export const SNIFF_BYTES = 8_000;
 
 /**
- * Heuristic binary check. A NUL byte in the first chunk means this isn't text,
- * regardless of what the extension claimed.
+ * Formats that are definitely not text, with a reason.
+ *
+ * The reader accepts anything that decodes as text rather than checking
+ * against a list of known extensions — a list can only ever be incomplete,
+ * and being told a .vdf "doesn't look like a text file" when it plainly is
+ * one is the kind of refusal that makes an app feel stupid.
+ *
+ * The inverse still needs handling: a .png would be sniffed, found binary,
+ * and reported as "looks like a binary file", which is true but unhelpful.
+ * Naming the common ones gives a better message and, where something could
+ * be supported later, says so.
  */
+const BINARY_FORMATS: Record<string, string> = {
+  pdf: "PDFs need a parser this app doesn't have yet — copy the text out, or say the word and I'll add one.",
+  docx: "Word documents aren't readable yet. Save as .txt or .md and it will work.",
+  doc: "Word documents aren't readable yet. Save as .txt or .md and it will work.",
+  xlsx: "Spreadsheets aren't readable yet. Export as .csv and it will work.",
+  xls: "Spreadsheets aren't readable yet. Export as .csv and it will work.",
+  pptx: "Slides aren't readable yet. Export the text or save as .pdf.",
+  exe: "an executable",
+  dll: "a library",
+  so: "a library",
+  dylib: "a library",
+  bin: "a binary",
+  dat: "a binary data file",
+  db: "a database file",
+  sqlite: "a database file",
+  mp3: "audio", wav: "audio", flac: "audio", ogg: "audio",
+  mp4: "video", avi: "video", mov: "video", mkv: "video", webm: "video",
+  ttf: "a font", otf: "a font", woff: "a font", woff2: "a font",
+  pyc: "compiled Python", class: "compiled Java", o: "an object file",
+};
+
+export function binaryFormatNote(name: string): string | null {
+  const ext = extensionOf(name);
+  const note = BINARY_FORMATS[ext];
+  if (!note) return null;
+  // Entries that are a full sentence explain themselves; the short ones are
+  // a noun phrase and need wrapping.
+  return note.endsWith(".")
+    ? note
+    : `${name} is ${note}, so there's no text to read.`;
+}
+
+export function bytesLookBinary(bytes: Uint8Array): boolean {
+  if (bytes.length === 0) return false;
+
+  const head = bytes.subarray(0, Math.min(bytes.length, 8000));
+  if (head.includes(0)) return true;
+
+  let control = 0;
+  for (let i = 0; i < head.length; i += 1) {
+    const b = head[i];
+    // Outside printable ASCII, tab, newline, carriage return. Bytes above
+    // 0x7f are left alone: they are ordinary in UTF-8 text.
+    if (b < 9 || (b > 13 && b < 32)) control += 1;
+  }
+  return control / head.length > 0.1;
+}
+
+/** Kept for the string case, which the archive reader still uses. */
 export function looksBinary(sample: string): boolean {
   const head = sample.slice(0, 8000);
   if (head.includes("\u0000")) return true;
@@ -108,7 +135,6 @@ export function looksBinary(sample: string): boolean {
   let control = 0;
   for (let i = 0; i < head.length; i += 1) {
     const code = head.charCodeAt(i);
-    // Anything outside printable ASCII, tab, newline, carriage return.
     if (code < 9 || (code > 13 && code < 32)) control += 1;
   }
   return head.length > 0 && control / head.length > 0.1;
@@ -198,19 +224,46 @@ export async function readTextFile(file: File): Promise<ReadResult> {
     }
   }
 
-  if (!isTextFile(file)) {
-    return { error: `${file.name} doesn't look like a text file` };
-  }
+  // Known binary formats are refused up front, so a .png or a .pdf gets a
+  // useful message rather than being sniffed and reported as "binary".
+  const refusal = binaryFormatNote(file.name);
+  if (refusal) return { error: refusal };
 
-  let raw: string;
+  // Decide from the first few KB rather than the whole file.
+  //
+  // This used to call file.text(), which decodes everything into a string
+  // before anything is inspected — so a 5MB log became a 5MB string, had
+  // 8000 characters checked, then had 200k kept and the rest discarded. On
+  // the main thread, that decode is the freeze. Worse, it happened even for
+  // files that were then rejected as binary.
+  let head: Uint8Array;
   try {
-    raw = await file.text();
+    head = new Uint8Array(
+      await file.slice(0, SNIFF_BYTES).arrayBuffer()
+    );
   } catch {
     return { error: `Couldn't read ${file.name}` };
   }
 
-  if (looksBinary(raw)) {
-    return { error: `${file.name} appears to be binary, not text` };
+  if (bytesLookBinary(head)) {
+    return {
+      error: `${file.name} looks like a binary file, so there's nothing to read`,
+    };
+  }
+
+  // Read only as much as will be kept. UTF-8 is at most 4 bytes per
+  // character, so this cannot cut short of MAX_CHARS; slicing on a byte
+  // boundary can split a multi-byte character, which the decoder replaces
+  // rather than throwing on.
+  const wanted = MAX_CHARS * 4;
+  const needsTruncating = file.size > wanted;
+
+  let raw: string;
+  try {
+    const part = needsTruncating ? file.slice(0, wanted) : file;
+    raw = await part.text();
+  } catch {
+    return { error: `Couldn't read ${file.name}` };
   }
 
   const truncated = raw.length > MAX_CHARS;
