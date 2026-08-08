@@ -90,6 +90,9 @@ function shouldSkip(path: string): string | null {
   const base = path.slice(path.lastIndexOf("/") + 1);
   if (base.startsWith("._")) return "macOS resource fork";
 
+  // A cheap pre-filter only. Anything not listed still goes through
+  // decodeText, which drops it if it turns out to be binary — so an
+  // unfamiliar text format is read rather than refused for being unknown.
   const dot = base.lastIndexOf(".");
   const ext = dot === -1 ? "" : base.slice(dot + 1).toLowerCase();
   if (SKIP_EXTENSIONS.has(ext)) return "binary file";

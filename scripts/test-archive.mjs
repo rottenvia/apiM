@@ -223,6 +223,62 @@ check("a file that is not a zip is rejected clearly", threw, "rather than hangin
 const emptyTar = await A.readArchive("empty.tar", new Uint8Array(1024));
 check("an empty tar yields nothing rather than throwing", emptyTar.entries.length === 0);
 
+// ------------------------------------------------- the attachment reader
+
+console.log("\n7. Reading a file that was dropped on the composer");
+
+const AT = await import(
+  pathToFileURL(path.join(ROOT, "src/lib/attachments.ts")).href
+);
+
+check(
+  "an unknown extension is not refused for being unknown",
+  AT.binaryFormatNote("cs2_config.vdf") === null,
+  "a list of known extensions can only ever be incomplete"
+);
+check(
+  "a PDF is refused with something actionable",
+  /copy the text out/i.test(AT.binaryFormatNote("paper.pdf") ?? ""),
+  "rather than 'appears to be binary'"
+);
+check(
+  "a .docx suggests what to do instead",
+  /save as \.txt/i.test(AT.binaryFormatNote("notes.docx") ?? "")
+);
+check(
+  "a plain binary is named for what it is",
+  /an executable/.test(AT.binaryFormatNote("thing.exe") ?? "")
+);
+
+check(
+  "text bytes are recognised as text",
+  !AT.bytesLookBinary(new TextEncoder().encode("hello\nworld\n"))
+);
+check(
+  "a NUL byte marks it binary",
+  AT.bytesLookBinary(new Uint8Array([104, 105, 0, 104, 105]))
+);
+check(
+  "an empty file is not binary",
+  !AT.bytesLookBinary(new Uint8Array(0)),
+  "an empty file is a valid, if boring, text file"
+);
+check(
+  "UTF-8 above ASCII stays text",
+  !AT.bytesLookBinary(new TextEncoder().encode("привіт — ok\n")),
+  "high bytes are ordinary in UTF-8 and must not trip the check"
+);
+check(
+  "mostly control bytes is binary",
+  AT.bytesLookBinary(new Uint8Array(Array.from({ length: 500 }, (_, i) => (i % 2 ? 1 : 65))))
+);
+
+check(
+  "only a small head is inspected",
+  AT.SNIFF_BYTES <= 16_000,
+  `${AT.SNIFF_BYTES} bytes — the old path decoded the entire file first`
+);
+
 await fs.rm(tmp, { recursive: true, force: true });
 
 console.log(
