@@ -54,12 +54,25 @@ export interface ArchiveResult {
   hitLimit: boolean;
 }
 
-/** Enough for a real project, short of something that would never fit anyway. */
-export const MAX_ENTRIES = 200;
-/** Per file, so one enormous log cannot crowd out everything else. */
-export const MAX_ENTRY_CHARS = 60_000;
-/** Across the whole archive, to stay inside the context window. */
-export const MAX_TOTAL_CHARS = 400_000;
+/**
+ * Caps, sized against the model actually in use.
+ *
+ * These were originally chosen for a ~128k token window and left alone when
+ * the model moved to 1M. The result was files being cut at around 1,500 lines
+ * while 89% of the context sat unused — the truncation was protecting against
+ * a limit that no longer existed.
+ *
+ * At roughly 3.6 characters per token, 1.5M characters is about 417k tokens,
+ * which leaves plenty of room for the conversation and the reply, and costs
+ * about $0.18 per round at DeepSeek pro rates. A cap still exists because an
+ * unbounded archive would eventually exceed the window and fail the request
+ * outright, which is worse than a note saying something was trimmed.
+ */
+export const MAX_ENTRIES = 800;
+/** Per file. Comfortably past any hand-written source file. */
+export const MAX_ENTRY_CHARS = 300_000;
+/** Across the whole archive. */
+export const MAX_TOTAL_CHARS = 1_500_000;
 
 export function isArchive(name: string): boolean {
   const lower = name.toLowerCase();

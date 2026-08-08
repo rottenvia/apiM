@@ -154,9 +154,45 @@ if (!(await have("tar"))) {
 
 console.log("\n4. Caps");
 
-check("a per-file cap exists", A.MAX_ENTRY_CHARS > 0 && A.MAX_ENTRY_CHARS <= 200_000);
+check(
+  "the per-file cap clears an ordinary source file",
+  A.MAX_ENTRY_CHARS >= 200_000,
+  `${A.MAX_ENTRY_CHARS.toLocaleString()} chars — 60k cut files at about 1,500 lines`
+);
 check("a whole-archive cap exists", A.MAX_TOTAL_CHARS > A.MAX_ENTRY_CHARS);
-check("an entry-count cap exists", A.MAX_ENTRIES > 0);
+check(
+  "the archive cap uses a real share of the context window",
+  A.MAX_TOTAL_CHARS >= 1_000_000,
+  `${Math.round(A.MAX_TOTAL_CHARS / 3.6 / 1000)}k tokens of a 1M window`
+);
+check(
+  "the entry cap clears a real project",
+  A.MAX_ENTRIES >= 500,
+  `${A.MAX_ENTRIES} files`
+);
+
+// A file large enough that the old 60k cap would have cut it.
+if (await have("zip")) {
+  const realistic = path.join(tmp, "realistic");
+  await fs.mkdir(realistic, { recursive: true });
+  const source = Array.from(
+    { length: 2500 },
+    (_, i) => `def function_${i}(argument):\n    return argument * ${i}\n`
+  ).join("\n");
+  await fs.writeFile(path.join(realistic, "module.py"), source);
+  await run("zip", ["-qr", path.join(tmp, "realistic.zip"), "."], {
+    cwd: realistic,
+  });
+
+  const buf = new Uint8Array(await fs.readFile(path.join(tmp, "realistic.zip")));
+  const res = await A.readArchive("realistic.zip", buf);
+  const entry = res.entries.find((e) => e.path.endsWith("module.py"));
+  check(
+    "a 2,500-line source file arrives whole",
+    Boolean(entry) && !entry.truncated && entry.content === source,
+    `${source.length.toLocaleString()} chars — over the old 60k cap`
+  );
+}
 
 if (await have("zip")) {
   const many = path.join(tmp, "many");

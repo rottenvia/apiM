@@ -57,10 +57,24 @@ export interface Attachment {
   visionError?: string;
 }
 
-/** Per-file cap. Large files would otherwise blow past the context window. */
-export const MAX_CHARS = 200_000;
-/** Reject anything over this outright rather than reading it into memory. */
-export const MAX_BYTES = 5 * 1024 * 1024;
+/**
+ * Per-file cap.
+ *
+ * Raised to match the model's 1M token window; the old 200k was sized for a
+ * 128k one and cut ordinary files for no reason. 800k characters is about
+ * 222k tokens, so even two large attachments still leave most of the window
+ * for the conversation.
+ */
+export const MAX_CHARS = 800_000;
+/**
+ * Reject anything over this outright rather than reading it into memory.
+ *
+ * Only the first MAX_CHARS worth is ever kept, so this is not a limit on
+ * useful content — it exists so a 2GB file is refused instantly instead of
+ * being streamed through. Comfortably above the 3.2MB that MAX_CHARS can
+ * consume, so it never becomes the binding constraint.
+ */
+export const MAX_BYTES = 64 * 1024 * 1024;
 /**
  * Archives get a larger cap.
  *

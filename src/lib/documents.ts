@@ -22,7 +22,7 @@ export interface DocumentResult {
 }
 
 /** Matches the attachment cap, so a document cannot outgrow a text file. */
-export const MAX_DOC_CHARS = 200_000;
+export const MAX_DOC_CHARS = 800_000;
 
 const KINDS: Record<string, DocumentKind> = {
   docx: "docx",
