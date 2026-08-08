@@ -637,20 +637,22 @@ function MessageBubbleImpl({
                 whether the panel tracks the incoming text. */}
             {message.reasoningContent && (
               <div
-                className="thinking-panel overflow-hidden"
+                data-thinking={isThinkingPhase}
+                className="thinking-panel thinking-shell overflow-hidden rounded-lg"
               >
-                {/* No box and no colour.
+                {/* The box and the amber arrive, rather than appearing.
                     
-                    A filled amber panel with an amber label made the model's
-                    private notes the loudest thing on screen, above the reply
-                    they belong to. It is a quiet line now: the same text
-                    colour as other metadata, and the only thing marking it
-                    while it runs is a hairline that fills left to right. */}
+                    Previously the row was plain text one frame and a filled
+                    amber panel the next, which is the jump that read as a
+                    glitch. Border, background and text colour now all ease
+                    from transparent over the same 0.3s, so the label starts
+                    as ordinary metadata and warms into the panel — the change
+                    is legible as a transition rather than a repaint. */}
                 <div className="flex items-center gap-2">
                   <button
                     onClick={() => setShowThinking((v) => !v)}
                     aria-expanded={showThinking}
-                    className="group/th flex min-w-0 flex-1 items-center gap-1.5 py-1 text-left font-sans text-[13px] leading-5 text-text-muted transition-colors hover:text-text-secondary"
+                    className="thinking-toggle flex min-w-0 flex-1 items-center gap-1.5 px-3 py-2 text-left font-sans text-[13px] font-medium leading-5"
                   >
                     <svg
                       width="13" height="13" viewBox="0 0 24 24" fill="none"
@@ -671,10 +673,10 @@ function MessageBubbleImpl({
                           : "Scrolling freely — click to follow the text"
                       }
                       aria-pressed={followThinking}
-                      className={`flex h-6 flex-none items-center gap-1 rounded-lg px-1.5 text-[11px] font-medium transition-colors ${
+                      className={`mr-2 flex h-6 flex-none items-center gap-1 rounded-lg px-2 text-[11px] font-medium transition-colors ${
                         followThinking
-                          ? "bg-bg-elevated text-text-secondary"
-                          : "text-text-muted hover:bg-bg-hover hover:text-text-secondary"
+                          ? "bg-[#cfa25a]/20 text-[#cfa25a]"
+                          : "text-[#cfa25a]/55 hover:bg-[#cfa25a]/10 hover:text-[#cfa25a]"
                       }`}
                     >
                       <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} aria-hidden="true">
@@ -707,7 +709,7 @@ function MessageBubbleImpl({
                     <div
                       ref={thinkingRef}
                       aria-hidden={!showThinking}
-                      className="mt-1 max-h-80 overflow-y-auto whitespace-pre-wrap break-words border-l border-border pl-3 font-sans text-[13px] leading-5 text-text-muted [overscroll-behavior:contain]"
+                      className="thinking-body-text max-h-80 overflow-y-auto whitespace-pre-wrap break-words px-3 pb-2.5 font-sans text-[13px] leading-5 [overscroll-behavior:contain]"
                     >
                       {message.reasoningContent}
                     </div>

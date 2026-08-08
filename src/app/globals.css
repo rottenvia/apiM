@@ -721,15 +721,60 @@ input:focus-visible {
   animation: thinking-enter 0.3s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
-/* Progress under the "Thinking" label.
+/* The panel warming up.
+ *
+ * The row used to be plain text one frame and a filled amber panel the next.
+ * Nothing moved, but the colour arrived instantly, and an instant change with
+ * no transition reads as a repaint — which is what made it feel like a glitch
+ * rather than a state.
+ *
+ * Everything that differs between the two states is transitioned over the
+ * same duration, so the label starts as ordinary metadata and warms into the
+ * panel. The amber is worth keeping: reasoning is genuinely a different kind
+ * of content from the answer, and it should look like it. */
+.thinking-shell {
+  border: 1px solid transparent;
+  background: transparent;
+  transition:
+    border-color 0.3s ease,
+    background-color 0.3s ease;
+}
+.thinking-shell[data-thinking='true'] {
+  border-color: color-mix(in oklab, #cfa25a 22%, transparent);
+  background: color-mix(in oklab, #cfa25a 7%, transparent);
+}
+
+.thinking-toggle {
+  color: var(--color-text-muted);
+  transition: color 0.3s ease;
+}
+.thinking-shell[data-thinking='true'] .thinking-toggle {
+  color: #cfa25a;
+}
+.thinking-toggle:hover {
+  color: var(--color-text-secondary);
+}
+.thinking-shell[data-thinking='true'] .thinking-toggle:hover {
+  color: color-mix(in oklab, #cfa25a 80%, white);
+}
+
+.thinking-body-text {
+  color: var(--color-text-muted);
+  border-top: 1px solid transparent;
+  transition:
+    color 0.3s ease,
+    border-color 0.3s ease;
+}
+.thinking-shell[data-thinking='true'] .thinking-body-text {
+  border-top-color: color-mix(in oklab, #cfa25a 14%, transparent);
+}
+
+/* Progress under the label.
  *
  * Bouncing dots repeat forever, which reads as a stalled spinner — the eye
  * learns the loop and stops believing anything is happening. A bar that
  * sweeps once, fades, and sweeps again says the work is ongoing without
- * pretending to know how far along it is.
- *
- * One pixel of low-contrast colour on purpose: the model's private notes
- * should be findable, not the loudest thing on screen. */
+ * pretending to know how far along it is. */
 @keyframes thinking-sweep {
   0% {
     transform: scaleX(0);
@@ -752,7 +797,7 @@ input:focus-visible {
   background: linear-gradient(
     90deg,
     transparent,
-    var(--color-border-light),
+    color-mix(in oklab, #cfa25a 55%, transparent),
     transparent
   );
   animation: thinking-sweep 1.5s ease-in-out infinite;
@@ -763,6 +808,11 @@ input:focus-visible {
     animation: none;
     opacity: 0.6;
     transform: none;
+  }
+  .thinking-shell,
+  .thinking-toggle,
+  .thinking-body-text {
+    transition: none;
   }
 }
 
