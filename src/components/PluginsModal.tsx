@@ -221,7 +221,7 @@ export function PluginsModal({
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
 
-      <div className="relative flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-3xl border border-border-light bg-bg-secondary shadow-2xl shadow-black/50 animate-fade-in">
+      <div className="relative flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-border-light bg-bg-secondary shadow-2xl shadow-black/50 animate-fade-in">
         {/* Header */}
         <div className="flex flex-none items-center justify-between border-b border-border px-6 py-4">
           <div>
@@ -332,7 +332,7 @@ export function PluginsModal({
                 maxLength={4000}
                 className="w-full resize-y rounded-xl border border-border bg-bg-primary px-3 py-2.5 font-mono text-[13px] leading-relaxed text-text-primary outline-none transition-colors placeholder:text-text-muted focus:border-accent/60"
               />
-              <p className="mt-1 text-right text-[10px] text-text-muted">
+              <p className="mt-1 text-right text-[11px] text-text-muted">
                 {draft.prompt.length}/4000
               </p>
             </div>
@@ -347,7 +347,7 @@ export function PluginsModal({
           <div className="flex-1 space-y-4 overflow-y-auto px-6 py-5">
             {custom.length > 0 && (
               <div>
-                <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.1em] text-text-muted">
+                <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.1em] text-text-muted">
                   Your plugins
                 </p>
                 <div className="space-y-2">
@@ -357,7 +357,7 @@ export function PluginsModal({
             )}
 
             <div>
-              <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.1em] text-text-muted">
+              <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.1em] text-text-muted">
                 Built in
               </p>
               <div className="space-y-2">
@@ -368,7 +368,7 @@ export function PluginsModal({
             {/* Listed apart from the current versions, or the near-duplicate
                 names read as a mistake rather than as a choice. */}
             <div>
-              <p className="mb-1 text-[10px] font-semibold uppercase tracking-[0.1em] text-text-muted">
+              <p className="mb-1 text-[11px] font-semibold uppercase tracking-[0.1em] text-text-muted">
                 Classic
               </p>
               <p className="mb-2 text-[11px] leading-4 text-text-muted">

@@ -144,7 +144,7 @@ export function ToolActivity({
               }
               disabled={!expandable}
               aria-expanded={expandable ? isOpen : undefined}
-              className={`group flex w-fit max-w-full items-center gap-2 rounded-lg border px-2.5 py-1.5 text-left text-[12.5px] transition-colors ${
+              className={`group flex w-fit max-w-full items-center gap-2 rounded-lg border px-2.5 py-1.5 text-left text-[13px] transition-colors ${
                 failed
                   ? "border-red-500/25 bg-red-500/[0.07] text-red-300"
                   : "border-border bg-bg-hover/40 text-text-secondary"
@@ -170,7 +170,7 @@ export function ToolActivity({
               </span>
 
               {failed && event.summary && (
-                <span className="min-w-0 truncate text-[11.5px] opacity-80">
+                <span className="min-w-0 truncate text-[12px] opacity-80">
                   — {event.summary}
                 </span>
               )}
@@ -203,7 +203,7 @@ export function ToolActivity({
               <button
                 type="button"
                 onClick={() => onOpenFile(filePath)}
-                className="mt-1 w-fit rounded-md px-2.5 py-0.5 text-[11.5px] text-text-muted transition-colors hover:text-accent-light"
+                className="mt-1 w-fit rounded-lg px-2.5 py-0.5 text-[12px] text-text-muted transition-colors hover:text-accent-light"
               >
                 Open in workspace
               </button>

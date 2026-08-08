@@ -51,11 +51,11 @@ export function ApprovalPrompt({
           </svg>
         </span>
         <div className="min-w-0 flex-1">
-          <p className="text-[12.5px] font-medium leading-5 text-text-primary">
+          <p className="text-[13px] font-medium leading-5 text-text-primary">
             Run this command?
           </p>
           {pending.reason && (
-            <p className="mt-0.5 text-[11.5px] leading-4 text-text-muted">
+            <p className="mt-0.5 text-[12px] leading-4 text-text-muted">
               {pending.reason}
             </p>
           )}
@@ -70,7 +70,7 @@ export function ApprovalPrompt({
       <div className="mt-2 flex flex-wrap items-center gap-1.5 border-t border-accent/15 px-3 py-2">
         <button
           onClick={() => onDecide(pending.id, true, false)}
-          className="rounded-lg bg-accent px-3 py-1.5 text-[12.5px] font-medium text-white transition-colors hover:bg-accent-light"
+          className="rounded-lg bg-accent px-3 py-1.5 text-[13px] font-medium text-white transition-colors hover:bg-accent-light"
         >
           Run
         </button>
@@ -78,7 +78,7 @@ export function ApprovalPrompt({
         <button
           ref={skipRef}
           onClick={() => onDecide(pending.id, false, false)}
-          className="rounded-lg border border-border px-3 py-1.5 text-[12.5px] font-medium text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
+          className="rounded-lg border border-border px-3 py-1.5 text-[13px] font-medium text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
         >
           Skip
         </button>
@@ -88,7 +88,7 @@ export function ApprovalPrompt({
         <button
           onClick={() => onDecide(pending.id, true, true)}
           title={`Run this, and don't ask again for "${pending.display}" in this chat`}
-          className="ml-auto rounded-lg px-2.5 py-1.5 text-[11.5px] text-text-muted transition-colors hover:text-text-primary"
+          className="ml-auto rounded-lg px-2.5 py-1.5 text-[12px] text-text-muted transition-colors hover:text-text-primary"
         >
           Always allow this
         </button>

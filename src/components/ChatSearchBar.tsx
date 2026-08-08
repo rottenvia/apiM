@@ -90,7 +90,7 @@ export function ChatSearchBar({
               : "Partial matches — “calc” will match “calculator”"
           }
           aria-pressed={wholeWord}
-          className="flex h-6 flex-none items-center rounded-md px-1.5 font-mono text-[11px] font-semibold text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary data-[active=true]:bg-accent/15 data-[active=true]:text-accent-light"
+          className="flex h-6 flex-none items-center rounded-lg px-1.5 font-mono text-[11px] font-semibold text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary data-[active=true]:bg-accent/15 data-[active=true]:text-accent-light"
         >
           ab|
         </button>
@@ -102,7 +102,7 @@ export function ChatSearchBar({
           disabled={total === 0}
           title="Previous match (Shift+Enter)"
           aria-label="Previous match"
-          className="flex h-6 w-6 flex-none items-center justify-center rounded-md text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-30"
+          className="flex h-6 w-6 flex-none items-center justify-center rounded-lg text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-30"
         >
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} aria-hidden="true">
             <path strokeLinecap="round" strokeLinejoin="round" d="M18 15l-6-6-6 6" />
@@ -114,7 +114,7 @@ export function ChatSearchBar({
           disabled={total === 0}
           title="Next match (Enter)"
           aria-label="Next match"
-          className="flex h-6 w-6 flex-none items-center justify-center rounded-md text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-30"
+          className="flex h-6 w-6 flex-none items-center justify-center rounded-lg text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-30"
         >
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} aria-hidden="true">
             <path strokeLinecap="round" strokeLinejoin="round" d="M6 9l6 6 6-6" />
@@ -125,7 +125,7 @@ export function ChatSearchBar({
           onClick={onClose}
           title="Close (Esc)"
           aria-label="Close find"
-          className="flex h-6 w-6 flex-none items-center justify-center rounded-md text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
+          className="flex h-6 w-6 flex-none items-center justify-center rounded-lg text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
         >
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} aria-hidden="true">
             <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />

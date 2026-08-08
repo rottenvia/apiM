@@ -136,7 +136,7 @@ export function SettingsModal({
             <h2 className="text-[15px] font-semibold leading-5 text-text-primary">
               Settings
             </h2>
-            <p className="mt-0.5 truncate text-[11.5px] leading-4 text-text-muted">
+            <p className="mt-0.5 truncate text-[12px] leading-4 text-text-muted">
               {active.blurb}
             </p>
           </div>
@@ -356,7 +356,7 @@ export function SettingsModal({
                       {m}
                     </button>
                   ))}
-                  <span className="self-center text-[10px] text-text-muted">
+                  <span className="self-center text-[11px] text-text-muted">
                     mini is ~10x cheaper and enough for most screenshots
                   </span>
                 </div>
@@ -384,27 +384,27 @@ export function SettingsModal({
                 <div className="grid grid-cols-2 gap-2">
                   <button
                     onClick={() => onModelChange("deepseek-v4-pro")}
-                    className={`px-4 py-3 rounded-xl text-sm font-medium transition-all duration-200 ${
+                    className={`px-4 py-3 rounded-xl text-sm font-medium transition-all duration-150 ${
                       model === "deepseek-v4-pro"
                         ? "bg-accent/15 text-accent-light border border-accent/30"
                         : "bg-bg-tertiary text-text-secondary border border-border hover:border-border-light"
                     }`}
                   >
                     <span className="block font-semibold">V4 Pro</span>
-                    <span className="text-[10px] opacity-70">
+                    <span className="text-[11px] opacity-70">
                       49B params • Frontier
                     </span>
                   </button>
                   <button
                     onClick={() => onModelChange("deepseek-v4-flash")}
-                    className={`px-4 py-3 rounded-xl text-sm font-medium transition-all duration-200 ${
+                    className={`px-4 py-3 rounded-xl text-sm font-medium transition-all duration-150 ${
                       model === "deepseek-v4-flash"
                         ? "bg-accent/15 text-accent-light border border-accent/30"
                         : "bg-bg-tertiary text-text-secondary border border-border hover:border-border-light"
                     }`}
                   >
                     <span className="block font-semibold">V4 Flash</span>
-                    <span className="text-[10px] opacity-70">
+                    <span className="text-[11px] opacity-70">
                       13B params • Fast
                     </span>
                   </button>
@@ -427,7 +427,7 @@ export function SettingsModal({
                     <button
                       key={e.id}
                       onClick={() => onDefaultEffortChange(e.id)}
-                      className={`px-2 py-2.5 rounded-xl text-xs font-medium transition-all duration-200 ${
+                      className={`px-2 py-2.5 rounded-xl text-xs font-medium transition-all duration-150 ${
                         defaultEffort === e.id
                           ? "bg-accent/15 text-accent-light border border-accent/30"
                           : "bg-bg-tertiary text-text-secondary border border-border hover:border-border-light"
@@ -537,7 +537,7 @@ export function SettingsModal({
                         />
                       </svg>
                     </span>
-                    <p className="text-[11.5px] leading-4 text-text-secondary">
+                    <p className="text-[12px] leading-4 text-text-secondary">
                       Code the assistant writes will run on this computer without
                       asking. It can only start real interpreters, never a shell,
                       and each command is stopped after 30 seconds — but a program

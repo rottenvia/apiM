@@ -131,7 +131,7 @@ export function DeleteChatDialog({
             <p className="truncate text-[13px] font-medium text-text-primary" title={title}>
               {title || "Untitled chat"}
             </p>
-            <p className="mt-0.5 text-[11.5px] text-text-muted">
+            <p className="mt-0.5 text-[12px] text-text-muted">
               {messageCount === undefined
                 ? "Every message in it will be deleted."
                 : `${messageCount} message${
@@ -142,7 +142,7 @@ export function DeleteChatDialog({
         </div>
 
         <div className="mt-4 flex items-center gap-2 border-t border-border px-5 py-3.5">
-          <p className="min-w-0 flex-1 text-[11.5px] leading-4 text-text-muted">
+          <p className="min-w-0 flex-1 text-[12px] leading-4 text-text-muted">
             {armed ? (
               "You can delete it now."
             ) : (
@@ -153,7 +153,7 @@ export function DeleteChatDialog({
           <button
             ref={cancelRef}
             onClick={close}
-            className="flex-none rounded-lg border border-border px-3 py-1.5 text-[12.5px] font-medium text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
+            className="flex-none rounded-lg border border-border px-3 py-1.5 text-[13px] font-medium text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
           >
             Cancel
           </button>
@@ -163,7 +163,7 @@ export function DeleteChatDialog({
             disabled={!armed}
             aria-disabled={!armed}
             title={armed ? "Delete this chat" : `Unlocks in ${remaining}s`}
-            className={`relative flex-none overflow-hidden rounded-lg px-3 py-1.5 text-[12.5px] font-medium text-white transition-colors ${
+            className={`relative flex-none overflow-hidden rounded-lg px-3 py-1.5 text-[13px] font-medium text-white transition-colors ${
               armed
                 ? "cursor-pointer bg-danger/90 hover:bg-danger"
                 : "cursor-not-allowed bg-danger/25"
@@ -174,7 +174,7 @@ export function DeleteChatDialog({
             {!armed && (
               <span
                 aria-hidden="true"
-                className="absolute inset-y-0 left-0 bg-danger/35 transition-[width] duration-200 ease-linear"
+                className="absolute inset-y-0 left-0 bg-danger/35 transition-[width] duration-150 ease-linear"
                 style={{ width: `${Math.round(progress * 100)}%` }}
               />
             )}

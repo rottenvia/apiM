@@ -341,7 +341,7 @@ function MessageBubbleImpl({
       <div
         className={`max-w-[85%] md:max-w-[75%] ${
           isUser
-            ? "rounded-[20px] bg-bg-elevated px-4 py-2.5"
+            ? "rounded-2xl bg-bg-elevated px-4 py-2.5"
             : "bg-transparent px-4"
         }`}
       >
@@ -406,7 +406,7 @@ function MessageBubbleImpl({
                 <div className="flex items-center justify-end gap-1.5">
                   <button
                     onClick={() => setEditing(false)}
-                    className="rounded-md px-2 py-1 text-[11px] text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
+                    className="rounded-lg px-2 py-1 text-[11px] text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
                   >
                     Cancel
                   </button>
@@ -417,7 +417,7 @@ function MessageBubbleImpl({
                       setEditing(false);
                     }}
                     disabled={!draft.trim()}
-                    className="rounded-md bg-accent px-2.5 py-1 text-[11px] font-medium text-white transition-colors hover:bg-accent-light disabled:opacity-40"
+                    className="rounded-lg bg-accent px-2.5 py-1 text-[11px] font-medium text-white transition-colors hover:bg-accent-light disabled:opacity-40"
                   >
                     Send
                   </button>
@@ -437,7 +437,7 @@ function MessageBubbleImpl({
                   </div>
 
                   {(onEdit || onDelete) && (
-                    <div className="grid grid-rows-[0fr] opacity-0 transition-all duration-200 focus-within:grid-rows-[1fr] focus-within:opacity-100 group-hover/msg:grid-rows-[1fr] group-hover/msg:opacity-100">
+                    <div className="grid grid-rows-[0fr] opacity-0 transition-all duration-150 focus-within:grid-rows-[1fr] focus-within:opacity-100 group-hover/msg:grid-rows-[1fr] group-hover/msg:opacity-100">
                       <div className="overflow-hidden">
                         <div className="mt-1 flex items-center justify-between gap-2">
                       {onEdit && (
@@ -448,7 +448,7 @@ function MessageBubbleImpl({
                           }}
                           title="Edit and resend"
                           aria-label="Edit message"
-                          className="flex h-6 items-center gap-1 rounded-md px-1.5 text-[10px] font-medium text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
+                          className="flex h-6 items-center gap-1 rounded-lg px-1.5 text-[11px] font-medium text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
                         >
                           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} aria-hidden="true">
                             <path strokeLinecap="round" strokeLinejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
@@ -462,7 +462,7 @@ function MessageBubbleImpl({
                           onClick={() => onDelete(message.id)}
                           title="Delete this message and its reply"
                           aria-label="Delete message"
-                          className="flex h-6 items-center gap-1 rounded-md px-1.5 text-[10px] font-medium text-text-muted transition-colors hover:bg-danger/12 hover:text-danger"
+                          className="flex h-6 items-center gap-1 rounded-lg px-1.5 text-[11px] font-medium text-text-muted transition-colors hover:bg-danger/12 hover:text-danger"
                         >
                           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} aria-hidden="true">
                             <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M4 7h16" />
@@ -514,7 +514,7 @@ function MessageBubbleImpl({
               <div className="flex flex-wrap items-center gap-1.5">
                 {message.thinkingEffort &&
                   message.thinkingEffort !== "none" && (
-                    <span className="inline-flex items-center gap-1 rounded-md border border-[#cfa25a]/25 bg-[#cfa25a]/10 px-1.5 py-0.5 text-[10px] font-medium text-[#cfa25a]">
+                    <span className="inline-flex items-center gap-1 rounded-lg border border-[#cfa25a]/25 bg-[#cfa25a]/10 px-1.5 py-0.5 text-[11px] font-medium text-[#cfa25a]">
                       <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} aria-hidden="true">
                         <path strokeLinecap="round" strokeLinejoin="round" d="M12 3l1.85 5.15L19 10l-5.15 1.85L12 17l-1.85-5.15L5 10l5.15-1.85L12 3z" />
                       </svg>
@@ -529,7 +529,7 @@ function MessageBubbleImpl({
                     onClick={() => setShowSources((v) => !v)}
                     aria-expanded={showSources}
                     title={searchTooltip}
-                    className="inline-flex items-center gap-1 rounded-md border border-[#6ba3a0]/25 bg-[#6ba3a0]/10 px-1.5 py-0.5 text-[10px] font-medium text-[#6ba3a0] transition-colors hover:bg-[#6ba3a0]/20"
+                    className="inline-flex items-center gap-1 rounded-lg border border-[#6ba3a0]/25 bg-[#6ba3a0]/10 px-1.5 py-0.5 text-[11px] font-medium text-[#6ba3a0] transition-colors hover:bg-[#6ba3a0]/20"
                   >
                     <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} aria-hidden="true">
                       <circle cx="11" cy="11" r="8" />
@@ -539,7 +539,7 @@ function MessageBubbleImpl({
                     <svg
                       width="8" height="8" viewBox="0 0 24 24" fill="none"
                       stroke="currentColor" strokeWidth={3} aria-hidden="true"
-                      className={`transition-transform duration-200 ${showSources ? "rotate-180" : ""}`}
+                      className={`transition-transform duration-150 ${showSources ? "rotate-180" : ""}`}
                     >
                       <path strokeLinecap="round" strokeLinejoin="round" d="M6 9l6 6 6-6" />
                     </svg>
@@ -548,7 +548,7 @@ function MessageBubbleImpl({
 
                 {message.tokenCount ? (
                   <span
-                    className="text-[10px] text-[#6d685d]"
+                    className="text-[11px] text-[#6d685d]"
                     title={
                       message.usage
                         ? `${(message.usage.prompt_tokens ?? 0).toLocaleString()} in · ${(message.usage.completion_tokens ?? 0).toLocaleString()} out`
@@ -561,7 +561,7 @@ function MessageBubbleImpl({
 
                 {cost !== null && (
                   <span
-                    className="text-[10px] text-[#6d685d]"
+                    className="text-[11px] text-[#6d685d]"
                     title={`Estimated from ${message.model ?? "model"} pricing`}
                   >
                     {formatCost(cost)}
@@ -572,7 +572,7 @@ function MessageBubbleImpl({
                     own figure rather than being folded into the token cost. */}
                 {message.searchUsd ? (
                   <span
-                    className="text-[10px] text-[#6d685d]"
+                    className="text-[11px] text-[#6d685d]"
                     title={
                       message.searchCacheHits
                         ? `Web search, estimated · ${message.searchCacheHits} query(s) reused from cache at no cost`
@@ -585,7 +585,7 @@ function MessageBubbleImpl({
 
                 {message.durationMs ? (
                   <span
-                    className="inline-flex items-center gap-1 text-[10px] text-[#6d685d]"
+                    className="inline-flex items-center gap-1 text-[11px] text-[#6d685d]"
                     title="Time from sending to the last token"
                   >
                     <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} aria-hidden="true">
@@ -616,7 +616,7 @@ function MessageBubbleImpl({
                       <span className="block truncate text-xs text-[#ede9e2] transition-colors group-hover:text-[#6ba3a0]">
                         {result.title}
                       </span>
-                      <span className="block truncate text-[10px] text-[#6d685d]">
+                      <span className="block truncate text-[11px] text-[#6d685d]">
                         {result.domain}
                       </span>
                     </span>
@@ -637,7 +637,7 @@ function MessageBubbleImpl({
                 whether the panel tracks the incoming text. */}
             {message.reasoningContent && (
               <div
-                className={`thinking-panel overflow-hidden rounded-[10px] border transition-colors duration-300 ${
+                className={`thinking-panel overflow-hidden rounded-lg border transition-colors duration-300 ${
                   showThinking
                     ? "border-[#cfa25a]/25 bg-[#cfa25a]/[0.04]"
                     : "border-[#cfa25a]/20"
@@ -661,7 +661,7 @@ function MessageBubbleImpl({
                     <svg
                       width="13" height="13" viewBox="0 0 24 24" fill="none"
                       stroke="currentColor" strokeWidth={2.2} aria-hidden="true"
-                      className={`flex-none transition-transform duration-200 ${showThinking ? "rotate-90" : ""}`}
+                      className={`flex-none transition-transform duration-150 ${showThinking ? "rotate-90" : ""}`}
                     >
                       <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
                     </svg>
@@ -682,7 +682,7 @@ function MessageBubbleImpl({
                           : "Scrolling freely — click to follow the text"
                       }
                       aria-pressed={followThinking}
-                      className={`flex h-6 flex-none items-center gap-1 rounded-md px-1.5 text-[10px] font-medium transition-colors ${
+                      className={`flex h-6 flex-none items-center gap-1 rounded-lg px-1.5 text-[11px] font-medium transition-colors ${
                         followThinking
                           ? "bg-[#cfa25a]/20 text-[#cfa25a]"
                           : "text-[#6d685d] hover:bg-[#33302a] hover:text-[#a29d92]"
@@ -734,7 +734,7 @@ function MessageBubbleImpl({
                 {onRegenerate && (
                   <button
                     onClick={() => onRegenerate(message.id)}
-                    className="flex-none rounded-md border border-[#cfa25a]/30 px-2 py-1 text-[11px] font-medium text-[#cfa25a] transition-colors hover:bg-[#cfa25a]/15"
+                    className="flex-none rounded-lg border border-[#cfa25a]/30 px-2 py-1 text-[11px] font-medium text-[#cfa25a] transition-colors hover:bg-[#cfa25a]/15"
                   >
                     Try again
                   </button>

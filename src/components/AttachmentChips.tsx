@@ -54,7 +54,7 @@ export function AttachmentChips({
               <img
                 src={file.dataUrl}
                 alt={file.name}
-                className="h-16 w-16 object-cover transition-transform duration-200 group-hover:scale-105"
+                className="h-16 w-16 object-cover transition-transform duration-150 group-hover:scale-105"
               />
 
               {file.analyzing && (
@@ -74,7 +74,7 @@ export function AttachmentChips({
               )}
 
               {file.description && !file.analyzing && (
-                <span className="absolute bottom-0 left-0 right-0 truncate bg-black/70 px-1 py-0.5 text-[8px] text-white">
+                <span className="absolute bottom-0 left-0 right-0 truncate bg-black/70 px-1 py-0.5 text-[9px] text-white">
                   {file.description.replace(/\s+/g, " ").slice(0, 24)}…
                 </span>
               )}
@@ -126,7 +126,7 @@ export function AttachmentChips({
             <span className="block truncate text-xs leading-4 text-text-primary">
               {file.name}
             </span>
-            <span className="block text-[10px] leading-3 text-text-muted">
+            <span className="block text-[11px] leading-3 text-text-muted">
               {formatBytes(file.size)}
               {file.truncated && (
                 <span className="text-warning"> · truncated</span>

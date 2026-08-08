@@ -78,13 +78,13 @@ export function CompareVersions({
       {/* Blurred backdrop — the conversation stays visible but recedes. */}
       <div
         onClick={handleClose}
-        className={`absolute inset-0 bg-black/70 backdrop-blur-md transition-opacity duration-200 ${
+        className={`absolute inset-0 bg-black/70 backdrop-blur-md transition-opacity duration-150 ${
           visible ? "opacity-100" : "opacity-0"
         }`}
       />
 
       <div
-        className={`relative flex h-full max-h-[88vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-[#403c34] bg-[#141210] shadow-[0_28px_80px_rgba(0,0,0,0.6)] transition-all duration-200 ${
+        className={`relative flex h-full max-h-[88vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-[#403c34] bg-[#141210] shadow-[0_28px_80px_rgba(0,0,0,0.6)] transition-all duration-150 ${
           visible ? "scale-100 opacity-100" : "scale-[0.98] opacity-0"
         }`}
       >
@@ -173,7 +173,7 @@ function Pane({
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex flex-none items-center gap-2 px-4 py-1.5">
         <span
-          className={`rounded-md px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
+          className={`rounded-lg px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide ${
             tone === "current"
               ? "bg-[#c96442]/15 text-[#d97f5d]"
               : "bg-[#2a2723] text-[#6d685d]"
@@ -182,12 +182,12 @@ function Pane({
           {version.label}
         </span>
         {version.model && (
-          <span className="text-[10px] text-[#6d685d]">{version.model}</span>
+          <span className="text-[11px] text-[#6d685d]">{version.model}</span>
         )}
       </div>
 
       {/* Independent scroll, contained so the page behind stays put. */}
-      <div className="prose-chat min-h-0 flex-1 overflow-y-auto px-4 pb-4 text-[14px] leading-relaxed text-[#ede9e2] [overscroll-behavior:contain]">
+      <div className="prose-chat min-h-0 flex-1 overflow-y-auto px-4 pb-4 text-[15px] leading-relaxed text-[#ede9e2] [overscroll-behavior:contain]">
         <ReactMarkdown remarkPlugins={[remarkGfm]}>
           {version.content}
         </ReactMarkdown>

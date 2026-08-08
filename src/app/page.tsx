@@ -1411,7 +1411,7 @@ export default function Home() {
             <span className="text-[13px] text-text-primary">{renameError}</span>
             <button
               onClick={() => setRenameError(null)}
-              className="rounded-md px-2 py-0.5 text-[12px] text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
+              className="rounded-lg px-2 py-0.5 text-[12px] text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
             >
               Dismiss
             </button>
@@ -1428,7 +1428,7 @@ export default function Home() {
             <span className="text-[13px] text-text-primary">{deleteError}</span>
             <button
               onClick={() => setDeleteError(null)}
-              className="rounded-md px-2 py-0.5 text-[12px] text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
+              className="rounded-lg px-2 py-0.5 text-[12px] text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
             >
               Dismiss
             </button>

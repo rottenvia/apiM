@@ -42,7 +42,7 @@ export function DiffView({
 
   return (
     <div className="flex min-h-0 flex-col">
-      <div className="flex flex-none items-center gap-3 border-b border-border px-3 py-1.5 text-[11.5px]">
+      <div className="flex flex-none items-center gap-3 border-b border-border px-3 py-1.5 text-[12px]">
         <span className="text-green-400">+{stats.added}</span>
         <span className="text-red-400">−{stats.removed}</span>
         <span className="text-text-muted">
@@ -82,13 +82,13 @@ export function DiffView({
                   {/* Line numbers are not selectable, so copying a diff
                       doesn't drag the gutter along with the code. */}
                   <span
-                    className="w-10 flex-none select-none px-1.5 text-right text-[10.5px] text-text-muted/70"
+                    className="w-10 flex-none select-none px-1.5 text-right text-[11px] text-text-muted/70"
                     aria-hidden="true"
                   >
                     {line.oldLine ?? ""}
                   </span>
                   <span
-                    className="w-10 flex-none select-none px-1.5 text-right text-[10.5px] text-text-muted/70"
+                    className="w-10 flex-none select-none px-1.5 text-right text-[11px] text-text-muted/70"
                     aria-hidden="true"
                   >
                     {line.newLine ?? ""}

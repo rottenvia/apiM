@@ -144,14 +144,14 @@ export function SearchModal({
     >
       <div
         onClick={close}
-        className={`fixed inset-0 bg-black/60 backdrop-blur-[3px] transition-opacity duration-200 ${
+        className={`fixed inset-0 bg-black/60 backdrop-blur-[3px] transition-opacity duration-150 ${
           visible ? "opacity-100" : "opacity-0"
         }`}
       />
 
       <div
         onKeyDown={onKeyDown}
-        className={`relative flex w-full max-w-3xl xl:max-w-4xl flex-col overflow-hidden rounded-2xl border border-[#403c34] bg-[#201e1b] shadow-[0_28px_70px_rgba(0,0,0,0.55)] transition-all duration-200 ${
+        className={`relative flex w-full max-w-3xl xl:max-w-4xl flex-col overflow-hidden rounded-2xl border border-[#403c34] bg-[#201e1b] shadow-[0_28px_70px_rgba(0,0,0,0.55)] transition-all duration-150 ${
           visible ? "translate-y-0 opacity-100" : "-translate-y-2 opacity-0"
         }`}
         role="dialog"
@@ -171,9 +171,9 @@ export function SearchModal({
             className="min-w-0 flex-1 bg-transparent text-[15px] text-[#ede9e2] placeholder-[#6d685d] outline-none"
           />
           {loading && (
-            <span className="flex-none text-[10px] text-[#6d685d]">…</span>
+            <span className="flex-none text-[11px] text-[#6d685d]">…</span>
           )}
-          <kbd className="flex-none rounded border border-[#2c2924] px-1.5 py-0.5 font-mono text-[10px] text-[#6d685d]">
+          <kbd className="flex-none rounded border border-[#2c2924] px-1.5 py-0.5 font-mono text-[11px] text-[#6d685d]">
             Esc
           </kbd>
         </div>
@@ -201,7 +201,7 @@ export function SearchModal({
                   <span className="min-w-0 flex-1 truncate text-sm font-medium text-[#ede9e2]">
                     {highlight(hit.title, query.trim())}
                   </span>
-                  <span className="flex-none text-[10px] text-[#6d685d]">
+                  <span className="flex-none text-[11px] text-[#6d685d]">
                     {hit.archived && "archived · "}
                     {timeAgo(hit.updatedAt)}
                   </span>
@@ -212,7 +212,7 @@ export function SearchModal({
                     key={j}
                     className="mt-1 line-clamp-2 text-[12px] leading-snug text-[#a29d92]"
                   >
-                    <span className="mr-1 text-[10px] uppercase tracking-wide text-[#6d685d]">
+                    <span className="mr-1 text-[11px] uppercase tracking-wide text-[#6d685d]">
                       {s.role === "user" ? "you" : "ai"}
                     </span>
                     {highlight(s.text, query.trim())}
@@ -220,7 +220,7 @@ export function SearchModal({
                 ))}
 
                 {hit.matchCount > hit.snippets.length && (
-                  <p className="mt-1 text-[10px] text-[#6d685d]">
+                  <p className="mt-1 text-[11px] text-[#6d685d]">
                     +{hit.matchCount - hit.snippets.length} more matches
                   </p>
                 )}
@@ -230,7 +230,7 @@ export function SearchModal({
         </div>
 
         {hits.length > 0 && (
-          <div className="flex flex-none items-center gap-3 border-t border-[#2c2924] px-3.5 py-2 text-[10px] text-[#6d685d]">
+          <div className="flex flex-none items-center gap-3 border-t border-[#2c2924] px-3.5 py-2 text-[11px] text-[#6d685d]">
             <span>↑↓ navigate</span>
             <span>↵ open</span>
             <span className="ml-auto">
