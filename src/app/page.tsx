@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import { v4 as uuidv4 } from "uuid";
 import { Sidebar } from "@/components/Sidebar";
 import { ChatArea } from "@/components/ChatArea";
 import { SettingsModal } from "@/components/SettingsModal";
@@ -202,6 +203,19 @@ interface ChatResponse {
 export default function Home() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [currentConvId, setCurrentConvId] = useState<string | null>(null);
+
+  /**
+   * The workspace a new chat will use, allocated before it has been saved.
+   *
+   * A conversation only gets an id once its first message reaches the server,
+   * but files are attached before that — so uploading a zip into a brand new
+   * chat had nowhere to unpack to and was silently skipped. Reserving the id
+   * up front means the workspace exists from the moment anything is dropped
+   * on it, and the first message adopts the same id rather than creating a
+   * second one.
+   */
+  const [draftConvId, setDraftConvId] = useState<string>(() => uuidv4());
+  const workspaceId = currentConvId ?? draftConvId;
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [statusStage, setStatusStage] = useState<StatusStage | null>(null);
@@ -522,6 +536,7 @@ export default function Home() {
 
   const startNewChat = useCallback(() => {
     setCurrentConvId(null);
+    setDraftConvId(uuidv4());
     setMessages([]);
   }, []);
 
@@ -785,7 +800,7 @@ export default function Home() {
             // The model gets `message`; the transcript stores these instead.
             displayContent: options?.displayContent,
             attachments: options?.attachments,
-            conversationId: currentConvId,
+            conversationId: currentConvId ?? draftConvId,
             deepseekApiKey: deepseekKey,
             tavilyApiKey: tavilyKey,
             model,
@@ -803,7 +818,7 @@ export default function Home() {
             visionModel,
             // A new chat has no id yet; the server falls back to the
             // conversation id it creates, which is what we adopt below.
-            workspaceId: currentConvId ?? undefined,
+            workspaceId,
           }),
         });
 
@@ -1140,6 +1155,8 @@ export default function Home() {
       isLoading,
       hasKeys,
       currentConvId,
+      draftConvId,
+      workspaceId,
       deepseekKey,
       tavilyKey,
       model,
@@ -1337,7 +1354,7 @@ export default function Home() {
         onOpenWorkspace={openWorkspace}
         onDecideCommand={decideCommand}
         onAnswerQuestion={answerQuestion}
-        workspaceId={currentConvId}
+        workspaceId={workspaceId}
         onProcessesChanged={() => void refreshWorkspaceFiles()}
         sidePanelOpen={sidePanelOpen}
         onToggleSidePanel={() => setSidePanelOpen((v) => !v)}
@@ -1347,7 +1364,7 @@ export default function Home() {
           conversation would be dead space. */}
       {workspaceEnabled && sidePanelOpen && (
         <WorkspaceSidePanel
-          workspaceId={currentConvId}
+          workspaceId={workspaceId}
           files={workspaceFiles}
           recentlyChanged={recentlyChanged}
           onOpenFile={openWorkspace}
@@ -1441,7 +1458,7 @@ export default function Home() {
 
       {showWorkspace && currentConvId && (
         <WorkspacePanel
-          workspaceId={currentConvId}
+          workspaceId={workspaceId}
           highlightPath={workspaceHighlight}
           onClose={() => {
             setShowWorkspace(false);

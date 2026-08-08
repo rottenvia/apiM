@@ -406,20 +406,33 @@ check(
 // loudest thing on screen, above the reply they belong to.
 const bubble = files.find((f) => f.file.endsWith("MessageBubble.tsx"))?.text ?? "";
 const panel = bubble.slice(
-  bubble.indexOf("thinking-panel overflow-hidden"),
+  bubble.indexOf("thinking-panel thinking-shell"),
   bubble.indexOf("{/* Reply was cut short")
 );
 
 check(
-  "the thinking panel has no accent colour",
-  !panel.includes("cfa25a"),
-  "it is metadata, not a warning"
+  "the panel's colour is transitioned, not switched",
+  /\.thinking-shell\s*\{[^}]*transition:[^}]*border-color[^}]*background-color/s.test(
+    css
+  ),
+  "an instant colour change reads as a repaint, which is what looked like a glitch"
 );
-const panelBorders = [...new Set(panel.match(/border[-\w[\]/#.]*/g) ?? [])];
 check(
-  "and no box around it",
-  panelBorders.every((b) => b === "border-l" || b === "border-border"),
-  panelBorders.join(", ") || "only the body's left rule remains"
+  "the label's colour is transitioned too",
+  /\.thinking-toggle\s*\{[^}]*transition:\s*color/s.test(css),
+  "text jumping from grey to amber in one frame is the same jump"
+);
+check(
+  "the resting state is transparent",
+  /\.thinking-shell\s*\{[^}]*border:\s*1px solid transparent[\s\S]*?background:\s*transparent/s.test(
+    css
+  ),
+  "so there is something to ease from"
+);
+check(
+  "everything that changes shares one duration",
+  (css.match(/\.thinking-(shell|toggle|body-text)[^{]*\{[^}]*0\.3s/gs) ?? []).length >= 3,
+  "staggered easings read as several things happening, not one"
 );
 check(
   "progress is a sweeping line, not repeating dots",
