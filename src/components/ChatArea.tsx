@@ -698,6 +698,7 @@ export function ChatArea({
               }}
               onOpen={() => onOpenWorkspace()}
               onOpenFile={openWorkspaceFile}
+              workspaceId={workspaceId}
             />
           )}
 

@@ -520,6 +520,31 @@ export function WorkspaceSidePanel({
         )}
       </div>
       )}
+
+      {/* Download, said in words.
+          
+          It already existed as a 14px unlabelled icon in the header strip,
+          among four other 14px unlabelled icons, and was reported as missing
+          — which is the same thing as not existing. Getting your files out is
+          not a secondary action: it is the point of having a workspace, and
+          it should be legible without hovering to find a tooltip. */}
+      {files.length > 0 && (
+        <div className="flex-none border-t border-border p-2">
+          <button
+            onClick={download}
+            title="Download everything as a .zip"
+            className="flex w-full items-center justify-center gap-2 rounded-lg border border-border px-3 py-2 text-[12px] font-medium text-text-secondary transition-colors hover:border-border-light hover:bg-bg-hover hover:text-text-primary"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" />
+            </svg>
+            Download all files
+            <span className="text-text-muted">
+              ({files.length})
+            </span>
+          </button>
+        </div>
+      )}
       {importing && workspaceId && (
         <ImportFilesDialog
           workspaceId={workspaceId}
