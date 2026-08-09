@@ -901,7 +901,27 @@ export async function POST(req: NextRequest) {
          * round rather than the task. Without this a long loop looks cheap
          * right up until the final total lands.
          */
-        const totalUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+        /*
+         * The cache split has to be carried, not just the totals.
+         *
+         * DeepSeek reports prompt tokens as a hit/miss pair, and the two are
+         * priced 120x apart. This accumulator kept only the three totals, so
+         * every live figure sent to the UI was computed with the split
+         * missing — and estimateCost falls back to treating the whole prompt
+         * as a miss when it is. The number climbed to several times the real
+         * cost during a run and then dropped when the reply finished and the
+         * saved usage, which does carry the split, replaced it.
+         *
+         * Nothing was ever overcharged; the display was just pricing cached
+         * tokens at the uncached rate.
+         */
+        const totalUsage = {
+          prompt_tokens: 0,
+          completion_tokens: 0,
+          total_tokens: 0,
+          prompt_cache_hit_tokens: 0,
+          prompt_cache_miss_tokens: 0,
+        };
         /**
          * Last tool round whose full transcript was persisted.
          *
@@ -1241,6 +1261,13 @@ export async function POST(req: NextRequest) {
                 totalUsage.prompt_tokens += u.prompt_tokens ?? 0;
                 totalUsage.completion_tokens += u.completion_tokens ?? 0;
                 totalUsage.total_tokens += u.total_tokens ?? 0;
+                // Kept per round and summed, since each round has its own
+                // split — the first is mostly a miss, later ones mostly hits.
+                const roundHit = u.prompt_cache_hit_tokens ?? 0;
+                totalUsage.prompt_cache_hit_tokens += roundHit;
+                totalUsage.prompt_cache_miss_tokens +=
+                  u.prompt_cache_miss_tokens ??
+                  Math.max(0, (u.prompt_tokens ?? 0) - roundHit);
                 send({
                   type: "usage",
                   usage: { ...totalUsage },
@@ -1751,7 +1778,15 @@ export async function POST(req: NextRequest) {
           id: assistantMsgId,
           conversationId: convId,
           persisted,
-          usage,
+          /*
+           * The accumulated total, not the last round.
+           *
+           * `usage` holds whatever the final round reported, so a
+           * twenty-round task ended by announcing the cost of round twenty.
+           * The record written to disk has always used totalUsage, which is
+           * why the figure changed again after a reload — the two disagreed.
+           */
+          usage: totalUsage.total_tokens ? { ...totalUsage } : usage,
           durationMs: Date.now() - startedAt,
           model,
         });
