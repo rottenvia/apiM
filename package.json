@@ -39,7 +39,8 @@
     "test:lessons": "tsx scripts/test-lessons.mjs",
     "test:hardening": "tsx scripts/test-hardening.mjs",
     "test:btw": "tsx scripts/test-btw.mjs",
-    "test:balance": "tsx scripts/test-balance.mjs"
+    "test:balance": "tsx scripts/test-balance.mjs",
+    "test:web": "tsx scripts/test-web.mjs"
   },
   "dependencies": {
     "@types/cross-spawn": "^6.0.6",

@@ -10,6 +10,12 @@ import {
   isRunning,
 } from "@/lib/processes";
 import {
+  fetchPage,
+  extractSelectors,
+  MAX_FETCH_CHARS,
+  WebError,
+} from "@/lib/web";
+import {
   deleteFile,
   editFile,
   listFiles,
@@ -375,6 +381,81 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
           path: { type: "string", description: "File path to delete." },
         },
         required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "fetch_url",
+      description:
+        "Open a web page and read it. Use this whenever the answer depends " +
+        "on what is actually on a site — its wording, its data, or its " +
+        "markup — rather than on what articles say about it. Set raw to true " +
+        "to get the HTML, which is what you need before writing anything " +
+        "that targets a page, such as a userscript or an extension content " +
+        "script. Never guess a selector you have not seen.",
+      parameters: {
+        type: "object",
+        properties: {
+          url: {
+            type: "string",
+            description: "Full URL, including https://",
+          },
+          raw: {
+            type: "boolean",
+            description:
+              "Return the HTML source instead of readable text. Use for " +
+              "anything that inspects or modifies a page's structure.",
+          },
+        },
+        required: ["url"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "inspect_page",
+      description:
+        "List the ids, classes and data-attributes on a page, so you can " +
+        "target it precisely. Far cheaper than reading the whole HTML and " +
+        "usually the only thing you need before writing a content script, " +
+        "a userscript, or a scraper. Prefer this over fetch_url with raw " +
+        "when you only need selectors.",
+      parameters: {
+        type: "object",
+        properties: {
+          url: { type: "string", description: "Full URL, including https://" },
+          contains: {
+            type: "string",
+            description:
+              "Optional filter — only return selectors containing this text, " +
+              'e.g. "score" or "match".',
+          },
+        },
+        required: ["url"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "download_file",
+      description:
+        "Save a file from a URL straight into the workspace — a dataset, an " +
+        "icon, a reference document. Use this instead of asking the user to " +
+        "download something and attach it.",
+      parameters: {
+        type: "object",
+        properties: {
+          url: { type: "string", description: "Full URL, including https://" },
+          path: {
+            type: "string",
+            description: "Where to save it, relative to the workspace root.",
+          },
+        },
+        required: ["url", "path"],
       },
     },
   },
@@ -783,6 +864,111 @@ export async function runTool(
         };
       }
 
+      case "fetch_url": {
+        const wantsRaw = args.raw === true;
+        const page = await fetchPage(str(args, "url"), { raw: wantsRaw });
+
+        const header = [
+          `${page.url}`,
+          page.title ? `Title: ${page.title}` : null,
+          `HTTP ${page.status} · ${page.contentType} · ${(page.bytes / 1024).toFixed(0)}KB`,
+          page.truncated
+            ? `[truncated at ${MAX_FETCH_CHARS.toLocaleString()} characters]`
+            : null,
+        ]
+          .filter(Boolean)
+          .join("\n");
+
+        const body = wantsRaw && page.html ? page.html : page.text;
+
+        return {
+          ok: true,
+          content: `${header}\n\n${body}`,
+          summary: `Read ${new URL(page.url).hostname}${
+            page.title ? ` — ${page.title.slice(0, 50)}` : ""
+          }`,
+        };
+      }
+
+      case "inspect_page": {
+        const page = await fetchPage(str(args, "url"), { raw: true });
+        if (!page.html) {
+          return {
+            ok: false,
+            content:
+              `${page.url} returned ${page.contentType}, not HTML, so it has ` +
+              `no selectors to inspect.`,
+            summary: "Not an HTML page",
+          };
+        }
+
+        const found = extractSelectors(page.html);
+        const filter =
+          typeof args.contains === "string" ? args.contains.toLowerCase() : "";
+        const keep = (list: string[]) =>
+          filter ? list.filter((v) => v.toLowerCase().includes(filter)) : list;
+
+        const ids = keep(found.ids);
+        const classes = keep(found.classes);
+        const attrs = keep(found.dataAttrs);
+
+        if (ids.length === 0 && classes.length === 0 && attrs.length === 0) {
+          return {
+            ok: true,
+            content: filter
+              ? `No ids, classes or data-attributes on ${page.url} contain "${filter}". ` +
+                `The page has ${found.ids.length} ids and ${found.classes.length} ` +
+                `classes in total — try a different word, or call again without a filter.`
+              : `${page.url} has no usable ids or classes. It is probably rendered ` +
+                `by JavaScript after load, so the served HTML is nearly empty. ` +
+                `Ask the user to paste the element from their browser's inspector.`,
+            summary: "No selectors found",
+          };
+        }
+
+        const section = (label: string, list: string[]) =>
+          list.length ? `${label} (${list.length}):\n${list.join("\n")}` : null;
+
+        return {
+          ok: true,
+          content: [
+            `Selectors on ${page.url}${filter ? ` matching "${filter}"` : ""}:`,
+            "",
+            section("IDs", ids),
+            section("Classes", classes),
+            section("Data attributes", attrs),
+            "",
+            "These are the real names on the page. Target these exactly rather " +
+              "than inventing selectors.",
+          ]
+            .filter(Boolean)
+            .join("\n"),
+          summary: `Inspected ${new URL(page.url).hostname} — ${
+            ids.length + classes.length
+          } selectors`,
+        };
+      }
+
+      case "download_file": {
+        const target = str(args, "path");
+        const page = await fetchPage(str(args, "url"), { raw: true });
+        // Raw body when it is a document, decoded text otherwise, so a saved
+        // page is the actual page rather than a stripped rendering of it.
+        const body = page.html ?? page.text;
+        const written = await writeFile(workspaceId, target, body);
+
+        return {
+          ok: true,
+          content:
+            `Saved ${page.url} to ${written.path} (${written.bytes} bytes).` +
+            (page.truncated
+              ? " The response was truncated at the size limit."
+              : ""),
+          summary: `Downloaded ${written.path}`,
+          changedPath: written.path,
+        };
+      }
+
       default:
         return {
           ok: false,
@@ -792,7 +978,9 @@ export async function runTool(
     }
   } catch (error) {
     const message =
-      error instanceof WorkspaceError
+      // A network refusal is actionable — the model should see "that host
+      // blocked us" or "that is a private address", not "Tool failed".
+      error instanceof WebError || error instanceof WorkspaceError
         ? error.message
         : error instanceof Error
           ? error.message

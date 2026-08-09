@@ -36,7 +36,11 @@ for (const bad of ["sh", "bash", "cmd", "powershell", "pwsh", "/bin/bash"]) {
   const v = R.validateCommand(bad, []);
   check(`refuses ${bad}`, v.ok === false);
 }
-for (const bad of ["rm", "curl", "wget", "chmod", "ssh", "nc"]) {
+// curl and wget were moved onto the allow-list deliberately: the agent had
+// no way to reach anything outside the workspace, which is what left it
+// writing code against pages it had never seen. They take their target as an
+// argument and cannot execute arbitrary text. Everything here still cannot.
+for (const bad of ["rm", "chmod", "ssh", "nc", "dd", "kill"]) {
   const v = R.validateCommand(bad, []);
   check(`refuses ${bad}`, v.ok === false);
 }
