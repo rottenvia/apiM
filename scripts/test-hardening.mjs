@@ -175,7 +175,7 @@ console.log("\n6. The refine pass cannot waste money");
 
 check(
   "it does not run after the user pressed Stop",
-  /!req\.signal\.aborted &&/.test(route),
+  /!stopped\(\) &&/.test(route),
   "reflecting on a cancelled task spends money on work the user rejected"
 );
 check(
@@ -600,6 +600,129 @@ check(
   /if \(!showThinking\) onLoadReasoning\?\.\(message\.id\)/.test(
     read("src/components/MessageBubble.tsx")
   )
+);
+
+// ------------------------------------------------------------------
+console.log("\n14. Closing the tab is not the same as pressing Stop");
+
+/*
+ * The route watched req.signal for everything, and the browser aborts that
+ * when its tab closes — so closing a tab killed a run that was thirty rounds
+ * in and still writing files into the user's workspace. Those files are the
+ * point, so a lost connection now means "nobody is watching", not "stop".
+ */
+const runs = await load("src/lib/runs.ts");
+const routeSrc = read("src/app/api/chat/route.ts");
+const pageSrc = read("src/app/page.tsx");
+
+const sig = runs.beginRun("t-1", "c-1");
+check(
+  "a run is registered and its signal starts clean",
+  runs.isRunning("t-1") && !sig.aborted
+);
+check("it is findable by conversation", runs.activeRuns("c-1").includes("t-1"));
+check(
+  "only an explicit stop aborts it",
+  runs.stopRun("t-1") && sig.aborted,
+  "the closed tab aborts req.signal, which the work no longer watches"
+);
+check(
+  "stopping something already finished says so",
+  runs.stopRun("t-1") === false,
+  "a Stop that silently did nothing is worse than an honest answer"
+);
+runs.beginRun("t-2", "c-1");
+runs.endRun("t-2");
+check("finishing releases the run", runs.runCount() === 0);
+
+check(
+  "the work watches the run, not the request",
+  /const runSignal = beginRun\(assistantMsgId, convId\)/.test(routeSrc) &&
+    /const stopped = \(\) => runSignal\.aborted/.test(routeSrc)
+);
+check(
+  "prompts that need a person still follow the connection",
+  /AbortSignal\.any\(\[req\.signal, runSignal\]\)/.test(routeSrc),
+  "a question with nobody to answer it would hang until the safety ceiling"
+);
+check(
+  "there is a ceiling so a wedged run cannot live forever",
+  runs.MAX_RUN_MS > 0 && runs.MAX_RUN_MS <= 60 * 60 * 1000,
+  `${runs.MAX_RUN_MS / 60000} minutes`
+);
+check(
+  "Stop tells the server rather than just closing the stream",
+  /\/api\/chat\/stop/.test(pageSrc) && /keepalive: true/.test(pageSrc),
+  "aborting the fetch alone no longer stops anything"
+);
+check(
+  "the server sends the id Stop needs",
+  /messageId: assistantMsgId/.test(routeSrc)
+);
+
+// ------------------------------------------------------------------
+console.log("\n15. Searching inside messages actually works");
+
+/*
+ * searchConversations looked for files ending in .json in the data directory
+ * — the layout from before chats were given their own folder. It matched
+ * nothing, so search silently returned no results for everything, which
+ * reads as "not found" rather than as a bug.
+ */
+const SEARCH_ID = randomUUID();
+await store.appendMessages(SEARCH_ID, "faceit extension work", [
+  { id: randomUUID(), role: "user", content: "how do we fix the zip bug", createdAt: new Date().toISOString() },
+  { id: randomUUID(), role: "assistant", content: "ensureFolder orphaned the uploads folder", createdAt: new Date().toISOString() },
+]);
+
+check(
+  "a phrase inside a message is found",
+  (await store.searchConversations("zip bug")).length === 1,
+  "this returned nothing at all before"
+);
+check(
+  "an identifier buried in a reply is found",
+  (await store.searchConversations("ensureFolder")).length === 1
+);
+check("titles still match", (await store.searchConversations("faceit")).length === 1);
+check(
+  "a real miss still returns nothing",
+  (await store.searchConversations("zzznotpresent")).length === 0
+);
+check(
+  "results carry a snippet, not just a title",
+  Boolean((await store.searchConversations("zip bug"))[0]?.snippets?.[0]?.text)
+);
+
+// ------------------------------------------------------------------
+console.log("\n16. A render crash does not blank the app");
+
+check(
+  "there is an error boundary",
+  existsSync(path.join(ROOT, "src/app/error.tsx")),
+  "an uncaught render error left a white page with no way back"
+);
+const errSrc = read("src/app/error.tsx");
+check(
+  "it says the work is safe",
+  /on disk and untouched/.test(errSrc),
+  "the first question is whether anything was lost"
+);
+check("it offers a retry", errSrc.includes("onClick={reset}"));
+check(
+  "it shows the actual message",
+  /error\.message/.test(errSrc),
+  "a self-hosted user is also the person who can fix it"
+);
+
+check(
+  "losing the connection is reported as such",
+  /No connection\./.test(pageSrc) && /addEventListener\("offline", update\)/.test(pageSrc),
+  "a reply stopping mid-sentence otherwise reads as the model failing"
+);
+check(
+  "and it says the work continues without the tab",
+  /keeps going on the server/.test(pageSrc)
 );
 
 console.log(

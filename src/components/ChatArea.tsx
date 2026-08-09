@@ -36,6 +36,8 @@ interface ChatAreaProps {
   canResumeLast?: boolean;
   /** Continue that reply — the typed equivalent of its Resume button. */
   onResumeLast?: () => void;
+  /** Shown above the composer when the browser has no connection. */
+  connectionNotice?: React.ReactNode;
   /** Shown above the composer when the DeepSeek balance is getting low. */
   balanceWarning?: React.ReactNode;
   /** The current side question, if one has been asked. */
@@ -95,6 +97,7 @@ export function ChatArea({
   statusStage,
   canResumeLast,
   onResumeLast,
+  connectionNotice,
   balanceWarning,
   btwEntry,
   onAskBtw,
@@ -894,7 +897,11 @@ export function ChatArea({
       )}
       </div>
 
-      {/* Money first: if there is not enough left to finish a task, that
+      {/* Connection first: with no network nothing else on this bar can be
+          acted on, and it explains failures the others would be blamed for. */}
+      {connectionNotice}
+
+      {/* Money next: if there is not enough left to finish a task, that
           matters more than anything else on screen. */}
       {balanceWarning}
 
