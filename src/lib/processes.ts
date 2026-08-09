@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import crossSpawn from "cross-spawn";
 import { promises as fs } from "node:fs";
-import path from "node:path";
 import { workspaceDirectory } from "@/lib/workspace";
 import { validateCommand, describeCommand } from "@/lib/runner";
 
@@ -37,29 +37,6 @@ export interface TrackedProcess {
   log: string;
   truncated: boolean;
   child: ChildProcess;
-}
-
-/**
- * Resolve a command to the file that actually exists, on Windows.
- *
- * Mirrors the resolver in lib/runner.ts — see the long note there for why
- * this is necessary and why turning `shell` on instead would be worse.
- */
-async function resolveLauncher(command: string): Promise<string> {
-  if (process.platform !== "win32") return command;
-  const dirs = (process.env.PATH ?? "").split(";").filter(Boolean);
-  for (const dir of dirs) {
-    for (const ext of [".exe", ".cmd", ".bat"]) {
-      const candidate = path.join(dir, `${command}${ext}`);
-      try {
-        await fs.access(candidate);
-        return candidate;
-      } catch {
-        /* keep looking */
-      }
-    }
-  }
-  return command;
 }
 
 const processes = new Map<string, TrackedProcess>();
@@ -132,18 +109,13 @@ export async function startProcess(
 
   let child: ChildProcess;
   try {
-    // Same Windows problem as run_command: `npm`, `npx` and most JS tooling
-    // are `.cmd` shims, which spawn cannot launch with shell:false. A dev
-    // server started with `npm run dev` failed here for the same reason.
-    const launcher = await resolveLauncher(check.command);
-
-    child = spawn(launcher, check.args, {
+    // cross-spawn for the same reason as run_command: `npm run dev` is a
+    // .cmd shim on Windows and a plain spawn cannot start it. See the long
+    // note in lib/runner.ts.
+    child = crossSpawn(check.command, check.args, {
       cwd,
       shell: false,
       windowsHide: true,
-      // Node refuses to spawn a batch file without this; it quotes the
-      // arguments itself rather than letting cmd.exe re-parse them.
-      windowsVerbatimArguments: false,
       // Own process group on Unix, so killing it also kills anything it
       // spawned — a dev server that forks a child would otherwise survive
       // and keep the port bound.

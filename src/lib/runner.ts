@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import crossSpawn from "cross-spawn";
 import path from "node:path";
 import { promises as fs } from "node:fs";
 import { workspaceDirectory } from "@/lib/workspace";
@@ -321,45 +322,35 @@ function childEnv(cwd: string, venvPath: string | null): NodeJS.ProcessEnv {
 }
 
 /**
- * Find the real file a command name refers to on Windows.
+ * Why this uses cross-spawn rather than node's spawn directly.
  *
- * On Windows most of these tools are not executables at all. `npm` is
- * `npm.cmd`, `npx` is `npx.cmd`, `tsc` and `jest` are `.cmd` shims — only
- * `node.exe` and `python.exe` are real binaries. `spawn()` with
- * `shell: false` can launch an `.exe` and cannot launch a `.cmd`, so every
- * npm command failed with ENOENT and surfaced as a bare "Failed: npm install"
- * that looked like a permissions problem. It was not: npm has always been on
- * the allow-list.
+ * On Windows npm, npx, tsx, eslint and most JS tooling are `.cmd` shims, not
+ * executables. Two separate things go wrong with a plain spawn:
  *
- * Resolving to the actual file keeps `shell: false`, which matters — turning
- * the shell on would mean the argument list is re-parsed by cmd.exe, and
- * every quoting and metacharacter question that the allow-list exists to
- * avoid comes back.
+ *   - `spawn("npm", ...)` fails with ENOENT, because there is no file called
+ *     exactly "npm" — the extension is required.
+ *   - `spawn("npm.cmd", ...)` fails with EINVAL, because since
+ *     CVE-2024-27980 node refuses to launch a batch file unless `shell` is
+ *     enabled. The vulnerability was that arguments passed to a `.cmd` are
+ *     re-parsed by cmd.exe, so a crafted argument could inject a second
+ *     command; node's mitigation was to refuse outright.
  *
- * Returns the command unchanged on Unix, and when nothing matching is found,
- * so the spawn failure is reported normally rather than being hidden here.
+ * Resolving the path to `npm.cmd` fixes the first and walks straight into the
+ * second, which is what happened here: the error changed from "not found" to
+ * EINVAL.
+ *
+ * `shell: true` is the fix everyone reaches for and it is the wrong one for
+ * this app. It re-enables exactly the injection the CVE describes, and every
+ * argument this runner handles comes from a language model — the one source
+ * you would least want feeding unescaped text to a shell. Node 24 also emits
+ * a deprecation warning for it.
+ *
+ * cross-spawn does what the mitigation intends: it detects a `.cmd`, invokes
+ * it as `cmd.exe /c`, and escapes the arguments itself so cmd.exe cannot
+ * reinterpret them. On Unix it is a thin pass-through to spawn. It is the
+ * approach node's own advisory points at and what most cross-platform CLIs
+ * use.
  */
-async function resolveWindowsLauncher(command: string): Promise<string> {
-  if (process.platform !== "win32") return command;
-
-  // Order matters: prefer a real executable, then the shims Node installs.
-  const extensions = [".exe", ".cmd", ".bat"];
-  const dirs = (process.env.PATH ?? "").split(";").filter(Boolean);
-
-  for (const dir of dirs) {
-    for (const ext of extensions) {
-      const candidate = path.join(dir, `${command}${ext}`);
-      try {
-        await fs.access(candidate);
-        return candidate;
-      } catch {
-        /* keep looking */
-      }
-    }
-  }
-
-  return command;
-}
 
 /** Interpreters whose packages belong in the workspace venv. */
 const PYTHON_COMMANDS = new Set(["python", "python3", "pip", "pip3", "pytest"]);
@@ -487,34 +478,29 @@ export async function runCommand(
         ...[process.platform === "win32" ? `${check.command}.exe` : check.command]
       )
     : check.command;
+  // The venv's own executable when it has one, otherwise the bare name —
+  // cross-spawn resolves it, including the .cmd shims on Windows.
   const resolved = venvPath
     ? await fs
         .access(executable)
         .then(() => executable)
-        // The venv may not hold this tool; fall back to resolving it normally.
-        .catch(() => resolveWindowsLauncher(check.command))
-    : await resolveWindowsLauncher(check.command);
+        .catch(() => check.command)
+    : check.command;
 
   const started = Date.now();
 
   return new Promise<RunResult>((resolve) => {
     // The env is cast because Next augments ProcessEnv with required keys,
     // and passing a deliberately minimal environment is the point here.
-    const child = spawn(resolved, check.args, {
+    // shell stays false: cross-spawn handles .cmd by invoking cmd.exe itself
+    // with escaped arguments, which is the safe form of what `shell: true`
+    // would do unsafely.
+    const child = crossSpawn(resolved, check.args, {
       cwd,
       shell: false,
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
       env: childEnv(cwd, venvPath),
-      /*
-       * Required for the `.cmd` shims resolved above.
-       *
-       * Node refuses to spawn a batch file without this since the fix for
-       * CVE-2024-27980, because the arguments would otherwise be re-parsed by
-       * cmd.exe. It quotes them itself instead, which is what makes running
-       * `npm` safe without turning `shell` on.
-       */
-      windowsVerbatimArguments: false,
     });
 
     const limitMs = timeoutFor(check.command, check.args);
