@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { BtwDock } from "@/components/BtwDock";
+import { BalanceWarning } from "@/components/BalanceWarning";
 import type { BtwEntry } from "@/components/BtwDock";
 
 /**
@@ -143,6 +144,34 @@ export default function PreviewBtw() {
       </div>
 
       <div className="mx-auto mt-10 w-full max-w-3xl space-y-14">
+        {/* The balance warning, in each of the states it can reach. */}
+        <section>
+          <div className="mb-3 flex items-baseline gap-3">
+            <h2 className="text-[13px] font-semibold text-text-primary">
+              Balance warnings
+            </h2>
+            <span className="text-[12px] text-text-muted">
+              Silent above $0.50. Appears on the way down, before it is too late to act.
+            </span>
+          </div>
+          <div className="space-y-2">
+            {[
+              { total: 0.42, available: true },
+              { total: 0.09, available: true },
+              { total: -0.53, available: true },
+            ].map((b) => (
+              <BalanceWarning
+                key={b.total}
+                total={b.total}
+                available={b.available}
+                checking={false}
+                onRefresh={() => {}}
+                onDismiss={() => {}}
+              />
+            ))}
+          </div>
+        </section>
+
         {/* What it looks like as you type one */}
         <section>
           <div className="mb-3 flex items-baseline gap-3">

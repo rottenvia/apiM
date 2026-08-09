@@ -5,6 +5,7 @@ import { v4 as uuidv4 } from "uuid";
 import { Sidebar } from "@/components/Sidebar";
 import { ChatArea } from "@/components/ChatArea";
 import type { BtwEntry } from "@/components/BtwDock";
+import { BalanceWarning, levelFor } from "@/components/BalanceWarning";
 import { SettingsModal } from "@/components/SettingsModal";
 import { PluginsModal } from "@/components/PluginsModal";
 import { ArtifactProvider } from "@/components/ArtifactContext";
@@ -239,6 +240,8 @@ export default function Home() {
   // silent 8-second pause reads as a freeze, and the user needs to know the
   // work is not lost.
   const [retryNotice, setRetryNotice] = useState<string | null>(null);
+
+
   const [showSettings, setShowSettings] = useState(false);
   const [showPlugins, setShowPlugins] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
@@ -269,6 +272,74 @@ export default function Home() {
 
   // Settings
   const [deepseekKey, setDeepseekKey] = useState("");
+
+  /*
+   * What is actually left in the DeepSeek account.
+   *
+   * Cost per reply is estimated from token counts after the fact, which
+   * cannot answer the question that matters: will the next task finish.
+   * DeepSeek admits a request against the balance and deducts after it runs,
+   * so a long agent task can begin with a few cents and end overdrawn. This
+   * reads the real figure so the warning arrives before that, not after.
+   */
+  const [balance, setBalance] = useState<{
+    total: number;
+    available: boolean;
+  } | null>(null);
+  const [checkingBalance, setCheckingBalance] = useState(false);
+  /** Balance the user dismissed at, so it reappears only if things worsen. */
+  const [balanceDismissedAt, setBalanceDismissedAt] = useState<number | null>(
+    null
+  );
+
+  const refreshBalanceRef = useRef<(() => void) | null>(null);
+
+  const refreshBalance = useCallback(async () => {
+    if (!deepseekKey) return;
+    setCheckingBalance(true);
+    try {
+      const res = await fetch("/api/balance", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deepseekApiKey: deepseekKey }),
+      });
+      const data = (await res.json()) as {
+        total?: number;
+        available?: boolean;
+        error?: string;
+      };
+      // A failed check leaves the last known figure alone. Showing nothing is
+      // better than replacing a real number with a guess.
+      if (!data.error && typeof data.total === "number") {
+        setBalance({ total: data.total, available: data.available === true });
+      }
+    } catch {
+      /* offline, or the key is wrong — stay quiet */
+    } finally {
+      setCheckingBalance(false);
+    }
+  }, [deepseekKey]);
+
+  useEffect(() => {
+    refreshBalanceRef.current = refreshBalance;
+  }, [refreshBalance]);
+
+  // One check when a key is first available. After that it only re-reads when
+  // a reply finishes, which is the only time the figure can have moved.
+  useEffect(() => {
+    if (deepseekKey) void refreshBalance();
+  }, [deepseekKey, refreshBalance]);
+
+  // A dismissal is tied to the amount it was dismissed at, so hiding the
+  // warning at $0.40 does not also hide it at $0.05 — it comes back when
+  // things get worse, not on a timer.
+  const balanceLevel = balance
+    ? levelFor(balance.total, balance.available)
+    : "ok";
+  const showBalanceWarning =
+    balance !== null &&
+    balanceLevel !== "ok" &&
+    (balanceDismissedAt === null || balance.total < balanceDismissedAt - 0.001);
   const [tavilyKey, setTavilyKey] = useState("");
   const [visionKey, setVisionKey] = useState("");
   const [visionModel, setVisionModel] = useState("gpt-4o-mini");
@@ -1315,6 +1386,10 @@ export default function Home() {
         // Re-sync with disk so ordering, titles and counts match what was
         // actually written.
         void refreshConversations();
+        // The balance only moves when a reply finishes, so this is the one
+        // moment worth re-reading it. Polling on a timer would spend requests
+        // to learn nothing between messages.
+        void refreshBalanceRef.current?.();
         if (sawToolWrite) {
           setRecentlyChanged([...changedPaths]);
           void refreshWorkspaceFiles();
@@ -1519,6 +1594,17 @@ export default function Home() {
         messages={messages}
         isLoading={isLoading}
         statusStage={statusStage}
+        balanceWarning={
+          showBalanceWarning && balance ? (
+            <BalanceWarning
+              total={balance.total}
+              available={balance.available}
+              checking={checkingBalance}
+              onRefresh={() => void refreshBalance()}
+              onDismiss={() => setBalanceDismissedAt(balance.total)}
+            />
+          ) : null
+        }
         btwEntry={btwEntry}
         onAskBtw={askBtw}
         onDismissBtw={dismissBtw}
