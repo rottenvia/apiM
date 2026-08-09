@@ -9,6 +9,9 @@ import {
   describeProcess,
   isRunning,
 } from "@/lib/processes";
+import { smartSearch } from "@/lib/smart-search";
+import { listSnapshots, restoreSnapshot } from "@/lib/snapshots";
+import { documentKind, readDocument } from "@/lib/documents";
 import {
   fetchPage,
   extractSelectors,
@@ -21,6 +24,8 @@ import {
   listFiles,
   readFile,
   readImageAsDataUrl,
+  readFileBytes,
+  previousVersion,
   searchFiles,
   writeFile,
   WorkspaceError,
@@ -52,6 +57,15 @@ export interface ToolDefinition {
  * roughly the size of the projects people actually drop in as a zip.
  */
 export const MAX_READ_FILES = 60;
+
+/**
+ * How many files one write_files call may create.
+ *
+ * Lower than the read limit on purpose: writing is destructive, and a single
+ * call that rewrites thirty files is already at the edge of what a user can
+ * reasonably review in the activity list.
+ */
+export const MAX_WRITE_FILES = 30;
 
 export const WORKSPACE_TOOLS: ToolDefinition[] = [
   {
@@ -441,6 +455,136 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "web_search",
+      description:
+        "Search the web from inside the task. Use this the moment you hit " +
+        "something you do not know — an unfamiliar error, a library's current " +
+        "API, whether a service still works the way you remember. Do not " +
+        "guess and carry on: a wrong assumption compounds over the rounds " +
+        "that follow. Returns titles, URLs and extracts; follow up with " +
+        "fetch_url when you need the full page.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description:
+              "What to look up, phrased as you would type it into a search " +
+              "engine. Be specific — include the error text or version.",
+          },
+        },
+        required: ["query"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "undo_file",
+      description:
+        "Put one file back the way it was before your last write. Use this " +
+        "when an edit turns out to be wrong: reverting is exact, whereas " +
+        "patching your own mistake by hand tends to make it worse. Only the " +
+        "most recent version is kept.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "File to revert." },
+        },
+        required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_snapshots",
+      description:
+        "List the restore points taken before each of the user's messages. " +
+        "Use before restore_snapshot so you pick the right one.",
+      parameters: { type: "object", properties: {}, required: [] },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "restore_snapshot",
+      description:
+        "Put the whole workspace back to a restore point. This is a large " +
+        "step: it reverts every file and deletes anything created since, so " +
+        "prefer undo_file for a single mistake. Say what you are about to " +
+        "undo before calling it.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: {
+            type: "string",
+            description: "Snapshot id, from list_snapshots.",
+          },
+        },
+        required: ["id"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "read_document",
+      description:
+        "Read a Word, Excel, PowerPoint, EPUB or ODT file in the workspace " +
+        "as text. read_file cannot open these — they are zipped XML, not " +
+        "plain text — so use this for any .docx, .xlsx, .pptx, .epub or .odt.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Path to the document." },
+        },
+        required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_processes",
+      description:
+        "List the background processes you started, with their state and " +
+        "how they were launched. Use it to check what is still running " +
+        "before starting another, and to find an id you have lost.",
+      parameters: { type: "object", properties: {}, required: [] },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "write_files",
+      description:
+        "Create several files in one step. Prefer this when scaffolding — " +
+        "each separate write_file costs a whole round trip, so a ten-file " +
+        "skeleton written one call at a time is ten times slower and dearer.",
+      parameters: {
+        type: "object",
+        properties: {
+          files: {
+            type: "array",
+            description: "Files to write, up to 30.",
+            items: {
+              type: "object",
+              properties: {
+                path: { type: "string" },
+                content: { type: "string" },
+              },
+              required: ["path", "content"],
+            },
+          },
+        },
+        required: ["files"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "download_file",
       description:
         "Save a file from a URL straight into the workspace — a dataset, an " +
@@ -490,6 +634,11 @@ export interface ToolContext {
   /** Vision provider key. Absent means view_image is unavailable. */
   visionKey?: string;
   visionModel?: string;
+  /** Tavily key. Absent means web_search is withheld from the model. */
+  searchKey?: string;
+  /** Needed by the search planner, which uses a cheap model to pick queries. */
+  deepseekKey?: string;
+  searchProfile?: string;
 }
 
 export async function runTool(
@@ -966,6 +1115,229 @@ export async function runTool(
               : ""),
           summary: `Downloaded ${written.path}`,
           changedPath: written.path,
+        };
+      }
+
+      case "web_search": {
+        const query = str(args, "query").trim();
+        if (!query) {
+          return { ok: false, content: "Error: a query is required.", summary: "Empty query" };
+        }
+        if (!context.searchKey || !context.deepseekKey) {
+          return {
+            ok: false,
+            content:
+              "Web search is not configured — no Tavily key is set in " +
+              "Settings. Say plainly that you could not look this up rather " +
+              "than guessing, or use fetch_url if you already know the URL.",
+            summary: "Search unavailable",
+          };
+        }
+
+        const found = await smartSearch(
+          query,
+          "",
+          context.deepseekKey,
+          context.searchKey,
+          undefined,
+          context.searchProfile
+        );
+
+        if (found.results.length === 0) {
+          return {
+            ok: true,
+            content: `No results for "${query}". Try different wording, or say you could not find it.`,
+            summary: `No results — ${query.slice(0, 40)}`,
+          };
+        }
+
+        const body = found.results
+          .slice(0, 8)
+          .map(
+            (hit, i) =>
+              `[${i + 1}] ${hit.title}\n${hit.url}\n${(hit.content ?? "").slice(0, 700)}`
+          )
+          .join("\n\n");
+
+        return {
+          ok: true,
+          content:
+            `${found.results.length} result(s) for "${query}":\n\n${body}\n\n` +
+            `Cite the URLs you use. Call fetch_url on one for the full page.`,
+          summary: `Searched: ${query.slice(0, 45)}`,
+        };
+      }
+
+      case "undo_file": {
+        const target = str(args, "path");
+        const previous = await previousVersion(workspaceId, target);
+        if (previous === null) {
+          return {
+            ok: false,
+            content:
+              `No previous version of ${target} is kept. Only the last write ` +
+              `is recoverable, and this file has not been overwritten since ` +
+              `it was created. Fix it forward with edit_file instead.`,
+            summary: `No history for ${target}`,
+          };
+        }
+        const written = await writeFile(workspaceId, target, previous);
+        return {
+          ok: true,
+          content: `Reverted ${written.path} to its previous contents (${written.bytes} bytes).`,
+          summary: `Reverted ${written.path}`,
+          changedPath: written.path,
+        };
+      }
+
+      case "list_snapshots": {
+        const snapshots = await listSnapshots(workspaceId);
+        if (snapshots.length === 0) {
+          return {
+            ok: true,
+            content: "There are no restore points for this workspace yet.",
+            summary: "No snapshots",
+          };
+        }
+        const listing = snapshots
+          .map(
+            (snap) =>
+              `${snap.id} — ${snap.label} (${snap.fileCount} files, ${new Date(
+                snap.createdAt
+              ).toLocaleString()})`
+          )
+          .join("\n");
+        return {
+          ok: true,
+          content: `${snapshots.length} restore point(s), newest first:\n${listing}`,
+          summary: `Listed ${snapshots.length} snapshot(s)`,
+        };
+      }
+
+      case "restore_snapshot": {
+        const id = str(args, "id");
+        const result = await restoreSnapshot(workspaceId, id);
+        return {
+          ok: true,
+          content:
+            `Restored the workspace to ${id}: ${result.restored} file(s) put ` +
+            `back, ${result.removed} created since then removed. A snapshot ` +
+            `of the state before this restore was taken first, so it is ` +
+            `itself reversible.`,
+          summary: `Restored ${result.restored} file(s)`,
+          changedPath: "",
+        };
+      }
+
+      case "read_document": {
+        const target = str(args, "path");
+        const kind = documentKind(target);
+        if (!kind) {
+          return {
+            ok: false,
+            content:
+              `${target} is not a document this can open. It handles .docx, ` +
+              `.xlsx, .pptx, .epub and .odt — for anything text-based use ` +
+              `read_file.`,
+            summary: "Not a document",
+          };
+        }
+
+        const bytes = await readFileBytes(workspaceId, target);
+        const doc = await readDocument(kind, bytes);
+        if (!doc.text.trim()) {
+          return {
+            ok: false,
+            content: `${target} opened but contained no readable text.`,
+            summary: `Empty document: ${target}`,
+          };
+        }
+
+        return {
+          ok: true,
+          content:
+            `${target} (${kind}${doc.truncated ? ", truncated" : ""}):\n\n${doc.text}`,
+          summary: `Read ${target}`,
+        };
+      }
+
+      case "list_processes": {
+        const running = listProcesses(workspaceId);
+        if (running.length === 0) {
+          return {
+            ok: true,
+            content: "No background processes are running in this workspace.",
+            summary: "No processes",
+          };
+        }
+        const listing = running
+          .map(
+            (proc) =>
+              `${proc.id} — ${describeProcess(proc)} — ${
+                isRunning(proc) ? "running" : `exited (${proc.exitCode})`
+              }`
+          )
+          .join("\n");
+        return {
+          ok: true,
+          content: `${running.length} process(es):\n${listing}`,
+          summary: `Listed ${running.length} process(es)`,
+        };
+      }
+
+      case "write_files": {
+        const raw = Array.isArray(args.files) ? args.files : [];
+        if (raw.length === 0) {
+          return {
+            ok: false,
+            content: "Error: files must be a non-empty list.",
+            summary: "No files given",
+          };
+        }
+
+        // Capped for the same reason as read_files: one call should not be
+        // able to rewrite an entire project unreviewed.
+        const batch = raw.slice(0, MAX_WRITE_FILES);
+        const written: string[] = [];
+        const failed: string[] = [];
+
+        for (const entry of batch) {
+          const file = entry as { path?: unknown; content?: unknown };
+          if (typeof file.path !== "string" || typeof file.content !== "string") {
+            failed.push(`${String(file.path ?? "?")} — malformed entry`);
+            continue;
+          }
+          try {
+            const result = await writeFile(workspaceId, file.path, file.content);
+            written.push(result.path);
+          } catch (error) {
+            // One bad path must not lose the rest of the batch.
+            failed.push(
+              `${file.path} — ${
+                error instanceof WorkspaceError ? error.message : "could not be written"
+              }`
+            );
+          }
+        }
+
+        const notes: string[] = [];
+        if (written.length) notes.push(`Wrote ${written.length}:\n${written.join("\n")}`);
+        if (failed.length) notes.push(`Failed ${failed.length}:\n${failed.join("\n")}`);
+        if (raw.length > batch.length) {
+          notes.push(
+            `[${raw.length - batch.length} more ignored — limit is ` +
+              `${MAX_WRITE_FILES} per call. Call again with the rest.]`
+          );
+        }
+
+        return {
+          ok: written.length > 0,
+          content: notes.join("\n\n"),
+          summary:
+            failed.length === 0
+              ? `Wrote ${written.length} files`
+              : `Wrote ${written.length}, ${failed.length} failed`,
+          changedPath: written[0],
         };
       }
 

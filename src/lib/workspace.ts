@@ -752,6 +752,35 @@ async function saveHistory(
  * Separate from readFile because that decodes UTF-8, which corrupts binary
  * data. Images have to be passed through as bytes.
  */
+/**
+ * Raw bytes of a workspace file.
+ *
+ * readFile decodes as UTF-8, which corrupts anything that is not text. A
+ * .docx is a zip archive, so reading one through readFile produced mojibake
+ * and then failed to parse. The document reader needs the bytes untouched.
+ */
+export async function readFileBytes(
+  workspaceId: string,
+  relative: string
+): Promise<Uint8Array> {
+  const target = resolveInside(workspaceId, relative);
+
+  let stat;
+  try {
+    stat = await fs.stat(target);
+  } catch {
+    throw new WorkspaceError(`No such file: ${relative}`);
+  }
+  if (!stat.isFile()) {
+    throw new WorkspaceError(`${relative} is not a file`);
+  }
+  if (stat.size > MAX_FILE_BYTES) {
+    throw new WorkspaceError(`${relative} is too large to read`);
+  }
+
+  return new Uint8Array(await fs.readFile(target));
+}
+
 export async function readImageAsDataUrl(
   workspaceId: string,
   relative: string
