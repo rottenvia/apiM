@@ -915,6 +915,65 @@ export async function editFile(
   return { path: relative, replaced: true };
 }
 
+/**
+ * Move or rename a file inside the workspace.
+ *
+ * Without this the agent had to read, write and delete — three round trips
+ * for one filesystem operation, each resending the whole conversation. A
+ * rename during a refactor is common enough that the cost was a steady tax
+ * for no reason.
+ *
+ * Both paths go through resolveInside, so neither the source nor the
+ * destination can point outside the workspace.
+ */
+export async function moveFile(
+  workspaceId: string,
+  from: string,
+  to: string
+): Promise<{ from: string; to: string; bytes: number }> {
+  const source = resolveInside(workspaceId, from);
+  const destination = resolveInside(workspaceId, to);
+
+  if (source === destination) {
+    throw new WorkspaceError("The source and destination are the same file");
+  }
+
+  let stat;
+  try {
+    stat = await fs.stat(source);
+  } catch {
+    throw new WorkspaceError(`No such file: ${from}`);
+  }
+  if (!stat.isFile()) {
+    throw new WorkspaceError(`${from} is not a file`);
+  }
+
+  // Refuse rather than clobber. Overwriting silently is how a rename loses
+  // the file it was supposed to preserve, and the model can delete first if
+  // that is genuinely what it means.
+  const occupied = await fs
+    .access(destination)
+    .then(() => true)
+    .catch(() => false);
+  if (occupied) {
+    throw new WorkspaceError(
+      `${to} already exists — delete it first if you mean to replace it`
+    );
+  }
+
+  await fs.mkdir(path.dirname(destination), { recursive: true });
+
+  try {
+    await fs.rename(source, destination);
+  } catch {
+    // Across devices rename fails; copy and unlink is the fallback.
+    await fs.copyFile(source, destination);
+    await fs.unlink(source).catch(() => {});
+  }
+
+  return { from, to, bytes: stat.size };
+}
+
 export async function deleteFile(
   workspaceId: string,
   relative: string
