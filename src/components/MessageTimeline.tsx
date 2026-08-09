@@ -60,12 +60,26 @@ export function MessageTimeline({
               split
                 ? "gap-x-0 md:grid-cols-[minmax(0,1fr)_auto_minmax(0,20rem)]"
                 : "grid-cols-1"
-            } ${i > 0 ? "mt-4 pt-4" : ""}`}
+              /*
+               * A rule between rows, not just above the first.
+               *
+               * Only one separator was ever drawn — above the whole timeline
+               * — so every row after it ran straight into the next with
+               * nothing but padding between them. The vertical divider inside
+               * a row then read as the only structure on screen, which is why
+               * the layout looked like disconnected columns rather than a
+               * sequence of steps.
+               */
+            } ${i > 0 ? "mt-4 border-t border-border/60 pt-4" : ""}`}
           >
             {hasText && (
               <div
-                className={`prose-chat min-w-0 text-[15px] leading-relaxed text-text-primary ${
-                  split ? "md:pr-5" : ""
+                className={`prose-chat min-w-0 break-words text-[15px] leading-relaxed text-text-primary ${
+                  // Wider gutter than the divider's own spacing, so a long
+                  // line ends clear of the rule instead of touching it, and
+                  // break-words so an unbroken token wraps rather than
+                  // spilling across it.
+                  split ? "md:pr-6" : ""
                 }`}
               >
                 <ReactMarkdown
@@ -90,7 +104,7 @@ export function MessageTimeline({
             )}
 
             {hasTools && (
-              <div className={`min-w-0 ${split ? "md:pl-5" : ""}`}>
+              <div className={`min-w-0 ${split ? "md:pl-6" : ""}`}>
                 <ToolActivity events={row.tools} onOpenFile={onOpenFile} />
               </div>
             )}

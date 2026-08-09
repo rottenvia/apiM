@@ -324,9 +324,23 @@ check(
   "an unlabelled icon requires hovering to discover"
 );
 check(
-  "the always-visible dock has one too",
-  /\/download`/.test(dock),
-  "the side panel disappears below 1024px, taking the only control with it"
+  "it fetches the bytes rather than navigating to the URL",
+  /await fetch\(`\/api\/workspace\/\$\{workspaceId\}\/download`\)/.test(sidePanel),
+  "a bare href is an ordinary navigation, which a download manager extension intercepts and then fails to fetch itself"
+);
+check(
+  "the anchor carries a download attribute and a filename",
+  /a\.download = match\?\.\[1\] \?\? "workspace\.zip"/.test(sidePanel),
+  "without it the browser may navigate instead of saving"
+);
+check(
+  "the blob url is revoked, but not before the save reads it",
+  /setTimeout\(\(\) => URL\.revokeObjectURL\(url\), 10_000\)/.test(sidePanel)
+);
+check(
+  "the dock was not given a second, duplicate button",
+  !/\/download`/.test(dock),
+  "the panel already had one; adding another was noise, not a fix"
 );
 
 // The archive itself, including the awkward cases an unpacked zip contains.
@@ -365,6 +379,32 @@ check(
   "a non-ASCII path is carried in the archive",
   archive.includes(Buffer.from("EXT-—-Faceit", "utf8")),
   "the em dash in an unpacked archive folder name"
+);
+
+// ------------------------------------------------------------------
+console.log("\n10. The reply timeline reads as a sequence");
+
+const timeline = read("src/components/MessageTimeline.tsx");
+const toolActivity = read("src/components/ToolActivity.tsx");
+
+check(
+  "every row after the first is separated by a rule",
+  /border-t border-border\/60 pt-4/.test(timeline),
+  "only one line was drawn, above the whole timeline, so rows ran together"
+);
+check(
+  "prose keeps clear of the vertical divider",
+  /md:pr-6/.test(timeline) && /break-words/.test(timeline),
+  "text was touching or crossing the rule"
+);
+check(
+  "a long file path truncates from the left",
+  /dir="rtl"/.test(toolActivity),
+  "cutting the end leaves the directory and hides the filename, so every row in an unpacked archive looked identical"
+);
+check(
+  "the full path is still available on hover",
+  /title=\{filePath\}/.test(toolActivity)
 );
 
 console.log(
