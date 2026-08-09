@@ -225,6 +225,68 @@ check(
   "it is the largest field in the record"
 );
 
+// ------------------------------------------------------------------
+console.log("\n8. Commands actually run on Windows");
+
+/*
+ * Reported: every npm command came back "Failed: npm install", and naming the
+ * file directly came back "Command not allowed". Neither was a permissions
+ * decision — npm has always been on the allow-list. On Windows npm is
+ * npm.cmd, not an executable, and spawn() with shell:false cannot launch a
+ * batch file; normaliseCommand also stripped only ".exe", so "npm.cmd" read
+ * as an unknown tool.
+ */
+const runnerSrc = read("src/lib/runner.ts");
+const procSrc = read("src/lib/processes.ts");
+const runner = await load("src/lib/runner.ts");
+
+check(
+  "a .cmd shim is recognised as its tool",
+  runner.validateCommand("npm.cmd", ["install"]).ok,
+  "this is what came back as 'Command not allowed'"
+);
+check(
+  "so is a full Windows path to one",
+  runner.validateCommand("C:\\Program Files\\nodejs\\npm.cmd", ["install"]).ok
+);
+check(
+  "the launcher is resolved to a real file before spawning",
+  /resolveWindowsLauncher/.test(runnerSrc),
+  "spawn with shell:false cannot start a .cmd by name"
+);
+check(
+  "background processes resolve it too",
+  /resolveLauncher/.test(procSrc),
+  "npm run dev failed the same way"
+);
+check(
+  "the shell stays off",
+  /shell: false/.test(runnerSrc) && !/shell: true/.test(runnerSrc),
+  "enabling it would hand argument parsing back to cmd.exe"
+);
+check(
+  "batch files are spawned with the flag Node requires",
+  /windowsVerbatimArguments: false/.test(runnerSrc)
+);
+check(
+  "shells are still refused",
+  !runner.validateCommand("bash", ["-c", "ls"]).ok &&
+    !runner.validateCommand("powershell.exe", []).ok,
+  "the allow-list is wider, not open"
+);
+check(
+  "a directory cannot smuggle in an unlisted binary",
+  !runner.validateCommand("C:\\evil\\rm.exe", []).ok,
+  "the basename is checked, and PATH decides what actually runs"
+);
+check(
+  "everyday tooling is available",
+  ["pnpm", "yarn", "git", "tsx", "eslint"].every((c) =>
+    runner.validateCommand(c, []).ok
+  ),
+  "the model hit a wall on ordinary requests"
+);
+
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
 );
