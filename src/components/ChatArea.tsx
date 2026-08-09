@@ -63,6 +63,8 @@ interface ChatAreaProps {
   ) => void;
   onRegenerate: (assistantId: string) => void;
   onResume: (assistantId: string) => void;
+  /** Fetch a message's reasoning the first time its panel is opened. */
+  onLoadReasoning?: (messageId: string) => void;
   onEdit: (messageId: string, newContent: string) => void;
   onDeleteMessage: (messageId: string) => void;
   onToggleSidebar: () => void;
@@ -110,6 +112,7 @@ export function ChatArea({
   onSend,
   onRegenerate,
   onResume,
+  onLoadReasoning,
   onEdit,
   onDeleteMessage,
   onToggleSidebar,
@@ -841,6 +844,7 @@ export function ChatArea({
                 messages={messages}
                 onRegenerate={onRegenerate}
                 onResume={onResume}
+                onLoadReasoning={onLoadReasoning}
                 onEdit={onEdit}
                 onDeleteMessage={onDeleteMessage}
                 searchQuery={findOpen ? findQuery : undefined}
@@ -1243,6 +1247,7 @@ const MessageList = memo(function MessageList({
   messages,
   onRegenerate,
   onResume,
+  onLoadReasoning,
   onEdit,
   onDeleteMessage,
   searchQuery,
@@ -1257,6 +1262,7 @@ const MessageList = memo(function MessageList({
   messages: Message[];
   onRegenerate: (assistantId: string) => void;
   onResume: (assistantId: string) => void;
+  onLoadReasoning?: (messageId: string) => void;
   onEdit: (messageId: string, newContent: string) => void;
   onDeleteMessage: (messageId: string) => void;
   onOpenWorkspaceFile: (path: string) => void;

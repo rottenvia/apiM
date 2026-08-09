@@ -37,6 +37,14 @@ export interface Message {
   isStreaming?: boolean;
   /** Renders the bubble in the error style instead of as a normal reply. */
   isError?: boolean;
+  /**
+   * How long the reasoning is, when the text itself has not been loaded.
+   *
+   * A stored chat sends this instead of the chain of thought, which on a long
+   * conversation was about half the payload and is collapsed by default. The
+   * text arrives only if the panel is opened.
+   */
+  reasoningLength?: number;
   /** Reply was cut short (tab closed / connection dropped) and can be retried. */
   incomplete?: boolean;
   /**
@@ -682,6 +690,9 @@ export default function Home() {
           role: m.role as "user" | "assistant",
           content: (m.content as string) ?? "",
           reasoningContent: m.reasoningContent as string | null | undefined,
+          // Sent as a length, not text — the body is fetched when the panel
+          // is opened. See api/conversations/[id]/reasoning.
+          reasoningLength: m.reasoningLength as number | undefined,
           thinkingEffort: m.thinkingEffort as string | undefined,
           webSearchUsed: m.webSearchUsed as boolean | undefined,
           searchResults: parseSearchResults(m.searchResults),
@@ -1584,6 +1595,39 @@ export default function Home() {
     return last;
   })();
 
+  /**
+   * Fetch a message's reasoning the first time it is expanded.
+   *
+   * Idempotent and cheap to call: it returns immediately if the text is
+   * already present, so the panel can ask on every open without checking.
+   */
+  const loadReasoning = useCallback(
+    async (messageId: string) => {
+      const convId = currentConvId;
+      if (!convId) return;
+      const existing = messagesRef.current.find((m) => m.id === messageId);
+      if (!existing || typeof existing.reasoningContent === "string") return;
+
+      try {
+        const res = await fetch(
+          `/api/conversations/${convId}/reasoning/${messageId}`
+        );
+        if (!res.ok) return;
+        const data = (await res.json()) as { reasoning?: string };
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === messageId
+              ? { ...m, reasoningContent: data.reasoning ?? "" }
+              : m
+          )
+        );
+      } catch {
+        /* the panel shows nothing rather than an error for this */
+      }
+    },
+    [currentConvId]
+  );
+
   const resumeReply = useCallback((assistantId: string) => {
     const list = messagesRef.current;
     const index = list.findIndex((m) => m.id === assistantId);
@@ -1652,6 +1696,7 @@ export default function Home() {
         onSend={sendMessage}
         onRegenerate={regenerate}
         onResume={resumeReply}
+        onLoadReasoning={loadReasoning}
         onEdit={editMessage}
         onDeleteMessage={deleteMessage}
         onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}

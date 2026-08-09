@@ -160,7 +160,7 @@ check(
 check(
   "the saved transcript is never sent to the browser",
   /const \{ resumeState, \.\.\.rest \} = m/.test(convRoute) &&
-    /return \{ \.\.\.rest, canResume \}/.test(convRoute) &&
+    /canResume,\s*\n\s*\};/.test(convRoute) &&
     !/return \{ \.\.\.m,/.test(convRoute),
   "it can run to megabytes; the UI only needs a boolean"
 );

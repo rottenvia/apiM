@@ -11,6 +11,7 @@ import path from "node:path";
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { rm, readdir, stat } from "node:fs/promises";
+import { existsSync } from "node:fs";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const load = (p) => import(pathToFileURL(path.join(ROOT, p)).href);
@@ -524,6 +525,81 @@ check(
     ) - 0.0009
   ) < 0.0002,
   "so the number was right; only its presentation was wrong"
+);
+
+// ------------------------------------------------------------------
+console.log("\n13. The app itself, not the agent");
+
+/*
+ * Two costs that grew with everything ever written rather than with what is
+ * on screen. Neither is about the model.
+ */
+const { randomUUID } = await import("node:crypto");
+const filler = "x".repeat(4000);
+for (let i = 0; i < 25; i++) {
+  const msgs = [];
+  for (let m = 0; m < (i % 5 === 0 ? 60 : 10); m++) {
+    msgs.push({
+      id: randomUUID(),
+      role: m % 2 ? "assistant" : "user",
+      content: filler,
+      reasoningContent: filler,
+      createdAt: new Date().toISOString(),
+    });
+  }
+  await store.appendMessages(randomUUID(), `perf chat ${i}`, msgs);
+}
+
+let t0 = Date.now();
+const first = await store.listConversations();
+const coldMs = Date.now() - t0;
+t0 = Date.now();
+await store.listConversations();
+const warmMs = Date.now() - t0;
+
+check(
+  "the sidebar list is cached between refreshes",
+  warmMs * 3 < coldMs || warmMs <= 2,
+  `${coldMs}ms cold, ${warmMs}ms warm — it re-read and re-parsed every chat in full to show titles`
+);
+
+const target = first[0];
+const wasCount = target.messageCount;
+await store.appendMessages(target.id, target.title, [
+  { id: randomUUID(), role: "user", content: "new", createdAt: new Date().toISOString() },
+]);
+const refreshed = (await store.listConversations()).find((c) => c.id === target.id);
+check(
+  "and a changed chat is not served stale",
+  refreshed.messageCount === wasCount + 1,
+  "keyed on size and mtime, so an edit made outside the app is picked up too"
+);
+
+const convRouteSrc = read("src/app/api/conversations/[id]/route.ts");
+check(
+  "opening a chat no longer ships every chain of thought",
+  /reasoningLength: reasoningContent\?\.length \?\? 0/.test(convRouteSrc),
+  "it was about half the payload, collapsed by default and rarely read"
+);
+check(
+  "the text is fetchable when the panel is opened",
+  existsSync(
+    path.join(ROOT, "src/app/api/conversations/[id]/reasoning/[messageId]/route.ts")
+  ),
+  "one small request when expanded, against a large one on every open"
+);
+check(
+  "the panel still appears before its text has loaded",
+  /message\.reasoningContent \|\| message\.reasoningLength/.test(
+    read("src/components/MessageBubble.tsx")
+  ),
+  "otherwise a stored reply would look as though it never reasoned"
+);
+check(
+  "expanding it triggers the fetch",
+  /if \(!showThinking\) onLoadReasoning\?\.\(message\.id\)/.test(
+    read("src/components/MessageBubble.tsx")
+  )
 );
 
 console.log(
