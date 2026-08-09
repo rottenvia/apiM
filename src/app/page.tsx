@@ -626,6 +626,38 @@ export default function Home() {
     }
   }, []);
 
+  /**
+   * The same refresh, but at most a few times a second.
+   *
+   * Every completed write asked the server for the whole file list, and each
+   * of those is a full recursive walk of the workspace. One `write_files`
+   * call creating thirty files therefore fired thirty walks back to back —
+   * measured at 1.2 seconds of disk work and 1.5MB of JSON to arrive at a
+   * single final state, while the agent was still running.
+   *
+   * Trailing rather than leading: during a burst only the last state is
+   * interesting, and asking after the writes have stopped is what makes the
+   * answer correct. The panel still updates during a long run, which is the
+   * behaviour this must not lose — it just stops asking thirty times for the
+   * same answer.
+   */
+  const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const scheduleWorkspaceRefresh = useCallback(() => {
+    if (refreshTimer.current) clearTimeout(refreshTimer.current);
+    refreshTimer.current = setTimeout(() => {
+      refreshTimer.current = null;
+      void refreshWorkspaceFiles();
+    }, 300);
+  }, [refreshWorkspaceFiles]);
+
+  useEffect(
+    () => () => {
+      if (refreshTimer.current) clearTimeout(refreshTimer.current);
+    },
+    []
+  );
+
   // Load the conversation list. Guarded against non-JSON responses so a
   // backend problem degrades to "no history" instead of throwing.
   const refreshConversations = useCallback(async () => {
@@ -1276,7 +1308,9 @@ export default function Home() {
                 // showed until the very end and the workspace looked frozen.
                 if (isWrite) {
                   setRecentlyChanged([...changedPaths]);
-                  void refreshWorkspaceFiles();
+                  // Coalesced: a batch of writes produces one refresh once
+                  // they stop, not one per file.
+                  scheduleWorkspaceRefresh();
                 }
                 setMessages((prev) =>
                   prev.map((m) =>
@@ -1439,6 +1473,7 @@ export default function Home() {
       enabledPlugins,
       messages,
       refreshConversations,
+      scheduleWorkspaceRefresh,
       workspaceEnabled,
       autoRunCommands,
       lessonsEnabled,
