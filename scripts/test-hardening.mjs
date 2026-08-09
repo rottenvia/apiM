@@ -305,6 +305,68 @@ check(
   "the model hit a wall on ordinary requests"
 );
 
+// ------------------------------------------------------------------
+console.log("\n9. Getting the files out");
+
+/*
+ * Reported as "i cant simply download workspace". The endpoint worked
+ * perfectly; the control was a 14px unlabelled icon among four others, in a
+ * panel that is `hidden ... lg:flex` — so below 1024px there was no way to
+ * download at all. A control nobody can find is the same as a missing one.
+ */
+const sidePanel = read("src/components/WorkspaceSidePanel.tsx");
+const dock = read("src/components/WorkspaceDock.tsx");
+const zip = await load("src/lib/zip.ts");
+
+check(
+  "the side panel has a download that says what it is",
+  /Download all files/.test(sidePanel),
+  "an unlabelled icon requires hovering to discover"
+);
+check(
+  "the always-visible dock has one too",
+  /\/download`/.test(dock),
+  "the side panel disappears below 1024px, taking the only control with it"
+);
+
+// The archive itself, including the awkward cases an unpacked zip contains.
+const ZWS = "harddl";
+await ws.writeFile(ZWS, "app.js", "console.log(1)");
+const zdir = ws.workspaceDirectory(ZWS);
+const { promises: nfs } = await import("node:fs");
+await nfs.mkdir(path.join(zdir, "uploads/EXT-—-Faceit"), { recursive: true });
+await nfs.writeFile(
+  path.join(zdir, "uploads/EXT-—-Faceit/icon.png"),
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+);
+
+const files = await ws.listFiles(ZWS);
+const entries = [];
+for (const f of files) {
+  entries.push({
+    path: f.path,
+    content: await nfs.readFile(ws.resolveInside(ZWS, f.path)),
+    modified: new Date(f.modifiedAt),
+  });
+}
+const archive = await zip.createZip(entries);
+
+check(
+  "the archive has a valid end-of-central-directory record",
+  archive.subarray(-22, -18).equals(Buffer.from([0x50, 0x4b, 0x05, 0x06])),
+  "a malformed one is what makes Windows refuse to open a zip"
+);
+check(
+  "a binary survives the round trip byte for byte",
+  archive.includes(Buffer.from([0x89, 0x50, 0x4e, 0x47])),
+  "an unpacked extension is full of images"
+);
+check(
+  "a non-ASCII path is carried in the archive",
+  archive.includes(Buffer.from("EXT-—-Faceit", "utf8")),
+  "the em dash in an unpacked archive folder name"
+);
+
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
 );
