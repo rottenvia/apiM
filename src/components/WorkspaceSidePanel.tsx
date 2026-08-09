@@ -325,16 +325,48 @@ export function WorkspaceSidePanel({
   );
 
 
-  const download = () => {
-    if (!workspaceId) return;
-    // A hidden anchor keeps the server's filename from Content-Disposition
-    // rather than navigating away from the conversation.
-    const a = document.createElement("a");
-    a.href = `/api/workspace/${workspaceId}/download`;
-    a.rel = "noopener";
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
+  const [downloading, setDownloading] = useState(false);
+
+  /*
+   * Fetch the bytes, then save them from memory.
+   *
+   * Pointing an anchor at the URL is the usual trick and it fails here: a
+   * bare href to a server route is an ordinary navigation, so a download
+   * manager extension — IDM in this case — intercepts it, tries to fetch the
+   * URL itself as a separate unauthenticated request, and fails. The user
+   * never gets a zip, they get IDM opening and erroring.
+   *
+   * Fetching in the page keeps the request inside the app, with its cookies,
+   * and the blob URL that follows is same-origin and instantaneous, so there
+   * is nothing for a download manager to take over.
+   */
+  const download = async () => {
+    if (!workspaceId || downloading) return;
+    setDownloading(true);
+    try {
+      const res = await fetch(`/api/workspace/${workspaceId}/download`);
+      if (!res.ok) throw new Error(String(res.status));
+
+      const blob = await res.blob();
+      // Keep the server's filename, falling back to something sensible.
+      const disposition = res.headers.get("content-disposition") ?? "";
+      const match = /filename="?([^"]+)"?/.exec(disposition);
+
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = match?.[1] ?? "workspace.zip";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      // Revoked on the next tick: doing it immediately can cancel the save
+      // in some browsers before it has read the blob.
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    } catch {
+      /* the button returns to normal; nothing was written */
+    } finally {
+      setDownloading(false);
+    }
   };
 
   return (

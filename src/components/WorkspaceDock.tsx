@@ -37,7 +37,6 @@ export function WorkspaceDock({
   onEnable,
   onOpen,
   onOpenFile,
-  workspaceId,
 }: {
   enabled: boolean;
   files: WorkspaceFileInfo[];
@@ -45,8 +44,6 @@ export function WorkspaceDock({
   onEnable: () => void;
   onOpen: () => void;
   onOpenFile: (path: string) => void;
-  /** Needed to build the download link; omitted before a chat exists. */
-  workspaceId?: string | null;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -68,25 +65,6 @@ export function WorkspaceDock({
       document.removeEventListener("keydown", onKey);
     };
   }, [open]);
-
-  /*
-   * Getting the files out has to work at every window size.
-   *
-   * The only download control lived in the side panel, which is
-   * `hidden ... lg:flex` — so below 1024px there was no way to download a
-   * workspace at all, and above it the control was a 14px unlabelled icon
-   * among four others. This dock is always present, so the action belongs
-   * here too.
-   */
-  const download = () => {
-    if (!workspaceId) return;
-    const a = document.createElement("a");
-    a.href = `/api/workspace/${workspaceId}/download`;
-    a.rel = "noopener";
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-  };
 
   const changed = new Set(recentlyChanged ?? []);
   const changedCount = files.filter((f) => changed.has(f.path)).length;
@@ -137,29 +115,15 @@ export function WorkspaceDock({
                     : `${files.length} file${files.length === 1 ? "" : "s"} in this chat`}
                 </p>
               </div>
-              <div className="flex flex-none items-center gap-1.5">
-                {files.length > 0 && workspaceId && (
-                  <button
-                    onClick={download}
-                    title="Download everything as a .zip"
-                    className="flex items-center gap-1 rounded-lg border border-border px-2 py-1 text-[12px] text-text-secondary transition-colors hover:border-border-light hover:text-text-primary"
-                  >
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" />
-                    </svg>
-                    Download
-                  </button>
-                )}
-                <button
-                  onClick={() => {
-                    onOpen();
-                    setOpen(false);
-                  }}
-                  className="rounded-lg border border-border px-2 py-1 text-[12px] text-text-secondary transition-colors hover:border-border-light hover:text-text-primary"
-                >
-                  Open
-                </button>
-              </div>
+              <button
+                onClick={() => {
+                  onOpen();
+                  setOpen(false);
+                }}
+                className="flex-none rounded-lg border border-border px-2 py-1 text-[12px] text-text-secondary transition-colors hover:border-border-light hover:text-text-primary"
+              >
+                Open
+              </button>
             </div>
 
             {files.length === 0 ? (

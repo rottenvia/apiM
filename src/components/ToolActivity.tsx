@@ -181,13 +181,29 @@ export function ToolActivity({
                 <Icon name={event.name} ok={event.ok} />
               </span>
 
-              <span className="min-w-0 truncate">
-                <span className="font-medium">
+              <span className="flex min-w-0 flex-1 items-baseline gap-1.5">
+                <span className="flex-none font-medium">
                   {running ? verbs.running : verbs.done}
                 </span>
                 {filePath && (
-                  <span className="ml-1.5 font-mono text-[12px] opacity-80">
-                    {filePath}
+                  /*
+                   * Truncated from the left, not the right.
+                   *
+                   * These rows sit in a 20rem column, so a real path never
+                   * fits. Cutting the end removed the filename and left the
+                   * directory — every row in an unpacked archive then read
+                   * "nohomolyzer/extension/src/cont…", identical to its
+                   * neighbours and useless. The tail is the part that
+                   * identifies the file, so the head is what gives way.
+                   */
+                  <span
+                    dir="rtl"
+                    title={filePath}
+                    className="min-w-0 flex-1 truncate text-left font-mono text-[12px] opacity-80"
+                  >
+                    {/* Isolated so the RTL direction only controls where the
+                        ellipsis lands, and does not reorder the path itself. */}
+                    <bdi>{filePath}</bdi>
                   </span>
                 )}
               </span>
