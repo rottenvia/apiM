@@ -347,6 +347,92 @@ check(
   "a tool the model is not told about is a tool it will not use"
 );
 
+// ------------------------------------------------------------------
+console.log("\n7. Batched edits, because rounds are the cost");
+
+/*
+ * None of these add a new ability — the agent could already rename and
+ * refactor. They remove round trips, and a round resends the whole
+ * conversation, so a rename touching a dozen files was a dozen full-price
+ * requests to do one thing.
+ */
+const B = "batchtools";
+await (await import("node:fs/promises")).rm(
+  path.join(ROOT, "data", "workspaces", B),
+  { recursive: true, force: true }
+);
+await runTool(B, "write_files", {
+  files: [
+    { path: "src/a.js", content: "import { helper } from './util';\nhelper();" },
+    { path: "src/b.js", content: "import { helper } from './util';\nhelper(1);" },
+    { path: "src/util.js", content: "export function helper() {}" },
+    { path: "README.md", content: "helper docs" },
+  ],
+});
+
+let out = await runTool(B, "move_file", { from: "src/util.js", to: "src/helpers.js" });
+check(
+  "move_file renames in one call",
+  out.ok,
+  "read + write + delete was three rounds for one operation"
+);
+check(
+  "it refuses to overwrite an existing file",
+  !(await runTool(B, "move_file", { from: "src/a.js", to: "src/b.js" })).ok,
+  "silently clobbering is how a rename loses the file it was preserving"
+);
+check(
+  "and it cannot move outside the workspace",
+  !(await runTool(B, "move_file", { from: "src/a.js", to: "../out.js" })).ok
+);
+
+out = await runTool(B, "edit_files", {
+  edits: [
+    { path: "src/a.js", old_text: "helper()", new_text: "assist()" },
+    { path: "src/b.js", old_text: "helper(1)", new_text: "assist(1)" },
+    { path: "src/a.js", old_text: "NOT PRESENT", new_text: "x" },
+  ],
+});
+check("edit_files applies several replacements at once", /Edited 2/.test(out.summary));
+check(
+  "a failed edit does not discard the successful ones",
+  /1 failed/.test(out.summary) && /NOT applied/.test(out.content),
+  "the model cannot tell which edits were correct, so reverting them all is worse"
+);
+
+out = await runTool(B, "replace_in_files", {
+  find: "helper",
+  replace: "assist",
+  preview: true,
+});
+check(
+  "replace_in_files can preview without writing",
+  out.ok && /Nothing was written/.test(out.content),
+  "for when the text might appear somewhere unintended"
+);
+
+out = await runTool(B, "replace_in_files", {
+  find: "helper",
+  replace: "assist",
+  glob: "*.js",
+});
+check("and applies across every matching file in one call", out.ok);
+check(
+  "the glob is honoured",
+  (await wsLib.readFile(B, "README.md")).content.includes("helper docs"),
+  "a project-wide rename must not touch files outside its scope"
+);
+check(
+  "an unmatched search says so instead of reporting success",
+  !(await runTool(B, "replace_in_files", { find: "zzznope", replace: "x" })).ok
+);
+
+check(
+  "the prompt tells the model to batch",
+  /replace_in_files changes the same text everywhere/.test(route) &&
+    /run it with preview first/.test(route)
+);
+
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
 );

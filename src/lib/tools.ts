@@ -25,6 +25,7 @@ import {
   readFile,
   readImageAsDataUrl,
   readFileBytes,
+  moveFile,
   previousVersion,
   searchFiles,
   writeFile,
@@ -66,6 +67,15 @@ export const MAX_READ_FILES = 60;
  * reasonably review in the activity list.
  */
 export const MAX_WRITE_FILES = 30;
+
+/**
+ * How many replacements one edit_files call may make.
+ *
+ * Higher than the write limit because an edit is surgical — it changes a
+ * named snippet rather than replacing a whole file — so forty of them is
+ * still a reviewable change.
+ */
+export const MAX_BATCH_EDITS = 40;
 
 export const WORKSPACE_TOOLS: ToolDefinition[] = [
   {
@@ -449,6 +459,91 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
           },
         },
         required: ["url"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "move_file",
+      description:
+        "Rename or move a file in one step. Use this instead of reading, " +
+        "rewriting and deleting — that is three round trips for one " +
+        "operation. Refuses if the destination already exists.",
+      parameters: {
+        type: "object",
+        properties: {
+          from: { type: "string", description: "Current path." },
+          to: { type: "string", description: "New path." },
+        },
+        required: ["from", "to"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "edit_files",
+      description:
+        "Make several exact replacements in one step, across one file or " +
+        "many. Prefer this over repeated edit_file whenever a change touches " +
+        "more than one place — each separate call costs a whole round. Every " +
+        "snippet must appear exactly once in its file.",
+      parameters: {
+        type: "object",
+        properties: {
+          edits: {
+            type: "array",
+            description: "Replacements to apply, up to 40.",
+            items: {
+              type: "object",
+              properties: {
+                path: { type: "string" },
+                old_text: {
+                  type: "string",
+                  description: "Exact text to replace, copied verbatim.",
+                },
+                new_text: { type: "string" },
+              },
+              required: ["path", "old_text", "new_text"],
+            },
+          },
+        },
+        required: ["edits"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "replace_in_files",
+      description:
+        "Replace the same text everywhere it appears across the workspace — " +
+        "renaming a function, changing an import path, updating a constant. " +
+        "Doing this by hand costs one search plus one edit per file, so a " +
+        "rename touching a dozen files is a dozen rounds. Reports every file " +
+        "it changed. Set preview to true first if you are unsure how many " +
+        "matches there are.",
+      parameters: {
+        type: "object",
+        properties: {
+          find: {
+            type: "string",
+            description: "Exact text to find. Not a regular expression.",
+          },
+          replace: { type: "string", description: "What to put in its place." },
+          glob: {
+            type: "string",
+            description: 'Optional filter, e.g. "*.ts" or "src/*".',
+          },
+          preview: {
+            type: "boolean",
+            description:
+              "Report what would change without writing anything. Use when " +
+              "the text might appear somewhere you did not intend.",
+          },
+        },
+        required: ["find", "replace"],
       },
     },
   },
@@ -1115,6 +1210,176 @@ export async function runTool(
               : ""),
           summary: `Downloaded ${written.path}`,
           changedPath: written.path,
+        };
+      }
+
+      case "move_file": {
+        const result = await moveFile(
+          workspaceId,
+          str(args, "from"),
+          str(args, "to")
+        );
+        return {
+          ok: true,
+          content: `Moved ${result.from} to ${result.to} (${result.bytes} bytes).`,
+          summary: `Moved ${result.from} → ${result.to}`,
+          changedPath: result.to,
+        };
+      }
+
+      case "edit_files": {
+        const raw = Array.isArray(args.edits) ? args.edits : [];
+        if (raw.length === 0) {
+          return {
+            ok: false,
+            content: "Error: edits must be a non-empty list.",
+            summary: "No edits given",
+          };
+        }
+
+        const batch = raw.slice(0, MAX_BATCH_EDITS);
+        const done: string[] = [];
+        const failed: string[] = [];
+
+        for (const entry of batch) {
+          const edit = entry as {
+            path?: unknown;
+            old_text?: unknown;
+            new_text?: unknown;
+          };
+          if (
+            typeof edit.path !== "string" ||
+            typeof edit.old_text !== "string" ||
+            typeof edit.new_text !== "string"
+          ) {
+            failed.push(`${String(edit.path ?? "?")} — malformed edit`);
+            continue;
+          }
+          try {
+            const result = await editFile(
+              workspaceId,
+              edit.path,
+              edit.old_text,
+              edit.new_text
+            );
+            done.push(result.path);
+          } catch (error) {
+            /*
+             * One failure does not abandon the rest.
+             *
+             * Half-applying a refactor sounds worse than applying none of it,
+             * but the alternative is silently reverting edits that were
+             * correct — and the model cannot tell which those were. Naming
+             * exactly what failed lets it fix that one and move on.
+             */
+            failed.push(
+              `${edit.path} — ${
+                error instanceof WorkspaceError ? error.message : "could not be edited"
+              }`
+            );
+          }
+        }
+
+        const notes: string[] = [];
+        if (done.length) notes.push(`Edited ${done.length}:\n${done.join("\n")}`);
+        if (failed.length) {
+          notes.push(
+            `Failed ${failed.length} — these were NOT applied, fix and retry ` +
+              `just these:\n${failed.join("\n")}`
+          );
+        }
+        if (raw.length > batch.length) {
+          notes.push(
+            `[${raw.length - batch.length} more ignored — limit is ` +
+              `${MAX_BATCH_EDITS} per call.]`
+          );
+        }
+
+        return {
+          ok: done.length > 0,
+          content: notes.join("\n\n"),
+          summary:
+            failed.length === 0
+              ? `Edited ${done.length} file(s)`
+              : `Edited ${done.length}, ${failed.length} failed`,
+          changedPath: done[0],
+        };
+      }
+
+      case "replace_in_files": {
+        const find = str(args, "find");
+        const replace = str(args, "replace");
+        if (!find) {
+          return {
+            ok: false,
+            content: "Error: find must not be empty.",
+            summary: "Empty search",
+          };
+        }
+
+        const preview = args.preview === true;
+        const glob = typeof args.glob === "string" ? args.glob : undefined;
+
+        // Reuses the same matcher the search tool uses, so a preview and the
+        // real thing can never disagree about which files are in scope.
+        const hits = await searchFiles(workspaceId, find, { glob });
+        const paths = [...new Set(hits.hits.map((h) => h.path))];
+
+        if (paths.length === 0) {
+          return {
+            ok: false,
+            content:
+              `"${find}" does not appear in any file${glob ? ` matching ${glob}` : ""}. ` +
+              `Check the exact text, or search first.`,
+            summary: "No matches",
+          };
+        }
+
+        const changed: string[] = [];
+        const failed: string[] = [];
+        let occurrences = 0;
+
+        for (const filePath of paths) {
+          try {
+            const file = await readFile(workspaceId, filePath);
+            const count = file.content.split(find).length - 1;
+            if (count === 0) continue;
+
+            occurrences += count;
+            if (!preview) {
+              await writeFile(
+                workspaceId,
+                filePath,
+                file.content.split(find).join(replace)
+              );
+            }
+            changed.push(`${filePath} (${count})`);
+          } catch (error) {
+            failed.push(
+              `${filePath} — ${
+                error instanceof WorkspaceError ? error.message : "could not be updated"
+              }`
+            );
+          }
+        }
+
+        const heading = preview
+          ? `Would replace ${occurrences} occurrence(s) of "${find}" across ${changed.length} file(s). Nothing was written.`
+          : `Replaced ${occurrences} occurrence(s) of "${find}" across ${changed.length} file(s).`;
+
+        return {
+          ok: changed.length > 0,
+          content: [
+            heading,
+            changed.join("\n"),
+            failed.length ? `Failed:\n${failed.join("\n")}` : null,
+          ]
+            .filter(Boolean)
+            .join("\n\n"),
+          summary: preview
+            ? `Previewed ${occurrences} replacement(s)`
+            : `Replaced ${occurrences} in ${changed.length} file(s)`,
+          changedPath: preview ? undefined : changed[0]?.split(" (")[0],
         };
       }
 
