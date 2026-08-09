@@ -102,6 +102,25 @@ const ALLOWED = new Set([
   "ruff",
   "black",
   "mypy",
+  /*
+   * Network and inspection tools.
+   *
+   * curl and wget were missing, which meant the agent had no way to reach
+   * anything outside the workspace even for a trivial check. They take their
+   * target as an argument and cannot execute arbitrary text, so they belong
+   * on the same footing as the rest of this list.
+   *
+   * `which` and `where` are here because the model kept reaching for them to
+   * diagnose its own failures and being told the command was not allowed,
+   * which made a tooling problem look like a permissions one.
+   */
+  "curl",
+  "wget",
+  "which",
+  "where",
+  "git",
+  "unzip",
+  "tar",
 ]);
 
 /** Rejected outright: these exist to run arbitrary shell text. */

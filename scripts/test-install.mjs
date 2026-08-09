@@ -164,7 +164,8 @@ console.log("\n5. The guards still hold");
 check("a shell is still refused", !R.isAllowedCommand("bash"));
 check("cmd is still refused", !R.isAllowedCommand("cmd"));
 check("powershell is still refused", !R.isAllowedCommand("powershell"));
-check("an arbitrary binary is still refused", !R.isAllowedCommand("curl"));
+// curl is allowed now — see test-web.mjs. Something never on the list:
+check("an arbitrary binary is still refused", !R.isAllowedCommand("nmap"));
 
 const bad = R.validateCommand("bash", ["-c", "echo hi"]);
 check(
