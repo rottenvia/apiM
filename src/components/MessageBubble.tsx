@@ -268,10 +268,29 @@ function MessageBubbleImpl({
 
   const sourceCount = message.searchResults?.length ?? 0;
 
-  const cost = useMemo(
+  const modelCost = useMemo(
     () => estimateCost(message.usage, message.model ?? ""),
     [message.usage, message.model]
   );
+
+  /*
+   * One number, because one number is what was spent.
+   *
+   * The model cost and the search cost were shown side by side as
+   * "$0.0009 +$0.184 search", leaving the reader to add them — and the two
+   * are not comparable at a glance, since the search figure is routinely two
+   * orders of magnitude larger. Worse, the token count sat beside them and
+   * appeared to explain them: "161,136 tokens $0.0009" reads as nonsense
+   * until you know the tokens are the model's and almost all cached, while
+   * the search dollars come from a per-query fee that has no token count at
+   * all.
+   *
+   * The total is the honest headline. The split stays available on hover for
+   * when it matters.
+   */
+  const searchCost = message.searchUsd ?? 0;
+  const cost =
+    modelCost === null && searchCost === 0 ? null : (modelCost ?? 0) + searchCost;
 
   const searchTooltip = useMemo(() => {
     const parts: string[] = [];
@@ -552,9 +571,25 @@ function MessageBubbleImpl({
                 {message.tokenCount ? (
                   <span
                     className="text-[11px] text-[#6d685d]"
+                    /*
+                     * The cache split belongs here.
+                     *
+                     * "161,136 tokens" beside a cost of a tenth of a cent
+                     * looks impossible until you know almost all of those
+                     * tokens were cache hits, which DeepSeek bills at 1/120th
+                     * of the normal input rate. Showing the split turns an
+                     * apparent error into the explanation.
+                     */
                     title={
                       message.usage
-                        ? `${(message.usage.prompt_tokens ?? 0).toLocaleString()} in · ${(message.usage.completion_tokens ?? 0).toLocaleString()} out`
+                        ? [
+                            `${(message.usage.prompt_tokens ?? 0).toLocaleString()} in · ${(message.usage.completion_tokens ?? 0).toLocaleString()} out`,
+                            message.usage.prompt_cache_hit_tokens
+                              ? `${message.usage.prompt_cache_hit_tokens.toLocaleString()} of the input was cached, billed at 1/120th the rate`
+                              : null,
+                          ]
+                            .filter(Boolean)
+                            .join("\n")
                         : undefined
                     }
                   >
@@ -564,27 +599,24 @@ function MessageBubbleImpl({
 
                 {cost !== null && (
                   <span
-                    className="text-[11px] text-[#6d685d]"
-                    title={`Estimated from ${message.model ?? "model"} pricing`}
-                  >
-                    {formatCost(cost)}
-                  </span>
-                )}
-
-                {/* Search is billed separately from the model, so it gets its
-                    own figure rather than being folded into the token cost. */}
-                {message.searchUsd ? (
-                  <span
-                    className="text-[11px] text-[#6d685d]"
+                    className="text-[11px] font-medium text-[#8b857a]"
                     title={
-                      message.searchCacheHits
-                        ? `Web search, estimated · ${message.searchCacheHits} query(s) reused from cache at no cost`
-                        : "Web search, estimated"
+                      [
+                        `Model: ${formatCost(modelCost ?? 0)}`,
+                        searchCost > 0 ? `Web search: ${formatCost(searchCost)}` : null,
+                        message.searchCacheHits
+                          ? `${message.searchCacheHits} search(es) reused from cache at no cost`
+                          : null,
+                        "Estimated from published rates",
+                      ]
+                        .filter(Boolean)
+                        .join("\n")
                     }
                   >
-                    +{formatCost(message.searchUsd)} search
+                    {formatCost(cost)}
+                    {searchCost > 0 ? " total" : ""}
                   </span>
-                ) : null}
+                )}
 
                 {message.durationMs ? (
                   <span

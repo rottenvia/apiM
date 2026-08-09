@@ -472,6 +472,60 @@ check(
   "it reported only totals, so no test could have caught this"
 );
 
+// ------------------------------------------------------------------
+console.log("\n12. One cost figure, not two to add up");
+
+/*
+ * Reported: "161,136 tokens $0.0009 +$0.184 search ... how can 161k tokens be
+ * 0.0009? i need total usage cuz it is total".
+ *
+ * The $0.0009 was correct — nearly all of those tokens were cache hits, which
+ * DeepSeek bills at 1/120th of the input rate. But three figures sat in a row
+ * with no relationship between them: a token count that belongs only to the
+ * model, a model cost that looked impossible next to it, and a search fee
+ * that has no token count at all and was two orders of magnitude larger.
+ */
+const bubbleSrc = read("src/components/MessageBubble.tsx");
+
+check(
+  "model and search are added into one number",
+  /const cost =\s*\n?\s*modelCost === null && searchCost === 0 \? null : \(modelCost \?\? 0\) \+ searchCost/.test(
+    bubbleSrc
+  ),
+  "leaving the reader to add $0.0009 and $0.184 themselves"
+);
+check(
+  "the separate '+search' figure is gone",
+  !/\+\{formatCost\(message\.searchUsd\)\} search/.test(bubbleSrc)
+);
+check(
+  "the split is still available on hover",
+  /`Model: \$\{formatCost\(modelCost \?\? 0\)\}`/.test(bubbleSrc) &&
+    /Web search: \$\{formatCost\(searchCost\)\}/.test(bubbleSrc)
+);
+check(
+  "the token tooltip explains why a huge count can cost almost nothing",
+  /billed at 1\/120th the rate/.test(bubbleSrc),
+  "the cache split is the missing explanation"
+);
+
+// The arithmetic behind the reported figures.
+check(
+  "a heavily cached 161k really does cost about a tenth of a cent",
+  Math.abs(
+    pricing.estimateCost(
+      {
+        prompt_tokens: 160_000,
+        completion_tokens: 1_136,
+        prompt_cache_hit_tokens: 159_000,
+        prompt_cache_miss_tokens: 1_000,
+      },
+      "deepseek-v4-flash"
+    ) - 0.0009
+  ) < 0.0002,
+  "so the number was right; only its presentation was wrong"
+);
+
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
 );
