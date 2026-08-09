@@ -504,6 +504,20 @@ export async function listFiles(
       return;
     }
 
+    /*
+     * Directories in order, files all at once.
+     *
+     * Every file needed its own `stat`, and awaiting them one after another
+     * turned a 600-file workspace into 600 sequential syscalls — 51ms per
+     * listing, and this runs whenever the panel refreshes. The calls do not
+     * depend on each other, so waiting for each before starting the next was
+     * pure latency.
+     *
+     * Subdirectories are still walked in order, which keeps the recursion
+     * bounded rather than fanning out across a whole tree at once.
+     */
+    const files: string[] = [];
+
     for (const entry of entries) {
       if (out.length >= MAX_FILES_PER_WORKSPACE) return;
       if (IGNORED.has(entry.name)) continue;
@@ -512,17 +526,29 @@ export async function listFiles(
       if (entry.isDirectory()) {
         await walk(full);
       } else if (entry.isFile()) {
-        try {
-          const stat = await fs.stat(full);
-          out.push({
-            path: path.relative(root, full).split(path.sep).join("/"),
-            size: stat.size,
-            modifiedAt: stat.mtime.toISOString(),
-          });
-        } catch {
-          /* vanished between readdir and stat */
-        }
+        files.push(full);
       }
+    }
+
+    const stats = await Promise.all(
+      files.map((full) =>
+        fs
+          .stat(full)
+          .then((stat) => ({ full, stat }))
+          // Vanished between readdir and stat — skip it rather than failing
+          // the whole listing.
+          .catch(() => null)
+      )
+    );
+
+    for (const found of stats) {
+      if (!found) continue;
+      if (out.length >= MAX_FILES_PER_WORKSPACE) return;
+      out.push({
+        path: path.relative(root, found.full).split(path.sep).join("/"),
+        size: found.stat.size,
+        modifiedAt: found.stat.mtime.toISOString(),
+      });
     }
   }
 

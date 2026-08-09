@@ -725,6 +725,64 @@ check(
   /keeps going on the server/.test(pageSrc)
 );
 
+// ------------------------------------------------------------------
+console.log("\n17. The workspace listing, which runs constantly");
+
+/*
+ * Measured rather than assumed, after an earlier list of "optimizations"
+ * turned out to be guesses. Two real costs, both on the path that runs
+ * whenever the agent touches a file.
+ */
+const HOT = "hotlist";
+await rm(path.join(ROOT, "data", "workspaces", HOT), {
+  recursive: true,
+  force: true,
+});
+for (let i = 0; i < 300; i++) {
+  await ws.writeFile(HOT, `uploads/ext/src/m${i}.js`, "x".repeat(500));
+}
+
+const listStart = Date.now();
+const listed = await ws.listFiles(HOT);
+const listMs = Date.now() - listStart;
+
+check(
+  "a 300-file listing is quick",
+  listMs < 120,
+  `${listMs}ms — every file needed its own stat, and they were awaited one at a time`
+);
+check("and it finds everything", listed.length === 300);
+check(
+  "the stats are gathered concurrently",
+  /const stats = await Promise\.all\(/.test(read("src/lib/workspace.ts")),
+  "the calls do not depend on each other, so serialising them was pure latency"
+);
+check(
+  "a file that vanishes mid-walk does not fail the listing",
+  /\.catch\(\(\) => null\)/.test(read("src/lib/workspace.ts"))
+);
+check(
+  "sizes and dates still come back",
+  listed.every((f) => f.size > 0 && Boolean(f.modifiedAt)),
+  "the whole point of the stat call"
+);
+
+check(
+  "the panel coalesces a burst of writes into one refresh",
+  /const scheduleWorkspaceRefresh = useCallback/.test(pageSrc) &&
+    /scheduleWorkspaceRefresh\(\);/.test(pageSrc),
+  "one write_files call fired 30 full listings back to back — 1.2s of disk work for one final state"
+);
+check(
+  "it is trailing, so the last state is the one fetched",
+  /clearTimeout\(refreshTimer\.current\)/.test(pageSrc),
+  "a leading debounce would show the state before the writes finished"
+);
+check(
+  "and the timer is cleared on unmount",
+  /\(\) => \{\s*\n\s*if \(refreshTimer\.current\) clearTimeout/.test(pageSrc)
+);
+
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
 );
