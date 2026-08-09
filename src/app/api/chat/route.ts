@@ -36,6 +36,7 @@ import { pruneTranscript } from "@/lib/prune";
 import { compactTranscript, compactForResume } from "@/lib/compact";
 import { readLessons, applyLessons, formatLessonsForPrompt } from "@/lib/lessons";
 import { runRefine } from "@/lib/refine";
+import { beginRun, endRun } from "@/lib/runs";
 import {
   rebuildResumeFromStored,
   rebuiltResumeInstruction,
@@ -154,6 +155,8 @@ type StreamEvent =
   | {
       type: "meta";
       conversationId: string | null;
+      /** Id of the reply being generated, so Stop can name it. */
+      messageId: string;
       title: string;
       resolvedEffort: string;
       thinkingEnabled: boolean;
@@ -355,6 +358,18 @@ export async function POST(req: NextRequest) {
       const assistantMsgId = resumeMessageId ?? uuidv4();
       let persisted = false;
 
+      /*
+       * The work watches this, not the request.
+       *
+       * `req.signal` aborts when the browser closes the tab, which used to
+       * kill a run that was thirty rounds in and still writing files. Those
+       * files are the point — they land in a workspace on the user's own
+       * machine — so a closed tab now means "nobody is watching", not "stop".
+       * Only the Stop button aborts, through /api/chat/stop.
+       */
+      const runSignal = beginRun(assistantMsgId, convId);
+      const stopped = () => runSignal.aborted;
+
       try {
         // Built-ins plus the user's own saved plugins.
         let customPlugins: Awaited<ReturnType<typeof listCustomPlugins>> = [];
@@ -517,7 +532,7 @@ export async function POST(req: NextRequest) {
               message,
               recentContext,
               deepseekApiKey,
-              req.signal
+              runSignal
             );
             doSearch = decision.needed;
             searchReason = decision.reason;
@@ -536,7 +551,7 @@ export async function POST(req: NextRequest) {
               recentContext,
               deepseekApiKey,
               tavilyApiKey as string,
-              req.signal,
+              runSignal,
               searchProfile
             );
           } catch (searchError) {
@@ -551,7 +566,7 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        if (req.signal.aborted) {
+        if (stopped()) {
           close();
           return;
         }
@@ -559,6 +574,7 @@ export async function POST(req: NextRequest) {
         send({
           type: "meta",
           conversationId: convId,
+          messageId: assistantMsgId,
           title,
           resolvedEffort,
           thinkingEnabled,
@@ -1029,12 +1045,12 @@ export async function POST(req: NextRequest) {
                 },
                 body: JSON.stringify(dsRequestBody),
                 signal: AbortSignal.any([
-                  req.signal,
+                  runSignal,
                   AbortSignal.timeout(280_000),
                 ]),
               }),
             {
-              signal: req.signal,
+              signal: runSignal,
               onRetry: ({ attempt: n, attempts, delayMs, reason }) => {
                 send({ type: "retrying", attempt: n, attempts, delayMs, reason });
               },
@@ -1203,7 +1219,7 @@ export async function POST(req: NextRequest) {
             // The client vanished (tab closed, navigation, network drop). Stop
             // pulling tokens and keep the last checkpoint, which stays flagged
             // incomplete so the UI can offer to continue.
-            if (req.signal.aborted) {
+            if (stopped()) {
               await checkpoint(true);
               await reader.cancel().catch(() => {});
               close();
@@ -1401,7 +1417,7 @@ export async function POST(req: NextRequest) {
           send({ type: "status", stage: "working" });
 
           for (const call of calls) {
-            if (req.signal.aborted) break;
+            if (stopped()) break;
 
             send({
               type: "tool_start",
@@ -1493,7 +1509,19 @@ export async function POST(req: NextRequest) {
                   context,
                 });
 
-                const answer = await askQuestion(call.id, req.signal);
+                /*
+                 * Waits on a person, so this one does follow the connection.
+                 *
+                 * A question with nobody there to answer it would otherwise
+                 * hang the run until the safety ceiling. The prompt is only
+                 * meaningful while the tab is open, so losing the tab is a
+                 * legitimate reason to stop waiting and carry on with a
+                 * sensible default.
+                 */
+                const answer = await askQuestion(
+                  call.id,
+                  AbortSignal.any([req.signal, runSignal])
+                );
 
                 send({
                   type: "question_resolved",
@@ -1572,7 +1600,9 @@ export async function POST(req: NextRequest) {
                       args: check.args,
                       reason,
                     },
-                    req.signal
+                    // Same as ask_user: an approval prompt needs someone
+                    // looking at it, so a closed tab ends the wait.
+                    AbortSignal.any([req.signal, runSignal])
                   );
 
                   approved = decision.approved;
@@ -1614,7 +1644,7 @@ export async function POST(req: NextRequest) {
                     workspace,
                     check.command,
                     check.args,
-                    req.signal
+                    runSignal
                   );
                   result = {
                     ok: run.exitCode === 0 && !run.timedOut,
@@ -1673,7 +1703,7 @@ export async function POST(req: NextRequest) {
           // before these tools ran.
           await refreshFileTree();
 
-          if (req.signal.aborted) break;
+          if (stopped()) break;
         }
 
         // ---------------- Final save ----------------
@@ -1737,7 +1767,7 @@ export async function POST(req: NextRequest) {
           // user just cancelled is the opposite of what they asked for, and
           // the run is half-finished anyway, so anything learned from it
           // would be drawn from incomplete evidence.
-          !req.signal.aborted &&
+          !stopped() &&
           toolSummaries.length > 0
         ) {
           try {
@@ -1766,7 +1796,7 @@ export async function POST(req: NextRequest) {
               existingLessons,
               deepseekApiKey,
               DEEPSEEK_BASE_URL,
-              req.signal
+              runSignal
             );
 
             if (refined.lessons.length > 0 || refined.confirms.length > 0) {
@@ -1790,6 +1820,7 @@ export async function POST(req: NextRequest) {
           }
         }
 
+        endRun(assistantMsgId);
         send({
           type: "done",
           id: assistantMsgId,
@@ -1809,6 +1840,7 @@ export async function POST(req: NextRequest) {
         });
         close();
       } catch (error) {
+        endRun(assistantMsgId);
         console.error("Chat API error:", error);
         send({
           type: "error",

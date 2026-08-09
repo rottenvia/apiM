@@ -137,6 +137,7 @@ type StreamEvent =
   | {
       type: "meta";
       conversationId: string | null;
+      messageId: string;
       title: string;
       resolvedEffort: string;
       thinkingEnabled: boolean;
@@ -366,6 +367,8 @@ export default function Home() {
   const conversationsRef = useRef<Conversation[]>([]);
   /** Lets the Stop button cancel an in-flight stream. */
   const abortRef = useRef<AbortController | null>(null);
+  /** Server-side id of the reply in flight, for the stop endpoint. */
+  const runMessageIdRef = useRef<string | null>(null);
 
   /*
    * The side channel.
@@ -1123,6 +1126,9 @@ export default function Home() {
 
               case "meta":
                 streamTitle = evt.title;
+                // Needed by Stop: the server aborts by message id now, so a
+                // closed tab no longer doubles as a stop signal.
+                runMessageIdRef.current = evt.messageId;
                 finalMeta = {
                   ...finalMeta,
                   thinkingEffort: evt.resolvedEffort,
@@ -1469,7 +1475,46 @@ export default function Home() {
     sendMessageRef.current = sendMessage;
   }, [sendMessage]);
 
+  /**
+   * Stop, meaning stop.
+   *
+   * Aborting the fetch alone is no longer enough: the server deliberately
+   * keeps working when its connection drops, because a closed tab used to
+   * kill a run that was still writing files. So Stop has to say so
+   * explicitly, and only then close the stream locally.
+   */
+  /*
+   * Whether the browser thinks it has a connection.
+   *
+   * Worth showing because the failure it causes is confusing: a reply stops
+   * mid-sentence and the error mentions the API, which reads as the model
+   * failing rather than the wifi dropping. It matters more now that a run
+   * survives a lost connection — the work is still going on the server, and
+   * saying so is the difference between waiting and starting over.
+   */
+  const [online, setOnline] = useState(true);
+
+  useEffect(() => {
+    const update = () => setOnline(navigator.onLine);
+    update();
+    window.addEventListener("online", update);
+    window.addEventListener("offline", update);
+    return () => {
+      window.removeEventListener("online", update);
+      window.removeEventListener("offline", update);
+    };
+  }, []);
+
   const stopGeneration = useCallback(() => {
+    const id = runMessageIdRef.current;
+    if (id) {
+      void fetch("/api/chat/stop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messageId: id }),
+        keepalive: true,
+      }).catch(() => {});
+    }
     abortRef.current?.abort();
   }, []);
 
@@ -1669,6 +1714,22 @@ export default function Home() {
         onResumeLast={() => {
           if (lastResumable) resumeReply(lastResumable.id);
         }}
+        connectionNotice={
+          !online ? (
+            <div className="px-4 pb-1.5 sm:px-6">
+              <div className="mx-auto w-full max-w-3xl">
+                <div className="flex items-center gap-2.5 rounded-xl border border-[#cfa25a]/30 bg-[#cfa25a]/[0.07] px-3 py-2">
+                  <span className="h-2 w-2 flex-none rounded-full bg-[#cfa25a]" />
+                  <span className="text-[12px] leading-relaxed text-text-secondary">
+                    <span className="font-medium text-[#cfa25a]">No connection.</span>{" "}
+                    Anything already running keeps going on the server — it
+                    will be here when you reconnect.
+                  </span>
+                </div>
+              </div>
+            </div>
+          ) : null
+        }
         balanceWarning={
           showBalanceWarning && balance ? (
             <BalanceWarning

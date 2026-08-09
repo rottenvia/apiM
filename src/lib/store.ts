@@ -700,21 +700,32 @@ export async function searchConversations(
   if (!needle) return [];
 
   await ensureDir();
-  let names: string[];
+  await migrateFlatFiles();
+
+  /*
+   * Chats live in folders, not loose .json files.
+   *
+   * This still looked for names ending in .json in the data directory — the
+   * layout from before conversations were given their own folder — so it
+   * matched nothing at all. Searching appeared to work and silently returned
+   * no results for everything, which reads as "not found" rather than as a
+   * bug.
+   */
+  let entries;
   try {
-    names = await fs.readdir(DATA_DIR);
+    entries = await fs.readdir(DATA_DIR, { withFileTypes: true });
   } catch {
     return [];
   }
 
   const hits: SearchHit[] = [];
 
-  for (const name of names) {
-    if (!name.endsWith(".json")) continue;
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
     let conv: StoredConversation;
     try {
       conv = JSON.parse(
-        await fs.readFile(path.join(DATA_DIR, name), "utf8")
+        await fs.readFile(fileIn(entry.name), "utf8")
       ) as StoredConversation;
     } catch {
       continue;
