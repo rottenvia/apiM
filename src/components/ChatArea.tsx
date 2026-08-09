@@ -32,6 +32,8 @@ interface ChatAreaProps {
   messages: Message[];
   isLoading: boolean;
   statusStage: StatusStage | null;
+  /** Shown above the composer when the DeepSeek balance is getting low. */
+  balanceWarning?: React.ReactNode;
   /** The current side question, if one has been asked. */
   btwEntry?: BtwEntry | null;
   /** Ask something without disturbing the running task. */
@@ -85,6 +87,7 @@ export function ChatArea({
   messages,
   isLoading,
   statusStage,
+  balanceWarning,
   btwEntry,
   onAskBtw,
   onDismissBtw,
@@ -848,6 +851,10 @@ export function ChatArea({
         </div>
       )}
       </div>
+
+      {/* Money first: if there is not enough left to finish a task, that
+          matters more than anything else on screen. */}
+      {balanceWarning}
 
       {/* The side channel, above the composer and below the transcript.
           

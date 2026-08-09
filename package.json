@@ -38,7 +38,8 @@
     "test:compact": "tsx scripts/test-compact.mjs",
     "test:lessons": "tsx scripts/test-lessons.mjs",
     "test:hardening": "tsx scripts/test-hardening.mjs",
-    "test:btw": "tsx scripts/test-btw.mjs"
+    "test:btw": "tsx scripts/test-btw.mjs",
+    "test:balance": "tsx scripts/test-balance.mjs"
   },
   "dependencies": {
     "@types/uuid": "^10.0.0",
