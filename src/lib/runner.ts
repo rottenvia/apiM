@@ -79,6 +79,28 @@ const ALLOWED = new Set([
   "pytest",
   "jest",
   "vitest",
+  // Everyday tooling that was missing, so the model hit a wall on ordinary
+  // requests. Each of these runs a defined job and takes its input as
+  // arguments; none of them is a way to execute arbitrary text, which is the
+  // line this list draws.
+  "pnpm",
+  "yarn",
+  "bun",
+  "deno",
+  "tsx",
+  "eslint",
+  "prettier",
+  "vite",
+  "next",
+  "git",
+  "make",
+  "gcc",
+  "g++",
+  "uv",
+  "poetry",
+  "ruff",
+  "black",
+  "mypy",
 ]);
 
 /** Rejected outright: these exist to run arbitrary shell text. */
@@ -105,8 +127,27 @@ export function allowedCommands(): string[] {
 
 /** Strips any path and a Windows .exe, so `/usr/bin/python3` is `python3`. */
 function normaliseCommand(command: string): string {
-  const base = path.basename(String(command).trim().toLowerCase());
-  return base.endsWith(".exe") ? base.slice(0, -4) : base;
+  /*
+   * A path and a Windows extension both reduce to the bare tool name.
+   *
+   * Only `.exe` was stripped, so when the model worked around a failing
+   * `npm install` by naming the file directly — `npm.cmd`, or the full
+   * `C:\\Program Files\\nodejs\\npm.cmd` — the allow-list saw a name it did
+   * not recognise and answered "Command not allowed". That reads as a
+   * permissions decision about npm, which was never the case: npm is on the
+   * list. The check simply did not know that `npm.cmd` is npm.
+   *
+   * The basename is taken first, so a directory cannot smuggle anything in:
+   * "C:/evil/npm.cmd" still resolves to "npm", and the launcher is then
+   * looked up on PATH rather than run from wherever the model pointed.
+   */
+  const base = path.basename(
+    String(command).trim().toLowerCase().replace(/\\/g, "/")
+  );
+  for (const ext of [".exe", ".cmd", ".bat", ".com", ".ps1"]) {
+    if (base.endsWith(ext)) return base.slice(0, -ext.length);
+  }
+  return base;
 }
 
 /**
@@ -279,6 +320,47 @@ function childEnv(cwd: string, venvPath: string | null): NodeJS.ProcessEnv {
   } as unknown as NodeJS.ProcessEnv;
 }
 
+/**
+ * Find the real file a command name refers to on Windows.
+ *
+ * On Windows most of these tools are not executables at all. `npm` is
+ * `npm.cmd`, `npx` is `npx.cmd`, `tsc` and `jest` are `.cmd` shims — only
+ * `node.exe` and `python.exe` are real binaries. `spawn()` with
+ * `shell: false` can launch an `.exe` and cannot launch a `.cmd`, so every
+ * npm command failed with ENOENT and surfaced as a bare "Failed: npm install"
+ * that looked like a permissions problem. It was not: npm has always been on
+ * the allow-list.
+ *
+ * Resolving to the actual file keeps `shell: false`, which matters — turning
+ * the shell on would mean the argument list is re-parsed by cmd.exe, and
+ * every quoting and metacharacter question that the allow-list exists to
+ * avoid comes back.
+ *
+ * Returns the command unchanged on Unix, and when nothing matching is found,
+ * so the spawn failure is reported normally rather than being hidden here.
+ */
+async function resolveWindowsLauncher(command: string): Promise<string> {
+  if (process.platform !== "win32") return command;
+
+  // Order matters: prefer a real executable, then the shims Node installs.
+  const extensions = [".exe", ".cmd", ".bat"];
+  const dirs = (process.env.PATH ?? "").split(";").filter(Boolean);
+
+  for (const dir of dirs) {
+    for (const ext of extensions) {
+      const candidate = path.join(dir, `${command}${ext}`);
+      try {
+        await fs.access(candidate);
+        return candidate;
+      } catch {
+        /* keep looking */
+      }
+    }
+  }
+
+  return command;
+}
+
 /** Interpreters whose packages belong in the workspace venv. */
 const PYTHON_COMMANDS = new Set(["python", "python3", "pip", "pip3", "pytest"]);
 
@@ -409,8 +491,9 @@ export async function runCommand(
     ? await fs
         .access(executable)
         .then(() => executable)
-        .catch(() => check.command)
-    : check.command;
+        // The venv may not hold this tool; fall back to resolving it normally.
+        .catch(() => resolveWindowsLauncher(check.command))
+    : await resolveWindowsLauncher(check.command);
 
   const started = Date.now();
 
@@ -423,6 +506,15 @@ export async function runCommand(
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
       env: childEnv(cwd, venvPath),
+      /*
+       * Required for the `.cmd` shims resolved above.
+       *
+       * Node refuses to spawn a batch file without this since the fix for
+       * CVE-2024-27980, because the arguments would otherwise be re-parsed by
+       * cmd.exe. It quotes them itself instead, which is what makes running
+       * `npm` safe without turning `shell` on.
+       */
+      windowsVerbatimArguments: false,
     });
 
     const limitMs = timeoutFor(check.command, check.args);
