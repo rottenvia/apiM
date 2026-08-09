@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { v4 as uuidv4 } from "uuid";
 import { Sidebar } from "@/components/Sidebar";
 import { ChatArea } from "@/components/ChatArea";
+import type { BtwEntry } from "@/components/BtwDock";
 import { SettingsModal } from "@/components/SettingsModal";
 import { PluginsModal } from "@/components/PluginsModal";
 import { ArtifactProvider } from "@/components/ArtifactContext";
@@ -286,6 +287,95 @@ export default function Home() {
   const conversationsRef = useRef<Conversation[]>([]);
   /** Lets the Stop button cancel an in-flight stream. */
   const abortRef = useRef<AbortController | null>(null);
+
+  /*
+   * The side channel.
+   *
+   * Held in its own state and never merged into `messages`, which is the
+   * whole safety argument: the agent's next round reads `conversationHistory`
+   * built from `messages`, so an aside that never lands there can never
+   * redirect the running task.
+   *
+   * Its own AbortController too, deliberately not `abortRef` — Stop belongs
+   * to the main task and dismissing an aside must not touch it.
+   */
+  const [btwEntry, setBtwEntry] = useState<BtwEntry | null>(null);
+  const btwAbortRef = useRef<AbortController | null>(null);
+
+  const dismissBtw = useCallback(() => {
+    btwAbortRef.current?.abort();
+    btwAbortRef.current = null;
+    setBtwEntry(null);
+  }, []);
+
+  const askBtw = useCallback(
+    async (question: string) => {
+      if (!question.trim() || !deepseekKey) return;
+
+      // One at a time. A second aside replaces the first rather than stacking,
+      // because a dock with a queue in it stops being an aside.
+      btwAbortRef.current?.abort();
+      const controller = new AbortController();
+      btwAbortRef.current = controller;
+
+      const id = `btw-${Date.now()}`;
+      setBtwEntry({ id, question, answer: "", pending: true });
+
+      // The last thing the user actually typed, for pronouns like "it".
+      // Never the in-flight reply.
+      const lastUser = [...messagesRef.current]
+        .reverse()
+        .find((m) => m.role === "user" && !m.isError);
+
+      try {
+        const res = await fetch("/api/btw", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal: controller.signal,
+          body: JSON.stringify({
+            question,
+            deepseekApiKey: deepseekKey,
+            workspaceId,
+            lastUserMessage: lastUser?.content?.slice(0, 500),
+          }),
+        });
+
+        const data = (await res.json()) as {
+          answer?: string;
+          error?: string;
+          cancelled?: boolean;
+        };
+
+        if (controller.signal.aborted || data.cancelled) return;
+
+        setBtwEntry((prev) =>
+          prev && prev.id === id
+            ? {
+                ...prev,
+                pending: false,
+                answer: data.answer ?? "",
+                error: data.error,
+              }
+            : prev
+        );
+      } catch (err) {
+        if (controller.signal.aborted) return;
+        setBtwEntry((prev) =>
+          prev && prev.id === id
+            ? {
+                ...prev,
+                pending: false,
+                error:
+                  err instanceof Error
+                    ? `Couldn't ask on the side: ${err.message}`
+                    : "Couldn't ask on the side.",
+              }
+            : prev
+        );
+      }
+    },
+    [deepseekKey, workspaceId]
+  );
   /** Latest messages + sender, so stable callbacks can read them. */
   const messagesRef = useRef<Message[]>([]);
   const sendMessageRef = useRef<
@@ -1429,6 +1519,9 @@ export default function Home() {
         messages={messages}
         isLoading={isLoading}
         statusStage={statusStage}
+        btwEntry={btwEntry}
+        onAskBtw={askBtw}
+        onDismissBtw={dismissBtw}
         retryNotice={retryNotice}
         onStop={stopGeneration}
         hasKeys={hasKeys}

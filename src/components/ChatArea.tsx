@@ -18,6 +18,8 @@ import { archiveFolderName, formatArchiveManifest } from "@/lib/archive";
 import type { Attachment } from "@/lib/attachments";
 import { Dots, MessageBubble } from "@/components/MessageBubble";
 import { ThinkingEffortSelector } from "@/components/ThinkingEffortSelector";
+import { BtwDock } from "@/components/BtwDock";
+import type { BtwEntry } from "@/components/BtwDock";
 import { ModelSelector } from "@/components/ModelSelector";
 import { WebSearchToggle } from "@/components/WebSearchToggle";
 import { WorkspaceBar } from "@/components/WorkspaceBar";
@@ -30,6 +32,11 @@ interface ChatAreaProps {
   messages: Message[];
   isLoading: boolean;
   statusStage: StatusStage | null;
+  /** The current side question, if one has been asked. */
+  btwEntry?: BtwEntry | null;
+  /** Ask something without disturbing the running task. */
+  onAskBtw?: (question: string) => void;
+  onDismissBtw?: () => void;
   /** Set while a transient upstream failure is being retried. */
   retryNotice?: string | null;
   onStop: () => void;
@@ -78,6 +85,9 @@ export function ChatArea({
   messages,
   isLoading,
   statusStage,
+  btwEntry,
+  onAskBtw,
+  onDismissBtw,
   retryNotice,
   onStop,
   hasKeys,
@@ -495,7 +505,25 @@ export function ChatArea({
     }
   }, [input]);
 
+  /*
+   * A side question, recognised by how you already say it.
+   *
+   * Only while a task is actually running: with the agent idle there is
+   * nothing to be parallel to, so "btw ..." is just a normal message and
+   * sends as one. That also means the prefix cannot surprise anyone who
+   * happens to start a sentence with it.
+   */
+  const btwMatch = /^btw[\s,:]+([\s\S]+)/i.exec(input.trim());
+  const btwQuestion = isLoading && btwMatch ? btwMatch[1].trim() : "";
+  const isBtw = Boolean(btwQuestion) && Boolean(onAskBtw);
+
   const handleSubmit = () => {
+    // An aside is sendable while the main task runs; a normal message is not.
+    if (isBtw) {
+      onAskBtw?.(btwQuestion);
+      setInput("");
+      return;
+    }
     // A message of only attachments is valid — the files are the content.
     if ((!input.trim() && attachments.length === 0) || isLoading) return;
     // The model receives the file contents and image descriptions; the
@@ -821,6 +849,24 @@ export function ChatArea({
       )}
       </div>
 
+      {/* The side channel, above the composer and below the transcript.
+          
+          Outside the composer box so it cannot be mistaken for something you
+          are editing, and outside the message list so it never disturbs the
+          reading order of the conversation. */}
+      {btwEntry && (
+        <div className="flex-shrink-0 px-4 sm:px-6">
+          <div className={`mx-auto w-full ${columnWidth}`}>
+            <BtwDock
+              entry={btwEntry}
+              onDismiss={onDismissBtw ?? (() => {})}
+              onAskProperly={(q) => onSend(q)}
+              mainTaskRunning={isLoading}
+            />
+          </div>
+        </div>
+      )}
+
       {/* Composer — the relative wrapper anchors the selector popovers so they
           open centered above the chat bar, never covering it */}
       <div className="flex-shrink-0 px-4 sm:px-6 pt-2 pb-4">
@@ -901,15 +947,27 @@ export function ChatArea({
               }}
               placeholder={
                 hasKeys
-                  ? attachments.length > 0
-                    ? "Add a question about these files…"
-                    : "Type your message…"
+                  ? isLoading && onAskBtw
+                    ? "Working… start with \"btw\" to ask something on the side"
+                    : attachments.length > 0
+                      ? "Add a question about these files…"
+                      : "Type your message…"
                   : "Add your API keys in Settings to start chatting"
               }
               disabled={!hasKeys}
               rows={1}
               className="block w-full resize-none bg-transparent px-4 pt-3.5 pb-1.5 text-[15px] leading-6 text-text-primary placeholder-text-muted outline-none disabled:opacity-50"
             />
+
+            {/* Confirms the aside is armed before you commit to sending it.
+                Without this the only signal is the send icon changing, which
+                is easy to miss while reading the reply above. */}
+            {isBtw && (
+              <div className="flex items-center gap-1.5 px-4 pb-1 text-[11px] text-[#6ba3a0]">
+                <span className="btw-pulse" aria-hidden="true" />
+                Asked on the side — the running task keeps going
+              </div>
+            )}
 
             <div className="flex items-center gap-2 px-2.5 pb-2.5 pt-0.5">
               {/* Uniform chips in a single row — scrolls instead of wrapping
@@ -969,7 +1027,26 @@ export function ChatArea({
 
               {/* While generating, this becomes a Stop control — you can
                   interrupt a long answer and keep whatever arrived. */}
-              {isLoading ? (
+              {isLoading && isBtw ? (
+                /* An aside is being composed while the task runs.
+                   
+                   The button becomes Send for the aside rather than Stop,
+                   because pressing Stop here would be the opposite of the
+                   intent — you typed a question precisely so you would not
+                   have to interrupt anything. Stop is still reachable: clear
+                   the input and it returns. */
+                <button
+                  onClick={handleSubmit}
+                  className="send-btn btw-send"
+                  title="Ask on the side — won't interrupt the task"
+                  aria-label="Ask on the side"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M8 10h8M8 14h5" />
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M21 12a8 8 0 01-8 8H7l-4 3V12a8 8 0 018-8h2a8 8 0 018 8z" />
+                  </svg>
+                </button>
+              ) : isLoading ? (
                 <button
                   onClick={onStop}
                   className="send-btn stop-btn"
