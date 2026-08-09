@@ -42,7 +42,24 @@ export async function GET(
           (Boolean(m.toolEvents?.length) ||
             Boolean(m.reasoningContent?.trim()) ||
             Boolean(m.content?.trim())));
-      return { ...rest, canResume };
+      /*
+       * Reasoning is sent as a length, not as text.
+       *
+       * It is collapsed by default and most of it is never expanded, yet on a
+       * long chat it was half the payload — 0.46MB of 0.93MB on a 120-message
+       * conversation. Every open of that chat downloaded and parsed it so the
+       * user could not read it.
+       *
+       * The panel now fetches the text when it is opened, from the endpoint
+       * below. The length is kept so the UI still knows whether to show the
+       * panel at all, without a round trip to find out.
+       */
+      const { reasoningContent, ...withoutReasoning } = rest;
+      return {
+        ...withoutReasoning,
+        reasoningLength: reasoningContent?.length ?? 0,
+        canResume,
+      };
     });
 
     return NextResponse.json({ ...conv, messages });

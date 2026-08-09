@@ -177,6 +177,8 @@ interface MessageBubbleProps {
   onRegenerate?: (assistantId: string) => void;
   /** Continue an interrupted reply instead of redoing it. */
   onResume?: (assistantId: string) => void;
+  /** Called the first time the reasoning panel is opened. */
+  onLoadReasoning?: (messageId: string) => void;
   /** Resend a user message with edited text, replacing everything after it. */
   onEdit?: (messageId: string, newContent: string) => void;
   /** Remove a message and the reply that followed it. */
@@ -199,6 +201,7 @@ function MessageBubbleImpl({
   isLast,
   onRegenerate,
   onResume,
+  onLoadReasoning,
   onEdit,
   onDelete,
   searchQuery,
@@ -670,7 +673,10 @@ function MessageBubbleImpl({
             {/* Reasoning. The header shows live dots while the model is
                 still thinking, and a follow/free-scroll toggle controls
                 whether the panel tracks the incoming text. */}
-            {message.reasoningContent && (
+            {/* Shown when there is reasoning, whether or not its text has
+                arrived — a stored chat sends only the length, and the body is
+                fetched when the panel is opened. */}
+            {(message.reasoningContent || message.reasoningLength) && (
               <div
                 data-thinking={isThinkingPhase}
                 className="thinking-panel thinking-shell overflow-hidden rounded-lg"
@@ -685,7 +691,12 @@ function MessageBubbleImpl({
                     is legible as a transition rather than a repaint. */}
                 <div className="flex items-center gap-2">
                   <button
-                    onClick={() => setShowThinking((v) => !v)}
+                    onClick={() => {
+                      // Asked on every open; the loader returns immediately
+                      // when the text is already present.
+                      if (!showThinking) onLoadReasoning?.(message.id);
+                      setShowThinking((v) => !v);
+                    }}
                     aria-expanded={showThinking}
                     className="thinking-toggle flex min-w-0 flex-1 items-center gap-1.5 px-3 py-2 text-left font-sans text-[13px] font-medium leading-5"
                   >
@@ -756,7 +767,8 @@ function MessageBubbleImpl({
                       aria-hidden={!showThinking}
                       className="thinking-body-text max-h-80 overflow-y-auto whitespace-pre-wrap break-words px-3 pb-2.5 font-sans text-[13px] leading-5 [overscroll-behavior:contain]"
                     >
-                      {message.reasoningContent}
+                      {message.reasoningContent ??
+                        (showThinking ? "Loading…" : "")}
                     </div>
                   </div>
                 </div>

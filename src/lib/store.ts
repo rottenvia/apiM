@@ -294,16 +294,54 @@ export async function listConversations(): Promise<ConversationSummary[]> {
     return [];
   }
 
+  /*
+   * The sidebar needs a title and a date, not a transcript.
+   *
+   * This read and JSON.parsed every conversation in full to produce a list of
+   * names — on forty chats that is twelve megabytes of text parsed, and the
+   * cost grows with everything ever written rather than with the number of
+   * rows displayed. It runs on load and again after every reply.
+   *
+   * The summary is now cached per file, keyed by size and mtime, so an
+   * unchanged conversation is never re-read. Only the chat that was just
+   * written is parsed again.
+   */
   const out: ConversationSummary[] = [];
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    try {
-      const raw = await fs.readFile(fileIn(entry.name), "utf8");
-      const conv = JSON.parse(raw) as StoredConversation;
-      const { messages, ...rest } = conv;
-      out.push({ ...rest, messageCount: messages?.length ?? 0 });
-    } catch {
-      // Skip unreadable/corrupt files rather than failing the whole list.
+  await Promise.all(
+    entries.map(async (entry) => {
+      if (!entry.isDirectory()) return;
+      const file = fileIn(entry.name);
+
+      try {
+        const stat = await fs.stat(file);
+        const fingerprint = `${stat.size}:${stat.mtimeMs}`;
+        const cached = summaryCache.get(file);
+        if (cached && cached.fingerprint === fingerprint) {
+          out.push(cached.summary);
+          return;
+        }
+
+        const raw = await fs.readFile(file, "utf8");
+        const conv = JSON.parse(raw) as StoredConversation;
+        const { messages, ...rest } = conv;
+        const summary: ConversationSummary = {
+          ...rest,
+          messageCount: messages?.length ?? 0,
+        };
+        summaryCache.set(file, { fingerprint, summary });
+        out.push(summary);
+      } catch {
+        // Skip unreadable/corrupt files rather than failing the whole list.
+      }
+    })
+  );
+
+  // Entries for folders that no longer exist would otherwise accumulate for
+  // the life of the process.
+  if (summaryCache.size > entries.length * 2) {
+    const live = new Set(entries.map((e) => fileIn(e.name)));
+    for (const key of summaryCache.keys()) {
+      if (!live.has(key)) summaryCache.delete(key);
     }
   }
 
@@ -333,6 +371,18 @@ export async function getConversation(
  * ordered without blocking other conversations.
  */
 const writeQueues = new Map<string, Promise<void>>();
+
+/**
+ * Parsed sidebar summaries, keyed by file path.
+ *
+ * Invalidated by size and mtime rather than by hand, so an edit made outside
+ * the app — or by a restore — is picked up without anyone having to remember
+ * to clear this.
+ */
+const summaryCache = new Map<
+  string,
+  { fingerprint: string; summary: ConversationSummary }
+>();
 
 /**
  * Conversations deleted during this process's lifetime.
