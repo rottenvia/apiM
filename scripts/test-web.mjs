@@ -219,6 +219,134 @@ check(
   !validateCommand("rm", ["-rf", "/"]).ok && !validateCommand("sudo", []).ok
 );
 
+// ------------------------------------------------------------------
+console.log("\n6. The rest of the gaps");
+
+const { runTool } = await load("src/lib/tools.ts");
+const wsLib = await load("src/lib/workspace.ts");
+const snapLib = await load("src/lib/snapshots.ts");
+const { createZip } = await load("src/lib/zip.ts");
+const { writeFile: fsWrite } = await import("node:fs/promises");
+const WS = "webtools";
+await (await import("node:fs/promises")).rm(
+  path.join(ROOT, "data", "workspaces", WS),
+  { recursive: true, force: true }
+);
+
+check(
+  "web_search is a tool, not just a pre-turn decision",
+  names.includes("web_search"),
+  "search ran before the loop, so round two could not look anything up"
+);
+check(
+  "it is withheld when there is no key",
+  !(await runTool(WS, "web_search", { query: "x" }, {})).ok,
+  "a tool that can only fail wastes a round and produces an apology"
+);
+check(
+  "the failure tells the model what to do instead",
+  /rather than guessing|already know the URL/.test(
+    (await runTool(WS, "web_search", { query: "x" }, {})).content
+  )
+);
+check(
+  "and the route hides it from the model entirely",
+  /t\.function\.name === "web_search"\) return Boolean\(tavilyApiKey\)/.test(route)
+);
+
+// write_files
+let res = await runTool(WS, "write_files", {
+  files: [
+    { path: "src/a.js", content: "export const a = 1;" },
+    { path: "src/b.js", content: "export const b = 2;" },
+    { path: "../escape.js", content: "nope" },
+  ],
+});
+check("write_files creates several at once", res.ok && /Wrote 2/.test(res.summary));
+check(
+  "a traversal inside a batch is refused without losing the rest",
+  /Failed 1/.test(res.content) && (await wsLib.listFiles(WS)).length === 2,
+  "one bad path must not discard the good ones"
+);
+
+// undo_file
+await runTool(WS, "write_file", { path: "src/a.js", content: "BROKEN" });
+res = await runTool(WS, "undo_file", { path: "src/a.js" });
+check("undo_file reverts the last write", res.ok);
+check(
+  "the file really is back",
+  (await wsLib.readFile(WS, "src/a.js")).content === "export const a = 1;",
+  "reverting is exact; patching a mistake by hand is not"
+);
+res = await runTool(WS, "undo_file", { path: "src/b.js" });
+check(
+  "with no history it says so rather than failing silently",
+  !res.ok && /Fix it forward with edit_file/.test(res.content)
+);
+
+// snapshots
+await snapLib.createSnapshot(WS, "before the mistake");
+await wsLib.writeFile(WS, "src/a.js", "RUINED");
+await wsLib.writeFile(WS, "src/junk.js", "created after");
+
+res = await runTool(WS, "list_snapshots", {});
+check("list_snapshots shows the restore points", res.ok && /before the mistake/.test(res.content));
+
+const snapId = res.content.split("\n")[1]?.split(" — ")[0];
+res = await runTool(WS, "restore_snapshot", { id: snapId });
+check("restore_snapshot puts the workspace back", res.ok);
+check(
+  "a ruined file is restored",
+  (await wsLib.readFile(WS, "src/a.js")).content === "RUINED" === false
+);
+check(
+  "and a file created since is removed",
+  !(await wsLib.listFiles(WS)).some((f) => f.path === "src/junk.js"),
+  "otherwise it is not the state it was"
+);
+check(
+  "the restore is itself reversible",
+  /reversible/.test(res.content),
+  "a snapshot is taken before restoring"
+);
+
+// read_document
+const xml =
+  '<?xml version="1.0"?><w:document xmlns:w="x"><w:body><w:p><w:r>' +
+  "<w:t>Hello from Word</w:t></w:r></w:p></w:body></w:document>";
+const docx = await createZip([
+  { path: "word/document.xml", content: Buffer.from(xml), modified: new Date() },
+]);
+await fsWrite(path.join(wsLib.workspaceDirectory(WS), "report.docx"), docx);
+
+res = await runTool(WS, "read_document", { path: "report.docx" });
+check(
+  "read_document opens a real .docx",
+  res.ok && res.content.includes("Hello from Word"),
+  "read_file decodes as UTF-8 and corrupts a zipped format"
+);
+check(
+  "it refuses something that is not a document",
+  !(await runTool(WS, "read_document", { path: "src/a.js" })).ok
+);
+check(
+  "reading raw bytes does not go through the text decoder",
+  /export async function readFileBytes/.test(read("src/lib/workspace.ts")),
+  "a .docx read as UTF-8 is mojibake and will not parse"
+);
+
+// list_processes
+res = await runTool(WS, "list_processes", {});
+check("list_processes reports an empty workspace", res.ok && /No background/.test(res.content));
+
+check(
+  "the prompt introduces all of them",
+  /undo_file puts that file back/.test(route) &&
+    /read_document opens Word/.test(route) &&
+    /write_files creates several files/.test(route),
+  "a tool the model is not told about is a tool it will not use"
+);
+
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
 );

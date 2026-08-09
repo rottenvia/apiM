@@ -605,7 +605,7 @@ export async function POST(req: NextRequest) {
         }
 
         const workspaceInstruction = workspaceEnabled
-          ? `\n\nYou have a workspace on the user's machine and tools to work in it. Prefer creating real files over printing code in chat: the user wants working files, not snippets to copy. List or read before editing so your replacements match exactly.\n\nYou can also run code with run_command. After writing something runnable, run it and check the output rather than assuming it works. If it fails, read the error, fix the file, and run it again. Each command needs the user's approval, so keep them few and purposeful, and say briefly why in the reason field. There is no shell. run_command waits for the program to finish, so use it only for things that exit — scripts, tests, installs. You can install packages: pip install and npm install both work and go into this workspace, not the user's system, so install what you need rather than rewriting code to avoid a dependency. For anything that keeps running, such as a dev server or a watcher, use start_process instead: it returns straight away, and you can read its output with read_process and stop it with stop_process. Always stop what you started once you are done with it. If a decision would genuinely change what you build and you cannot settle it by reading a file, use ask_user rather than guessing — but sparingly, since every question interrupts the user. When you are done, briefly say what you changed and whether it ran.\n\nUse search_files to find where something lives rather than opening files one at a time, and read_files when you already know you need several — each separate call costs a whole round.\n\nYou can also look at the live web. When a task depends on what is actually on a page — its markup, its data, its exact wording — fetch it rather than reasoning from memory. Before writing anything that targets a site, such as a content script, a userscript or a scraper, call inspect_page on the real URL and use the ids and classes it returns. Never invent a selector you have not seen: a plausible-looking one that does not exist produces code that runs and does nothing, which is worse than admitting you need to look. Use fetch_url to read a page, fetch_url with raw for its HTML, and download_file to save something from a URL straight into the workspace.${
+          ? `\n\nYou have a workspace on the user's machine and tools to work in it. Prefer creating real files over printing code in chat: the user wants working files, not snippets to copy. List or read before editing so your replacements match exactly.\n\nYou can also run code with run_command. After writing something runnable, run it and check the output rather than assuming it works. If it fails, read the error, fix the file, and run it again. Each command needs the user's approval, so keep them few and purposeful, and say briefly why in the reason field. There is no shell. run_command waits for the program to finish, so use it only for things that exit — scripts, tests, installs. You can install packages: pip install and npm install both work and go into this workspace, not the user's system, so install what you need rather than rewriting code to avoid a dependency. For anything that keeps running, such as a dev server or a watcher, use start_process instead: it returns straight away, and you can read its output with read_process and stop it with stop_process. Always stop what you started once you are done with it. If a decision would genuinely change what you build and you cannot settle it by reading a file, use ask_user rather than guessing — but sparingly, since every question interrupts the user. When you are done, briefly say what you changed and whether it ran.\n\nUse search_files to find where something lives rather than opening files one at a time, and read_files when you already know you need several — each separate call costs a whole round.\n\nYou can also look at the live web. When a task depends on what is actually on a page — its markup, its data, its exact wording — fetch it rather than reasoning from memory. Before writing anything that targets a site, such as a content script, a userscript or a scraper, call inspect_page on the real URL and use the ids and classes it returns. Never invent a selector you have not seen: a plausible-looking one that does not exist produces code that runs and does nothing, which is worse than admitting you need to look. Use fetch_url to read a page, fetch_url with raw for its HTML, and download_file to save something from a URL straight into the workspace. When you hit something you do not know — an unfamiliar error, a library's current API — use web_search rather than guessing, because a wrong assumption compounds over every round after it.\n\nIf an edit turns out to be wrong, undo_file puts that file back exactly as it was; reverting is safer than patching your own mistake. restore_snapshot rolls the whole workspace back to a restore point, which is a much larger step — list_snapshots first, and say what you are undoing before you do it. read_document opens Word, Excel, PowerPoint, EPUB and ODT files, which read_file cannot. write_files creates several files in one call, which is worth using whenever you are scaffolding.${
               visionApiKey
                 ? " You can also view_image to look at a screenshot or mockup saved in the workspace."
                 : ""
@@ -996,14 +996,19 @@ export async function POST(req: NextRequest) {
           }
 
           if (workspaceEnabled) {
-            // view_image is withheld without a key, so the model never calls
-            // a tool that can only fail — it would waste a round and then
-            // apologise instead of just working around it.
-            dsRequestBody.tools = visionApiKey
-              ? WORKSPACE_TOOLS
-              : WORKSPACE_TOOLS.filter(
-                  (t) => t.function.name !== "view_image"
-                );
+            /*
+             * Tools that cannot work are withheld rather than offered.
+             *
+             * A model given a tool it has no key for will call it, get an
+             * error, apologise, and try something worse — a wasted round and
+             * a worse answer. view_image needs a vision key; web_search needs
+             * a Tavily one.
+             */
+            dsRequestBody.tools = WORKSPACE_TOOLS.filter((t) => {
+              if (t.function.name === "view_image") return Boolean(visionApiKey);
+              if (t.function.name === "web_search") return Boolean(tavilyApiKey);
+              return true;
+            });
             dsRequestBody.tool_choice = "auto";
           }
 
@@ -1596,7 +1601,13 @@ export async function POST(req: NextRequest) {
                     workspace,
                     "start_process",
                     parsed.value,
-                    { visionKey: visionApiKey, visionModel }
+                    {
+                      visionKey: visionApiKey,
+                      visionModel,
+                      searchKey: tavilyApiKey,
+                      deepseekKey: deepseekApiKey,
+                      searchProfile,
+                    }
                   );
                 } else {
                   const run = await runCommand(
@@ -1619,7 +1630,13 @@ export async function POST(req: NextRequest) {
                 workspace,
                 call.function.name,
                 parsed.value,
-                { visionKey: visionApiKey, visionModel }
+                {
+                  visionKey: visionApiKey,
+                  visionModel,
+                  searchKey: tavilyApiKey,
+                  deepseekKey: deepseekApiKey,
+                  searchProfile,
+                }
               );
             }
 
