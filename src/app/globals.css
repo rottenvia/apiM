@@ -895,3 +895,151 @@ input:focus-visible {
     transform: none;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   The btw dock — a side question that must not disturb the running task
+--------------------------------------------------------------------------- */
+
+/* Arriving.
+ *
+ * It rises from the composer rather than fading in place, because that is
+ * where it came from: you typed it there. Anything appearing above the reply
+ * you are reading has to explain itself in the motion, or it registers as the
+ * page jumping. */
+@keyframes btw-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.btw-dock {
+  animation: btw-enter 0.3s cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+
+/* Expanding, the same grid-rows approach as the thinking panel: it animates
+ * to the content's real height with nothing measured. The row itself never
+ * moves — only what is underneath it grows — so the composer stays exactly
+ * where your hands already are. */
+.btw-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.3s cubic-bezier(0.32, 0.72, 0, 1);
+}
+.btw-body[data-open='true'] {
+  grid-template-rows: 1fr;
+}
+.btw-body > * {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.btw-body .btw-body-inner {
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.btw-body[data-open='true'] .btw-body-inner {
+  opacity: 1;
+  transition: opacity 0.15s ease 0.05s;
+}
+
+/* The send button while an aside is composed.
+ *
+ * Teal rather than the accent terracotta, matching the dock it will produce.
+ * The point is that at a glance you can tell this press will not touch the
+ * running task — the button that normally says Stop has become something
+ * else, and the colour is what says so before you read the icon. */
+.send-btn.btw-send {
+  background: color-mix(in oklab, var(--color-search) 88%, black);
+  color: #fff;
+}
+.send-btn.btw-send:hover {
+  background: var(--color-search);
+}
+.send-btn.btw-send:active {
+  transform: scale(0.94);
+}
+
+/* Waiting.
+ *
+ * One dot, breathing. A spinner would compete with the main task's own
+ * activity indicator a few pixels above it, and two things spinning at once
+ * reads as one thing broken. */
+@keyframes btw-breathe {
+  0%, 100% {
+    opacity: 0.25;
+    transform: scale(0.8);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.btw-pulse {
+  display: block;
+  height: 6px;
+  width: 6px;
+  border-radius: 9999px;
+  background: var(--color-search);
+  animation: btw-breathe 1.5s ease-in-out infinite;
+}
+
+/* Markdown inside the answer. Tightened, because this is an aside — it should
+ * never look like a second reply competing with the real one. */
+.btw-prose > :first-child {
+  margin-top: 0;
+}
+.btw-prose > :last-child {
+  margin-bottom: 0;
+}
+.btw-prose p {
+  margin: 0 0 0.5em;
+}
+.btw-prose ul,
+.btw-prose ol {
+  margin: 0 0 0.5em;
+  padding-left: 1.1em;
+}
+.btw-prose li {
+  margin: 0.15em 0;
+}
+.btw-prose code {
+  border-radius: 8px;
+  background: var(--color-bg-tertiary);
+  padding: 0.1em 0.32em;
+  font-size: 0.92em;
+}
+.btw-prose pre {
+  overflow-x: auto;
+  border-radius: 8px;
+  background: var(--color-bg-secondary);
+  padding: 0.6em 0.7em;
+  margin: 0 0 0.5em;
+}
+.btw-prose pre code {
+  background: none;
+  padding: 0;
+}
+.btw-prose a {
+  color: var(--color-search);
+  text-decoration: underline;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .btw-dock {
+    animation: none;
+  }
+  .btw-body,
+  .btw-body .btw-body-inner {
+    transition: none;
+  }
+  .btw-pulse {
+    animation: none;
+    opacity: 0.7;
+  }
+}
