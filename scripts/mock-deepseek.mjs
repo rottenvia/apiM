@@ -90,7 +90,16 @@ createServer((req, res) => {
       }
       send({
         choices: [{ delta: {} }],
-        usage: { prompt_tokens: 90, completion_tokens: 18, total_tokens: 108 },
+        // A cache split, like the real API reports. Round one is mostly a
+        // miss; later rounds are mostly hits. Without this the mock could
+        // not catch the display pricing cached tokens at the uncached rate.
+        usage: {
+          prompt_tokens: 90,
+          completion_tokens: 18,
+          total_tokens: 108,
+          prompt_cache_hit_tokens: 0,
+          prompt_cache_miss_tokens: 90,
+        },
       });
     } else if (round === 1) {
       send({
@@ -163,7 +172,13 @@ createServer((req, res) => {
       }
       send({
         choices: [{ delta: {} }],
-        usage: { prompt_tokens: 320, completion_tokens: 42, total_tokens: 362 },
+        usage: {
+          prompt_tokens: 320,
+          completion_tokens: 42,
+          total_tokens: 362,
+          prompt_cache_hit_tokens: 288,
+          prompt_cache_miss_tokens: 32,
+        },
       });
     }
 

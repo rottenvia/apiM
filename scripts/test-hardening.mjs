@@ -407,6 +407,71 @@ check(
   /title=\{filePath\}/.test(toolActivity)
 );
 
+// ------------------------------------------------------------------
+console.log("\n11. The cost shown while running matches the final figure");
+
+/*
+ * Reported: the price climbs to something like $0.466 during a run and then
+ * drops sharply once it finishes.
+ *
+ * Two causes, both display-only — nothing was ever overcharged.
+ *
+ *   - the live accumulator kept only prompt/completion/total, dropping
+ *     DeepSeek's cache hit/miss split. estimateCost falls back to pricing the
+ *     whole prompt as a miss when the split is absent, and a miss costs 120x
+ *     a hit, so the running figure was several times too high.
+ *   - the `done` event sent the last round's usage rather than the total, so
+ *     the number changed a third time after a reload, when the stored record
+ *     (which does use the total) was read back.
+ */
+const pricing = await load("src/lib/pricing.ts");
+
+check(
+  "the accumulator carries the cache split",
+  /prompt_cache_hit_tokens: 0,\s*\n\s*prompt_cache_miss_tokens: 0,/.test(route),
+  "without it every live figure prices cached tokens at the uncached rate"
+);
+check(
+  "each round's split is summed, not overwritten",
+  /totalUsage\.prompt_cache_hit_tokens \+= roundHit/.test(route),
+  "round one is mostly a miss, later rounds mostly hits"
+);
+check(
+  "a missing miss count is derived rather than dropped",
+  /Math\.max\(0, \(u\.prompt_tokens \?\? 0\) - roundHit\)/.test(route)
+);
+check(
+  "the done event reports the accumulated total",
+  /usage: totalUsage\.total_tokens \? \{ \.\.\.totalUsage \} : usage/.test(route),
+  "it sent the final round alone, so a 20-round task announced round 20's cost"
+);
+
+// The gap this closes, at a realistic cache rate.
+const withSplit = pricing.estimateCost(
+  {
+    prompt_tokens: 1_800_000,
+    completion_tokens: 190_000,
+    prompt_cache_hit_tokens: 1_620_000,
+    prompt_cache_miss_tokens: 180_000,
+  },
+  "deepseek-v4-pro"
+);
+const withoutSplit = pricing.estimateCost(
+  { prompt_tokens: 1_800_000, completion_tokens: 190_000 },
+  "deepseek-v4-pro"
+);
+check(
+  "dropping the split really did overstate the cost several times over",
+  withoutSplit > withSplit * 3,
+  `${withoutSplit.toFixed(3)} against ${withSplit.toFixed(3)} — the jump the user saw`
+);
+
+check(
+  "the mock reports a cache split, so this stays covered",
+  /prompt_cache_hit_tokens/.test(read("scripts/mock-deepseek.mjs")),
+  "it reported only totals, so no test could have caught this"
+);
+
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
 );
