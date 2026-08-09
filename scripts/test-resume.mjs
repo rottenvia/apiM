@@ -46,6 +46,7 @@ const store = read("src/lib/store.ts");
 const bubble = read("src/components/MessageBubble.tsx");
 const panel = read("src/components/WorkspaceSidePanel.tsx");
 const page = read("src/app/page.tsx");
+const chatArea = read("src/components/ChatArea.tsx");
 const convRoute = read("src/app/api/conversations/[id]/route.ts");
 
 console.log("\napiM resume / output-limit / cache checks\n");
@@ -298,8 +299,70 @@ check(
 );
 check(
   "the banner shows why it stopped",
-  /message\.errorNotice \?\? "This reply was interrupted"/.test(bubble),
+  /message\.errorNotice \?\? "This reply stopped before it finished"/.test(bubble),
   "'insufficient balance' is more use than 'interrupted'"
+);
+
+// ------------------------------------------------------- task 3d
+console.log("\n3d. Resuming is findable");
+
+/*
+ * Reported: "i didnt resume even once, and i dont know where the button is."
+ * It was an 11px pill on the right of a thin bar, attached to a reply that by
+ * then had scrolled far up. An action worth tens of cents was the quietest
+ * thing in its own notice.
+ */
+check(
+  "Resume is a full-width primary button, not a pill",
+  /flex flex-1 items-center justify-center[^"]*bg-\[#cfa25a\]/.test(bubble),
+  "it sat at text-[11px] in a corner and was never found"
+);
+check(
+  "it is labelled Resume",
+  />\s*Resume\s*</.test(bubble),
+  "the word the user reached for"
+);
+check(
+  "the banner explains what resuming keeps",
+  /Everything it did is saved/.test(bubble),
+  "otherwise there is no reason to prefer it over starting over"
+);
+check(
+  "starting over is de-emphasised when resuming is possible",
+  /message\.canResume\s*\?\s*"flex-none text-\[#cfa25a\]/.test(bubble),
+  "it buys the same work twice"
+);
+check(
+  "a reply that only got as far as reasoning is still resumable",
+  /current\?\.reasoningContent\?\.trim\(\)/.test(page),
+  "running out of balance mid-thought is the most common interruption, and it produced a bare error with no way back"
+);
+
+console.log("\n3e. And it can be typed instead");
+
+check(
+  "a typed resume word continues the last reply",
+  /RESUME_WORDS\.has\(input\.trim\(\)\.toLowerCase\(\)\)/.test(chatArea),
+  "after a long run you are at the bottom; the button may be far above"
+);
+check(
+  "the accepted words are the obvious ones",
+  /"resume",[\s\S]{0,120}"continue",/.test(chatArea)
+);
+check(
+  "only when something is actually resumable",
+  /canResumeLast && RESUME_WORDS/.test(chatArea),
+  "otherwise an ordinary message would be swallowed"
+);
+check(
+  "only the newest reply, never one further up",
+  /const last = messages\[messages\.length - 1\]/.test(page),
+  "reaching back into the transcript would continue something already moved on from"
+);
+check(
+  "the composer says the command exists",
+  /Type \\"resume\\" to carry on/.test(chatArea),
+  "a shortcut nobody knows about is not a shortcut"
 );
 
 // -------------------------------------------------------------- task 4

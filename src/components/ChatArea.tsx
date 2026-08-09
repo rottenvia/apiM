@@ -32,6 +32,10 @@ interface ChatAreaProps {
   messages: Message[];
   isLoading: boolean;
   statusStage: StatusStage | null;
+  /** True when the newest reply stopped early and kept its work. */
+  canResumeLast?: boolean;
+  /** Continue that reply — the typed equivalent of its Resume button. */
+  onResumeLast?: () => void;
   /** Shown above the composer when the DeepSeek balance is getting low. */
   balanceWarning?: React.ReactNode;
   /** The current side question, if one has been asked. */
@@ -87,6 +91,8 @@ export function ChatArea({
   messages,
   isLoading,
   statusStage,
+  canResumeLast,
+  onResumeLast,
   balanceWarning,
   btwEntry,
   onAskBtw,
@@ -516,6 +522,21 @@ export function ChatArea({
    * sends as one. That also means the prefix cannot surprise anyone who
    * happens to start a sentence with it.
    */
+  /**
+   * What people actually type to mean "carry on".
+   *
+   * Kept to unambiguous single words. Anything longer is a real message —
+   * "resume the download" is a request, not a command, and swallowing it
+   * would be worse than not having the shortcut at all.
+   */
+  const RESUME_WORDS = new Set([
+    "resume",
+    "continue",
+    "carry on",
+    "keep going",
+    "go on",
+  ]);
+
   const btwMatch = /^btw[\s,:]+([\s\S]+)/i.exec(input.trim());
   const btwQuestion = isLoading && btwMatch ? btwMatch[1].trim() : "";
   const isBtw = Boolean(btwQuestion) && Boolean(onAskBtw);
@@ -524,6 +545,23 @@ export function ChatArea({
     // An aside is sendable while the main task runs; a normal message is not.
     if (isBtw) {
       onAskBtw?.(btwQuestion);
+      setInput("");
+      return;
+    }
+    /*
+     * Typing it works too.
+     *
+     * The Resume button lives on the interrupted reply, which by then may be
+     * far up the transcript — after a long run you are at the bottom, and
+     * scrolling back to find a control is friction at exactly the wrong
+     * moment. "resume" in the composer does the same thing from where your
+     * hands already are.
+     *
+     * Only when something is actually resumable, so the word is never
+     * swallowed when it was meant as an ordinary message.
+     */
+    if (canResumeLast && RESUME_WORDS.has(input.trim().toLowerCase())) {
+      onResumeLast?.();
       setInput("");
       return;
     }
@@ -956,6 +994,8 @@ export function ChatArea({
                 hasKeys
                   ? isLoading && onAskBtw
                     ? "Working… start with \"btw\" to ask something on the side"
+                    : canResumeLast
+                      ? "Type \"resume\" to carry on, or ask something new…"
                     : attachments.length > 0
                       ? "Add a question about these files…"
                       : "Type your message…"
@@ -969,6 +1009,16 @@ export function ChatArea({
             {/* Confirms the aside is armed before you commit to sending it.
                 Without this the only signal is the send icon changing, which
                 is easy to miss while reading the reply above. */}
+            {canResumeLast &&
+              RESUME_WORDS.has(input.trim().toLowerCase()) && (
+                <div className="flex items-center gap-1.5 px-4 pb-1 text-[11px] text-[#cfa25a]">
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                    <path d="M8 5v14l11-7z" />
+                  </svg>
+                  Carries on the interrupted reply, keeping its work
+                </div>
+              )}
+
             {isBtw && (
               <div className="flex items-center gap-1.5 px-4 pb-1 text-[11px] text-[#6ba3a0]">
                 <span className="btw-pulse" aria-hidden="true" />
