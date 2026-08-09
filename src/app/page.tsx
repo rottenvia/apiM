@@ -1333,8 +1333,20 @@ export default function Home() {
                   (m) => m.id === streamingId
                 );
                 const hadWork = Boolean(
-                  current?.content?.trim() || current?.toolEvents?.length
+                  current?.content?.trim() ||
+                    current?.reasoningContent?.trim() ||
+                    current?.toolEvents?.length
                 );
+                /*
+                 * Reasoning counts as work.
+                 *
+                 * A reply that died before emitting prose still had a plan —
+                 * on max thinking that is thousands of tokens already paid
+                 * for, and the server saves it. Judging only on visible text
+                 * meant the most common failure, running out of balance
+                 * mid-thought, produced a bare error with no way back to it.
+                 * That is why Resume was never seen.
+                 */
                 finish(
                   hadWork
                     ? { incomplete: true, canResume: true, errorNotice: evt.error }
@@ -1557,6 +1569,21 @@ export default function Home() {
    * everything the tools returned — so only the rounds still outstanding are
    * charged, and any file already written stays written.
    */
+  /**
+   * The reply a typed "resume" would continue.
+   *
+   * Only the last message, and only if it is resumable. Anything looser
+   * would reach back into the transcript and continue something the user has
+   * moved on from — the shortcut has to mean one obvious thing or it is worse
+   * than the button.
+   */
+  const lastResumable = (() => {
+    const last = messages[messages.length - 1];
+    if (!last || last.role !== "assistant") return null;
+    if (!last.incomplete || last.isStreaming || !last.canResume) return null;
+    return last;
+  })();
+
   const resumeReply = useCallback((assistantId: string) => {
     const list = messagesRef.current;
     const index = list.findIndex((m) => m.id === assistantId);
@@ -1594,6 +1621,10 @@ export default function Home() {
         messages={messages}
         isLoading={isLoading}
         statusStage={statusStage}
+        canResumeLast={Boolean(lastResumable)}
+        onResumeLast={() => {
+          if (lastResumable) resumeReply(lastResumable.id);
+        }}
         balanceWarning={
           showBalanceWarning && balance ? (
             <BalanceWarning

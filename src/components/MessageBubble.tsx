@@ -734,53 +734,90 @@ function MessageBubbleImpl({
             {/* Reply was cut short — offer to retry rather than leaving a
                 silently truncated answer looking complete. */}
             {message.incomplete && !message.isStreaming && (
-              <div className="flex items-center gap-2.5 rounded-xl border border-[#cfa25a]/25 bg-[#cfa25a]/8 px-3 py-2">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} aria-hidden="true" className="flex-none text-[#cfa25a]">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
-                </svg>
-                <button
-                  onClick={() => setShowInterrupted((v) => !v)}
-                  className="min-w-0 flex-1 text-left text-[12px] leading-snug text-[#cfa25a] hover:underline"
-                >
-                  {/* The reason, when there is one. "Insufficient balance"
-                      is far more use than a generic "interrupted", and it
-                      tells the user the one thing they have to fix before
-                      Continue will work. */}
-                  {message.errorNotice ?? "This reply was interrupted"}
-                  {message.content ? (
-                    <span className="ml-1 opacity-70">
-                      · {showInterrupted ? "hide" : "show"} what arrived
-                    </span>
-                  ) : null}
-                </button>
-                {/* Continue is offered first, and styled as the primary
-                    action, because it is nearly always the right one: it
-                    keeps every file already written and every result already
-                    gathered, and pays only for the rounds still left. Start
-                    over throws all of that away and buys the same work twice,
-                    so it stays available but quiet. */}
-                {onResume && message.canResume && (
-                  <button
-                    onClick={() => onResume(message.id)}
-                    title="Carry on from where it stopped, keeping the work already done"
-                    className="flex-none rounded-lg bg-[#cfa25a]/20 px-2 py-1 text-[11px] font-medium text-[#cfa25a] transition-colors hover:bg-[#cfa25a]/30"
-                  >
-                    Continue
-                  </button>
-                )}
-                {onRegenerate && (
-                  <button
-                    onClick={() => onRegenerate(message.id)}
-                    title={
-                      message.canResume
-                        ? "Discard what was done and answer again from scratch"
-                        : "Answer again from the beginning"
-                    }
-                    className="flex-none rounded-lg border border-[#cfa25a]/30 px-2 py-1 text-[11px] font-medium text-[#cfa25a] transition-colors hover:bg-[#cfa25a]/15"
-                  >
-                    {message.canResume ? "Start over" : "Try again"}
-                  </button>
-                )}
+              /*
+               * The interrupted banner.
+               *
+               * This was a thin row with an 11px pill on the right, and it was
+               * missed entirely — the reply it belongs to had run for minutes
+               * and the way to recover it was smaller than the timestamp
+               * beneath it. An action worth tens of cents should not be the
+               * quietest thing in its own notice.
+               *
+               * Resume is now a full-width button on its own line, labelled
+               * with what it does rather than with a bare verb.
+               */
+              <div className="overflow-hidden rounded-xl border border-[#cfa25a]/30 bg-[#cfa25a]/[0.07]">
+                <div className="flex items-start gap-2.5 px-3 py-2.5">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} aria-hidden="true" className="mt-0.5 flex-none text-[#cfa25a]">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+                  </svg>
+
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[13px] font-medium leading-snug text-[#cfa25a]">
+                      {/* The reason, when there is one. "Insufficient balance"
+                          is far more use than a generic "interrupted", and it
+                          names the one thing to fix before Resume will work. */}
+                      {message.errorNotice ?? "This reply stopped before it finished"}
+                    </p>
+                    {message.canResume ? (
+                      <p className="mt-0.5 text-[12px] leading-relaxed text-text-secondary">
+                        Everything it did is saved — the files it wrote, what it
+                        read, and its reasoning. Resuming carries on from there
+                        and only pays for what is left.
+                      </p>
+                    ) : (
+                      <p className="mt-0.5 text-[12px] leading-relaxed text-text-secondary">
+                        This one is from before resuming existed, so it can only
+                        be run again from the start.
+                      </p>
+                    )}
+                    {message.content ? (
+                      <button
+                        onClick={() => setShowInterrupted((v) => !v)}
+                        className="mt-1 text-[12px] text-[#cfa25a]/80 underline-offset-2 hover:underline"
+                      >
+                        {showInterrupted ? "Hide" : "Show"} what arrived
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+
+                {/* Actions on their own line, full width. Resume dominates
+                    because it is nearly always right: it keeps every file
+                    already written and pays only for the remaining rounds.
+                    Starting over buys the same work a second time, so it stays
+                    reachable but quiet. */}
+                <div className="flex items-stretch gap-1.5 border-t border-[#cfa25a]/20 p-1.5">
+                  {onResume && message.canResume && (
+                    <button
+                      onClick={() => onResume(message.id)}
+                      title="Carry on from where it stopped, keeping the work already done"
+                      className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-[#cfa25a] px-3 py-2 text-[13px] font-semibold text-[#191715] transition-colors hover:bg-[#dbb271]"
+                    >
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                        <path d="M8 5v14l11-7z" />
+                      </svg>
+                      Resume
+                    </button>
+                  )}
+                  {onRegenerate && (
+                    <button
+                      onClick={() => onRegenerate(message.id)}
+                      title={
+                        message.canResume
+                          ? "Discard what was done and answer again from scratch"
+                          : "Answer again from the beginning"
+                      }
+                      className={`flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-[13px] font-medium transition-colors ${
+                        message.canResume
+                          ? "flex-none text-[#cfa25a] hover:bg-[#cfa25a]/15"
+                          : "flex-1 bg-[#cfa25a] text-[#191715] hover:bg-[#dbb271]"
+                      }`}
+                    >
+                      {message.canResume ? "Start over" : "Try again"}
+                    </button>
+                  )}
+                </div>
               </div>
             )}
 

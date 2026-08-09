@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { BtwDock } from "@/components/BtwDock";
 import { BalanceWarning } from "@/components/BalanceWarning";
+import { MessageBubble } from "@/components/MessageBubble";
 import type { BtwEntry } from "@/components/BtwDock";
 
 /**
@@ -144,6 +145,38 @@ export default function PreviewBtw() {
       </div>
 
       <div className="mx-auto mt-10 w-full max-w-3xl space-y-14">
+        {/* The interrupted banner, which is where Resume lives. */}
+        <section>
+          <div className="mb-3 flex items-baseline gap-3">
+            <h2 className="text-[13px] font-semibold text-text-primary">
+              A reply that stopped early
+            </h2>
+            <span className="text-[12px] text-text-muted">
+              Resume is the primary action; Start over stays quiet beside it.
+            </span>
+          </div>
+          <MessageBubble
+            message={{
+              id: "interrupted-demo",
+              role: "assistant",
+              content:
+                "I've set up the engine and started on the renderer. Writing the draw loop now",
+              incomplete: true,
+              canResume: true,
+              errorNotice: "Your DeepSeek account has insufficient balance.",
+              toolEvents: [
+                { id: "t1", name: "write_file", args: "{}", ok: true, summary: "Created engine.js" },
+              ],
+            }}
+            isLast
+            onResume={() => {}}
+            onRegenerate={() => {}}
+            onOpenWorkspaceFile={() => {}}
+            onDecideCommand={() => {}}
+            onAnswerQuestion={() => {}}
+          />
+        </section>
+
         {/* The balance warning, in each of the states it can reach. */}
         <section>
           <div className="mb-3 flex items-baseline gap-3">
