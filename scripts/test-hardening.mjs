@@ -250,23 +250,41 @@ check(
   runner.validateCommand("C:\\Program Files\\nodejs\\npm.cmd", ["install"]).ok
 );
 check(
-  "the launcher is resolved to a real file before spawning",
-  /resolveWindowsLauncher/.test(runnerSrc),
-  "spawn with shell:false cannot start a .cmd by name"
+  "commands are launched through cross-spawn",
+  /crossSpawn\(/.test(runnerSrc),
+  "resolving the path to npm.cmd only moved the failure from ENOENT to EINVAL"
 );
 check(
-  "background processes resolve it too",
-  /resolveLauncher/.test(procSrc),
+  "background processes use it too",
+  /crossSpawn\(/.test(procSrc),
   "npm run dev failed the same way"
 );
 check(
   "the shell stays off",
-  /shell: false/.test(runnerSrc) && !/shell: true/.test(runnerSrc),
-  "enabling it would hand argument parsing back to cmd.exe"
+  /shell: false/.test(runnerSrc) && !/^\s*shell: true/m.test(runnerSrc),
+  "shell:true re-enables the injection CVE-2024-27980 describes, and every argument here comes from a model"
 );
 check(
-  "batch files are spawned with the flag Node requires",
-  /windowsVerbatimArguments: false/.test(runnerSrc)
+  "an argument cannot inject a second command",
+  await (async () => {
+    const { runCommand } = await load("src/lib/runner.ts");
+    const res = await runCommand(
+      "injtest",
+      "node",
+      ["-e", "console.log('safe')", "&& echo PWNED"]
+    );
+    return !(res.stdout ?? "").includes("PWNED");
+  })(),
+  "the whole reason not to reach for shell:true"
+);
+check(
+  "real commands actually run",
+  await (async () => {
+    const { runCommand } = await load("src/lib/runner.ts");
+    const res = await runCommand("injtest", "npm", ["--version"]);
+    return res.exitCode === 0;
+  })(),
+  "verified end to end, not just by reading the source"
 );
 check(
   "shells are still refused",

@@ -42,7 +42,9 @@
     "test:balance": "tsx scripts/test-balance.mjs"
   },
   "dependencies": {
+    "@types/cross-spawn": "^6.0.6",
     "@types/uuid": "^10.0.0",
+    "cross-spawn": "^7.0.6",
     "dotenv": "17.3.1",
     "drizzle-orm": "0.45.2",
     "next": "16.2.6",
