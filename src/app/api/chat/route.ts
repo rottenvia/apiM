@@ -36,6 +36,7 @@ import { listFiles, workspaceDirectory } from "@/lib/workspace";
 import { createSnapshot } from "@/lib/snapshots";
 import {
   runCommand,
+  isReadOnlyCommand,
   validateCommand,
   describeCommand,
   formatRunResult,
@@ -2028,8 +2029,19 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                     ? args.reason.trim()
                     : "";
 
+                /*
+                 * Reading does not need permission.
+                 *
+                 * The approval prompt is what stops the agent working
+                 * unattended, and most of what it interrupts for is
+                 * `--version` and `git status`. Those cannot change anything,
+                 * so asking about them trains the user to click through
+                 * prompts without reading — which makes the prompt worse at
+                 * the job it exists for.
+                 */
                 const preApproved =
                   autoRunCommands ||
+                  isReadOnlyCommand(check.command, check.args) ||
                   isRemembered(workspace, check.command, check.args);
 
                 let approved = true;

@@ -198,6 +198,79 @@ const SHELLS = new Set([
   "pwsh",
 ]);
 
+/**
+ * Commands that only look at things.
+ *
+ * The approval prompt is the single biggest obstacle to the agent working
+ * unattended: every command stops the run and waits for a click, including
+ * the ones that cannot possibly do harm. `node --version` and `git status`
+ * are not decisions a user needs to make.
+ *
+ * The line drawn here is deliberately narrow: a command qualifies only if it
+ * both (a) appears below and (b) uses a subcommand or flag from the read-only
+ * list. `git status` is safe; `git push` is not, and it is the same binary,
+ * so the check has to look at the arguments rather than the program.
+ *
+ * Anything that writes a file, installs a package, runs project code, or
+ * touches the network still asks. This is not "trust the agent" — it is
+ * "do not ask permission to read a version number".
+ */
+const READ_ONLY_COMMANDS = new Map<string, Set<string>>([
+  // Subcommand-based tools: only these subcommands are read-only.
+  ["git", new Set(["status", "log", "diff", "show", "branch", "remote", "ls-files", "rev-parse", "describe", "blame"])],
+  ["npm", new Set(["ls", "list", "view", "outdated", "why", "root", "prefix"])],
+  ["pnpm", new Set(["ls", "list", "why", "outdated"])],
+  ["pip", new Set(["list", "show", "freeze"])],
+  ["pip3", new Set(["list", "show", "freeze"])],
+  ["go", new Set(["version", "env", "list"])],
+  ["cargo", new Set(["--version", "tree"])],
+]);
+
+/** Flags that mean "print information and exit", whatever the program. */
+const INFO_FLAGS = new Set(["--version", "-v", "--help", "-h", "version"]);
+
+/** Programs whose entire job is to report, never to change anything. */
+const ALWAYS_READ_ONLY = new Set(["which", "where"]);
+
+/**
+ * Can this command run without asking?
+ *
+ * Conservative by construction: an unrecognised shape is never safe, so a new
+ * command added to the allow-list does not silently become approval-free.
+ */
+export function isReadOnlyCommand(command: string, args: string[]): boolean {
+  const name = normaliseCommand(command);
+
+  if (ALWAYS_READ_ONLY.has(name)) return true;
+
+  // `node --version`, `python3 --version`, and similar.
+  if (args.length === 1 && INFO_FLAGS.has(args[0])) return true;
+  if (args.length === 0) {
+    // A bare interpreter opens an interactive prompt that will hang until the
+    // timeout. Not dangerous, but not useful either — let it ask.
+    return false;
+  }
+
+  const subcommands = READ_ONLY_COMMANDS.get(name);
+  if (!subcommands) return false;
+
+  // The first non-flag argument is the subcommand.
+  const sub = args.find((a) => !a.startsWith("-")) ?? args[0];
+  if (!subcommands.has(sub)) return false;
+
+  /*
+   * Even a read-only subcommand can be made to write.
+   *
+   * `git log --output=file` and friends exist, and an argument that looks
+   * like a redirect or an assignment is enough to disqualify the call. The
+   * cost of being wrong here is a command that runs without being seen, so
+   * the check errs heavily toward asking.
+   */
+  return !args.some(
+    (a) => a.includes(">") || a.includes("|") || /^--(output|out|file)=/.test(a)
+  );
+}
+
 export function isAllowedCommand(command: string): boolean {
   return ALLOWED.has(normaliseCommand(command));
 }
