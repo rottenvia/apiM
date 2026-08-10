@@ -20,6 +20,15 @@ import { WORKSPACE_TOOLS, runTool } from "@/lib/tools";
 import type { ToolResult } from "@/lib/tools";
 import { buildWorkspaceContext } from "@/lib/workspace-context";
 import { TreeTracker } from "@/lib/tree-delta";
+import {
+  createPlan,
+  updatePlan,
+  formatPlan,
+  planSummary,
+  planProgress,
+  PLAN_MARKER,
+} from "@/lib/plan";
+import type { Plan } from "@/lib/plan";
 import { BROWSER_POLICY_PROMPT } from "@/lib/browser-policy";
 import { browserAvailable } from "@/lib/browser-playwright";
 import { recordAsync } from "@/lib/diagnostics";
@@ -262,6 +271,18 @@ type StreamEvent =
       spentUsd?: number;
       /** The cap in force, if any. */
       limitUsd?: number;
+    }
+  | {
+      type: "plan";
+      goal: string;
+      steps: {
+        id: number;
+        text: string;
+        state: string;
+        verified?: string;
+        blocker?: string;
+      }[];
+      summary: string;
     }
   | { type: "budget_warning"; spentUsd: number; limitUsd: number }
   | {
@@ -662,7 +683,11 @@ export async function POST(req: NextRequest) {
         }
 
         const workspaceInstruction = workspaceEnabled
-          ? `\n\nYou have a workspace on the user's machine and tools to work in it. Prefer creating real files over printing code in chat: the user wants working files, not snippets to copy. List or read before editing so your replacements match exactly.\n\nYou can also run code with run_command. After writing something runnable, run it and check the output rather than assuming it works. If it fails, read the error, fix the file, and run it again. Each command needs the user's approval, so keep them few and purposeful, and say briefly why in the reason field. There is no shell. run_command waits for the program to finish, so use it only for things that exit — scripts, tests, installs. You can install packages: pip install and npm install both work and go into this workspace, not the user's system, so install what you need rather than rewriting code to avoid a dependency. For anything that keeps running, such as a dev server or a watcher, use start_process instead: it returns straight away, and you can read its output with read_process and stop it with stop_process. Always stop what you started once you are done with it. If a decision would genuinely change what you build and you cannot settle it by reading a file, use ask_user rather than guessing — but sparingly, since every question interrupts the user. When you are done, briefly say what you changed and whether it ran.\n\nUse search_files to find where something lives rather than opening files one at a time, and read_files when you already know you need several — each separate call costs a whole round.\n\nYou can also look at the live web. When a task depends on what is actually on a page — its markup, its data, its exact wording — fetch it rather than reasoning from memory. Before writing anything that targets a site, such as a content script, a userscript or a scraper, call inspect_page on the real URL and use the ids and classes it returns. Never invent a selector you have not seen: a plausible-looking one that does not exist produces code that runs and does nothing, which is worse than admitting you need to look. Use fetch_url to read a page, fetch_url with raw for its HTML, and download_file to save something from a URL straight into the workspace. When you hit something you do not know — an unfamiliar error, a library's current API — use web_search rather than guessing, because a wrong assumption compounds over every round after it.\n\nIf an edit turns out to be wrong, undo_file puts that file back exactly as it was; reverting is safer than patching your own mistake. restore_snapshot rolls the whole workspace back to a restore point, which is a much larger step — list_snapshots first, and say what you are undoing before you do it. read_document opens Word, Excel, PowerPoint, EPUB and ODT files, which read_file cannot. write_files creates several files in one call, which is worth using whenever you are scaffolding.\n\nBatch the changes that belong together. move_file renames in one step instead of read-write-delete. edit_files applies several replacements at once, across one file or many. replace_in_files changes the same text everywhere it appears, which is what you want for renaming a function or an import path — doing that file by file costs a round each. When a string might occur somewhere you did not intend, run it with preview first and read the list before committing.${
+          ? `\n\nYou have a workspace on the user's machine and tools to work in it. Prefer creating real files over printing code in chat: the user wants working files, not snippets to copy. List or read before editing so your replacements match exactly.\n\nYou can also run code with run_command. After writing something runnable, run it and check the output rather than assuming it works. If it fails, read the error, fix the file, and run it again. Each command needs the user's approval, so keep them few and purposeful, and say briefly why in the reason field. There is no shell. run_command waits for the program to finish, so use it only for things that exit — scripts, tests, installs. You can install packages: pip install and npm install both work and go into this workspace, not the user's system, so install what you need rather than rewriting code to avoid a dependency. For anything that keeps running, such as a dev server or a watcher, use start_process instead: it returns straight away, and you can read its output with read_process and stop it with stop_process. Always stop what you started once you are done with it. Before anything that takes more than two or three actions, call make_plan: write down what finished looks like and the steps to get there, including how you will CHECK each one. On a long task your own reasoning from twenty rounds ago is gone, so without a written plan you will forget requirements from the first message and stop early because the work so far looks finished. Keep it current with update_plan — a step is only done when you can say how you verified it.
+
+Work to the end. Do not hand back a half-finished task with a summary that reads as if it is complete: if something cannot be done, say so plainly and say why. Check your own work before claiming it works — run the tests, call the endpoint, open the page.
+
+Ask before you build the wrong thing. If a choice would change what you produce and you cannot settle it by reading a file or looking it up, call ask_user — one question up front is far cheaper than twenty rounds of work in the wrong direction, and the user would rather be asked than handed something they have to throw away. Ask early, while the work is cheap to redo, not after you have committed to an approach. Offer concrete options with a sensible default so it is one click. Do not ask about things you can find out yourself, and do not ask the same thing twice. When you are done, briefly say what you changed and whether it ran.\n\nUse search_files to find where something lives rather than opening files one at a time, and read_files when you already know you need several — each separate call costs a whole round.\n\nYou can also look at the live web. When a task depends on what is actually on a page — its markup, its data, its exact wording — fetch it rather than reasoning from memory. Before writing anything that targets a site, such as a content script, a userscript or a scraper, call inspect_page on the real URL and use the ids and classes it returns. Never invent a selector you have not seen: a plausible-looking one that does not exist produces code that runs and does nothing, which is worse than admitting you need to look. Use fetch_url to read a page, fetch_url with raw for its HTML, and download_file to save something from a URL straight into the workspace. When you hit something you do not know — an unfamiliar error, a library's current API — use web_search rather than guessing, because a wrong assumption compounds over every round after it.\n\nIf an edit turns out to be wrong, undo_file puts that file back exactly as it was; reverting is safer than patching your own mistake. restore_snapshot rolls the whole workspace back to a restore point, which is a much larger step — list_snapshots first, and say what you are undoing before you do it. read_document opens Word, Excel, PowerPoint, EPUB and ODT files, which read_file cannot. write_files creates several files in one call, which is worth using whenever you are scaffolding.\n\nBatch the changes that belong together. move_file renames in one step instead of read-write-delete. edit_files applies several replacements at once, across one file or many. replace_in_files changes the same text everywhere it appears, which is what you want for renaming a function or an import path — doing that file by file costs a round each. When a string might occur somewhere you did not intend, run it with preview first and read the list before committing.${
               visionApiKey
                 ? " You can also view_image to look at a screenshot or mockup saved in the workspace."
                 : ""
@@ -760,6 +785,17 @@ export async function POST(req: NextRequest) {
          * delta or spend a cache miss on a fresh listing.
          */
         const treeTracker = new TreeTracker();
+
+        /**
+         * The agent's plan for this reply, if it made one.
+         *
+         * Lives for the duration of the run. It is appended to the request as
+         * a trailing message so it can change every round without disturbing
+         * the cached prefix, the same reason the file tree sits at the end.
+         */
+        let plan: Plan | null = null;
+        /** Only ever nudged once — see the check where the loop ends. */
+        let nudgedIncomplete = false;
 
         const setFileTree = (text: string) => {
           currentFileTree = text;
@@ -1546,7 +1582,46 @@ export async function POST(req: NextRequest) {
             tool_calls: calls.length ? calls : undefined,
           });
 
-          if (calls.length === 0) break;
+          if (calls.length === 0) {
+            /*
+             * The model stopped talking. Is it actually finished?
+             *
+             * This is the single most common way a long task ends badly: at
+             * round twelve, the work done so far looks like a complete answer
+             * from the inside, so the model writes a summary and stops — with
+             * requirements from the first message still unmet.
+             *
+             * If it wrote a plan, there is now an objective answer to "are you
+             * done", and it is cheap to check. One nudge, once: nagging a
+             * model that has genuinely finished wastes a full round and
+             * usually produces a worse, padded answer.
+             *
+             * Deliberately not enforced when steps are BLOCKED. Being stuck
+             * and saying so is a correct ending, and pushing against it would
+             * teach the model to mark things done to escape the loop.
+             */
+            if (plan && !nudgedIncomplete) {
+              const progress = planProgress(plan);
+              const stuck = plan.steps.some((s) => s.state === "blocked");
+              if (!progress.complete && !stuck && progress.next) {
+                nudgedIncomplete = true;
+                transcript.push({
+                  role: "user",
+                  content:
+                    `Your plan is not finished — ${progress.done} of ` +
+                    `${progress.total} steps are done, and you stopped ` +
+                    `before step ${progress.next.id} (${progress.next.text}).\n\n` +
+                    `Either carry on with it, or if it genuinely cannot be ` +
+                    `done, mark that step blocked with update_plan and tell ` +
+                    `the user what is in the way. Do not present unfinished ` +
+                    `work as complete.`,
+                });
+                send({ type: "status", stage: "working" });
+                continue;
+              }
+            }
+            break;
+          }
 
           /*
            * The spending limit, checked at the only safe place: between
@@ -1744,6 +1819,100 @@ export async function POST(req: NextRequest) {
                   ? `Cut off mid-call — splitting into parts`
                   : "Invalid tool arguments",
               };
+            } else if (call.function.name === "make_plan") {
+              /*
+               * Handled here, not in runTool, because a plan is per-RUN state.
+               * The tool dispatcher is deliberately stateless — it takes a
+               * workspace id and arguments — and threading a mutable plan
+               * through it would make every tool call carry state it does not
+               * use.
+               */
+              const pArgs = parsed.value as {
+                goal?: unknown;
+                steps?: unknown;
+              };
+              try {
+                plan = createPlan(
+                  String(pArgs.goal ?? ""),
+                  Array.isArray(pArgs.steps) ? pArgs.steps.map(String) : []
+                );
+                send({
+                  type: "plan",
+                  goal: plan.goal,
+                  steps: plan.steps,
+                  summary: planSummary(plan),
+                });
+                result = {
+                  ok: true,
+                  content:
+                    `Plan set.\n\n${formatPlan(plan)}\n\nStart on step 1. ` +
+                    `Update it with update_plan as you go.`,
+                  summary: `Planned ${plan.steps.length} steps`,
+                };
+              } catch (error) {
+                result = {
+                  ok: false,
+                  content: `Error: ${
+                    error instanceof Error ? error.message : "bad plan"
+                  }`,
+                  summary: "Could not set plan",
+                };
+              }
+            } else if (call.function.name === "update_plan") {
+              if (!plan) {
+                result = {
+                  ok: false,
+                  content:
+                    "There is no plan to update. Call make_plan first.",
+                  summary: "No plan",
+                };
+              } else {
+                const uArgs = parsed.value as { updates?: unknown };
+                const raw = Array.isArray(uArgs.updates) ? uArgs.updates : [];
+                try {
+                  plan = updatePlan(
+                    plan,
+                    raw.map((u) => {
+                      const entry = u as Record<string, unknown>;
+                      return {
+                        id: Number(entry.id),
+                        state: String(entry.state) as
+                          | "todo"
+                          | "doing"
+                          | "done"
+                          | "blocked",
+                        verified:
+                          typeof entry.verified === "string"
+                            ? entry.verified
+                            : undefined,
+                        blocker:
+                          typeof entry.blocker === "string"
+                            ? entry.blocker
+                            : undefined,
+                      };
+                    })
+                  );
+                  send({
+                    type: "plan",
+                    goal: plan.goal,
+                    steps: plan.steps,
+                    summary: planSummary(plan),
+                  });
+                  result = {
+                    ok: true,
+                    content: formatPlan(plan),
+                    summary: planSummary(plan),
+                  };
+                } catch (error) {
+                  result = {
+                    ok: false,
+                    content: `Error: ${
+                      error instanceof Error ? error.message : "bad update"
+                    }`,
+                    summary: "Could not update plan",
+                  };
+                }
+              }
             } else if (call.function.name === "ask_user") {
               // Pauses the reply the same way approval does, so the model can
               // get a real answer instead of guessing and building the wrong
@@ -2005,6 +2174,42 @@ export async function POST(req: NextRequest) {
           // The next round must see the workspace as it is now, not as it was
           // before these tools ran.
           await refreshFileTree();
+
+          /*
+           * Keep the plan in front of the model.
+           *
+           * The tool result carrying the plan is a `tool` message, which will
+           * be summarised away by compaction on a long run — exactly when the
+           * plan matters most. Re-appending it at the end each round means it
+           * is always the last thing read before the model decides what to do,
+           * and being last is also why it is free: everything before it is
+           * byte-identical, so the whole prefix still hits the cache.
+           *
+           * The old copy is removed first, so the transcript never holds two
+           * plans that disagree.
+           */
+          if (plan) {
+            /*
+             * Found by content, not by a remembered index.
+             *
+             * Two things in this loop splice the transcript — the tree
+             * re-baseline and this — so any index stored by one can be made
+             * wrong by the other. Searching for the marker is O(n) on a list
+             * of a few dozen messages, which costs nothing, and it cannot
+             * drift.
+             */
+            for (let i = transcript.length - 1; i >= 0; i--) {
+              const m = transcript[i];
+              if (
+                m.role === "system" &&
+                typeof m.content === "string" &&
+                m.content.startsWith(PLAN_MARKER)
+              ) {
+                transcript.splice(i, 1);
+              }
+            }
+            transcript.push({ role: "system", content: formatPlan(plan) });
+          }
 
           if (stopped()) break;
         }

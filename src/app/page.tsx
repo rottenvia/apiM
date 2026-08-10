@@ -16,6 +16,7 @@ import type { WorkspaceFileInfo } from "@/components/WorkspaceBar";
 import type { ToolEvent } from "@/components/ToolActivity";
 import type { PendingCommand } from "@/components/ApprovalPrompt";
 import type { PendingQuestion } from "@/components/QuestionPrompt";
+import type { PlanView, PlanStepView } from "@/components/PlanPanel";
 import type { TimelineEntry } from "@/components/MessageTimeline";
 import { clampDeleteDelay, DEFAULT_DELETE_DELAY } from "@/components/DeleteChatDialog";
 import { warmRoutes } from "@/lib/warmup";
@@ -90,6 +91,8 @@ export interface Message {
   pendingCommand?: PendingCommand | null;
   /** A question the model asked, waiting on an answer. */
   pendingQuestion?: PendingQuestion | null;
+  /** The agent's plan for this reply, when it wrote one. */
+  plan?: PlanView | null;
 }
 
 /** Lightweight record of an attachment, for display only. */
@@ -162,6 +165,12 @@ type StreamEvent =
   | { type: "continuing"; reason: string; n: number; of: number }
   | { type: "context_pruned"; collapsed: number; tokensSaved: number }
   | { type: "context_compacted"; rounds: number; tokensSaved: number }
+  | {
+      type: "plan";
+      goal: string;
+      steps: PlanStepView[];
+      summary: string;
+    }
   | { type: "budget_warning"; spentUsd: number; limitUsd: number }
   | {
       type: "budget_stopped";
@@ -1190,6 +1199,26 @@ export default function Home() {
               case "context_compacted":
                 // Also informational. Not surfaced as a notice: it happens
                 // mid-task and reads as an error when it is the opposite.
+                break;
+
+              case "plan":
+                // Applied immediately rather than batched with text: the plan
+                // changes a handful of times per reply, and seeing progress
+                // land as it happens is the entire point of showing it.
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === streamingId
+                      ? {
+                          ...m,
+                          plan: {
+                            goal: evt.goal,
+                            steps: evt.steps,
+                            summary: evt.summary,
+                          },
+                        }
+                      : m
+                  )
+                );
                 break;
 
               case "budget_warning":

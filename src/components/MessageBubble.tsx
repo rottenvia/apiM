@@ -24,6 +24,8 @@ import { CompareVersions } from "@/components/CompareVersions";
 import { buildSearchRegex } from "@/lib/chat-search";
 import { estimateCost, formatCost, formatDuration } from "@/lib/pricing";
 import { CodeBlock } from "@/components/CodeBlock";
+import { PlanPanel } from "@/components/PlanPanel";
+import type { PlanView } from "@/components/PlanPanel";
 
 /**
  * Render fenced code blocks with a language label and copy button.
@@ -995,6 +997,11 @@ function MessageBubbleImpl({
                 />
               )}
 
+            {/* The plan sits above the reply: it is the frame the rest of the
+                message is read inside, and burying it under the prose would
+                make it something you find rather than something you see. */}
+            {message.plan && <PlanPanel plan={message.plan} />}
+
             {message.pendingQuestion && onAnswerQuestion && (
               <QuestionPrompt
                 pending={message.pendingQuestion}
@@ -1203,6 +1210,9 @@ export const MessageBubble = memo(MessageBubbleImpl, (prev, next) => {
     a.timeline === b.timeline &&
     a.pendingCommand === b.pendingCommand &&
     a.pendingQuestion === b.pendingQuestion &&
+    // New object identity on every plan update, which is what makes the
+    // progress bar move as the agent works.
+    a.plan === b.plan &&
     prev.isLast === next.isLast &&
     prev.onRegenerate === next.onRegenerate &&
     prev.onResume === next.onResume &&

@@ -49,7 +49,8 @@
     "test:tools2": "tsx scripts/test-tools2.mjs",
     "browser:install": "node scripts/install-browser.mjs",
     "test:browser": "tsx scripts/test-browser.mjs",
-    "test:tools3": "tsx scripts/test-tools3.mjs"
+    "test:tools3": "tsx scripts/test-tools3.mjs",
+    "test:plan": "tsx scripts/test-plan.mjs"
   },
   "dependencies": {
     "@types/cross-spawn": "^6.0.6",

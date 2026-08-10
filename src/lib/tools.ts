@@ -326,14 +326,78 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "make_plan",
+      description:
+        "Write down the goal and the steps before starting anything that will take more than two or three actions. This is not paperwork: on a long task your own reasoning from twenty rounds ago is gone, and without a plan you will forget requirements from the first message and stop early because the work so far looks finished. Include verification steps — 'run the tests', 'open the page and check it renders' — not just the building. Replaces any existing plan.",
+      parameters: {
+        type: "object",
+        properties: {
+          goal: {
+            type: "string",
+            description: "What finished looks like, in one sentence.",
+          },
+          steps: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "The steps, in order. Include how you will check the work, not only how you will do it.",
+          },
+        },
+        required: ["goal", "steps"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "update_plan",
+      description:
+        "Mark steps as doing, done or blocked as you go. A step can only be marked done if you say how you checked it — the test you ran, the output you saw, the page you opened. If you have not checked it, it is not done.",
+      parameters: {
+        type: "object",
+        properties: {
+          updates: {
+            type: "array",
+            description: "One entry per step you are changing.",
+            items: {
+              type: "object",
+              properties: {
+                id: { type: "number", description: "Step number." },
+                state: {
+                  type: "string",
+                  description: '"todo", "doing", "done" or "blocked".',
+                },
+                verified: {
+                  type: "string",
+                  description:
+                    "Required for done: how you know it works.",
+                },
+                blocker: {
+                  type: "string",
+                  description: "Required for blocked: what is in the way.",
+                },
+              },
+              required: ["id", "state"],
+            },
+          },
+        },
+        required: ["updates"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "ask_user",
       description:
-        "Ask the user a question and wait for their answer. Use this when a " +
-        "decision genuinely changes what you build — which database, which " +
-        "framework, whether to overwrite something — rather than guessing " +
-        "and possibly doing the wrong work. Do not use it for things you can " +
-        "decide yourself or find out by reading a file; every question " +
-        "interrupts the user.",
+        "Ask the user a question and wait for their answer. Use it whenever a " +
+        "choice would change what you build and you cannot settle it yourself " +
+        "— which framework, which data source, what 'done' looks like, " +
+        "whether to overwrite something. Asking costs one round; guessing " +
+        "wrong costs the whole task, so ask EARLY rather than after you have " +
+        "committed to an approach. Always offer options when you can: a " +
+        "question with buttons is one click, an open question is homework. " +
+        "Do not ask what you could find out by reading a file or searching.",
       parameters: {
         type: "object",
         properties: {
