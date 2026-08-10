@@ -356,7 +356,58 @@ check(
 );
 
 // ---------------------------------------------------------------------------
-console.log("\n8. Everything is offered to the model");
+console.log("\n8. Reading does not need permission");
+
+/*
+ * The approval prompt is what stops the agent working unattended, and most of
+ * what it interrupts for cannot change anything. Asking about `node --version`
+ * trains the user to click through prompts without reading them, which makes
+ * the prompt worse at the job it exists for.
+ *
+ * The boundary has to be exact, so both directions are tested: safe things
+ * must be free, and anything that writes, installs, runs project code or
+ * touches the network must still ask.
+ */
+const runner2 = await load("src/lib/runner.ts");
+
+for (const [cmd, args] of [
+  ["node", ["--version"]],
+  ["python3", ["--version"]],
+  ["git", ["status"]],
+  ["git", ["log"]],
+  ["git", ["diff"]],
+  ["npm", ["ls"]],
+  ["pip", ["freeze"]],
+  ["which", ["node"]],
+]) {
+  check(`${cmd} ${args.join(" ")} runs without asking`, runner2.isReadOnlyCommand(cmd, args));
+}
+
+for (const [cmd, args, why] of [
+  ["git", ["push"], "publishes work"],
+  ["git", ["commit", "-m", "x"], "changes history"],
+  ["npm", ["install"], "fetches and runs install scripts"],
+  ["npm", ["run", "build"], "runs project code"],
+  ["python3", ["app.py"], "runs project code"],
+  ["node", ["server.js"], "runs project code"],
+  ["pip", ["install", "requests"], "installs"],
+  ["cargo", ["build"], "compiles and runs build scripts"],
+  ["go", ["run", "."], "runs project code"],
+  ["node", [], "an interactive prompt would hang"],
+  ["git", ["log", "--output=hack.txt"], "a read subcommand made to write"],
+  ["git", ["status", ">", "f"], "redirection"],
+]) {
+  check(`${cmd} ${args.join(" ")} still asks`, !runner2.isReadOnlyCommand(cmd, args), why);
+}
+
+const routeSrc2 = readFileSync(path.join(ROOT, "src/app/api/chat/route.ts"), "utf8");
+check(
+  "the exemption is wired into the approval path",
+  /isReadOnlyCommand\(check\.command, check\.args\)/.test(routeSrc2)
+);
+
+// ---------------------------------------------------------------------------
+console.log("\n9. Everything is offered to the model");
 
 const names = WORKSPACE_TOOLS.map((t) => t.function.name);
 check("http_request is registered", names.includes("http_request"));

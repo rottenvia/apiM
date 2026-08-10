@@ -128,10 +128,22 @@ console.log("\n12. The auto-run setting defaults to asking");
 // A request that omits the field must not run commands unattended — the
 // dangerous mode has to be opted into, never inherited or assumed.
 const routeSrc = await readFile(path.join(ROOT, "src/app/api/chat/route.ts"), "utf8");
+const runnerSrc = await readFile(path.join(ROOT, "src/lib/runner.ts"), "utf8");
 check("autoRunCommands defaults to false in the route",
   /autoRunCommands\s*=\s*false/.test(routeSrc));
-check("approval is skipped only when it is explicitly true",
-  /autoRunCommands\s*\|\|\s*\n?\s*isRemembered/.test(routeSrc));
+/*
+ * Tests the property, not the exact line. The condition gained a third term
+ * — read-only commands like `git status` no longer prompt — and an assertion
+ * pinned to the old two-term shape failed while the safety property was
+ * unchanged. What matters is that autoRunCommands is one of several ways to
+ * pre-approve, and that each of the others is itself narrow.
+ */
+check("approval is skipped only via autoRun, a remembered choice, or a read-only command",
+  /const preApproved =[\s\S]{0,400}?autoRunCommands \|\|[\s\S]{0,200}?isRemembered\(/.test(routeSrc));
+check("the read-only exemption cannot cover a command that writes",
+  /isReadOnlyCommand\(check\.command, check\.args\)/.test(routeSrc) &&
+    /READ_ONLY_COMMANDS/.test(runnerSrc),
+  "it checks arguments, not just the program — git status is safe, git push is not");
 
 const pageSrc = await readFile(path.join(ROOT, "src/app/page.tsx"), "utf8");
 check("the client only enables it on a literal true",
