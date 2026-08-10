@@ -798,20 +798,34 @@ export async function runTool(
         const parts: string[] = [];
         let read = 0;
 
-        for (const filePath of paths) {
-          try {
-            const result = await readFile(workspaceId, filePath);
+        // Read together, reported in the order asked for. Sixty local files
+        // is only a few milliseconds either way, but the ordering guarantee
+        // matters: the model refers to them by position in its own request.
+        const results = await Promise.all(
+          paths.map((filePath) =>
+            readFile(workspaceId, filePath)
+              .then((result) => ({ filePath, result, error: null as unknown }))
+              .catch((error: unknown) => ({ filePath, result: null, error }))
+          )
+        );
+
+        for (const entry of results) {
+          if (entry.result) {
             read++;
-            const note = result.truncated
+            const note = entry.result.truncated
               ? "\n\n[truncated — file is larger than the read limit]"
               : "";
-            parts.push(`--- ${result.path} ---\n${result.content}${note}`);
-          } catch (error) {
+            parts.push(
+              `--- ${entry.result.path} ---\n${entry.result.content}${note}`
+            );
+          } else {
             // One missing file must not lose the others: report it inline and
             // keep going, so the model still gets what does exist.
             parts.push(
-              `--- ${filePath} ---\n[could not read: ${
-                error instanceof WorkspaceError ? error.message : "unreadable"
+              `--- ${entry.filePath} ---\n[could not read: ${
+                entry.error instanceof WorkspaceError
+                  ? entry.error.message
+                  : "unreadable"
               }]`
             );
           }
