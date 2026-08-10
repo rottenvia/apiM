@@ -71,6 +71,124 @@ export function getProcess(id: string): TrackedProcess | undefined {
   return processes.get(id);
 }
 
+/** Longest a single wait may block. A dev server that slow has a problem. */
+export const MAX_WAIT_MS = 120_000;
+
+export interface WaitResult {
+  /** "matched" | "exited" | "timeout" */
+  outcome: "matched" | "exited" | "timeout";
+  /** Output produced since the wait began. */
+  newOutput: string;
+  /** The line that matched, when one did. */
+  matchedLine?: string;
+  waitedMs: number;
+}
+
+/**
+ * Block until a process prints something, exits, or runs out of time.
+ *
+ * The gap this fills: after `start_process`, the agent has no way to know
+ * when the thing is ready. Its options were to read the log immediately —
+ * which is empty, because the server has not booted — or to guess a sleep.
+ * Both are wrong in the same expensive way: a round spent finding out that
+ * nothing has happened yet, then another guess, then another round.
+ *
+ * "Wait until it prints Ready" is what a person does, and it is exactly
+ * expressible. One round, and it returns the moment the condition is met
+ * rather than after a fixed delay.
+ *
+ * Exiting counts as an outcome, not an error. A process that dies during
+ * startup will never print the pattern, and waiting the full timeout for
+ * something already dead is the worst case this must avoid.
+ */
+export async function waitForOutput(
+  id: string,
+  pattern: string,
+  timeoutMs: number
+): Promise<WaitResult | null> {
+  const proc = processes.get(id);
+  if (!proc) return null;
+
+  const limit = Math.min(Math.max(1000, timeoutMs), MAX_WAIT_MS);
+  const started = Date.now();
+
+  /*
+   * Search the whole log, not just what arrives from now on.
+   *
+   * My first version recorded the log length at the start of the wait and
+   * only matched text after it, reasoning that a stale banner should not
+   * satisfy a fresh wait. Testing killed that: `start_process` deliberately
+   * pauses for a startup grace period before returning, and a fast server
+   * prints "Ready" during it. So by the time the agent could possibly call
+   * this, the line it is waiting for was already in the buffer — and the wait
+   * ran to its full timeout while the answer sat there.
+   *
+   * That is the common case, not an edge case: the faster the process, the
+   * more reliably it broke.
+   *
+   * Matching the whole log makes an already-satisfied wait return instantly,
+   * which is correct — "wait until it says Ready" is satisfied by it having
+   * already said Ready. The output reported back is still only what is new,
+   * so the model is not re-shown text it has seen.
+   */
+  const from = proc.log.length;
+
+  let regex: RegExp | null = null;
+  if (pattern) {
+    try {
+      regex = new RegExp(pattern, "i");
+    } catch {
+      // A pattern that will not compile is treated as literal text, which is
+      // almost always what was meant — "Ready in 1.2s" contains no valid
+      // regex intent but does contain characters that break one.
+      regex = null;
+    }
+  }
+
+  const matches = (text: string): string | null => {
+    if (!pattern) return null;
+    for (const line of text.split("\n")) {
+      if (regex ? regex.test(line) : line.toLowerCase().includes(pattern.toLowerCase())) {
+        return line.trim();
+      }
+    }
+    return null;
+  };
+
+  // Polling rather than hooking the stream: `append` is called from several
+  // places and a listener would have to be unregistered on every exit path.
+  // 100ms is imperceptible next to a process start and costs nothing.
+  for (;;) {
+    const sinceStart = proc.log.slice(from);
+    // Matched against everything the process has said; reported as only what
+    // is new. See the note above on why the whole log has to be searched.
+    const hit = matches(proc.log);
+    if (hit) {
+      return {
+        outcome: "matched",
+        newOutput: sinceStart,
+        matchedLine: hit,
+        waitedMs: Date.now() - started,
+      };
+    }
+    if (!isRunning(proc)) {
+      return {
+        outcome: "exited",
+        newOutput: sinceStart,
+        waitedMs: Date.now() - started,
+      };
+    }
+    if (Date.now() - started >= limit) {
+      return {
+        outcome: "timeout",
+        newOutput: sinceStart,
+        waitedMs: Date.now() - started,
+      };
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
 /**
  * Starts a process and returns once it has had a moment to fail.
  *

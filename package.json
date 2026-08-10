@@ -48,7 +48,8 @@
     "test:reasoning": "tsx scripts/test-reasoning.mjs",
     "test:tools2": "tsx scripts/test-tools2.mjs",
     "browser:install": "node scripts/install-browser.mjs",
-    "test:browser": "tsx scripts/test-browser.mjs"
+    "test:browser": "tsx scripts/test-browser.mjs",
+    "test:tools3": "tsx scripts/test-tools3.mjs"
   },
   "dependencies": {
     "@types/cross-spawn": "^6.0.6",
@@ -57,6 +58,7 @@
     "dotenv": "17.3.1",
     "drizzle-orm": "0.45.2",
     "next": "16.2.6",
+    "pdfjs-dist": "^4.10.38",
     "pg": "8.20.0",
     "react": "19.2.6",
     "react-dom": "19.2.6",

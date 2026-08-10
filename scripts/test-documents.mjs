@@ -52,7 +52,11 @@ console.log("1. Which files are documents");
 for (const [name, expected] of [
   ["a.docx", "docx"], ["a.xlsx", "xlsx"], ["a.pptx", "pptx"],
   ["a.epub", "epub"], ["a.odt", "odt"],
-  ["a.txt", null], ["a.zip", null], ["a.pdf", null],
+  // PDF was deliberately unsupported and is now handled — it was the one
+  // format people actually send, so "read this document" failed on the
+  // common case while working on ODT.
+  ["a.pdf", "pdf"],
+  ["a.txt", null], ["a.zip", null],
 ]) {
   check(`${name} -> ${expected ?? "not a document"}`, D.documentKind(name) === expected);
 }

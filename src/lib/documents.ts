@@ -12,7 +12,7 @@
 
 import { zipMembers } from "@/lib/archive";
 
-export type DocumentKind = "docx" | "xlsx" | "pptx" | "epub" | "odt";
+export type DocumentKind = "docx" | "xlsx" | "pptx" | "epub" | "odt" | "pdf";
 
 export interface DocumentResult {
   text: string;
@@ -30,6 +30,7 @@ const KINDS: Record<string, DocumentKind> = {
   pptx: "pptx",
   epub: "epub",
   odt: "odt",
+  pdf: "pdf",
 };
 
 export function documentKind(name: string): DocumentKind | null {
@@ -259,5 +260,107 @@ export async function readDocument(
       return readEpub(buf);
     case "odt":
       return readOdt(buf);
+    case "pdf":
+      return readPdf(buf);
   }
+}
+
+/**
+ * PDF text extraction.
+ *
+ * The one format people actually send, and the only one this tool could not
+ * open — which made "read this document" fail on the common case while
+ * succeeding on ODT.
+ *
+ * Two things worth stating about how this works:
+ *
+ * A PDF has no paragraphs. It is a set of positioned glyph runs, so the text
+ * has to be reassembled from coordinates: a run that starts on a new vertical
+ * position is a new line, and a gap on the same line is a space. Concatenating
+ * the runs in file order — which is the naive approach — produces text with
+ * words fused together and columns interleaved.
+ *
+ * A scanned PDF contains no text at all, only images. It extracts to an empty
+ * string, and saying "this file is empty" would be actively misleading. That
+ * case is detected and explained, with a usable suggestion, rather than
+ * reported as success.
+ */
+async function readPdf(buf: Uint8Array): Promise<DocumentResult> {
+  // The legacy build is the one that runs under Node without a DOM.
+  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+
+  const doc = await pdfjs.getDocument({
+    // pdf.js takes ownership of the buffer, so it gets a copy — the caller's
+    // Uint8Array is reused elsewhere and would be detached.
+    data: new Uint8Array(buf),
+    useSystemFonts: true,
+    // Nothing here should ever reach the network or execute embedded code.
+    isEvalSupported: false,
+    disableFontFace: true,
+  }).promise;
+
+  const pages: string[] = [];
+  let chars = 0;
+  let truncated = false;
+
+  for (let i = 1; i <= doc.numPages; i++) {
+    if (chars >= MAX_DOC_CHARS) {
+      truncated = true;
+      break;
+    }
+    const page = await doc.getPage(i);
+    const content = await page.getTextContent();
+
+    let text = "";
+    let lastY: number | null = null;
+    let lastEndX: number | null = null;
+
+    for (const item of content.items as { str: string; transform?: number[]; width?: number }[]) {
+      const str = item.str ?? "";
+      if (!str) continue;
+      const x = item.transform?.[4];
+      const y = item.transform?.[5];
+
+      if (lastY !== null && y !== undefined && Math.abs(y - lastY) > 2) {
+        // A different vertical position is a new line.
+        text += "\n";
+      } else if (
+        lastEndX !== null &&
+        x !== undefined &&
+        x - lastEndX > 1 &&
+        !/\s$/.test(text) &&
+        !/^\s/.test(str)
+      ) {
+        // Same line, but a visible gap: a space the PDF did not encode.
+        text += " ";
+      }
+
+      text += str;
+      if (y !== undefined) lastY = y;
+      if (x !== undefined) lastEndX = x + (item.width ?? 0);
+    }
+
+    pages.push(text.trim());
+    chars += text.length;
+  }
+
+  const joined = pages.join("\n\n");
+
+  if (!joined.trim()) {
+    return {
+      text:
+        "[This PDF contains no extractable text. It is almost certainly a " +
+        "scan or an export of images, so the words are pixels rather than " +
+        "characters. To read it, convert the pages to images and use " +
+        "view_image, which can actually look at them.]",
+      sections: doc.numPages,
+      truncated: false,
+    };
+  }
+
+  return {
+    text: joined.slice(0, MAX_DOC_CHARS),
+    sections: doc.numPages,
+    truncated: truncated || joined.length > MAX_DOC_CHARS,
+  };
 }

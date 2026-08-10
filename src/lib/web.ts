@@ -160,6 +160,48 @@ export interface FetchedPage {
   html?: string;
   truncated: boolean;
   bytes: number;
+  /**
+   * True when the response is an app shell rather than a real page.
+   *
+   * Measured: for a React/Vue/Angular site the server sends `<div id="root">`
+   * and nothing else, so this tool returns almost no text and no usable
+   * selectors. Previously it reported that as a successful fetch of an
+   * almost-empty page, and the model believed it — which is how the Faceit
+   * overlay was written against selectors that did not exist.
+   *
+   * Detecting it and saying so turns a silent wrong answer into a signpost.
+   */
+  needsBrowser: boolean;
+}
+
+/**
+ * Does this look like an app shell?
+ *
+ * Three signals together, because any one alone has false positives:
+ *
+ *   - very little visible text for the amount of HTML
+ *   - a well-known empty mount point (#root, #app, #__next)
+ *   - script tags present
+ *
+ * A short static page has little text but no mount point and few scripts. A
+ * heavy article has scripts but plenty of text. Requiring the combination
+ * keeps this quiet on the pages where fetch_url genuinely works.
+ */
+export function looksLikeAppShell(html: string, text: string): boolean {
+  const scripts = (html.match(/<script\b/gi) ?? []).length;
+  if (scripts === 0) return false;
+
+  const visible = text.replace(/\s+/g, " ").trim();
+  const hasMount =
+    /<div[^>]+id=["'](root|app|__next|__nuxt|main-app)["'][^>]*>\s*<\/div>/i.test(
+      html
+    ) || /<div[^>]+id=["'](root|app|__next)["'][^>]*\/?>\s*(<\/div>)?\s*<\/body>/i.test(html);
+
+  // An empty mount point is close to conclusive on its own.
+  if (hasMount && visible.length < 2_000) return true;
+
+  // Otherwise: a lot of markup, almost no words.
+  return html.length > 1_000 && visible.length < 200;
 }
 
 /**
@@ -234,6 +276,7 @@ export async function fetchPage(
     status: res.status,
     contentType: contentType.split(";")[0] || "unknown",
     title: isHtml ? extractTitle(body) : "",
+    needsBrowser: isHtml ? looksLikeAppShell(body, text) : false,
     text: truncated ? text.slice(0, MAX_FETCH_CHARS) : text,
     html:
       options.raw && isHtml

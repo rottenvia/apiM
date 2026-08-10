@@ -8,6 +8,7 @@ import {
   listProcesses,
   describeProcess,
   isRunning,
+  waitForOutput,
 } from "@/lib/processes";
 import { smartSearch } from "@/lib/smart-search";
 import { listSnapshots, restoreSnapshot } from "@/lib/snapshots";
@@ -34,6 +35,7 @@ import {
   WorkspaceError,
 } from "@/lib/workspace";
 import { applyPatch } from "@/lib/patch";
+import { httpRequest, formatHttpResult } from "@/lib/http";
 import {
   validateActions,
   runSession,
@@ -624,6 +626,58 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "http_request",
+      description:
+        "Call an HTTP API directly and see the status code, headers and body. Use this to test an endpoint you or someone else built — it is the API equivalent of run_tests. Prefer it over run_command with curl: no approval prompt, no shell quoting to get wrong, and JSON comes back parsed.",
+      parameters: {
+        type: "object",
+        properties: {
+          url: { type: "string", description: "Full URL, including https://" },
+          method: {
+            type: "string",
+            description: "GET, POST, PUT, PATCH, DELETE, HEAD or OPTIONS. Defaults to GET.",
+          },
+          headers: {
+            type: "object",
+            description:
+              'Request headers, e.g. {"authorization": "Bearer ..."}. Content-Type is set to application/json automatically when the body looks like JSON.',
+          },
+          body: {
+            type: "string",
+            description: "Request body, for POST/PUT/PATCH.",
+          },
+        },
+        required: ["url"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "wait_for_output",
+      description:
+        "Wait until a background process prints something, or exits. Use this straight after start_process instead of guessing how long a server takes to boot — 'wait until it prints Ready' returns the moment it does. It also returns immediately if the process dies, so a crash during startup does not cost you the full wait.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "Process id from start_process." },
+          pattern: {
+            type: "string",
+            description:
+              "Text or a regular expression to wait for, e.g. 'Ready in' or 'listening on'. Omit to just wait for the process to exit.",
+          },
+          timeout_ms: {
+            type: "number",
+            description: "How long to wait before giving up. Default 30000, max 120000.",
+          },
+        },
+        required: ["id"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "browse",
       description:
         "Open a page in a real browser, run its JavaScript, and see what actually renders — the DOM, the visible text, the console, failed requests, and screenshots. Use this instead of fetch_url or inspect_page whenever the site is an app rather than static HTML: those only see the empty shell a server sends before scripts run, so any selector you write from them will not exist. Also use it to check your own work: open a page you built, screenshot it, and read the console for errors.",
@@ -719,9 +773,10 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
     function: {
       name: "read_document",
       description:
-        "Read a Word, Excel, PowerPoint, EPUB or ODT file in the workspace " +
-        "as text. read_file cannot open these — they are zipped XML, not " +
-        "plain text — so use this for any .docx, .xlsx, .pptx, .epub or .odt.",
+        "Read a PDF, Word, Excel, PowerPoint, EPUB or ODT file in the " +
+        "workspace as text. read_file cannot open any of these — they are " +
+        "binary or zipped XML, not plain text — so use this for any .pdf, " +
+        ".docx, .xlsx, .pptx, .epub or .odt.",
       parameters: {
         type: "object",
         properties: {
@@ -1312,12 +1367,30 @@ export async function runTool(
 
         const body = wantsRaw && page.html ? page.html : page.text;
 
+        /*
+         * Say so when this tool is the wrong one.
+         *
+         * An app shell fetches successfully and contains nothing. Reporting
+         * that as a normal result is how the model ends up writing selectors
+         * for a DOM that was never sent — it had no way to tell the page was
+         * empty rather than simply short.
+         */
+        const warning = page.needsBrowser
+          ? `\n\n[This page is an app shell — its content is built by ` +
+            `JavaScript, which has not run here, so the text and markup above ` +
+            `are nearly empty. Use browse for this URL instead: it runs the ` +
+            `scripts and returns the real DOM. Do not write selectors from ` +
+            `what you see above.]`
+          : "";
+
         return {
           ok: true,
-          content: `${header}\n\n${body}`,
-          summary: `Read ${new URL(page.url).hostname}${
-            page.title ? ` — ${page.title.slice(0, 50)}` : ""
-          }`,
+          content: `${header}${warning}\n\n${body}`,
+          summary: page.needsBrowser
+            ? `${new URL(page.url).hostname} needs a browser`
+            : `Read ${new URL(page.url).hostname}${
+                page.title ? ` — ${page.title.slice(0, 50)}` : ""
+              }`,
         };
       }
 
@@ -1330,6 +1403,22 @@ export async function runTool(
               `${page.url} returned ${page.contentType}, not HTML, so it has ` +
               `no selectors to inspect.`,
             summary: "Not an HTML page",
+          };
+        }
+
+        if (page.needsBrowser) {
+          // Refused rather than answered. inspect_page exists to hand back
+          // selectors, and returning `id=root` as though it were the page's
+          // structure is precisely the failure this whole area was fixed for.
+          return {
+            ok: false,
+            content:
+              `${page.url} is an app shell: the markup the server sent ` +
+              `contains no real content, because the page is built by ` +
+              `JavaScript that has not run. Any selector taken from it would ` +
+              `not exist in the live page.\n\nUse browse on this URL — it ` +
+              `runs the scripts and returns the rendered DOM.`,
+            summary: "Needs a browser, not a fetch",
           };
         }
 
@@ -1639,6 +1728,88 @@ export async function runTool(
           content: `Reverted ${written.path} to its previous contents (${written.bytes} bytes).`,
           summary: `Reverted ${written.path}`,
           changedPath: written.path,
+        };
+      }
+
+      case "http_request": {
+        const headers: Record<string, string> = {};
+        if (args.headers && typeof args.headers === "object") {
+          for (const [k, v] of Object.entries(
+            args.headers as Record<string, unknown>
+          )) {
+            headers[k] = String(v);
+          }
+        }
+
+        try {
+          const result = await httpRequest({
+            url: str(args, "url"),
+            method: typeof args.method === "string" ? args.method : "GET",
+            headers,
+            body: typeof args.body === "string" ? args.body : undefined,
+          });
+          return {
+            // A 404 or a 500 is a true answer to the question asked, not a
+            // tool failure. Marking it failed would send the model down the
+            // retry path for a response it should be reading.
+            ok: true,
+            content: formatHttpResult(result),
+            summary: `${result.status} ${result.statusText} in ${result.ms}ms`,
+          };
+        } catch (error) {
+          return {
+            ok: false,
+            content: `Error: ${
+              error instanceof Error ? error.message : "request failed"
+            }`,
+            summary: "Request failed",
+          };
+        }
+      }
+
+      case "wait_for_output": {
+        const id = str(args, "id");
+        const pattern = typeof args.pattern === "string" ? args.pattern : "";
+        const timeout = num(args, "timeout_ms") ?? 30_000;
+
+        const result = await waitForOutput(id, pattern, timeout);
+        if (!result) {
+          return {
+            ok: false,
+            content: `Error: no process with id "${id}". Use list_processes.`,
+            summary: "No such process",
+          };
+        }
+
+        const tail = result.newOutput.trim()
+          ? `\n\nOutput since waiting:\n${result.newOutput.slice(-4000)}`
+          : "\n\nIt printed nothing while waiting.";
+
+        if (result.outcome === "matched") {
+          return {
+            ok: true,
+            content:
+              `Matched after ${result.waitedMs}ms: ${result.matchedLine}${tail}`,
+            summary: `Ready after ${(result.waitedMs / 1000).toFixed(1)}s`,
+          };
+        }
+        if (result.outcome === "exited") {
+          return {
+            // Not an error: finding out it died IS the answer, and it is
+            // usually the thing worth knowing.
+            ok: true,
+            content:
+              `The process exited after ${result.waitedMs}ms without ` +
+              `printing that.${tail}`,
+            summary: "Process exited while waiting",
+          };
+        }
+        return {
+          ok: false,
+          content:
+            `Timed out after ${result.waitedMs}ms. The process is still ` +
+            `running but has not printed that yet.${tail}`,
+          summary: "Timed out waiting",
         };
       }
 
