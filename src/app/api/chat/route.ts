@@ -19,6 +19,8 @@ import {
 import { WORKSPACE_TOOLS, runTool } from "@/lib/tools";
 import type { ToolResult } from "@/lib/tools";
 import { buildWorkspaceContext } from "@/lib/workspace-context";
+import { TreeTracker } from "@/lib/tree-delta";
+import { listFiles } from "@/lib/workspace";
 import { createSnapshot } from "@/lib/snapshots";
 import {
   runCommand,
@@ -44,6 +46,7 @@ import {
 } from "@/lib/rebuild-resume";
 import type { RebuiltResume } from "@/lib/rebuild-resume";
 import { fetchWithRetry } from "@/lib/retry";
+import { createBudget, chargeRound, checkBudget, budgetStopMessage } from "@/lib/budget";
 import { listCustomPlugins } from "@/lib/plugin-store";
 
 export const maxDuration = 300;
@@ -145,6 +148,14 @@ interface ChatRequestBody {
   /** Vision provider key, so the agent can look at images in the workspace. */
   visionApiKey?: string;
   visionModel?: string;
+  /**
+   * Hard ceiling on what this reply may cost, in USD.
+   *
+   * Omitted or non-positive means no cap. Enforced between agent rounds, so
+   * a run that hits it stops with its work saved and resumable rather than
+   * being cut off mid-sentence.
+   */
+  budgetUsd?: number | null;
 }
 
 /** One frame of our own SSE protocol (deliberately simpler than DeepSeek's). */
@@ -232,7 +243,22 @@ type StreamEvent =
       context: string;
     }
   | { type: "question_resolved"; id: string; answered: boolean }
-  | { type: "usage"; usage: Record<string, number>; model: string }
+  | {
+      type: "usage";
+      usage: Record<string, number>;
+      model: string;
+      /** Running cost of this reply, for the live budget readout. */
+      spentUsd?: number;
+      /** The cap in force, if any. */
+      limitUsd?: number;
+    }
+  | { type: "budget_warning"; spentUsd: number; limitUsd: number }
+  | {
+      type: "budget_stopped";
+      spentUsd: number;
+      limitUsd: number;
+      reason: string;
+    }
   | {
       type: "tool_result";
       id: string;
@@ -292,6 +318,8 @@ export async function POST(req: NextRequest) {
     visionApiKey,
     visionModel,
     searchProfile,
+    // A ceiling on what this one reply may cost, in USD. Absent means no cap.
+    budgetUsd,
   } = body;
 
   if (!message || !deepseekApiKey) {
@@ -711,6 +739,12 @@ export async function POST(req: NextRequest) {
         let fileTreeIndex = -1;
         let currentFileTree = "";
 
+        /*
+         * Decides, each time the workspace changes, whether to append a short
+         * delta or spend a cache miss on a fresh listing.
+         */
+        const treeTracker = new TreeTracker();
+
         const setFileTree = (text: string) => {
           currentFileTree = text;
           const body =
@@ -731,7 +765,19 @@ export async function POST(req: NextRequest) {
           }
         };
 
-        if (workspaceEnabled) setFileTree(workspaceFiles);
+        if (workspaceEnabled) {
+          setFileTree(workspaceFiles);
+          // Seed the tracker with the same listing the model was just shown,
+          // so the first delta describes changes from what it actually saw
+          // rather than from an empty workspace.
+          try {
+            treeTracker.update(
+              (await listFiles(workspace)).filter((f) => f.path !== "LESSONS.md")
+            );
+          } catch {
+            /* the tracker simply baselines on its first successful refresh */
+          }
+        }
 
         /*
          * Replace everything above with the saved transcript when resuming.
@@ -757,23 +803,64 @@ export async function POST(req: NextRequest) {
          */
         const refreshFileTree = async () => {
           if (!workspaceEnabled) return;
+
+          let files: { path: string; size: number }[];
+          try {
+            files = (await listFiles(workspace)).filter(
+              (f) => f.path !== "LESSONS.md"
+            );
+          } catch {
+            return; // Keep the last known tree rather than blanking it.
+          }
+
+          const step = treeTracker.update(files);
+          if (step.kind === "none") return;
+
+          if (step.kind === "delta") {
+            /*
+             * Append, and touch nothing above.
+             *
+             * This is the whole optimisation. See lib/tree-delta.ts for the
+             * measurements, but the short version: the previous code deleted
+             * the listing from near the front of the array and re-appended
+             * it, which changes the request from that point onward and costs
+             * a full-price re-read of the entire conversation. Measured at
+             * 229k wasted tokens on a 40-round task — a third of all input.
+             *
+             * A trailing append leaves every earlier byte identical, so it
+             * all still hits the cache. The listing itself never moves again.
+             */
+            transcript.push({ role: "system", content: step.text });
+            return;
+          }
+
+          // A re-baseline: enough has changed that a fresh listing is clearer
+          // and smaller than the accumulated diffs. This costs one cache
+          // miss, knowingly and rarely.
           let next = "";
           try {
             next = await buildWorkspaceContext(workspace);
           } catch {
-            return; // Keep the last known tree rather than blanking it.
+            return;
           }
           if (next === currentFileTree) return;
 
-          // Drop the stale copy and re-append, so the freshest listing is
-          // always the last thing before the model's next turn. Editing it in
-          // place would leave it buried behind the tool results from this
-          // round, where it reads as older than output that is actually
-          // older than it.
-          if (fileTreeIndex !== -1) {
-            transcript.splice(fileTreeIndex, 1);
-            fileTreeIndex = -1;
+          // Remove the old listing and every delta that described changes to
+          // it — they are all superseded by the tree about to be appended,
+          // and leaving them would have the model reading a diff against a
+          // listing that no longer exists.
+          for (let i = transcript.length - 1; i >= 0; i--) {
+            const m = transcript[i];
+            if (
+              m.role === "system" &&
+              typeof m.content === "string" &&
+              (m.content.startsWith("Current workspace contents") ||
+                m.content.startsWith("Workspace changes since"))
+            ) {
+              transcript.splice(i, 1);
+            }
           }
+          fileTreeIndex = -1;
           setFileTree(next);
         };
 
@@ -873,6 +960,14 @@ export async function POST(req: NextRequest) {
         let continuations = resumed?.continuations ?? 0;
         /** Set when the reply stopped because it ran out of room. */
         let hitOutputCeiling = false;
+        /** Set when the spending limit ended the run rather than the model. */
+        let stoppedByBudget = false;
+        const budget = createBudget(budgetUsd);
+        /**
+         * What the previous round cost, used to predict the next one. A limit
+         * that only looks backwards overshoots by a whole round.
+         */
+        let lastRoundCost = 0;
 
         // Accumulated across every round — one displayed reply can span
         // several API turns once tools are involved.
@@ -1290,10 +1385,17 @@ export async function POST(req: NextRequest) {
                 totalUsage.prompt_cache_miss_tokens +=
                   u.prompt_cache_miss_tokens ??
                   Math.max(0, (u.prompt_tokens ?? 0) - roundHit);
+                // Charge the running total for this round, at the real
+                // cache-split rates, so the limit is enforced against what is
+                // actually being billed rather than a token count.
+                lastRoundCost = chargeRound(budget, u, model);
+
                 send({
                   type: "usage",
                   usage: { ...totalUsage },
                   model,
+                  spentUsd: budget.spentUsd,
+                  limitUsd: budget.limitUsd ?? undefined,
                 });
               }
 
@@ -1394,6 +1496,53 @@ export async function POST(req: NextRequest) {
           });
 
           if (calls.length === 0) break;
+
+          /*
+           * The spending limit, checked at the only safe place: between
+           * rounds, with a complete transcript behind us.
+           *
+           * This is deliberately BEFORE the tools run. Stopping after them
+           * would pay for work whose results are never read, and the results
+           * are the expensive part — a round's tool output is resent on every
+           * request after it.
+           *
+           * The pending calls still have to be answered. DeepSeek rejects a
+           * transcript where a tool_call has no matching tool reply, so
+           * skipping them would make the saved run unresumable — which is
+           * exactly the state a spending limit must not leave someone in.
+           */
+          const verdict = checkBudget(budget, lastRoundCost);
+          if (verdict.action === "warn") {
+            send({
+              type: "budget_warning",
+              spentUsd: verdict.spentUsd,
+              limitUsd: verdict.limitUsd,
+            });
+          } else if (verdict.action === "stop") {
+            for (const call of calls) {
+              transcript.push({
+                role: "tool",
+                tool_call_id: call.id,
+                content:
+                  `Not run — the spending limit for this reply was reached ` +
+                  `($${verdict.spentUsd.toFixed(4)} of ` +
+                  `$${verdict.limitUsd.toFixed(2)}). Stop now. Tell the user ` +
+                  `plainly what you finished, what is still outstanding, and ` +
+                  `the exact next step. Do not claim the task is complete.`,
+              });
+            }
+            send({
+              type: "budget_stopped",
+              spentUsd: verdict.spentUsd,
+              limitUsd: verdict.limitUsd,
+              reason: verdict.reason,
+            });
+            // Flagged like an interrupted run so the work is kept and Resume
+            // is offered — the user can lift the cap and carry on rather than
+            // paying to redo everything.
+            stoppedByBudget = true;
+            break;
+          }
 
           if (toolRounds >= MAX_TOOL_ROUNDS) {
             // Guard against a model that keeps calling tools forever. Every
@@ -1759,6 +1908,23 @@ export async function POST(req: NextRequest) {
           if (stopped()) break;
         }
 
+        /*
+         * Say why it stopped, in the reply itself.
+         *
+         * The `budget_stopped` event drives the UI, but the transcript has to
+         * stand on its own: reopened tomorrow, a reply that just ends is
+         * indistinguishable from the model giving up. This is appended to the
+         * saved content and streamed, so both views agree.
+         */
+        if (stoppedByBudget && budget.limitUsd !== null) {
+          const note =
+            (assistantContent.trim() ? "\n\n" : "") +
+            budgetStopMessage(budget.spentUsd, budget.limitUsd, true);
+          assistantContent += note;
+          send({ type: "content", delta: note });
+          appendTimelineText(note);
+        }
+
         // ---------------- Final save ----------------
         // The assistant message has been checkpointed throughout the stream;
         // this last write clears the `incomplete` flag and records usage.
@@ -1788,13 +1954,20 @@ export async function POST(req: NextRequest) {
             // Stopping at the output ceiling is not a finished answer. Left
             // as complete it looked done while ending mid-sentence, so the
             // UI had nothing to offer and the work was silently abandoned.
-            incomplete: hitOutputCeiling,
+            //
+            // A budget stop is the same situation for a different reason: the
+            // task is unfinished and the work so far is worth keeping. Marked
+            // incomplete so Resume is offered — otherwise hitting the cap
+            // would throw away everything it just paid for, which is the
+            // opposite of what a spending limit is for.
+            incomplete: hitOutputCeiling || stoppedByBudget,
             // Kept only while there is something to resume. A finished reply
             // drops it: it is the largest field in the record and resuming a
             // complete answer means nothing.
-            resumeState: hitOutputCeiling
-              ? { toolRounds, continuations, messages: transcript }
-              : null,
+            resumeState:
+              hitOutputCeiling || stoppedByBudget
+                ? { toolRounds, continuations, messages: transcript }
+                : null,
           });
           persisted = true;
         } catch (storeError) {

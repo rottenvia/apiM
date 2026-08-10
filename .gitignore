@@ -50,3 +50,7 @@ data/
 
 # Server deployment secrets — contains the app password and session key.
 deploy/.env
+
+# Output of `npm run cost:lab` — a measurement artefact, regenerated on demand.
+scripts/.cost-report.json
+scripts/tmp/

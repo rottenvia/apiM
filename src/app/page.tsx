@@ -162,6 +162,13 @@ type StreamEvent =
   | { type: "continuing"; reason: string; n: number; of: number }
   | { type: "context_pruned"; collapsed: number; tokensSaved: number }
   | { type: "context_compacted"; rounds: number; tokensSaved: number }
+  | { type: "budget_warning"; spentUsd: number; limitUsd: number }
+  | {
+      type: "budget_stopped";
+      spentUsd: number;
+      limitUsd: number;
+      reason: string;
+    }
   | { type: "tool_start"; id: string; name: string; args: string }
   | {
       type: "approval_request";
@@ -358,6 +365,11 @@ export default function Home() {
   const [enabledPlugins, setEnabledPlugins] = useState<string[]>([]);
   /** Seconds the delete button stays locked in the confirmation dialog. */
   const [deleteDelay, setDeleteDelay] = useState(DEFAULT_DELETE_DELAY);
+  /**
+   * Spend ceiling per reply, in USD. `null` is no cap, which is the default:
+   * a limit nobody chose that stops a task halfway is its own kind of bug.
+   */
+  const [budgetUsd, setBudgetUsd] = useState<number | null>(null);
 
   const hasKeys = deepseekKey.length > 0;
   const initialLoadDone = useRef(false);
@@ -497,6 +509,11 @@ export default function Home() {
               setSearchProfile(s.searchProfile);
             }
             if (s.sidePanelOpen === false) setSidePanelOpen(false);
+            // Only a positive number is a cap. Anything else — null, 0, a
+            // corrupted string — means no limit, never "stop immediately".
+            if (typeof s.budgetUsd === "number" && s.budgetUsd > 0) {
+              setBudgetUsd(s.budgetUsd);
+            }
             // Clamped on read as well as write: a hand-edited or older
             // localStorage value must not produce an un-closable dialog.
             if (s.deleteDelay !== undefined) {
@@ -530,6 +547,7 @@ export default function Home() {
           searchProfile,
           sidePanelOpen,
           deleteDelay,
+          budgetUsd,
         })
       );
     }
@@ -547,6 +565,7 @@ export default function Home() {
     searchProfile,
     sidePanelOpen,
     deleteDelay,
+    budgetUsd,
   ]);
 
   /** Sends the user's Run / Skip answer back to the waiting request. */
@@ -1065,6 +1084,9 @@ export default function Home() {
             lessonsEnabled,
             autoRunCommands,
             searchProfile,
+            // The ceiling for this reply. Enforced on the server between
+            // rounds — a client-side check could not stop a run in progress.
+            budgetUsd,
             // Lets the agent look at images saved in the workspace, not just
             // ones attached to a message.
             visionApiKey: visionKey || undefined,
@@ -1154,6 +1176,24 @@ export default function Home() {
               case "context_compacted":
                 // Also informational. Not surfaced as a notice: it happens
                 // mid-task and reads as an error when it is the opposite.
+                break;
+
+              case "budget_warning":
+                // Warned rather than stopped. Being cut off with no notice is
+                // worse than knowing it is going to be close.
+                setRetryNotice(
+                  `Spending limit approaching — $${evt.spentUsd.toFixed(4)} of ` +
+                    `$${evt.limitUsd.toFixed(2)} used on this reply`
+                );
+                break;
+
+              case "budget_stopped":
+                // The reply itself explains this too, so the notice is short.
+                // It clears on the next message like every other notice.
+                setRetryNotice(
+                  `Stopped at your $${evt.limitUsd.toFixed(2)} spending limit — ` +
+                    `the work so far is saved, use Resume to continue`
+                );
                 break;
 
               case "meta":
@@ -1480,6 +1520,7 @@ export default function Home() {
       searchProfile,
       visionKey,
       visionModel,
+      budgetUsd,
       refreshWorkspaceFiles,
     ]
   );
@@ -1850,6 +1891,8 @@ export default function Home() {
           onAutoRunCommandsChange={setAutoRunCommands}
           searchProfile={searchProfile}
           onSearchProfileChange={setSearchProfile}
+          budgetUsd={budgetUsd}
+          onBudgetUsdChange={setBudgetUsd}
           onClose={() => setShowSettings(false)}
         />
       )}

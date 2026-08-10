@@ -44,12 +44,37 @@ import type { TranscriptMessage } from "@/lib/transcript";
 export const KEEP_RECENT_ROUNDS = 4;
 
 /**
- * Don't bother below this size.
+ * Don't compact below this size — and this is much larger than it looks.
  *
- * Compaction trades fidelity for tokens. On a short run there is nothing to
- * gain and no reason to lose the detail.
+ * This was 120_000 chars (~33k tokens), on the reasoning that reasoning is
+ * 93% of a transcript and therefore worth removing. The first half of that is
+ * true. The conclusion was wrong, and measuring it (`npm run cost:lab`)
+ * showed compaction was making a 40-round task MORE expensive, not less:
+ *
+ *     compaction on   $0.5236
+ *     compaction off  $0.4929
+ *
+ * The arithmetic nobody did:
+ *
+ * Old reasoning is not expensive. It sits in the cached prefix, where it
+ * costs $0.003625/M — a hundred and twenty times less than fresh input. It is
+ * the largest thing in the transcript and very nearly the cheapest.
+ *
+ * Compaction rewrites the middle of that prefix. Everything from the edit
+ * point onward stops matching the cache and is re-read at $0.435/M, once, in
+ * full. So the trade is: pay full price for the whole remaining transcript
+ * today, to save the cached rate on the removed part every round after.
+ *
+ * Break-even, at these rates, is 120 rounds if compaction removes half the
+ * transcript and 480 rounds if it removes a fifth. MAX_TOOL_ROUNDS is 40.
+ * There is no task on which the old threshold could ever pay for itself.
+ *
+ * Compaction still has a real job, just not this one: DeepSeek's window is
+ * 1M tokens, and a transcript that reaches it fails outright. So it now fires
+ * only as a safety valve, at ~500k tokens — half the window, with plenty of
+ * room for the reply. Below that, leaving history alone is strictly cheaper.
  */
-export const COMPACT_THRESHOLD_CHARS = 120_000;
+export const COMPACT_THRESHOLD_CHARS = 1_800_000;
 
 /**
  * How far the compaction boundary jumps at a time.

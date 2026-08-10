@@ -154,8 +154,19 @@ check(
 );
 check(
   "a finished reply does not keep resume state",
-  /resumeState: hitOutputCeiling/.test(route),
+  // Matches the condition, not its formatting. This was pinned to the exact
+  // string `resumeState: hitOutputCeiling`, so adding a second reason to
+  // resume (the spending limit) broke the test while the behaviour was fine.
+  // A check that fails when the code gets more correct is worse than no check.
+  /resumeState:[\s\S]{0,200}?hitOutputCeiling[\s\S]{0,80}?\?[\s\S]{0,120}?messages: transcript[\s\S]{0,40}?:\s*null/.test(
+    route
+  ),
   "it is the largest field in the record"
+);
+check(
+  "an unfinished reply keeps it, whatever ended the run",
+  /hitOutputCeiling \|\| stoppedByBudget/.test(route),
+  "running out of room and running out of budget both leave work worth keeping"
 );
 check(
   "the saved transcript is never sent to the browser",

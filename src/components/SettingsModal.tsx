@@ -8,6 +8,7 @@ import {
   MAX_DELETE_DELAY,
 } from "@/components/DeleteChatDialog";
 import { SearchBudget } from "@/components/SearchBudget";
+import { BUDGET_PRESETS } from "@/lib/budget";
 
 /**
  * Settings, grouped.
@@ -91,6 +92,9 @@ interface SettingsModalProps {
   onAutoRunCommandsChange: (enabled: boolean) => void;
   searchProfile: string;
   onSearchProfileChange: (profile: string) => void;
+  /** Spend ceiling per reply in USD, or null for no cap. */
+  budgetUsd: number | null;
+  onBudgetUsdChange: (usd: number | null) => void;
   onClose: () => void;
 }
 
@@ -115,6 +119,8 @@ export function SettingsModal({
   onAutoRunCommandsChange,
   searchProfile,
   onSearchProfileChange,
+  budgetUsd,
+  onBudgetUsdChange,
   onClose,
 }: SettingsModalProps) {
   const [tab, setTab] = useState<TabId>("keys");
@@ -444,6 +450,52 @@ export function SettingsModal({
                     </button>
                   ))}
                 </div>
+                <p className="mt-2 text-[11px] leading-relaxed text-text-muted">
+                  On V4 Pro, &ldquo;Low&rdquo; is mapped to &ldquo;High&rdquo; by
+                  DeepSeek itself — only Max is genuinely different. Use V4 Flash
+                  if you want a cheaper, shallower answer.
+                </p>
+              </div>
+
+              {/* Spending limit */}
+              <div>
+                <label className="block text-sm font-semibold text-text-primary mb-2">
+                  Spending limit per reply
+                </label>
+                <p className="mb-2.5 text-[12px] leading-relaxed text-text-secondary">
+                  Stops a reply once it has cost this much. The work done so far
+                  is kept and you can Resume it — nothing is thrown away. This is
+                  the guard against a task the model never finishes.
+                </p>
+                <div className="grid grid-cols-4 gap-1.5">
+                  <button
+                    onClick={() => onBudgetUsdChange(null)}
+                    className={`px-2 py-2.5 rounded-xl text-xs font-medium transition-all duration-150 ${
+                      budgetUsd === null
+                        ? "bg-accent/15 text-accent-light border border-accent/30"
+                        : "bg-bg-tertiary text-text-secondary border border-border hover:border-border-light"
+                    }`}
+                  >
+                    Off
+                  </button>
+                  {BUDGET_PRESETS.map((amount) => (
+                    <button
+                      key={amount}
+                      onClick={() => onBudgetUsdChange(amount)}
+                      className={`px-2 py-2.5 rounded-xl text-xs font-medium transition-all duration-150 ${
+                        budgetUsd === amount
+                          ? "bg-accent/15 text-accent-light border border-accent/30"
+                          : "bg-bg-tertiary text-text-secondary border border-border hover:border-border-light"
+                      }`}
+                    >
+                      ${amount < 1 ? amount.toFixed(2) : amount.toFixed(0)}
+                    </button>
+                  ))}
+                </div>
+                <p className="mt-2 text-[11px] leading-relaxed text-text-muted">
+                  For scale: an ordinary reply is a fraction of a cent. A
+                  forty-round agent task on Max thinking is around $0.50.
+                </p>
               </div>
 
               </>
