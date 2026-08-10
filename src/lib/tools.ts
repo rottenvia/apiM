@@ -463,7 +463,10 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
         "Read the output a background process has produced so far, and " +
         "whether it is still running. Use this after start_process to check " +
         "for startup errors, and after making a change to see what a watcher " +
-        "reported.",
+        "reported. If you only need to know what just happened, pass tail — " +
+        "re-reading a long log costs you those tokens on every later round. " +
+        "To WAIT for something specific rather than polling, use " +
+        "wait_for_output.",
       parameters: {
         type: "object",
         properties: {
@@ -472,6 +475,11 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
             description:
               "Process id from start_process. Omit to list every process " +
               "in this workspace.",
+          },
+          tail: {
+            type: "number",
+            description:
+              "Show only the last N lines. Use it when polling a server or a watcher.",
           },
         },
         required: [],
@@ -1269,10 +1277,31 @@ export async function runTool(
           ? "\n\n[earlier output dropped — only the most recent is kept]"
           : "";
 
+        /*
+         * Only the last N lines, when asked for.
+         *
+         * Polling a dev server meant re-reading its entire log every time,
+         * and that whole log then rode along in the transcript on every later
+         * round. On a watcher that prints a line a second, the interesting
+         * part is always the end — and `tail` makes checking twice cost
+         * almost nothing instead of doubling the context.
+         */
+        const tailLines = num(args, "tail");
+        let body = proc.log.trim() || "(no output)";
+        let trimmedNote = "";
+        if (tailLines && tailLines > 0) {
+          const lines = body.split("\n");
+          if (lines.length > tailLines) {
+            trimmedNote =
+              `\n\n[showing the last ${tailLines} of ${lines.length} lines]`;
+            body = lines.slice(-tailLines).join("\n");
+          }
+        }
+
         return {
           ok: true,
           content:
-            `${describeProcess(proc)}\n\n${proc.log.trim() || "(no output)"}${note}`,
+            `${describeProcess(proc)}\n\n${body}${trimmedNote}${note}`,
           summary: isRunning(proc)
             ? `Read ${proc.display}`
             : `${proc.display} has stopped`,

@@ -51,7 +51,8 @@
     "test:browser": "tsx scripts/test-browser.mjs",
     "test:tools3": "tsx scripts/test-tools3.mjs",
     "test:plan": "tsx scripts/test-plan.mjs",
-    "test:adversarial": "tsx scripts/test-adversarial.mjs"
+    "test:adversarial": "tsx scripts/test-adversarial.mjs",
+    "score": "tsx scripts/score-tools.mjs"
   },
   "dependencies": {
     "@types/cross-spawn": "^6.0.6",
