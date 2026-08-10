@@ -22,6 +22,7 @@ import { buildWorkspaceContext } from "@/lib/workspace-context";
 import { TreeTracker } from "@/lib/tree-delta";
 import {
   createPlan,
+  replacePlan,
   updatePlan,
   formatPlan,
   planSummary,
@@ -59,7 +60,13 @@ import {
 } from "@/lib/rebuild-resume";
 import type { RebuiltResume } from "@/lib/rebuild-resume";
 import { fetchWithRetry } from "@/lib/retry";
-import { createBudget, chargeRound, checkBudget, budgetStopMessage } from "@/lib/budget";
+import {
+  createBudget,
+  chargeRound,
+  checkBudget,
+  budgetStopMessage,
+  maxTokensFor,
+} from "@/lib/budget";
 import { listCustomPlugins } from "@/lib/plugin-store";
 
 export const maxDuration = 300;
@@ -797,6 +804,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         let plan: Plan | null = null;
         /** Only ever nudged once — see the check where the loop ends. */
         let nudgedIncomplete = false;
+        /** How many times the plan has been rewritten, to catch thrashing. */
+        let replanCount = 0;
 
         const setFileTree = (text: string) => {
           currentFileTree = text;
@@ -1153,7 +1162,16 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             messages: serializeForApi(compacted.messages),
             stream: true,
             stream_options: { include_usage: true },
-            max_tokens: MAX_OUTPUT_TOKENS,
+            /*
+             * Bounded by what the remaining budget can pay for.
+             *
+             * The spending limit is checked between rounds, which is the only
+             * place a run can stop with its work saved — but on its own that
+             * let a single round overshoot badly, measured at 4.8x a $0.10
+             * cap. Capping max_tokens means the round physically cannot cost
+             * more than is left.
+             */
+            max_tokens: maxTokensFor(budget, model, MAX_OUTPUT_TOKENS),
             // NOTE: `thinking` is a REAL top-level parameter of DeepSeek's REST
             // API. It previously sat inside `extra_body`, which only exists as a
             // passthrough convention in the *Python OpenAI SDK*. Sending it over
@@ -1603,7 +1621,40 @@ Ask before you build the wrong thing. If a choice would change what you produce 
              */
             if (plan && !nudgedIncomplete) {
               const progress = planProgress(plan);
+              /*
+               * Being blocked ends the loop — but only if it is real.
+               *
+               * Marking a step blocked is the honest way to stop, and pushing
+               * against it would teach the model to fake completion instead.
+               * But it is also, for exactly that reason, the cheapest escape:
+               * block everything and the loop lets go.
+               *
+               * The compromise is that blocking has to be answerable. A
+               * blocker must be something the USER could act on, so the
+               * requirement is a real sentence (enforced in lib/plan.ts) and
+               * the run is not allowed to end with nothing attempted at all.
+               * Blocking the first step before doing any work is not being
+               * stuck; it is declining the task.
+               */
               const stuck = plan.steps.some((s) => s.state === "blocked");
+              const attemptedNothing =
+                progress.done === 0 && toolRounds <= 2;
+
+              if (stuck && attemptedNothing) {
+                nudgedIncomplete = true;
+                transcript.push({
+                  role: "user",
+                  content:
+                    `You marked work blocked without attempting any of it. ` +
+                    `Try the steps first. If something genuinely cannot be ` +
+                    `done — a missing key, a decision only the user can make ` +
+                    `— use ask_user to ask for it directly rather than ` +
+                    `stopping.`,
+                });
+                send({ type: "status", stage: "working" });
+                continue;
+              }
+
               if (!progress.complete && !stuck && progress.next) {
                 nudgedIncomplete = true;
                 transcript.push({
@@ -1833,10 +1884,23 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 steps?: unknown;
               };
               try {
-                plan = createPlan(
-                  String(pArgs.goal ?? ""),
-                  Array.isArray(pArgs.steps) ? pArgs.steps.map(String) : []
+                /*
+                 * Re-planning keeps what was already proved.
+                 *
+                 * Without this, the cheapest way out of "four steps remain"
+                 * was to call make_plan again with one trivial step and mark
+                 * it done. replacePlan carries verified work forward, so a
+                 * rewrite can reorganise what is left but cannot erase what
+                 * happened.
+                 */
+                plan = replacePlan(
+                  plan,
+                  createPlan(
+                    String(pArgs.goal ?? ""),
+                    Array.isArray(pArgs.steps) ? pArgs.steps.map(String) : []
+                  )
                 );
+                replanCount += 1;
                 send({
                   type: "plan",
                   goal: plan.goal,

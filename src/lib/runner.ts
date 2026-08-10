@@ -241,6 +241,18 @@ const ALWAYS_READ_ONLY = new Set(["which", "where"]);
 export function isReadOnlyCommand(command: string, args: string[]): boolean {
   const name = normaliseCommand(command);
 
+  /*
+   * Anything shell-shaped goes to the prompt, whatever the command.
+   *
+   * There is no shell, so `which "node;rm -rf /"` cannot do harm — it just
+   * fails to find a program with a silly name. But an argument containing
+   * shell metacharacters means the model believes there IS a shell, and that
+   * belief is worth showing the user rather than quietly executing. Checked
+   * first so it applies to every path below, including the ones that would
+   * otherwise return true immediately.
+   */
+  if (args.some((a) => /[>|;&$`\n]/.test(a))) return false;
+
   if (ALWAYS_READ_ONLY.has(name)) return true;
 
   // `node --version`, `python3 --version`, and similar.
@@ -259,16 +271,40 @@ export function isReadOnlyCommand(command: string, args: string[]): boolean {
   if (!subcommands.has(sub)) return false;
 
   /*
-   * Even a read-only subcommand can be made to write.
+   * Even a read-only subcommand can be made to write, or to read elsewhere.
    *
-   * `git log --output=file` and friends exist, and an argument that looks
-   * like a redirect or an assignment is enough to disqualify the call. The
-   * cost of being wrong here is a command that runs without being seen, so
-   * the check errs heavily toward asking.
+   * Found by attacking this function rather than by reading it:
+   *
+   *   git --work-tree=/etc status   reports on a directory outside the
+   *                                 workspace entirely
+   *   git -C /etc status            same, via a different flag
+   *   which "node;rm -rf /"         harmless here because there is no shell,
+   *                                 but an argument containing shell
+   *                                 metacharacters means the model believes
+   *                                 there is one, and that belief is worth
+   *                                 surfacing to the user rather than
+   *                                 silently running
+   *
+   * The rule is therefore: no argument may redirect, pipe, name an output
+   * file, or point the command at a different directory. Anything unusual
+   * falls through to the approval prompt, which is the safe default — the
+   * cost of being wrong here is a command that runs without being seen.
    */
-  return !args.some(
-    (a) => a.includes(">") || a.includes("|") || /^--(output|out|file)=/.test(a)
-  );
+  const suspicious = /[>|;&$`\n]/;
+  const relocates = /^(-C|--work-tree|--git-dir|--prefix|--cwd|--directory)$/;
+
+  for (const [i, a] of args.entries()) {
+    if (suspicious.test(a)) return false;
+    if (/^--(output|out|file|log-file)=/.test(a)) return false;
+    if (relocates.test(a)) return false;
+    // The `--flag=value` form of the same thing.
+    if (/^--(work-tree|git-dir|prefix|cwd|directory)=/.test(a)) return false;
+    // A bare `-C` style flag takes its value as the next argument; both are
+    // caught, but this keeps the intent explicit.
+    if (i > 0 && relocates.test(args[i - 1])) return false;
+  }
+
+  return true;
 }
 
 export function isAllowedCommand(command: string): boolean {
