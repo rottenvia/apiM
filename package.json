@@ -40,7 +40,9 @@
     "test:hardening": "tsx scripts/test-hardening.mjs",
     "test:btw": "tsx scripts/test-btw.mjs",
     "test:balance": "tsx scripts/test-balance.mjs",
-    "test:web": "tsx scripts/test-web.mjs"
+    "test:web": "tsx scripts/test-web.mjs",
+    "cost:lab": "node scripts/cost-lab.mjs",
+    "test:cost": "tsx scripts/test-cost.mjs"
   },
   "dependencies": {
     "@types/cross-spawn": "^6.0.6",
