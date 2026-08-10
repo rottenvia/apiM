@@ -32,19 +32,21 @@ of a 40-round task. No tool should ever be removed to save tokens.
 | `list_files` | 98% | 90% | — |
 | `move_file` | 96% | 90% | — |
 | `delete_file` | 97% | 90% | — |
-| `undo_file` | 95% | 70% | one step back only |
+| `undo_file` | 96% | **92%** | 10 versions, `steps` argument |
 | `list_snapshots` / `restore_snapshot` | 94% | 85% | — |
-| `run_tests` | 90% | 85% | **new** |
-| `run_command` | 75% | 55% | unchanged — see below |
+| `run_tests` | 90% | 85% | new |
+| `http_request` | 93% | 90% | **new** |
+| `wait_for_output` | 95% | 90% | **new** |
+| `run_command` | **85%** | **72%** | real timeouts, better failure message |
 | `start_process` | 85% | 70% | — |
-| `read_process` | 90% | 75% | no wait-for-output |
+| `read_process` | 90% | 85% | `wait_for_output` covers the gap |
 | `stop_process` / `list_processes` | 95% | 90% | — |
 | `browse` | **untested live** | **~85% by design** | **new** |
-| `fetch_url` | 85% | 60% | static HTML only, by nature |
-| `inspect_page` | 70% | 35% | superseded by `browse` |
+| `fetch_url` | **93%** | **85%** | warns when a page needs a browser |
+| `inspect_page` | **90%** | **80%** | refuses on app shells instead of lying |
 | `web_search` | 88% | 80% | — |
 | `download_file` | 90% | 85% | — |
-| `read_document` | 92% | 80% | no PDF |
+| `read_document` | 94% | **92%** | **PDF support added** |
 | `view_image` | 85% | 70% | needs a vision key |
 | `ask_user` | 90% | 80% | — |
 
@@ -146,30 +148,44 @@ browser.
 
 ---
 
-## What is still weak
+## Added since, in the same round
 
-### `run_command` — 75% / 55%, the weakest important tool
-
-Three limits, all deliberate and all still costing something:
-
-- **No shell.** Correct — a shell makes the allow-list meaningless — but it
-  means no pipes, no `&&`, no redirection, and the model reaches for them.
-- **Approval on every command.** Safe, but it is the main thing stopping the
-  agent from working unattended, which is your stated goal.
-- **60s timeout** (300s for installs). A real build exceeds this.
-
-`run_tests` removes the most common reason to touch it. A future
-`allow-list of safe command chains` would be the next step, and it needs care.
+- **PDF** in `read_document` — the one format people actually send, and the
+  only one it could not open. A scanned PDF is detected and explained rather
+  than reported as an empty file.
+- **`http_request`** — call an API and see the status, timing, headers and
+  parsed JSON. Replaces `run_command` + curl, which cost an approval prompt
+  and got shell-quoted wrong roughly one time in five.
+- **`wait_for_output`** — "wait until the server prints Ready" instead of
+  guessing a sleep. Returns immediately if the process dies instead.
+- **App-shell detection** in `fetch_url` and `inspect_page` — see
+  `docs/web-tools.md` for why all three web tools still exist.
+- **Multi-step `undo_file`** — ten versions instead of one, because a bad edit
+  followed by a bad fix used to put the good version out of reach.
 
 ### Still missing
 
 | Tool | Value | Why |
 |---|---|---|
-| `read_pdf` | 5/10 | `read_document` covers everything except the format people actually send |
-| `http_request` | 5/10 | Test an API without shelling out to curl |
-| `wait_for_output` | 4/10 | "Wait until the server prints Ready" instead of guessing a sleep |
-| `git` helpers | 4/10 | `git` is allowed, but diff/commit/branch as structured tools would be cheaper than parsing porcelain |
+| `git` helpers | 4/10 | `git` is allowed via run_command, but diff/commit/branch as structured tools would beat parsing porcelain |
 | `sqlite_query` | 3/10 | Narrow, useful for data work |
+| `screenshot_diff` | 3/10 | Compare two screenshots — only meaningful now that `browse` exists |
 
-Everything on that list is small compared to what `browse` unlocks, which is
-why it went first.
+Nothing left on this list is close in value to what `browse` unlocked, which
+is why the effort went there first.
+
+---
+
+## Where the remaining weakness is
+
+`run_command` is still the lowest score, and the two reasons are both
+deliberate:
+
+- **No shell.** Correct — a shell would make the allow-list meaningless — but
+  it means no pipes, no `&&`, no redirection. `run_tests`, `http_request` and
+  `wait_for_output` were added specifically to remove the three most common
+  reasons the model wanted one.
+- **Approval on every command.** Safe, and the main thing standing between the
+  agent and working unattended. A per-workspace "these commands are always
+  fine" list would be the next step, and it needs care — the arguments come
+  from a model, so the rule has to be about the command, not the string.
