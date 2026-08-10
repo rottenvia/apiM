@@ -176,7 +176,13 @@ interface MessageBubbleProps {
   isLast?: boolean;
   onRegenerate?: (assistantId: string) => void;
   /** Continue an interrupted reply instead of redoing it. */
-  onResume?: (assistantId: string) => void;
+  /**
+   * Continue an interrupted reply.
+   *
+   * `model` overrides which model finishes it — the saved transcript is just
+   * messages, so a run that stalled on Pro can be finished on Flash.
+   */
+  onResume?: (assistantId: string, model?: string) => void;
   /** Called the first time the reasoning panel is opened. */
   onLoadReasoning?: (messageId: string) => void;
   /** Resend a user message with edited text, replacing everything after it. */
@@ -212,6 +218,8 @@ function MessageBubbleImpl({
   onAnswerQuestion,
 }: MessageBubbleProps) {
   const [showThinking, setShowThinking] = useState(false);
+  /** Open state of the "resume with a different model" menu. */
+  const [resumeMenuOpen, setResumeMenuOpen] = useState(false);
   const [showSources, setShowSources] = useState(false);
   const [followThinking, setFollowThinking] = useState(true);
   const [copiedMessage, setCopiedMessage] = useState(false);
@@ -866,16 +874,92 @@ function MessageBubbleImpl({
                     reachable but quiet. */}
                 <div className="flex items-stretch gap-1.5 border-t border-[#cfa25a]/20 p-1.5">
                   {onResume && message.canResume && (
-                    <button
-                      onClick={() => onResume(message.id)}
-                      title="Carry on from where it stopped, keeping the work already done"
-                      className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-[#cfa25a] px-3 py-2 text-[13px] font-semibold text-[#191715] transition-colors hover:bg-[#dbb271]"
-                    >
-                      <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                        <path d="M8 5v14l11-7z" />
-                      </svg>
-                      Resume
-                    </button>
+                    /*
+                     * Resume, with the option of a different model.
+                     *
+                     * Asked for directly: "idk if I can pick the model when I
+                     * click resume, if it's possible add it, so model sees the
+                     * same thing but I can choose another one."
+                     *
+                     * It is possible, and it is genuinely useful — the saved
+                     * transcript is just messages, so any model can pick it
+                     * up. The common case is a Pro run that stalled: finish it
+                     * on Flash for a sixth of the price, or the reverse when
+                     * Flash got stuck on something hard.
+                     *
+                     * A split button rather than a menu: the plain Resume path
+                     * stays one click, and the chevron is there when the model
+                     * matters. Anything that makes the ordinary case slower to
+                     * save a rare one is a bad trade.
+                     */
+                    <div className="relative flex flex-1 items-stretch">
+                      <button
+                        onClick={() => onResume(message.id)}
+                        title="Carry on from where it stopped, keeping the work already done"
+                        className="flex flex-1 items-center justify-center gap-1.5 rounded-lg rounded-r-none bg-[#cfa25a] px-3 py-2 text-[13px] font-semibold text-[#191715] transition-colors hover:bg-[#dbb271]"
+                      >
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                          <path d="M8 5v14l11-7z" />
+                        </svg>
+                        Resume
+                      </button>
+                      <button
+                        onClick={() => setResumeMenuOpen((v) => !v)}
+                        aria-expanded={resumeMenuOpen}
+                        aria-haspopup="menu"
+                        title="Resume with a different model"
+                        className="flex flex-none items-center rounded-lg rounded-l-none border-l border-[#191715]/20 bg-[#cfa25a] px-2 text-[#191715] transition-colors hover:bg-[#dbb271]"
+                      >
+                        <svg
+                          width="13" height="13" viewBox="0 0 24 24" fill="none"
+                          stroke="currentColor" strokeWidth={2.4} aria-hidden="true"
+                          className={`transition-transform duration-150 ${resumeMenuOpen ? "rotate-180" : ""}`}
+                        >
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M6 9l6 6 6-6" />
+                        </svg>
+                      </button>
+
+                      {resumeMenuOpen && (
+                        <div className="absolute bottom-full left-0 z-50 mb-1.5 w-64 overflow-hidden rounded-xl border border-border bg-bg-secondary shadow-lg">
+                          <p className="border-b border-border px-3 py-2 text-[11px] leading-4 text-text-muted">
+                            Continue the same work with:
+                          </p>
+                          {[
+                            {
+                              id: "deepseek-v4-pro",
+                              label: "V4 Pro",
+                              blurb: "Best at long agent work",
+                            },
+                            {
+                              id: "deepseek-v4-flash",
+                              label: "V4 Flash",
+                              blurb: "About 6x cheaper",
+                            },
+                          ].map((m) => (
+                            <button
+                              key={m.id}
+                              onClick={() => {
+                                setResumeMenuOpen(false);
+                                onResume(message.id, m.id);
+                              }}
+                              className="flex w-full items-baseline gap-2 px-3 py-2 text-left transition-colors hover:bg-bg-hover"
+                            >
+                              <span className="text-[13px] font-medium text-text-primary">
+                                {m.label}
+                              </span>
+                              <span className="text-[11px] text-text-muted">
+                                {m.blurb}
+                              </span>
+                              {message.model === m.id && (
+                                <span className="ml-auto text-[11px] text-text-muted">
+                                  used before
+                                </span>
+                              )}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                   )}
                   {onRegenerate && (
                     <button
@@ -1129,6 +1213,12 @@ export const MessageBubble = memo(MessageBubbleImpl, (prev, next) => {
     prev.activeMatchIndex === next.activeMatchIndex &&
     prev.onOpenWorkspaceFile === next.onOpenWorkspaceFile &&
     prev.onDecideCommand === next.onDecideCommand &&
+    // Missing from this list was half of the "Loading… forever" bug: a bubble
+    // that skipped re-rendering kept whichever onLoadReasoning it first
+    // received, and that closure knew only the conversation open at the time.
+    // The callback is now identity-stable so this can never go stale again,
+    // but an omitted prop in a comparator is a trap either way.
+    prev.onLoadReasoning === next.onLoadReasoning &&
     prev.onAnswerQuestion === next.onAnswerQuestion
   );
 });
