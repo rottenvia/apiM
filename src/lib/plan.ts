@@ -207,6 +207,69 @@ export interface StepUpdate {
 }
 
 /**
+ * Words that claim a check was performed.
+ *
+ * Used to decide whether a piece of evidence is a CLAIM about something that
+ * ran, as opposed to a description of work done. "wrote the parser" is a fine
+ * thing to say and needs no corroboration; "ran the tests, all passed" is a
+ * factual assertion about a tool that either ran or did not.
+ */
+const CHECK_WORDS =
+  /\b(ran|run|ok|passing|passed|tests?|pytest|jest|vitest|npm test|executed|verified by running)\b/i;
+
+/**
+ * Tools whose use constitutes an actual check.
+ *
+ * Deliberately short. These are the tools that return a fact from outside the
+ * model — a test result, a status code, a rendered page — rather than
+ * something the model decided.
+ */
+const VERIFYING_TOOLS = new Set([
+  "run_tests",
+  "run_command",
+  "http_request",
+  "browse",
+  "read_file",
+  "read_files",
+  "read_process",
+  "wait_for_output",
+]);
+
+/**
+ * Did the agent actually do what its evidence claims?
+ *
+ * The deepest weakness in the plan mechanism, and I wrote it down as
+ * unsolved: the agent supplies its own evidence, so "ran the tests, all
+ * passed" is accepted whether or not anything ran.
+ *
+ * It cannot be solved completely — no amount of checking makes a model
+ * honest — but the specific case of *claiming a tool ran when it did not* is
+ * cheap to catch, because the tool calls of the current round are right
+ * there. This does not judge whether the evidence is TRUE; it catches the
+ * narrower and more common failure of evidence that is not even attached to
+ * anything that happened.
+ *
+ * Returns a warning string, or null when the claim is consistent.
+ */
+export function checkEvidence(
+  verified: string,
+  toolsUsedThisRun: string[]
+): string | null {
+  if (!CHECK_WORDS.test(verified)) return null;
+
+  const didVerify = toolsUsedThisRun.some((t) => VERIFYING_TOOLS.has(t));
+  if (didVerify) return null;
+
+  return (
+    `You marked this done with "${verified}", which says something was run ` +
+    `or checked — but no tool that could check anything has been used in ` +
+    `this reply. Either actually run it (run_tests, run_command, ` +
+    `http_request or browse), or describe what you did without claiming a ` +
+    `check you did not perform.`
+  );
+}
+
+/**
  * Apply updates to a plan.
  *
  * Returns a new plan rather than mutating, so a rejected update cannot leave

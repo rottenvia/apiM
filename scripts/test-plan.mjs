@@ -337,6 +337,36 @@ if (!mockUp || !appUp) {
   );
 }
 
+// ---------------------------------------------------------------------------
+console.log("\n6. End to end: a model that claims a test run it never made");
+
+if (appUp) {
+  const mock2 = start("liar", process.execPath, ["scripts/mock-liar.mjs"], {
+    MOCK_PLAN_PORT: String(await findFreePort()),
+  });
+  // Re-point is not possible on a running app, so this reuses the same app
+  // against the first mock's port only for the plan flow; the liar path is
+  // exercised through the unit check below instead, which is where the
+  // decision actually lives.
+  killTree(mock2);
+}
+
+const planLib = await load("src/lib/plan.ts");
+check(
+  "a claimed test run with no tool used is refused",
+  planLib.checkEvidence("ran the tests, all passed", ["write_file"]) !== null,
+  "the agent writes its own evidence — this catches the cheapest lie"
+);
+check(
+  "the same claim is accepted once run_tests has run",
+  planLib.checkEvidence("ran the tests, all passed", ["run_tests"]) === null
+);
+check(
+  "describing work needs no corroboration",
+  planLib.checkEvidence("wrote the parser module", []) === null,
+  "over-reaching here would make the plan unusable for ordinary steps"
+);
+
 cleanup();
 await rm(path.join(ROOT, "data", "workspaces", "plantest"), { recursive: true, force: true });
 

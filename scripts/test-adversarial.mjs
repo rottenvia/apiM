@@ -355,6 +355,65 @@ check(
   "a half-applied patch leaves a state neither side predicted"
 );
 
+// ---------------------------------------------------------------------------
+console.log("\n7. Claiming a check that never happened");
+
+/*
+ * The deepest weakness in the plan mechanism, and I wrote it down as unsolved:
+ * the agent supplies its own evidence, so "ran the tests, all passed" is
+ * accepted whether or not anything ran.
+ *
+ * It cannot be solved completely — nothing here makes a model honest. But the
+ * narrower failure of claiming a tool ran when none did is cheap to catch,
+ * because the tools used this round are right there.
+ */
+for (const [evidence, tools] of [
+  ["ran pytest, 4 passed 0 failed", []],
+  ["ran the tests, all passing", ["write_file"]],
+  ["tests pass now", ["edit_file", "write_file"]],
+]) {
+  check(
+    `"${evidence}" is refused with tools [${tools.join(", ") || "none"}]`,
+    plan.checkEvidence(evidence, tools) !== null,
+    "a claim about something running, with nothing having run"
+  );
+}
+
+for (const [evidence, tools] of [
+  ["ran pytest, 4 passed 0 failed", ["run_tests"]],
+  ["called the endpoint and got 200", ["http_request"]],
+  ["opened the page, it renders correctly", ["browse"]],
+  ["ran the command and read the output", ["run_command"]],
+]) {
+  check(
+    `"${evidence.slice(0, 34)}" is accepted after ${tools[0]}`,
+    plan.checkEvidence(evidence, tools) === null
+  );
+}
+
+for (const [evidence, tools] of [
+  ["wrote the parser module with the new selectors", []],
+  ["created three files under src/lib", ["write_files"]],
+]) {
+  check(
+    `"${evidence.slice(0, 34)}" needs no corroboration`,
+    plan.checkEvidence(evidence, tools) === null,
+    "describing work done is not the same as claiming a check"
+  );
+}
+
+check(
+  "the explanation names the tools that would satisfy it",
+  /run_tests, run_command/.test(plan.checkEvidence("ran the tests", []) ?? ""),
+  "a refusal the model cannot act on becomes a retry loop"
+);
+check(
+  "the check is wired into update_plan",
+  /checkEvidence\(\s*String\(entry\.verified/.test(route) &&
+    /toolsUsedThisRun\.push\(call\.function\.name\)/.test(route),
+  "the list has to be populated or the check always passes"
+);
+
 console.log(
   `\n${pass + fail} checks · ${pass} passed${fail ? ` · ${r(`${fail} failed`)}` : ""}\n`
 );
