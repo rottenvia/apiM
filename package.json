@@ -46,7 +46,9 @@
     "test:refine": "tsx scripts/test-refine-live.mjs",
     "test:agentsafety": "tsx scripts/test-agentsafety.mjs",
     "test:reasoning": "tsx scripts/test-reasoning.mjs",
-    "test:tools2": "tsx scripts/test-tools2.mjs"
+    "test:tools2": "tsx scripts/test-tools2.mjs",
+    "browser:install": "node scripts/install-browser.mjs",
+    "test:browser": "tsx scripts/test-browser.mjs"
   },
   "dependencies": {
     "@types/cross-spawn": "^6.0.6",

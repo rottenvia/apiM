@@ -29,10 +29,18 @@ import {
   previousVersion,
   searchFiles,
   writeFile,
+  writeFileBytes,
   workspaceDirectory,
   WorkspaceError,
 } from "@/lib/workspace";
 import { applyPatch } from "@/lib/patch";
+import {
+  validateActions,
+  runSession,
+  formatSession,
+  SCREENSHOT_DIR,
+} from "@/lib/browser";
+import { launch as launchBrowser } from "@/lib/browser-playwright";
 import {
   detectRunner,
   parseTestOutput,
@@ -610,6 +618,26 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
           path: { type: "string", description: "File to revert." },
         },
         required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "browse",
+      description:
+        "Open a page in a real browser, run its JavaScript, and see what actually renders — the DOM, the visible text, the console, failed requests, and screenshots. Use this instead of fetch_url or inspect_page whenever the site is an app rather than static HTML: those only see the empty shell a server sends before scripts run, so any selector you write from them will not exist. Also use it to check your own work: open a page you built, screenshot it, and read the console for errors.",
+      parameters: {
+        type: "object",
+        properties: {
+          actions: {
+            type: "array",
+            description:
+              'Steps to perform, in order. The first must be goto. Examples: {"action":"goto","url":"https://..."}, {"action":"wait_for","selector":".match-score"}, {"action":"click","selector":"#accept"}, {"action":"type","selector":"#q","text":"hello"}, {"action":"scroll","to":"bottom"}, {"action":"screenshot","name":"after-load"}, {"action":"extract","selector":".score"}, {"action":"evaluate","script":"document.querySelectorAll(\'.row\').length"}.',
+            items: { type: "object" },
+          },
+        },
+        required: ["actions"],
       },
     },
   },
@@ -1611,6 +1639,57 @@ export async function runTool(
           content: `Reverted ${written.path} to its previous contents (${written.bytes} bytes).`,
           summary: `Reverted ${written.path}`,
           changedPath: written.path,
+        };
+      }
+
+      case "browse": {
+        let actions;
+        try {
+          actions = validateActions(args.actions);
+        } catch (error) {
+          return {
+            ok: false,
+            content: `Error: ${
+              error instanceof Error ? error.message : "invalid actions"
+            }`,
+            summary: "Invalid browser actions",
+          };
+        }
+
+        const dir = workspaceDirectory(workspaceId);
+        let session;
+        try {
+          session = await launchBrowser(dir);
+        } catch (error) {
+          return {
+            ok: false,
+            content: `Error: ${
+              error instanceof Error ? error.message : "browser unavailable"
+            }`,
+            summary: "Browser not available",
+          };
+        }
+
+        const result = await runSession(
+          session.driver,
+          actions,
+          async (name, data) => {
+            const rel = `${SCREENSHOT_DIR}/${name}`;
+            await writeFileBytes(workspaceId, rel, data);
+            return rel;
+          },
+          { console: session.console, failedRequests: session.failedRequests }
+        );
+
+        const failed = result.results.filter((r) => !r.ok).length;
+        return {
+          // A step that failed is still a useful answer: the model asked what
+          // the page does and found out. Only an unusable session is an error.
+          ok: result.results.some((r) => r.ok),
+          content: formatSession(result),
+          summary: failed
+            ? `Browsed with ${failed} step(s) failing`
+            : `Browsed ${result.title || "page"}`,
         };
       }
 
