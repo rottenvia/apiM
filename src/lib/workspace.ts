@@ -885,6 +885,37 @@ export async function readImageAsDataUrl(
   };
 }
 
+/**
+ * Write raw bytes.
+ *
+ * `writeFile` takes a string, which is correct for source code and wrong for
+ * anything else: a PNG round-tripped through a UTF-8 string is corrupt by the
+ * time it reaches disk. Screenshots need this; so would any future tool that
+ * saves an image or an archive.
+ *
+ * Shares the same containment and size rules — `resolveInside` is what stops
+ * a path escaping the workspace, and it is applied here identically.
+ */
+export async function writeFileBytes(
+  workspaceId: string,
+  relative: string,
+  data: Buffer
+): Promise<{ path: string; bytes: number }> {
+  await ensureRoot(workspaceId);
+  const target = resolveInside(workspaceId, relative);
+
+  if (!Buffer.isBuffer(data)) {
+    throw new WorkspaceError("Binary content must be a Buffer");
+  }
+  if (data.byteLength > MAX_FILE_BYTES) {
+    throw new WorkspaceError("File is too large to write");
+  }
+
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  await fs.writeFile(target, data);
+  return { path: relative, bytes: data.byteLength };
+}
+
 export async function writeFile(
   workspaceId: string,
   relative: string,

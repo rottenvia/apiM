@@ -21,6 +21,7 @@ import type { ToolResult } from "@/lib/tools";
 import { buildWorkspaceContext } from "@/lib/workspace-context";
 import { TreeTracker } from "@/lib/tree-delta";
 import { BROWSER_POLICY_PROMPT } from "@/lib/browser-policy";
+import { browserAvailable } from "@/lib/browser-playwright";
 import { recordAsync } from "@/lib/diagnostics";
 import { listFiles, workspaceDirectory } from "@/lib/workspace";
 import { createSnapshot } from "@/lib/snapshots";
@@ -686,6 +687,10 @@ export async function POST(req: NextRequest) {
         }
         const lessonsBlock = formatLessonsForPrompt(existingLessons);
 
+        // Checked once per reply, not per round: it is a module resolution
+        // and the answer cannot change mid-conversation.
+        const hasBrowser = workspaceEnabled ? await browserAvailable() : false;
+
         /*
          * A structured transcript, not bare {role, content}. Tool calls and
          * reasoning must survive across turns or DeepSeek rejects the next
@@ -1138,6 +1143,9 @@ export async function POST(req: NextRequest) {
             dsRequestBody.tools = WORKSPACE_TOOLS.filter((t) => {
               if (t.function.name === "view_image") return Boolean(visionApiKey);
               if (t.function.name === "web_search") return Boolean(tavilyApiKey);
+              // The browser is an optional install. Offering it when Chromium
+              // is absent buys an error, an apology and a worse fallback.
+              if (t.function.name === "browse") return hasBrowser;
               return true;
             });
             dsRequestBody.tool_choice = "auto";
