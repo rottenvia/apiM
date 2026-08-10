@@ -50,6 +50,13 @@ export interface Plan {
   steps: PlanStep[];
   /** Bumped on every change, so a stale write can be detected. */
   revision: number;
+  /**
+   * Steps that have ever been verified, across every version of the plan.
+   *
+   * Carried through replacements so progress cannot be erased by rewriting
+   * the plan — see `replacePlan`.
+   */
+  history: { text: string; verified: string }[];
 }
 
 /** Enough for a real task, few enough that the plan stays readable. */
@@ -57,9 +64,36 @@ export const MAX_STEPS = 25;
 
 export class PlanError extends Error {}
 
+/**
+ * Shortest a goal or a step may be.
+ *
+ * "x" is not a goal and "done" is not a step. A one-word entry passes every
+ * structural check while carrying no information, which makes the plan look
+ * legitimate to the loop and useless to a reader. Twelve characters is about
+ * three words — enough to be a sentence fragment, short enough that nothing
+ * real is rejected.
+ */
+export const MIN_TEXT = 12;
+
+/**
+ * Shortest acceptable evidence.
+ *
+ * Testing the plan adversarially, `verified: "."` was accepted. That defeats
+ * the entire mechanism: the requirement exists so that closing a step costs
+ * a moment of honesty, and a single character costs nothing. Evidence has to
+ * describe something that happened.
+ */
+export const MIN_EVIDENCE = 15;
+
 export function createPlan(goal: string, steps: string[]): Plan {
   const cleanGoal = goal.trim();
   if (!cleanGoal) throw new PlanError("A plan needs a goal.");
+  if (cleanGoal.length < MIN_TEXT) {
+    throw new PlanError(
+      `"${cleanGoal}" is not a goal — say what finished actually looks like, ` +
+        `in a sentence.`
+    );
+  }
 
   const cleaned = steps.map((s) => String(s).trim()).filter(Boolean);
   if (cleaned.length === 0) {
@@ -72,10 +106,96 @@ export function createPlan(goal: string, steps: string[]): Plan {
     );
   }
 
+  const tooShort = cleaned.find((step) => step.length < MIN_TEXT);
+  if (tooShort) {
+    throw new PlanError(
+      `"${tooShort}" is not a step — describe the actual work, not a label.`
+    );
+  }
+
   return {
     goal: cleanGoal,
     steps: cleaned.map((text, i) => ({ id: i + 1, text, state: "todo" })),
     revision: 1,
+    history: [],
+  };
+}
+
+/**
+ * Replace a plan while keeping what was already proved.
+ *
+ * The hole this closes, found by attacking my own design: the loop refuses to
+ * end while the plan is unfinished, and `make_plan` replaced the plan
+ * outright. So the cheapest escape from "you have four steps left" was to
+ * call make_plan again with one easy step, mark it done, and be complete.
+ * Nothing malicious required — a model under pressure to finish will find
+ * that path because it is the shortest one.
+ *
+ * Re-planning is legitimate: the shape of a task genuinely changes once you
+ * start it. What is not legitimate is losing the record. Verified work is
+ * carried into the new plan's history, and any step whose text matches
+ * something already proved comes back already done — so a rewrite can
+ * reorganise the remaining work but cannot un-know what happened.
+ */
+export function replacePlan(previous: Plan | null, next: Plan): Plan {
+  if (!previous) return next;
+
+  /*
+   * A replacement must not be smaller than what was already outstanding.
+   *
+   * Carrying history forward was not enough on its own: the escape was to
+   * replace a five-step plan with a one-step plan, mark that step done, and
+   * be "complete". The history survived but nothing consulted it, so the loop
+   * let go anyway.
+   *
+   * The rule is that unfinished work has to be accounted for. If the new plan
+   * has fewer steps than the old one had REMAINING, the model is not
+   * re-planning, it is discarding. That is refused, with the count, so the
+   * correction is obvious.
+   */
+  const remaining = previous.steps.filter(
+    (s) => s.state !== "done" && s.state !== "blocked"
+  );
+  if (remaining.length > 0 && next.steps.length < remaining.length) {
+    throw new PlanError(
+      `The new plan has ${next.steps.length} step` +
+        `${next.steps.length === 1 ? "" : "s"} but ${remaining.length} were ` +
+        `still outstanding:\n` +
+        remaining.map((s) => `  - ${s.text}`).join("\n") +
+        `\n\nRe-planning is fine, but the work does not disappear because ` +
+        `the plan changed. Include what is left, or mark it blocked with a ` +
+        `reason first.`
+    );
+  }
+
+  const proved = [
+    ...previous.history,
+    ...previous.steps
+      .filter((s) => s.state === "done" && s.verified)
+      .map((s) => ({ text: s.text, verified: s.verified as string })),
+  ];
+
+  // Deduplicate by step text: re-planning several times must not multiply the
+  // history.
+  const seen = new Set<string>();
+  const history = proved.filter((entry) => {
+    const key = entry.text.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  const byText = new Map(history.map((h) => [h.text.toLowerCase(), h]));
+
+  return {
+    ...next,
+    history,
+    steps: next.steps.map((step) => {
+      const already = byText.get(step.text.toLowerCase());
+      return already
+        ? { ...step, state: "done" as const, verified: already.verified }
+        : step;
+    }),
   };
 }
 
@@ -110,16 +230,21 @@ export function updatePlan(plan: Plan, updates: StepUpdate[]): Plan {
      * long tasks. Requiring one line of evidence is a small tax that makes
      * over-claiming take deliberate effort rather than happening by default.
      */
-    if (update.state === "done" && !update.verified?.trim()) {
+    const evidence = update.verified?.trim() ?? "";
+    if (update.state === "done" && evidence.length < MIN_EVIDENCE) {
       throw new PlanError(
-        `Step ${update.id} cannot be marked done without saying how you ` +
-          `checked it. Give "verified": what you ran, what you saw, or what ` +
-          `now works. If you have not checked it, mark it "doing".`
+        `Step ${update.id} cannot be marked done on "${evidence}". Say what ` +
+          `you actually did to check it — the command you ran and its result, ` +
+          `the page you opened, the response you got. If you have not checked ` +
+          `it, mark it "doing".`
       );
     }
-    if (update.state === "blocked" && !update.blocker?.trim()) {
+    const blocker = update.blocker?.trim() ?? "";
+    if (update.state === "blocked" && blocker.length < MIN_EVIDENCE) {
       throw new PlanError(
-        `Step ${update.id} cannot be marked blocked without saying why.`
+        `Step ${update.id} cannot be marked blocked on "${blocker}". Say what ` +
+          `is actually in the way and what would unblock it — "blocked" is ` +
+          `how you stop, so it has to be answerable by the user.`
       );
     }
   }

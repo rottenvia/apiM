@@ -72,7 +72,7 @@ check("a plan needs a goal", /needs a goal/.test(threw));
 
 threw = "";
 try {
-  plan.createPlan("goal", []);
+  plan.createPlan("A properly stated goal", []);
 } catch (e) {
   threw = e.message;
 }
@@ -80,7 +80,10 @@ check("a plan needs steps", /at least one step/.test(threw));
 
 threw = "";
 try {
-  plan.createPlan("goal", Array.from({ length: 40 }, (_, i) => `step ${i}`));
+  plan.createPlan(
+    "A properly stated goal",
+    Array.from({ length: 40 }, (_, i) => `Do the numbered piece of work ${i}`)
+  );
 } catch (e) {
   threw = e.message;
 }
@@ -109,7 +112,7 @@ try {
 }
 check(
   "a step cannot be marked done without evidence",
-  /how you checked it/.test(threw),
+  /cannot be marked done/.test(threw),
   "'done' is the word an agent over-claims — this makes it cost something"
 );
 check("and the refusal says what to do instead", /mark it "doing"/.test(threw));
@@ -120,7 +123,18 @@ try {
 } catch (e) {
   threw = e.message;
 }
-check("whitespace is not evidence", /how you checked it/.test(threw));
+check("whitespace is not evidence", /cannot be marked done/.test(threw));
+threw = "";
+try {
+  plan.updatePlan(p0, [{ id: 1, state: "done", verified: "ok" }]);
+} catch (e) {
+  threw = e.message;
+}
+check(
+  "and neither is a token word like 'ok'",
+  /cannot be marked done/.test(threw),
+  "a one-word acknowledgement costs nothing, which defeats the point"
+);
 
 threw = "";
 try {
@@ -128,7 +142,7 @@ try {
 } catch (e) {
   threw = e.message;
 }
-check("blocked needs a reason too", /without saying why/.test(threw));
+check("blocked needs a reason too", /cannot be marked blocked/.test(threw));
 
 threw = "";
 try {
