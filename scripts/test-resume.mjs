@@ -370,6 +370,23 @@ check(
   "otherwise an ordinary message would be swallowed"
 );
 check(
+  "Resume can hand the job to a different model",
+  /onResume\?: \(assistantId: string, model\?: string\) => void/.test(bubble) &&
+    /onResume\(message\.id, m\.id\)/.test(bubble),
+  "a run that stalled on Pro can be finished on Flash for a sixth of the price"
+);
+check(
+  "the override applies to this reply only",
+  /const activeModel = options\?\.modelOverride \?\? model/.test(page) &&
+    /model: activeModel/.test(page),
+  "it must not quietly rewrite the model setting for every later message"
+);
+check(
+  "the saved transcript is what gets replayed, whichever model finishes it",
+  /resumeMessageId: assistantId/.test(page),
+  "the point is that the work already paid for is reused"
+);
+check(
   "extra words after it become an instruction, not a lost message",
   /onResumeLast\?\.\(withNote\[2\]\.trim\(\)\)/.test(chatArea),
   '"resume but skip the tests" used to resume and drop the condition'

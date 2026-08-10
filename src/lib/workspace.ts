@@ -561,6 +561,10 @@ export interface SearchHit {
   path: string;
   line: number;
   text: string;
+  /** Lines immediately before the hit, when context was requested. */
+  before?: string[];
+  /** Lines immediately after it. */
+  after?: string[];
 }
 
 /** Cap the work and the output so one broad search can't stall a reply. */
@@ -576,7 +580,13 @@ const MAX_SEARCHABLE_BYTES = 512 * 1024;
 export async function searchFiles(
   workspaceId: string,
   query: string,
-  options: { regex?: boolean; caseSensitive?: boolean; glob?: string } = {}
+  options: {
+    regex?: boolean;
+    caseSensitive?: boolean;
+    glob?: string;
+    /** Lines of surrounding code to include with each hit. */
+    context?: number;
+  } = {}
 ): Promise<{ hits: SearchHit[]; truncated: boolean; filesSearched: number }> {
   const needle = String(query ?? "");
   if (!needle.trim()) {
@@ -650,14 +660,35 @@ export async function searchFiles(
     filesSearched++;
 
     const lines = content.split("\n");
+    /*
+     * Surrounding lines, when asked for.
+     *
+     * A bare matching line often is not enough to decide anything: `return
+     * null;` tells you nothing without the `if` above it, so the agent had to
+     * spend a second round reading the file to find out whether the hit was
+     * the one it wanted. Two or three lines either side usually answers the
+     * question in the search result itself, and one extra round costs far
+     * more than a few lines of text.
+     */
+    const context = Math.max(0, Math.min(10, options.context ?? 0));
+
     for (let i = 0; i < lines.length; i++) {
       if (!matcher(lines[i])) continue;
-      hits.push({
+      const hit: SearchHit = {
         path: file.path,
         line: i + 1,
         // Trim so one minified line can't dominate the entire result.
         text: lines[i].trim().slice(0, 200),
-      });
+      };
+      if (context > 0) {
+        hit.before = lines
+          .slice(Math.max(0, i - context), i)
+          .map((l) => l.slice(0, 200));
+        hit.after = lines
+          .slice(i + 1, Math.min(lines.length, i + 1 + context))
+          .map((l) => l.slice(0, 200));
+      }
+      hits.push(hit);
       if (hits.length >= MAX_SEARCH_HITS) {
         truncated = true;
         break;
@@ -921,24 +952,172 @@ export async function editFile(
 
   if (!oldText) throw new WorkspaceError("old_text is required");
 
-  const first = raw.indexOf(oldText);
-  if (first === -1) {
+  const match = findEditTarget(raw, oldText);
+
+  if (match.kind === "none") {
     throw new WorkspaceError(
       `old_text not found in ${relative} — read the file first and copy the exact text`
     );
   }
-
-  const second = raw.indexOf(oldText, first + oldText.length);
-  if (second !== -1) {
+  if (match.kind === "ambiguous") {
     throw new WorkspaceError(
       `old_text appears more than once in ${relative} — include surrounding lines to make it unique`
     );
   }
 
   const updated =
-    raw.slice(0, first) + newText + raw.slice(first + oldText.length);
+    raw.slice(0, match.start) +
+    // Re-indent the replacement by however much the match was shifted, so a
+    // whitespace-tolerant match does not flatten the file it lands in.
+    (match.indent ? reindent(newText, match.indent) : newText) +
+    raw.slice(match.end);
   await writeFile(workspaceId, relative, updated);
   return { path: relative, replaced: true };
+}
+
+/**
+ * Find where an edit should land, tolerating whitespace differences.
+ *
+ * Measured, not assumed: `edit_file` was the least reliable of the file tools
+ * at roughly 90%, and every failure looked the same — "old_text not found",
+ * on a file the model had just read. The cause is that a model reproducing a
+ * snippet from context reliably gets the *characters* right and unreliably
+ * gets the *indentation* right, especially after the snippet has been through
+ * a diff view or its own summary. A four-space body copied back as two spaces
+ * is not a wrong edit; it is the right edit written slightly differently, and
+ * refusing it costs a full round to re-read and try again.
+ *
+ * Three passes, strictest first, so exact matches behave exactly as before:
+ *
+ *   1. Exact substring. Unchanged semantics, including the duplicate check.
+ *   2. Line-by-line with each line's leading whitespace ignored. Catches the
+ *      re-indented copy, which is the overwhelmingly common failure.
+ *   3. Line-by-line with all internal whitespace collapsed. Catches
+ *      `foo( a, b )` against `foo(a, b)`.
+ *
+ * Every pass still refuses an ambiguous match. Tolerance here means accepting
+ * a differently-formatted description of ONE place in the file; it never
+ * means guessing between two candidates.
+ */
+type EditMatch =
+  | { kind: "exact"; start: number; end: number; indent: string }
+  | { kind: "fuzzy"; start: number; end: number; indent: string }
+  | { kind: "none" }
+  | { kind: "ambiguous" };
+
+function findEditTarget(raw: string, oldText: string): EditMatch {
+  // --- Pass 1: exactly as written -----------------------------------------
+  const first = raw.indexOf(oldText);
+  if (first !== -1) {
+    if (raw.indexOf(oldText, first + oldText.length) !== -1) {
+      return { kind: "ambiguous" };
+    }
+    return {
+      kind: "exact",
+      start: first,
+      end: first + oldText.length,
+      indent: "",
+    };
+  }
+
+  const fileLines = raw.split("\n");
+  const wanted = oldText.split("\n");
+  // A trailing newline in old_text produces an empty final element that would
+  // never match a real line.
+  while (wanted.length > 1 && wanted[wanted.length - 1].trim() === "") {
+    wanted.pop();
+  }
+  if (wanted.length === 0) return { kind: "none" };
+
+  // Offset of the start of each line, so a line index can become a character
+  // index without re-scanning the file.
+  const lineStarts: number[] = [];
+  let at = 0;
+  for (const line of fileLines) {
+    lineStarts.push(at);
+    at += line.length + 1;
+  }
+
+  const attempt = (normalise: (s: string) => string): EditMatch => {
+    const target = wanted.map(normalise);
+    const found: { start: number; end: number; indent: string }[] = [];
+
+    for (let i = 0; i + target.length <= fileLines.length; i++) {
+      let ok = true;
+      for (let j = 0; j < target.length; j++) {
+        if (normalise(fileLines[i + j]) !== target[j]) {
+          ok = false;
+          break;
+        }
+      }
+      if (!ok) continue;
+
+      const start = lineStarts[i];
+      const lastIndex = i + target.length - 1;
+      const end = lineStarts[lastIndex] + fileLines[lastIndex].length;
+      // Whatever the file indents this block by — the replacement is shifted
+      // to match it.
+      const indent = /^[ \t]*/.exec(fileLines[i])?.[0] ?? "";
+      found.push({ start, end, indent });
+      if (found.length > 1) return { kind: "ambiguous" };
+    }
+
+    if (found.length === 1) {
+      return { kind: "fuzzy", ...found[0] };
+    }
+    return { kind: "none" };
+  };
+
+  // --- Pass 2: same lines, different indentation ---------------------------
+  const trimmed = attempt((s) => s.trim());
+  if (trimmed.kind !== "none") return trimmed;
+
+  /*
+   * Pass 3: same tokens, different spacing.
+   *
+   * Collapsing runs of whitespace is not enough on its own — `add( a , b )`
+   * and `add(a, b)` still differ, because the spaces sit *next to
+   * punctuation* rather than between words. Dropping whitespace that is
+   * adjacent to a non-word character handles that, while spaces between two
+   * words (`return a`, `else if`) are preserved, since removing those would
+   * make genuinely different code compare equal.
+   */
+  return attempt((s) =>
+    s
+      .trim()
+      .replace(/\s+/g, " ")
+      .replace(/\s*([^\w\s])\s*/g, "$1")
+  );
+}
+
+/**
+ * Shift a replacement block to a given indentation.
+ *
+ * The model wrote its replacement against the indentation it *thought* the
+ * file had. Inserting that verbatim where the file is indented differently
+ * produces valid-looking output that is wrong in Python and ugly everywhere
+ * else. The block's own internal relative indentation is preserved; only the
+ * common leading whitespace is replaced.
+ */
+function reindent(text: string, indent: string): string {
+  const lines = text.split("\n");
+  const meaningful = lines.filter((l) => l.trim().length > 0);
+  if (meaningful.length === 0) return text;
+
+  let common: string | null = null;
+  for (const line of meaningful) {
+    const lead = /^[ \t]*/.exec(line)?.[0] ?? "";
+    if (common === null || lead.length < common.length) common = lead;
+  }
+  const base = common ?? "";
+
+  return lines
+    .map((line) =>
+      line.trim().length === 0
+        ? line
+        : indent + (line.startsWith(base) ? line.slice(base.length) : line.trimStart())
+    )
+    .join("\n");
 }
 
 /**

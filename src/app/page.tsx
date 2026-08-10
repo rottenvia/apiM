@@ -480,6 +480,8 @@ export default function Home() {
           resumeMessageId?: string;
           /** Extra instruction typed alongside "resume". */
           resumeNote?: string;
+          /** Answer with this model instead of the selected one. */
+          modelOverride?: string;
           previousVersions?: Message["previousVersions"];
         }
       ) => void)
@@ -892,6 +894,8 @@ export default function Home() {
         resumeMessageId?: string;
         /** Extra instruction typed alongside "resume". */
         resumeNote?: string;
+        /** Answer with this model instead of the selected one, just this once. */
+        modelOverride?: string;
         /** What the user actually typed, when it differs from `content`. */
         displayContent?: string;
         /** Thumbnails to show on the user's bubble. */
@@ -906,6 +910,10 @@ export default function Home() {
       const regenerateFromId = options?.regenerateFromId;
       const resumeMessageId = options?.resumeMessageId;
       const resumeNote = options?.resumeNote;
+      // A one-off model choice (from Resume). Never written to settings: it
+      // applies to this reply only, so the next message uses the model the
+      // user actually selected.
+      const activeModel = options?.modelOverride ?? model;
       const userMsg: Message = {
         id: `temp-${Date.now()}`,
         role: "user",
@@ -1078,7 +1086,7 @@ export default function Home() {
             conversationId: currentConvId ?? draftConvId,
             deepseekApiKey: deepseekKey,
             tavilyApiKey: tavilyKey,
-            model,
+            model: activeModel,
             thinkingEffort,
             webSearchMode,
             enabledPluginIds: enabledPlugins,
@@ -1742,48 +1750,69 @@ export default function Home() {
    * flight, and on a large chain of thought the two raced.
    */
   const reasoningInFlight = useRef(new Set<string>());
-  const loadReasoning = useCallback(
-    async (messageId: string) => {
-      const existing = messagesRef.current.find((m) => m.id === messageId);
-      // Already have it, or it is still streaming in — nothing to fetch.
-      if (!existing || typeof existing.reasoningContent === "string") return;
-      if (reasoningInFlight.current.has(messageId)) return;
+  /**
+   * Deliberately depends on NOTHING, so its identity never changes.
+   *
+   * This is the actual cause of the "Loading… forever" report, and my first
+   * fix missed it. The callback used to be `useCallback([currentConvId])`, so
+   * it got a new identity whenever you switched chats — but MessageBubble is
+   * memoised and its comparator does not include `onLoadReasoning`. An
+   * already-mounted bubble therefore kept the OLD closure, holding the
+   * PREVIOUS conversation's id, and asked
+   * `/api/conversations/<previous-id>/reasoning/<message>`. That is a 404,
+   * every time, for any chat you opened after the first one.
+   *
+   * Which is exactly the reported symptom: old chats, reliably, forever.
+   *
+   * Reading the id from a ref at call time means there is no stale closure to
+   * capture. The memo comparator is fixed too, but this is the real repair —
+   * a callback that is correct regardless of when it was captured.
+   */
+  const loadReasoning = useCallback(async (messageId: string) => {
+    const existing = messagesRef.current.find((m) => m.id === messageId);
+    // Already have it, or it is still streaming in — nothing to fetch.
+    if (!existing || typeof existing.reasoningContent === "string") return;
+    if (reasoningInFlight.current.has(messageId)) return;
 
-      // An unsaved chat has nothing on disk to fetch. Resolve to empty rather
-      // than leaving the panel loading against a request that can never come.
-      const convId = currentConvId;
-      if (!convId) {
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === messageId ? { ...m, reasoningContent: "" } : m
-          )
-        );
-        return;
-      }
+    const convId = workspaceIdRef.current;
 
-      reasoningInFlight.current.add(messageId);
-      let text = "";
-      try {
-        const res = await fetch(
-          `/api/conversations/${convId}/reasoning/${messageId}`
-        );
-        if (res.ok) {
-          const data = (await res.json()) as { reasoning?: string };
-          text = data.reasoning ?? "";
-        }
-      } catch {
-        /* fall through — an empty panel beats one that loads forever */
-      } finally {
-        reasoningInFlight.current.delete(messageId);
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === messageId ? { ...m, reasoningContent: text } : m
-          )
-        );
+    // An unsaved chat has nothing on disk. Resolve to empty rather than
+    // leaving the panel loading against a request that can never come.
+    if (!convId) {
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === messageId ? { ...m, reasoningContent: "" } : m
+        )
+      );
+      return;
+    }
+
+    reasoningInFlight.current.add(messageId);
+    let text = "";
+    try {
+      const res = await fetch(
+        `/api/conversations/${convId}/reasoning/${messageId}`
+      );
+      if (res.ok) {
+        const data = (await res.json()) as { reasoning?: string };
+        text = data.reasoning ?? "";
       }
-    },
-    [currentConvId]
-  );
+    } catch {
+      /* fall through — an empty panel beats one that loads forever */
+    } finally {
+      reasoningInFlight.current.delete(messageId);
+      setMessages((prev) => {
+        const next = prev.map((m) =>
+          m.id === messageId ? { ...m, reasoningContent: text } : m
+        );
+        // Keep the cache in step. Without this, switching away and back
+        // served the pre-fetch copy from `conversationCache` and the panel
+        // had to fetch all over again — which looked like the same bug.
+        if (convId) conversationCache.current.set(convId, next);
+        return next;
+      });
+    }
+  }, []);
 
   /**
    * Continue an interrupted reply.
@@ -1793,18 +1822,35 @@ export default function Home() {
    * original prompt: the point of resuming is that the saved work is reused,
    * and swapping the question out from under it would invalidate that.
    */
-  const resumeReply = useCallback((assistantId: string, note?: string) => {
-    const list = messagesRef.current;
-    const index = list.findIndex((m) => m.id === assistantId);
-    if (index < 1) return;
-    const prompt = list[index - 1];
-    if (prompt.role !== "user") return;
+  /**
+   * Continue an interrupted reply.
+   *
+   * Argument order matters here: the Resume BUTTON passes a model, the typed
+   * "resume ..." passes a note. Keeping model second matches the button,
+   * which is the common path, and the typed path names its argument.
+   */
+  const resumeReply = useCallback(
+    (
+      assistantId: string,
+      modelOverride?: string,
+      opts?: { note?: string }
+    ) => {
+      const list = messagesRef.current;
+      const index = list.findIndex((m) => m.id === assistantId);
+      if (index < 1) return;
+      const prompt = list[index - 1];
+      if (prompt.role !== "user") return;
 
-    void sendMessageRef.current?.(prompt.content, {
-      resumeMessageId: assistantId,
-      resumeNote: note?.trim() || undefined,
-    });
-  }, []);
+      void sendMessageRef.current?.(prompt.content, {
+        resumeMessageId: assistantId,
+        resumeNote: opts?.note?.trim() || undefined,
+        // Which model finishes the job. The saved transcript is just
+        // messages, so a run that stalled on Pro can be completed on Flash.
+        modelOverride,
+      });
+    },
+    []
+  );
 
   return (
     <ArtifactProvider>
@@ -1833,7 +1879,7 @@ export default function Home() {
         statusStage={statusStage}
         canResumeLast={Boolean(lastResumable)}
         onResumeLast={(note) => {
-          if (lastResumable) resumeReply(lastResumable.id, note);
+          if (lastResumable) resumeReply(lastResumable.id, undefined, { note });
         }}
         connectionNotice={
           !online ? (

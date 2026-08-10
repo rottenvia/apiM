@@ -97,7 +97,24 @@ console.log("\n2. Radius scale");
 const RADIUS_UTILS = ["rounded-lg", "rounded-xl", "rounded-2xl", "rounded-full", "rounded-none"];
 const ALLOWED_ARBITRARY = ["rounded-[3px]"]; // search-match highlight
 
-const utils = [...new Set([...all.matchAll(/\brounded-[a-z0-9]+\b/g)].map((m) => m[0]))];
+/*
+ * Side-specific corners are part of the same scale, not a new tier.
+ *
+ * A split button (Resume | v) needs `rounded-lg rounded-r-none` on its left
+ * half — that is still one radius value, just not applied to all four
+ * corners. The pattern matched `rounded-r` out of `rounded-r-none` and
+ * reported it as an unknown tier, which is a false positive: the rule this
+ * check exists to enforce is "one size", and the size is unchanged.
+ *
+ * Side suffixes are therefore normalised away before comparing, so a genuine
+ * new size (rounded-md, rounded-3xl) is still caught.
+ */
+const utils = [
+  ...new Set(
+    [...all.matchAll(/\brounded(?:-(?:t|b|l|r|tl|tr|bl|br|s|e))?-[a-z0-9]+\b/g)]
+      .map((m) => m[0].replace(/^rounded-(?:t|b|l|r|tl|tr|bl|br|s|e)-/, "rounded-"))
+  ),
+];
 check(
   "only the four named tiers are used",
   utils.every((u) => RADIUS_UTILS.includes(u)),

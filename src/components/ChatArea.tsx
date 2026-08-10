@@ -69,7 +69,7 @@ interface ChatAreaProps {
     }
   ) => void;
   onRegenerate: (assistantId: string) => void;
-  onResume: (assistantId: string) => void;
+  onResume: (assistantId: string, model?: string) => void;
   /** Fetch a message's reasoning the first time its panel is opened. */
   onLoadReasoning?: (messageId: string) => void;
   onEdit: (messageId: string, newContent: string) => void;
@@ -1337,7 +1337,7 @@ const MessageList = memo(function MessageList({
 }: {
   messages: Message[];
   onRegenerate: (assistantId: string) => void;
-  onResume: (assistantId: string) => void;
+  onResume: (assistantId: string, model?: string) => void;
   onLoadReasoning?: (messageId: string) => void;
   onEdit: (messageId: string, newContent: string) => void;
   onDeleteMessage: (messageId: string) => void;

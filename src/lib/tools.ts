@@ -29,8 +29,16 @@ import {
   previousVersion,
   searchFiles,
   writeFile,
+  workspaceDirectory,
   WorkspaceError,
 } from "@/lib/workspace";
+import { applyPatch } from "@/lib/patch";
+import {
+  detectRunner,
+  parseTestOutput,
+  formatTestSummary,
+} from "@/lib/testing";
+import { runCommand } from "@/lib/runner";
 
 /**
  * Tool definitions exposed to the model, and the dispatcher that runs them.
@@ -102,7 +110,7 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
     function: {
       name: "read_file",
       description:
-        "Read the full contents of one file in the workspace. Always read a file before editing it, so the text you replace matches exactly.",
+        "Read one file in the workspace. Always read a file before editing it, so the text you replace matches exactly. For a large file, use start_line and end_line to read just the part you need instead of pulling the whole thing into context.",
       parameters: {
         type: "object",
         properties: {
@@ -110,6 +118,16 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
             type: "string",
             description:
               "File path relative to the workspace root, e.g. 'src/app.py'.",
+          },
+          start_line: {
+            type: "number",
+            description:
+              "First line to read, 1-based. Omit to start at the beginning.",
+          },
+          end_line: {
+            type: "number",
+            description:
+              "Last line to read, inclusive. Omit to read to the end.",
           },
         },
         required: ["path"],
@@ -190,6 +208,11 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
           glob: {
             type: "string",
             description: 'Only search matching paths, e.g. "*.py" or "src/*".',
+          },
+          context: {
+            type: "number",
+            description:
+              "Lines of surrounding code to show around each match, up to 10. Use 2 or 3 when you need to see what a match is part of — it usually saves a whole round of reading the file.",
           },
         },
         required: ["query"],
@@ -593,6 +616,48 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "run_tests",
+      description:
+        "Run this project's test suite and get back only the verdict and the failures, instead of hundreds of lines of runner output. Works out the right command itself (pytest, npm test, vitest, jest, cargo, go). Prefer this over run_command for tests: it is shorter, it cannot be misread, and it does not need you to guess the command.",
+      parameters: {
+        type: "object",
+        properties: {
+          filter: {
+            type: "string",
+            description:
+              "Only run tests matching this name or path, e.g. 'test_login' or 'tests/test_auth.py'. Use it after a failure to re-run just the broken test.",
+          },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "apply_patch",
+      description:
+        "Apply a unified diff to one file — the same format as `git diff`. Use this instead of edit_file when you are changing several separate places in one file: a patch carries its own line context, so it applies cleanly where a series of edits can drift as each one shifts the lines below it.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description: "File to patch, relative to the workspace root.",
+          },
+          patch: {
+            type: "string",
+            description:
+              "A unified diff body: lines starting with ' ' for context, '-' to remove and '+' to add, in @@ hunks. File headers are optional.",
+          },
+        },
+        required: ["path", "patch"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "list_snapshots",
       description:
         "List the restore points taken before each of the user's messages. " +
@@ -719,6 +784,21 @@ function str(args: Record<string, unknown>, key: string): string {
 }
 
 /**
+ * An optional numeric argument.
+ *
+ * Returns null when absent, so "not given" and "given as zero" stay
+ * distinguishable. Models sometimes send numbers as strings, and rejecting
+ * "12" when 12 was meant costs a whole round to correct.
+ */
+function num(args: Record<string, unknown>, key: string): number | null {
+  const value = args[key];
+  if (value === undefined || value === null || value === "") return null;
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(parsed)) return null;
+  return Math.trunc(parsed);
+}
+
+/**
  * Execute one tool call.
  *
  * Errors are returned as tool results rather than thrown: the model needs to
@@ -769,10 +849,60 @@ export async function runTool(
         const note = result.truncated
           ? "\n\n[truncated — file is larger than the read limit]"
           : "";
+
+        /*
+         * Optional line range.
+         *
+         * The parameters were accepted by callers and silently ignored: asking
+         * for lines 1-2 of an eight-line file returned all eight. Harmless on
+         * a small file, expensive on a large one — reading a 3000-line module
+         * to change one function is most of a round's budget spent on context
+         * that is never used.
+         */
+        const total = result.content.split("\n").length;
+        const start = num(args, "start_line");
+        const end = num(args, "end_line");
+
+        if (start === null && end === null) {
+          return {
+            ok: true,
+            content: `${result.path}:\n\n${result.content}${note}`,
+            summary: `Read ${result.path}`,
+          };
+        }
+
+        const from = Math.max(1, start ?? 1);
+        const to = Math.min(total, end ?? total);
+        if (from > total) {
+          return {
+            ok: false,
+            content:
+              `Error: ${result.path} has ${total} lines, so line ${from} ` +
+              `does not exist.`,
+            summary: `Line ${from} is past the end of ${result.path}`,
+          };
+        }
+
+        const slice = result.content.split("\n").slice(from - 1, to);
+        /*
+         * Numbered, because a slice without them is a trap.
+         *
+         * Handed lines 400-460 as bare text, a model reasons about them as if
+         * they were the file — reporting "the bug is on line 12" when it means
+         * line 411. The numbers cost a few tokens and make the offset
+         * impossible to lose.
+         */
+        const width = String(to).length;
+        const numbered = slice
+          .map((line, i) => `${String(from + i).padStart(width)} | ${line}`)
+          .join("\n");
+
         return {
           ok: true,
-          content: `${result.path}:\n\n${result.content}${note}`,
-          summary: `Read ${result.path}`,
+          content:
+            `${result.path} (lines ${from}-${to} of ${total}):\n\n` +
+            `${numbered}${note}`,
+          summary: `Read ${result.path} lines ${from}-${to}`,
         };
       }
 
@@ -860,6 +990,7 @@ export async function runTool(
           regex: args.regex === true,
           caseSensitive: args.case_sensitive === true,
           glob: typeof args.glob === "string" ? args.glob : undefined,
+          context: num(args, "context") ?? 0,
         });
 
         if (result.hits.length === 0) {
@@ -872,9 +1003,23 @@ export async function runTool(
           };
         }
 
-        const lines = result.hits.map(
-          (h) => `${h.path}:${h.line}: ${h.text}`
-        );
+        const lines = result.hits.map((h) => {
+          if (!h.before?.length && !h.after?.length) {
+            return `${h.path}:${h.line}: ${h.text}`;
+          }
+          // With context, the hit is marked so the model can tell which line
+          // actually matched — otherwise it reasons about a neighbour.
+          const out: string[] = [`${h.path}:${h.line}:`];
+          const first = h.line - (h.before?.length ?? 0);
+          h.before?.forEach((l, i) =>
+            out.push(`  ${String(first + i).padStart(5)}   ${l}`)
+          );
+          out.push(`> ${String(h.line).padStart(5)}   ${h.text}`);
+          h.after?.forEach((l, i) =>
+            out.push(`  ${String(h.line + 1 + i).padStart(5)}   ${l}`)
+          );
+          return out.join("\n");
+        });
         if (result.truncated) {
           lines.push("… more matches exist; narrow the search to see them.");
         }
@@ -1466,6 +1611,76 @@ export async function runTool(
           content: `Reverted ${written.path} to its previous contents (${written.bytes} bytes).`,
           summary: `Reverted ${written.path}`,
           changedPath: written.path,
+        };
+      }
+
+      case "run_tests": {
+        const dir = workspaceDirectory(workspaceId);
+        const runner = await detectRunner(dir);
+        if (!runner) {
+          return {
+            ok: false,
+            content:
+              "Error: no test suite found. Looked for a package.json test " +
+              "script, pytest config, a tests/ directory, Cargo.toml and " +
+              "go.mod. If tests live somewhere unusual, run them with " +
+              "run_command instead.",
+            summary: "No test suite found",
+          };
+        }
+
+        const filter = typeof args.filter === "string" ? args.filter.trim() : "";
+        const runArgs = filter ? [...runner.args, filter] : runner.args;
+
+        const run = await runCommand(workspaceId, runner.command, runArgs);
+        const summary = parseTestOutput(
+          runner.name,
+          run.stdout,
+          run.stderr,
+          run.exitCode ?? 1
+        );
+        const raw = `${run.stdout}\n${run.stderr}`;
+
+        return {
+          // A failing suite is a successful TOOL call: the agent asked what
+          // the state was and got a true answer. Marking it failed would put
+          // it in the error path and invite a retry of the same command.
+          ok: true,
+          content: formatTestSummary(summary, raw),
+          summary: summary.unparsed
+            ? `Ran ${runner.name} — output not recognised`
+            : summary.ok
+              ? `All ${summary.passed} tests passed`
+              : `${summary.failed} failed, ${summary.passed} passed`,
+        };
+      }
+
+      case "apply_patch": {
+        const relative = str(args, "path");
+        const patch = str(args, "patch");
+
+        const existing = await readFile(workspaceId, relative);
+        let applied;
+        try {
+          applied = applyPatch(existing.content, patch);
+        } catch (error) {
+          return {
+            ok: false,
+            content: `Error: ${
+              error instanceof Error ? error.message : "could not apply patch"
+            }`,
+            summary: `Patch did not apply to ${relative}`,
+          };
+        }
+
+        await writeFile(workspaceId, relative, applied.content);
+        return {
+          ok: true,
+          content:
+            `Applied ${applied.hunksApplied} hunk` +
+            `${applied.hunksApplied === 1 ? "" : "s"} to ${relative}.`,
+          summary: `Patched ${relative}`,
+          changedPath: relative,
         };
       }
 
