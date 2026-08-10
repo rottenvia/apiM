@@ -100,10 +100,33 @@ input:focus-visible {
     background-color 0.15s ease,
     border-color 0.15s ease;
 }
-.chip:hover {
-  color: var(--color-text-primary);
-  background: var(--color-bg-hover);
-  border-color: var(--color-border-light);
+/* Hover only where hovering is a real thing.
+ *
+ * Reported from screenshot 144: after clicking a chip and going back to
+ * typing, the chip stayed lit. Two causes, both fixed here.
+ *
+ * 1. On a device with a mouse this is genuine hover and correct. But the
+ *    plain `:hover` rule also latches on touch and, more importantly, some
+ *    browsers keep the hover state on an element whose dropdown just closed
+ *    because the pointer never technically left it. Scoping to `hover:hover`
+ *    means the rule only exists where the pointer can actually move away
+ *    again.
+ * 2. A click leaves the button focused. The base `:focus-visible` rule draws
+ *    a 2px accent outline, and on a chip sitting in a dense toolbar that
+ *    reads as "still selected" rather than "focused". Keyboard users still
+ *    need it, so it is kept — but tightened to a ring that matches the
+ *    chip's own radius instead of a hard square outline. */
+@media (hover: hover) {
+  .chip:hover {
+    color: var(--color-text-primary);
+    background: var(--color-bg-hover);
+    border-color: var(--color-border-light);
+  }
+}
+.chip:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px
+    color-mix(in oklab, var(--color-accent) 45%, transparent);
 }
 .chip[aria-expanded='true'] {
   color: var(--color-text-primary);
@@ -115,10 +138,12 @@ input:focus-visible {
   background: color-mix(in oklab, var(--color-accent) 10%, transparent);
   border-color: color-mix(in oklab, var(--color-accent) 32%, transparent);
 }
-.chip[data-active='true']:hover {
-  color: var(--color-accent-light);
-  background: color-mix(in oklab, var(--color-accent) 16%, transparent);
-  border-color: color-mix(in oklab, var(--color-accent) 44%, transparent);
+@media (hover: hover) {
+  .chip[data-active='true']:hover {
+    color: var(--color-accent-light);
+    background: color-mix(in oklab, var(--color-accent) 16%, transparent);
+    border-color: color-mix(in oklab, var(--color-accent) 44%, transparent);
+  }
 }
 .chip > svg {
   width: 14px;
@@ -703,22 +728,52 @@ input:focus-visible {
 
 /* The panel arriving.
  *
- * Reasoning used to appear fully formed the instant the first token landed,
- * which read as a glitch rather than as the model starting to think. Fading
- * and settling makes the start of thinking legible as an event. */
-@keyframes thinking-enter {
+ * Asked for repeatedly and repeatedly not done, so: what was wrong with it.
+ *
+ * The old version faded in while sliding down from -4px. The slide is the
+ * problem. The panel takes up height the instant it mounts, so everything
+ * below it is shoved down in one frame — and then the panel itself drifts
+ * downward into a gap that has already opened. Two motions disagreeing about
+ * where the content belongs is what read as "ugly": the page jumps, then the
+ * box glides, and the eye tracks both.
+ *
+ * Now nothing slides. The panel grows from zero height using the same
+ * grid 0fr->1fr technique used for the body below, so the text underneath is
+ * eased apart by exactly the amount the panel occupies, at the same rate the
+ * panel fills it. One motion, no jump, and the opacity resolves early so the
+ * label is readable while the box is still settling.
+ *
+ * Timings stay on the three-value scale the design tests enforce. */
+@keyframes thinking-fade {
   from {
     opacity: 0;
-    transform: translateY(-4px);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
   }
 }
 
 .thinking-panel {
-  animation: thinking-enter 0.3s cubic-bezier(0.22, 1, 0.36, 1) both;
+  display: grid;
+  grid-template-rows: 0fr;
+  animation: thinking-open 0.3s cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+
+@keyframes thinking-open {
+  from {
+    grid-template-rows: 0fr;
+    opacity: 0;
+  }
+  to {
+    grid-template-rows: 1fr;
+    opacity: 1;
+  }
+}
+
+/* The row itself must be able to collapse, or the grid animation has nothing
+   to animate against. */
+.thinking-panel > * {
+  min-height: 0;
 }
 
 /* The panel warming up.
@@ -733,8 +788,15 @@ input:focus-visible {
  * panel. The amber is worth keeping: reasoning is genuinely a different kind
  * of content from the answer, and it should look like it. */
 .thinking-shell {
-  border: 1px solid transparent;
-  background: transparent;
+  /* A resting state that is actually visible.
+   *
+   * This was fully transparent once the model stopped thinking, so a finished
+   * panel had no edge at all and its text sat loose on the page — reported as
+   * "transparent without any outline, text looks out of place". The panel is
+   * a container whether or not it is active, so it now keeps a quiet border
+   * and fill and only warms to amber while reasoning is arriving. */
+  border: 1px solid var(--color-border);
+  background: color-mix(in oklab, var(--color-bg-secondary) 55%, transparent);
   transition:
     border-color 0.3s ease,
     background-color 0.3s ease;

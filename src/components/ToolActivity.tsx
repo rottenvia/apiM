@@ -181,7 +181,23 @@ export function ToolActivity({
                 <Icon name={event.name} ok={event.ok} />
               </span>
 
-              <span className="flex min-w-0 flex-1 items-baseline gap-1.5">
+              {/*
+                `min-w-0` on BOTH the flex parent and the truncating child.
+                
+                This row is the "bugged text" in the report: `run_command`
+                printed on top of `python arena_automation.py`, unreadable.
+                The cause is a flexbox default — a flex item's `min-width` is
+                `auto`, meaning it refuses to shrink below its content. The
+                verb and the path therefore both demanded their natural width
+                inside a 20rem column, the sum overflowed, and with the path
+                set to `dir="rtl"` the overflow rendered back across the verb
+                rather than past the right edge.
+
+                Making the container shrinkable lets `truncate` on the path do
+                its job instead of the path spilling. `gap-1.5` is now real
+                separation rather than a gap the overflow leapt over.
+              */}
+              <span className="flex min-w-0 flex-1 items-baseline gap-1.5 overflow-hidden">
                 <span className="flex-none font-medium">
                   {running ? verbs.running : verbs.done}
                 </span>
@@ -199,7 +215,7 @@ export function ToolActivity({
                   <span
                     dir="rtl"
                     title={filePath}
-                    className="min-w-0 flex-1 truncate text-left font-mono text-[12px] opacity-80"
+                    className="min-w-0 flex-1 shrink truncate text-left font-mono text-[12px] opacity-80"
                   >
                     {/* Isolated so the RTL direction only controls where the
                         ellipsis lands, and does not reorder the path itself. */}
@@ -208,8 +224,12 @@ export function ToolActivity({
                 )}
               </span>
 
+              {/* A failure reason can be a whole shell error. Capped at half
+                  the row and allowed to shrink, so it never pushes the verb
+                  and path into each other — the same overlap, from the other
+                  side. */}
               {failed && event.summary && (
-                <span className="min-w-0 truncate text-[12px] opacity-80">
+                <span className="min-w-0 max-w-[50%] shrink truncate text-[12px] opacity-80">
                   — {event.summary}
                 </span>
               )}

@@ -362,8 +362,17 @@ check(
 );
 check(
   "only when something is actually resumable",
-  /canResumeLast && RESUME_WORDS/.test(chatArea),
+  // Matches the guard, not one exact line. The branch was widened so that
+  // "resume, and also skip the tests" resumes WITH that instruction instead
+  // of falling through and being sent as a brand-new message — which is what
+  // silently threw the extra words away.
+  /if \(canResumeLast\) \{[\s\S]{0,400}?RESUME_WORDS\.has\(lower\)/.test(chatArea),
   "otherwise an ordinary message would be swallowed"
+);
+check(
+  "extra words after it become an instruction, not a lost message",
+  /onResumeLast\?\.\(withNote\[2\]\.trim\(\)\)/.test(chatArea),
+  '"resume but skip the tests" used to resume and drop the condition'
 );
 check(
   "only the newest reply, never one further up",

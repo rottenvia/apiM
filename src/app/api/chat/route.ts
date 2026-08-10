@@ -20,7 +20,9 @@ import { WORKSPACE_TOOLS, runTool } from "@/lib/tools";
 import type { ToolResult } from "@/lib/tools";
 import { buildWorkspaceContext } from "@/lib/workspace-context";
 import { TreeTracker } from "@/lib/tree-delta";
-import { listFiles } from "@/lib/workspace";
+import { BROWSER_POLICY_PROMPT } from "@/lib/browser-policy";
+import { recordAsync } from "@/lib/diagnostics";
+import { listFiles, workspaceDirectory } from "@/lib/workspace";
 import { createSnapshot } from "@/lib/snapshots";
 import {
   runCommand,
@@ -129,6 +131,14 @@ interface ChatRequestBody {
    * rounds still to come.
    */
   resumeMessageId?: string;
+  /**
+   * Something typed alongside "resume" — "resume but skip the tests".
+   *
+   * Appended to the continue instruction rather than replacing the original
+   * question: the whole value of resuming is that the saved transcript stays
+   * valid, and swapping the prompt would contradict the work above it.
+   */
+  resumeNote?: string;
   /**
    * Let the agent record what it learns and read it back next time.
    * Off unless asked for: it writes a file into the workspace.
@@ -307,6 +317,7 @@ export async function POST(req: NextRequest) {
     conversationHistory = [],
     regenerateFromId,
     resumeMessageId,
+    resumeNote,
     displayContent,
     attachments,
     workspaceEnabled = false,
@@ -654,7 +665,7 @@ export async function POST(req: NextRequest) {
               visionApiKey
                 ? " You can also view_image to look at a screenshot or mockup saved in the workspace."
                 : ""
-            }`
+            }${BROWSER_POLICY_PROMPT}`
           : "";
 
         /*
@@ -921,14 +932,22 @@ export async function POST(req: NextRequest) {
             // A rebuilt transcript needs a different brief: some results
             // above are placeholders, and telling the model everything is
             // intact is how it ends up describing a file it never saw.
-            content: rebuilt
-              ? rebuiltResumeInstruction(rebuilt)
-              : "You were interrupted before finishing. Everything above is " +
-                "your own work so far, including what the tools returned — " +
-                "it is still valid, so do not repeat it. Continue from " +
-                "exactly where you stopped. If a file was only partly " +
-                "written, finish it with edit_file rather than rewriting it " +
-                "from the start.",
+            content:
+              (rebuilt
+                ? rebuiltResumeInstruction(rebuilt)
+                : "You were interrupted before finishing. Everything above is " +
+                  "your own work so far, including what the tools returned — " +
+                  "it is still valid, so do not repeat it. Continue from " +
+                  "exactly where you stopped. If a file was only partly " +
+                  "written, finish it with edit_file rather than rewriting it " +
+                  "from the start.") +
+              // Anything typed next to "resume". Placed last so it is the
+              // final thing the model reads before continuing, which is where
+              // a course correction belongs.
+              (resumeNote?.trim()
+                ? `\n\nThe user added this instruction for the rest of the ` +
+                  `work — follow it:\n${resumeNote.trim()}`
+                : ""),
           });
 
           await refreshFileTree();
@@ -1409,6 +1428,30 @@ export async function POST(req: NextRequest) {
               if (!delta) continue;
 
               if (delta.reasoning_content) {
+                /*
+                 * Separate one round's thinking from the next.
+                 *
+                 * Reported as "blah blah blah.blah" — a missing space in the
+                 * thinking panel. It is not a lost token and not a
+                 * token-saving trick: the agent loop makes one API call per
+                 * round, each returns its own `reasoning_content`, and the
+                 * displayed panel is every round concatenated. Round N ends
+                 * with "...check the file." and round N+1 starts with "Now
+                 * I..." so the join reads "file.Now I".
+                 *
+                 * A blank line at each boundary is inserted rather than a
+                 * space, because these really are separate passes of thought
+                 * and running them into one paragraph is what made the panel
+                 * hard to read in the first place. Only when the round has
+                 * produced nothing yet, so it never lands mid-sentence.
+                 */
+                if (!roundReasoning && reasoningContent) {
+                  const gap = /\n\s*$/.test(reasoningContent) ? "" : "\n\n";
+                  if (gap) {
+                    reasoningContent += gap;
+                    send({ type: "reasoning", delta: gap });
+                  }
+                }
                 reasoningContent += delta.reasoning_content;
                 roundReasoning += delta.reasoning_content;
                 send({ type: "reasoning", delta: delta.reasoning_content });
@@ -1537,6 +1580,16 @@ export async function POST(req: NextRequest) {
               limitUsd: verdict.limitUsd,
               reason: verdict.reason,
             });
+            recordAsync({
+              kind: "run_stopped",
+              subject: "spending limit",
+              detail: verdict.reason,
+              context: {
+                spentUsd: Number(verdict.spentUsd.toFixed(4)),
+                limitUsd: verdict.limitUsd,
+                rounds: toolRounds,
+              },
+            });
             // Flagged like an interrupted run so the work is kept and Resume
             // is offered — the user can lift the cap and carry on rather than
             // paying to redo everything.
@@ -1559,6 +1612,14 @@ export async function POST(req: NextRequest) {
                   `Do not pretend the task is complete.`,
               });
             }
+            recordAsync({
+              kind: "limit_hit",
+              subject: "tool rounds",
+              detail:
+                `The agent used all ${MAX_TOOL_ROUNDS} rounds without ` +
+                `finishing, so it was told to stop and summarise.`,
+              context: { rounds: toolRounds },
+            });
             send({ type: "status", stage: "writing" });
             continue;
           }
@@ -1757,11 +1818,26 @@ export async function POST(req: NextRequest) {
                 args?: unknown;
                 reason?: unknown;
               };
-              const check = validateCommand(args.command, args.args);
+              const check = validateCommand(
+                args.command,
+                args.args,
+                workspaceDirectory(workspace)
+              );
 
               if (!check.ok) {
                 // Rejected before the user is asked — no point prompting for
                 // something that could never run.
+                //
+                // Recorded: a refusal the model keeps hitting is either a
+                // missing entry in the allow-list or a rule it does not
+                // understand, and both are invisible without a count.
+                recordAsync({
+                  kind: /browser|profile/i.test(check.reason)
+                    ? "browser_blocked"
+                    : "command_refused",
+                  subject: String(args.command ?? "?").slice(0, 60),
+                  detail: check.reason,
+                });
                 result = {
                   ok: false,
                   content: `Error: ${check.reason}`,
@@ -1892,6 +1968,17 @@ export async function POST(req: NextRequest) {
               recorded.ok = result.ok;
               recorded.summary = result.summary;
               recorded.changedPath = result.changedPath;
+            }
+
+            // A failing tool is the highest-value signal there is: it is the
+            // agent hitting a wall, and it is exactly what the user cannot
+            // see without reading the whole transcript.
+            if (!result.ok) {
+              recordAsync({
+                kind: "tool_failed",
+                subject: call.function.name,
+                detail: result.summary || result.content.slice(0, 200),
+              });
             }
 
             toolSummaries.push({

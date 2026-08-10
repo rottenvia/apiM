@@ -90,7 +90,7 @@ export async function startProcess(
   registerShutdownCleanup();
   pruneProcesses();
 
-  const check = validateCommand(command, args);
+  const check = validateCommand(command, args, workspaceDirectory(workspaceId));
   if (!check.ok) return { ok: false, reason: check.reason };
 
   const running = listProcesses(workspaceId).filter(isRunning);

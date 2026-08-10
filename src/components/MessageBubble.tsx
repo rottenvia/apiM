@@ -219,7 +219,6 @@ function MessageBubbleImpl({
     null
   );
   const [comparing, setComparing] = useState(false);
-  const [showInterrupted, setShowInterrupted] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const thinkingRef = useRef<HTMLDivElement>(null);
@@ -676,10 +675,17 @@ function MessageBubbleImpl({
             {/* Shown when there is reasoning, whether or not its text has
                 arrived — a stored chat sends only the length, and the body is
                 fetched when the panel is opened. */}
+            {/* Two elements, not one: the outer .thinking-panel animates its
+                own height from zero so the messages below are eased apart
+                instead of jumping, and the inner .thinking-shell carries the
+                border and background. Putting both on one element would mean
+                animating grid-template-rows on the same box that draws the
+                frame, and the frame would squash. */}
             {(message.reasoningContent || message.reasoningLength) && (
+              <div className="thinking-panel">
               <div
                 data-thinking={isThinkingPhase}
-                className="thinking-panel thinking-shell overflow-hidden rounded-lg"
+                className="thinking-shell overflow-hidden rounded-lg"
               >
                 {/* The box and the amber arrive, rather than appearing.
                     
@@ -767,11 +773,30 @@ function MessageBubbleImpl({
                       aria-hidden={!showThinking}
                       className="thinking-body-text max-h-80 overflow-y-auto whitespace-pre-wrap break-words px-3 pb-2.5 font-sans text-[13px] leading-5 [overscroll-behavior:contain]"
                     >
-                      {message.reasoningContent ??
-                        (showThinking ? "Loading…" : "")}
+                      {/*
+                        Three distinct states, not two. `undefined` means the
+                        text has not been fetched yet; `""` means it was
+                        fetched and there is genuinely nothing there. Treating
+                        both as "no content" is what left an empty panel
+                        looking identical to a broken one.
+                      */}
+                      {typeof message.reasoningContent === "string" ? (
+                        message.reasoningContent.trim() ? (
+                          message.reasoningContent
+                        ) : (
+                          <span className="opacity-60">
+                            No thinking was recorded for this reply.
+                          </span>
+                        )
+                      ) : showThinking ? (
+                        <span className="thinking-loading">Loading…</span>
+                      ) : (
+                        ""
+                      )}
                     </div>
                   </div>
                 </div>
+              </div>
               </div>
             )}
 
@@ -815,14 +840,22 @@ function MessageBubbleImpl({
                         be run again from the start.
                       </p>
                     )}
-                    {message.content ? (
-                      <button
-                        onClick={() => setShowInterrupted((v) => !v)}
-                        className="mt-1 text-[12px] text-[#cfa25a]/80 underline-offset-2 hover:underline"
-                      >
-                        {showInterrupted ? "Hide" : "Show"} what arrived
-                      </button>
-                    ) : null}
+                    {/*
+                      "Show / Hide what arrived" was here and has been removed.
+                      
+                      It appeared to do nothing, and it genuinely did nothing
+                      on most replies: it gated the plain-markdown branch far
+                      below, but any reply with tool activity renders through
+                      the timeline instead, which was never gated. So on
+                      exactly the long agent runs where an interruption
+                      matters, the button toggled a label and changed no
+                      pixels.
+                      
+                      Rather than extend the gate to the timeline — hiding work
+                      the user just paid for, behind a control they have to
+                      find — the partial reply is now always visible. It is the
+                      most useful thing on screen after an interruption.
+                    */}
                   </div>
                 </div>
 
@@ -904,9 +937,7 @@ function MessageBubbleImpl({
             {/* Main content. While streaming, an unterminated ``` fence is
                 replaced by a placeholder card — watching code type itself line
                 by line is noisy, and half-written markup renders as garbage. */}
-            {!useTimeline &&
-              (displayContent || !message.isStreaming) &&
-              !(message.incomplete && !message.isStreaming && !showInterrupted) && (
+            {!useTimeline && (displayContent || !message.isStreaming) && (
               <div
                 className={`prose-chat text-[15px] leading-relaxed ${
                   message.isError
