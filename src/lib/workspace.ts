@@ -772,21 +772,60 @@ function historyPathFor(workspaceId: string, relative: string): string {
   return path.join(root, ".history", `${flat}.prev`);
 }
 
-/** The version replaced by the last write, if there is one. */
+/**
+ * A previous version of a file. `steps` of 1 is the last write, 2 the one
+ * before it, and so on.
+ */
 export async function previousVersion(
   workspaceId: string,
-  relative: string
+  relative: string,
+  steps = 1
 ): Promise<string | null> {
   // Validates the path, so a crafted name can't read outside the history dir.
   resolveInside(workspaceId, relative);
+  const slot = Math.max(0, Math.min(MAX_HISTORY_VERSIONS - 1, steps - 1));
   try {
-    return await fs.readFile(historyPathFor(workspaceId, relative), "utf8");
+    return await fs.readFile(
+      historySlotPath(workspaceId, relative, slot),
+      "utf8"
+    );
   } catch {
     return null;
   }
 }
 
-/** Records the current contents before they are overwritten. */
+/**
+ * How many previous versions of a file are kept.
+ *
+ * One was not enough, and the shortfall showed up in a specific way: the
+ * agent edits a file, the edit is wrong, it edits again to fix it, that is
+ * also wrong — and now undo_file can only reach the second attempt. The
+ * version the user actually wants back is gone.
+ *
+ * Ten is far more than a single reply ever writes to one file, and the cost
+ * is a few kilobytes of text per file in a hidden folder.
+ */
+export const MAX_HISTORY_VERSIONS = 10;
+
+/** Path of the Nth previous version. 0 is the most recent. */
+function historySlotPath(
+  workspaceId: string,
+  relative: string,
+  slot: number
+): string {
+  const base = historyPathFor(workspaceId, relative);
+  return slot === 0 ? base : `${base}.${slot}`;
+}
+
+/**
+ * Records the current contents before they are overwritten.
+ *
+ * Versions shift down a slot each time, so `.prev` is always the most recent
+ * and `.prev.9` the oldest. Shifting rather than appending keeps the naming
+ * stable, which matters because the original single-slot layout is still on
+ * disk in existing workspaces — `.prev` means the same thing it always did,
+ * so nothing has to be migrated.
+ */
 async function saveHistory(
   workspaceId: string,
   relative: string,
@@ -796,11 +835,49 @@ async function saveHistory(
     const current = await fs.readFile(target, "utf8");
     const dest = historyPathFor(workspaceId, relative);
     await fs.mkdir(path.dirname(dest), { recursive: true });
+
+    // Shift older versions down, oldest first so nothing is overwritten
+    // before it has been moved.
+    for (let slot = MAX_HISTORY_VERSIONS - 1; slot >= 0; slot--) {
+      const from = historySlotPath(workspaceId, relative, slot);
+      const to = historySlotPath(workspaceId, relative, slot + 1);
+      try {
+        await fs.rename(from, to);
+      } catch {
+        // That slot does not exist yet, which is normal for a young file.
+      }
+    }
+
     await fs.writeFile(dest, current, "utf8");
+
+    // Drop anything that fell off the end.
+    await fs
+      .rm(historySlotPath(workspaceId, relative, MAX_HISTORY_VERSIONS), {
+        force: true,
+      })
+      .catch(() => {});
   } catch {
     // No existing file, or it isn't text. Either way there is nothing worth
     // keeping, and failing to save history must never block the write.
   }
+}
+
+/** How many previous versions are available for a file. */
+export async function historyDepth(
+  workspaceId: string,
+  relative: string
+): Promise<number> {
+  resolveInside(workspaceId, relative);
+  let depth = 0;
+  for (let slot = 0; slot < MAX_HISTORY_VERSIONS; slot++) {
+    try {
+      await fs.access(historySlotPath(workspaceId, relative, slot));
+      depth++;
+    } catch {
+      break;
+    }
+  }
+  return depth;
 }
 
 /**
