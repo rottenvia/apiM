@@ -56,6 +56,7 @@ import { compactTranscript, compactForResume } from "@/lib/compact";
 import { readLessons, applyLessons, formatLessonsForPrompt } from "@/lib/lessons";
 import { runRefine } from "@/lib/refine";
 import { beginRun, endRun } from "@/lib/runs";
+import { listProcesses, isRunning } from "@/lib/processes";
 import {
   rebuildResumeFromStored,
   rebuiltResumeInstruction,
@@ -2329,6 +2330,40 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           }
 
           if (stopped()) break;
+        }
+
+        /*
+         * Tell the user what is still running.
+         *
+         * `start_process` is the one tool with a side effect that outlives
+         * the reply, and the model reliably forgets to stop what it started —
+         * the prompt asks it to, which is not the same as it happening. A dev
+         * server left running holds a port and burns CPU on the user's
+         * machine until they notice.
+         *
+         * Deliberately reported, not killed. A server the user asked for
+         * should keep serving, and silently killing it would be the more
+         * surprising behaviour. Naming them makes the choice theirs, and puts
+         * the leak somewhere visible rather than in a process list nobody
+         * opens.
+         */
+        if (workspaceEnabled) {
+          try {
+            const alive = listProcesses(workspace).filter(isRunning);
+            if (alive.length > 0) {
+              const note =
+                (assistantContent.trim() ? "\n\n" : "") +
+                `Still running from this reply: ` +
+                alive.map((p) => `\`${p.display}\``).join(", ") +
+                `. Stop them from the workspace panel when you are done with ` +
+                `them — they hold their ports until then.`;
+              assistantContent += note;
+              send({ type: "content", delta: note });
+              appendTimelineText(note);
+            }
+          } catch {
+            /* reporting must never fail the reply */
+          }
         }
 
         /*
