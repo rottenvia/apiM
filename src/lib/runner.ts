@@ -27,15 +27,75 @@ import { checkBrowserPolicy } from "@/lib/browser-policy";
 export const MAX_RUN_MS = 60_000;
 export const MAX_INSTALL_MS = 300_000;
 
-/** Package managers, where a slow run is normal rather than a hang. */
-const SLOW_COMMANDS = new Set(["npm", "npx", "pip", "pip3", "cargo", "go", "dotnet"]);
+/**
+ * Package managers and build tools, where a slow run is normal, not a hang.
+ *
+ * The list was missing every JS package manager except npm, so `pnpm install`
+ * on a real project was killed at 60 seconds and reported as a timeout —
+ * indistinguishable, to the model, from a command that had genuinely hung. It
+ * would then retry, and be killed again.
+ */
+const SLOW_COMMANDS = new Set([
+  "npm",
+  "npx",
+  "pnpm",
+  "yarn",
+  "bun",
+  "pip",
+  "pip3",
+  "uv",
+  "poetry",
+  "cargo",
+  "go",
+  "dotnet",
+  "make",
+  "gcc",
+  "g++",
+  "tsc",
+  "next",
+  "vite",
+]);
 
-export function timeoutFor(command: string, args: string[]): number {
-  if (!SLOW_COMMANDS.has(command)) return MAX_RUN_MS;
-  const installing = args.some((a) =>
-    ["install", "i", "add", "ci", "get", "restore", "build", "mod"].includes(a)
-  );
-  return installing ? MAX_INSTALL_MS : MAX_RUN_MS;
+/** Subcommands that mean "this will take a while". */
+const SLOW_SUBCOMMANDS = new Set([
+  "install",
+  "i",
+  "add",
+  "ci",
+  "get",
+  "restore",
+  "build",
+  "mod",
+  "sync",
+  "update",
+  "compile",
+  "bundle",
+]);
+
+/**
+ * How long a command may run.
+ *
+ * `override` lets the model ask for longer when it knows the job is slow —
+ * capped, because the point of a timeout is that a genuinely hung process is
+ * eventually reclaimed. The default stays deliberately short: a command that
+ * has produced nothing in a minute is usually waiting for input that will
+ * never come, and that is the case worth failing fast on.
+ */
+export function timeoutFor(
+  command: string,
+  args: string[],
+  override?: number | null
+): number {
+  const base = SLOW_COMMANDS.has(command)
+    ? args.some((a) => SLOW_SUBCOMMANDS.has(a))
+      ? MAX_INSTALL_MS
+      : MAX_RUN_MS
+    : MAX_RUN_MS;
+
+  if (typeof override === "number" && Number.isFinite(override) && override > 0) {
+    return Math.min(Math.max(5_000, Math.trunc(override)), MAX_INSTALL_MS);
+  }
+  return base;
 }
 /** Truncate output so one runaway loop can't fill the context window. */
 export const MAX_OUTPUT_CHARS = 20_000;
@@ -509,9 +569,11 @@ export async function runCommand(
   workspaceId: string,
   command: string,
   args: string[],
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  /** Override the default time limit, in ms. Capped at MAX_INSTALL_MS. */
+  timeoutMs?: number | null
 ): Promise<RunResult> {
-  const check = validateCommand(command, args);
+  const check = validateCommand(command, args, workspaceDirectory(workspaceId));
   if (!check.ok) throw new RunError(check.reason);
 
   const cwd = workspaceDirectory(workspaceId);
@@ -557,7 +619,7 @@ export async function runCommand(
       env: childEnv(cwd, venvPath),
     });
 
-    const limitMs = timeoutFor(check.command, check.args);
+    const limitMs = timeoutFor(check.command, check.args, timeoutMs);
 
     let stdout = "";
     let stderr = "";
@@ -635,11 +697,13 @@ export function formatRunResult(result: RunResult): string {
 
   if (result.timedOut) {
     parts.push(
-      `\nTimed out after ${Math.round(
-        timeoutFor(result.command, result.args) / 1000
-      )}s and was stopped. ` +
-        `If this was an interactive program or a server, it will never finish ` +
-        `on its own — run something that exits.`
+      `\nTimed out and was stopped.` +
+        `\n\nThree reasons this happens, in order of likelihood:` +
+        `\n  1. It is a server or a watcher, which never exits on its own. ` +
+        `Use start_process instead, then wait_for_output to know when it is ready.` +
+        `\n  2. It is waiting for input that will never arrive. Add the flag ` +
+        `that makes it non-interactive (-y, --yes, --no-input).` +
+        `\n  3. It is genuinely slow. Pass timeout_ms to allow longer.`
     );
   }
 

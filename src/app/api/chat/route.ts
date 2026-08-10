@@ -1825,6 +1825,7 @@ export async function POST(req: NextRequest) {
                 command?: unknown;
                 args?: unknown;
                 reason?: unknown;
+                timeout_ms?: unknown;
               };
               const check = validateCommand(
                 args.command,
@@ -1927,7 +1928,12 @@ export async function POST(req: NextRequest) {
                     workspace,
                     check.command,
                     check.args,
-                    runSignal
+                    runSignal,
+                    // A model that knows a build is slow can say so, rather
+                    // than being killed at the default and retrying blind.
+                    typeof args.timeout_ms === "number"
+                      ? args.timeout_ms
+                      : null
                   );
                   result = {
                     ok: run.exitCode === 0 && !run.timedOut,

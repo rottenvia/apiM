@@ -28,6 +28,7 @@ import {
   readFileBytes,
   moveFile,
   previousVersion,
+  historyDepth,
   searchFiles,
   writeFile,
   writeFileBytes,
@@ -288,8 +289,10 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
         "approve each command before it runs. Only real interpreters are " +
         "available (python, node, npm, pip and similar) — there is no shell, " +
         "so pass arguments as a list rather than one string. Commands are " +
-        "stopped after 30 seconds, so never start a server or anything that " +
-        "waits for input.",
+        "stopped after 60 seconds by default (5 minutes for installs and " +
+        "builds); pass timeout_ms if you know a job is slower. Never start a " +
+        "server or anything that waits for input — use start_process for " +
+        "those, then wait_for_output. For tests, prefer run_tests.",
       parameters: {
         type: "object",
         properties: {
@@ -303,6 +306,11 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
             items: { type: "string" },
             description:
               'Arguments as separate items, e.g. ["app.py"] or ["install", "requests"].',
+          },
+          timeout_ms: {
+            type: "number",
+            description:
+              "How long to allow, in ms, when you know the job is slow. Capped at 5 minutes.",
           },
           reason: {
             type: "string",
@@ -612,12 +620,18 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
       description:
         "Put one file back the way it was before your last write. Use this " +
         "when an edit turns out to be wrong: reverting is exact, whereas " +
-        "patching your own mistake by hand tends to make it worse. Only the " +
-        "most recent version is kept.",
+        "patching your own mistake by hand tends to make it worse. Up to 10 " +
+        "previous versions are kept, so you can step further back with " +
+        "`steps` if the version before this one was also wrong.",
       parameters: {
         type: "object",
         properties: {
           path: { type: "string", description: "File to revert." },
+          steps: {
+            type: "number",
+            description:
+              "How many writes to go back. 1 is the last write (the default), 2 the one before it.",
+          },
         },
         required: ["path"],
       },
@@ -1711,21 +1725,36 @@ export async function runTool(
 
       case "undo_file": {
         const target = str(args, "path");
-        const previous = await previousVersion(workspaceId, target);
+        const steps = Math.max(1, num(args, "steps") ?? 1);
+        const previous = await previousVersion(workspaceId, target, steps);
+
         if (previous === null) {
+          const depth = await historyDepth(workspaceId, target);
           return {
             ok: false,
-            content:
-              `No previous version of ${target} is kept. Only the last write ` +
-              `is recoverable, and this file has not been overwritten since ` +
-              `it was created. Fix it forward with edit_file instead.`,
+            content: depth
+              ? `Cannot go back ${steps} writes: only ${depth} previous ` +
+                `version${depth === 1 ? " is" : "s are"} kept for ${target}. ` +
+                `Try a smaller number, or restore_snapshot for a bigger step ` +
+                `back.`
+              : `No previous version of ${target} is kept — it has not been ` +
+                `overwritten since it was created. Fix it forward with ` +
+                `edit_file instead.`,
             summary: `No history for ${target}`,
           };
         }
+
+        /*
+         * Reverting is itself a write, so it goes into history too. That is
+         * deliberate: undoing an undo is a real thing to want, and it falls
+         * out for free rather than needing a redo stack.
+         */
         const written = await writeFile(workspaceId, target, previous);
         return {
           ok: true,
-          content: `Reverted ${written.path} to its previous contents (${written.bytes} bytes).`,
+          content:
+            `Reverted ${written.path} to how it was ${steps} write` +
+            `${steps === 1 ? "" : "s"} ago (${written.bytes} bytes).`,
           summary: `Reverted ${written.path}`,
           changedPath: written.path,
         };

@@ -271,7 +271,92 @@ check(
 await rm(path.join(ROOT, "data", "workspaces", WS), { recursive: true, force: true });
 
 // ---------------------------------------------------------------------------
-console.log("\n6. Everything is offered to the model");
+console.log("\n6. undo_file can step back further than one write");
+
+const UWS = "tools3undo";
+await rm(path.join(ROOT, "data", "workspaces", UWS), { recursive: true, force: true });
+
+for (const v of ["one", "two", "three", "four"]) {
+  await ws.writeFile(UWS, "f.txt", `${v}\n`);
+}
+check(
+  "several previous versions are kept",
+  (await ws.historyDepth(UWS, "f.txt")) >= 3,
+  `${await ws.historyDepth(UWS, "f.txt")} versions — one was not enough when ` +
+    `a bad edit was followed by a bad fix`
+);
+check(
+  "one step back is the previous write",
+  (await ws.previousVersion(UWS, "f.txt", 1)) === "three\n"
+);
+check(
+  "two steps back is the one before that",
+  (await ws.previousVersion(UWS, "f.txt", 2)) === "two\n"
+);
+check(
+  "asking too far back returns nothing rather than the wrong version",
+  (await ws.previousVersion(UWS, "f.txt", 99)) === null ||
+    (await ws.previousVersion(UWS, "f.txt", 99)) === "one\n"
+);
+check(
+  "history is capped",
+  ws.MAX_HISTORY_VERSIONS === 10,
+  "unbounded history would grow with every write"
+);
+await rm(path.join(ROOT, "data", "workspaces", UWS), { recursive: true, force: true });
+
+console.log("\n7. run_command time limits fit real work");
+
+const runner = await load("src/lib/runner.ts");
+check(
+  "a plain script gets the short limit",
+  runner.timeoutFor("node", ["app.js"]) === runner.MAX_RUN_MS
+);
+check(
+  "an install gets the long one",
+  runner.timeoutFor("npm", ["install"]) === runner.MAX_INSTALL_MS
+);
+check(
+  "pnpm and yarn are recognised too",
+  runner.timeoutFor("pnpm", ["install"]) === runner.MAX_INSTALL_MS &&
+    runner.timeoutFor("yarn", ["add", "react"]) === runner.MAX_INSTALL_MS,
+  "they were missing, so a real install was killed at 60s and looked like a hang"
+);
+check(
+  "a build is treated as slow",
+  runner.timeoutFor("next", ["build"]) === runner.MAX_INSTALL_MS
+);
+check(
+  "an override is honoured",
+  runner.timeoutFor("node", ["slow.js"], 120_000) === 120_000
+);
+check(
+  "but cannot exceed the ceiling",
+  runner.timeoutFor("node", ["x.js"], 99_999_999) === runner.MAX_INSTALL_MS,
+  "a timeout that can be disabled is not a timeout"
+);
+check(
+  "and cannot be set absurdly low",
+  runner.timeoutFor("node", ["x.js"], 1) === 5_000
+);
+
+const timedOut = runner.formatRunResult({
+  command: "node",
+  args: ["server.js"],
+  stdout: "",
+  stderr: "",
+  exitCode: null,
+  timedOut: true,
+  durationMs: 60_000,
+});
+check(
+  "a timeout explains the likely causes",
+  /start_process/.test(timedOut) && /timeout_ms/.test(timedOut),
+  "'timed out' alone tells the model nothing it can act on"
+);
+
+// ---------------------------------------------------------------------------
+console.log("\n8. Everything is offered to the model");
 
 const names = WORKSPACE_TOOLS.map((t) => t.function.name);
 check("http_request is registered", names.includes("http_request"));
@@ -296,6 +381,22 @@ check(
   "the schemas are still a rounding error on the bill",
   schemaChars / 3.6 < 8_000,
   `${total} tools, ~${Math.round(schemaChars / 3.6)} tokens, sent once and cached`
+);
+
+check(
+  "run_command exposes a timeout",
+  /timeout_ms/.test(JSON.stringify(WORKSPACE_TOOLS.find((t) => t.function.name === "run_command")))
+);
+check(
+  "undo_file exposes steps",
+  /steps/.test(JSON.stringify(WORKSPACE_TOOLS.find((t) => t.function.name === "undo_file")))
+);
+check(
+  "run_command no longer claims a 30s limit it does not have",
+  !/stopped after 30 seconds/.test(
+    JSON.stringify(WORKSPACE_TOOLS.find((t) => t.function.name === "run_command"))
+  ),
+  "the code used 60s; the description said 30s"
 );
 
 console.log(
