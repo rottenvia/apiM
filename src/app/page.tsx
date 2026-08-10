@@ -478,6 +478,8 @@ export default function Home() {
         options?: {
           regenerateFromId?: string;
           resumeMessageId?: string;
+          /** Extra instruction typed alongside "resume". */
+          resumeNote?: string;
           previousVersions?: Message["previousVersions"];
         }
       ) => void)
@@ -888,6 +890,8 @@ export default function Home() {
         regenerateFromId?: string;
         /** Continue this unfinished reply rather than sending a new one. */
         resumeMessageId?: string;
+        /** Extra instruction typed alongside "resume". */
+        resumeNote?: string;
         /** What the user actually typed, when it differs from `content`. */
         displayContent?: string;
         /** Thumbnails to show on the user's bubble. */
@@ -901,6 +905,7 @@ export default function Home() {
       const trimmed = content.trim();
       const regenerateFromId = options?.regenerateFromId;
       const resumeMessageId = options?.resumeMessageId;
+      const resumeNote = options?.resumeNote;
       const userMsg: Message = {
         id: `temp-${Date.now()}`,
         role: "user",
@@ -1080,6 +1085,7 @@ export default function Home() {
             conversationHistory: historyForApi,
             regenerateFromId,
             resumeMessageId,
+            resumeNote,
             workspaceEnabled,
             lessonsEnabled,
             autoRunCommands,
@@ -1722,34 +1728,72 @@ export default function Home() {
    * Idempotent and cheap to call: it returns immediately if the text is
    * already present, so the panel can ask on every open without checking.
    */
+  /**
+   * Fetch a stored message's chain of thought when its panel is opened.
+   *
+   * Every failure path here must end by writing SOMETHING into
+   * `reasoningContent`. The panel renders "Loading…" whenever that field is
+   * still undefined, so an early `return` leaves the text spinning forever —
+   * which is exactly what happened: a chat with no id yet, a 404, or a
+   * network blip all bailed out silently and the panel never resolved.
+   *
+   * It is also guarded against firing twice. Without that, opening and
+   * closing the panel quickly issued a second request while the first was in
+   * flight, and on a large chain of thought the two raced.
+   */
+  const reasoningInFlight = useRef(new Set<string>());
   const loadReasoning = useCallback(
     async (messageId: string) => {
-      const convId = currentConvId;
-      if (!convId) return;
       const existing = messagesRef.current.find((m) => m.id === messageId);
+      // Already have it, or it is still streaming in — nothing to fetch.
       if (!existing || typeof existing.reasoningContent === "string") return;
+      if (reasoningInFlight.current.has(messageId)) return;
 
+      // An unsaved chat has nothing on disk to fetch. Resolve to empty rather
+      // than leaving the panel loading against a request that can never come.
+      const convId = currentConvId;
+      if (!convId) {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === messageId ? { ...m, reasoningContent: "" } : m
+          )
+        );
+        return;
+      }
+
+      reasoningInFlight.current.add(messageId);
+      let text = "";
       try {
         const res = await fetch(
           `/api/conversations/${convId}/reasoning/${messageId}`
         );
-        if (!res.ok) return;
-        const data = (await res.json()) as { reasoning?: string };
+        if (res.ok) {
+          const data = (await res.json()) as { reasoning?: string };
+          text = data.reasoning ?? "";
+        }
+      } catch {
+        /* fall through — an empty panel beats one that loads forever */
+      } finally {
+        reasoningInFlight.current.delete(messageId);
         setMessages((prev) =>
           prev.map((m) =>
-            m.id === messageId
-              ? { ...m, reasoningContent: data.reasoning ?? "" }
-              : m
+            m.id === messageId ? { ...m, reasoningContent: text } : m
           )
         );
-      } catch {
-        /* the panel shows nothing rather than an error for this */
       }
     },
     [currentConvId]
   );
 
-  const resumeReply = useCallback((assistantId: string) => {
+  /**
+   * Continue an interrupted reply.
+   *
+   * `note` is anything the user typed alongside the resume word. It is passed
+   * through to the server as an extra instruction rather than replacing the
+   * original prompt: the point of resuming is that the saved work is reused,
+   * and swapping the question out from under it would invalidate that.
+   */
+  const resumeReply = useCallback((assistantId: string, note?: string) => {
     const list = messagesRef.current;
     const index = list.findIndex((m) => m.id === assistantId);
     if (index < 1) return;
@@ -1758,6 +1802,7 @@ export default function Home() {
 
     void sendMessageRef.current?.(prompt.content, {
       resumeMessageId: assistantId,
+      resumeNote: note?.trim() || undefined,
     });
   }, []);
 
@@ -1787,8 +1832,8 @@ export default function Home() {
         isLoading={isLoading}
         statusStage={statusStage}
         canResumeLast={Boolean(lastResumable)}
-        onResumeLast={() => {
-          if (lastResumable) resumeReply(lastResumable.id);
+        onResumeLast={(note) => {
+          if (lastResumable) resumeReply(lastResumable.id, note);
         }}
         connectionNotice={
           !online ? (

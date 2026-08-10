@@ -405,8 +405,12 @@ check(
 // A filled amber box with an amber label made the model's private notes the
 // loudest thing on screen, above the reply they belong to.
 const bubble = files.find((f) => f.file.endsWith("MessageBubble.tsx"))?.text ?? "";
+// Anchored on the panel's opening element rather than an exact className
+// string: the wrapper and the shell were split into two elements so the panel
+// can animate its own height, and a slice keyed to the old combined class
+// silently matched nothing.
 const panel = bubble.slice(
-  bubble.indexOf("thinking-panel thinking-shell"),
+  bubble.indexOf('className="thinking-panel"'),
   bubble.indexOf("{/* Reply was cut short")
 );
 
@@ -423,11 +427,15 @@ check(
   "text jumping from grey to amber in one frame is the same jump"
 );
 check(
-  "the resting state is transparent",
-  /\.thinking-shell\s*\{[^}]*border:\s*1px solid transparent[\s\S]*?background:\s*transparent/s.test(
-    css
-  ),
-  "so there is something to ease from"
+  // Was "the resting state is transparent". A fully transparent resting state
+  // is what left a finished panel with no edge at all, so its text sat loose
+  // on the page — reported directly by the user. The panel is a container
+  // whether or not it is active; what matters is that the amber ARRIVES
+  // rather than snapping in, which the transition check above covers.
+  "the resting state is visible but quiet",
+  /\.thinking-shell\s*\{[^}]*border:\s*1px solid var\(--color-border\)/s.test(css) &&
+    /\.thinking-shell\[data-thinking='true'\]\s*\{[^}]*#cfa25a/s.test(css),
+  "a finished panel still needs an outline, or its text looks out of place"
 );
 check(
   "everything that changes shares one duration",
@@ -436,6 +444,10 @@ check(
 );
 check(
   "progress is a sweeping line, not repeating dots",
+  // Scoped to the panel. `<Dots>` also appears further down the file as the
+  // placeholder for a code block still being written, which is a different
+  // control with a different job — checking the whole file caught that one
+  // and reported a regression that did not exist.
   panel.includes("thinking-line") && !panel.includes("<Dots"),
   "a loop that never advances reads as a stall"
 );

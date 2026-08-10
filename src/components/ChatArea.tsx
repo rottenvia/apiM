@@ -34,8 +34,13 @@ interface ChatAreaProps {
   statusStage: StatusStage | null;
   /** True when the newest reply stopped early and kept its work. */
   canResumeLast?: boolean;
-  /** Continue that reply — the typed equivalent of its Resume button. */
-  onResumeLast?: () => void;
+  /**
+   * Continue that reply — the typed equivalent of its Resume button.
+   *
+   * `note` carries anything typed after the resume word ("resume but skip the
+   * tests"), so the instruction reaches the model instead of being dropped.
+   */
+  onResumeLast?: (note?: string) => void;
   /** Shown above the composer when the browser has no connection. */
   connectionNotice?: React.ReactNode;
   /** Shown above the composer when the DeepSeek balance is getting low. */
@@ -566,10 +571,35 @@ export function ChatArea({
      * Only when something is actually resumable, so the word is never
      * swallowed when it was meant as an ordinary message.
      */
-    if (canResumeLast && RESUME_WORDS.has(input.trim().toLowerCase())) {
-      onResumeLast?.();
-      setInput("");
-      return;
+    /*
+     * "resume" on its own, or "resume, and also do X".
+     *
+     * Reported as: typing "resume blah blah" resumed but the "blah blah"
+     * vanished. It did — the set only matched the bare word, so anything
+     * longer fell through to the normal send path, which posted the whole
+     * string as a fresh message and started the reply again from scratch.
+     * The extra words were not lost so much as spent on the wrong thing.
+     *
+     * A leading resume word followed by more text is now treated as a resume
+     * WITH an instruction, and the remainder is handed to the model as the
+     * note to carry on with.
+     */
+    const trimmed = input.trim();
+    if (canResumeLast) {
+      const lower = trimmed.toLowerCase();
+      if (RESUME_WORDS.has(lower)) {
+        onResumeLast?.();
+        setInput("");
+        return;
+      }
+      const withNote = /^(resume|continue|carry on|keep going|go on)\b[\s,:.—-]*([\s\S]+)$/i.exec(
+        trimmed
+      );
+      if (withNote && withNote[2].trim()) {
+        onResumeLast?.(withNote[2].trim());
+        setInput("");
+        return;
+      }
     }
     // A message of only attachments is valid — the files are the content.
     if ((!input.trim() && attachments.length === 0) || isLoading) return;
@@ -799,7 +829,22 @@ export function ChatArea({
       <div
         ref={scrollRef}
         onScroll={handleScroll}
-        className="relative flex-1 overflow-y-auto"
+        /*
+         * Vertical scrolling only.
+         *
+         * `overflow-y-auto` on its own computes to `overflow-x: auto` for the
+         * other axis, so ANY descendant a pixel too wide — a long unbroken
+         * path in a tool row, a wide table, a code block — gave the whole
+         * conversation a horizontal scrollbar. The content is a column of
+         * text; there is never a reason to scroll it sideways, and the bar
+         * appearing under the entire chat was the most visible symptom of a
+         * problem that belonged to one child.
+         *
+         * Clipping here rather than hunting every possible offender means a
+         * future wide element degrades to being clipped, which is recoverable,
+         * instead of breaking the page layout.
+         */
+        className="relative flex-1 overflow-y-auto overflow-x-hidden"
       >
         {messages.length === 0 ? (
           <EmptyState hasKeys={hasKeys} onOpenSettings={onOpenSettings} />
@@ -1037,28 +1082,45 @@ export function ChatArea({
               </div>
             )}
 
+            {/* The composer's bottom row, in three parts.
+                
+                Modelled on the layout the user pointed at: the things that act
+                on THIS message (attach, send) sit at the outer edges, and the
+                settings that describe HOW the message is answered are grouped
+                together behind a hairline. Previously all six controls were
+                one undifferentiated run of chips, so "attach a file" and
+                "which model answers" looked like the same kind of decision.
+                
+                The rule is a real separator, not decoration: everything to its
+                right is persistent configuration that outlives the message. */}
             <div className="flex items-center gap-2 px-2.5 pb-2.5 pt-0.5">
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                className="chip flex-none"
+                data-active={attachments.length > 0}
+                title="Attach files, or a .zip / .tar.gz of a whole project"
+                aria-label="Attach files"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" />
+                </svg>
+                {attachments.length > 0 && <span>{attachments.length}</span>}
+              </button>
+
+              <span
+                className="h-6 w-px flex-none self-center bg-border"
+                aria-hidden="true"
+              />
+
               {/* Uniform chips in a single row — scrolls instead of wrapping
                   on narrow resolutions, so spacing never breaks */}
               <div className="no-scrollbar flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto">
-                <button
-                  onClick={() => fileInputRef.current?.click()}
-                  className="chip"
-                  data-active={attachments.length > 0}
-                  title="Attach files, or a .zip / .tar.gz of a whole project"
-                  aria-label="Attach files"
-                >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" />
-                  </svg>
-                  {attachments.length > 0 && <span>{attachments.length}</span>}
-                </button>
-
                 <ModelSelector value={model} onChange={onSetModel} />
 
                 <ThinkingEffortSelector
                   value={thinkingEffort}
                   onChange={onSetThinkingEffort}
+                  model={model}
                 />
 
                 <WebSearchToggle
@@ -1092,6 +1154,11 @@ export function ChatArea({
                   </span>
                 </button>
               </div>
+
+              <span
+                className="h-6 w-px flex-none self-center bg-border"
+                aria-hidden="true"
+              />
 
               {/* While generating, this becomes a Stop control — you can
                   interrupt a long answer and keep whatever arrived. */}
@@ -1151,9 +1218,11 @@ export function ChatArea({
             </div>
           </div>
 
-          <p className="mt-2.5 text-center text-[11px] leading-4 text-text-muted">
-            Responses are generated by AI — verify important information.
-          </p>
+          {/* The "responses are generated by AI" disclaimer used to sit here.
+              Removed at the user's request: this is a self-hosted app with one
+              user who configured the API key themselves, so it told them
+              something they already knew and cost a line of vertical space
+              under every message. */}
         </div>
       </div>
     </div>

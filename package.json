@@ -42,7 +42,9 @@
     "test:balance": "tsx scripts/test-balance.mjs",
     "test:web": "tsx scripts/test-web.mjs",
     "cost:lab": "node scripts/cost-lab.mjs",
-    "test:cost": "tsx scripts/test-cost.mjs"
+    "test:cost": "tsx scripts/test-cost.mjs",
+    "test:refine": "tsx scripts/test-refine-live.mjs",
+    "test:agentsafety": "tsx scripts/test-agentsafety.mjs"
   },
   "dependencies": {
     "@types/cross-spawn": "^6.0.6",

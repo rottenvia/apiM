@@ -9,6 +9,7 @@ import {
 } from "@/components/DeleteChatDialog";
 import { SearchBudget } from "@/components/SearchBudget";
 import { BUDGET_PRESETS } from "@/lib/budget";
+import { DiagnosticsPanel } from "@/components/DiagnosticsPanel";
 
 /**
  * Settings, grouped.
@@ -19,7 +20,7 @@ import { BUDGET_PRESETS } from "@/lib/budget";
  * settings an obvious home, which is the part that keeps this from needing
  * another rebuild later — adding one is a line in this array.
  */
-type TabId = "keys" | "model" | "search" | "misc";
+type TabId = "keys" | "model" | "search" | "reports" | "misc";
 
 const GROUPS: {
   id: TabId;
@@ -56,6 +57,17 @@ const GROUPS: {
         <circle cx="12" cy="12" r="9" />
         <path d="M3 12h18" />
         <path d="M12 3a15.3 15.3 0 014 9 15.3 15.3 0 01-4 9 15.3 15.3 0 01-4-9 15.3 15.3 0 014-9z" />
+      </svg>
+    ),
+  },
+  {
+    id: "reports",
+    label: "Reports",
+    blurb: "What has been failing, so it can be fixed",
+    icon: (
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} aria-hidden="true">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M9 3h6l4 4v14H5V3h4zM9 3v5h6" />
+        <path strokeLinecap="round" d="M8.5 13h7M8.5 16.5h4.5" />
       </svg>
     ),
   },
@@ -511,6 +523,8 @@ export function SettingsModal({
 
               </>
             )}
+
+            {tab === "reports" && <DiagnosticsPanel />}
 
             {tab === "misc" && (
               <>

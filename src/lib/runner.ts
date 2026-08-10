@@ -3,6 +3,7 @@ import crossSpawn from "cross-spawn";
 import path from "node:path";
 import { promises as fs } from "node:fs";
 import { workspaceDirectory } from "@/lib/workspace";
+import { checkBrowserPolicy } from "@/lib/browser-policy";
 
 /**
  * Runs a command the model asked for.
@@ -178,8 +179,21 @@ function normaliseCommand(command: string): string {
  */
 export function validateCommand(
   command: unknown,
-  args: unknown
-): { ok: true; command: string; args: string[] } | { ok: false; reason: string } {
+  args: unknown,
+  /**
+   * Where the agent's own browser profile belongs. Only needed for the
+   * browser policy; omitted callers get the check with a workspace-relative
+   * default, which is still correct — it only affects the suggested path in
+   * the message.
+   */
+  workspaceDir = "."
+): {
+  ok: true;
+  command: string;
+  args: string[];
+  /** Set when the policy adjusted the arguments; shown to the user. */
+  note?: string;
+} | { ok: false; reason: string } {
   if (typeof command !== "string" || !command.trim()) {
     return { ok: false, reason: "A command is required." };
   }
@@ -224,6 +238,27 @@ export function validateCommand(
       return { ok: false, reason: "Arguments must not contain NUL bytes." };
     }
     clean.push(arg);
+  }
+
+  /*
+   * The agent's browser must not be the user's browser.
+   *
+   * Checked here rather than at each call site so every path — run_command,
+   * start_process and the runner itself — is covered by one rule. See
+   * lib/browser-policy.ts for why this exists: an agent task closed the
+   * user's running browser and drove their logged-in profile.
+   */
+  const policy = checkBrowserPolicy(name, clean, workspaceDir);
+  if (policy.action === "refuse") {
+    return { ok: false, reason: policy.reason ?? "Refused by browser policy." };
+  }
+  if (policy.action === "rewrite") {
+    return {
+      ok: true,
+      command: name,
+      args: policy.args,
+      note: policy.reason,
+    };
   }
 
   return { ok: true, command: name, args: clean };
