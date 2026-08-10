@@ -783,6 +783,71 @@ check(
   /\(\) => \{\s*\n\s*if \(refreshTimer\.current\) clearTimeout/.test(pageSrc)
 );
 
+// ------------------------------------------------------------------
+console.log("\n18. Several tools in one round no longer queue");
+
+/*
+ * Measured before changing anything. Sixty local file reads take 27ms serial
+ * and 23ms parallel — disk was never the problem. A network round trip is:
+ * four page fetches serially is about 1.6s where one is 0.4s, and three
+ * searches is 4.5s against 1.5s.
+ */
+const routeText = read("src/app/api/chat/route.ts");
+
+check(
+  "network reads in a round are started together",
+  /const prefetched = new Map<string, Promise<ToolResult>>\(\)/.test(routeText),
+  "each was awaited before the next began"
+);
+check(
+  "only read-only tools are eligible",
+  /const PARALLEL_SAFE = new Set\(\[\s*\n\s*"fetch_url",/.test(routeText) &&
+    !/PARALLEL_SAFE[\s\S]{0,200}"write_file"/.test(routeText),
+  "two writes racing on one path is a corrupt file"
+);
+check(
+  "commands and approvals stay strictly in order",
+  !/PARALLEL_SAFE[\s\S]{0,200}"run_command"/.test(routeText),
+  "approval prompts arriving out of order would be unreadable"
+);
+check(
+  "results are still awaited in the order the model asked",
+  /result = await prefetched\.get\(call\.id\)!/.test(routeText),
+  "the transcript has to read as one result after another"
+);
+check(
+  "a failure in a prefetched call is caught, not thrown",
+  /\}\)\.catch\(\(error\) => \(\{/.test(routeText),
+  "an unhandled rejection would abandon the whole round"
+);
+check(
+  "a single call does not pay for the machinery",
+  /if \(calls\.length > 1\) \{/.test(routeText)
+);
+
+// read_files ordering, which is what parallelising it could have broken.
+const ORD = "ordering";
+await rm(path.join(ROOT, "data", "workspaces", ORD), {
+  recursive: true,
+  force: true,
+});
+for (const n of ["a", "b", "c"]) await ws.writeFile(ORD, `${n}.js`, `// ${n}`);
+
+const { runTool } = await load("src/lib/tools.ts");
+const ordered = await runTool(ORD, "read_files", {
+  paths: ["c.js", "MISSING.js", "a.js", "b.js"],
+});
+const seen = [...ordered.content.matchAll(/--- (.+?) ---/g)].map((m) => m[1]);
+check(
+  "read_files returns files in the order requested",
+  seen.join(",") === "c.js,MISSING.js,a.js,b.js",
+  "the model refers to them by position in its own request"
+);
+check(
+  "a missing file is still reported inline without losing the others",
+  /could not read/.test(ordered.content) && /Read 3 of 4/.test(ordered.summary)
+);
+
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
 );
