@@ -27,6 +27,8 @@ import {
   formatPlan,
   planSummary,
   planProgress,
+  checkEvidence,
+  PlanError,
   PLAN_MARKER,
 } from "@/lib/plan";
 import type { Plan } from "@/lib/plan";
@@ -806,6 +808,14 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         let nudgedIncomplete = false;
         /** How many times the plan has been rewritten, to catch thrashing. */
         let replanCount = 0;
+        /**
+         * Every tool the model has actually used in this reply.
+         *
+         * Used to check that "I ran the tests" corresponds to something that
+         * really ran. Names only — the arguments are irrelevant here and
+         * keeping them would make this grow without bound on a long task.
+         */
+        const toolsUsedThisRun: string[] = [];
 
         const setFileTree = (text: string) => {
           currentFileTree = text;
@@ -1814,6 +1824,11 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           for (const call of calls) {
             if (stopped()) break;
 
+            // Recorded before the tool runs, so a claim can be checked
+            // against what was attempted rather than only what succeeded —
+            // a failing test run is still a real check.
+            toolsUsedThisRun.push(call.function.name);
+
             send({
               type: "tool_start",
               id: call.id,
@@ -1935,6 +1950,32 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 const uArgs = parsed.value as { updates?: unknown };
                 const raw = Array.isArray(uArgs.updates) ? uArgs.updates : [];
                 try {
+                  /*
+                   * Cross-check the claim against what actually ran.
+                   *
+                   * The agent writes its own evidence, which is the deepest
+                   * weakness in this mechanism. It cannot be fixed
+                   * completely — nothing here makes a model honest — but the
+                   * specific case of claiming a tool ran when none did is
+                   * cheap to catch, because the tools used this run are right
+                   * here. Refusing rather than warning: an unenforced check
+                   * teaches the model the words are optional.
+                   */
+                  const claimIssue = raw
+                    .map((u) => {
+                      const entry = u as Record<string, unknown>;
+                      if (entry.state !== "done") return null;
+                      return checkEvidence(
+                        String(entry.verified ?? ""),
+                        toolsUsedThisRun
+                      );
+                    })
+                    .find(Boolean);
+
+                  if (claimIssue) {
+                    throw new PlanError(claimIssue);
+                  }
+
                   plan = updatePlan(
                     plan,
                     raw.map((u) => {
