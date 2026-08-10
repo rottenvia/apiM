@@ -135,12 +135,38 @@ async function main() {
     process.exit(1);
   }
 
+  // Optionally simulate a real CONVERSATION: several user messages in one
+  // chat, not one message in isolation. This is how the app is actually used
+  // and it exercises a cache path the single-message test never touches.
+  const turns = Number(process.env.SIM_TURNS ?? 1);
+  let convId = null;
+  const history = [];
+  for (let turn = 1; turn < turns; turn++) {
+    const q = `Follow-up question number ${turn}: check the previous step and continue.`;
+    const evs = await run("turn", appPort, {
+      message: q,
+      conversationId: convId,
+      conversationHistory: history.slice(),
+      workspaceEnabled: true,
+      workspaceId: WS_ID,
+      thinkingEffort: process.env.SIM_EFFORT ?? "high",
+    });
+    const meta = evs.find((e) => e.type === "meta");
+    if (meta?.conversationId) convId = meta.conversationId;
+    const text = evs.filter((e) => e.type === "content").map((e) => e.delta).join("");
+    history.push({ role: "user", content: q });
+    history.push({ role: "assistant", content: text });
+  }
+
   const events = await run("agent task", appPort, {
+    conversationId: convId,
+    conversationHistory: history,
     message:
       "Refactor the data layer: debug the failing tests, implement the new " +
       "cache, and review performance across the whole system.",
     workspaceEnabled: true,
     workspaceId: WS_ID,
+    model: process.env.SIM_MODEL ?? "deepseek-v4-pro",
     thinkingEffort: process.env.SIM_EFFORT ?? "high",
     budgetUsd: process.env.SIM_BUDGET ? Number(process.env.SIM_BUDGET) : undefined,
   });
@@ -186,10 +212,13 @@ async function main() {
   }
 
   const t = bill.totals;
-  const inCostMiss = (t.missTokens / 1e6) * 0.435;
-  const inCostHit = (t.hitTokens / 1e6) * 0.003625;
-  const outCost = (t.outputTokens / 1e6) * 0.87;
-  const reasoningCost = (t.reasoningOutputTokens / 1e6) * 0.87;
+  const RATE = (bill.requests[0]?.model ?? "deepseek-v4-pro") === "deepseek-v4-flash"
+    ? { input: 0.14, cached: 0.0028, output: 0.28 }
+    : { input: 0.435, cached: 0.003625, output: 0.87 };
+  const inCostMiss = (t.missTokens / 1e6) * RATE.input;
+  const inCostHit = (t.hitTokens / 1e6) * RATE.cached;
+  const outCost = (t.outputTokens / 1e6) * RATE.output;
+  const reasoningCost = (t.reasoningOutputTokens / 1e6) * RATE.output;
 
   console.log(bold("\nTotals\n"));
   console.log(`  cache misses (input)   ${k(t.missTokens).padEnd(10)} ${usd(inCostMiss)}  ${yellow(pctOf(inCostMiss, t.cost))}`);
@@ -201,7 +230,7 @@ async function main() {
   console.log(bold("Cache misses, by what caused them\n"));
   const kinds = Object.entries(bill.missByKind).sort((a, b) => b[1] - a[1]);
   for (const [kind, tokens] of kinds) {
-    const cost = (tokens / 1e6) * 0.435;
+    const cost = (tokens / 1e6) * RATE.input;
     console.log(`  ${kind.padEnd(22)} ${k(tokens).padEnd(9)} ${usd(cost)}  ${pctOf(cost, t.cost)}`);
   }
   console.log();
