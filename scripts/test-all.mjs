@@ -92,12 +92,28 @@ function runOne(name) {
     );
 
     child.on("close", (code) => {
-      // Both summary shapes in this repo: "42 checks · 42 passed" and
-      // "All 42 checks passed."
-      const a = /(\d+) checks · (\d+) passed/.exec(output);
+      /*
+       * Three summary shapes, and skips are not failures.
+       *
+       *   "42 checks · 42 passed"
+       *   "40 checks · 39 passed · 1 skipped"
+       *   "All 42 checks passed."
+       *
+       * My first version computed failures as total minus passed, which
+       * counted a SKIP as a failure. Reported from a real Windows run:
+       * archive and documents were listed as failing when both had exited 0
+       * — they skip the checks that need `zip` or LibreOffice installed.
+       *
+       * Skipping is the correct behaviour for a check that needs a tool the
+       * machine does not have; calling it a failure teaches people to ignore
+       * red, which is worse than not reporting it at all. The explicit count
+       * is parsed and subtracted.
+       */
+      const a = /(\d+) checks · (\d+) passed(?: · (\d+) skipped)?/.exec(output);
       const b = /All (\d+) checks passed/.exec(output);
+      const skipped = a?.[3] ? Number(a[3]) : 0;
       const checks = a ? Number(a[2]) : b ? Number(b[1]) : 0;
-      const failed = a ? Number(a[1]) - Number(a[2]) : 0;
+      const failed = a ? Number(a[1]) - Number(a[2]) - skipped : 0;
 
       resolve({
         name,
@@ -105,6 +121,7 @@ function runOne(name) {
         // printing a summary must not be counted as passing.
         ok: code === 0 && failed === 0,
         checks,
+        skipped,
         failed,
         ms: Date.now() - started,
         output,
@@ -138,12 +155,20 @@ async function main() {
 
   // A previous run's directories would let a suite see stale fixtures and
   // "pass" for the wrong reason.
-  await rm(path.join(ROOT, ".test-data"), { recursive: true, force: true });
+  /*
+   * Windows holds directory handles for a moment after a process exits, so a
+   * plain rm can fail with EBUSY even when nothing is really using it.
+   * Retrying is the documented remedy and is a no-op elsewhere.
+   */
+  const RM_OPTS = { recursive: true, force: true, maxRetries: 5, retryDelay: 200 };
+  await rm(path.join(ROOT, ".test-data"), RM_OPTS);
 
   const results = [];
   const report = (r) => {
     const label = r.ok ? green("PASS") : red("FAIL");
-    const count = r.checks ? dim(`${r.checks} checks`) : dim("no summary");
+    const count = r.checks
+      ? dim(`${r.checks} checks${r.skipped ? `, ${r.skipped} skipped` : ""}`)
+      : dim("no summary");
     const time = dim(`${(r.ms / 1000).toFixed(1)}s`);
     console.log(`  ${label}  ${r.name.padEnd(14)} ${count.padEnd(22)} ${time}`);
     results.push(r);
@@ -183,7 +208,7 @@ async function main() {
 
   if (failed.length === 0) {
     // Only on success: on failure the directories are the evidence.
-    await rm(path.join(ROOT, ".test-data"), { recursive: true, force: true });
+    await rm(path.join(ROOT, ".test-data"), RM_OPTS);
     console.log(green(`  Everything passed.\n`));
     console.log(
       dim(

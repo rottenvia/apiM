@@ -42,20 +42,31 @@ const DIR = path.join(DATA_ROOT, "workspaces", WS);
 await rm(DIR, { recursive: true, force: true });
 await mkdir(DIR, { recursive: true });
 
+/*
+ * Fixtures in Node, not Python.
+ *
+ * This suite tests process MANAGEMENT — starting, reading, stopping — and
+ * the language of the child is irrelevant to any of it. Using Python meant
+ * every check failed on a Windows machine without it ("Failed to start:
+ * python3 server.py"), reporting a broken process manager when the process
+ * manager was fine.
+ *
+ * Node is guaranteed present: it is running this file.
+ */
 // A stand-in for a dev server: prints, then stays alive forever.
-await fsWrite(path.join(DIR, "server.py"),
-  "import time\nprint('listening on port 1234', flush=True)\nwhile True:\n    time.sleep(0.2)\n");
+await fsWrite(path.join(DIR, "server.js"),
+  "console.log('listening on port 1234');\nsetInterval(() => {}, 200);\n");
 // Something that fails instantly, like a port already in use.
-await fsWrite(path.join(DIR, "broken.py"),
-  "import sys\nprint('cannot bind: address in use', file=sys.stderr, flush=True)\nsys.exit(1)\n");
+await fsWrite(path.join(DIR, "broken.js"),
+  "console.error('cannot bind: address in use');\nprocess.exit(1);\n");
 // Something noisy, to test log capping.
-await fsWrite(path.join(DIR, "noisy.py"),
-  "import time\nfor i in range(200000):\n    print('x' * 100, flush=True)\ntime.sleep(30)\n");
+await fsWrite(path.join(DIR, "noisy.js"),
+  "for (let i = 0; i < 200000; i++) console.log('x'.repeat(100));\nsetTimeout(() => {}, 30000);\n");
 
 console.log("\napiM background process checks\n");
 
 console.log("1. Starting something that keeps running");
-let res = await runTool(WS, "start_process", { command: "python3", args: ["server.py"] });
+let res = await runTool(WS, "start_process", { command: "node", args: ["server.js"] });
 check("it starts", res.ok, res.summary);
 check("it reports still running", /still running/.test(res.content));
 check("early output is captured", /listening on port 1234/.test(res.content));
@@ -69,7 +80,7 @@ check("output is readable after the fact", /listening on port 1234/.test(res.con
 check("it is reported as running", /running/.test(res.content));
 
 console.log("\n3. A process that dies immediately is a failure, not a success");
-res = await runTool(WS, "start_process", { command: "python3", args: ["broken.py"] });
+res = await runTool(WS, "start_process", { command: "node", args: ["broken.js"] });
 check("reported as failed", !res.ok, res.summary);
 check("the reason is included", /address in use/.test(res.content));
 check("it does not claim to be running", !/still running/.test(res.content));
@@ -84,7 +95,7 @@ res = await runTool(WS, "read_process", { id });
 check("reading after stop says it stopped", /stopped/.test(res.content));
 
 console.log("\n5. Output can't grow forever");
-res = await runTool(WS, "start_process", { command: "python3", args: ["noisy.py"] });
+res = await runTool(WS, "start_process", { command: "node", args: ["noisy.js"] });
 const noisyId = res.content.match(/id (proc-[\w-]+)/)?.[1];
 await sleep(1500);
 const noisy = P.getProcess(noisyId);
@@ -96,7 +107,7 @@ P.stopProcess(noisyId);
 console.log("\n6. Limits and isolation");
 const ids = [];
 for (let i = 0; i < P.MAX_PROCESSES_PER_WORKSPACE + 2; i++) {
-  const r2 = await runTool(WS, "start_process", { command: "python3", args: ["server.py"] });
+  const r2 = await runTool(WS, "start_process", { command: "node", args: ["server.js"] });
   const m = r2.content.match(/id (proc-[\w-]+)/);
   if (m) ids.push(m[1]);
   if (!r2.ok && /limit/.test(r2.content)) break;
@@ -117,7 +128,7 @@ const stillAlive = P.listProcesses(WS).filter(P.isRunning).length;
 check("nothing is left running", stillAlive === 0, `${stillAlive} alive`);
 
 console.log("\n8. Deleting a chat kills its processes");
-await runTool(WS, "start_process", { command: "python3", args: ["server.py"] });
+await runTool(WS, "start_process", { command: "node", args: ["server.js"] });
 const store = await import(pathToFileURL(path.join(ROOT, "src/lib/store.ts")).href);
 await store.deleteConversation(WS);
 await sleep(500);
