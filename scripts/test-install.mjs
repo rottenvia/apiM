@@ -13,7 +13,7 @@
  * The install test needs a network and is skipped without one.
  */
 import path from "node:path";
-import { PYTHON, havePython } from "./lib/proc.mjs";
+import { PYTHON, havePython, finishSuite } from "./lib/proc.mjs";
 import { pathToFileURL } from "node:url";
 import { promises as fs } from "node:fs";
 
@@ -235,4 +235,4 @@ console.log(
     `${fail ? " · " + r(fail + " failed") : ""}` +
     `${skip ? " · " + y(skip + " skipped") : ""}\n`
 );
-process.exit(fail ? 1 : 0);
+await finishSuite(fail);

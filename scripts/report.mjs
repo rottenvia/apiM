@@ -122,7 +122,21 @@ if (tests.code === 0) {
    * from that heading onward is the useful part; the hundreds of PASS lines
    * above it are not.
    */
-  const at = text.indexOf("suites failed:");
+  /*
+   * Match one suite as well as many.
+   *
+   * The runner pluralises: "3 suites failed:" but "1 suite failed:". This
+   * searched for the literal "suites failed:", so when exactly one suite
+   * failed the heading never matched and the whole detail block was dropped.
+   *
+   * That is precisely what a real Windows run produced — "failing suites:
+   * refine" followed by nothing at all, so the report named the problem and
+   * withheld the evidence, in the one case where there is least to print.
+   * Found by re-reading this against the runner's output, not by a test:
+   * the report has no suite of its own, which is its own gap.
+   */
+  const heading = /^\s*\d+ suites? failed:/m.exec(text);
+  const at = heading ? heading.index : -1;
   if (at !== -1) {
     for (const line of text.slice(at).split("\n").slice(0, 80)) {
       if (line.trim()) say(line.replace(/\s+$/, ""));

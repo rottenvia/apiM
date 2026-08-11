@@ -158,6 +158,67 @@ export function readSourceSync(file) {
  * Falls back to the shell form if npm cannot be located, since a working
  * noisy command beats a silent broken one.
  */
+/**
+ * Exit a test suite without tripping Node's Windows teardown bug.
+ *
+ * The symptom, from a real Windows run on Node 24: the `refine` suite printed
+ * "23 checks - 23 passed" and then died with
+ *
+ *   Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), file src\win\async.c, line 94
+ *
+ * Every check passed and the exit code was still a crash, so the runner
+ * correctly called the suite failed. Nothing in apiM is wrong.
+ *
+ * What is actually happening: Node's built-in `fetch` (undici) keeps its
+ * sockets alive for reuse on a worker thread. When `process.exit()` runs
+ * immediately afterwards, Node calls `uv_async_send()` on a handle that
+ * `uv_close()` has already marked as closing, and libuv aborts. It is
+ * upstream nodejs/node#56645, open since January 2025, reproducible in four
+ * lines: fetch a URL, then call process.exit. Windows and Node >= 23 only,
+ * which is exactly why the same suite is green on this Linux machine and on
+ * older Node — I cannot reproduce it here, so this fix is written from the
+ * upstream diagnosis rather than from a local repro.
+ *
+ * Two things, because either alone is a gamble:
+ *
+ *   1. Close undici's global dispatcher. That severs the keep-alive sockets
+ *      deliberately instead of leaving them for the teardown race, and it is
+ *      the part that addresses the cause rather than the timing.
+ *   2. Yield ~100ms on Windows before exiting, letting the worker thread
+ *      finish. This is the mitigation shipped by setup-uv, varlock, aegir
+ *      and others for the same assertion; 100ms is their settled figure
+ *      after 50ms proved marginal.
+ *
+ * Both are wrapped so a failure here can never change a suite's verdict: the
+ * exit code is decided before either runs.
+ */
+export async function finishSuite(failed) {
+  const code = failed ? 1 : 0;
+  // Set first. If anything below throws or hangs, the verdict still stands.
+  process.exitCode = code;
+
+  try {
+    /*
+     * undici publishes its global dispatcher on a well-known symbol. Reached
+     * this way rather than by importing undici, which is not a dependency —
+     * this is Node's own bundled copy, the one `fetch` uses.
+     */
+    const dispatcher = globalThis[Symbol.for("undici.globalDispatcher.1")];
+    if (dispatcher?.close) {
+      await Promise.race([
+        dispatcher.close(),
+        new Promise((resolve) => setTimeout(resolve, 1000)),
+      ]);
+    }
+  } catch {
+    /* No dispatcher, or a version that does not expose one. Nothing to close. */
+  }
+
+  if (IS_WINDOWS) await new Promise((resolve) => setTimeout(resolve, 100));
+
+  process.exit(code);
+}
+
 export function npmCommand(root, args) {
   /*
    * npm tells us where it lives.

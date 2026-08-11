@@ -11,6 +11,7 @@
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { createServer } from "node:http";
+import { finishSuite } from "./lib/proc.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const load = (p) => import(pathToFileURL(path.join(ROOT, p)).href);
@@ -355,4 +356,4 @@ check("parallel calls still got pruned", res.stats.collapsed > 0);
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
 );
-process.exit(fail ? 1 : 0);
+await finishSuite(fail);

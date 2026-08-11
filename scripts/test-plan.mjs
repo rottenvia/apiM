@@ -24,6 +24,7 @@ import {
   killTree,
   spawnTracked,
   waitForServer,
+  finishSuite,
 } from "./lib/proc.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
@@ -384,4 +385,4 @@ await rm(path.join(DATA_ROOT, "workspaces", "plantest"), { recursive: true, forc
 console.log(
   `\n${pass + fail} checks · ${pass} passed${fail ? ` · ${r(`${fail} failed`)}` : ""}\n`
 );
-process.exit(fail ? 1 : 0);
+await finishSuite(fail);

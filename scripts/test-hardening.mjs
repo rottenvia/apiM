@@ -978,6 +978,98 @@ check(
   /could not read/.test(ordered.content) && /Read 3 of 4/.test(ordered.summary)
 );
 
+/*
+ * Two Windows-only failures, tested on every platform.
+ *
+ * Both were reported from a real Windows run and neither reproduces here, so
+ * the properties are checked rather than the symptoms: the behaviour is
+ * asserted where it can be, and where it cannot, the wiring is.
+ */
+
+/*
+ * 1. A suite that used fetch and then called process.exit.
+ *
+ * The `refine` suite printed "23 checks - 23 passed" and then aborted with
+ * "Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)". Every check
+ * passed and the exit code was still a crash. It is upstream
+ * nodejs/node#56645: Node's fetch keeps sockets alive on a worker thread and
+ * process.exit races libuv's teardown. Windows and Node >= 23 only.
+ */
+const { finishSuite } = await import("./lib/proc.mjs");
+check(
+  "there is one guarded way to end a suite",
+  typeof finishSuite === "function",
+  "so the fix is in one place rather than copied into eight files"
+);
+
+const helperSrc = read("scripts/lib/proc.mjs");
+check(
+  "it closes undici's keep-alive sockets",
+  /undici\.globalDispatcher\.1/.test(helperSrc),
+  "addressing the cause, not only the timing"
+);
+check(
+  "it also yields before exiting on Windows",
+  /if \(IS_WINDOWS\) await new Promise\(\(resolve\) => setTimeout\(resolve, \d+\)\)/.test(
+    helperSrc
+  ),
+  "the mitigation several projects settled on for this same assertion"
+);
+check(
+  "the verdict is set before any of that runs",
+  helperSrc.indexOf("process.exitCode = code;") <
+    helperSrc.indexOf("undici.globalDispatcher.1"),
+  "cleanup must never be able to turn a pass into a fail"
+);
+
+/*
+ * Every suite that calls fetch has to use it. Measured, not guessed: these
+ * eight are the ones observed calling fetch under an instrumented run, out of
+ * forty. The rest exit plainly and are unaffected.
+ */
+for (const suite of [
+  "refine-live",
+  "web",
+  "resilience",
+  "install",
+  "auth",
+  "workspace",
+  "autonomy",
+  "plan",
+]) {
+  const src = read(`scripts/test-${suite}.mjs`);
+  check(
+    `${suite} ends through finishSuite`,
+    /finishSuite\(/.test(src) && !/^\s*process\.exit\(fail/m.test(src),
+    "it calls fetch, so a bare process.exit can abort it on Windows"
+  );
+}
+
+/*
+ * 2. The report dropped the details when exactly one suite failed.
+ *
+ * The runner pluralises — "3 suites failed:" but "1 suite failed:" — and the
+ * report searched for the literal "suites failed:". So the single-failure
+ * case, the one with least to print, printed nothing. The user's run said
+ * "failing suites: refine" and then stopped.
+ */
+const reportSrc = read("scripts/report.mjs");
+const headingRe = /const heading = (\/.*\/m)\.exec/.exec(reportSrc);
+check("the report looks for the heading by pattern", !!headingRe);
+if (headingRe) {
+  const re = new RegExp(headingRe[1].slice(1, -2), "m");
+  check(
+    "it matches the singular heading",
+    re.test("  1 suite failed:\n"),
+    "this is the case that silently printed nothing"
+  );
+  check("and still matches the plural", re.test("  3 suites failed:\n"));
+  check(
+    "and does not match the per-suite summary line",
+    !re.test("  1387 checks across 40 suites\n")
+  );
+}
+
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
 );
