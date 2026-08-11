@@ -17,6 +17,7 @@ import { createServer } from "node:http";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { rm } from "node:fs/promises";
+import { finishSuite } from "./lib/proc.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 /*
@@ -237,4 +238,4 @@ server.unref();
 console.log(
   `\n${pass + fail} checks · ${pass} passed${fail ? ` · ${r(`${fail} failed`)}` : ""}\n`
 );
-process.exit(fail ? 1 : 0);
+await finishSuite(fail);

@@ -35,6 +35,7 @@ import {
   killTree,
   spawnTracked,
   waitForServer,
+  finishSuite,
 } from "./lib/proc.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
@@ -379,7 +380,7 @@ async function main() {
   console.log(
     `${total} checks · ${pass} passed${fail ? ` · ${red(`${fail} failed`)}` : ""}\n`
   );
-  process.exit(fail ? 1 : 0);
+  await finishSuite(fail);
 }
 
 main().catch((e) => {
