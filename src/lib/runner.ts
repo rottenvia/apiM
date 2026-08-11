@@ -592,6 +592,33 @@ function venvDir(cwd: string): string {
   return path.join(cwd, ...[PACKAGE_DIR, "venv"]);
 }
 
+/**
+ * The name an interpreter actually has on this platform.
+ *
+ * A Unix virtualenv's bin/ holds `python`, `python3` and `python3.13`. A
+ * Windows venv's Scripts/ holds `python.exe` and `pythonw.exe` — and no
+ * `python3.exe` at all. Windows itself is the same: the installer provides
+ * `python`, and the bare name `python3` usually hits the Microsoft Store stub
+ * that prints an advert and exits non-zero.
+ *
+ * Models write `python3` because that is the name that works on Linux and
+ * macOS, and it is the name in most documentation. On Windows that meant two
+ * failures at once: the venv executable was not found, so the command fell
+ * back to the system interpreter — silently leaving the workspace virtualenv,
+ * which is the isolation the venv exists to provide — and then the system
+ * `python3` was a stub, so it failed anyway.
+ *
+ * Reported from a real run: the model wrote fizzbuzz.py, then called
+ * `python3 fizzbuzz.py` to check its own work.
+ *
+ * Only python3 is remapped. Windows venvs do create pip3.exe, so pip and
+ * pip3 both resolve correctly and are left alone.
+ */
+export function platformCommandName(command: string): string {
+  if (process.platform !== "win32") return command;
+  return command === "python3" ? "python" : command;
+}
+
 function venvBin(cwd: string): string {
   return path.join(
     venvDir(cwd),
@@ -697,20 +724,21 @@ export async function runCommand(
 
   // Spawn the venv's own executable. Relying on PATH alone is not enough on
   // Windows, where a bare "python" can still resolve elsewhere.
+  const localName = platformCommandName(check.command);
   const executable = venvPath
     ? path.join(
         venvPath,
-        ...[process.platform === "win32" ? `${check.command}.exe` : check.command]
+        ...[process.platform === "win32" ? `${localName}.exe` : localName]
       )
-    : check.command;
+    : localName;
   // The venv's own executable when it has one, otherwise the bare name —
   // cross-spawn resolves it, including the .cmd shims on Windows.
   const resolved = venvPath
     ? await fs
         .access(executable)
         .then(() => executable)
-        .catch(() => check.command)
-    : check.command;
+        .catch(() => localName)
+    : localName;
 
   const started = Date.now();
 

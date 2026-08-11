@@ -192,15 +192,26 @@ if (pythonAvailable) {
 }
 
 // The whole point: nothing landed on the user's machine.
-res = await R.runCommand(WS, PYTHON, [
-  "-c",
-  "import sys; print('SYSTEM' if sys.prefix == sys.base_prefix else 'ISOLATED')",
-]);
-check(
-  "the interpreter is isolated from the system one",
-  res.stdout.includes("ISOLATED"),
-  res.stdout.trim()
-);
+if (pythonAvailable) {
+  res = await R.runCommand(WS, PYTHON, [
+    "-c",
+    "import sys; print('SYSTEM' if sys.prefix == sys.base_prefix else 'ISOLATED')",
+  ]);
+  check(
+    "the interpreter is isolated from the system one",
+    res.stdout.includes("ISOLATED"),
+    res.stdout.trim()
+  );
+}
+/*
+ * No `else skipped(...)` here: this check is already declared skipped in the
+ * block at the top, alongside the rest of the python-dependent ones.
+ *
+ * Without the guard it ran anyway on a machine with no python, printing both
+ * SKIP and FAIL for the same check name and inflating the totals. It was
+ * counted twice — once as skipped, once as failed — which is how a suite can
+ * report more checks than it has.
+ */
 
 // --------------------------------------------------------- still guarded
 
@@ -218,15 +229,19 @@ check(
   !bad.ok && /Run the interpreter directly/.test(bad.reason)
 );
 
-res = await R.runCommand(WS, PYTHON, [
-  "-c",
-  "import os; print(os.environ.get('DEEPSEEK_API_KEY') or 'ABSENT')",
-]);
-check(
-  "API keys are not visible to anything the model runs",
-  res.stdout.includes("ABSENT"),
-  "the minimal environment is what makes running commands survivable"
-);
+// Same guard, same reason: declared skipped at the top when there is no
+// python, so running it here too would double-count it.
+if (pythonAvailable) {
+  res = await R.runCommand(WS, PYTHON, [
+    "-c",
+    "import os; print(os.environ.get('DEEPSEEK_API_KEY') or 'ABSENT')",
+  ]);
+  check(
+    "API keys are not visible to anything the model runs",
+    res.stdout.includes("ABSENT"),
+    "the minimal environment is what makes running commands survivable"
+  );
+}
 
 await fs.rm(wsDir, { recursive: true, force: true });
 

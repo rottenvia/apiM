@@ -160,5 +160,70 @@ const pageSrc = (await readFile(path.join(ROOT, "src/app/page.tsx"), "utf8")).re
 check("the client only enables it on a literal true",
   /s\.autoRunCommands === true/.test(pageSrc));
 
+/*
+ * `python3` on Windows.
+ *
+ * Models write `python3` because that is what works on Linux and macOS and
+ * what most documentation says. On Windows there is no python3.exe — neither
+ * in a virtualenv's Scripts/ nor, usually, on the system, where the bare name
+ * hits a Microsoft Store stub that prints an advert and exits non-zero.
+ *
+ * That failed twice over: the venv executable was not found, so the command
+ * quietly fell back to the system interpreter — leaving the workspace
+ * virtualenv, which is the isolation the venv exists for — and then the
+ * system python3 was a stub, so it failed anyway.
+ *
+ * Reported from a real run: the model wrote fizzbuzz.py and called
+ * `python3 fizzbuzz.py` to check its own work.
+ *
+ * The mapping is platform-dependent, so on Linux the correct answer is that
+ * nothing changes. Both directions are asserted, whichever machine runs this.
+ */
+console.log("\nPython naming across platforms");
+const onWindows = process.platform === "win32";
+
+check(
+  "python3 becomes python on Windows, and is left alone elsewhere",
+  R.platformCommandName("python3") === (onWindows ? "python" : "python3"),
+  `platform is ${process.platform}`
+);
+check(
+  "plain python is never renamed",
+  R.platformCommandName("python") === "python",
+  "it is correct on every platform already"
+);
+check(
+  "pip and pip3 are left alone",
+  R.platformCommandName("pip") === "pip" &&
+    R.platformCommandName("pip3") === "pip3",
+  "Windows venvs do create pip3.exe, so both already resolve"
+);
+check(
+  "unrelated commands are untouched",
+  R.platformCommandName("node") === "node" &&
+    R.platformCommandName("git") === "git"
+);
+
+const runnerText = await readFile(path.join(ROOT, "src/lib/runner.ts"), "utf8");
+check(
+  "the mapping is applied to what actually gets spawned",
+  /const localName = platformCommandName\(check\.command\)/.test(runnerText) &&
+    /\.catch\(\(\) => localName\)/.test(runnerText),
+  "including the fallback, which is the path that silently left the venv"
+);
+
+// It has to really run, not just map names.
+const PYWS = "pythonname";
+await rm(path.join(DATA_ROOT, "workspaces", PYWS), { recursive: true, force: true });
+const pyRes = await R.runCommand(PYWS, "python3", ["-c", "print('hello')"]);
+check(
+  "python3 runs a real script on this machine",
+  pyRes.exitCode === 0 && pyRes.stdout.includes("hello"),
+  pyRes.exitCode === 0
+    ? pyRes.stdout.trim()
+    : (pyRes.stderr || "").split("\n").filter(Boolean).pop() ?? "no output"
+);
+await rm(path.join(DATA_ROOT, "workspaces", PYWS), { recursive: true, force: true });
+
 console.log("\n" + (fail === 0 ? g(`All ${pass} checks passed.`) : r(`${fail} of ${pass + fail} failed.`)) + "\n");
 process.exit(fail === 0 ? 0 : 1);
