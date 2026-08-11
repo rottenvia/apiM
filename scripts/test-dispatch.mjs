@@ -500,9 +500,8 @@ res = await call("run_tests", {});
  * The COUNT matters, not just the verdict.
  *
  * This first said only "no failures", and passed while reporting "All 0 tests
- * passed" — node --test speaks TAP, which had no parser, so a green run came
- * back with the count silently zeroed. A summary that is confidently wrong
- * about how much ran is worse than one that admits it did not understand.
+ * passed" — a summary confidently wrong about how much ran, which is worse
+ * than admitting it did not understand.
  */
 check(
   "a passing suite is reported as passing, with the real count",
@@ -539,9 +538,106 @@ check(
   "a count with no name means reading the raw output again"
 );
 
+/*
+ * Both of node --test's output formats, pinned.
+ *
+ * The live run above only ever exercises whichever format THIS machine's Node
+ * produces, so it cannot catch the other one — which is exactly how the first
+ * version of this shipped broken.
+ *
+ * Node 22 and earlier print TAP when piped. Node 23 changed the non-TTY
+ * default to spec to match what a terminal shows. So the TAP-only parser I
+ * wrote passed here on Node 22 and did nothing on a real Node 24 run: "All 0
+ * tests passed" for a green suite, no named failures for a red one.
+ *
+ * These are fixed samples, so they test the parser on every machine
+ * regardless of which Node is installed.
+ */
+console.log("\n9. node --test speaks two formats, and both must parse");
+
+const { parseTestOutput } = await load("src/lib/testing.ts");
+
+const TAP_PASS = [
+  "TAP version 13",
+  "# Subtest: adds",
+  "ok 1 - adds",
+  "1..1",
+  "# tests 1",
+  "# pass 1",
+  "# fail 0",
+  "# skipped 0",
+].join("\n");
+
+const TAP_FAIL = [
+  "TAP version 13",
+  "not ok 1 - adds",
+  "  ---",
+  "  error: '2 !== 3'",
+  "  ...",
+  "# tests 1",
+  "# pass 0",
+  "# fail 1",
+  "# skipped 0",
+].join("\n");
+
+// A real U+2714 / U+2716 / U+2139, as the spec reporter emits.
+const SPEC_PASS = [
+  "\u2714 adds (0.71ms)",
+  "\u2139 tests 1",
+  "\u2139 suites 0",
+  "\u2139 pass 1",
+  "\u2139 fail 0",
+  "\u2139 skipped 0",
+].join("\n");
+
+const SPEC_FAIL = [
+  "\u2716 adds (1.20ms)",
+  "  Error [ERR_ASSERTION]: 2 !== 3",
+  "\u2139 tests 1",
+  "\u2139 pass 0",
+  "\u2139 fail 1",
+  "\u2139 skipped 0",
+  "\u2716 failing tests:",
+  "\u2716 adds (1.20ms)",
+].join("\n");
+
+for (const [label, sample, code, wantPass, wantFail] of [
+  ["TAP, passing", TAP_PASS, 0, 1, 0],
+  ["TAP, failing", TAP_FAIL, 1, 0, 1],
+  ["spec, passing", SPEC_PASS, 0, 1, 0],
+  ["spec, failing", SPEC_FAIL, 1, 0, 1],
+]) {
+  const parsed = parseTestOutput("npm test", sample, "", code);
+  check(
+    `${label} is understood`,
+    !parsed.unparsed &&
+      parsed.passed === wantPass &&
+      parsed.failed === wantFail &&
+      parsed.ok === (wantFail === 0),
+    `${parsed.passed} passed, ${parsed.failed} failed${parsed.unparsed ? ", UNPARSED" : ""}`
+  );
+}
+
+const specFail = parseTestOutput("npm test", SPEC_FAIL, "", 1);
+check(
+  "the failing test is named once, not once per mention",
+  specFail.failures.length === 1 && specFail.failures[0].name === "adds",
+  `${specFail.failures.length} entries: ${specFail.failures.map((f) => f.name).join(", ")}`
+);
+check(
+  "a stack-trace line is not mistaken for a test name",
+  !parseTestOutput(
+    "npm test",
+    `${SPEC_FAIL}\n    at Test.run (node:internal/test_runner/test:1047:25)`,
+    "",
+    1
+  ).failures.some((f) => /at Test\.run/.test(f.name)),
+  "the duration suffix is what keeps the pattern honest"
+);
+
 // ------------------------------------------------- network tools, honestly
 
-console.log("\n9. The network tools, where they can be checked without a network");
+console.log("\n10. The network tools, where they can be checked without a network");
 
 for (const name of ["fetch_url", "web_search", "browse", "inspect_page"]) {
   const tool = WORKSPACE_TOOLS.find((t) => t.function.name === name);
@@ -564,7 +660,7 @@ check(
 
 // --------------------------------------------------------------- the audit
 
-console.log("\n10. The audit this suite exists to satisfy");
+console.log("\n11. The audit this suite exists to satisfy");
 
 const all = WORKSPACE_TOOLS.map((t) => t.function.name).sort();
 /*
