@@ -242,6 +242,39 @@ export function parseTestOutput(
     return base;
   }
 
+  /*
+   * --- node --test (TAP) ---------------------------------------------------
+   *
+   * Node's own test runner ships with Node, needs no install, and is what a
+   * small project most often has. It was not recognised, so a green run came
+   * back as "All 0 tests passed" — a true-sounding sentence with the count
+   * silently wrong — and a red one fell through to the "not recognised" path,
+   * which is honest but names no failures.
+   *
+   * Found by writing a real node --test fixture in the dispatch suite and
+   * reading what came back, rather than by reading this file.
+   *
+   * Checked before Go because Go's detector is a loose /^(ok|FAIL|---)\s/,
+   * and TAP's "ok 1 - name" lines match it.
+   */
+  const tapCounts = /^# pass (\d+)$/m.exec(text);
+  if (tapCounts && /^# tests \d+$/m.test(text)) {
+    base.passed = Number(tapCounts[1]);
+    base.failed = Number((/^# fail (\d+)$/m.exec(text) ?? [])[1] ?? 0);
+    base.skipped = Number((/^# skipped (\d+)$/m.exec(text) ?? [])[1] ?? 0);
+    base.ok = base.failed === 0 && exitCode === 0;
+
+    // "not ok 1 - the name" is TAP's failure line. The trailing " # SKIP"
+    // marker means it was skipped, not failed, so those are left out.
+    for (const m of text.matchAll(/^not ok \d+ - (.+)$/gm)) {
+      const name = m[1].replace(/\s*#\s*(SKIP|TODO).*$/i, "").trim();
+      if (name && base.failures.length < 20) {
+        base.failures.push({ name, detail: "failed" });
+      }
+    }
+    return base;
+  }
+
   // --- cargo ---------------------------------------------------------------
   const cargo = /test result: \w+\. (\d+) passed; (\d+) failed; (\d+) ignored/.exec(
     text
