@@ -214,8 +214,26 @@ export interface StepUpdate {
  * thing to say and needs no corroboration; "ran the tests, all passed" is a
  * factual assertion about a tool that either ran or did not.
  */
-const CHECK_WORDS =
-  /\b(ran|run|ok|passing|passed|tests?|pytest|jest|vitest|npm test|executed|verified by running)\b/i;
+const CHECK_WORDS = [
+  // A claim that something was executed. "ran"/"executed" followed by a word,
+  // so "ran node greet.test.js" matches and "wrote the runner" does not.
+  /\b(ran|executed|invoked)\s+\S/i,
+  // A claim about a test outcome. The word "test" alone is not enough — it
+  // appears in filenames constantly ("wrote greet.test.js"), and treating
+  // that as a claim refused a model doing exactly the right thing. Caught by
+  // the autonomy benchmark on its first run.
+  /\btests?\s+(pass|passed|passing|fail|failed|green|succeed)/i,
+  /\b(all|every)\s+tests?\b/i,
+  /\b(pytest|jest|vitest|npm test|cargo test|go test)\b/i,
+  // A claim about a live response.
+  /\b(returned|responded with)\s+\d{3}\b/i,
+  /\bverified by (running|calling|opening)/i,
+];
+
+/** Does this evidence assert that something was actually executed? */
+function claimsACheck(text: string): boolean {
+  return CHECK_WORDS.some((re) => re.test(text));
+}
 
 /**
  * Tools whose use constitutes an actual check.
@@ -255,7 +273,7 @@ export function checkEvidence(
   verified: string,
   toolsUsedThisRun: string[]
 ): string | null {
-  if (!CHECK_WORDS.test(verified)) return null;
+  if (!claimsACheck(verified)) return null;
 
   const didVerify = toolsUsedThisRun.some((t) => VERIFYING_TOOLS.has(t));
   if (didVerify) return null;
