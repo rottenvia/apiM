@@ -44,6 +44,19 @@ server and run one at a time afterwards, which is why they appear last.
 On failure you get the failing lines and `(run it alone: npm run test:plan)`.
 Running it alone gives the full output.
 
+## Testing autonomy, not just units
+
+```bash
+npm run test:autonomy
+```
+
+Unit suites test parts. This runs the whole loop against a model **scripted to
+misbehave** — stopping early, claiming tests it never ran, rewriting the plan
+to escape it — and checks the system catches each one. Currently 19/19.
+
+It is included in `npm test`. See [make-me-100.md](make-me-100.md) for what it
+measures and why.
+
 ## The three other commands
 
 ```bash
