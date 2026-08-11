@@ -1135,6 +1135,83 @@ for (const label of [
   );
 }
 
+/*
+ * The live test only ever exercised two tools.
+ *
+ * "create fizzbuzz.py" is answerable with write_file alone, so 33 tools were
+ * covered by one real call to one of them. It also declared success from the
+ * fact that a file existed and a command exited 0 — the model's closing
+ * "Output confirmed correct." was the only evidence the CONTENT was right,
+ * which is precisely the self-report the plan system exists to distrust.
+ */
+check(
+  "the live test seeds a file that must be found and read first",
+  /counter\.py/.test(realSrc) && /Do not rewrite the file from scratch/.test(realSrc),
+  "a task answerable by write_file alone can only ever test write_file"
+);
+check(
+  "the seeded bugs are invisible without reading or running it",
+  /range\(1, 20\)/.test(realSrc) && /if n % 15 == 0/.test(realSrc),
+  "off-by-one, and the 15 case unreachable behind 3 and 5"
+);
+check(
+  "editing counts as changing a file, not just write_file",
+  /WRITERS/.test(realSrc) && /"apply_patch"/.test(realSrc),
+  "the prompt asks it to edit, so demanding write_file would fail good work"
+);
+check(
+  "it verifies the output itself rather than believing the summary",
+  /the output is ACTUALLY correct/.test(realSrc) &&
+    /checked here, not taken from what it said/.test(realSrc)
+);
+check(
+  "correctness is part of the verdict",
+  /const passed = usedTools && wrote && onDisk && correct !== false/.test(realSrc),
+  "otherwise a confident wrong answer still exits 0"
+);
+check(
+  "the cheap smoke test is still available",
+  /"quick"/.test(realSrc) && /"full"/.test(realSrc)
+);
+
+/*
+ * The cost line ignored the cache and so overstated the bill.
+ *
+ * It carried its own `in * 0.435 + out * 0.87`, which prices cache hits at
+ * full rate — they are about 120x cheaper. On the reported two-round run that
+ * is up to ~2.5x too high, in the one place whose job is to say what the real
+ * API costs.
+ */
+check(
+  "the live test prices with the app's own function",
+  /estimateCost\(usage, MODEL\)/.test(realSrc) &&
+    // The rate may still appear in a comment explaining the old bug; what
+    // must not come back is a live calculation using it.
+    !/const cost = [^;]*0\.435/.test(realSrc),
+  "a second copy of the pricing maths is a copy that drifts"
+);
+check(
+  "and shows the cache split, since that is where the money is",
+  /cached, \$\{miss\} new/.test(realSrc) || /cached/.test(realSrc)
+);
+
+const { estimateCost: priceIt } = await load("src/lib/pricing.ts");
+const cached = priceIt(
+  {
+    prompt_tokens: 18950,
+    completion_tokens: 497,
+    prompt_cache_hit_tokens: 12000,
+    prompt_cache_miss_tokens: 6950,
+  },
+  "deepseek-v4-pro"
+);
+const naive = (18950 / 1e6) * 0.435 + (497 / 1e6) * 0.87;
+check(
+  "pricing a cached prompt costs materially less than pricing it naively",
+  cached < naive * 0.6,
+  `$${cached.toFixed(5)} against $${naive.toFixed(5)} — the old line showed the larger one`
+);
+
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
 );
