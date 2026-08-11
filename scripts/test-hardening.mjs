@@ -544,6 +544,34 @@ check(
 console.log("\n13. The app itself, not the agent");
 
 /*
+ * Linting must never walk the user's data directory.
+ *
+ * data/ holds their chats and their workspaces, and a workspace contains
+ * whatever the agent installed for them. One Playwright install produced 215
+ * ESLint errors about React hooks inside Playwright's own bundled trace
+ * viewer — none of them actionable, none of them our code, and all of them
+ * appearing only AFTER the agent had done real work, which is the worst
+ * possible time for a red lint run.
+ */
+const eslintConfig = readFileSync(path.join(ROOT, "eslint.config.mjs"), "utf8");
+check(
+  "eslint ignores the user's data directory",
+  /globalIgnores\(\[[\s\S]*?"data\/\*\*"/.test(eslintConfig),
+  "a workspace can contain an entire node_modules or a Python venv"
+);
+check(
+  "and the parallel test runner's scratch directories",
+  /"\.test-data\/\*\*"/.test(eslintConfig)
+);
+
+const tsconfig = JSON.parse(readFileSync(path.join(ROOT, "tsconfig.json"), "utf8"));
+check(
+  "typecheck excludes them too",
+  tsconfig.exclude.includes("data") && tsconfig.exclude.includes(".test-data"),
+  "a .ts file in a workspace is the user's, not ours"
+);
+
+/*
  * Two costs that grew with everything ever written rather than with what is
  * on screen. Neither is about the model.
  */

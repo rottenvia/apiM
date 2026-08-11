@@ -39,6 +39,7 @@
   "exclude": [
     "node_modules",
     "data",
+    ".test-data",
     "scripts/tmp"
   ]
 }
