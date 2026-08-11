@@ -6,6 +6,7 @@
     "build": "next build",
     "start": "next start",
     "test": "node scripts/test-all.mjs",
+    "report": "node scripts/report.mjs",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test:workspace": "tsx scripts/test-workspace.mjs",
