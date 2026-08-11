@@ -191,7 +191,21 @@ export function summarise(entries: Diagnostic[]): ReportGroup[] {
     const existing = groups.get(key);
     if (existing) {
       existing.count += 1;
-      if (e.at > existing.lastAt) {
+      /*
+       * `>=`, not `>`.
+       *
+       * ISO timestamps have millisecond resolution, and two events recorded
+       * in the same millisecond are common — a burst of tool failures in one
+       * round produces several. With a strict `>` the first of them won and
+       * the later, usually clearer, wording was thrown away.
+       *
+       * Entries are read back in the order they were written, so when the
+       * timestamps tie, later in the file is later in time. Found by the
+       * parallel test runner: the check passed alone on a slow machine where
+       * the writes landed in different milliseconds, and failed under load
+       * where they did not.
+       */
+      if (e.at >= existing.lastAt) {
         existing.lastAt = e.at;
         existing.example = e.detail;
       }
