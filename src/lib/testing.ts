@@ -243,33 +243,75 @@ export function parseTestOutput(
   }
 
   /*
-   * --- node --test (TAP) ---------------------------------------------------
+   * --- node --test ---------------------------------------------------------
    *
-   * Node's own test runner ships with Node, needs no install, and is what a
-   * small project most often has. It was not recognised, so a green run came
-   * back as "All 0 tests passed" — a true-sounding sentence with the count
-   * silently wrong — and a red one fell through to the "not recognised" path,
-   * which is honest but names no failures.
+   * Node's own runner ships with Node and needs no install, so it is a likely
+   * suite for a small project. It has TWO output formats and which one you
+   * get depends on the Node version:
    *
-   * Found by writing a real node --test fixture in the dispatch suite and
-   * reading what came back, rather than by reading this file.
+   *   Node 22 and earlier, piped:  TAP        "# pass 1"
+   *   Node 23 and later,   always: spec       "i pass 1"   (a real U+2139)
    *
-   * Checked before Go because Go's detector is a loose /^(ok|FAIL|---)\s/,
-   * and TAP's "ok 1 - name" lines match it.
+   * Node 23 changed the non-TTY default from tap to spec to match TTY. So the
+   * TAP parser I added worked on my Node 22 machine and did nothing on the
+   * reported Node 24 run — "All 0 tests passed" for a green suite, and no
+   * named failures for a red one.
+   *
+   * Both are matched here, by the counter lines they share, with the leading
+   * marker left unanchored so the symbol never has to be spelled out. That
+   * also survives --test-reporter being set explicitly either way.
+   *
+   * Checked before Go, whose detector is a loose /^(ok|FAIL|---)\s/ that TAP's
+   * "ok 1 - name" lines would otherwise match first.
    */
-  const tapCounts = /^# pass (\d+)$/m.exec(text);
-  if (tapCounts && /^# tests \d+$/m.test(text)) {
-    base.passed = Number(tapCounts[1]);
-    base.failed = Number((/^# fail (\d+)$/m.exec(text) ?? [])[1] ?? 0);
-    base.skipped = Number((/^# skipped (\d+)$/m.exec(text) ?? [])[1] ?? 0);
+  const nodeCount = (label: string): number | null => {
+    // Leading marker is "# " (tap) or a symbol (spec); both then have the
+    // label, whitespace and a number, and nothing else on the line.
+    const m = new RegExp(`^\\s*\\S?\\s*${label}\\s+(\\d+)\\s*$`, "m").exec(text);
+    return m ? Number(m[1]) : null;
+  };
+
+  const nodeTotal = nodeCount("tests");
+  const nodePass = nodeCount("pass");
+  const nodeFail = nodeCount("fail");
+  if (nodeTotal !== null && nodePass !== null && nodeFail !== null) {
+    base.passed = nodePass;
+    base.failed = nodeFail;
+    base.skipped = nodeCount("skipped") ?? 0;
     base.ok = base.failed === 0 && exitCode === 0;
 
-    // "not ok 1 - the name" is TAP's failure line. The trailing " # SKIP"
-    // marker means it was skipped, not failed, so those are left out.
+    /*
+     * Failure names, from whichever format produced them.
+     *
+     *   tap:   "not ok 1 - the name"
+     *   spec:  a cross, then the name and a duration
+     *
+     * The spec pattern deliberately requires the trailing "(1.23ms)" so it
+     * cannot match a stack-trace line that happens to start with a symbol.
+     */
     for (const m of text.matchAll(/^not ok \d+ - (.+)$/gm)) {
       const name = m[1].replace(/\s*#\s*(SKIP|TODO).*$/i, "").trim();
       if (name && base.failures.length < 20) {
         base.failures.push({ name, detail: "failed" });
+      }
+    }
+    if (base.failures.length === 0) {
+      /*
+       * De-duplicated, because spec prints each failure twice: once inline
+       * as it happens, and again in the "failing tests:" block at the end.
+       * Verified against real `node --test --test-reporter=spec` output — one
+       * failing test came back as two identical entries, which would tell the
+       * model it had two problems to fix instead of one.
+       */
+      const seen = new Set<string>();
+      for (const m of text.matchAll(
+        /^\s*[\u2716\u00d7x\u2717]\s+(.+?)\s+\([\d.]+m?s\)\s*$/gim
+      )) {
+        const name = m[1].trim();
+        if (name && !seen.has(name) && base.failures.length < 20) {
+          seen.add(name);
+          base.failures.push({ name, detail: "failed" });
+        }
       }
     }
     return base;
