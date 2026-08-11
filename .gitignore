@@ -57,3 +57,6 @@ scripts/tmp/
 
 # Per-suite test data, created by `npm test`.
 .test-data/
+
+# Output of `npm run report`, meant to be attached rather than committed.
+report.txt
