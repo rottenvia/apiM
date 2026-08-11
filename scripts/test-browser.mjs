@@ -329,17 +329,17 @@ check(
 check("it mentions checking your own work", /your own work/.test(schema));
 
 const { readFile } = await import("node:fs/promises");
-const route = await readFile(path.join(ROOT, "src/app/api/chat/route.ts"), "utf8");
+const route = (await readFile(path.join(ROOT, "src/app/api/chat/route.ts"), "utf8")).replace(/\r\n/g, "\n");
 check(
   "it is withheld when the browser is not installed",
   /name === "browse"\) return hasBrowser/.test(route),
   "offering an unavailable tool buys an error and an apology"
 );
 
-const adapter = await readFile(
+const adapter = (await readFile(
   path.join(ROOT, "src/lib/browser-playwright.ts"),
   "utf8"
-);
+)).replace(/\r\n/g, "\n");
 check(
   "the adapter launches headless",
   /headless: true/.test(adapter),
@@ -358,7 +358,7 @@ check(
   /browser:install/.test(adapter)
 );
 
-const pkg = JSON.parse(await readFile(path.join(ROOT, "package.json"), "utf8"));
+const pkg = JSON.parse((await readFile(path.join(ROOT, "package.json"), "utf8")).replace(/\r\n/g, "\n"));
 check(
   "chromium is not forced on everyone at npm install",
   !pkg.dependencies?.["playwright-core"] && !pkg.dependencies?.playwright,

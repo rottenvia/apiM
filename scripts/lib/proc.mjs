@@ -8,6 +8,7 @@
  */
 import { spawn, execSync } from "node:child_process";
 import { createServer } from "node:net";
+import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 
@@ -115,4 +116,62 @@ export async function havePython() {
   });
   // Windows ships a stub that prints a Microsoft Store advert and exits 9009.
   return res.status === 0 && /Python \d/.test(`${res.stdout}${res.stderr}`);
+}
+
+/**
+ * Read a source file for assertions, with line endings normalised.
+ *
+ * Several suites check that the code contains a particular shape — that a
+ * guard exists, that a tool is wired up. Those patterns are written with
+ * "\n", and on Windows git checks the repository out with CRLF, so every
+ * multi-line pattern silently fails to match.
+ *
+ * Reported from a real Windows run: one tools3 check failed for exactly this
+ * reason while the code it was testing was correct. The assertion was about
+ * behaviour, so the line endings should never have been part of it.
+ *
+ * Tabs are left alone; only the carriage returns go.
+ */
+export async function readSource(file) {
+  const { readFile } = await import("node:fs/promises");
+  return (await readFile(file, "utf8")).replace(/\r\n/g, "\n");
+}
+
+/** Synchronous form, for suites that read at module scope. */
+export function readSourceSync(file) {
+  return readFileSync(file, "utf8").replace(/\r\n/g, "\n");
+}
+
+/**
+ * How to invoke npm without a shell.
+ *
+ * `spawn("npm", args, { shell: true })` works, but Node 24 now warns on every
+ * call — "Passing args to a child process with shell option true can lead to
+ * security vulnerabilities" — which is noise in the middle of a test report,
+ * and the warning is fair: with a shell, arguments are concatenated rather
+ * than escaped.
+ *
+ * npm ships as npm-cli.js, a plain JavaScript file. Running that with the
+ * Node we are already using needs no shell, no .cmd shim, and no quoting.
+ * The same trick nextBin() uses for Next.
+ *
+ * Falls back to the shell form if npm cannot be located, since a working
+ * noisy command beats a silent broken one.
+ */
+export function npmCommand(root, args) {
+  /*
+   * npm tells us where it lives.
+   *
+   * `npm_execpath` is set by npm itself for every script it runs, and points
+   * at npm-cli.js. Both callers here ARE npm scripts, so it is always
+   * available — and it is exact, rather than a guess at where npm might be
+   * installed, which varies wildly between nvm, Volta, Homebrew and the
+   * Windows installer.
+   */
+  const cli = process.env.npm_execpath;
+  if (cli && cli.endsWith(".js")) {
+    return { cmd: process.execPath, args: [cli, ...args], shell: false };
+  }
+  // Run directly from a bare `node scripts/...` — fall back to the shell form.
+  return { cmd: "npm", args, shell: IS_WINDOWS };
 }

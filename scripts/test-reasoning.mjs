@@ -60,11 +60,11 @@ const check = (label, ok, detail = "") => {
   ok ? pass++ : fail++;
 };
 
-const page = await readFile(path.join(ROOT, "src/app/page.tsx"), "utf8");
-const bubble = await readFile(
+const page = (await readFile(path.join(ROOT, "src/app/page.tsx"), "utf8")).replace(/\r\n/g, "\n");
+const bubble = (await readFile(
   path.join(ROOT, "src/components/MessageBubble.tsx"),
   "utf8"
-);
+)).replace(/\r\n/g, "\n");
 
 console.log("\napiM thinking-panel checks\n");
 

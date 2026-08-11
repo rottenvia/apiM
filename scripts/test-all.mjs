@@ -28,10 +28,10 @@
 
 import { spawn } from "node:child_process";
 import path from "node:path";
+import { npmCommand } from "./lib/proc.mjs";
 import { readFile, rm } from "node:fs/promises";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
-const IS_WINDOWS = process.platform === "win32";
 
 const COLOR = process.stdout.isTTY && !process.env.NO_COLOR;
 const wrap = (c) => (s) => (COLOR ? `\x1b[${c}m${s}\x1b[0m` : s);
@@ -75,11 +75,12 @@ function runOne(name) {
      */
     const dataRoot = path.join(ROOT, ".test-data", name);
 
-    const child = spawn("npm", ["run", `test:${name}`], {
+    // Runs npm's own CLI with this Node: no shell, so no quoting and no
+    // Node 24 deprecation warning about unescaped arguments.
+    const invocation = npmCommand(ROOT, ["run", `test:${name}`]);
+    const child = spawn(invocation.cmd, invocation.args, {
       cwd: ROOT,
-      // npm is a .cmd shim on Windows and cannot be spawned without a shell.
-      // The arguments here are constants from this file, not model output.
-      shell: IS_WINDOWS,
+      shell: invocation.shell,
       env: { ...process.env, NO_COLOR: "1", APIM_DATA_ROOT: dataRoot },
     });
 
@@ -131,7 +132,7 @@ function runOne(name) {
 }
 
 async function main() {
-  const pkg = JSON.parse(await readFile(path.join(ROOT, "package.json"), "utf8"));
+  const pkg = JSON.parse((await readFile(path.join(ROOT, "package.json"), "utf8")).replace(/\r\n/g, "\n"));
   const all = Object.keys(pkg.scripts)
     .filter((s) => s.startsWith("test:"))
     .map((s) => s.slice(5))

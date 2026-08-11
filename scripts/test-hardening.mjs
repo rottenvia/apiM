@@ -28,7 +28,7 @@ const DATA_ROOT = process.env.APIM_DATA_ROOT
   ? path.resolve(process.env.APIM_DATA_ROOT)
   : path.join(ROOT, "data");
 const load = (p) => import(pathToFileURL(path.join(ROOT, p)).href);
-const read = (p) => readFileSync(path.join(ROOT, p), "utf8");
+const read = (p) => readFileSync(path.join(ROOT, p), "utf8").replace(/\r\n/g, "\n");
 
 const ws = await load("src/lib/workspace.ts");
 const snaps = await load("src/lib/snapshots.ts");
@@ -553,7 +553,7 @@ console.log("\n13. The app itself, not the agent");
  * appearing only AFTER the agent had done real work, which is the worst
  * possible time for a red lint run.
  */
-const eslintConfig = readFileSync(path.join(ROOT, "eslint.config.mjs"), "utf8");
+const eslintConfig = readFileSync(path.join(ROOT, "eslint.config.mjs"), "utf8").replace(/\r\n/g, "\n");
 check(
   "eslint ignores the user's data directory",
   /globalIgnores\(\[[\s\S]*?"data\/\*\*"/.test(eslintConfig),
@@ -564,7 +564,35 @@ check(
   /"\.test-data\/\*\*"/.test(eslintConfig)
 );
 
-const tsconfig = JSON.parse(readFileSync(path.join(ROOT, "tsconfig.json"), "utf8"));
+const tsconfig = JSON.parse(readFileSync(path.join(ROOT, "tsconfig.json"), "utf8").replace(/\r\n/g, "\n"));
+
+/*
+ * Source assertions must survive a Windows checkout.
+ *
+ * git checks the repository out with CRLF on Windows by default, so any
+ * pattern written with "\n" silently fails to match. Reported from a real
+ * Windows run: one tools3 check failed for exactly this reason while the
+ * code it tested was correct — the assertion was about behaviour, and line
+ * endings should never have been part of it.
+ */
+const crlfSample = 'ok: true,\r\n            content: formatHttpResult(result),';
+const multiLinePattern = /ok: true,\n            content: formatHttpResult/;
+check(
+  "a multi-line source pattern fails on raw CRLF",
+  !multiLinePattern.test(crlfSample),
+  "this is the failure being guarded against, not a bug"
+);
+check(
+  "and matches once line endings are normalised",
+  multiLinePattern.test(crlfSample.replace(/\r\n/g, "\n"))
+);
+
+const tools3Src = readFileSync(path.join(ROOT, "scripts/test-tools3.mjs"), "utf8");
+check(
+  "suites normalise the source they assert against",
+  tools3Src.includes('"src/lib/tools.ts"), "utf8").replace('),
+  "otherwise the same class of failure returns on the next Windows run"
+);
 check(
   "typecheck excludes them too",
   tsconfig.exclude.includes("data") && tsconfig.exclude.includes(".test-data"),

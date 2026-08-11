@@ -217,7 +217,7 @@ check("make_plan is offered", names.includes("make_plan"));
 check("update_plan is offered", names.includes("update_plan"));
 
 const { readFile } = await import("node:fs/promises");
-const route = await readFile(path.join(ROOT, "src/app/api/chat/route.ts"), "utf8");
+const route = (await readFile(path.join(ROOT, "src/app/api/chat/route.ts"), "utf8")).replace(/\r\n/g, "\n");
 
 check(
   "the system prompt tells the model to plan",
@@ -253,7 +253,7 @@ check(
   "being stuck and saying so is a correct ending"
 );
 
-const bubble = await readFile(path.join(ROOT, "src/components/MessageBubble.tsx"), "utf8");
+const bubble = (await readFile(path.join(ROOT, "src/components/MessageBubble.tsx"), "utf8")).replace(/\r\n/g, "\n");
 check("the plan is shown in the UI", /<PlanPanel plan=\{message\.plan\}/.test(bubble));
 check(
   "and the bubble re-renders when it changes",
