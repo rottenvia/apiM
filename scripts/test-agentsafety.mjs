@@ -201,6 +201,27 @@ check(
   groups[0].subject === "run_command",
   "the thing happening most is nearly always what to fix first"
 );
+/*
+ * Two events in the same millisecond.
+ *
+ * Recording through the filesystem is fast enough that a burst of failures
+ * shares a timestamp, and summarise() compared with `>` — so the FIRST won
+ * and the later, clearer wording was discarded. It passed alone on a slow
+ * machine where the writes landed in different milliseconds and failed under
+ * the parallel runner where they did not. Asserted directly here so it no
+ * longer depends on how busy the machine is.
+ */
+const sameMs = new Date().toISOString();
+const tied = diag.summarise([
+  { at: sameMs, kind: "tool_failed", subject: "same", detail: "first" },
+  { at: sameMs, kind: "tool_failed", subject: "same", detail: "second" },
+]);
+check(
+  "a tie on the timestamp keeps the later entry",
+  tied[0].example === "second",
+  "entries are read in write order, so a tie means later in the file"
+);
+
 check(
   "the newest example is kept",
   groups[0].example.includes("again"),
