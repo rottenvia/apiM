@@ -17,6 +17,17 @@ import { pathToFileURL } from "node:url";
 import { promises as fs } from "node:fs";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
+/*
+ * Where this suite keeps its files.
+ *
+ * Several suites clear `data/` to start from a known state, which is correct
+ * alone and destructive in parallel — they delete each other's fixtures. The
+ * runner gives each suite its own directory through APIM_DATA_ROOT, and the
+ * app reads the same variable, so the code under test and the test agree.
+ */
+const DATA_ROOT = process.env.APIM_DATA_ROOT
+  ? path.resolve(process.env.APIM_DATA_ROOT)
+  : path.join(ROOT, "data");
 const load = (p) => import(pathToFileURL(path.join(ROOT, p)).href);
 
 const R = await load("src/lib/runner.ts");
@@ -39,7 +50,7 @@ const skipped = (label, why) => {
 };
 
 const WS = "installtest";
-const wsDir = path.join(ROOT, "data", "workspaces", WS);
+const wsDir = path.join(DATA_ROOT, "workspaces", WS);
 await fs.rm(wsDir, { recursive: true, force: true });
 
 console.log("\napiM package install checks\n");

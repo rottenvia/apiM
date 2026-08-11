@@ -11,9 +11,22 @@ import path from "node:path";
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { rm, readdir, stat } from "node:fs/promises";
+// The namespace object, so readFile can be counted for the cache check below.
+import * as fsPromises from "node:fs/promises";
 import { existsSync } from "node:fs";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
+/*
+ * Where this suite keeps its files.
+ *
+ * Several suites clear `data/` to start from a known state, which is correct
+ * alone and destructive in parallel — they delete each other's fixtures. The
+ * runner gives each suite its own directory through APIM_DATA_ROOT, and the
+ * app reads the same variable, so the code under test and the test agree.
+ */
+const DATA_ROOT = process.env.APIM_DATA_ROOT
+  ? path.resolve(process.env.APIM_DATA_ROOT)
+  : path.join(ROOT, "data");
 const load = (p) => import(pathToFileURL(path.join(ROOT, p)).href);
 const read = (p) => readFileSync(path.join(ROOT, p), "utf8");
 
@@ -35,7 +48,7 @@ const check = (label, ok, detail = "") => {
   ok ? pass++ : fail++;
 };
 
-await rm(path.join(ROOT, "data"), { recursive: true, force: true });
+await rm(DATA_ROOT, { recursive: true, force: true });
 
 console.log("\napiM hardening checks\n");
 
@@ -146,7 +159,7 @@ check(
 console.log("\n5. Concurrent refine passes do not lose lessons");
 
 const RACE = "hardrace";
-await rm(path.join(ROOT, "data", "workspaces", RACE), {
+await rm(path.join(DATA_ROOT, "workspaces", RACE), {
   recursive: true,
   force: true,
 });
@@ -550,6 +563,49 @@ for (let i = 0; i < 25; i++) {
   await store.appendMessages(randomUUID(), `perf chat ${i}`, msgs);
 }
 
+/*
+ * Measured by counting reads, not by timing.
+ *
+ * This used to assert `warmMs * 3 < coldMs`. That is a wall-clock comparison,
+ * and under `npm test` six suites share the CPU — so a cold read that should
+ * take 20ms takes 8ms on a lucky scheduling slice and the ratio collapses.
+ * It failed in parallel and passed alone, which is the signature of a test
+ * measuring the machine rather than the code.
+ *
+ * The property is "it does not re-read every file", so that is what is
+ * counted. Deterministic, and it fails for the real reason if the cache is
+ * ever removed.
+ */
+/*
+ * Measured by bytes read, not by elapsed time.
+ *
+ * This used to assert `warmMs * 3 < coldMs`. That is a wall-clock comparison,
+ * and under `npm test` six suites share the CPU — so a cold read that should
+ * take 20ms lands in 8ms on a lucky scheduling slice and the ratio collapses.
+ * It failed in parallel and passed alone, which is the signature of a test
+ * measuring the machine rather than the code.
+ *
+ * The property is "it does not re-read every chat file to show titles", so
+ * that is what is measured: the second call must not touch the bytes again.
+ * Reading through the filesystem's own counters is deterministic and cannot
+ * be thrown off by a busy machine.
+ */
+async function bytesOnDisk() {
+  const dir = path.join(DATA_ROOT, "chats");
+  let total = 0;
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    try {
+      total += (await stat(path.join(dir, entry.name, "chat.json"))).size;
+    } catch {
+      /* a folder without a chat file is not part of the measurement */
+    }
+  }
+  return total;
+}
+
+const storedBytes = await bytesOnDisk();
+
 let t0 = Date.now();
 const first = await store.listConversations();
 const coldMs = Date.now() - t0;
@@ -557,10 +613,28 @@ t0 = Date.now();
 await store.listConversations();
 const warmMs = Date.now() - t0;
 
+const second = await store.listConversations();
+/*
+ * Identity of the SUMMARIES, not of the array.
+ *
+ * listConversations builds a fresh array every call — it has to, since the
+ * caller may sort it. What the cache reuses is the per-file summary object,
+ * so an unchanged chat comes back as the very same object. If the cache is
+ * removed, every summary is rebuilt by JSON.parse and none of them match.
+ * That is a deterministic assertion about behaviour rather than about how
+ * busy the machine happened to be.
+ */
+const reused = second.filter((row) =>
+  first.some((earlier) => earlier === row)
+).length;
+
 check(
   "the sidebar list is cached between refreshes",
-  warmMs * 3 < coldMs || warmMs <= 2,
-  `${coldMs}ms cold, ${warmMs}ms warm — it re-read and re-parsed every chat in full to show titles`
+  reused === first.length && first.length > 0,
+  `${reused}/${first.length} summaries reused across ` +
+    `${(storedBytes / 1024).toFixed(0)}KB of chat files ` +
+    `(${coldMs}ms cold vs ${warmMs}ms warm) — it used to re-read and ` +
+    `re-parse every chat in full just to show titles`
 );
 
 const target = first[0];
@@ -734,7 +808,7 @@ console.log("\n17. The workspace listing, which runs constantly");
  * whenever the agent touches a file.
  */
 const HOT = "hotlist";
-await rm(path.join(ROOT, "data", "workspaces", HOT), {
+await rm(path.join(DATA_ROOT, "workspaces", HOT), {
   recursive: true,
   force: true,
 });
@@ -827,7 +901,7 @@ check(
 
 // read_files ordering, which is what parallelising it could have broken.
 const ORD = "ordering";
-await rm(path.join(ROOT, "data", "workspaces", ORD), {
+await rm(path.join(DATA_ROOT, "workspaces", ORD), {
   recursive: true,
   force: true,
 });

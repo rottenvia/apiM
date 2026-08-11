@@ -11,6 +11,17 @@ import { pathToFileURL } from "node:url";
 import { rm, writeFile as fsWrite, mkdir } from "node:fs/promises";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
+/*
+ * Where this suite keeps its files.
+ *
+ * Several suites clear `data/` to start from a known state, which is correct
+ * alone and destructive in parallel — they delete each other's fixtures. The
+ * runner gives each suite its own directory through APIM_DATA_ROOT, and the
+ * app reads the same variable, so the code under test and the test agree.
+ */
+const DATA_ROOT = process.env.APIM_DATA_ROOT
+  ? path.resolve(process.env.APIM_DATA_ROOT)
+  : path.join(ROOT, "data");
 const P = await import(pathToFileURL(path.join(ROOT, "src/lib/processes.ts")).href);
 const { runTool } = await import(pathToFileURL(path.join(ROOT, "src/lib/tools.ts")).href);
 
@@ -27,7 +38,7 @@ const check = (label, ok, detail = "") => {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const WS = "proctest";
-const DIR = path.join(ROOT, "data", "workspaces", WS);
+const DIR = path.join(DATA_ROOT, "workspaces", WS);
 await rm(DIR, { recursive: true, force: true });
 await mkdir(DIR, { recursive: true });
 

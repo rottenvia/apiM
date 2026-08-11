@@ -18,6 +18,17 @@ import os from "node:os";
 
 const run = promisify(execFile);
 const ROOT = path.resolve(import.meta.dirname, "..");
+/*
+ * Where this suite keeps its files.
+ *
+ * Several suites clear `data/` to start from a known state, which is correct
+ * alone and destructive in parallel — they delete each other's fixtures. The
+ * runner gives each suite its own directory through APIM_DATA_ROOT, and the
+ * app reads the same variable, so the code under test and the test agree.
+ */
+const DATA_ROOT = process.env.APIM_DATA_ROOT
+  ? path.resolve(process.env.APIM_DATA_ROOT)
+  : path.join(ROOT, "data");
 const A = await import(pathToFileURL(path.join(ROOT, "src/lib/archive.ts")).href);
 
 const COLOR = process.stdout.isTTY && !process.env.NO_COLOR;
@@ -398,7 +409,7 @@ check(
 );
 
 const W = await import(pathToFileURL(path.join(ROOT, "src/lib/workspace.ts")).href);
-const WSROOT = path.join(ROOT, "data", "workspaces");
+const WSROOT = path.join(DATA_ROOT, "workspaces");
 await fs.rm(path.join(WSROOT, "archtest"), { recursive: true, force: true });
 
 // An archive entry is attacker-controlled, so the path it produces has to be

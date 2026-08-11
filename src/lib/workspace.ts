@@ -24,7 +24,22 @@ import { documentKind, readDocument } from "@/lib/documents";
  * it being traced at all.
  */
 const DATA_DIR = ["data", "workspaces"].join(path.sep);
-const ROOT = path.resolve(process.cwd(), DATA_DIR);
+/*
+ * `APIM_DATA_ROOT` lets a test suite point the whole app at its own directory.
+ *
+ * Six suites used to delete `data/` outright to start clean, which is correct
+ * in isolation and destructive the moment two of them run at once — they wipe
+ * each other's fixtures mid-run and fail in ways that look like real bugs.
+ * Discovered by building `npm test`: nine suites failed together and every
+ * one of them passed alone.
+ *
+ * Isolating by directory rather than by lock means they can genuinely run in
+ * parallel instead of merely not colliding. Unset in normal use, so this is
+ * exactly the old behaviour for anyone running the app.
+ */
+const ROOT = process.env.APIM_DATA_ROOT
+  ? path.resolve(process.env.APIM_DATA_ROOT, "workspaces")
+  : path.resolve(process.cwd(), DATA_DIR);
 
 /**
  * Guard rails, not a quota.

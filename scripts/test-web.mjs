@@ -18,6 +18,17 @@ import { pathToFileURL } from "node:url";
 import { createServer } from "node:http";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
+/*
+ * Where this suite keeps its files.
+ *
+ * Several suites clear `data/` to start from a known state, which is correct
+ * alone and destructive in parallel — they delete each other's fixtures. The
+ * runner gives each suite its own directory through APIM_DATA_ROOT, and the
+ * app reads the same variable, so the code under test and the test agree.
+ */
+const DATA_ROOT = process.env.APIM_DATA_ROOT
+  ? path.resolve(process.env.APIM_DATA_ROOT)
+  : path.join(ROOT, "data");
 const load = (p) => import(pathToFileURL(path.join(ROOT, p)).href);
 const read = (p) => readFileSync(path.join(ROOT, p), "utf8");
 
@@ -229,7 +240,7 @@ const { createZip } = await load("src/lib/zip.ts");
 const { writeFile: fsWrite } = await import("node:fs/promises");
 const WS = "webtools";
 await (await import("node:fs/promises")).rm(
-  path.join(ROOT, "data", "workspaces", WS),
+  path.join(DATA_ROOT, "workspaces", WS),
   { recursive: true, force: true }
 );
 
@@ -358,7 +369,7 @@ console.log("\n7. Batched edits, because rounds are the cost");
  */
 const B = "batchtools";
 await (await import("node:fs/promises")).rm(
-  path.join(ROOT, "data", "workspaces", B),
+  path.join(DATA_ROOT, "workspaces", B),
   { recursive: true, force: true }
 );
 await runTool(B, "write_files", {

@@ -17,6 +17,17 @@ import {
 } from "./lib/proc.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
+/*
+ * Where this suite keeps its files.
+ *
+ * Several suites clear `data/` to start from a known state, which is correct
+ * alone and destructive in parallel — they delete each other's fixtures. The
+ * runner gives each suite its own directory through APIM_DATA_ROOT, and the
+ * app reads the same variable, so the code under test and the test agree.
+ */
+const DATA_ROOT = process.env.APIM_DATA_ROOT
+  ? path.resolve(process.env.APIM_DATA_ROOT)
+  : path.join(ROOT, "data");
 const PASSWORD = "correct-horse-battery";
 const SECRET = "test-secret-not-for-production";
 
@@ -55,8 +66,8 @@ process.on("SIGINT", () => {
 async function main() {
   console.log(bold("\napiM auth checks\n"));
 
-  await rm(path.join(ROOT, "data"), { recursive: true, force: true });
-  await mkdir(path.join(ROOT, "data"), { recursive: true });
+  await rm(DATA_ROOT, { recursive: true, force: true });
+  await mkdir(DATA_ROOT, { recursive: true });
 
   const port = await findFreePort();
   const base = `http://127.0.0.1:${port}`;

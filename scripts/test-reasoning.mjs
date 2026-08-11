@@ -33,6 +33,17 @@ import { rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
+/*
+ * Where this suite keeps its files.
+ *
+ * Several suites clear `data/` to start from a known state, which is correct
+ * alone and destructive in parallel — they delete each other's fixtures. The
+ * runner gives each suite its own directory through APIM_DATA_ROOT, and the
+ * app reads the same variable, so the code under test and the test agree.
+ */
+const DATA_ROOT = process.env.APIM_DATA_ROOT
+  ? path.resolve(process.env.APIM_DATA_ROOT)
+  : path.join(ROOT, "data");
 const load = (p) => import(pathToFileURL(path.join(ROOT, p)).href);
 
 const store = await load("src/lib/store.ts");
@@ -207,7 +218,7 @@ check(
   "which is the 404 the stale closure was producing"
 );
 
-await rm(path.join(ROOT, "data", "chats"), { recursive: true, force: true });
+await rm(path.join(DATA_ROOT, "chats"), { recursive: true, force: true });
 
 console.log(
   `\n${pass + fail} checks · ${pass} passed${fail ? ` · ${r(`${fail} failed`)}` : ""}\n`

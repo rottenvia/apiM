@@ -17,7 +17,10 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import type { SearchResultItem } from "@/lib/search-types";
 
-const CACHE_DIR = path.resolve(process.cwd(), "data", "search-cache");
+/** Overridable so parallel test suites do not share one cache. */
+const CACHE_DIR = process.env.APIM_DATA_ROOT
+  ? path.resolve(process.env.APIM_DATA_ROOT, "search-cache")
+  : path.resolve(process.cwd(), "data", "search-cache");
 
 /**
  * How long a cached result stays usable.

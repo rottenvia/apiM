@@ -27,6 +27,17 @@ import {
 } from "./lib/proc.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
+/*
+ * Where this suite keeps its files.
+ *
+ * Several suites clear `data/` to start from a known state, which is correct
+ * alone and destructive in parallel — they delete each other's fixtures. The
+ * runner gives each suite its own directory through APIM_DATA_ROOT, and the
+ * app reads the same variable, so the code under test and the test agree.
+ */
+const DATA_ROOT = process.env.APIM_DATA_ROOT
+  ? path.resolve(process.env.APIM_DATA_ROOT)
+  : path.join(ROOT, "data");
 const load = (p) => import(pathToFileURL(path.join(ROOT, p)).href);
 
 const plan = await load("src/lib/plan.ts");
@@ -368,7 +379,7 @@ check(
 );
 
 cleanup();
-await rm(path.join(ROOT, "data", "workspaces", "plantest"), { recursive: true, force: true });
+await rm(path.join(DATA_ROOT, "workspaces", "plantest"), { recursive: true, force: true });
 
 console.log(
   `\n${pass + fail} checks · ${pass} passed${fail ? ` · ${r(`${fail} failed`)}` : ""}\n`

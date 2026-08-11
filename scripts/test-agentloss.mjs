@@ -27,6 +27,17 @@ import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
+/*
+ * Where this suite keeps its files.
+ *
+ * Several suites clear `data/` to start from a known state, which is correct
+ * alone and destructive in parallel — they delete each other's fixtures. The
+ * runner gives each suite its own directory through APIM_DATA_ROOT, and the
+ * app reads the same variable, so the code under test and the test agree.
+ */
+const DATA_ROOT = process.env.APIM_DATA_ROOT
+  ? path.resolve(process.env.APIM_DATA_ROOT)
+  : path.join(ROOT, "data");
 const load = (p) => import(pathToFileURL(path.join(ROOT, p)).href);
 
 const ws = await load("src/lib/workspace.ts");
@@ -46,8 +57,8 @@ const check = (label, ok, detail = "") => {
   ok ? pass++ : fail++;
 };
 
-const WORK = path.join(ROOT, "data", "workspaces");
-await rm(path.join(ROOT, "data"), { recursive: true, force: true });
+const WORK = path.join(DATA_ROOT, "workspaces");
+await rm(DATA_ROOT, { recursive: true, force: true });
 
 console.log("\napiM agent context-loss checks\n");
 
@@ -143,7 +154,7 @@ console.log("\n2. An already-broken workspace repairs itself");
  * two folders. Shipping a fix that only prevents new splits would leave them
  * with a zip that stays invisible forever, so the merge is tested too.
  */
-await rm(path.join(ROOT, "data"), { recursive: true, force: true });
+await rm(DATA_ROOT, { recursive: true, force: true });
 const SPLIT = randomUUID();
 await mkdir(path.join(WORK, "split-chat"), { recursive: true });
 await fsWrite(path.join(WORK, "split-chat", "notes.md"), "earlier work");

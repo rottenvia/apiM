@@ -17,9 +17,20 @@ import path from "node:path";
 import { nextBin, findFreePort, killTree, spawnTracked, waitForServer } from "./lib/proc.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
+/*
+ * Where this suite keeps its files.
+ *
+ * Several suites clear `data/` to start from a known state, which is correct
+ * alone and destructive in parallel — they delete each other's fixtures. The
+ * runner gives each suite its own directory through APIM_DATA_ROOT, and the
+ * app reads the same variable, so the code under test and the test agree.
+ */
+const DATA_ROOT = process.env.APIM_DATA_ROOT
+  ? path.resolve(process.env.APIM_DATA_ROOT)
+  : path.join(ROOT, "data");
 const WS_ID = "real-test";
-const WS_DIR = path.join(ROOT, "data", "workspaces", WS_ID);
-const KEY_FILE = path.join(ROOT, "data", ".deepseek-key");
+const WS_DIR = path.join(DATA_ROOT, "workspaces", WS_ID);
+const KEY_FILE = path.join(DATA_ROOT, ".deepseek-key");
 
 const COLOR = process.stdout.isTTY && !process.env.NO_COLOR;
 const wrap = (c) => (s) => (COLOR ? `\x1b[${c}m${s}\x1b[0m` : s);
@@ -82,7 +93,7 @@ async function getKey() {
     console.log(yellow("  Carrying on anyway — if it's wrong you'll get an auth error.\n"));
   }
 
-  await mkdir(path.join(ROOT, "data"), { recursive: true });
+  await mkdir(DATA_ROOT, { recursive: true });
   await writeFile(KEY_FILE, key, "utf8");
   console.log(dim(`\n  Saved to data${path.sep}.deepseek-key so you won't be asked again.`));
   console.log(dim("  That folder is ignored by git, so the key never leaves your machine.\n"));
@@ -98,7 +109,7 @@ async function main() {
   const key = await getKey();
 
   await rm(WS_DIR, { recursive: true, force: true });
-  await mkdir(path.join(ROOT, "data"), { recursive: true });
+  await mkdir(DATA_ROOT, { recursive: true });
 
   const appPort = await findFreePort();
   console.log(dim("  starting the app (first run compiles, ~30s)…\n"));

@@ -52,6 +52,24 @@ python build.py
 
 The executable will be in the `dist` folder. Just double-click to run!
 
+## Testing
+
+```bash
+npm test
+```
+
+Runs every suite — 1,361 checks — in about 90 seconds. It never calls the
+paid API; `npm run test:real` does that and is opt-in.
+
+```bash
+npm test plan       # one suite
+npm run typecheck   # types
+npm run lint        # unused code, React mistakes
+npm run score       # rates all 33 agent tools
+```
+
+See [docs/testing.md](docs/testing.md).
+
 ## Requirements
 
 - Python 3.10+

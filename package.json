@@ -5,6 +5,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "test": "node scripts/test-all.mjs",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test:workspace": "tsx scripts/test-workspace.mjs",

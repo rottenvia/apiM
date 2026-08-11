@@ -15,6 +15,17 @@ import { createServer } from "node:http";
 import { rm } from "node:fs/promises";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
+/*
+ * Where this suite keeps its files.
+ *
+ * Several suites clear `data/` to start from a known state, which is correct
+ * alone and destructive in parallel — they delete each other's fixtures. The
+ * runner gives each suite its own directory through APIM_DATA_ROOT, and the
+ * app reads the same variable, so the code under test and the test agree.
+ */
+const DATA_ROOT = process.env.APIM_DATA_ROOT
+  ? path.resolve(process.env.APIM_DATA_ROOT)
+  : path.join(ROOT, "data");
 
 const COLOR = process.stdout.isTTY && !process.env.NO_COLOR;
 const g = (s) => (COLOR ? `\x1b[32m${s}\x1b[0m` : s);
@@ -105,8 +116,8 @@ await listen(deepseek, 8832);
 process.env.TAVILY_BASE_URL = "http://127.0.0.1:8831";
 process.env.DEEPSEEK_BASE_URL = "http://127.0.0.1:8832";
 
-await rm(path.join(ROOT, "data", "search-cache"), { recursive: true, force: true });
-await rm(path.join(ROOT, "data", "search-usage.json"), { force: true });
+await rm(path.join(DATA_ROOT, "search-cache"), { recursive: true, force: true });
+await rm(path.join(DATA_ROOT, "search-usage.json"), { force: true });
 
 // Imported after the env vars are set — the module reads them at load time.
 const S = await import(pathToFileURL(path.join(ROOT, "src/lib/smart-search.ts")).href);
@@ -257,8 +268,8 @@ check(
   `${Math.floor(1000 / perQuestionNew)} vs ${Math.floor(1000 / perQuestionOld)} questions`
 );
 
-await rm(path.join(ROOT, "data", "search-cache"), { recursive: true, force: true });
-await rm(path.join(ROOT, "data", "search-usage.json"), { force: true });
+await rm(path.join(DATA_ROOT, "search-cache"), { recursive: true, force: true });
+await rm(path.join(DATA_ROOT, "search-usage.json"), { force: true });
 tavily.close();
 deepseek.close();
 

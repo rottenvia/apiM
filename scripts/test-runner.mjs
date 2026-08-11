@@ -11,6 +11,17 @@ import { pathToFileURL } from "node:url";
 import { rm, mkdir, writeFile as fsWrite, readFile } from "node:fs/promises";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
+/*
+ * Where this suite keeps its files.
+ *
+ * Several suites clear `data/` to start from a known state, which is correct
+ * alone and destructive in parallel — they delete each other's fixtures. The
+ * runner gives each suite its own directory through APIM_DATA_ROOT, and the
+ * app reads the same variable, so the code under test and the test agree.
+ */
+const DATA_ROOT = process.env.APIM_DATA_ROOT
+  ? path.resolve(process.env.APIM_DATA_ROOT)
+  : path.join(ROOT, "data");
 const R = await import(pathToFileURL(path.join(ROOT, "src/lib/runner.ts")).href);
 
 const COLOR = process.stdout.isTTY && !process.env.NO_COLOR;
@@ -25,7 +36,7 @@ const check = (label, ok, detail = "") => {
 };
 
 const WS = "runnertest";
-const WSDIR = path.join(ROOT, "data", "workspaces", WS);
+const WSDIR = path.join(DATA_ROOT, "workspaces", WS);
 await rm(WSDIR, { recursive: true, force: true });
 await mkdir(WSDIR, { recursive: true });
 
@@ -62,7 +73,7 @@ console.log("\n4. Shell metacharacters are inert");
 const inject = R.validateCommand("python3", ["-c", "print(1)", "; rm -rf ~"]);
 check("a '; rm -rf ~' argument is accepted as literal text", inject.ok === true);
 
-await fsWrite(path.join(ROOT, "data", "workspaces", WS, "canary.txt"), "still here\n");
+await fsWrite(path.join(DATA_ROOT, "workspaces", WS, "canary.txt"), "still here\n");
 const res1 = await R.runCommand(WS, "python3", ["-c", "print('hi')", "; rm -rf ."]);
 const canary = await readFile(path.join(WSDIR, "canary.txt"), "utf8").catch(() => null);
 check("nothing was deleted by the injected text", canary === "still here\n");

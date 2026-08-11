@@ -11,6 +11,17 @@ import { pathToFileURL } from "node:url";
 import { rm } from "node:fs/promises";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
+/*
+ * Where this suite keeps its files.
+ *
+ * Several suites clear `data/` to start from a known state, which is correct
+ * alone and destructive in parallel — they delete each other's fixtures. The
+ * runner gives each suite its own directory through APIM_DATA_ROOT, and the
+ * app reads the same variable, so the code under test and the test agree.
+ */
+const DATA_ROOT = process.env.APIM_DATA_ROOT
+  ? path.resolve(process.env.APIM_DATA_ROOT)
+  : path.join(ROOT, "data");
 const { diffLines, diffStats, diffHunks } = await import(
   pathToFileURL(path.join(ROOT, "src/lib/diff.ts")).href
 );
@@ -86,8 +97,8 @@ check("skipped context is reported", hunks[0]?.skippedBefore > 0,
 console.log("\n3. Undo");
 
 const WS = "difftest";
-await rm(path.join(ROOT, "data", "workspaces", WS), { recursive: true, force: true });
-await rm(path.join(ROOT, "data", "workspaces", `${WS}.history`), { recursive: true, force: true });
+await rm(path.join(DATA_ROOT, "workspaces", WS), { recursive: true, force: true });
+await rm(path.join(DATA_ROOT, "workspaces", `${WS}.history`), { recursive: true, force: true });
 
 await ws.writeFile(WS, "app.py", "print('v1')\n");
 check("a brand-new file has no previous version",

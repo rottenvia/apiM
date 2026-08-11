@@ -54,3 +54,6 @@ deploy/.env
 # Output of `npm run cost:lab` — a measurement artefact, regenerated on demand.
 scripts/.cost-report.json
 scripts/tmp/
+
+# Per-suite test data, created by `npm test`.
+.test-data/
