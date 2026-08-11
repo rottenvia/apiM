@@ -1663,8 +1663,29 @@ export async function runTool(
           }
         }
 
+        /*
+         * Count files, not edits.
+         *
+         * `done` holds one entry per successful EDIT, and several edits to the
+         * same file is the normal case — two bugs in one file is two entries.
+         * Reporting that as "Edited 2 file(s)" is wrong in the one direction
+         * that matters: it tells the model it touched more of the workspace
+         * than it did.
+         *
+         * Seen in a real run: the model fixed both bugs in counter.py with one
+         * edit_files call and was told it had edited two files. The work was
+         * correct; the receipt was not.
+         */
+        const distinct = [...new Set(done)];
+        const fileWord = (n: number) => `${n} file${n === 1 ? "" : "s"}`;
+
         const notes: string[] = [];
-        if (done.length) notes.push(`Edited ${done.length}:\n${done.join("\n")}`);
+        if (done.length) {
+          notes.push(
+            `Applied ${done.length} edit${done.length === 1 ? "" : "s"} to ` +
+              `${fileWord(distinct.length)}:\n${distinct.join("\n")}`
+          );
+        }
         if (failed.length) {
           notes.push(
             `Failed ${failed.length} — these were NOT applied, fix and retry ` +
@@ -1683,8 +1704,8 @@ export async function runTool(
           content: notes.join("\n\n"),
           summary:
             failed.length === 0
-              ? `Edited ${done.length} file(s)`
-              : `Edited ${done.length}, ${failed.length} failed`,
+              ? `Edited ${fileWord(distinct.length)}`
+              : `Edited ${fileWord(distinct.length)}, ${failed.length} failed`,
           changedPath: done[0],
         };
       }
@@ -2136,14 +2157,19 @@ export async function runTool(
             summary: "No processes",
           };
         }
-        const listing = running
-          .map(
-            (proc) =>
-              `${proc.id} — ${describeProcess(proc)} — ${
-                isRunning(proc) ? "running" : `exited (${proc.exitCode})`
-              }`
-          )
-          .join("\n");
+        /*
+         * describeProcess already returns "id: command — status".
+         *
+         * This wrapped it in the id AGAIN and the status AGAIN, so one process
+         * read:
+         *
+         *   proc-1-abc — proc-1-abc: node slowsrv.js — running (4s) — running
+         *
+         * Every duplicated word is resent on every later round, and the model
+         * has to work out that the two "running"s are one fact. Found by
+         * reading the output while testing wait_for_output.
+         */
+        const listing = running.map((proc) => describeProcess(proc)).join("\n");
         return {
           ok: true,
           content: `${running.length} process(es):\n${listing}`,
