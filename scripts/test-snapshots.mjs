@@ -12,6 +12,17 @@ import { pathToFileURL } from "node:url";
 import { rm, access } from "node:fs/promises";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
+/*
+ * Where this suite keeps its files.
+ *
+ * Several suites clear `data/` to start from a known state, which is correct
+ * alone and destructive in parallel — they delete each other's fixtures. The
+ * runner gives each suite its own directory through APIM_DATA_ROOT, and the
+ * app reads the same variable, so the code under test and the test agree.
+ */
+const DATA_ROOT = process.env.APIM_DATA_ROOT
+  ? path.resolve(process.env.APIM_DATA_ROOT)
+  : path.join(ROOT, "data");
 const ws = await import(pathToFileURL(path.join(ROOT, "src/lib/workspace.ts")).href);
 const S = await import(pathToFileURL(path.join(ROOT, "src/lib/snapshots.ts")).href);
 
@@ -29,7 +40,7 @@ const read = (p) => ws.readFile(WS, p).then((r2) => r2.content).catch(() => null
 const exists = (p) => access(p).then(() => true).catch(() => false);
 
 const WS = "snaptest";
-await rm(path.join(ROOT, "data"), { recursive: true, force: true });
+await rm(DATA_ROOT, { recursive: true, force: true });
 
 console.log("\napiM workspace history checks\n");
 

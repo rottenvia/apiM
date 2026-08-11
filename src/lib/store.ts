@@ -17,7 +17,10 @@ import { deleteAllSnapshots } from "@/lib/snapshots";
  * need no database.
  */
 
-const DATA_DIR = path.resolve(process.cwd(), "data", "chats");
+/** Overridable so parallel test suites do not share one chat store. */
+const DATA_DIR = process.env.APIM_DATA_ROOT
+  ? path.resolve(process.env.APIM_DATA_ROOT, "chats")
+  : path.resolve(process.cwd(), "data", "chats");
 
 export interface StoredMessage {
   id: string;

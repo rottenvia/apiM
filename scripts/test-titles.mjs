@@ -11,6 +11,17 @@ import { pathToFileURL } from "node:url";
 import { rm, access, readdir } from "node:fs/promises";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
+/*
+ * Where this suite keeps its files.
+ *
+ * Several suites clear `data/` to start from a known state, which is correct
+ * alone and destructive in parallel — they delete each other's fixtures. The
+ * runner gives each suite its own directory through APIM_DATA_ROOT, and the
+ * app reads the same variable, so the code under test and the test agree.
+ */
+const DATA_ROOT = process.env.APIM_DATA_ROOT
+  ? path.resolve(process.env.APIM_DATA_ROOT)
+  : path.join(ROOT, "data");
 const store = await import(pathToFileURL(path.join(ROOT, "src/lib/store.ts")).href);
 
 const COLOR = process.stdout.isTTY && !process.env.NO_COLOR;
@@ -24,12 +35,12 @@ const check = (label, ok, detail = "") => {
   ok ? pass++ : fail++;
 };
 const exists = (p) => access(p).then(() => true).catch(() => false);
-const CHATS = path.join(ROOT, "data", "chats");
+const CHATS = path.join(DATA_ROOT, "chats");
 const now = () => new Date().toISOString();
 const mk = (id, title) =>
   store.appendMessages(id, title, [{ id: "m1", role: "user", content: "hi", createdAt: now() }]);
 
-await rm(path.join(ROOT, "data"), { recursive: true, force: true });
+await rm(DATA_ROOT, { recursive: true, force: true });
 
 console.log("\napiM duplicate-name checks\n");
 

@@ -14,6 +14,17 @@ import { pathToFileURL } from "node:url";
 import { rm } from "node:fs/promises";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
+/*
+ * Where this suite keeps its files.
+ *
+ * Several suites clear `data/` to start from a known state, which is correct
+ * alone and destructive in parallel — they delete each other's fixtures. The
+ * runner gives each suite its own directory through APIM_DATA_ROOT, and the
+ * app reads the same variable, so the code under test and the test agree.
+ */
+const DATA_ROOT = process.env.APIM_DATA_ROOT
+  ? path.resolve(process.env.APIM_DATA_ROOT)
+  : path.join(ROOT, "data");
 const load = (p) => import(pathToFileURL(path.join(ROOT, p)).href);
 
 const ws = await load("src/lib/workspace.ts");
@@ -34,7 +45,7 @@ const check = (label, ok, detail = "") => {
 };
 
 const WS = "tools2test";
-await rm(path.join(ROOT, "data", "workspaces", WS), { recursive: true, force: true });
+await rm(path.join(DATA_ROOT, "workspaces", WS), { recursive: true, force: true });
 
 console.log("\napiM tool capability checks\n");
 
@@ -247,7 +258,7 @@ check(
 
 console.log("\n6. Runner detection reads the project, not a guess");
 
-const DETECT = path.join(ROOT, "data", "workspaces", `${WS}-detect`);
+const DETECT = path.join(DATA_ROOT, "workspaces", `${WS}-detect`);
 await rm(DETECT, { recursive: true, force: true });
 await ws.writeFile(`${WS}-detect`, "package.json", JSON.stringify({ scripts: { test: "vitest run" } }));
 let runner = await testing.detectRunner(DETECT);
@@ -291,7 +302,7 @@ check("read_file advertises the line range",
 check("search_files advertises context",
   JSON.stringify(WORKSPACE_TOOLS.find((t) => t.function.name === "search_files")).includes("context"));
 
-await rm(path.join(ROOT, "data", "workspaces", WS), { recursive: true, force: true });
+await rm(path.join(DATA_ROOT, "workspaces", WS), { recursive: true, force: true });
 await rm(DETECT, { recursive: true, force: true });
 
 console.log(

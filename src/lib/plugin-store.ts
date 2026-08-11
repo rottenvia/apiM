@@ -9,7 +9,10 @@ import type { Plugin, PluginCategory } from "@/lib/plugins";
  * one place and can be edited or backed up by hand.
  */
 
-const DATA_DIR = path.resolve(process.cwd(), "data");
+/** Overridable so parallel test suites do not share one plugin store. */
+const DATA_DIR = process.env.APIM_DATA_ROOT
+  ? path.resolve(process.env.APIM_DATA_ROOT)
+  : path.resolve(process.cwd(), "data");
 const FILE = path.join(DATA_DIR, "plugins.json");
 
 export interface CustomPlugin extends Plugin {

@@ -35,7 +35,10 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 /** Where the log lives. Alongside the chats, not inside a workspace. */
-const DATA_DIR = path.join(process.cwd(), "data");
+/** Overridable so parallel test suites do not share one log. */
+const DATA_DIR = process.env.APIM_DATA_ROOT
+  ? path.resolve(process.env.APIM_DATA_ROOT)
+  : path.join(process.cwd(), "data");
 const LOG_PATH = path.join(DATA_DIR, "diagnostics.jsonl");
 
 /**

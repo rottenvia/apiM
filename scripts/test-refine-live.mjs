@@ -19,6 +19,17 @@ import { pathToFileURL } from "node:url";
 import { rm } from "node:fs/promises";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
+/*
+ * Where this suite keeps its files.
+ *
+ * Several suites clear `data/` to start from a known state, which is correct
+ * alone and destructive in parallel — they delete each other's fixtures. The
+ * runner gives each suite its own directory through APIM_DATA_ROOT, and the
+ * app reads the same variable, so the code under test and the test agree.
+ */
+const DATA_ROOT = process.env.APIM_DATA_ROOT
+  ? path.resolve(process.env.APIM_DATA_ROOT)
+  : path.join(ROOT, "data");
 const load = (p) => import(pathToFileURL(path.join(ROOT, p)).href);
 
 const { runRefine, buildOutcomeDigest } = await load("src/lib/refine.ts");
@@ -176,7 +187,7 @@ check(
 
 console.log("\n6. Known lessons are shown so they can be revised");
 const WS = "refinetest";
-await rm(path.join(ROOT, "data", "workspaces", WS), { recursive: true, force: true });
+await rm(path.join(DATA_ROOT, "workspaces", WS), { recursive: true, force: true });
 await lessons.applyLessons(WS, [{ text: "Tests live in test/", evidence: "seen" }], []);
 const known = await lessons.readLessons(WS);
 check("a lesson was stored", known.length === 1);
@@ -201,7 +212,7 @@ check(
   `${applied.added} added, ${applied.revised} revised`
 );
 
-await rm(path.join(ROOT, "data", "workspaces", WS), { recursive: true, force: true });
+await rm(path.join(DATA_ROOT, "workspaces", WS), { recursive: true, force: true });
 server.close();
 
 console.log(

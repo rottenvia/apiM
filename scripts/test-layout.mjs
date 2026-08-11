@@ -15,6 +15,17 @@ import { pathToFileURL } from "node:url";
 import { promises as fs } from "node:fs";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
+/*
+ * Where this suite keeps its files.
+ *
+ * Several suites clear `data/` to start from a known state, which is correct
+ * alone and destructive in parallel — they delete each other's fixtures. The
+ * runner gives each suite its own directory through APIM_DATA_ROOT, and the
+ * app reads the same variable, so the code under test and the test agree.
+ */
+const DATA_ROOT = process.env.APIM_DATA_ROOT
+  ? path.resolve(process.env.APIM_DATA_ROOT)
+  : path.join(ROOT, "data");
 const load = (p) => import(pathToFileURL(path.join(ROOT, p)).href);
 
 const W = await load("src/lib/workspace.ts");
@@ -32,7 +43,7 @@ const check = (label, ok, detail = "") => {
   ok ? pass++ : fail++;
 };
 
-const WSROOT = path.join(ROOT, "data", "workspaces");
+const WSROOT = path.join(DATA_ROOT, "workspaces");
 await fs.rm(WSROOT, { recursive: true, force: true });
 
 console.log("\napiM workspace layout checks\n");
@@ -211,7 +222,7 @@ console.log("\n8. Files uploaded before the chat is named");
 const store = await import(
   pathToFileURL(path.join(ROOT, "src/lib/store.ts")).href
 );
-const CHROOT = path.join(ROOT, "data", "chats");
+const CHROOT = path.join(DATA_ROOT, "chats");
 await fs.rm(WSROOT, { recursive: true, force: true });
 await fs.rm(CHROOT, { recursive: true, force: true });
 

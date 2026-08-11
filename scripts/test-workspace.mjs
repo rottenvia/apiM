@@ -25,8 +25,19 @@ import {
 } from "./lib/proc.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
+/*
+ * Where this suite keeps its files.
+ *
+ * Several suites clear `data/` to start from a known state, which is correct
+ * alone and destructive in parallel — they delete each other's fixtures. The
+ * runner gives each suite its own directory through APIM_DATA_ROOT, and the
+ * app reads the same variable, so the code under test and the test agree.
+ */
+const DATA_ROOT = process.env.APIM_DATA_ROOT
+  ? path.resolve(process.env.APIM_DATA_ROOT)
+  : path.join(ROOT, "data");
 const WS_ID = "selftest";
-const WS_DIR = path.join(ROOT, "data", "workspaces", WS_ID);
+const WS_DIR = path.join(DATA_ROOT, "workspaces", WS_ID);
 
 // Colour codes confuse older Windows terminals, so only use them where the
 // terminal says it can cope.
@@ -116,7 +127,7 @@ async function main() {
   console.log(bold("\napiM workspace self-test\n"));
 
   await rm(WS_DIR, { recursive: true, force: true });
-  await mkdir(path.join(ROOT, "data"), { recursive: true });
+  await mkdir(DATA_ROOT, { recursive: true });
 
   // Asking the OS for free ports means a leftover server from an earlier run
   // can never be mistaken for ours — the old "tests pass against a stale
@@ -289,7 +300,7 @@ async function main() {
   // ------------------------------------------------------------------
   console.log(bold("\n4. Workspace off really means off"));
   // ------------------------------------------------------------------
-  const offDir = path.join(ROOT, "data", "workspaces", "selftest-off");
+  const offDir = path.join(DATA_ROOT, "workspaces", "selftest-off");
   await rm(offDir, { recursive: true, force: true });
 
   const offFrames = await chat(appPort, {

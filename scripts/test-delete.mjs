@@ -11,6 +11,17 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
+/*
+ * Where this suite keeps its files.
+ *
+ * Several suites clear `data/` to start from a known state, which is correct
+ * alone and destructive in parallel — they delete each other's fixtures. The
+ * runner gives each suite its own directory through APIM_DATA_ROOT, and the
+ * app reads the same variable, so the code under test and the test agree.
+ */
+const DATA_ROOT = process.env.APIM_DATA_ROOT
+  ? path.resolve(process.env.APIM_DATA_ROOT)
+  : path.join(ROOT, "data");
 // file:// URL so this resolves on Windows too, where a bare drive path is
 // not a valid module specifier.
 const store = await import(
@@ -60,7 +71,7 @@ check("survives 20 concurrent writes", !(await store.getConversation(d)));
 
 // 5. No temp files left behind
 const { promises: fs } = await import("node:fs");
-const leftovers = (await fs.readdir(path.join(ROOT, "data", "chats")).catch(()=>[])).filter(n=>n.endsWith(".tmp"));
+const leftovers = (await fs.readdir(path.join(DATA_ROOT, "chats")).catch(()=>[])).filter(n=>n.endsWith(".tmp"));
 check("no orphaned .tmp files", leftovers.length===0, leftovers.join(", "));
 
 // 6. Deleting something that isn't there

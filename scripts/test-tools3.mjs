@@ -19,6 +19,17 @@ import { rm, writeFile as fsWrite } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
+/*
+ * Where this suite keeps its files.
+ *
+ * Several suites clear `data/` to start from a known state, which is correct
+ * alone and destructive in parallel — they delete each other's fixtures. The
+ * runner gives each suite its own directory through APIM_DATA_ROOT, and the
+ * app reads the same variable, so the code under test and the test agree.
+ */
+const DATA_ROOT = process.env.APIM_DATA_ROOT
+  ? path.resolve(process.env.APIM_DATA_ROOT)
+  : path.join(ROOT, "data");
 const load = (p) => import(pathToFileURL(path.join(ROOT, p)).href);
 
 const web = await load("src/lib/web.ts");
@@ -212,7 +223,7 @@ check("an empty body is stated, not blank", /empty response body/.test(out));
 console.log("\n5. wait_for_output — no more guessing how long a server takes");
 
 const WS = "tools3test";
-await rm(path.join(ROOT, "data", "workspaces", WS), { recursive: true, force: true });
+await rm(path.join(DATA_ROOT, "workspaces", WS), { recursive: true, force: true });
 
 await ws.writeFile(WS, "fast.js", `console.log("Ready in 0.1s"); setInterval(()=>{},10000);`);
 let started = await procs.startProcess(WS, "node", ["fast.js"]);
@@ -268,13 +279,13 @@ check(
   "an invalid pattern must not throw — it is almost always meant literally"
 );
 
-await rm(path.join(ROOT, "data", "workspaces", WS), { recursive: true, force: true });
+await rm(path.join(DATA_ROOT, "workspaces", WS), { recursive: true, force: true });
 
 // ---------------------------------------------------------------------------
 console.log("\n6. undo_file can step back further than one write");
 
 const UWS = "tools3undo";
-await rm(path.join(ROOT, "data", "workspaces", UWS), { recursive: true, force: true });
+await rm(path.join(DATA_ROOT, "workspaces", UWS), { recursive: true, force: true });
 
 for (const v of ["one", "two", "three", "four"]) {
   await ws.writeFile(UWS, "f.txt", `${v}\n`);
@@ -303,7 +314,7 @@ check(
   ws.MAX_HISTORY_VERSIONS === 10,
   "unbounded history would grow with every write"
 );
-await rm(path.join(ROOT, "data", "workspaces", UWS), { recursive: true, force: true });
+await rm(path.join(DATA_ROOT, "workspaces", UWS), { recursive: true, force: true });
 
 console.log("\n7. run_command time limits fit real work");
 

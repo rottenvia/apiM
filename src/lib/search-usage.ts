@@ -15,7 +15,10 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-const USAGE_FILE = path.resolve(process.cwd(), "data", "search-usage.json");
+/** Overridable so parallel test suites do not share one usage ledger. */
+const USAGE_FILE = process.env.APIM_DATA_ROOT
+  ? path.resolve(process.env.APIM_DATA_ROOT, "search-usage.json")
+  : path.resolve(process.cwd(), "data", "search-usage.json");
 
 /** Known providers, with what their free allowance is worth per month. */
 export interface ProviderInfo {
