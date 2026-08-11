@@ -47,7 +47,7 @@ const yellow = wrap(33);
  * They take 10-60 seconds each and cannot overlap, so they go last and go
  * alone. Running them first would make the fast feedback wait on the slow.
  */
-const NEEDS_SERVER = new Set(["workspace", "auth", "plan"]);
+const NEEDS_SERVER = new Set(["workspace", "auth", "plan", "autonomy"]);
 
 /**
  * Excluded from `npm test`.
