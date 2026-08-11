@@ -13,6 +13,7 @@
  * The install test needs a network and is skipped without one.
  */
 import path from "node:path";
+import { PYTHON, havePython } from "./lib/proc.mjs";
 import { pathToFileURL } from "node:url";
 import { promises as fs } from "node:fs";
 
@@ -59,7 +60,7 @@ console.log("\napiM package install checks\n");
 
 console.log("1. Install tools are permitted");
 
-for (const cmd of ["pip", "pip3", "npm", "python", "python3"]) {
+for (const cmd of ["pip", "pip3", "npm", "python", PYTHON]) {
   check(`${cmd} is allowed`, R.isAllowedCommand(cmd));
 }
 check(
@@ -69,7 +70,7 @@ check(
 );
 check(
   "an ordinary command keeps the short timeout",
-  R.timeoutFor("python3", ["app.py"]) === R.MAX_RUN_MS,
+  R.timeoutFor(PYTHON, ["app.py"]) === R.MAX_RUN_MS,
   "so a runaway loop is still caught quickly"
 );
 
@@ -77,7 +78,33 @@ check(
 
 console.log("\n2. Python runs in a workspace virtualenv");
 
-let res = await R.runCommand(WS, "python3", ["-c", "print('ok')"]);
+/*
+ * Skipped, not failed, when there is no Python.
+ *
+ * This section genuinely needs an interpreter — it is about virtualenvs. On a
+ * Windows machine without one, every check here failed with "Python was not
+ * found; run without arguments to install from the Microsoft Store", which
+ * says nothing about whether apiM works and trains you to skim red output.
+ *
+ * Windows also ships a stub named `python` that prints that advert and exits
+ * non-zero, so merely finding the command is not enough — havePython() checks
+ * it actually reports a version.
+ */
+const pythonAvailable = await havePython();
+// Declared out here because later sections use it too.
+let res;
+
+if (!pythonAvailable) {
+  skipped("python runs at all", `${PYTHON} is not installed on this machine`);
+  skipped("a virtualenv was created inside the workspace", "needs python");
+  skipped("python reports the workspace venv as its prefix", "needs python");
+  skipped("pip is the venv's pip, not the system one", "needs python");
+  skipped("the package imports on the very next run", "needs python");
+  skipped("the interpreter is isolated from the system one", "needs python");
+  skipped("API keys are not visible to anything the model runs", "needs python");
+} else {
+
+res = await R.runCommand(WS, PYTHON, ["-c", "print('ok')"]);
 check("python runs at all", res.exitCode === 0, res.stderr.slice(0, 80));
 
 const venvDir = path.join(wsDir, ".packages", "venv");
@@ -88,7 +115,7 @@ check(
   "since PEP 668 the system interpreter refuses pip entirely"
 );
 
-res = await R.runCommand(WS, "python3", ["-c", "import sys; print(sys.prefix)"]);
+res = await R.runCommand(WS, PYTHON, ["-c", "import sys; print(sys.prefix)"]);
 check(
   "python reports the workspace venv as its prefix",
   res.stdout.includes(".packages"),
@@ -102,11 +129,13 @@ check(
   res.stdout.trim().slice(0, 90)
 );
 
+} // end: python is available
+
 // ------------------------------------------------------------- installing
 
 console.log("\n3. Installing");
 
-const online = await fetch("https://pypi.org/simple/", {
+const online = pythonAvailable && await fetch("https://pypi.org/simple/", {
   method: "HEAD",
   signal: AbortSignal.timeout(4000),
 }).then((r2) => r2.ok).catch(() => false);
@@ -125,7 +154,7 @@ if (!online) {
   );
 
   await W.writeFile(WS, "use.py", "import requests\nprint(requests.__version__)\n");
-  res = await R.runCommand(WS, "python3", ["use.py"]);
+  res = await R.runCommand(WS, PYTHON, ["use.py"]);
   check(
     "the package imports on the very next run",
     res.exitCode === 0,
@@ -151,14 +180,19 @@ check(
 );
 
 const onDisk = await fs.readdir(wsDir).catch(() => []);
-check(
-  "the package directory sits inside the workspace",
-  onDisk.includes(".packages"),
-  "so deleting the workspace removes them"
-);
+if (pythonAvailable) {
+  check(
+    "the package directory sits inside the workspace",
+    onDisk.includes(".packages"),
+    "so deleting the workspace removes them"
+  );
+} else {
+  // .packages only exists once a venv has been created, which needs python.
+  skipped("the package directory sits inside the workspace", "needs python");
+}
 
 // The whole point: nothing landed on the user's machine.
-res = await R.runCommand(WS, "python3", [
+res = await R.runCommand(WS, PYTHON, [
   "-c",
   "import sys; print('SYSTEM' if sys.prefix == sys.base_prefix else 'ISOLATED')",
 ]);
@@ -184,7 +218,7 @@ check(
   !bad.ok && /Run the interpreter directly/.test(bad.reason)
 );
 
-res = await R.runCommand(WS, "python3", [
+res = await R.runCommand(WS, PYTHON, [
   "-c",
   "import os; print(os.environ.get('DEEPSEEK_API_KEY') or 'ABSENT')",
 ]);

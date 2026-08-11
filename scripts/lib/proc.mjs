@@ -92,3 +92,27 @@ export async function waitForServer(url, timeoutMs, isDead) {
   }
   return false;
 }
+
+/**
+ * The Python command that exists on this platform.
+ *
+ * Windows installs `python`; most Linux and macOS setups only expose
+ * `python3`. `src/lib/runner.ts` has always picked correctly — the TESTS
+ * hardcoded `python3`, so three suites failed on Windows with "Python was not
+ * found" while the code they were testing was fine.
+ *
+ * A test that fails for a reason unrelated to the thing under test is worse
+ * than no test: it trains you to skim red output.
+ */
+export const PYTHON = IS_WINDOWS ? "python" : "python3";
+
+/** True when a Python interpreter is actually callable here. */
+export async function havePython() {
+  const { spawnSync } = await import("node:child_process");
+  const res = spawnSync(PYTHON, ["--version"], {
+    encoding: "utf8",
+    shell: IS_WINDOWS,
+  });
+  // Windows ships a stub that prints a Microsoft Store advert and exits 9009.
+  return res.status === 0 && /Python \d/.test(`${res.stdout}${res.stderr}`);
+}

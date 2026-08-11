@@ -268,8 +268,9 @@ check(
   (await procs.waitForOutput("no-such-process", "x", 1_000)) === null
 );
 
+const badPatternProc = await procs.startProcess(WS, "node", ["fast.js"]);
 const bad = await procs.waitForOutput(
-  (await procs.startProcess(WS, "node", ["fast.js"])).process.id,
+  badPatternProc.process.id,
   "Ready in [",
   5_000
 );
@@ -279,7 +280,26 @@ check(
   "an invalid pattern must not throw — it is almost always meant literally"
 );
 
-await rm(path.join(DATA_ROOT, "workspaces", WS), { recursive: true, force: true });
+/*
+ * Stop everything before deleting the folder.
+ *
+ * This process was started and never stopped. On Linux that is untidy; on
+ * Windows it is fatal — a running process holds a handle to its working
+ * directory, so the rm below fails with EBUSY and takes the suite down.
+ * Reported from a real Windows run.
+ */
+procs.stopAll(WS);
+// Give the OS a moment to release the handles before removing the directory.
+await new Promise((r) => setTimeout(r, 300));
+
+await rm(path.join(DATA_ROOT, "workspaces", WS), {
+  recursive: true,
+  force: true,
+  // Windows can still report the directory busy for a beat after the last
+  // handle closes; retrying is the documented remedy.
+  maxRetries: 5,
+  retryDelay: 200,
+});
 
 // ---------------------------------------------------------------------------
 console.log("\n6. undo_file can step back further than one write");

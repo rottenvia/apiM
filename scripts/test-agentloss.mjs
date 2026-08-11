@@ -58,6 +58,20 @@ const check = (label, ok, detail = "") => {
 };
 
 const WORK = path.join(DATA_ROOT, "workspaces");
+/*
+ * Read a directory that may legitimately not exist yet.
+ *
+ * If an earlier step failed, nothing created it — and crashing with ENOENT
+ * hides the check that would have said WHY. An empty list fails the check
+ * with a useful message instead of taking the whole suite down.
+ */
+const readdirSafe = async (dir) => {
+  try {
+    return await readdir(dir);
+  } catch {
+    return [];
+  }
+};
 await rm(DATA_ROOT, { recursive: true, force: true });
 
 console.log("\napiM agent context-loss checks\n");
@@ -90,9 +104,23 @@ ${body}
 `,
     "utf8"
   );
+  /*
+   * `shell` on Windows only.
+   *
+   * npx is a .cmd shim there, and spawning a batch file without a shell fails
+   * with EINVAL — the same CVE-2024-27980 behaviour that broke run_command.
+   * Reported from a real Windows run: this suite died before its first check
+   * with ENOENT on a directory the failed child never created.
+   *
+   * `shell: true` is safe HERE and nowhere near the agent: every argument is
+   * a constant from this file or a path we just wrote. The runner
+   * (lib/tools.ts) still refuses it, because there the arguments come from a
+   * model.
+   */
   const res = spawnSync("npx", ["tsx", file], {
     cwd: ROOT,
     encoding: "utf8",
+    shell: process.platform === "win32",
     env: { ...process.env, CONV_ID: CONV },
   });
   return (res.stdout ?? "") + (res.stderr ?? "");
@@ -106,7 +134,7 @@ await appendMessages(process.env.CONV_ID, "faceit extension chat", [
 await writeFile(process.env.CONV_ID, "notes.md", "earlier work");
 `);
 
-const afterChat = await readdir(WORK);
+const afterChat = await readdirSafe(WORK);
 check(
   "the chat's workspace is named after the chat",
   afterChat.includes("faceit-extension-chat"),
@@ -120,7 +148,7 @@ for (const f of ["manifest.json", "content.js", "background.js"]) {
 }
 `);
 
-const afterUpload = await readdir(WORK);
+const afterUpload = await readdirSafe(WORK);
 check(
   "a cold server does not invent a second folder for the same chat",
   afterUpload.length === 1,
@@ -171,7 +199,7 @@ check(
   healed.join(", ")
 );
 check("nothing that was already there is lost", healed.includes("notes.md"));
-const dirsNow = await readdir(WORK);
+const dirsNow = await readdirSafe(WORK);
 check("and the duplicate folder is gone", dirsNow.length === 1, dirsNow.join(", "));
 
 // --------------------------------------------------------------------------

@@ -213,7 +213,15 @@ check(
 );
 
 await rm(path.join(DATA_ROOT, "workspaces", WS), { recursive: true, force: true });
-server.close();
+/*
+ * Wait for the server to actually close.
+ *
+ * `server.close()` is asynchronous. Exiting immediately after it left a
+ * half-closed handle, and on Windows libuv aborts the process with
+ * "Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)" — after every
+ * check had already passed, so the suite reported 23/23 AND failed.
+ */
+await new Promise((resolve) => server.close(resolve));
 
 console.log(
   `\n${pass + fail} checks · ${pass} passed${fail ? ` · ${r(`${fail} failed`)}` : ""}\n`
