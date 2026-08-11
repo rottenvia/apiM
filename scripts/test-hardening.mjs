@@ -1070,6 +1070,71 @@ if (headingRe) {
   );
 }
 
+/*
+ * The live test froze because nothing answered the approval prompt.
+ *
+ * Reported from a real run: it printed "calling run_command" and then
+ * nothing. The app was behaving correctly — it asks permission before running
+ * a command, by sending an `approval_request` frame and waiting on a separate
+ * HTTP request for the answer. In the UI a button sends that. The script had
+ * no handler, so it waited the full five-minute timeout in silence.
+ *
+ * The model was doing the right thing, too: it wrote fizzbuzz.py and then
+ * tried to run it to check its own work.
+ */
+const realSrc = read("scripts/test-real.mjs");
+check(
+  "the live test answers the approval prompt",
+  /f\.type === "approval_request"/.test(realSrc) &&
+    /\/api\/chat\/approve/.test(realSrc),
+  "without this it waits five minutes for a button nobody can click"
+);
+check(
+  "it answers without awaiting inside the stream loop",
+  /\/\/ Deliberately not awaited/.test(realSrc),
+  "the stream being read is what unblocks, so awaiting there would deadlock"
+);
+check(
+  "a stall explains itself instead of looking like a hang",
+  /stallWatch/.test(realSrc) && /nothing has arrived for/.test(realSrc)
+);
+check(
+  "and the timer is cleared once the stream ends",
+  /clearInterval\(stallWatch\)/.test(realSrc),
+  "an un-cleared interval would keep the process alive after the test"
+);
+check(
+  "it reports whether the model verified its own work",
+  /it ran the file to check its own work/.test(realSrc),
+  "writing the file is the easy half"
+);
+
+/*
+ * A check must never be both skipped and failed.
+ *
+ * On a machine with no python, two checks in the install suite were declared
+ * skipped at the top and then run anyway further down, printing SKIP and FAIL
+ * for the same name and counting twice. That is how a suite reports more
+ * checks than it contains — and it is part of why the totals differ between
+ * machines.
+ */
+const installSrc = read("scripts/test-install.mjs");
+for (const label of [
+  "the interpreter is isolated from the system one",
+  "API keys are not visible to anything the model runs",
+]) {
+  const declaredSkipped = installSrc.includes(`skipped("${label}"`);
+  const checkedAt = installSrc.indexOf(`check(\n    "${label}"`);
+  const guardedAbove =
+    checkedAt !== -1 &&
+    /if \(pythonAvailable\) \{[^}]*$/s.test(installSrc.slice(0, checkedAt).split("\n").slice(-8).join("\n"));
+  check(
+    `"${label.slice(0, 34)}…" is skipped or run, never both`,
+    declaredSkipped && guardedAbove,
+    "it was counted twice on a machine without python"
+  );
+}
+
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
 );

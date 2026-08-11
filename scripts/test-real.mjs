@@ -183,6 +183,7 @@ async function main() {
   // Stream the frames as they arrive, so you can watch it think and act live.
   const toolCalls = [];
   const toolResults = [];
+  const approvals = [];
   let answer = "";
   let usage = null;
   let errorFrame = null;
@@ -192,9 +193,33 @@ async function main() {
   const decoder = new TextDecoder();
   let buffer = "";
 
+  /*
+   * A silence timer, so a stall says what it is.
+   *
+   * The previous version of this script hung with no output and no
+   * explanation, and there was no way to tell "the model is thinking" from
+   * "the app is waiting for something that is never coming". Ninety seconds
+   * without a single frame is not thinking.
+   */
+  let lastFrame = Date.now();
+  const stallWatch = setInterval(() => {
+    const idle = Math.round((Date.now() - lastFrame) / 1000);
+    if (idle >= 90) {
+      console.log(
+        yellow(
+          `  nothing has arrived for ${idle}s — the last thing printed above ` +
+            `is where it stopped.`
+        )
+      );
+      lastFrame = Date.now();
+    }
+  }, 30_000);
+  stallWatch.unref?.();
+
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
+    lastFrame = Date.now();
     buffer += decoder.decode(value, { stream: true });
     const lines = buffer.split("\n");
     buffer = lines.pop() ?? "";
@@ -221,10 +246,47 @@ async function main() {
         const mark = f.ok ? green("ok") : red("failed");
         console.log(`  ${dim("←")} ${f.name} ${mark} ${dim(f.summary ?? "")}`);
       }
+      /*
+       * Answer the approval prompt.
+       *
+       * This is why the test hung. The app asks permission before running a
+       * command, and it asks by sending an `approval_request` frame and then
+       * waiting on a SEPARATE HTTP request for the answer. In the real UI a
+       * button sends that. This script had no handler at all, so the stream
+       * sat there until the five-minute timeout with nothing printed after
+       * "calling run_command" — it looked like a freeze and was actually the
+       * app correctly waiting for a person who was never asked.
+       *
+       * Reported from a real run: the model wrote fizzbuzz.py and then tried
+       * to run it to check its own work, which is exactly what it should do.
+       *
+       * Approving is right for this test. It is a fixed, harmless task in a
+       * throwaway workspace, the whole point is to see whether the model can
+       * write AND verify, and an unattended script cannot ask anyone.
+       */
+      if (f.type === "approval_request") {
+        console.log(
+          `  ${dim("?")} it wants to run ${bold(f.display ?? f.command)}` +
+            (f.reason ? dim(`  — ${f.reason}`) : "")
+        );
+        // Deliberately not awaited: the stream we are reading is what
+        // unblocks, so awaiting inside this loop would deadlock.
+        fetch(`http://127.0.0.1:${appPort}/api/chat/approve`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: f.id, approved: true }),
+        }).catch((err) => {
+          console.log(red(`  could not answer the prompt: ${err.message}`));
+        });
+        approvals.push(f);
+      }
+
       if (f.type === "done") usage = f.usage;
       if (f.type === "error") errorFrame = f.error;
     }
   }
+
+  clearInterval(stallWatch);
 
   const seconds = ((Date.now() - started) / 1000).toFixed(1);
 
@@ -255,6 +317,24 @@ async function main() {
   console.log(
     `  ${onDisk ? green("YES") : red("NO ")}  fizzbuzz.py is on your disk` +
       (onDisk ? dim(`  (${path.relative(ROOT, filePath)})`) : "")
+  );
+  /*
+   * Did it check its own work?
+   *
+   * Writing the file is the easy half. The task the user actually cares about
+   * is an agent that runs what it wrote, reads the output and only then says
+   * it is done — so that is worth reporting separately rather than folding
+   * into a single pass/fail.
+   *
+   * Not part of the exit code: a model that writes correct fizzbuzz and does
+   * not run it has still done what was asked.
+   */
+  const ranIt = toolResults.some(
+    (t) => (t.name === "run_command" || t.name === "run_tests") && t.ok
+  );
+  console.log(
+    `  ${ranIt ? green("YES") : dim("no ")}  it ran the file to check its own work` +
+      (approvals.length ? dim(`  (${approvals.length} approved)`) : "")
   );
   console.log(`  ${dim("time:")} ${seconds}s   ${dim("rounds:")} ${toolCalls.length}`);
 
