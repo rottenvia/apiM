@@ -183,7 +183,7 @@ check("real files are still listed", ctx.includes("app.js"));
 // ------------------------------------------------------------------
 console.log("\n6. The refine pass is cheap by construction");
 
-const refineSrc = await readFile(path.join(ROOT, "src/lib/refine.ts"), "utf8");
+const refineSrc = (await readFile(path.join(ROOT, "src/lib/refine.ts"), "utf8")).replace(/\r\n/g, "\n");
 check(
   "it runs on Flash, not Pro",
   /deepseek-v4-flash/.test(refineSrc),

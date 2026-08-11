@@ -82,7 +82,7 @@ for (const [name, html] of REAL) {
   );
 }
 
-const toolsSrc = readFileSync(path.join(ROOT, "src/lib/tools.ts"), "utf8");
+const toolsSrc = readFileSync(path.join(ROOT, "src/lib/tools.ts"), "utf8").replace(/\r\n/g, "\n");
 check(
   "fetch_url warns rather than staying silent",
   /This page is an app shell/.test(toolsSrc),
@@ -431,7 +431,7 @@ for (const [cmd, args, why] of [
   check(`${cmd} ${args.join(" ")} still asks`, !runner2.isReadOnlyCommand(cmd, args), why);
 }
 
-const routeSrc2 = readFileSync(path.join(ROOT, "src/app/api/chat/route.ts"), "utf8");
+const routeSrc2 = readFileSync(path.join(ROOT, "src/app/api/chat/route.ts"), "utf8").replace(/\r\n/g, "\n");
 check(
   "the exemption is wired into the approval path",
   /isReadOnlyCommand\(check\.command, check\.args\)/.test(routeSrc2)

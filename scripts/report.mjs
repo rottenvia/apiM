@@ -20,10 +20,10 @@
 import { spawn } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
+import { npmCommand } from "./lib/proc.mjs";
 import os from "node:os";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
-const IS_WINDOWS = process.platform === "win32";
 
 /**
  * Reduce text to something any input box will accept.
@@ -54,9 +54,11 @@ function plain(text) {
 
 function run(cmd, args) {
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, {
+    const invocation =
+      cmd === "npm" ? npmCommand(ROOT, args) : { cmd, args, shell: false };
+    const child = spawn(invocation.cmd, invocation.args, {
       cwd: ROOT,
-      shell: IS_WINDOWS,
+      shell: invocation.shell,
       env: { ...process.env, NO_COLOR: "1" },
     });
     let out = "";
@@ -151,8 +153,26 @@ if (lint.code !== 0) {
 
 // --- optional extras --------------------------------------------------------
 say("");
-const browser = await run("node", ["-e", "import('playwright-core').then(()=>console.log('installed')).catch(()=>console.log('not installed'))"]);
-say(`browser  : ${plain(browser.out).trim()}`);
+/*
+ * Resolved here, not in a spawned node -e.
+ *
+ * The inline script was passed through cmd.exe on Windows (shell is needed
+ * for npm), which ate the quotes and left node parsing
+ * "import('playwright-core').then(()=" — a syntax error printed as the
+ * browser status. Reported from a real Windows run.
+ *
+ * createRequire.resolve answers the same question in-process, with no shell
+ * and nothing to quote.
+ */
+let browserStatus = "not installed";
+try {
+  const { createRequire } = await import("node:module");
+  createRequire(path.join(ROOT, "package.json")).resolve("playwright-core");
+  browserStatus = "installed";
+} catch {
+  browserStatus = "not installed (run: npm run browser:install)";
+}
+say(`browser  : ${browserStatus}`);
 
 const out = lines.join("\n") + "\n";
 const file = path.join(ROOT, "report.txt");

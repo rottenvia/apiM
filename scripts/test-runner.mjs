@@ -138,8 +138,8 @@ for (const [cmd, args, want, label] of [
 console.log("\n12. The auto-run setting defaults to asking");
 // A request that omits the field must not run commands unattended — the
 // dangerous mode has to be opted into, never inherited or assumed.
-const routeSrc = await readFile(path.join(ROOT, "src/app/api/chat/route.ts"), "utf8");
-const runnerSrc = await readFile(path.join(ROOT, "src/lib/runner.ts"), "utf8");
+const routeSrc = (await readFile(path.join(ROOT, "src/app/api/chat/route.ts"), "utf8")).replace(/\r\n/g, "\n");
+const runnerSrc = (await readFile(path.join(ROOT, "src/lib/runner.ts"), "utf8")).replace(/\r\n/g, "\n");
 check("autoRunCommands defaults to false in the route",
   /autoRunCommands\s*=\s*false/.test(routeSrc));
 /*
@@ -156,7 +156,7 @@ check("the read-only exemption cannot cover a command that writes",
     /READ_ONLY_COMMANDS/.test(runnerSrc),
   "it checks arguments, not just the program — git status is safe, git push is not");
 
-const pageSrc = await readFile(path.join(ROOT, "src/app/page.tsx"), "utf8");
+const pageSrc = (await readFile(path.join(ROOT, "src/app/page.tsx"), "utf8")).replace(/\r\n/g, "\n");
 check("the client only enables it on a literal true",
   /s\.autoRunCommands === true/.test(pageSrc));
 

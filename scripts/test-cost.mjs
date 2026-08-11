@@ -260,7 +260,7 @@ check(
 console.log("\n5. It is actually wired into the request path");
 
 const { readFile } = await import("node:fs/promises");
-const route = await readFile(path.join(ROOT, "src/app/api/chat/route.ts"), "utf8");
+const route = (await readFile(path.join(ROOT, "src/app/api/chat/route.ts"), "utf8")).replace(/\r\n/g, "\n");
 
 check("the route accepts a budget", /budgetUsd/.test(route));
 check("every round is charged", /chargeRound\(/.test(route));
@@ -281,7 +281,7 @@ check(
   "a tool_call with no reply is a 400 and an unresumable transcript"
 );
 
-const page = await readFile(path.join(ROOT, "src/app/page.tsx"), "utf8");
+const page = (await readFile(path.join(ROOT, "src/app/page.tsx"), "utf8")).replace(/\r\n/g, "\n");
 check("the client sends the limit", /budgetUsd,/.test(page));
 check("the client shows the warning", /budget_warning/.test(page));
 check("the client explains the stop", /budget_stopped/.test(page));

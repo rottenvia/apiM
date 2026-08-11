@@ -214,14 +214,25 @@ check(
 
 await rm(path.join(DATA_ROOT, "workspaces", WS), { recursive: true, force: true });
 /*
- * Wait for the server to actually close.
+ * Shut the server down completely, including its idle sockets.
  *
- * `server.close()` is asynchronous. Exiting immediately after it left a
- * half-closed handle, and on Windows libuv aborts the process with
- * "Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)" — after every
- * check had already passed, so the suite reported 23/23 AND failed.
+ * `server.close()` stops accepting NEW connections and then waits for the
+ * existing ones to end — and Node's fetch keeps its sockets alive for reuse,
+ * so nothing ever ends and the callback never fires. My first attempt just
+ * awaited that callback, which is why the same libuv assertion came back on
+ * Windows: the suite reported 23/23 and then aborted with
+ * "Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)".
+ *
+ * closeAllConnections() severs the keep-alive sockets so close() can finish.
+ * A short timeout guards it regardless: this is the last statement in the
+ * file and a hang here would be worse than an unclean exit.
  */
-await new Promise((resolve) => server.close(resolve));
+server.closeAllConnections?.();
+await Promise.race([
+  new Promise((resolve) => server.close(resolve)),
+  new Promise((resolve) => setTimeout(resolve, 2000)),
+]);
+server.unref();
 
 console.log(
   `\n${pass + fail} checks · ${pass} passed${fail ? ` · ${r(`${fail} failed`)}` : ""}\n`
