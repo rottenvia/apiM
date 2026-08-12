@@ -53,7 +53,39 @@ async function loadPlaywright(): Promise<any | null> {
 
 /** Is Playwright installed at all? Checked before the tool is offered. */
 export async function browserAvailable(): Promise<boolean> {
-  return (await loadPlaywright()) !== null;
+  const playwright = await loadPlaywright();
+  if (!playwright) return false;
+
+  /*
+   * The binary, not just the package.
+   *
+   * `npm run browser:install` does two things that fail independently:
+   * install playwright-core, then download Chromium (~150MB from Playwright's
+   * CDN). The second is the one that gets blocked — by a firewall, a proxy, a
+   * corporate network, or simply being interrupted.
+   *
+   * This used to return true as soon as the PACKAGE resolved, so a
+   * half-finished install offered the model a `browse` tool that could not
+   * launch. The model would call it, get an error, apologise, and fall back
+   * to fetch_url — which is exactly the "he didnt use browse he used only
+   * fetch url" symptom, one layer down.
+   *
+   * Reproduced deliberately: with playwright-core installed and Chromium
+   * absent, this returned true while launch() threw BrowserUnavailable.
+   *
+   * executablePath() is a pure path computation — it does not spawn anything
+   * — so this stays cheap enough to call once per reply.
+   */
+  try {
+    const exe = playwright.chromium.executablePath();
+    if (!exe) return false;
+    const { existsSync } = await import("node:fs");
+    return existsSync(exe);
+  } catch {
+    // Some builds throw here rather than returning a path. Either way we
+    // cannot confirm a usable browser, and claiming one would be worse.
+    return false;
+  }
 }
 
 /**

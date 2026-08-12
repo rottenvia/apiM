@@ -76,9 +76,42 @@ if (!run("npx", ["playwright", "install", "chromium"], "downloading Chromium (~1
   process.exit(1);
 }
 
+/*
+ * Confirm the binary is really there before saying "Done".
+ *
+ * `npx playwright install` can exit 0 having done less than it claims — a
+ * partial download, a cached failure, a mirror that served the wrong thing.
+ * Saying "Done" and then having the agent report the browser as unavailable
+ * is the worst of both: the setup step lied, and the failure surfaces later
+ * somewhere unrelated.
+ *
+ * This is the same check `browserAvailable()` makes, so what this prints and
+ * what the agent sees cannot disagree.
+ */
+let exePath = null;
+try {
+  const pw = require("playwright-core");
+  exePath = pw.chromium.executablePath();
+} catch {
+  /* handled below */
+}
+
+const { existsSync } = await import("node:fs");
+if (!exePath || !existsSync(exePath)) {
+  console.log(red("\n  Chromium still is not on disk."));
+  console.log(
+    "  The command reported success but the binary is missing, so `browse`\n" +
+      "  will stay unavailable. Try again, or set PLAYWRIGHT_DOWNLOAD_HOST if\n" +
+      "  you are behind a mirror.\n"
+  );
+  process.exit(1);
+}
+
 console.log(green("\n  Done."));
+console.log(dim(`  Chromium: ${exePath}`));
 console.log(
-  "  The agent can now open pages in a real browser, take screenshots and\n" +
+  "\n  The agent can now open pages in a real browser, take screenshots and\n" +
     "  read the console. It always uses its own profile inside the workspace\n" +
     "  and runs headless — it will never touch the browser you are using.\n"
 );
+console.log(bold("  Check it worked:") + "  npm run test:browser:live\n");
