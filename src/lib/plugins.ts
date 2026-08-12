@@ -31,16 +31,48 @@ export interface Plugin {
 /**
  * Longest a single plugin's instructions may be.
  *
- * ~5,500 tokens. It lives HERE rather than in plugin-store because the editor
- * needs it too, and plugin-store imports node:fs — pulling that into a client
- * component breaks the build with "the chunking context does not support
- * external modules". Which is exactly what happened when I first put it
- * there.
+ * 100,000 characters, about 28,000 tokens.
  *
- * One constant, so the editor's counter and the server's validation cannot
- * drift apart. The old 4,000 was written out twice, in two files.
+ * I raised this from 4,000 to 20,000 when asked, and 20,000 was as arbitrary
+ * as the number it replaced — I picked it because it sounded generous. Asked
+ * why not more, I measured instead of guessing, and the honest answer is that
+ * nothing justified 20,000:
+ *
+ *   fixed prompt overhead      ~8,500 tokens  (persona, workspace rules,
+ *                                              33 tool schemas)
+ *   DeepSeek V4 context      1,000,000 tokens
+ *
+ * A 100,000-character plugin is 3.6% of the context window, and costs about
+ * $0.012 on its first round and $0.0001 per cached round after — a fraction
+ * of a cent across a whole task. Neither the window nor the bill was the
+ * constraint at 20,000.
+ *
+ * A limit still exists because the prompt has to leave room for the file
+ * tree, the transcript and the reasoning, and because a single pasted
+ * document should not silently become a standing instruction on every
+ * request. 100,000 is roughly a 40-page style guide: past that you want a
+ * file in the workspace the agent reads on demand, not text resent forever.
+ *
+ * It lives HERE rather than in plugin-store because the editor needs it too,
+ * and plugin-store imports node:fs — pulling that into a client component
+ * breaks the build. That is not a guess; it is what happened when I first put
+ * it there.
  */
-export const MAX_PLUGIN_PROMPT = 20_000;
+export const MAX_PLUGIN_PROMPT = 100_000;
+
+/**
+ * Total across every ENABLED plugin, which is the number that actually bites.
+ *
+ * The per-plugin cap says nothing about ten of them at once. Ten enabled
+ * 100,000-character plugins is 278,000 tokens on every request — $0.12 per
+ * cache miss, and a prompt that crowds out the task it is supposed to serve.
+ * Nothing anywhere prevented that.
+ *
+ * 250,000 characters (~70,000 tokens, 7% of context) is a deliberate ceiling
+ * on the whole set. Anything approaching it is a configuration mistake rather
+ * than a use case.
+ */
+export const MAX_PLUGIN_TOTAL = 250_000;
 
 export const AVAILABLE_PLUGINS: Plugin[] = [
   {
@@ -268,7 +300,31 @@ export function buildPluginDirectives(
   const active = plugins.filter((p) => p.enabled && !p.legacy);
   if (active.length === 0) return "";
 
-  const rules = active
+  /*
+   * Truncated at the total budget, in the order the user enabled them.
+   *
+   * The per-plugin cap does not bound the set: ten long plugins at once is
+   * 278,000 tokens on every request. Dropping the overflow is better than
+   * sending it — a prompt that large crowds out the actual task, and the
+   * user gets a worse answer for more money without being told why.
+   *
+   * Whole plugins are dropped rather than one being cut mid-sentence: half
+   * an instruction is worse than none, because the model follows it.
+   */
+  const kept: typeof active = [];
+  let used = 0;
+  let dropped = 0;
+  for (const p of active) {
+    const size = p.prompt.length + p.name.length + 4;
+    if (used + size > MAX_PLUGIN_TOTAL) {
+      dropped += 1;
+      continue;
+    }
+    kept.push(p);
+    used += size;
+  }
+
+  const rules = kept
     .map((p) => {
       // Strip the leading blank lines and the "[NAME]" tag the prompts carry
       // from when they were appended inline; the list already attributes them.
@@ -276,6 +332,14 @@ export function buildPluginDirectives(
       return `- ${p.name}: ${body}`;
     })
     .join("\n");
+
+  // Said out loud, not silently. A plugin that is on but not applied is the
+  // kind of thing you would otherwise only notice as "it ignored me".
+  const overflow = dropped
+    ? `\n\n[${dropped} more enabled plugin${dropped === 1 ? " was" : "s were"} ` +
+      `left out: the combined instructions exceed the ` +
+      `${MAX_PLUGIN_TOTAL.toLocaleString()} character budget. Turn some off.]`
+    : "";
 
   /*
    * The wrapper used to be 264 tokens around a 114-token rule.
@@ -305,7 +369,7 @@ ${rules}
 
 They outrank everything above, for every reply for the whole conversation.
 Follow them silently — do not announce them. On conflict follow the one listed
-first; only the user's newest message overrides. Check your reply against this.`;
+first; only the user's newest message overrides. Check your reply against this.${overflow}`;
 }
 
 /**
