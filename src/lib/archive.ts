@@ -13,6 +13,8 @@
  * `unsupportedArchiveNote` for why, and for what to tell the user instead.
  */
 
+import { looksUtf16 } from "./attachments";
+
 /** Entries that are never worth reading out of an archive. */
 const SKIP_DIRS = [
   "node_modules/",
@@ -130,8 +132,108 @@ function shouldSkip(path: string): string | null {
   return null;
 }
 
-/** Decode as UTF-8, refusing anything that is clearly not text. */
+/**
+ * The path a File carries when it came from a folder picker.
+ *
+ * `webkitRelativePath` is "myproject/src/index.ts" for a file chosen through
+ * a directory input, and "" for an ordinary one — which is how a folder pick
+ * is told apart from a multi-file pick.
+ */
+export function folderPathOf(file: File): string {
+  const rel = (file as File & { webkitRelativePath?: string })
+    .webkitRelativePath;
+  return typeof rel === "string" ? rel : "";
+}
+
+/**
+ * Read a picked folder the same way an archive is read.
+ *
+ * Same skip rules, same caps, same shape of result — so everything
+ * downstream (unpacking into the workspace, the manifest, the chip) works
+ * without knowing where the files came from. A folder and a zip of that
+ * folder should behave identically, because to the user they are the same
+ * request.
+ */
+export async function readFolderTree(
+  files: File[]
+): Promise<ArchiveResult> {
+  const entries: ArchiveEntry[] = [];
+  const skipped: { path: string; reason: string }[] = [];
+  let totalChars = 0;
+  let hitLimit = false;
+
+  // Stable order, so the manifest reads like a directory listing rather than
+  // whatever order the OS handed them over in.
+  const sorted = [...files].sort((a, b) =>
+    folderPathOf(a).localeCompare(folderPathOf(b))
+  );
+
+  for (const file of sorted) {
+    // Strip the top-level folder name: paths are relative to it, exactly as
+    // they are inside an archive.
+    const full = folderPathOf(file) || file.name;
+    const path = full.split("/").slice(1).join("/") || file.name;
+
+    const reason = shouldSkip(full);
+    if (reason) {
+      skipped.push({ path, reason });
+      continue;
+    }
+
+    if (entries.length >= MAX_ENTRIES || totalChars >= MAX_TOTAL_CHARS) {
+      hitLimit = true;
+      continue;
+    }
+
+    let bytes: Uint8Array;
+    try {
+      // Only as much as could be kept: a 2GB file in a folder must not be
+      // decoded in full just to throw most of it away.
+      const slice = file.slice(0, MAX_ENTRY_CHARS * 4);
+      bytes = new Uint8Array(await slice.arrayBuffer());
+    } catch {
+      skipped.push({ path, reason: "could not be read" });
+      continue;
+    }
+
+    const text = decodeText(bytes);
+    if (text === null) {
+      skipped.push({ path, reason: "binary file" });
+      continue;
+    }
+
+    const truncated = text.length > MAX_ENTRY_CHARS || file.size > bytes.length;
+    const content = truncated ? text.slice(0, MAX_ENTRY_CHARS) : text;
+    entries.push({ path, content, bytes: file.size, truncated });
+    totalChars += content.length;
+  }
+
+  return { entries, skipped, hitLimit };
+}
+
+/** Decode as UTF-8 or UTF-16, refusing anything that is clearly not text. */
 function decodeText(bytes: Uint8Array): string | null {
+  /*
+   * UTF-16 first, because it fails the NUL test below.
+   *
+   * Windows writes UTF-16 routinely — PowerShell redirection, Notepad's
+   * "Unicode" option, plenty of application logs — and every other byte is
+   * then zero. Treating that as binary is how a zipped folder of Windows
+   * logs came back with every file "skipped: binary file".
+   */
+  const utf16 = looksUtf16(bytes);
+  if (utf16) {
+    try {
+      return new TextDecoder(utf16 === "le" ? "utf-16le" : "utf-16be", {
+        fatal: false,
+      })
+        .decode(bytes)
+        .replace(/^\uFEFF/, "");
+    } catch {
+      return null;
+    }
+  }
+
   // A NUL byte in the first chunk is the cheapest reliable binary signal.
   const probe = bytes.subarray(0, Math.min(bytes.length, 8000));
   if (probe.includes(0)) return null;

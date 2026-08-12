@@ -9,6 +9,7 @@ import {
   formatArchive,
   isArchive,
   readArchive,
+  readFolderTree,
   unsupportedArchiveNote,
 } from "@/lib/archive";
 import { documentKind, readDocument } from "@/lib/documents";
@@ -153,8 +154,57 @@ export function binaryFormatNote(name: string): string | null {
     : `${name} is ${note}, so there's no text to read.`;
 }
 
+/**
+ * Does this look like UTF-16 text rather than a binary blob?
+ *
+ * Windows writes UTF-16 far more often than anything else does: PowerShell's
+ * `>` redirection, `Export-CSV`, Notepad's "Unicode" option and a good number
+ * of application logs all produce it. Every other byte is then a zero, so the
+ * `includes(0)` check below calls it binary and the file is refused with
+ * "looks like a binary file, so there's nothing to read".
+ *
+ * Reported: a .log file that could not be attached. This is the reason.
+ *
+ * Detected by the byte-order mark, or by the giveaway pattern of ASCII text
+ * in one of the two byte positions with zeros in the other. Deliberately
+ * narrow — it must not start accepting actual binaries.
+ */
+export function looksUtf16(bytes: Uint8Array): "le" | "be" | null {
+  if (bytes.length < 4) return null;
+
+  // A byte-order mark is unambiguous.
+  if (bytes[0] === 0xff && bytes[1] === 0xfe) return "le";
+  if (bytes[0] === 0xfe && bytes[1] === 0xff) return "be";
+
+  // No BOM: look at how the zeros fall. In UTF-16LE ASCII text every odd
+  // byte is zero; in UTF-16BE every even one is.
+  const n = Math.min(bytes.length, 2000) & ~1;
+  if (n < 8) return null;
+
+  let zeroOdd = 0;
+  let zeroEven = 0;
+  let printableEven = 0;
+  let printableOdd = 0;
+  for (let i = 0; i < n; i += 2) {
+    const even = bytes[i];
+    const odd = bytes[i + 1];
+    if (odd === 0) zeroOdd += 1;
+    if (even === 0) zeroEven += 1;
+    if (even >= 9 && even < 127) printableEven += 1;
+    if (odd >= 9 && odd < 127) printableOdd += 1;
+  }
+  const pairs = n / 2;
+  // Nearly every high byte zero AND nearly every low byte ordinary text.
+  if (zeroOdd / pairs > 0.9 && printableEven / pairs > 0.9) return "le";
+  if (zeroEven / pairs > 0.9 && printableOdd / pairs > 0.9) return "be";
+  return null;
+}
+
 export function bytesLookBinary(bytes: Uint8Array): boolean {
   if (bytes.length === 0) return false;
+
+  // UTF-16 is text, even though half its bytes are zeros.
+  if (looksUtf16(bytes)) return false;
 
   const head = bytes.subarray(0, Math.min(bytes.length, 8000));
   if (head.includes(0)) return true;
@@ -162,6 +212,18 @@ export function bytesLookBinary(bytes: Uint8Array): boolean {
   let control = 0;
   for (let i = 0; i < head.length; i += 1) {
     const b = head[i];
+    /*
+     * ESC is text when it starts a colour code.
+     *
+     * A densely coloured log — "\x1b[32mINFO\x1b[0m up" — is 11.8% ESC bytes,
+     * just over the 10% threshold, so it was rejected as binary. That is a
+     * console log saved to a file, which is one of the most likely things
+     * anyone attaches. Measured, not guessed: the ratio is in the test.
+     *
+     * Only ESC immediately followed by '[' is forgiven, which is the CSI
+     * sequence every colouring library emits. A lone ESC still counts.
+     */
+    if (b === 0x1b && head[i + 1] === 0x5b) continue;
     // Outside printable ASCII, tab, newline, carriage return. Bytes above
     // 0x7f are left alone: they are ordinary in UTF-8 text.
     if (b < 9 || (b > 13 && b < 32)) control += 1;
@@ -225,6 +287,54 @@ export async function readImageFile(file: File): Promise<ReadResult> {
       analyzing: true,
     },
   };
+}
+
+/**
+ * Read a folder picked through the directory input.
+ *
+ * Produces exactly the shape an archive produces, so the caller unpacks it
+ * into the workspace and shows a manifest without caring which it was. A
+ * folder and a .zip of that folder are the same request.
+ */
+export async function readFolder(
+  name: string,
+  files: File[]
+): Promise<ReadResult> {
+  const total = files.reduce((n, f) => n + f.size, 0);
+  if (total > MAX_ARCHIVE_BYTES) {
+    return {
+      error: `${name} is ${formatBytes(total)} — the limit is ${formatBytes(MAX_ARCHIVE_BYTES)}`,
+    };
+  }
+
+  try {
+    const result = await readFolderTree(files);
+    if (result.entries.length === 0) {
+      return { error: `${name} had no readable text files in it` };
+    }
+    return {
+      attachment: {
+        id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+        name,
+        size: total,
+        content: formatArchive(name, result),
+        truncated: result.hitLimit || result.entries.some((e) => e.truncated),
+        kind: "text",
+        fileCount: result.entries.length,
+        entries: result.entries.map((e) => ({
+          path: e.path,
+          content: e.content,
+        })),
+      },
+    };
+  } catch (error) {
+    return {
+      error:
+        error instanceof Error
+          ? `Couldn't read ${name}: ${error.message}`
+          : `Couldn't read ${name}`,
+    };
+  }
 }
 
 export async function readTextFile(
@@ -356,7 +466,28 @@ export async function readTextFile(
   let raw: string;
   try {
     const part = needsTruncating ? file.slice(0, wanted) : file;
-    raw = await part.text();
+    /*
+     * Decode with the encoding the bytes actually are.
+     *
+     * `Blob.text()` always assumes UTF-8. Handed a UTF-16 file it returns a
+     * string with a NUL between every character, which then reads as
+     * gibberish to the model — worse than a refusal, because it looks like
+     * it worked. Windows produces UTF-16 routinely, which is how a .log file
+     * ended up unattachable.
+     */
+    const encoding = looksUtf16(head);
+    if (encoding) {
+      const buf = await part.arrayBuffer();
+      raw = new TextDecoder(encoding === "le" ? "utf-16le" : "utf-16be", {
+        fatal: false,
+      })
+        .decode(buf)
+        // Strip a leading byte-order mark so the first line is not prefixed
+        // with an invisible character.
+        .replace(/^\uFEFF/, "");
+    } else {
+      raw = await part.text();
+    }
   } catch {
     return { error: `Couldn't read ${file.name}` };
   }

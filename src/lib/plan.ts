@@ -33,6 +33,9 @@
  * reason `run_tests` refuses to report a pass it did not parse.
  */
 
+import { promises as fs } from "node:fs";
+import path from "node:path";
+
 export type StepState = "todo" | "doing" | "done" | "blocked";
 
 export interface PlanStep {
@@ -236,6 +239,68 @@ function claimsACheck(text: string): boolean {
 }
 
 /**
+ * Claims of a FILE operation, for checking the closing summary.
+ *
+ * Separate from CHECK_WORDS, which is about things being run. Reported: the
+ * agent ended replies with lines like "Actions taken: [read 3412321]" and
+ * "edited the file" on turns where no file tool had been called at all. The
+ * work was never done and the tokens were spent anyway.
+ */
+const FILE_CLAIM_WORDS = [
+  /\b(read|opened)\s+(the\s+)?(file|files)\b/i,
+  /\b(edited|modified|updated|patched|rewrote|wrote)\s+(the\s+)?(file|files)\b/i,
+  /\b(created|added|deleted|removed|renamed|moved)\s+(the\s+)?(file|files)\b/i,
+  /\bactions?\s+taken\s*:/i,
+  /\b(I|I've|I have)\s+(read|edited|created|written|wrote|updated|deleted)\b/i,
+];
+
+/** Tools that actually touch files. */
+const FILE_TOOLS = new Set([
+  "read_file",
+  "read_files",
+  "write_file",
+  "write_files",
+  "edit_file",
+  "edit_files",
+  "apply_patch",
+  "replace_in_files",
+  "move_file",
+  "delete_file",
+  "undo_file",
+  "list_files",
+  "search_files",
+  "read_document",
+  "restore_snapshot",
+]);
+
+/**
+ * Did the closing answer claim work that no tool performed?
+ *
+ * Returns a note to append when the reply asserts it read or changed files
+ * and not one file tool ran in the whole reply. Deliberately narrow: it fires
+ * only on the total-absence case, where there is no ambiguity about whether
+ * something happened. A model that read one file and describes two is not
+ * caught here, and should not be — a false accusation is worse than a missed
+ * one, because it teaches the user to ignore the warning.
+ *
+ * This does not stop the model lying. It stops the lie being invisible.
+ */
+export function checkAnswerClaims(
+  answer: string,
+  toolsUsedThisRun: string[]
+): string | null {
+  if (!answer.trim()) return null;
+  if (toolsUsedThisRun.some((t) => FILE_TOOLS.has(t))) return null;
+  if (!FILE_CLAIM_WORDS.some((re) => re.test(answer))) return null;
+
+  return (
+    `This reply describes reading or changing files, but no file tool ran ` +
+    `in it — nothing on disk was touched. Treat the summary above as a ` +
+    `proposal, not a record of work done.`
+  );
+}
+
+/**
  * Tools whose use constitutes an actual check.
  *
  * Deliberately short. These are the tools that return a fact from outside the
@@ -430,4 +495,83 @@ export function formatPlan(plan: Plan): string {
 export function planSummary(plan: Plan): string {
   const p = planProgress(plan);
   return `${p.done}/${p.total} steps${p.blocked ? `, ${p.blocked} blocked` : ""}`;
+}
+
+/* ------------------------------------------------------------------ *
+ * Persistence
+ *
+ * The plan used to live in a `let` inside the request handler, with the
+ * comment "lives for the duration of the run". That is precisely the bug
+ * reported: pressing Stop, or a round failing, threw the plan away. The next
+ * message started with no plan, so the agent either re-planned from nothing
+ * — losing every step it had already verified — or carried on from memory,
+ * which is the drift the plan exists to prevent.
+ *
+ * It is per-workspace, not per-conversation, for the same reason the files
+ * are: the work being planned is the work in that folder.
+ * ------------------------------------------------------------------ */
+
+const PLAN_FILE = "plan.json";
+
+function planPath(workspaceId: string): string {
+  const root = process.env.APIM_DATA_ROOT
+    ? path.resolve(process.env.APIM_DATA_ROOT)
+    : path.join(process.cwd(), "data");
+  return path.join(root, "plans", `${encodeURIComponent(workspaceId)}.json`);
+}
+
+/**
+ * Read the saved plan, or null when there is none.
+ *
+ * Never throws: a plan that cannot be read must not take the reply down with
+ * it. A corrupt file is treated as no plan, which is recoverable — the agent
+ * makes a new one — where a thrown error is not.
+ */
+export async function readPlan(workspaceId: string): Promise<Plan | null> {
+  try {
+    const raw = await fs.readFile(planPath(workspaceId), "utf8");
+    const parsed = JSON.parse(raw) as Plan;
+    // Shape-check rather than trust: this file is on disk between runs and
+    // an older or hand-edited one should degrade to "no plan", not crash.
+    if (
+      !parsed ||
+      typeof parsed.goal !== "string" ||
+      !Array.isArray(parsed.steps) ||
+      parsed.steps.some((s) => typeof s?.id !== "number")
+    ) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+/** Save the plan. Also never throws, for the same reason. */
+export async function writePlan(
+  workspaceId: string,
+  plan: Plan | null
+): Promise<void> {
+  try {
+    const file = planPath(workspaceId);
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    if (plan === null) {
+      await fs.rm(file, { force: true });
+      return;
+    }
+    await fs.writeFile(file, JSON.stringify(plan, null, 2), "utf8");
+  } catch {
+    /* A plan that cannot be saved is worse than one that can, but far
+       better than a reply that dies because the disk was busy. */
+  }
+}
+
+/**
+ * Is this plan finished, so a new task should start clean?
+ *
+ * A completed plan left on disk would be handed to the next, unrelated
+ * message as if it were still live.
+ */
+export function planIsComplete(plan: Plan): boolean {
+  return planProgress(plan).complete;
 }

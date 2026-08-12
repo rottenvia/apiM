@@ -11,10 +11,15 @@ import {
   buildMessageWithAttachments,
   readImageFile,
   readTextFile,
+  readFolder,
   MAX_FILES,
 } from "@/lib/attachments";
 import { isImageFile } from "@/lib/vision";
-import { archiveFolderName, formatArchiveManifest } from "@/lib/archive";
+import {
+  archiveFolderName,
+  formatArchiveManifest,
+  folderPathOf,
+} from "@/lib/archive";
 import type { Attachment } from "@/lib/attachments";
 import { Dots, MessageBubble } from "@/components/MessageBubble";
 import { ThinkingEffortSelector } from "@/components/ThinkingEffortSelector";
@@ -155,6 +160,7 @@ export function ChatArea({
   const [attachError, setAttachError] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
   // Drag events fire for child elements too, so track depth rather than
   // toggling on every enter/leave — otherwise the overlay flickers.
   const dragDepth = useRef(0);
@@ -221,8 +227,46 @@ export function ChatArea({
   );
 
   const addFiles = useCallback(async (files: FileList | File[]) => {
-    const list = Array.from(files);
-    if (list.length === 0) return;
+    const all = Array.from(files);
+    if (all.length === 0) return;
+
+    /*
+     * A picked folder is one item, not one per file inside it.
+     *
+     * The folder input hands over every file it contains, each carrying its
+     * path in webkitRelativePath. Treated as loose files that hits MAX_FILES
+     * at once — a 200-file project would attach ten and silently drop the
+     * rest, which is worse than refusing outright.
+     *
+     * A folder is the same shape as an unpacked archive, so it takes the
+     * same route: read the text out, write it into the workspace, put a
+     * manifest in the message. Grouped by top-level folder name so picking
+     * two folders stays two items.
+     */
+    const groups = new Map<string, File[]>();
+    const loose: File[] = [];
+    for (const f of all) {
+      const rel = folderPathOf(f);
+      if (rel) {
+        const top = rel.split("/")[0] || "folder";
+        const bucket = groups.get(top);
+        if (bucket) bucket.push(f);
+        else groups.set(top, [f]);
+      } else {
+        loose.push(f);
+      }
+    }
+
+    type Item =
+      | { kind: "file"; file: File }
+      | { kind: "folder"; name: string; files: File[] };
+
+    const list: Item[] = [
+      ...[...groups.entries()].map(
+        ([name, gFiles]): Item => ({ kind: "folder", name, files: gFiles })
+      ),
+      ...loose.map((file): Item => ({ kind: "file", file })),
+    ];
 
     setAttachError(null);
     const accepted: Attachment[] = [];
@@ -234,14 +278,18 @@ export function ChatArea({
     // dropping a large zip looked like nothing had happened — the work is
     // real (unpack, decompress, decode) and it was completely invisible.
     // These are replaced by the finished attachment, or removed on failure.
-    const pending: Attachment[] = list.map((file, i) => ({
+    const pending: Attachment[] = list.map((item, i) => ({
       id: `pending-${Date.now().toString(36)}-${i}`,
-      name: file.name,
-      size: file.size,
+      name: item.kind === "folder" ? item.name : item.file.name,
+      size:
+        item.kind === "folder"
+          ? item.files.reduce((n, f) => n + f.size, 0)
+          : item.file.size,
       content: "",
       truncated: false,
-      kind: isImageFile(file) ? "image" : "text",
-      stage: "reading",
+      kind:
+        item.kind === "file" && isImageFile(item.file) ? "image" : "text",
+      stage: item.kind === "folder" ? "unpacking" : "reading",
     }));
     // Room is computed here, not inside the updater below.
     //
@@ -273,23 +321,28 @@ export function ChatArea({
       // Beyond the cap the placeholder was never added, so there is nothing
       // to read into.
       if (i >= room) break;
-      const file = list[i];
+      const item = list[i];
+      const label = item.kind === "folder" ? item.name : item.file.name;
 
       let attachment: Attachment | undefined;
       let error: string | undefined;
       try {
-        ({ attachment, error } = isImageFile(file)
-          ? await readImageFile(file)
-          : await readTextFile(file, (stage) =>
-              setStage(placeholder.id, stage)
-            ));
+        if (item.kind === "folder") {
+          ({ attachment, error } = await readFolder(item.name, item.files));
+        } else if (isImageFile(item.file)) {
+          ({ attachment, error } = await readImageFile(item.file));
+        } else {
+          ({ attachment, error } = await readTextFile(item.file, (stage) =>
+            setStage(placeholder.id, stage)
+          ));
+        }
       } catch (e) {
         // A reader that throws rather than returning an error would otherwise
         // leave its placeholder spinning with nothing to replace it.
         error =
           e instanceof Error
-            ? `Couldn't read ${file.name}: ${e.message}`
-            : `Couldn't read ${file.name}`;
+            ? `Couldn't read ${label}: ${e.message}`
+            : `Couldn't read ${label}`;
       }
 
       // Swap the placeholder for the real thing, or drop it if it failed.
@@ -1021,6 +1074,33 @@ export function ChatArea({
               }}
             />
 
+            {/*
+              A whole folder, without having to zip it first.
+
+              Reported: "i couldnt upload a whole folder". Dropping a folder
+              onto a page gives you a directory entry the file input cannot
+              read, and the picker only offered individual files — so the only
+              route was to make a .zip by hand.
+
+              webkitdirectory is the standard way to ask for a directory; it
+              is supported in every current browser despite the prefix. React
+              does not know the attribute, hence the cast.
+            */}
+            <input
+              ref={folderInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              {...({
+                webkitdirectory: "",
+                directory: "",
+              } as Record<string, string>)}
+              onChange={(e) => {
+                if (e.target.files) void addFiles(e.target.files);
+                e.target.value = "";
+              }}
+            />
+
             <AttachmentChips
               attachments={attachments}
               onRemove={removeAttachment}
@@ -1105,6 +1185,19 @@ export function ChatArea({
                   <path strokeLinecap="round" strokeLinejoin="round" d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" />
                 </svg>
                 {attachments.length > 0 && <span>{attachments.length}</span>}
+              </button>
+
+              {/* Separate control, not a menu: one click either way, and the
+                  two are genuinely different requests to the OS. */}
+              <button
+                onClick={() => folderInputRef.current?.click()}
+                className="chip flex-none"
+                title="Attach a whole folder"
+                aria-label="Attach a folder"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 7a2 2 0 012-2h3.9a2 2 0 011.6.8l1 1.4a2 2 0 001.6.8H19a2 2 0 012 2v7a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" />
+                </svg>
               </button>
 
               <span
