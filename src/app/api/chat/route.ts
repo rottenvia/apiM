@@ -706,7 +706,7 @@ export async function POST(req: NextRequest) {
 
 Work to the end. Do not hand back a half-finished task with a summary that reads as if it is complete: if something cannot be done, say so plainly and say why. Check your own work before claiming it works — run the tests, call the endpoint, open the page.
 
-Ask before you build the wrong thing. If a choice would change what you produce and you cannot settle it by reading a file or looking it up, call ask_user — one question up front is far cheaper than twenty rounds of work in the wrong direction, and the user would rather be asked than handed something they have to throw away. Ask early, while the work is cheap to redo, not after you have committed to an approach. Offer concrete options with a sensible default so it is one click. Do not ask about things you can find out yourself, and do not ask the same thing twice. When you are done, briefly say what you changed and whether it ran.\n\nUse search_files to find where something lives rather than opening files one at a time, and read_files when you already know you need several — each separate call costs a whole round.\n\nYou can also look at the live web. When a task depends on what is actually on a page — its markup, its data, its exact wording — fetch it rather than reasoning from memory. Before writing anything that targets a site, such as a content script, a userscript or a scraper, call inspect_page on the real URL and use the ids and classes it returns. Never invent a selector you have not seen: a plausible-looking one that does not exist produces code that runs and does nothing, which is worse than admitting you need to look. Use fetch_url to read a page, fetch_url with raw for its HTML, and download_file to save something from a URL straight into the workspace. When you hit something you do not know — an unfamiliar error, a library's current API — use web_search rather than guessing, because a wrong assumption compounds over every round after it.\n\nIf an edit turns out to be wrong, undo_file puts that file back exactly as it was; reverting is safer than patching your own mistake. restore_snapshot rolls the whole workspace back to a restore point, which is a much larger step — list_snapshots first, and say what you are undoing before you do it. read_document opens Word, Excel, PowerPoint, EPUB and ODT files, which read_file cannot. write_files creates several files in one call, which is worth using whenever you are scaffolding.\n\nBatch the changes that belong together. move_file renames in one step instead of read-write-delete. edit_files applies several replacements at once, across one file or many. replace_in_files changes the same text everywhere it appears, which is what you want for renaming a function or an import path — doing that file by file costs a round each. When a string might occur somewhere you did not intend, run it with preview first and read the list before committing.${
+Ask before you build the wrong thing. If a choice would change what you produce and you cannot settle it by reading a file or looking it up, call ask_user — one question up front is far cheaper than twenty rounds of work in the wrong direction, and the user would rather be asked than handed something they have to throw away. Ask early, while the work is cheap to redo, not after you have committed to an approach. Offer concrete options with a sensible default so it is one click. Do not ask about things you can find out yourself, and do not ask the same thing twice. When you are done, briefly say what you changed and whether it ran.\n\nUse search_files to find where something lives rather than opening files one at a time, and read_files when you already know you need several — each separate call costs a whole round.\n\nYou can also look at the live web. When a task depends on what is actually on a page — its markup, its data, its exact wording — fetch it rather than reasoning from memory. Before writing anything that targets a site, such as a content script, a userscript or a scraper, call inspect_page on the real URL and use the ids and classes it returns. Never invent a selector you have not seen: a plausible-looking one that does not exist produces code that runs and does nothing, which is worse than admitting you need to look. Use fetch_url to read a page, fetch_url with raw for its HTML, and download_file to save something from a URL straight into the workspace. ${canSearch ? "When you hit something you do not know — an unfamiliar error, a library's current API — use web_search rather than guessing, because a wrong assumption compounds over every round after it. One web_search costs several model calls of its own, so make the query specific and read what comes back before searching again." : "There is no web_search in this workspace — no Tavily key is set in Settings. fetch_url still works if you already know the URL. When you genuinely do not know something and cannot look it up, say so instead of guessing, and name what you would have searched for."}\n\nIf an edit turns out to be wrong, undo_file puts that file back exactly as it was; reverting is safer than patching your own mistake. restore_snapshot rolls the whole workspace back to a restore point, which is a much larger step — list_snapshots first, and say what you are undoing before you do it. read_document opens Word, Excel, PowerPoint, EPUB and ODT files, which read_file cannot. write_files creates several files in one call, which is worth using whenever you are scaffolding.\n\nBatch the changes that belong together. move_file renames in one step instead of read-write-delete. edit_files applies several replacements at once, across one file or many. replace_in_files changes the same text everywhere it appears, which is what you want for renaming a function or an import path — doing that file by file costs a round each. When a string might occur somewhere you did not intend, run it with preview first and read the list before committing.${
               visionApiKey
                 ? " You can also view_image to look at a screenshot or mockup saved in the workspace."
                 : ""
@@ -840,6 +840,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         }
         /** Only ever nudged once — see the check where the loop ends. */
         let nudgedIncomplete = false;
+        /** Only ever pushed to clarify once, however long the run gets. */
+        let askedEarly = false;
         /** How many times the plan has been rewritten, to catch thrashing. */
         let replanCount = 0;
         /**
@@ -1663,6 +1665,44 @@ Ask before you build the wrong thing. If a choice would change what you produce 
              * and saying so is a correct ending, and pushing against it would
              * teach the model to mark things done to escape the loop.
              */
+            /*
+             * A long build with no question asked and nothing to check it
+             * against.
+             *
+             * Reported: an experimental UI for a game in exclusive fullscreen,
+             * where the model "spent a millions of tokens before understanding
+             * what i wanted", on Pro at high effort. The ask_user description
+             * says to ask early, and nothing anywhere notices when it does
+             * not.
+             *
+             * This fires once, at a point where asking is still cheap relative
+             * to what has been spent, and only when all three are true: real
+             * work has happened, no question has been asked, and no plan
+             * exists to have written the requirements down. With a plan the
+             * goal is at least recorded; without one, after this many rounds,
+             * the model is building from an interpretation nobody confirmed.
+             */
+            if (
+              !plan &&
+              !askedEarly &&
+              toolRounds >= 8 &&
+              !toolsUsedThisRun.includes("ask_user")
+            ) {
+              askedEarly = true;
+              transcript.push({
+                role: "user",
+                content:
+                  `You are ${toolRounds} rounds in, you have not written a ` +
+                  `plan, and you have not asked anything. If any part of what ` +
+                  `you are building rests on a guess about what was wanted — ` +
+                  `the platform, the shape of the interface, what "done" ` +
+                  `means — call ask_user NOW, with concrete options. One ` +
+                  `question here is far cheaper than continuing in the wrong ` +
+                  `direction. If nothing is genuinely ambiguous, ignore this ` +
+                  `and carry on.`,
+              });
+            }
+
             if (plan && !nudgedIncomplete) {
               const progress = planProgress(plan);
               /*

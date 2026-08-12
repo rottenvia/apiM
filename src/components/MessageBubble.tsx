@@ -219,7 +219,43 @@ function MessageBubbleImpl({
   onDecideCommand,
   onAnswerQuestion,
 }: MessageBubbleProps) {
-  const [showThinking, setShowThinking] = useState(false);
+  /**
+   * Open while the model is thinking, closed once it has answered.
+   *
+   * This defaulted to false with a note saying nothing should expand
+   * underneath the reader mid-answer. That reasoning was about the wrong
+   * moment: while reasoning is the ONLY thing happening there is nothing to
+   * push down, and collapsing it means the one part of the reply that exists
+   * yet is the part you cannot see. Reported as "thinking literally hidden
+   * now, i cant see thinking process".
+   *
+   * `useState(() => ...)` so it is decided once, at mount. A message that is
+   * already finished when it first renders — reopening an old chat — starts
+   * shut, which is right: there the answer is the point.
+   */
+  const [userSetThinking, setUserSetThinking] = useState<boolean | null>(null);
+
+  /*
+   * Derived, not stored, so it needs no effect to keep it in step.
+   *
+   * Open while reasoning is the only thing on screen; closed once the answer
+   * begins, because then the answer is what you came for and a tall block of
+   * reasoning above it is in the way. An explicit click wins over both — once
+   * the reader has chosen, nothing moves the panel under them again.
+   *
+   * Writing this as a useEffect that called setShowThinking was my first
+   * attempt, and lint was right to reject it: state that can be computed from
+   * props during render should be, or the panel renders once wrong and then
+   * corrects itself.
+   */
+  const showThinking =
+    userSetThinking ??
+    Boolean(message.isStreaming && !message.content);
+  const setShowThinking = (next: boolean | ((v: boolean) => boolean)) =>
+    setUserSetThinking((prev) => {
+      const current = prev ?? Boolean(message.isStreaming && !message.content);
+      return typeof next === "function" ? next(current) : next;
+    });
   /** Open state of the "resume with a different model" menu. */
   const [resumeMenuOpen, setResumeMenuOpen] = useState(false);
   const [showSources, setShowSources] = useState(false);
@@ -232,7 +268,22 @@ function MessageBubbleImpl({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const thinkingRef = useRef<HTMLDivElement>(null);
+  /** Scroll target for the plan pill in the meta row. */
+  const planRef = useRef<HTMLDivElement>(null);
   const isUser = message.role === "user";
+
+  /*
+   * The step the plan is on, for the pill in the meta row.
+   *
+   * "doing" if the model marked one, otherwise the first thing not yet done —
+   * which is what it is about to pick up. Null once everything is finished.
+   */
+  const planCurrent =
+    message.plan?.steps.find((s) => s.state === "doing") ??
+    message.plan?.steps.find((s) => s.state === "todo") ??
+    null;
+  const planBlocked =
+    message.plan?.steps.filter((s) => s.state === "blocked").length ?? 0;
 
   /**
    * Whether to show the split view.
@@ -325,7 +376,11 @@ function MessageBubbleImpl({
     (message.thinkingEffort && message.thinkingEffort !== "none") ||
       message.tokenCount ||
       message.durationMs ||
-      message.searchUsd
+      message.searchUsd ||
+      // The plan pill lives in this row, so a reply with a plan and no
+      // timing yet — which is every reply while it is still running, and
+      // exactly when the step matters most — has to render it.
+      (message.plan && message.plan.steps.length > 0)
   );
 
   // Detect a code fence that has been opened but not yet closed. An odd number
@@ -556,6 +611,50 @@ function MessageBubbleImpl({
                     </span>
                   )}
 
+                {/* Which step the plan is on, in one pill.
+ 
+                    Asked for directly: "a mini button like sources to see on
+                    which step of planning is model". The full panel stays —
+                    it is where the whole plan lives — but during a long run
+                    the only question most of the time is "where is it now",
+                    and that should not need scrolling up to a twenty-step
+                    list to answer.
+ 
+                    It scrolls to the panel rather than duplicating it. Two
+                    places showing the same steps would drift, and the panel
+                    already renders them properly. */}
+                {message.plan && message.plan.steps.length > 0 && (
+                  <button
+                    onClick={() => {
+                      planRef.current?.scrollIntoView({
+                        behavior: "smooth",
+                        block: "center",
+                      });
+                    }}
+                    title={
+                      planCurrent
+                        ? `Step ${planCurrent.id}: ${planCurrent.text}`
+                        : "Every step is done"
+                    }
+                    className={`inline-flex items-center gap-1 rounded-lg border px-1.5 py-0.5 text-[11px] font-medium transition-colors ${
+                      planBlocked > 0
+                        ? "border-danger/25 bg-danger/10 text-danger hover:bg-danger/20"
+                        : planCurrent
+                          ? "border-[#cfa25a]/25 bg-[#cfa25a]/10 text-[#cfa25a] hover:bg-[#cfa25a]/20"
+                          : "border-[#7ea05a]/25 bg-[#7ea05a]/10 text-[#7ea05a] hover:bg-[#7ea05a]/20"
+                    }`}
+                  >
+                    <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} aria-hidden="true">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M9 11l3 3L22 4" />
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" />
+                    </svg>
+                    {planCurrent
+                      ? `Step ${planCurrent.id}/${message.plan.steps.length}`
+                      : `${message.plan.steps.length}/${message.plan.steps.length} done`}
+                    {planBlocked > 0 && ` · ${planBlocked} blocked`}
+                  </button>
+                )}
+
                 {/* Search reason lives on the sources pill — the control it
                     explains — rather than as another separate badge. */}
                 {sourceCount > 0 && (
@@ -711,6 +810,8 @@ function MessageBubbleImpl({
                       // Asked on every open; the loader returns immediately
                       // when the text is already present.
                       if (!showThinking) onLoadReasoning?.(message.id);
+                      // From here on the reader owns this panel: the
+                      // derived default stops applying.
                       setShowThinking((v) => !v);
                     }}
                     aria-expanded={showThinking}
@@ -1000,13 +1101,10 @@ function MessageBubbleImpl({
             {/* The plan sits above the reply: it is the frame the rest of the
                 message is read inside, and burying it under the prose would
                 make it something you find rather than something you see. */}
-            {message.plan && <PlanPanel plan={message.plan} />}
-
-            {message.pendingQuestion && onAnswerQuestion && (
-              <QuestionPrompt
-                pending={message.pendingQuestion}
-                onAnswer={onAnswerQuestion}
-              />
+            {message.plan && (
+              <div ref={planRef}>
+                <PlanPanel plan={message.plan} />
+              </div>
             )}
 
             {message.pendingCommand && onDecideCommand && (
@@ -1052,6 +1150,24 @@ function MessageBubbleImpl({
                   <span className="stream-caret" aria-hidden="true" />
                 )}
               </div>
+            )}
+
+            {/* The question goes UNDER the sentence that asks it.
+
+                It used to sit above the reply, so the screen read:
+
+                  [ pick one: A / B / C ]
+                  Sure — I need to know one thing first.
+
+                which is backwards. You met the buttons before the reason for
+                them, and the explanation arrived after the decision. Below
+                the text the order matches how it is spoken: ask, then offer
+                the options. */}
+            {message.pendingQuestion && onAnswerQuestion && (
+              <QuestionPrompt
+                pending={message.pendingQuestion}
+                onAnswer={onAnswerQuestion}
+              />
             )}
 
             {/* Placeholder while a code block is still being generated */}
