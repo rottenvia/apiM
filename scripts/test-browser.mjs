@@ -513,6 +513,43 @@ check(
   "detected, never defeated"
 );
 
+/*
+ * The installer's own output, which a real Windows run showed was noisy in
+ * two ways that both looked like failures and were not.
+ */
+console.log("\n11. The installer runs cleanly");
+
+const installSrc2 = readSourceSync(path.join(ROOT, "scripts/install-browser.mjs"));
+
+check(
+  "it does not shell out to `npx playwright`",
+  !/"npx"/.test(installSrc2),
+  "npx fetched a THIRD package and printed a large warning box about it"
+);
+check(
+  "it runs playwright-core's own cli.js with this Node",
+  /playwright-core\/package\.json/.test(installSrc2) &&
+    /"cli\.js"/.test(installSrc2),
+  "no npx, no second download, no two versions disagreeing"
+);
+check(
+  "the cli is found via the package root, not a subpath",
+  !/require\.resolve\("playwright-core\/cli\.js"\)/.test(installSrc2),
+  'its "exports" map omits cli.js, so the subpath throws ERR_PACKAGE_PATH_NOT_EXPORTED'
+);
+check(
+  "the shell is opt-in per call, not always on Windows",
+  /function run\(command, args, label, \{ shell = false \} = \{\}\)/.test(
+    installSrc2
+  ),
+  "running node under a shell is what produced the DEP0190 warning"
+);
+check(
+  "only the npm step asks for a shell",
+  (installSrc2.match(/shell: IS_WINDOWS/g) ?? []).length === 1,
+  "npm is a .cmd shim; node is not"
+);
+
 console.log(
   `\n${pass + fail} checks · ${pass} passed${fail ? ` · ${r(`${fail} failed`)}` : ""}\n`
 );
