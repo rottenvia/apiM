@@ -293,6 +293,119 @@ check(
   /transcript\.push\(\{ role: "system", content: step\.text \}\)/.test(route)
 );
 
+/*
+ * The file tree must be the LAST thing rewritten, not patched in place.
+ *
+ * DeepSeek caches by prefix, so a message that changes at position 3
+ * invalidates 3..n. The tree changes on nearly every round — it is refreshed
+ * after every action — so writing it back to a fixed early index re-billed
+ * every tool result behind it, and the bill grew with the length of the run.
+ *
+ * Simulated over 40 rounds with a modest workspace and the real ordering:
+ *
+ *   tree patched at a fixed index   126,088 missed tokens   $0.0552
+ *   tree removed and re-appended     34,945 missed tokens   $0.0159
+ *
+ * The plan block already had this right and said so in its own comment. The
+ * tree, which changes far more often, did not.
+ */
+console.log("\n8. The file tree does not sit in front of the transcript");
+
+const { readFileSync: rfs } = await import("node:fs");
+const routeText = rfs(path.join(ROOT, "src/app/api/chat/route.ts"), "utf8").replace(
+  /\r\n/g,
+  "\n"
+);
+
+const setTreeBody = routeText.slice(
+  routeText.indexOf("const setFileTree = (text: string) => {"),
+  routeText.indexOf("if (workspaceEnabled) {\n          setFileTree(workspaceFiles);")
+);
+
+check(
+  "setFileTree removes the old listing before writing a new one",
+  /transcript\.splice\(i, 1\)/.test(setTreeBody),
+  "leaving it in place is what invalidated everything behind it"
+);
+check(
+  "and appends, rather than assigning to a stored index",
+  /transcript\.push\(\{ role: "system", content: body \}\)/.test(setTreeBody) &&
+    !/transcript\[fileTreeIndex\] = /.test(setTreeBody),
+  "an in-place write at position 3 re-bills positions 3..n"
+);
+check(
+  "only the tree is removed, not every system message",
+  /startsWith\("Current workspace contents"\)/.test(setTreeBody),
+  "the plan and the persona are system messages too"
+);
+
+/*
+ * Ordering still holds: the plan is re-appended after the tree each round, so
+ * it remains the last thing read before the model decides. Both blocks push
+ * to the end, and the plan block runs later in the loop.
+ */
+const atTreeRefresh = routeText.indexOf("const refreshFileTree = async () => {");
+const atPlanReappend = routeText.indexOf("Keep the plan in front of the model");
+check(
+  "the plan is re-appended after the tree is refreshed",
+  atPlanReappend > atTreeRefresh && atTreeRefresh !== -1,
+  "the plan has to be the last thing the model reads"
+);
+
+/*
+ * A prefix-cache simulation, so the property is measured rather than asserted
+ * from the shape of the code.
+ */
+const estTok = (t) => Math.ceil(t.length / 3.6);
+const simulate = (inPlace, rounds) => {
+  let t = [
+    { c: "SYS".padEnd(9000, "s"), tag: "sys" },
+    { c: "task", tag: "user" },
+  ];
+  let idx = -1;
+  let prev = [];
+  let missed = 0;
+  const setTree = (n) => {
+    const body = "Current workspace contents".padEnd(1800, "y") + n;
+    if (inPlace) {
+      if (idx === -1) {
+        t.push({ c: body, tag: "tree" });
+        idx = t.length - 1;
+      } else t[idx] = { c: body, tag: "tree" };
+    } else {
+      t = t.filter((m) => m.tag !== "tree");
+      t.push({ c: body, tag: "tree" });
+    }
+  };
+  setTree(0);
+  for (let n = 0; n < rounds; n++) {
+    let common = 0;
+    while (common < t.length && common < prev.length && t[common].c === prev[common].c)
+      common++;
+    for (let i = common; i < t.length; i++) missed += estTok(t[i].c);
+    prev = t.map((m) => ({ ...m }));
+    t.push({ c: "call".repeat(20), tag: "a" });
+    t.push({ c: "result".repeat(60), tag: "t" });
+    setTree(n + 1);
+    t = t.filter((m) => m.tag !== "plan");
+    t.push({ c: "Your plan for:".padEnd(700, "x"), tag: "plan" });
+  }
+  return missed;
+};
+
+const inPlaceMiss = simulate(true, 40);
+const appendedMiss = simulate(false, 40);
+check(
+  "appending costs at least 3x fewer missed tokens over 40 rounds",
+  appendedMiss * 3 <= inPlaceMiss,
+  `${inPlaceMiss} in place vs ${appendedMiss} appended`
+);
+check(
+  "the saving is real money, not rounding",
+  ((inPlaceMiss - appendedMiss) / 1e6) * 0.435 > 0.02,
+  `$${(((inPlaceMiss - appendedMiss) / 1e6) * 0.435).toFixed(4)} on one 40-round task`
+);
+
 console.log(
   `\n${pass + fail} checks · ${pass} passed${fail ? ` · ${r(`${fail} failed`)}` : ""}\n`
 );
