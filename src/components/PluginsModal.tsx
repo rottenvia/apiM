@@ -6,6 +6,7 @@ import {
   LEGACY_PLUGINS,
   buildPluginDirectives,
   MAX_PLUGIN_PROMPT,
+  MAX_PLUGIN_TOTAL,
 } from "@/lib/plugins";
 import type { Plugin } from "@/lib/plugins";
 
@@ -51,15 +52,19 @@ export function PluginsModal({
   onClose,
 }: PluginsModalProps) {
   const [custom, setCustom] = useState<CustomPlugin[]>([]);
-  /** Standing cost of the enabled plugins, shown in the footer. */
-  const pluginTokens = Math.ceil(
-    buildPluginDirectives(
-      [...AVAILABLE_PLUGINS, ...LEGACY_PLUGINS].map((p) => ({
-        ...p,
-        enabled: enabledPlugins.includes(p.id),
-      }))
-    ).length / 3.6
-  );
+  /*
+   * Standing cost of the enabled plugins, shown in the footer.
+   *
+   * Counts CUSTOM plugins too. The first version listed only the built-ins,
+   * so someone with a 90,000-character plugin of their own saw a reassuring
+   * number that was nothing to do with what they were being billed — which
+   * defeats the point of showing it at all.
+   */
+  const enabledChars = [...AVAILABLE_PLUGINS, ...LEGACY_PLUGINS, ...custom]
+    .filter((p) => enabledPlugins.includes(p.id))
+    .reduce((n, p) => n + p.prompt.length, 0);
+  const pluginTokens = Math.ceil(enabledChars / 3.6);
+  const overBudget = enabledChars > MAX_PLUGIN_TOTAL;
 
   const [draft, setDraft] = useState<Draft | null>(null);
   const [saving, setSaving] = useState(false);
@@ -457,8 +462,16 @@ export function PluginsModal({
                 {enabledPlugins.length > 0 && (
                   <>
                     {" · "}
-                    <span title="Added to every request while these are on. Cached after the first round of a conversation.">
-                      ~{pluginTokens} tokens per request
+                    <span
+                      className={overBudget ? "text-danger" : undefined}
+                      title={
+                        overBudget
+                          ? `Over the ${MAX_PLUGIN_TOTAL.toLocaleString()} character budget — the ones past it are left out of the prompt.`
+                          : "Added to every request while these are on. Cached after the first round of a conversation."
+                      }
+                    >
+                      ~{pluginTokens.toLocaleString()} tokens per request
+                      {overBudget && " — over budget, some are ignored"}
                     </span>
                   </>
                 )}

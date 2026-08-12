@@ -398,8 +398,23 @@ check(
 );
 check(
   "it is well above the old 4,000",
-  /MAX_PLUGIN_PROMPT = 20_000/.test(pluginsSrc),
-  "~5,500 tokens"
+  /MAX_PLUGIN_PROMPT = 100_000/.test(pluginsSrc),
+  "~28,000 tokens, 3.6% of a 1M context"
+);
+/*
+ * Why 100,000 and not 20,000: nothing justified 20,000. Measured — fixed
+ * prompt overhead is ~8,500 tokens against a 1,000,000 token window, and a
+ * 100,000-character plugin costs about $0.012 on its first round and
+ * $0.0001 per cached round after. Neither the window nor the bill was the
+ * binding constraint.
+ *
+ * What DOES bite is the total across every enabled plugin, which nothing
+ * bounded at all.
+ */
+check(
+  "there is a cap on the TOTAL, not just one plugin",
+  /export const MAX_PLUGIN_TOTAL/.test(pluginsSrc),
+  "ten enabled 100k plugins is 278,000 tokens on every request"
 );
 /*
  * It lives in plugins.ts, not plugin-store.ts, and that is load-bearing:
@@ -432,6 +447,63 @@ check(
   "a 10,000 character prompt is now allowed",
   MAX_PLUGIN_PROMPT >= 10_000,
   `limit is ${MAX_PLUGIN_PROMPT.toLocaleString()}`
+);
+
+console.log("\n10. The combined budget is enforced");
+
+const big = (i, chars) => ({
+  id: `big${i}`,
+  name: `Big ${i}`,
+  icon: "x",
+  description: "d",
+  category: "enhancement",
+  prompt: "y".repeat(chars),
+  enabled: true,
+});
+
+const underBudget = P.buildPluginDirectives([big(1, 50_000), big(2, 50_000)]);
+check(
+  "under the budget nothing is dropped",
+  !/left out/.test(underBudget) &&
+    (underBudget.match(/^- Big /gm) ?? []).length === 2
+);
+
+const overBudget = P.buildPluginDirectives([
+  big(1, 100_000),
+  big(2, 100_000),
+  big(3, 100_000),
+]);
+check(
+  "over the budget the overflow is dropped",
+  (overBudget.match(/^- Big /gm) ?? []).length === 2,
+  `${(overBudget.match(/^- Big /gm) ?? []).length} of 3 kept`
+);
+check(
+  "and the block says so rather than dropping them silently",
+  /left out/.test(overBudget) && /Turn some off/.test(overBudget),
+  'a plugin that is on but not applied reads as "it ignored me"'
+);
+check(
+  "whole plugins are dropped, never cut mid-sentence",
+  !/y{99999}[^y]/.test(overBudget) ||
+    overBudget.split("- Big ").every((chunk, i) => i === 0 || chunk.length > 99_000),
+  "half an instruction is worse than none, because the model follows it"
+);
+check(
+  "the block never exceeds the budget by more than one heading",
+  overBudget.length < P.MAX_PLUGIN_TOTAL + 2_000,
+  `${overBudget.length} chars against a ${P.MAX_PLUGIN_TOTAL} budget`
+);
+
+const modalSrc2 = readSrc("src/components/PluginsModal.tsx");
+check(
+  "the footer counts custom plugins too",
+  /\.\.\.custom\]/.test(modalSrc2),
+  "it listed only the built-ins, so a big custom plugin showed as free"
+);
+check(
+  "and warns when the set is over budget",
+  /over budget, some are ignored/.test(modalSrc2)
 );
 
 console.log(
