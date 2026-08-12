@@ -340,6 +340,100 @@ check(
   "nobody's enabled plugins silently switch off"
 );
 
+/*
+ * Two reported gaps.
+ *
+ *   "when agent checking whether it need web or not it doesnt follow plugin
+ *    instructions"
+ *   "make plugin instructions bigger than 4k chars"
+ */
+console.log("\n8. The search judge sees the standing orders");
+
+const { readFileSync: rf } = await import("node:fs");
+const readSrc = (rel) => rf(path.join(ROOT, rel), "utf8").replace(/\r\n/g, "\n");
+
+const searchSrc = readSrc("src/lib/smart-search.ts");
+const routeSrc2 = readSrc("src/app/api/chat/route.ts");
+
+check(
+  "decideSearch accepts the plugin block",
+  /standingOrders\?: string/.test(searchSrc),
+  "it is a separate model call with its own prompt — plugins were invisible to it"
+);
+check(
+  "the route passes it in",
+  /runSignal,[\s\S]{0,300}pluginDirectives\s*\n\s*\);/.test(routeSrc2)
+);
+check(
+  "the judge is told the orders apply to this decision",
+  /They apply to this decision too/.test(searchSrc)
+);
+check(
+  "including whether to ask a clarifying question",
+  /avoid "clarify"/.test(searchSrc),
+  "a brevity plugin should stop it interrupting with questions"
+);
+check(
+  "the JSON contract still comes first, so a plugin cannot break parsing",
+  searchSrc.indexOf('{"action": "answer"|"search"|"clarify"') <
+    searchSrc.indexOf("The user has standing orders"),
+  "orders are appended after the response format, never woven into it"
+);
+check(
+  "with no plugins the prompt is unchanged",
+  /standingOrders\?\.trim\(\)\s*\n?\s*\?/.test(searchSrc),
+  "byte-identical for anyone not using plugins, so nothing is re-cached"
+);
+
+console.log("\n9. Plugin prompts can be long");
+
+const storeSrc = readSrc("src/lib/plugin-store.ts");
+const modalSrc = readSrc("src/components/PluginsModal.tsx");
+
+const pluginsSrc = readSrc("src/lib/plugins.ts");
+check(
+  "the limit is a named constant, not a number in two files",
+  /export const MAX_PLUGIN_PROMPT/.test(pluginsSrc),
+  "4000 was written out twice and could drift"
+);
+check(
+  "it is well above the old 4,000",
+  /MAX_PLUGIN_PROMPT = 20_000/.test(pluginsSrc),
+  "~5,500 tokens"
+);
+/*
+ * It lives in plugins.ts, not plugin-store.ts, and that is load-bearing:
+ * plugin-store imports node:fs, and pulling that into the editor (a client
+ * component) fails the build outright. I put it in the wrong file first and
+ * the dev server refused to compile.
+ */
+check(
+  "it is not in the module that imports node:fs",
+  !/export const MAX_PLUGIN_PROMPT/.test(storeSrc) &&
+    /import \{ MAX_PLUGIN_PROMPT \} from "@\/lib\/plugins"/.test(storeSrc),
+  "the editor cannot import a server-only module"
+);
+check(
+  "the editor uses the same constant",
+  /maxLength=\{MAX_PLUGIN_PROMPT\}/.test(modalSrc) &&
+    /MAX_PLUGIN_PROMPT\.toLocaleString\(\)/.test(modalSrc),
+  "the counter and the validator cannot disagree"
+);
+check(
+  "and shows what a long prompt costs",
+  /tokens, added to every request/.test(modalSrc),
+  "every character is billed on every request while the plugin is on"
+);
+
+const { MAX_PLUGIN_PROMPT } = await import(
+  pathToFileURL(path.join(ROOT, "src/lib/plugins.ts")).href
+);
+check(
+  "a 10,000 character prompt is now allowed",
+  MAX_PLUGIN_PROMPT >= 10_000,
+  `limit is ${MAX_PLUGIN_PROMPT.toLocaleString()}`
+);
+
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
 );

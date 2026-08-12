@@ -28,6 +28,20 @@ export interface Plugin {
   legacy?: boolean;
 }
 
+/**
+ * Longest a single plugin's instructions may be.
+ *
+ * ~5,500 tokens. It lives HERE rather than in plugin-store because the editor
+ * needs it too, and plugin-store imports node:fs — pulling that into a client
+ * component breaks the build with "the chunking context does not support
+ * external modules". Which is exactly what happened when I first put it
+ * there.
+ *
+ * One constant, so the editor's counter and the server's validation cannot
+ * drift apart. The old 4,000 was written out twice, in two files.
+ */
+export const MAX_PLUGIN_PROMPT = 20_000;
+
 export const AVAILABLE_PLUGINS: Plugin[] = [
   {
     id: "caveman",

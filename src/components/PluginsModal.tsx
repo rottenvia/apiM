@@ -5,6 +5,7 @@ import {
   AVAILABLE_PLUGINS,
   LEGACY_PLUGINS,
   buildPluginDirectives,
+  MAX_PLUGIN_PROMPT,
 } from "@/lib/plugins";
 import type { Plugin } from "@/lib/plugins";
 
@@ -343,11 +344,32 @@ export function PluginsModal({
                 onChange={(e) => setDraft({ ...draft, prompt: e.target.value })}
                 placeholder={"You are a Rust expert. Prefer idiomatic, zero-cost abstractions.\nNever explain basic syntax. Show complete compiling code."}
                 rows={7}
-                maxLength={4000}
+                maxLength={MAX_PLUGIN_PROMPT}
                 className="w-full resize-y rounded-xl border border-border bg-bg-primary px-3 py-2.5 font-mono text-[13px] leading-relaxed text-text-primary outline-none transition-colors placeholder:text-text-muted focus:border-accent/60"
               />
-              <p className="mt-1 text-right text-[11px] text-text-muted">
-                {draft.prompt.length}/4000
+              {/* The character count AND what it costs.
+
+                  The limit went from 4,000 to 20,000 because 4,000 was an
+                  arbitrary guess, but a longer plugin is a real standing
+                  charge: every character here is billed on every request
+                  while the plugin is on. Showing the token estimate beside
+                  the count is the difference between an informed long prompt
+                  and an accidental one. */}
+              <p className="mt-1 flex items-center justify-between text-[11px] text-text-muted">
+                <span>
+                  {draft.prompt.length > 0 &&
+                    `~${Math.ceil(draft.prompt.length / 3.6).toLocaleString()} tokens, added to every request`}
+                </span>
+                <span
+                  className={
+                    draft.prompt.length > MAX_PLUGIN_PROMPT * 0.9
+                      ? "text-danger"
+                      : undefined
+                  }
+                >
+                  {draft.prompt.length.toLocaleString()}/
+                  {MAX_PLUGIN_PROMPT.toLocaleString()}
+                </span>
               </p>
             </div>
 

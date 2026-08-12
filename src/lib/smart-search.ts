@@ -188,7 +188,25 @@ export async function decideSearch(
   message: string,
   context: string,
   deepseekKey: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  /**
+   * The user's standing orders, if any are enabled.
+   *
+   * Reported: "when agent checking whether it need web or not it doesnt
+   * follow plugin instructions". Correct — this judge is a separate model
+   * call with its own system prompt, and the plugin block was never part of
+   * it. So a plugin saying "never search, answer from what you know" or
+   * "always look things up before answering" was invisible to the one
+   * decision it most obviously applies to.
+   *
+   * Worse, this judge can return "clarify", which makes the main model ask a
+   * question — and a plugin like Caveman Mode, whose whole point is not to
+   * pad, had no say in whether that happened.
+   *
+   * Passed as extra system text rather than woven into the JSON contract, so
+   * the response shape is unchanged and a plugin cannot break the parser.
+   */
+  standingOrders?: string
 ): Promise<{ needed: boolean; reason: string; clarify?: string }> {
   if (obviouslyNoSearch(message)) {
     return { needed: false, reason: "no external information required" };
@@ -229,7 +247,11 @@ Prefer "answer" or "search" when either would serve. Only pick "clarify" when
 the missing detail materially changes the answer.
 
 Respond with JSON only:
-{"action": "answer"|"search"|"clarify", "reason": "under 8 words", "question": "only when action is clarify"}`,
+{"action": "answer"|"search"|"clarify", "reason": "under 8 words", "question": "only when action is clarify"}${
+                standingOrders?.trim()
+                  ? `\n\nThe user has standing orders for this conversation. They apply to this decision too — if they tell you to look things up, prefer "search"; if they tell you to be brief or not to ask questions, avoid "clarify". Still answer with the JSON above and nothing else.\n${standingOrders.trim()}`
+                  : ""
+              }`,
             },
             {
               role: "user",

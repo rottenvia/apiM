@@ -609,7 +609,11 @@ export async function POST(req: NextRequest) {
               message,
               recentContext,
               deepseekApiKey,
-              runSignal
+              runSignal,
+              // The plugin block governs this call too. Without it a plugin
+              // that says "always look it up" or "never ask me questions"
+              // had no effect on the one decision it most clearly applies to.
+              pluginDirectives
             );
             doSearch = decision.needed;
             searchReason = decision.reason;
