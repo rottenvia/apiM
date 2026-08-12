@@ -720,10 +720,25 @@ check(
 );
 check(
   "the panel still appears before its text has loaded",
-  /message\.reasoningContent \|\| message\.reasoningLength/.test(
+  /message\.reasoningContent \|\|\s*message\.reasoningLength/.test(
     read("src/components/MessageBubble.tsx")
   ),
   "otherwise a stored reply would look as though it never reasoned"
+);
+/*
+ * And before the FIRST token, which is a different moment.
+ *
+ * reasoningContent starts as "" on a new streaming message, and "" is falsy —
+ * so the panel was unmounted for the whole gap between the request opening
+ * and the first reasoning delta. On a short reply that gap is the entire
+ * thinking phase, which is why it was reported as "no thinking showing".
+ */
+check(
+  "and while reasoning is only expected, not yet arrived",
+  /message\.isStreaming &&\s*message\.thinkingEffort &&\s*message\.thinkingEffort !== "none"/.test(
+    read("src/components/MessageBubble.tsx")
+  ),
+  'an empty string is falsy, so "" read as "no reasoning at all"'
 );
 check(
   "expanding it triggers the fetch",
