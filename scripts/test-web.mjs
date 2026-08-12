@@ -684,6 +684,92 @@ for (const [label, text] of [
   );
 }
 
+/*
+ * The silent "No results" that survived three rounds of debugging.
+ *
+ * Exa was answering correctly and every result was being thrown away before
+ * the model saw it. The filter was `r.score < 0.3`, tuned to Tavily's
+ * relevance scale where a decent hit is 0.5+. Exa reports cosine similarity,
+ * where the same quality of hit is 0.15-0.35. One threshold, two scales.
+ *
+ * Reproduced before fixing: three correct Exa results scoring 0.19, 0.24 and
+ * 0.28, all discarded, output "No results for playwright python version".
+ * That is why it looked like a broken fallback rather than a filter.
+ */
+console.log("\n13. Scores are not comparable across providers");
+
+check(
+  "each provider has its own floor",
+  /const SCORE_FLOOR: Record<string, number> = \{/.test(searchSrc) &&
+    /tavily: 0\.3/.test(searchSrc) &&
+    /exa: 0\.12/.test(searchSrc),
+  "0.3 is right for Tavily and discards nearly everything from Exa"
+);
+check(
+  "the filter uses the per-provider floor",
+  /r\.score < scoreFloor\(r\.provider\)/.test(searchSrc),
+  "a single threshold is what silently emptied the results"
+);
+check(
+  "results are tagged with the provider that returned them",
+  /provider: "exa"/.test(searchSrc) && /provider: "tavily"/.test(searchSrc)
+);
+check(
+  "an unknown provider is not filtered at all",
+  /SCORE_FLOOR\[provider\] \?\? 0/.test(searchSrc),
+  "dropping results we have no calibration for is worse than showing a weak one"
+);
+
+console.log("\n14. The result says which provider answered");
+
+check(
+  "providers that answered are reported",
+  /providersUsed: \[\.\.\.providersUsed\]/.test(searchSrc)
+);
+check(
+  "and providers that failed are reported too",
+  /onProviderError\?\.\(/.test(searchSrc),
+  "an empty result was indistinguishable from a provider never called"
+);
+check(
+  "the model is told, on success",
+  /\[via \$\{ran\}\$\{errs\}\]/.test(toolsSrc3)
+);
+check(
+  "and especially on an empty result",
+  /Providers that answered: \$\{ran\}/.test(toolsSrc3),
+  "this is the line that would have ended three rounds of guessing"
+);
+check(
+  "an errored provider is distinguished from a genuine miss",
+  /At least one provider errored — that is not the same as/.test(toolsSrc3)
+);
+
+console.log("\n15. Providers can be switched off without losing the key");
+
+const pageSrc = readSourceSync(path.join(ROOT, "src/app/page.tsx"));
+check(
+  "there is an on/off for each provider",
+  /const \[tavilyEnabled/.test(pageSrc) && /const \[exaEnabled/.test(pageSrc)
+);
+check(
+  "a disabled provider's key is not sent to the server",
+  /tavilyApiKey: tavilyEnabled \? tavilyKey : ""/.test(pageSrc) &&
+    /exaApiKey: exaEnabled \? exaKey : ""/.test(pageSrc),
+  "the server never sees a key it must not use"
+);
+check(
+  "both default to on for anyone upgrading",
+  /if \(s\.tavilyEnabled === false\)/.test(pageSrc),
+  "explicit false only — an older settings object has neither field"
+);
+check(
+  "the switch is in Settings",
+  /ProviderToggle/.test(settingsSrc) &&
+    /Use Tavily for web search/.test(settingsSrc) &&
+    /Use Exa for web search/.test(settingsSrc)
+);
+
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
 );

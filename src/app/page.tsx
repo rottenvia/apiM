@@ -285,6 +285,16 @@ export default function Home() {
   // gap the sufficiency check finds is worth a full-page read. "quality"
   // reproduces the original always-deep behaviour if this ever reads thin.
   const [searchProfile, setSearchProfile] = useState("balanced");
+  /*
+   * Which providers may be used, independent of whether a key is saved.
+   *
+   * Asked for after Tavily's quota died: "make that i can enable or disable
+   * providers maybe that tavily is ruining that all". Deleting the key would
+   * also work, but then you have to paste it back when the month rolls over.
+   * A switch keeps the key and stops the calls.
+   */
+  const [tavilyEnabled, setTavilyEnabled] = useState(true);
+  const [exaEnabled, setExaEnabled] = useState(true);
   const [showWorkspace, setShowWorkspace] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [renameError, setRenameError] = useState<string | null>(null);
@@ -511,6 +521,10 @@ export default function Home() {
             if (s.deepseekKey) setDeepseekKey(s.deepseekKey);
             if (s.tavilyKey) setTavilyKey(s.tavilyKey);
             if (s.exaKey) setExaKey(s.exaKey);
+            // Explicit false only: an older saved settings object has neither
+            // field, and the default is on.
+            if (s.tavilyEnabled === false) setTavilyEnabled(false);
+            if (s.exaEnabled === false) setExaEnabled(false);
             if (s.visionKey) setVisionKey(s.visionKey);
             if (s.visionModel) setVisionModel(s.visionModel);
             if (s.model) setModel(s.model);
@@ -553,6 +567,8 @@ export default function Home() {
           deepseekKey,
           tavilyKey,
           exaKey,
+          tavilyEnabled,
+          exaEnabled,
           visionKey,
           visionModel,
           model,
@@ -572,6 +588,8 @@ export default function Home() {
     deepseekKey,
     tavilyKey,
     exaKey,
+    tavilyEnabled,
+    exaEnabled,
     visionKey,
     visionModel,
     model,
@@ -1161,8 +1179,10 @@ export default function Home() {
             attachments: options?.attachments,
             conversationId: currentConvId ?? draftConvId,
             deepseekApiKey: deepseekKey,
-            tavilyApiKey: tavilyKey,
-            exaApiKey: exaKey,
+            // A disabled provider is simply not sent, so the server
+            // never sees a key it must not use.
+            tavilyApiKey: tavilyEnabled ? tavilyKey : "",
+            exaApiKey: exaEnabled ? exaKey : "",
             model: activeModel,
             thinkingEffort,
             webSearchMode,
@@ -1640,6 +1660,8 @@ export default function Home() {
       deepseekKey,
       tavilyKey,
       exaKey,
+      tavilyEnabled,
+      exaEnabled,
       model,
       thinkingEffort,
       webSearchMode,
@@ -2086,6 +2108,10 @@ export default function Home() {
           tavilyKey={tavilyKey}
           exaKey={exaKey}
           onExaKeyChange={setExaKey}
+          tavilyEnabled={tavilyEnabled}
+          onTavilyEnabledChange={setTavilyEnabled}
+          exaEnabled={exaEnabled}
+          onExaEnabledChange={setExaEnabled}
           visionKey={visionKey}
           visionModel={visionModel}
           onVisionKeyChange={setVisionKey}
