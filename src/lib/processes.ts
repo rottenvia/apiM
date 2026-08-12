@@ -238,7 +238,19 @@ export async function startProcess(
       // spawned — a dev server that forks a child would otherwise survive
       // and keep the port bound.
       detached: process.platform !== "win32",
-      stdio: ["ignore", "pipe", "pipe"],
+      /*
+       * stdin is a pipe, not "ignore".
+       *
+       * It was closed, so a process that asks a question was unanswerable —
+       * the agent could watch a prompt appear and had no way to reply. That
+       * covers a lot of ordinary work: `npm init`, a migration asking to
+       * confirm, a REPL, anything with a "continue? [y/N]".
+       *
+       * Worse than being unable to answer, a closed stdin makes some tools
+       * read EOF and abort with a confusing error rather than prompting, so
+       * the failure did not even look like a missing feature.
+       */
+      stdio: ["pipe", "pipe", "pipe"],
       env: {
         PATH: process.env.PATH ?? "",
         HOME: cwd,
@@ -298,6 +310,74 @@ export async function startProcess(
 }
 
 /** Stops a process and everything it started. */
+/**
+ * Send a line to a running process's stdin.
+ *
+ * The missing half of `read_process`: the agent could watch a program ask a
+ * question and had no way to answer it. `npm init`, a migration confirming a
+ * destructive step, a REPL, anything with "continue? [y/N]" — all of it was
+ * a dead end that looked like the process had hung.
+ *
+ * A newline is appended unless one is already there, because a program
+ * waiting on readline gets nothing until the line is terminated, and
+ * forgetting that produces exactly the same silent hang the feature is meant
+ * to fix.
+ *
+ * Returns a reason rather than throwing: this runs inside the agent loop and
+ * a thrown error there abandons the round.
+ */
+export function writeToProcess(
+  id: string,
+  input: string
+): { ok: boolean; reason?: string } {
+  const proc = processes.get(id);
+  if (!proc) return { ok: false, reason: "No such process." };
+  /*
+   * Both flags, because `exitedAt` lags.
+   *
+   * It is set on the child's 'exit' event, which arrives a tick or two after
+   * the kill. stopProcess() sets `stoppedByUser` synchronously, so for a
+   * short window after stopping, isRunning() still says true — and a write
+   * in that window reported success while going nowhere.
+   *
+   * Caught by a test that stopped a process and immediately wrote to it,
+   * which is exactly what an agent does when it decides mid-answer to send
+   * one more line.
+   */
+  if (!isRunning(proc) || proc.stoppedByUser) {
+    return {
+      ok: false,
+      reason: proc.stoppedByUser
+        ? "That process was stopped."
+        : `That process already exited (code ${proc.exitCode ?? "unknown"}).`,
+    };
+  }
+  const stdin = proc.child.stdin;
+  if (!stdin || stdin.destroyed) {
+    return { ok: false, reason: "That process is not accepting input." };
+  }
+
+  const line = input.endsWith("\n") ? input : `${input}\n`;
+  try {
+    stdin.write(line);
+  } catch (err) {
+    return {
+      ok: false,
+      reason: err instanceof Error ? err.message : "Could not write to it.",
+    };
+  }
+
+  /*
+   * Echoed into the log, marked as ours.
+   *
+   * Terminals show what you typed; a pipe does not. Without this the
+   * transcript reads as a question followed by an unexplained answer, and
+   * neither the agent nor the user can tell what was actually sent.
+   */
+  append(proc, `\n> ${line}`);
+  return { ok: true };
+}
+
 export function stopProcess(id: string): boolean {
   const proc = processes.get(id);
   if (!proc) return false;
