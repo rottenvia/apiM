@@ -16,7 +16,7 @@ import path from "node:path";
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { createServer } from "node:http";
-import { finishSuite } from "./lib/proc.mjs";
+import { finishSuite, readSourceSync } from "./lib/proc.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 /*
@@ -443,6 +443,104 @@ check(
   "the prompt tells the model to batch",
   /replace_in_files changes the same text everywhere/.test(route) &&
     /run it with preview first/.test(route)
+);
+
+/*
+ * A failed search is not an empty search.
+ *
+ * Reported from a real run: five web_search calls, five "No results",
+ * including for the query "cat". A search that cannot possibly return nothing
+ * returning nothing is the tell — and the model, told only "try different
+ * wording", rephrased and retried four more times. Each one billed.
+ *
+ * The cause: tavilySearch fell through to `return []` on any non-OK response,
+ * so a rejected key, a spent quota and a genuine miss were indistinguishable.
+ */
+console.log("\n9. A broken search says so, instead of pretending it found nothing");
+
+const smart = await load("src/lib/smart-search.ts");
+
+check(
+  "there is a distinct error for a provider failure",
+  typeof smart.SearchProviderError === "function",
+  "zero results and a rejected key are different facts"
+);
+check(
+  "it carries the status, so the message can be specific",
+  new smart.SearchProviderError(401, "bad key").status === 401
+);
+
+const searchSrc = readSourceSync(path.join(ROOT, "src/lib/smart-search.ts"));
+check(
+  "a non-OK response throws rather than returning []",
+  /throw new SearchProviderError\(response\.status, detail\)/.test(searchSrc),
+  "this is the line that made a 401 look like a miss"
+);
+check(
+  "Stop still returns quietly",
+  /error\.name === "AbortError"\) return \[\]/.test(searchSrc),
+  "the user pressing Stop is not a provider failure"
+);
+
+const toolsSrc3 = readSourceSync(path.join(ROOT, "src/lib/tools.ts"));
+check(
+  "web_search reports the failure as a failure",
+  /Search FAILED —/.test(toolsSrc3) && /summary: `Search failed/.test(toolsSrc3)
+);
+check(
+  "a rejected key is named as a key problem",
+  /the Tavily key was rejected/.test(toolsSrc3)
+);
+check(
+  "a spent quota is named as a quota problem",
+  /quota or rate limit is spent/.test(toolsSrc3)
+);
+check(
+  "and the model is told not to rephrase",
+  /Do not retry ` \+\s*`it or rephrase/.test(toolsSrc3),
+  "no wording fixes a rejected key; retrying just spends more"
+);
+
+const routeSrc3 = readSourceSync(path.join(ROOT, "src/app/api/chat/route.ts"));
+check(
+  "the automatic search path also tells the model",
+  /<web_search_failed>/.test(routeSrc3),
+  "it was logged to the server console and nowhere the model could see"
+);
+check(
+  "and says it is not the same as finding nothing",
+  /this is not the same as/.test(routeSrc3)
+);
+
+/*
+ * The other half of the same report: fetching 477KB to read one line.
+ */
+console.log("\n10. fetch_url can return only the part that matters");
+
+check(
+  "there is a find parameter",
+  /find: \{\s*type: "string"/.test(toolsSrc3),
+  "a 477KB JSON body truncated at 200k can cut off the answer"
+);
+check(
+  "matches carry surrounding context",
+  /i - 2\); j <= Math\.min\(lines\.length - 1, i \+ 2\)/.test(toolsSrc3),
+  "one line out of JSON is meaningless without the object around it"
+);
+check(
+  "an invalid regex falls back to a literal search",
+  /catch \{\s*re = new RegExp\(find\.replace/.test(toolsSrc3),
+  'a model writing "info.version[" means the text, not a character class'
+);
+check(
+  "no match says so, with the full size",
+  /Nothing matched/.test(toolsSrc3) && /fetch it again/.test(toolsSrc3),
+  "otherwise an empty body reads as an empty page"
+);
+check(
+  "the header still reports the real page size",
+  toolsSrc3.indexOf("KB`") < toolsSrc3.indexOf("Showing ${picked.length}"),
+  "so you can tell whether you narrowed a big page or a small one"
 );
 
 console.log(

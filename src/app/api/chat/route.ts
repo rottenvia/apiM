@@ -8,7 +8,12 @@ import {
   getConversation,
 } from "@/lib/store";
 import type { StoredMessage } from "@/lib/store";
-import { smartSearch, autoThinkingEffort, decideSearch } from "@/lib/smart-search";
+import {
+  smartSearch,
+  autoThinkingEffort,
+  decideSearch,
+  SearchProviderError,
+} from "@/lib/smart-search";
 import type { SmartSearchContext } from "@/lib/smart-search";
 import {
   ALL_PLUGINS,
@@ -636,8 +641,41 @@ export async function POST(req: NextRequest) {
               searchProfile
             );
           } catch (searchError) {
-            // A failed search shouldn't kill the answer — carry on without it.
+            /*
+             * Carry on, but SAY so.
+             *
+             * A failed search should not kill the answer — that part was
+             * right. But it was logged to the server console and nowhere
+             * else, so the model answered from memory believing it had
+             * simply found nothing, and the user saw a confident answer with
+             * no hint the web was never consulted.
+             *
+             * The note goes into the prompt, so the reply can be honest
+             * about what it is based on.
+             */
             console.error("Search failed:", searchError);
+            const status =
+              searchError instanceof SearchProviderError ? searchError.status : 0;
+            const why =
+              status === 401 || status === 403
+                ? "the Tavily key was rejected"
+                : status === 429 || status === 432
+                  ? "the Tavily quota is spent"
+                  : status
+                    ? `the search service returned HTTP ${status}`
+                    : "the search service could not be reached";
+            searchSummary =
+              `\n\n<web_search_failed>\nA web search was attempted and FAILED: ` +
+              `${why}. No results were retrieved — this is not the same as ` +
+              `finding nothing. Answer from your own knowledge, and tell the ` +
+              `user plainly that you could not look it up.\n` +
+              `</web_search_failed>`;
+            recordAsync({
+              kind: "api_error",
+              subject: "web_search",
+              detail: why,
+              context: { status },
+            });
           }
 
           if (searchContext && searchContext.results.length > 0) {
