@@ -1257,6 +1257,27 @@ export default function Home() {
                   searchCacheHits: evt.searchCacheHits,
                   searchUsd: evt.searchUsd,
                 };
+                /*
+                 * Apply the effort to the live bubble, not only at the end.
+                 *
+                 * `finalMeta` is merged when the stream finishes, so until
+                 * then the streaming message had no thinkingEffort — and the
+                 * thinking panel needs it to know reasoning is coming before
+                 * the first token of it arrives. Without this the panel only
+                 * appeared once text landed, which on a short reply is after
+                 * the thinking is over.
+                 *
+                 * Only this one field: the search and cost numbers are not
+                 * final yet and showing a half-filled meta row mid-reply
+                 * would be worse than showing it at the end.
+                 */
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === streamingId
+                      ? { ...m, thinkingEffort: evt.resolvedEffort }
+                      : m
+                  )
+                );
                 if (!currentConvId && evt.conversationId) {
                   // Ref first: `finally` reads it to refresh the file count,
                   // and a brand-new chat only learns its id here.

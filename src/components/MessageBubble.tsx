@@ -790,7 +790,30 @@ function MessageBubbleImpl({
                 border and background. Putting both on one element would mean
                 animating grid-template-rows on the same box that draws the
                 frame, and the frame would squash. */}
-            {(message.reasoningContent || message.reasoningLength) && (
+            {/*
+              Mounted while thinking is EXPECTED, not only once text arrives.
+
+              This tested `reasoningContent || reasoningLength`, and a new
+              streaming message starts with reasoningContent set to "" — which
+              is falsy. So during the seconds before the first reasoning token
+              lands there was no panel at all, and on a short reply where the
+              model thinks briefly and answers fast, that is the whole of it.
+              Reported as "no thinking showing": nothing was broken downstream,
+              the panel was simply never mounted.
+
+              The sweep animation had the same cause. It lives inside this
+              block, so it could not run before the block existed.
+
+              `thinkingEffort` is set from the resolved effort the moment the
+              stream opens, so it is the earliest honest signal that reasoning
+              is coming. "none" means the model was told not to think, and
+              then there is correctly nothing to show.
+            */}
+            {(message.reasoningContent ||
+              message.reasoningLength ||
+              (message.isStreaming &&
+                message.thinkingEffort &&
+                message.thinkingEffort !== "none")) && (
               <div className="thinking-panel">
               <div
                 data-thinking={isThinkingPhase}

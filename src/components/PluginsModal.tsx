@@ -1,7 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { AVAILABLE_PLUGINS, LEGACY_PLUGINS } from "@/lib/plugins";
+import {
+  AVAILABLE_PLUGINS,
+  LEGACY_PLUGINS,
+  buildPluginDirectives,
+} from "@/lib/plugins";
 import type { Plugin } from "@/lib/plugins";
 
 interface CustomPlugin extends Plugin {
@@ -46,6 +50,16 @@ export function PluginsModal({
   onClose,
 }: PluginsModalProps) {
   const [custom, setCustom] = useState<CustomPlugin[]>([]);
+  /** Standing cost of the enabled plugins, shown in the footer. */
+  const pluginTokens = Math.ceil(
+    buildPluginDirectives(
+      [...AVAILABLE_PLUGINS, ...LEGACY_PLUGINS].map((p) => ({
+        ...p,
+        enabled: enabledPlugins.includes(p.id),
+      }))
+    ).length / 3.6
+  );
+
   const [draft, setDraft] = useState<Draft | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -403,8 +417,29 @@ export function PluginsModal({
             </>
           ) : (
             <>
+              {/*
+                What the active plugins cost, every round.
+
+                Reported: "when i enable plugin caveman it spends more token
+                than it saves". It did — the block wrapping the rules was 264
+                tokens of boilerplate around a 114-token rule, and nothing on
+                screen said so. A token-saving feature with an invisible
+                standing charge is the one case where a number in the UI is
+                worth more than any amount of tuning.
+
+                Estimated at ~3.6 characters per token, which is the ratio
+                measured against DeepSeek's own usage figures in docs/token-costs.md.
+              */}
               <span className="text-xs text-text-muted">
                 {enabledPlugins.length} active
+                {enabledPlugins.length > 0 && (
+                  <>
+                    {" · "}
+                    <span title="Added to every request while these are on. Cached after the first round of a conversation.">
+                      ~{pluginTokens} tokens per request
+                    </span>
+                  </>
+                )}
               </span>
               <button
                 onClick={() => {

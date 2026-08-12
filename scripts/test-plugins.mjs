@@ -55,7 +55,8 @@ check(
 );
 check(
   "it applies for the whole conversation, not one reply",
-  /every reply for the whole conversation/i.test(one)
+  /every reply for the whole\s+conversation/i.test(one),
+  "wording may change; the standing-order property must not"
 );
 check(
   "the model is told to apply them silently",
@@ -64,7 +65,7 @@ check(
 );
 check(
   "the user's newest message can still override",
-  /newest message/i.test(one)
+  /newest\s+message/i.test(one)
 );
 check(
   "conflicting orders have a deterministic resolution",
@@ -72,7 +73,8 @@ check(
 );
 check(
   "the model is told to check its reply against the list",
-  /Before you send a reply/i.test(one)
+  /check (your reply|it) against/i.test(one),
+  "the self-check property, not one exact sentence"
 );
 
 // ------------------------------------------------------------- the content
@@ -85,7 +87,13 @@ check(
 );
 check(
   "its instruction text appears",
-  one.includes("Answer in as few words")
+  one.includes(
+    P.AVAILABLE_PLUGINS.find((p) => p.id === "caveman")
+      .prompt.replace(/^\s*(\[[^\]]+\]\s*)?/, "")
+      .trim()
+      .slice(0, 40)
+  ),
+  "read from the plugin rather than pinned, so shortening it is not a failure"
 );
 check(
   "the bracket tag is stripped — the list already attributes it",
@@ -146,7 +154,7 @@ check(
 );
 check(
   "the directives are the last thing in the prompt",
-  assembled.trimEnd().endsWith("Before you send a reply, check it against the list above."),
+  assembled.trimEnd().endsWith(two.trimEnd()),
   "last position in a system prompt is the strongest"
 );
 
@@ -165,7 +173,10 @@ console.log("\n4. The old builder still works for other callers");
 const blended = P.buildSystemPrompt(withEnabled("caveman"));
 check(
   "buildSystemPrompt still returns the base with plugins appended",
-  blended.startsWith(P.BASE_PROMPT) && blended.includes("Answer in as few words")
+  blended.startsWith(P.BASE_PROMPT) &&
+    blended.includes(
+      P.AVAILABLE_PLUGINS.find((p) => p.id === "caveman").prompt.trim().slice(0, 30)
+    )
 );
 check(
   "with nothing enabled it returns the base unchanged",

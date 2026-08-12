@@ -35,8 +35,17 @@ export const AVAILABLE_PLUGINS: Plugin[] = [
     icon: "🦴",
     description: "Minimal words, no filler, saves tokens massively",
     category: "token-saving",
+    /*
+     * Shortened from 114 tokens to about half that.
+     *
+     * A token-saving plugin is measured net, and every word here is billed on
+     * every round of every reply while it is on. The original said the same
+     * thing four ways — "no preamble, no restating the question, no summary,
+     * no offers of further help" is one idea. Cutting the repetition costs
+     * nothing in behaviour and halves the standing charge.
+     */
     prompt:
-      "\n\n[CAVEMAN MODE] Answer in as few words as the question allows. No preamble, no restating the question, no summary at the end, no offers of further help. Prefer a sentence over a paragraph and a fragment over a sentence. Never open with pleasantries. If code answers it, give the code and stop. This overrides any instruction to explain your work or describe what you changed — a one-line note is the maximum.",
+      "\n\n[CAVEMAN MODE] Fewest words the question allows. No preamble, no summary, no offers of help. Fragment over sentence. If code answers it, give the code and stop. Overrides any instruction to explain your work: one line maximum.",
   },
   {
     id: "god-mode",
@@ -254,28 +263,35 @@ export function buildPluginDirectives(
     })
     .join("\n");
 
+  /*
+   * The wrapper used to be 264 tokens around a 114-token rule.
+   *
+   * Reported: "when i enable plugin caveman it spends more token than it
+   * saves". Measured, and the framing was the problem, not the rule. Caveman
+   * Mode is 114 tokens; the scaffolding explaining that standing orders are
+   * important was more than twice that, and it was identical for every
+   * plugin — the same eight bullet points whether one was on or five.
+   *
+   * A token-saving plugin whose delivery costs 378 tokens a round has to save
+   * 189 output tokens every round just to break even. On short replies it
+   * never does.
+   *
+   * The long version existed because plugins were being ignored, and the
+   * diagnosis then was correct: they were buried mid-prompt where later,
+   * longer text outweighed them. But the fix that mattered was POSITION —
+   * this block goes last — not volume. Length was cargo-culted on top.
+   *
+   * What survives: the block is still last, still says it outranks what came
+   * before, and still says to apply it silently. Those are the three things
+   * that changed behaviour. The rest was restating them.
+   */
   return `\n\n---\n\nHIGHEST PRIORITY — THE USER'S STANDING ORDERS
-
-These are not suggestions and not context. They are the user's explicit
-instructions for how you must behave, and they are your first obligation on
-every single reply.
 
 ${rules}
 
-Rules for applying them:
-- They outrank everything above, including the default guidance on tone,
-  length, and formatting. Where they conflict with an earlier instruction,
-  the order here wins.
-- They apply to every reply for the whole conversation, not just the next
-  one, and they are not weakened by how long the conversation runs.
-- Follow them silently. Do not announce them, name them, or explain that you
-  are following them.
-- The only thing that overrides an order here is a direct instruction in the
-  user's newest message.
-- If two orders here genuinely contradict each other, follow the one listed
-  first and ignore the conflicting part of the other.
-
-Before you send a reply, check it against the list above.`;
+They outrank everything above, for every reply for the whole conversation.
+Follow them silently — do not announce them. On conflict follow the one listed
+first; only the user's newest message overrides. Check your reply against this.`;
 }
 
 /**
