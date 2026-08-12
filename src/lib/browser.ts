@@ -470,14 +470,43 @@ export function formatSession(result: BrowserSessionResult): string {
    * scraper against Cloudflare's markup and telling the user it works.
    */
   if (result.blocked) {
+    /*
+     * A dead end plus a route out.
+     *
+     * The first version of this said only "you cannot get through", which is
+     * true and useless: a model told only what it cannot do will either keep
+     * retrying the same URL or invent something. Asked "so how do we bypass
+     * this", the honest answer is that you do not — but there is nearly
+     * always a supported door, and naming the specific ones turns a refusal
+     * into the next action.
+     *
+     * The order is deliberate: official API first because it is the one that
+     * keeps working, then the data the site publishes on purpose, then asking
+     * the user, and only then giving up. Every option here is something the
+     * site operator has chosen to offer.
+     */
     lines.push(
       `BLOCKED: this page is ${result.blocked}'s anti-bot challenge, not the ` +
         `site's real content. Everything below describes the challenge page.`,
       `Do not build selectors from it and do not describe it as the site. ` +
-        `Say plainly that the page could not be reached automatically. There ` +
-        `is no way around this from here: these systems exist specifically ` +
-        `to stop automated browsers, and defeating them is not something ` +
-        `this tool does.`,
+        `There is no way through it from here — these systems fingerprint ` +
+        `the browser specifically to catch automation, and defeating them is ` +
+        `not something this tool does or will do.`,
+      ``,
+      `Do this instead, in order:`,
+      `1. Look for an official API. Search for "<site> API docs" or try ` +
+        `/api, /api/v1 or /.well-known/ with http_request. A documented ` +
+        `endpoint is faster than scraping, returns clean JSON, and does not ` +
+        `break when the page is redesigned. This is the answer far more ` +
+        `often than people expect.`,
+      `2. Look for data the site publishes deliberately: an RSS or Atom ` +
+        `feed, a sitemap.xml, a CSV or JSON export, a public dataset.`,
+      `3. If the task genuinely needs a signed-in page, ask the user with ` +
+        `ask_user. They can open it themselves and paste what is there, or ` +
+        `save the page and attach it. That takes them one minute.`,
+      `4. If none of those exist, say so plainly and stop. Report which ones ` +
+        `you checked. Do not retry this URL, do not look for a bypass ` +
+        `service, and do not present the challenge page as a result.`,
       ""
     );
   }

@@ -766,7 +766,7 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
     function: {
       name: "browse",
       description:
-        "Open a page in a real browser, run its JavaScript, and see what actually renders — the DOM, the visible text, the console, failed requests, and screenshots. Use this instead of fetch_url or inspect_page whenever the site is an app rather than static HTML: those only see the empty shell a server sends before scripts run, so any selector you write from them will not exist. Also use it to check your own work: open a page you built, screenshot it, and read the console for errors.",
+        "Open a page in a real browser, run its JavaScript, and see what actually renders — the DOM, the visible text, the console, failed requests, and screenshots. Use this instead of fetch_url or inspect_page whenever the site is an app rather than static HTML: those only see the empty shell a server sends before scripts run, so any selector you write from them will not exist. Also use it to check your own work: open a page you built, screenshot it, and read the console for errors. Before scraping a site you do not control, check whether it has an official API — a documented endpoint returns clean JSON, survives redesigns, and is usually quicker to find than the right selector. If a page answers with an anti-bot challenge, that site has chosen not to be automated: report it and move to an API, a feed, or asking the user. Do not look for a way around it.",
       parameters: {
         type: "object",
         properties: {

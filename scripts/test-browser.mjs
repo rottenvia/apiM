@@ -502,7 +502,9 @@ check(
 );
 check(
   "and told plainly that there is no way around it",
-  /defeating them is not something/.test(browserSrc),
+  /defeating them is\s*\` \+\s*\`?\s*not something|not something this tool does/.test(
+    browserSrc
+  ),
   "an agent that keeps retrying a challenge burns rounds for nothing"
 );
 check(
@@ -548,6 +550,74 @@ check(
   "only the npm step asks for a shell",
   (installSrc2.match(/shell: IS_WINDOWS/g) ?? []).length === 1,
   "npm is a .cmd shim; node is not"
+);
+
+/*
+ * A refusal that names the way forward.
+ *
+ * Asked "so how do we make our agent bypass this". The answer is that it does
+ * not — but the first version of the blocked message said only that, and a
+ * model told only what it cannot do either retries the same URL or invents
+ * something. Every option below is a door the site operator deliberately
+ * left open.
+ */
+console.log("\n12. Blocked means redirected, not just refused");
+
+const blockedOut = B.formatSession({
+  results: [{ action: "goto", ok: true, detail: "loaded" }],
+  screenshots: [],
+  console: [],
+  failedRequests: [],
+  blocked: "Cloudflare",
+  title: "Attention Required! | Cloudflare",
+  text: "Verify you are a human",
+});
+
+check(
+  "it points at an official API first",
+  /Look for an official API/.test(blockedOut),
+  "the one route that keeps working and survives a redesign"
+);
+check(
+  "and says how to look for one",
+  /\/api\/v1|API docs/.test(blockedOut),
+  "a suggestion with no next action is not a suggestion"
+);
+check(
+  "it names the data sites publish on purpose",
+  /RSS|sitemap\.xml/.test(blockedOut)
+);
+check(
+  "it offers to ask the user rather than guessing",
+  /ask_user/.test(blockedOut),
+  "a signed-in page is one minute of the user's time, not an arms race"
+);
+check(
+  "it tells the model to stop rather than loop",
+  /Do not retry this URL/.test(blockedOut),
+  "retrying a challenge burns rounds and changes nothing"
+);
+check(
+  "and explicitly rules out hunting for a bypass service",
+  /do not look for a bypass service/i.test(blockedOut),
+  "FlareSolverr and friends are documented as non-functional against Turnstile"
+);
+check(
+  "the routes come before the scraped content",
+  blockedOut.indexOf("Look for an official API") <
+    blockedOut.indexOf("Visible text"),
+  "otherwise the advice is buried under the block page"
+);
+
+const toolsSrc2 = readSourceSync(path.join(ROOT, "src/lib/tools.ts"));
+check(
+  "the browse tool itself says to check for an API first",
+  /check whether it has an official API/.test(toolsSrc2),
+  "cheaper to find the API before spending a browser round"
+);
+check(
+  "and that a challenge means the site opted out of automation",
+  /chosen not to be automated/.test(toolsSrc2)
 );
 
 console.log(
