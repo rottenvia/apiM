@@ -57,7 +57,8 @@
     "score": "tsx scripts/score-tools.mjs",
     "test:autonomy": "tsx scripts/test-autonomy.mjs",
     "test:dispatch": "tsx scripts/test-dispatch.mjs",
-    "test:honesty": "tsx scripts/test-honesty.mjs"
+    "test:honesty": "tsx scripts/test-honesty.mjs",
+    "test:ux": "tsx scripts/test-ux.mjs"
   },
   "dependencies": {
     "@types/cross-spawn": "^6.0.6",
