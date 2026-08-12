@@ -248,12 +248,76 @@ function MessageBubbleImpl({
    * props during render should be, or the panel renders once wrong and then
    * corrects itself.
    */
-  const showThinking =
-    userSetThinking ??
-    Boolean(message.isStreaming && !message.content);
+  /*
+   * Open while reasoning is arriving — which is NOT the same as "before the
+   * answer starts".
+   *
+   * The previous rule was `isStreaming && !message.content`, and it was wrong
+   * in a way that only shows up against a real reply. Measured by replaying
+   * actual frames through this logic: the stream sends meta, then reasoning,
+   * then content — and the very first content token flips `!message.content`
+   * to false. So the panel was open for exactly ONE frame and then slammed
+   * shut, which is why it reads as a line that flashes and disappears.
+   *
+   * Reported twice. My first fix mounted the panel earlier, which was a real
+   * bug too, but it was not this one: mounting it does no good if it closes a
+   * moment later.
+   *
+   * The honest signal is whether reasoning is still GROWING. DeepSeek streams
+   * reasoning and content in that order, so once the reasoning stops
+   * lengthening it is genuinely finished, whatever else is arriving. A ref
+   * holds the last length seen — comparing during render rather than storing
+   * derived state, so there is still no effect to keep in step.
+   */
+  const reasoningLen = message.reasoningContent?.length ?? 0;
+  /*
+   * How much reasoning there is, for the collapsed label.
+   *
+   * A stored chat sends only the length and fetches the body on demand, so
+   * both sources have to be considered or an old chat shows nothing.
+   */
+  const reasoningChars = reasoningLen || message.reasoningLength || 0;
+  const reasoningGrewRef = useRef({ len: 0, done: false });
+  if (reasoningLen > reasoningGrewRef.current.len) {
+    // Still growing. Only clears `done` before any prose has arrived — after
+    // that the latch above holds, so a late burst of reasoning cannot make
+    // the panel spring open again.
+    reasoningGrewRef.current = {
+      len: reasoningLen,
+      done: reasoningGrewRef.current.done,
+    };
+  } else if (
+    reasoningLen > 0 &&
+    message.content &&
+    reasoningLen === reasoningGrewRef.current.len
+  ) {
+    /*
+     * Reasoning has stopped growing and prose has started.
+     *
+     * Latched, never un-latched, because the alternative flickers. On a long
+     * Pro reply the model interleaves — reasoning, prose, more reasoning — and
+     * an un-latched flag reopens the panel mid-answer, which is a box jumping
+     * open and shut under the text you are reading. Once the answer is
+     * genuinely underway, the reasoning belongs behind the toggle.
+     *
+     * A ref rather than state on purpose: this must not schedule a re-render
+     * of its own, and the value is read during the same render that set it.
+     */
+    reasoningGrewRef.current.done = true;
+  }
+
+  const autoOpen = Boolean(
+    message.isStreaming &&
+      // Something is expected, or already here.
+      (reasoningLen > 0 ||
+        (message.thinkingEffort && message.thinkingEffort !== "none")) &&
+      !reasoningGrewRef.current.done
+  );
+
+  const showThinking = userSetThinking ?? autoOpen;
   const setShowThinking = (next: boolean | ((v: boolean) => boolean)) =>
     setUserSetThinking((prev) => {
-      const current = prev ?? Boolean(message.isStreaming && !message.content);
+      const current = prev ?? autoOpen;
       return typeof next === "function" ? next(current) : next;
     });
   /** Open state of the "resume with a different model" menu. */
@@ -303,8 +367,16 @@ function MessageBubbleImpl({
   // Label-only signal that reasoning is still in progress. The panel itself
   // stays closed unless the user opens it, so nothing expands and collapses
   // underneath them mid-answer.
+  /*
+   * Same correction as the open state above.
+   *
+   * This drove the amber tint and the sweeping progress line, and it used the
+   * same `!message.content` test — so both switched off on the first token of
+   * the answer, while reasoning was often still streaming. The line you saw
+   * appear and vanish was this.
+   */
   const isThinkingPhase = Boolean(
-    message.isStreaming && message.reasoningContent && !message.content
+    message.isStreaming && reasoningLen > 0 && !reasoningGrewRef.current.done
   );
 
   // Keep the reasoning panel pinned to the newest text while "Follow" is on.
@@ -847,7 +919,24 @@ function MessageBubbleImpl({
                     >
                       <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
                     </svg>
-                    <span className="truncate">Thinking</span>
+                    {/* The collapsed row has to say there is something in it.
+
+                        Once the answer starts the panel closes, and a bare
+                        word "Thinking" gives no hint that it holds anything —
+                        so it reads as a decorative line rather than a control,
+                        which is exactly how it was described: "its an line".
+                        A length makes it obviously openable. */}
+                    <span className="truncate">
+                      {isThinkingPhase
+                        ? "Thinking"
+                        : reasoningChars > 0
+                          ? `Thought for ${
+                              reasoningChars >= 1000
+                                ? `${(reasoningChars / 1000).toFixed(1)}k`
+                                : reasoningChars
+                            } characters`
+                          : "Thinking"}
+                    </span>
                   </button>
 
                   {/* Only while reasoning is actually arriving.
