@@ -14,6 +14,7 @@ const DEEPSEEK_BASE_URL =
 /** Overridable so the search path can be exercised against a stub in tests. */
 const TAVILY_BASE_URL =
   process.env.TAVILY_BASE_URL ?? "https://api.tavily.com";
+const EXA_BASE_URL = process.env.EXA_BASE_URL ?? "https://api.exa.ai";
 
 import type {
   ProfileSettings,
@@ -406,6 +407,123 @@ Respond in JSON ONLY:
  * Execute a single Tavily search.
  */
 /**
+ * Exa, used as the fallback when Tavily refuses.
+ *
+ * Added because Tavily started answering 432 — "This request exceeds your
+ * plan's set usage limit" — which is a hard stop until the month rolls over
+ * or the plan changes. One provider means one bad month is a dead feature.
+ *
+ * Two details that are easy to get wrong, both from Exa's own docs:
+ *
+ *   - Auth is `x-api-key`. The docs also list `Authorization: Bearer`, but
+ *     the header that is verified to work is x-api-key, so that is what is
+ *     sent.
+ *   - Content fields MUST nest under `contents`. A top-level `text: true`
+ *     returns 400, and it is documented as the single most common
+ *     integration mistake.
+ *
+ * Exa has no `search_depth`, so depth is expressed as how many results to
+ * ask for. Its scores are cosine similarities on a different scale from
+ * Tavily's, which matters because the caller filters on score — see the note
+ * where that filter lives.
+ */
+async function exaSearch(
+  query: string,
+  exaKey: string,
+  options: {
+    maxResults?: number;
+    includeDomains?: string[];
+    signal?: AbortSignal;
+    depth?: SearchDepth;
+    useCache?: boolean;
+    onCacheHit?: () => void;
+  } = {}
+): Promise<Omit<SearchResultItem, "domain">[]> {
+  const {
+    maxResults = 10,
+    includeDomains,
+    signal,
+    depth = "advanced",
+    useCache = true,
+    onCacheHit,
+  } = options;
+
+  const cacheKey = { query, provider: "exa", depth, maxResults };
+  if (useCache) {
+    const hit = await readCache(cacheKey);
+    if (hit) {
+      onCacheHit?.();
+      void recordCacheHit("exa");
+      return hit;
+    }
+  }
+
+  try {
+    const body: Record<string, unknown> = {
+      query,
+      type: "auto",
+      numResults: maxResults,
+      // Nested, not top-level. Top-level text/highlights returns 400.
+      contents: { text: { maxCharacters: MAX_SOURCE_CHARS }, highlights: true },
+      excludeDomains: BLOCKED_DOMAINS,
+    };
+    if (includeDomains?.length) body.includeDomains = includeDomains;
+
+    const response = await fetch(`${EXA_BASE_URL}/search`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": exaKey,
+      },
+      body: JSON.stringify(body),
+      signal: withTimeout(signal, 45_000),
+    });
+
+    void recordRequest("exa", depth);
+
+    if (response.ok) {
+      const data = await response.json();
+      const mapped = (data?.results ?? []).map((r: Record<string, unknown>) => {
+        const text = String(r.text ?? "");
+        // Highlights are the model-chosen key passages. When the full text is
+        // missing they are all there is, and they are better than nothing.
+        const highlights = Array.isArray(r.highlights)
+          ? (r.highlights as unknown[]).map(String).join("\n\n")
+          : "";
+        const best = text.length > highlights.length ? text : highlights;
+        return {
+          title: String(r.title ?? ""),
+          url: String(r.url ?? ""),
+          content: best.slice(0, MAX_SOURCE_CHARS),
+          score: Number(r.score ?? 0),
+          publishedDate: r.publishedDate ? String(r.publishedDate) : undefined,
+        };
+      });
+
+      if (useCache) await writeCache(cacheKey, mapped);
+      return mapped;
+    }
+
+    let detail = "";
+    try {
+      const err = (await response.json()) as { error?: unknown; message?: unknown };
+      detail = String(err?.error ?? err?.message ?? "");
+    } catch {
+      /* a non-JSON error body tells us nothing extra */
+    }
+    throw new SearchProviderError(response.status, detail);
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") return [];
+    if (error instanceof SearchProviderError) throw error;
+    console.error("Exa search error:", error);
+    throw new SearchProviderError(
+      0,
+      error instanceof Error ? error.message : "the search service could not be reached"
+    );
+  }
+}
+
+/**
  * The search provider refused or failed, as opposed to finding nothing.
  *
  * Carries the HTTP status so the caller can say something specific: a 401 is
@@ -563,6 +681,65 @@ async function tavilySearch(
 }
 
 /**
+ * One search, with a fallback provider.
+ *
+ * Tavily first when a key exists, because it returns cleaned full-page
+ * markdown and this app was built around that. Exa when Tavily refuses.
+ *
+ * Only a REFUSAL falls through, never an empty result. A provider that
+ * answers "nothing matched" has done its job, and re-asking a second provider
+ * for the same nothing costs money and time. A 401, a 429/432 or a 5xx is a
+ * different thing entirely: the query never ran.
+ *
+ * Reported: Tavily began returning 432, "This request exceeds your plan's set
+ * usage limit". That is a hard stop until the month rolls over, and with one
+ * provider it made search a dead feature for the rest of the month.
+ */
+async function searchOnce(
+  query: string,
+  options: {
+    tavilyKey?: string;
+    exaKey?: string;
+    maxResults?: number;
+    timeRange?: string;
+    includeDomains?: string[];
+    signal?: AbortSignal;
+    depth?: SearchDepth;
+    useCache?: boolean;
+    onCacheHit?: () => void;
+    /** Told which provider actually answered, for the UI and the ledger. */
+    onProvider?: (id: string) => void;
+  } = {}
+): Promise<Omit<SearchResultItem, "domain">[]> {
+  const { tavilyKey, exaKey, timeRange, onProvider, ...rest } = options;
+
+  if (tavilyKey) {
+    try {
+      const results = await tavilySearch(query, tavilyKey, { ...rest, timeRange });
+      onProvider?.("tavily");
+      return results;
+    } catch (error) {
+      if (!(error instanceof SearchProviderError) || !exaKey) throw error;
+      console.warn(
+        `Tavily failed (${error.status}); falling back to Exa: ${error.message}`
+      );
+      // Fall through to Exa below.
+    }
+  }
+
+  if (exaKey) {
+    // Exa has no time_range parameter, so a recency-limited query loses that
+    // filter here. Better than no answer, and the caller sees which provider
+    // ran.
+    const results = await exaSearch(query, exaKey, rest);
+    onProvider?.("exa");
+    return results;
+  }
+
+  throw new SearchProviderError(0, "no search provider is configured");
+}
+
+/**
  * Ask a cheap model whether the gathered sources actually answer the question.
  *
  * Deliberately concrete — "does this contain the specific fact needed" rather
@@ -658,7 +835,14 @@ export async function smartSearch(
   deepseekKey: string,
   tavilyKey: string,
   signal?: AbortSignal,
-  profileName?: string
+  profileName?: string,
+  /**
+   * Optional second provider, used when Tavily refuses.
+   *
+   * Appended rather than inserted so every existing caller keeps working
+   * unchanged — this function is called from three places.
+   */
+  exaKey?: string
 ): Promise<SmartSearchContext> {
   const profile: ProfileSettings = profileSettings(profileName);
   const plan = await generateSearchQueries(message, context, deepseekKey, signal);
@@ -702,7 +886,9 @@ export async function smartSearch(
     const settled = await Promise.all(
       fresh.map((query) => {
         let hit = false;
-        return tavilySearch(query, tavilyKey, {
+        return searchOnce(query, {
+          tavilyKey,
+          exaKey,
           timeRange,
           includeDomains,
           signal,

@@ -366,6 +366,8 @@ export default function Home() {
     balanceLevel !== "ok" &&
     (balanceDismissedAt === null || balance.total < balanceDismissedAt - 0.001);
   const [tavilyKey, setTavilyKey] = useState("");
+  /** Optional fallback provider, used only when Tavily refuses. */
+  const [exaKey, setExaKey] = useState("");
   const [visionKey, setVisionKey] = useState("");
   const [visionModel, setVisionModel] = useState("gpt-4o-mini");
   const [model, setModel] = useState("deepseek-v4-pro");
@@ -508,6 +510,7 @@ export default function Home() {
             const s = JSON.parse(saved);
             if (s.deepseekKey) setDeepseekKey(s.deepseekKey);
             if (s.tavilyKey) setTavilyKey(s.tavilyKey);
+            if (s.exaKey) setExaKey(s.exaKey);
             if (s.visionKey) setVisionKey(s.visionKey);
             if (s.visionModel) setVisionModel(s.visionModel);
             if (s.model) setModel(s.model);
@@ -549,6 +552,7 @@ export default function Home() {
         JSON.stringify({
           deepseekKey,
           tavilyKey,
+          exaKey,
           visionKey,
           visionModel,
           model,
@@ -567,6 +571,7 @@ export default function Home() {
   }, [
     deepseekKey,
     tavilyKey,
+    exaKey,
     visionKey,
     visionModel,
     model,
@@ -1157,6 +1162,7 @@ export default function Home() {
             conversationId: currentConvId ?? draftConvId,
             deepseekApiKey: deepseekKey,
             tavilyApiKey: tavilyKey,
+            exaApiKey: exaKey,
             model: activeModel,
             thinkingEffort,
             webSearchMode,
@@ -1633,6 +1639,7 @@ export default function Home() {
       workspaceId,
       deepseekKey,
       tavilyKey,
+      exaKey,
       model,
       thinkingEffort,
       webSearchMode,
@@ -2077,6 +2084,8 @@ export default function Home() {
         <SettingsModal
           deepseekKey={deepseekKey}
           tavilyKey={tavilyKey}
+          exaKey={exaKey}
+          onExaKeyChange={setExaKey}
           visionKey={visionKey}
           visionModel={visionModel}
           onVisionKeyChange={setVisionKey}

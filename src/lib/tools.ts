@@ -1020,6 +1020,8 @@ export interface ToolContext {
   visionModel?: string;
   /** Tavily key. Absent means web_search is withheld from the model. */
   searchKey?: string;
+  /** Optional Exa key, used when Tavily refuses. Either one enables search. */
+  exaKey?: string;
   /** Needed by the search planner, which uses a cheap model to pick queries. */
   deepseekKey?: string;
   searchProfile?: string;
@@ -1577,42 +1579,71 @@ export async function runTool(
         const find = typeof args.find === "string" ? args.find.trim() : "";
         let findNote = "";
         if (find) {
+          /*
+           * Match on CHARACTER OFFSETS, not on lines.
+           *
+           * The first version split the body into lines and kept the matching
+           * ones with two either side. That works on pretty-printed text and
+           * does nothing at all on minified JSON — which is most API
+           * responses. Reported from a real test against PyPI: the whole
+           * 477KB document is ONE line, so "the matching line" was the entire
+           * file and `find` filtered one line down to one line.
+           *
+           * Windowing around each match instead works on both shapes: a line
+           * in pretty-printed JSON is well under the window, and a minified
+           * blob gets a slice around the needle rather than the ocean.
+           */
+          const WINDOW = 300;
+          const MAX_MATCHES = 20;
+
           let re: RegExp;
           try {
-            re = new RegExp(find, "i");
+            re = new RegExp(find, "gi");
           } catch {
-            re = new RegExp(find.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+            // A model writing "info.version[" means the text, not a broken
+            // character class.
+            re = new RegExp(find.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
           }
-          const lines = body.split("\n");
-          const keep = new Set<number>();
-          lines.forEach((line, i) => {
-            if (!re.test(line)) return;
-            // Two lines either side: enough to see the shape of a JSON
-            // object or the sentence a phrase sits in.
-            for (let j = Math.max(0, i - 2); j <= Math.min(lines.length - 1, i + 2); j++) {
-              keep.add(j);
-            }
-          });
 
-          if (keep.size === 0) {
+          const spans: [number, number][] = [];
+          for (const m of body.matchAll(re)) {
+            if (m.index === undefined) continue;
+            spans.push([
+              Math.max(0, m.index - WINDOW),
+              Math.min(body.length, m.index + m[0].length + WINDOW),
+            ]);
+            if (spans.length >= MAX_MATCHES) break;
+          }
+
+          if (spans.length === 0) {
             findNote =
-              `\n\n[Nothing matched "${find}". The full page is ` +
+              `\n\n[Nothing matched "${find}". The page is ` +
               `${body.length.toLocaleString()} characters — fetch it again ` +
               `without find, or try a different pattern.]`;
             body = "";
           } else {
-            const picked = [...keep].sort((a, b) => a - b);
-            const out: string[] = [];
-            let previous = -1;
-            for (const i of picked) {
-              if (previous !== -1 && i > previous + 1) out.push("…");
-              out.push(lines[i]);
-              previous = i;
+            // Overlapping windows are merged so a dense cluster of matches
+            // reads as one passage rather than the same text repeated.
+            const merged: [number, number][] = [];
+            for (const [from, to] of spans) {
+              const last = merged[merged.length - 1];
+              if (last && from <= last[1]) last[1] = Math.max(last[1], to);
+              else merged.push([from, to]);
             }
+
+            const pieces = merged.map(([from, to]) => {
+              const lead = from > 0 ? "…" : "";
+              const trail = to < body.length ? "…" : "";
+              return `${lead}${body.slice(from, to)}${trail}`;
+            });
+
+            const shown = pieces.join("\n\n");
             findNote =
-              `\n[Showing ${picked.length} of ${lines.length} lines matching ` +
-              `"${find}".]`;
-            body = out.join("\n").slice(0, MAX_FETCH_CHARS);
+              `\n[Showing ${merged.length} match${merged.length === 1 ? "" : "es"} ` +
+              `for "${find}" with ${WINDOW} characters of context each, out of ` +
+              `${body.length.toLocaleString()} characters.` +
+              `${spans.length >= MAX_MATCHES ? ` Stopped at ${MAX_MATCHES} matches.` : ""}]`;
+            body = shown.slice(0, MAX_FETCH_CHARS);
           }
         }
 
@@ -1934,11 +1965,11 @@ export async function runTool(
         if (!query) {
           return { ok: false, content: "Error: a query is required.", summary: "Empty query" };
         }
-        if (!context.searchKey || !context.deepseekKey) {
+        if ((!context.searchKey && !context.exaKey) || !context.deepseekKey) {
           return {
             ok: false,
             content:
-              "Web search is not configured — no Tavily key is set in " +
+              "Web search is not configured — no Tavily or Exa key is set in " +
               "Settings. Say plainly that you could not look this up rather " +
               "than guessing, or use fetch_url if you already know the URL.",
             summary: "Search unavailable",
@@ -1951,9 +1982,10 @@ export async function runTool(
             query,
             "",
             context.deepseekKey,
-            context.searchKey,
+            context.searchKey ?? "",
             undefined,
-            context.searchProfile
+            context.searchProfile,
+            context.exaKey
           );
         } catch (error) {
           /*
