@@ -237,3 +237,25 @@ Browser use:
 - Never launch a browser with the user's real profile (their Chrome/Edge/Firefox user data). It holds their live sessions.
 - Run headless unless the user asked to watch it happen.
 - If a page needs a logged-in account, stop and ask the user instead of trying to borrow their session.`;
+
+/**
+ * What to say when Chromium is not installed.
+ *
+ * `browse` is withheld from the tool list when the browser is missing, which
+ * is right — offering a tool that cannot run buys an error and an apology.
+ * But the prompt still described browsing in detail, so the model was told
+ * how to use a tool it could not see, and quietly fell back to fetch_url.
+ *
+ * Reported: "he didnt use browse he used only fetch url". Nothing anywhere
+ * said why, or that one command would fix it.
+ *
+ * fetch_url is genuinely fine for static pages, so this frames the gap
+ * accurately rather than as a failure: the difference only matters when the
+ * content is rendered by JavaScript.
+ */
+export const NO_BROWSER_PROMPT = `
+
+Browser use:
+- There is no real browser available in this workspace, so you cannot run JavaScript on a page or click anything. fetch_url and inspect_page still work and read the HTML the server sends.
+- That is enough for most sites. It is NOT enough for a page whose content is built by JavaScript after load: you will see an empty shell.
+- If a task actually needs a rendered page, say so plainly and tell the user to run \`npm run browser:install\` once. Do not pretend fetch_url saw something it could not.`;

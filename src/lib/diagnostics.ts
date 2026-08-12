@@ -56,6 +56,8 @@ export type DiagnosticKind =
   | "api_error"
   | "limit_hit"
   | "run_stopped"
+  /** The reply described work no tool performed. */
+  | "unverified_claim"
   | "ui_error";
 
 export interface Diagnostic {
@@ -233,6 +235,7 @@ const KIND_LABEL: Record<DiagnosticKind, string> = {
   api_error: "API error",
   limit_hit: "Hit a limit",
   run_stopped: "Run stopped early",
+  unverified_claim: "Claimed work no tool did",
   ui_error: "Interface error",
 };
 

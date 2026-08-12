@@ -30,9 +30,13 @@ import {
   checkEvidence,
   PlanError,
   PLAN_MARKER,
+  readPlan,
+  writePlan,
+  planIsComplete,
+  checkAnswerClaims,
 } from "@/lib/plan";
 import type { Plan } from "@/lib/plan";
-import { BROWSER_POLICY_PROMPT } from "@/lib/browser-policy";
+import { BROWSER_POLICY_PROMPT, NO_BROWSER_PROMPT } from "@/lib/browser-policy";
 import { browserAvailable } from "@/lib/browser-playwright";
 import { recordAsync } from "@/lib/diagnostics";
 import { listFiles, workspaceDirectory } from "@/lib/workspace";
@@ -693,6 +697,10 @@ export async function POST(req: NextRequest) {
           }
         }
 
+        // Checked once per reply, not per round: it is a module resolution
+        // and the answer cannot change mid-conversation.
+        const hasBrowser = workspaceEnabled ? await browserAvailable() : false;
+
         const workspaceInstruction = workspaceEnabled
           ? `\n\nYou have a workspace on the user's machine and tools to work in it. Prefer creating real files over printing code in chat: the user wants working files, not snippets to copy. List or read before editing so your replacements match exactly.\n\nYou can also run code with run_command. After writing something runnable, run it and check the output rather than assuming it works. If it fails, read the error, fix the file, and run it again. Each command needs the user's approval, so keep them few and purposeful, and say briefly why in the reason field. There is no shell. run_command waits for the program to finish, so use it only for things that exit — scripts, tests, installs. You can install packages: pip install and npm install both work and go into this workspace, not the user's system, so install what you need rather than rewriting code to avoid a dependency. For anything that keeps running, such as a dev server or a watcher, use start_process instead: it returns straight away, and you can read its output with read_process and stop it with stop_process. Always stop what you started once you are done with it. Before anything that takes more than two or three actions, call make_plan: write down what finished looks like and the steps to get there, including how you will CHECK each one. On a long task your own reasoning from twenty rounds ago is gone, so without a written plan you will forget requirements from the first message and stop early because the work so far looks finished. Keep it current with update_plan — a step is only done when you can say how you verified it.
 
@@ -702,7 +710,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               visionApiKey
                 ? " You can also view_image to look at a screenshot or mockup saved in the workspace."
                 : ""
-            }${BROWSER_POLICY_PROMPT}`
+            }${hasBrowser ? BROWSER_POLICY_PROMPT : NO_BROWSER_PROMPT}`
           : "";
 
         /*
@@ -723,9 +731,6 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         }
         const lessonsBlock = formatLessonsForPrompt(existingLessons);
 
-        // Checked once per reply, not per round: it is a module resolution
-        // and the answer cannot change mid-conversation.
-        const hasBrowser = workspaceEnabled ? await browserAvailable() : false;
 
         /*
          * A structured transcript, not bare {role, content}. Tool calls and
@@ -804,7 +809,35 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          * a trailing message so it can change every round without disturbing
          * the cached prefix, the same reason the file tree sits at the end.
          */
+        /*
+         * Loaded from disk, not started empty.
+         *
+         * This was `let plan = null` with a comment saying it lived for the
+         * duration of the run — which is exactly the reported bug. Pressing
+         * Stop threw the plan away, so the next message either re-planned
+         * from nothing (losing every verified step) or carried on from
+         * memory, which is the drift a plan exists to prevent.
+         *
+         * A finished plan is not carried into the next message: it belongs to
+         * the task that ended, and handing it to an unrelated question would
+         * be worse than having none.
+         */
         let plan: Plan | null = null;
+        if (workspaceEnabled) {
+          const saved = await readPlan(workspace);
+          if (saved && !planIsComplete(saved)) {
+            plan = saved;
+            send({
+              type: "plan",
+              goal: plan.goal,
+              steps: plan.steps,
+              summary: planSummary(plan),
+            });
+          } else if (saved) {
+            // Finished last time: clear it so it cannot leak into this task.
+            await writePlan(workspace, null);
+          }
+        }
         /** Only ever nudged once — see the check where the loop ends. */
         let nudgedIncomplete = false;
         /** How many times the plan has been rewritten, to catch thrashing. */
@@ -1917,6 +1950,9 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   )
                 );
                 replanCount += 1;
+                // Saved immediately, not at the end of the run: Stop, a
+                // crash, or a closed tab must not lose it.
+                await writePlan(workspace, plan);
                 send({
                   type: "plan",
                   goal: plan.goal,
@@ -1999,6 +2035,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                       };
                     })
                   );
+                  // Persisted on every update, so progress survives a Stop.
+                  await writePlan(workspace, plan);
                   send({
                     type: "plan",
                     goal: plan.goal,
@@ -2363,6 +2401,40 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             }
           } catch {
             /* reporting must never fail the reply */
+          }
+        }
+
+        /*
+         * Catch a summary that describes work no tool did.
+         *
+         * Reported, and the most damaging thing in this app: replies ending
+         * "Actions taken: [read 3412321]" on turns where nothing was read.
+         * The plan mechanism already cross-checks evidence, but only inside
+         * update_plan — the closing answer, which is the part actually read,
+         * was never checked against anything.
+         *
+         * A note is appended rather than the reply being blocked. Blocking
+         * would throw away work that may be perfectly good apart from an
+         * over-claiming last paragraph, and would cost another round to
+         * regenerate. The point is that the claim stops being invisible.
+         */
+        if (workspaceEnabled) {
+          const claimIssue = checkAnswerClaims(
+            assistantContent,
+            toolsUsedThisRun
+          );
+          if (claimIssue) {
+            const note =
+              (assistantContent.trim() ? "\n\n" : "") + `_${claimIssue}_`;
+            assistantContent += note;
+            send({ type: "content", delta: note });
+            appendTimelineText(note);
+            recordAsync({
+              kind: "unverified_claim",
+              subject: "closing summary",
+              detail: claimIssue,
+              context: { toolsUsed: toolsUsedThisRun.length },
+            });
           }
         }
 
