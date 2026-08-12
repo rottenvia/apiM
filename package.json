@@ -51,6 +51,7 @@
     "test:tools2": "tsx scripts/test-tools2.mjs",
     "browser:install": "node scripts/install-browser.mjs",
     "test:browser": "tsx scripts/test-browser.mjs",
+    "test:browser:live": "tsx scripts/test-browser-live.mjs",
     "test:tools3": "tsx scripts/test-tools3.mjs",
     "test:plan": "tsx scripts/test-plan.mjs",
     "test:adversarial": "tsx scripts/test-adversarial.mjs",

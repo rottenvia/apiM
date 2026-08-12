@@ -23,6 +23,7 @@
  */
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { readSourceSync } from "./lib/proc.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const load = (p) => import(pathToFileURL(path.join(ROOT, p)).href);
@@ -365,6 +366,79 @@ check(
   "150MB for a feature most runs never use"
 );
 check("there is a one-command installer", Boolean(pkg.scripts["browser:install"]));
+
+/*
+ * Availability means the BINARY, not just the package.
+ *
+ * `npm run browser:install` does two independent things: install
+ * playwright-core, then download Chromium (~150MB from Playwright's CDN).
+ * The download is the one that gets blocked — firewall, proxy, or simply
+ * interrupted — and it leaves the package present and the browser missing.
+ *
+ * browserAvailable() used to return true as soon as the package resolved, so
+ * that half-finished state offered the model a `browse` tool that could not
+ * launch: it would call it, get an error, apologise, and fall back to
+ * fetch_url. Reproduced deliberately in this sandbox, where the CDN is
+ * unreachable — playwright-core installed fine and Chromium never arrived.
+ */
+console.log("\n9. Availability is about the browser, not the package");
+
+const adapterSrc = readSourceSync(
+  path.join(ROOT, "src/lib/browser-playwright.ts")
+);
+
+check(
+  "the check looks for the executable on disk",
+  /executablePath\(\)/.test(adapterSrc) && /existsSync\(exe\)/.test(adapterSrc),
+  "resolving the package proves nothing about the 150MB download"
+);
+check(
+  "a package with no binary reports unavailable",
+  /if \(!exe\) return false;/.test(adapterSrc)
+);
+check(
+  "and a throw from executablePath is not treated as success",
+  /catch \{[\s\S]{0,200}return false;/.test(adapterSrc),
+  "claiming a browser we cannot confirm is the failure being fixed"
+);
+
+const installSrc = readSourceSync(path.join(ROOT, "scripts/install-browser.mjs"));
+check(
+  "the installer verifies the binary before saying Done",
+  /existsSync\(exePath\)/.test(installSrc),
+  "npx playwright install can exit 0 having done less than it claims"
+);
+check(
+  "and points at the test that proves it works",
+  /test:browser:live/.test(installSrc)
+);
+
+check(
+  "there is a live test that uses a real browser",
+  Boolean(pkg.scripts["test:browser:live"]),
+  "44 checks against a fake driver is not the same as one against Chromium"
+);
+
+const liveSrc = readSourceSync(path.join(ROOT, "scripts/test-browser-live.mjs"));
+check(
+  "it skips rather than fails when Chromium is absent",
+  /skipped\("the whole suite"/.test(liveSrc),
+  "an optional install must not turn npm test red"
+);
+check(
+  "it proves the thing fetch_url cannot do",
+  /Rewritten by script/.test(liveSrc) && /cannot see/.test(liveSrc),
+  "the served HTML says one thing and the rendered DOM says another"
+);
+check(
+  "it checks the console, including a real thrown error",
+  /page ready/.test(liveSrc) && /undefinedFunctionCall/.test(liveSrc)
+);
+check(
+  "it serves its own page instead of depending on a live site",
+  /createServer/.test(liveSrc) && !/https:\/\/(?!127)/.test(liveSrc),
+  "works offline, and cannot fail because someone redesigned a homepage"
+);
 
 console.log(
   `\n${pass + fail} checks · ${pass} passed${fail ? ` · ${r(`${fail} failed`)}` : ""}\n`
