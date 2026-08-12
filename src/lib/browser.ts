@@ -69,6 +69,15 @@ export interface BrowserSessionResult {
   console: string[];
   /** Failed network requests, the other place bugs hide. */
   failedRequests: string[];
+  /**
+   * Set when the page is an anti-bot challenge rather than the real content.
+   *
+   * Without this the agent scrapes the block page and reports on THAT — the
+   * selectors it returns are Cloudflare's, the text is "Verify you are a
+   * human", and nothing says the real page was never seen. Naming it is the
+   * difference between a useful failure and a confidently wrong answer.
+   */
+  blocked?: string;
 }
 
 /**
@@ -381,6 +390,11 @@ export async function runSession(
       out.title = await driver.title().catch(() => "");
       const text = await driver.innerText().catch(() => "");
       out.text = text.slice(0, MAX_TEXT_CHARS);
+
+      // Flagged before the selectors are gathered below, so the warning is
+      // attached to the same result that carries the challenge page's markup.
+      const challenge = detectChallenge(out.title ?? "", text);
+      if (challenge) out.blocked = challenge;
       const html = await driver.html().catch(() => "");
       if (html) {
         const { extractSelectors } = await import("@/lib/web");
@@ -394,9 +408,79 @@ export async function runSession(
   }
 }
 
+/**
+ * Is this an anti-bot challenge rather than the page that was asked for?
+ *
+ * Detected, never defeated. A challenge page looks like a successful load —
+ * HTTP 200 or 403 with real HTML — so without this the agent happily reports
+ * the selectors and text of the block page as though they were the site's,
+ * and the user gets a scraper built against Cloudflare's markup.
+ *
+ * The signatures are the interstitials themselves, which are boilerplate and
+ * stable. Deliberately narrow: a page that merely mentions "captcha" in an
+ * article is not a challenge, so a title or a very short body is required
+ * alongside the marker.
+ */
+export function detectChallenge(
+  title: string,
+  text: string
+): string | null {
+  const t = `${title}\n${text}`.toLowerCase();
+  const shortPage = text.trim().length < 2000;
+
+  const signatures: [RegExp, string][] = [
+    [/just a moment\.\.\./, "Cloudflare"],
+    [/checking your browser before accessing/, "Cloudflare"],
+    [/enable javascript and cookies to continue/, "Cloudflare"],
+    // Named vendors first: "verify you are a human" appears on Cloudflare's
+    // own page too, and attributing it to a generic "bot check" loses the
+    // one detail that tells the user what they are up against.
+    [/cf-browser-verification|cf_chl_|__cf_chl/, "Cloudflare"],
+    [/attention required!? \| cloudflare/, "Cloudflare"],
+    [/verify you are (a )?human/, "a bot check"],
+    [/ddos protection by/, "a DDoS filter"],
+    [/please complete the security check/, "a security check"],
+    [/access denied.{0,40}(reference #|error \d{4})/, "an edge block"],
+    [/are you a robot|i'm not a robot|recaptcha/, "a CAPTCHA"],
+    [/px-captcha|perimeterx|human challenge/, "PerimeterX"],
+    [/incapsula incident id/, "Imperva"],
+  ];
+
+  for (const [re, who] of signatures) {
+    if (!re.test(t)) continue;
+    // A long page that happens to mention a captcha is an article about
+    // captchas, not a challenge. A challenge page is nearly always short.
+    if (!shortPage && !/just a moment|cf_chl_|incapsula incident/.test(t)) {
+      continue;
+    }
+    return who;
+  }
+  return null;
+}
+
 /** Render a session result for the model. */
 export function formatSession(result: BrowserSessionResult): string {
   const lines: string[] = [];
+
+  /*
+   * The block comes first, before anything scraped from the block page.
+   *
+   * Everything below — selectors, text, title — belongs to the challenge,
+   * not to the site. Leading with that is what stops the model writing a
+   * scraper against Cloudflare's markup and telling the user it works.
+   */
+  if (result.blocked) {
+    lines.push(
+      `BLOCKED: this page is ${result.blocked}'s anti-bot challenge, not the ` +
+        `site's real content. Everything below describes the challenge page.`,
+      `Do not build selectors from it and do not describe it as the site. ` +
+        `Say plainly that the page could not be reached automatically. There ` +
+        `is no way around this from here: these systems exist specifically ` +
+        `to stop automated browsers, and defeating them is not something ` +
+        `this tool does.`,
+      ""
+    );
+  }
 
   for (const r of result.results) {
     lines.push(`${r.ok ? "OK  " : "FAIL"} ${r.action}: ${r.detail}`);

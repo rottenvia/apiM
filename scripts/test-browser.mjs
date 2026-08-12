@@ -440,6 +440,79 @@ check(
   "works offline, and cannot fail because someone redesigned a homepage"
 );
 
+/*
+ * An anti-bot challenge is reported, not scraped.
+ *
+ * Asked whether we could add a Cloudflare bypass. We cannot and will not —
+ * but the honest failure was missing too: a challenge page loads with real
+ * HTML and a 200 or 403, so the agent was reading Cloudflare's markup and
+ * reporting ITS selectors and ITS text as though they were the site's. The
+ * user then gets a scraper built against a block page, and nothing anywhere
+ * says the real page was never seen.
+ */
+console.log("\n10. A block is named, not mistaken for the page");
+
+const B = await import(pathToFileURL(path.join(ROOT, "src/lib/browser.ts")).href);
+
+for (const [label, title, text, want] of [
+  ["Cloudflare's interstitial", "Just a moment...", "Enable JavaScript and cookies to continue", "Cloudflare"],
+  ["a Cloudflare 403", "Attention Required! | Cloudflare", "Verify you are a human by completing the action below.", "Cloudflare"],
+  ["a bare human check", "", "Verify you are human. Check the box below.", "a bot check"],
+  ["reCAPTCHA", "Security check", "I'm not a robot reCAPTCHA", "a CAPTCHA"],
+  ["Imperva", "", "Incapsula incident ID: 123-456", "Imperva"],
+  ["PerimeterX", "Access denied", "px-captcha human challenge", "PerimeterX"],
+]) {
+  check(
+    `${label} is detected`,
+    B.detectChallenge(title, text) === want,
+    `got ${String(B.detectChallenge(title, text))}`
+  );
+}
+
+/*
+ * The false-positive side matters more than the detection side. A page that
+ * merely discusses captchas must not be reported as blocked, or the warning
+ * becomes noise and gets ignored.
+ */
+check(
+  "an article ABOUT captchas is not a challenge",
+  B.detectChallenge("How CAPTCHAs work", "recaptcha ".repeat(400)) === null,
+  "length is the tell: a challenge page is short"
+);
+check(
+  "an ordinary page is not a challenge",
+  B.detectChallenge("apiM docs", "Welcome to the documentation. ".repeat(50)) === null
+);
+check("an empty page is not a challenge", B.detectChallenge("", "") === null);
+
+const browserSrc = readSourceSync(path.join(ROOT, "src/lib/browser.ts"));
+check(
+  "the session flags it rather than only detecting it",
+  /if \(challenge\) out\.blocked = challenge;/.test(browserSrc)
+);
+check(
+  "the warning is printed BEFORE the scraped content",
+  browserSrc.indexOf("BLOCKED: this page is") <
+    browserSrc.indexOf("Selectors on the rendered page"),
+  "otherwise the model reads the block page's selectors as the site's"
+);
+check(
+  "the model is told not to build selectors from it",
+  /Do not build selectors from it/.test(browserSrc)
+);
+check(
+  "and told plainly that there is no way around it",
+  /defeating them is not something/.test(browserSrc),
+  "an agent that keeps retrying a challenge burns rounds for nothing"
+);
+check(
+  "no bypass is attempted anywhere",
+  !/solve.?captcha|2captcha|anticaptcha|stealth.?plugin|puppeteer-extra/i.test(
+    browserSrc
+  ),
+  "detected, never defeated"
+);
+
 console.log(
   `\n${pass + fail} checks · ${pass} passed${fail ? ` · ${r(`${fail} failed`)}` : ""}\n`
 );
