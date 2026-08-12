@@ -405,6 +405,22 @@ Respond in JSON ONLY:
 /**
  * Execute a single Tavily search.
  */
+/**
+ * The search provider refused or failed, as opposed to finding nothing.
+ *
+ * Carries the HTTP status so the caller can say something specific: a 401 is
+ * a wrong key, a 429 is a spent quota, and neither is fixed by rephrasing.
+ */
+export class SearchProviderError extends Error {
+  constructor(
+    readonly status: number,
+    readonly detail: string
+  ) {
+    super(detail || `search provider returned ${status}`);
+    this.name = "SearchProviderError";
+  }
+}
+
 async function tavilySearch(
   query: string,
   tavilyKey: string,
@@ -505,14 +521,45 @@ async function tavilySearch(
       if (cacheable) await writeCache(cacheKey, mapped);
       return mapped;
     }
+
+    /*
+     * A failed REQUEST is not an empty RESULT.
+     *
+     * This used to fall straight through to `return []`, so a rejected key, a
+     * spent quota and a genuine "nothing matched" were all reported to the
+     * model as "No results — try different wording". It then rephrased and
+     * retried, five times, each one billed and each one failing the same way.
+     *
+     * Reported after a real run: five searches, five empty answers, including
+     * for the query "cat". A search that cannot possibly return nothing
+     * returning nothing is the tell, and nothing in the output said so.
+     *
+     * The status is what distinguishes them, so it is thrown rather than
+     * swallowed. The caller decides what to tell the model.
+     */
+    let detail = "";
+    try {
+      const body = (await response.json()) as { detail?: unknown };
+      const d = body?.detail;
+      detail =
+        typeof d === "string"
+          ? d
+          : typeof (d as { error?: string })?.error === "string"
+            ? (d as { error: string }).error
+            : "";
+    } catch {
+      /* a non-JSON error body tells us nothing extra */
+    }
+    throw new SearchProviderError(response.status, detail);
   } catch (error) {
     // AbortError just means the user pressed Stop.
-    if (!(error instanceof Error && error.name === "AbortError")) {
-      console.error("Tavily search error:", error);
-    }
+    if (error instanceof Error && error.name === "AbortError") return [];
+    // A provider failure must reach the caller, not look like zero hits.
+    if (error instanceof SearchProviderError) throw error;
+    console.error("Tavily search error:", error);
+    throw new SearchProviderError(0,
+      error instanceof Error ? error.message : "the search service could not be reached");
   }
-
-  return [];
 }
 
 /**

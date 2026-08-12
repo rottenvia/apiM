@@ -575,6 +575,16 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
               "Return the HTML source instead of readable text. Use for " +
               "anything that inspects or modifies a page's structure.",
           },
+          find: {
+            type: "string",
+            description:
+              "Return only the lines matching this text or regular " +
+              "expression, with a little surrounding context. Use it when " +
+              "you want one fact out of a large page or JSON API — asking " +
+              'for "\"version\"" beats pulling a 477KB document to read one ' +
+              "line. The header always reports the full size, so you can " +
+              "tell whether you narrowed a big page or a small one.",
+          },
         },
         required: ["url"],
       },
@@ -1548,7 +1558,63 @@ export async function runTool(
           .filter(Boolean)
           .join("\n");
 
-        const body = wantsRaw && page.html ? page.html : page.text;
+        let body = wantsRaw && page.html ? page.html : page.text;
+
+        /*
+         * Narrowing, because the whole page is often the wrong amount.
+         *
+         * Reported from a real test: fetching PyPI's JSON to read one version
+         * string returned 477KB, truncated at 200,000 characters — the answer
+         * was in there, but so was the release history of every version since
+         * 2021, and a truncated body can cut off the very line that was
+         * wanted.
+         *
+         * A literal substring is tried as a regex first, so both work. An
+         * invalid pattern falls back to a literal search rather than failing:
+         * a model writing `info.version` means the text, not a character
+         * class.
+         */
+        const find = typeof args.find === "string" ? args.find.trim() : "";
+        let findNote = "";
+        if (find) {
+          let re: RegExp;
+          try {
+            re = new RegExp(find, "i");
+          } catch {
+            re = new RegExp(find.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+          }
+          const lines = body.split("\n");
+          const keep = new Set<number>();
+          lines.forEach((line, i) => {
+            if (!re.test(line)) return;
+            // Two lines either side: enough to see the shape of a JSON
+            // object or the sentence a phrase sits in.
+            for (let j = Math.max(0, i - 2); j <= Math.min(lines.length - 1, i + 2); j++) {
+              keep.add(j);
+            }
+          });
+
+          if (keep.size === 0) {
+            findNote =
+              `\n\n[Nothing matched "${find}". The full page is ` +
+              `${body.length.toLocaleString()} characters — fetch it again ` +
+              `without find, or try a different pattern.]`;
+            body = "";
+          } else {
+            const picked = [...keep].sort((a, b) => a - b);
+            const out: string[] = [];
+            let previous = -1;
+            for (const i of picked) {
+              if (previous !== -1 && i > previous + 1) out.push("…");
+              out.push(lines[i]);
+              previous = i;
+            }
+            findNote =
+              `\n[Showing ${picked.length} of ${lines.length} lines matching ` +
+              `"${find}".]`;
+            body = out.join("\n").slice(0, MAX_FETCH_CHARS);
+          }
+        }
 
         /*
          * Say so when this tool is the wrong one.
@@ -1568,7 +1634,7 @@ export async function runTool(
 
         return {
           ok: true,
-          content: `${header}${warning}\n\n${body}`,
+          content: `${header}${warning}${findNote}\n\n${body}`,
           summary: page.needsBrowser
             ? `${new URL(page.url).hostname} needs a browser`
             : `Read ${new URL(page.url).hostname}${
@@ -1879,14 +1945,48 @@ export async function runTool(
           };
         }
 
-        const found = await smartSearch(
-          query,
-          "",
-          context.deepseekKey,
-          context.searchKey,
-          undefined,
-          context.searchProfile
-        );
+        let found;
+        try {
+          found = await smartSearch(
+            query,
+            "",
+            context.deepseekKey,
+            context.searchKey,
+            undefined,
+            context.searchProfile
+          );
+        } catch (error) {
+          /*
+           * Say WHY, so the model stops instead of rephrasing.
+           *
+           * A provider failure used to arrive as "No results — try different
+           * wording", which is advice that cannot work: no rewording fixes a
+           * rejected key. Reported from a real run — five searches, five
+           * empty answers, including for the query "cat", each one billed.
+           */
+          const { SearchProviderError } = await import("@/lib/smart-search");
+          if (error instanceof SearchProviderError) {
+            const why =
+              error.status === 401 || error.status === 403
+                ? "the Tavily key was rejected. Check it in Settings."
+                : error.status === 429 || error.status === 432
+                  ? "the Tavily quota or rate limit is spent."
+                  : error.status
+                    ? `the search service returned HTTP ${error.status}.`
+                    : "the search service could not be reached.";
+            return {
+              ok: false,
+              content:
+                `Search FAILED — ${why}${error.detail ? ` (${error.detail})` : ""}\n\n` +
+                `This is not "no results": the query never ran. Do not retry ` +
+                `it or rephrase — nothing about the wording is the problem. ` +
+                `Tell the user plainly, and use fetch_url if you already know ` +
+                `a URL that would answer this.`,
+              summary: `Search failed (${error.status || "unreachable"})`,
+            };
+          }
+          throw error;
+        }
 
         if (found.results.length === 0) {
           return {
