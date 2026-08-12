@@ -58,6 +58,16 @@ export interface SmartSearchContext {
   cacheHits: number;
   /** Estimated spend for this question, in USD. */
   estimatedUsd: number;
+  /**
+   * Which providers actually answered, and which failed.
+   *
+   * Asked for directly after three rounds of debugging a black box: "one line
+   * telling me which provider answered". Without it a silent empty result is
+   * indistinguishable from a provider that was never called, and the only way
+   * to find out was to read the server console.
+   */
+  providersUsed: string[];
+  providerErrors: string[];
 }
 
 /**
@@ -496,6 +506,7 @@ async function exaSearch(
           url: String(r.url ?? ""),
           content: best.slice(0, MAX_SOURCE_CHARS),
           score: Number(r.score ?? 0),
+          provider: "exa",
           publishedDate: r.publishedDate ? String(r.publishedDate) : undefined,
         };
       });
@@ -630,6 +641,7 @@ async function tavilySearch(
           url: String(r.url ?? ""),
           content: best.slice(0, MAX_SOURCE_CHARS),
           score: Number(r.score ?? 0),
+          provider: "tavily",
           publishedDate: r.published_date
             ? String(r.published_date)
             : undefined,
@@ -717,9 +729,12 @@ async function searchOnce(
     onCacheHit?: () => void;
     /** Told which providers actually answered, for the UI and the ledger. */
     onProvider?: (id: string) => void;
+    /** Told which providers failed, so a silent empty result cannot happen. */
+    onProviderError?: (id: string, why: string) => void;
   } = {}
 ): Promise<Omit<SearchResultItem, "domain">[]> {
-  const { tavilyKey, exaKey, timeRange, onProvider, ...rest } = options;
+  const { tavilyKey, exaKey, timeRange, onProvider, onProviderError, ...rest } =
+    options;
 
   if (!tavilyKey && !exaKey) {
     throw new SearchProviderError(0, "no search provider is configured");
@@ -757,6 +772,10 @@ async function searchOnce(
   for (const outcome of settled) {
     if (outcome.error !== undefined) {
       failures.push({ id: outcome.id, error: outcome.error });
+      onProviderError?.(
+        outcome.id,
+        outcome.error instanceof Error ? outcome.error.message : "failed"
+      );
       console.warn(
         `${outcome.id} search failed:`,
         outcome.error instanceof Error ? outcome.error.message : outcome.error
@@ -882,6 +901,32 @@ function domainOf(url: string): string {
  * Execute smart multi-step search: plan queries, search each,
  * deduplicate, rank, and summarize.
  */
+/**
+ * The lowest score worth keeping, per provider.
+ *
+ * These numbers are not interchangeable and that is the whole point. Tavily
+ * reports a relevance score where a decent hit is 0.5 or better; Exa reports
+ * a cosine similarity where the same quality of hit is 0.15-0.35. The old
+ * code applied Tavily's 0.3 to both, so a perfectly good Exa answer was
+ * thrown away before the model ever saw it — and the user was told "No
+ * results", which is how this looked like a broken fallback rather than a
+ * filter.
+ *
+ * Reproduced before fixing: three correct Exa results scoring 0.19, 0.24 and
+ * 0.28 all discarded, output "No results for playwright python version".
+ *
+ * An unknown provider gets 0, because dropping results from something we do
+ * not have a calibration for is worse than showing a weak one.
+ */
+const SCORE_FLOOR: Record<string, number> = {
+  tavily: 0.3,
+  exa: 0.12,
+};
+
+function scoreFloor(provider?: string): number {
+  return provider ? (SCORE_FLOOR[provider] ?? 0) : 0;
+}
+
 export async function smartSearch(
   message: string,
   context: string,
@@ -910,6 +955,8 @@ export async function smartSearch(
   let billedAdvanced = 0;
   let rounds = 0;
   let stopReason = "";
+  const providersUsed = new Set<string>();
+  const providerErrors: string[] = [];
 
   void recordQuestion();
 
@@ -951,6 +998,11 @@ export async function smartSearch(
           onCacheHit: () => {
             hit = true;
           },
+          onProvider: (id) => providersUsed.add(id),
+          onProviderError: (id, why) => {
+            const line = `${id}: ${why}`;
+            if (!providerErrors.includes(line)) providerErrors.push(line);
+          },
         }).then((results) => {
           if (hit) cacheHits += 1;
           else if (depth === "advanced") billedAdvanced += 1;
@@ -964,7 +1016,7 @@ export async function smartSearch(
       searchesPerformed += 1;
       for (const r of results) {
         if (!r.url || seenUrls.has(r.url)) continue;
-        if (r.score < 0.3 || r.content.length < 50) continue;
+        if (r.score < scoreFloor(r.provider) || r.content.length < 50) continue;
         seenUrls.add(r.url);
         collected.push({ ...r, domain: domainOf(r.url) });
       }
@@ -1058,5 +1110,7 @@ export async function smartSearch(
     stopReason,
     cacheHits,
     estimatedUsd,
+    providersUsed: [...providersUsed],
+    providerErrors,
   };
 }

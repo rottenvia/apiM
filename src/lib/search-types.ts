@@ -14,6 +14,17 @@ export interface SearchResultItem {
   domain: string;
   /** Publication date, when the provider supplies one. */
   publishedDate?: string;
+  /**
+   * Which provider returned this.
+   *
+   * Not decoration. Scores are NOT comparable across providers — Tavily
+   * reports a relevance value that sits around 0.5-0.95 for a decent hit,
+   * Exa reports a cosine similarity that sits around 0.15-0.35 for the same
+   * quality of hit. A single threshold tuned to one silently discards
+   * everything from the other, which is exactly what happened: Exa answered
+   * correctly and every result was dropped before the model saw it.
+   */
+  provider?: string;
 }
 
 /** Search depth. Providers that have no such split ignore this. */

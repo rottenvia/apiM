@@ -2020,11 +2020,34 @@ export async function runTool(
           throw error;
         }
 
+        /*
+         * Always say which providers ran, especially when nothing came back.
+         *
+         * Asked for after three rounds of debugging a black box: an empty
+         * result was indistinguishable from a provider that was never called,
+         * and the only way to tell was the server console. One line here
+         * replaces all of that guessing.
+         */
+        const ran = found.providersUsed.length
+          ? found.providersUsed.join(", ")
+          : "none";
+        const errs = found.providerErrors.length
+          ? `\nProvider errors: ${found.providerErrors.join("; ")}`
+          : "";
+
         if (found.results.length === 0) {
           return {
             ok: true,
-            content: `No results for "${query}". Try different wording, or say you could not find it.`,
-            summary: `No results — ${query.slice(0, 40)}`,
+            content:
+              `No results for "${query}".\n` +
+              `Providers that answered: ${ran}.${errs}\n\n` +
+              (found.providerErrors.length
+                ? `At least one provider errored — that is not the same as ` +
+                  `finding nothing. Tell the user what failed rather than ` +
+                  `rephrasing.`
+                : `Every configured provider ran and genuinely found nothing. ` +
+                  `Try different wording, or say you could not find it.`),
+            summary: `No results — ${query.slice(0, 40)} (via ${ran})`,
           };
         }
 
@@ -2040,8 +2063,9 @@ export async function runTool(
           ok: true,
           content:
             `${found.results.length} result(s) for "${query}":\n\n${body}\n\n` +
-            `Cite the URLs you use. Call fetch_url on one for the full page.`,
-          summary: `Searched: ${query.slice(0, 45)}`,
+            `Cite the URLs you use. Call fetch_url on one for the full page.` +
+            `\n[via ${ran}${errs}]`,
+          summary: `Searched via ${ran}: ${query.slice(0, 35)}`,
         };
       }
 

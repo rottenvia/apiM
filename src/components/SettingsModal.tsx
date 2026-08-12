@@ -88,6 +88,10 @@ interface SettingsModalProps {
   tavilyKey: string;
   exaKey: string;
   onExaKeyChange: (v: string) => void;
+  tavilyEnabled: boolean;
+  onTavilyEnabledChange: (v: boolean) => void;
+  exaEnabled: boolean;
+  onExaEnabledChange: (v: boolean) => void;
   visionKey: string;
   visionModel: string;
   model: string;
@@ -112,11 +116,51 @@ interface SettingsModalProps {
   onClose: () => void;
 }
 
+/**
+ * On/off for one search provider.
+ *
+ * Separate from having a key: a spent quota should not force you to delete a
+ * key you will want back next month. Reported directly — "maybe that tavily
+ * is ruining that all" — and switching it off is a one-click way to find out.
+ */
+function ProviderToggle({
+  on,
+  onChange,
+  label,
+}: {
+  on: boolean;
+  onChange: (v: boolean) => void;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      aria-label={label}
+      onClick={() => onChange(!on)}
+      className={`relative h-5 w-9 flex-none rounded-full transition-colors duration-150 ${
+        on ? "bg-success/70" : "bg-bg-tertiary border border-border"
+      }`}
+    >
+      <span
+        className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform duration-150 ${
+          on ? "translate-x-4" : "translate-x-0.5"
+        }`}
+      />
+    </button>
+  );
+}
+
 export function SettingsModal({
   deepseekKey,
   tavilyKey,
   exaKey,
   onExaKeyChange,
+  tavilyEnabled,
+  onTavilyEnabledChange,
+  exaEnabled,
+  onExaEnabledChange,
   visionKey,
   visionModel,
   model,
@@ -274,12 +318,19 @@ export function SettingsModal({
 
               {/* Tavily API Key */}
               <div>
-                <label className="block text-sm font-semibold text-text-primary mb-1.5">
-                  Tavily API Key
-                  <span className="text-text-muted ml-1 text-xs font-normal">
-                    (for Web Search)
-                  </span>
-                </label>
+                <div className="mb-1.5 flex items-center justify-between gap-3">
+                  <label className="block text-sm font-semibold text-text-primary">
+                    Tavily API Key
+                    <span className="text-text-muted ml-1 text-xs font-normal">
+                      {tavilyEnabled ? "(for Web Search)" : "(switched off)"}
+                    </span>
+                  </label>
+                  <ProviderToggle
+                    on={tavilyEnabled}
+                    onChange={onTavilyEnabledChange}
+                    label="Use Tavily for web search"
+                  />
+                </div>
                 <p className="text-xs text-text-secondary mb-2">
                   Get your key from{" "}
                   <a
@@ -335,12 +386,21 @@ export function SettingsModal({
                   search a dead feature. Optional: leave it empty and nothing
                   changes. */}
               <div>
-                <label className="block text-sm font-semibold text-text-primary mb-1.5">
-                  Exa API Key
-                  <span className="text-text-muted ml-1 text-xs font-normal">
-                    (optional — searched alongside Tavily)
-                  </span>
-                </label>
+                <div className="mb-1.5 flex items-center justify-between gap-3">
+                  <label className="block text-sm font-semibold text-text-primary">
+                    Exa API Key
+                    <span className="text-text-muted ml-1 text-xs font-normal">
+                      {exaEnabled
+                        ? "(optional — searched alongside Tavily)"
+                        : "(switched off)"}
+                    </span>
+                  </label>
+                  <ProviderToggle
+                    on={exaEnabled}
+                    onChange={onExaEnabledChange}
+                    label="Use Exa for web search"
+                  />
+                </div>
                 <p className="text-xs text-text-secondary mb-2">
                   Get your key from{" "}
                   <a
