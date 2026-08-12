@@ -464,6 +464,66 @@ if (started.ok && id) {
 
 // ----------------------------------------------------------------- run_tests
 
+/*
+ * Answering a process that asks a question.
+ *
+ * stdin was opened with "ignore", so the agent could WATCH a prompt appear
+ * and had no way to reply. That covers npm init, a migration confirming a
+ * destructive step, a REPL, anything with "continue? [y/N]" — and because a
+ * closed stdin makes some tools read EOF and abort rather than prompt, the
+ * failure did not even look like a missing feature.
+ */
+console.log("\n7b. write_process answers a prompt");
+
+await writeFile(
+  path.join(WS_DIR, "ask.js"),
+  [
+    'const rl = require("readline").createInterface({ input: process.stdin, output: process.stdout });',
+    'process.stdout.write("Name? ");',
+    'rl.on("line", (line) => {',
+    "  if (!line.trim()) return;",
+    '  console.log("Hello, " + line.trim() + "!");',
+    "  setInterval(() => {}, 1000);",
+    "});",
+    "",
+  ].join("\n"),
+  "utf8"
+);
+
+const asker = await runTool(WS, "start_process", {
+  command: "node",
+  args: ["ask.js"],
+});
+const askId = (asker.content.match(/\bid (proc-[\w-]+)/) ?? [])[1];
+
+if (asker.ok && askId) {
+  res = await call("write_process", { id: askId, input: "Marsel" });
+  check("input reaches the process", res.ok, res.summary);
+  check(
+    "and the program acted on it",
+    /Hello, Marsel!/.test(res.content),
+    "proof it was read, not just written"
+  );
+  check(
+    "what was typed is echoed into the log",
+    /> Marsel/.test(res.content),
+    "a pipe shows no keystrokes, so the transcript would be a mystery"
+  );
+
+  res = await call("write_process", { id: "proc-does-not-exist", input: "y" });
+  check("an unknown id is refused", !res.ok && /No process/.test(res.content));
+
+  await runTool(WS, "stop_process", { id: askId });
+  res = await call("write_process", { id: askId, input: "y" });
+  check(
+    "writing to a stopped process fails with a reason",
+    !res.ok && /exited|stopped|not accepting/i.test(res.content),
+    res.content.slice(0, 60)
+  );
+} else {
+  check("a process was available to write to", false, asker.summary);
+}
+
 console.log("\n8. run_tests");
 
 res = await call("run_tests", {});

@@ -3,6 +3,7 @@ import { describeImage } from "@/lib/vision";
 import {
   startProcess,
   stopProcess,
+  writeToProcess,
   stopAll,
   getProcess,
   listProcesses,
@@ -483,6 +484,35 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
           },
         },
         required: [],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "write_process",
+      description:
+        "Type a line into a running background process, as if at its " +
+        "keyboard. Use it when read_process shows something waiting for " +
+        "input: an installer asking to confirm, `npm init` asking for a " +
+        "package name, a migration asking [y/N], a REPL. A newline is added " +
+        "for you. Read the output again afterwards to see what it did with " +
+        "the answer — the prompt is not always the last line.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: {
+            type: "string",
+            description: "Process id from start_process.",
+          },
+          input: {
+            type: "string",
+            description:
+              "The line to send. Just the answer — 'y', a name, a path — " +
+              "not the whole question.",
+          },
+        },
+        required: ["id", "input"],
       },
     },
   },
@@ -1305,6 +1335,52 @@ export async function runTool(
           summary: isRunning(proc)
             ? `Read ${proc.display}`
             : `${proc.display} has stopped`,
+        };
+      }
+
+      case "write_process": {
+        const id = str(args, "id").trim();
+        const input = typeof args.input === "string" ? args.input : "";
+
+        const proc = getProcess(id);
+        // Workspace-scoped like every other process call: one chat must not
+        // be able to type into another chat's process.
+        if (!proc || proc.workspaceId !== workspaceId) {
+          return {
+            ok: false,
+            content: `No process with id "${id}" in this workspace. Use read_process with no id to list them.`,
+            summary: "Unknown process",
+          };
+        }
+
+        const res = writeToProcess(id, input);
+        if (!res.ok) {
+          return {
+            ok: false,
+            content: `Could not send that: ${res.reason}`,
+            summary: "Write failed",
+          };
+        }
+
+        /*
+         * A short pause, then the new output.
+         *
+         * Sending input and returning immediately shows the log as it was
+         * BEFORE the process reacted, which reads as "nothing happened" and
+         * invites the model to send it again. 250ms is enough for a prompt
+         * to advance without being a wait the user notices.
+         */
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        const after = getProcess(id);
+        const tail = (after?.log ?? "").split("\n").slice(-15).join("\n");
+
+        return {
+          ok: true,
+          content:
+            `Sent to ${proc.display}: ${input.trim()}\n\n` +
+            `Output since (last 15 lines):\n${tail || "(nothing yet)"}\n\n` +
+            `Read it again with read_process if it needed longer to respond.`,
+          summary: `Sent "${input.trim().slice(0, 20)}"`,
         };
       }
 
