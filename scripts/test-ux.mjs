@@ -77,8 +77,8 @@ console.log('\n2. "thinking literally hidden now, i cant see thinking process"')
 
 check(
   "the panel is open while reasoning is the only content",
-  /message\.isStreaming && !message\.content/.test(bubble) &&
-    /const showThinking =/.test(bubble),
+  /const showThinking = userSetThinking \?\? autoOpen;/.test(bubble) &&
+    /const autoOpen = Boolean\(\s*message\.isStreaming/.test(bubble),
   "it used to default to closed, so the only thing on screen was hidden"
 );
 check(
@@ -94,7 +94,8 @@ check(
 );
 check(
   "a finished reply still opens closed",
-  /Boolean\(message\.isStreaming && !message\.content\)/.test(bubble),
+  // autoOpen requires isStreaming, so a stored reply can never auto-open.
+  /const autoOpen = Boolean\(\s*message\.isStreaming &&/.test(bubble),
   "reopening an old chat should show the answer, not the reasoning"
 );
 
@@ -325,6 +326,69 @@ check(
 check(
   "and says the cost is per request, not one-off",
   /Added to every request/.test(modal)
+);
+
+/*
+ * The panel opened for exactly one frame.
+ *
+ * Reported twice. The first fix mounted it earlier, which was a real bug —
+ * but mounting does no good if it closes a moment later, and that is what was
+ * happening. Measured by driving a real reply through a mock DeepSeek and
+ * counting frames: meta, ONE reasoning frame, then fifteen content frames.
+ * The open test was `isStreaming && !message.content`, so the first content
+ * token shut it. One frame open, then a line.
+ */
+console.log('\n8. The thinking panel stays open while reasoning arrives');
+
+check(
+  "the open state no longer keys off the answer being empty",
+  !/userSetThinking \?\?\s*\n?\s*Boolean\(message\.isStreaming && !message\.content\)/.test(
+    bubble
+  ),
+  "the first content token flipped that false while reasoning was still coming"
+);
+check(
+  "it tracks whether reasoning is still GROWING",
+  /reasoningGrewRef/.test(bubble) && /reasoningLen > reasoningGrewRef\.current\.len/.test(bubble),
+  "the honest signal for 'still thinking'"
+);
+check(
+  "the amber tint and progress line use the same signal",
+  /isThinkingPhase = Boolean\(\s*message\.isStreaming && reasoningLen > 0 && !reasoningGrewRef/.test(
+    bubble
+  ),
+  "both switched off on the first answer token before this"
+);
+check(
+  "once prose is underway the panel latches shut",
+  /reasoningGrewRef\.current\.done = true;/.test(bubble) &&
+    /done: reasoningGrewRef\.current\.done,/.test(bubble),
+  "a late burst of reasoning must not pop the panel open mid-answer"
+);
+check(
+  "a ref, so this schedules no extra render",
+  /useRef\(\{ len: 0, done: false \}\)/.test(bubble)
+);
+check(
+  "thinking disabled still shows nothing",
+  /message\.thinkingEffort !== "none"/.test(bubble)
+);
+
+/*
+ * And the collapsed row has to look like a control.
+ *
+ * "its an line" — once shut, a bare "Thinking" gives no hint it contains
+ * anything, so it reads as decoration rather than something to click.
+ */
+check(
+  "the collapsed row says how much reasoning is inside",
+  /Thought for \$\{/.test(bubble),
+  "a length makes it obviously openable"
+);
+check(
+  "it reads the stored length too, for reopened chats",
+  /reasoningLen \|\| message\.reasoningLength/.test(bubble),
+  "an old chat sends only the length and fetches the body on demand"
 );
 
 console.log(
