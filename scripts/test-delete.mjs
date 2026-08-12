@@ -83,5 +83,86 @@ await store.appendMessages(keep, "Keep me", [{id:"m1",role:"user",content:"still
 await store.deleteConversation("del-plain");
 check("unrelated chats survive", !!(await store.getConversation(keep)));
 
+
+// ---------------------------------------------------------- bulk delete
+//
+// Asked for: "make multi delete feature so i can delete multiple chat at
+// once". The route is driven directly rather than through a server — it is a
+// plain function of a Request, and starting Next to POST to it would test
+// Next.
+console.log("\nBulk delete");
+
+const { POST: bulkDelete } = await import(
+  pathToFileURL(path.join(ROOT, "src/app/api/conversations/bulk-delete/route.ts")).href
+);
+const post = (body) =>
+  bulkDelete(
+    new Request("http://localhost/api/conversations/bulk-delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: typeof body === "string" ? body : JSON.stringify(body),
+    })
+  );
+
+const mk = async (id, title) =>
+  store.appendMessages(id, title, [
+    { id: `${id}-m`, role: "user", content: "hello", createdAt: new Date().toISOString() },
+  ]);
+
+for (const n of [1, 2, 3]) await mk(`bulk-${n}`, `Bulk ${n}`);
+await mk("bulk-keep", "Keep this one");
+
+let res = await post({ ids: ["bulk-1", "bulk-2", "bulk-3"] });
+let data = await res.json();
+check("three chats delete in one request", data.deleted.length === 3, JSON.stringify(data));
+check("none reported as failed", data.failed.length === 0);
+check("they are really gone", !(await store.getConversation("bulk-1")) && !(await store.getConversation("bulk-3")));
+check(
+  "an unselected chat is untouched",
+  !!(await store.getConversation("bulk-keep")),
+  "the whole risk of a bulk action is taking something with it"
+);
+
+// A partial failure must not abandon the rest, and must be reported.
+await mk("bulk-real", "Real one");
+res = await post({ ids: ["bulk-real", "bulk-never-existed"] });
+data = await res.json();
+check(
+  "one bad id does not stop the others",
+  data.deleted.includes("bulk-real"),
+  JSON.stringify(data)
+);
+check(
+  "and the failure is named, not swallowed",
+  data.failed.includes("bulk-never-existed"),
+  "the client keeps those ticked so they can be retried"
+);
+
+// Duplicates would otherwise count twice and report a phantom failure.
+await mk("bulk-dupe", "Dupe");
+res = await post({ ids: ["bulk-dupe", "bulk-dupe"] });
+data = await res.json();
+check(
+  "the same id twice counts once",
+  data.deleted.length === 1 && data.failed.length === 0,
+  JSON.stringify(data)
+);
+
+// Input the UI would never send, but a stray script might.
+check("a non-array body is rejected", (await post({ ids: "bulk-1" })).status === 400);
+check("an empty list is rejected", (await post({ ids: [] })).status === 400);
+check("malformed JSON is rejected", (await post("{ not json")).status === 400);
+check(
+  "a huge list is refused rather than attempted",
+  (await post({ ids: Array.from({ length: 500 }, (_, i) => `x${i}`) })).status === 400,
+  "the client batches; this is the backstop"
+);
+res = await post({ ids: [null, 42, "", "bulk-nope"] });
+check(
+  "non-string ids are dropped, not passed through",
+  (await res.json()).failed.length === 1,
+  "only the one real string survives filtering"
+);
+
 console.log(`\n${fail===0 ? "All "+pass+" checks passed." : fail+" failed."}`);
 process.exit(fail===0?0:1);

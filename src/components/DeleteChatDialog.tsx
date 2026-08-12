@@ -24,16 +24,28 @@ export function clampDeleteDelay(value: unknown): number {
 export function DeleteChatDialog({
   title,
   messageCount,
+  /**
+   * Titles of the other chats going with this one, when several are selected.
+   *
+   * Kept separate from `title` rather than folded into one string: the first
+   * chat still gets the same prominent line it always had, and the rest are
+   * listed underneath. Deleting eleven chats should not look like deleting
+   * one with a long name.
+   */
+  alsoTitles,
   delaySeconds,
   onConfirm,
   onCancel,
 }: {
   title: string;
   messageCount?: number;
+  alsoTitles?: string[];
   delaySeconds: number;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
+  const extra = alsoTitles?.length ?? 0;
+  const totalChats = extra + 1;
   const total = clampDeleteDelay(delaySeconds);
   const [remaining, setRemaining] = useState(total);
   const [visible, setVisible] = useState(false);
@@ -119,10 +131,12 @@ export function DeleteChatDialog({
                 id="delete-chat-title"
                 className="text-[15px] font-semibold leading-6 text-text-primary"
               >
-                Are you sure?
+                {totalChats > 1 ? `Delete ${totalChats} chats?` : "Are you sure?"}
               </h2>
               <p className="mt-1 text-[13px] leading-5 text-text-secondary">
-                You will lose all data of this chat. This cannot be undone.
+                You will lose all data of{" "}
+                {totalChats > 1 ? "these chats" : "this chat"}. This cannot be
+                undone.
               </p>
             </div>
           </div>
@@ -131,12 +145,42 @@ export function DeleteChatDialog({
             <p className="truncate text-[13px] font-medium text-text-primary" title={title}>
               {title || "Untitled chat"}
             </p>
-            <p className="mt-0.5 text-[12px] text-text-muted">
-              {messageCount === undefined
-                ? "Every message in it will be deleted."
-                : `${messageCount} message${
-                    messageCount === 1 ? "" : "s"
-                  } will be deleted.`}
+
+            {/*
+              Name every chat, up to a point.
+
+              A confirmation that says only "12 chats" asks you to trust your
+              own memory of what you ticked, which is exactly the thing the
+              countdown exists to slow down. The list is scrollable and capped
+              so a hundred selected chats cannot push the buttons off screen.
+            */}
+            {extra > 0 && (
+              <div className="mt-1.5 max-h-28 overflow-y-auto border-t border-border pt-1.5">
+                {alsoTitles!.slice(0, 40).map((t, i) => (
+                  <p
+                    key={i}
+                    className="truncate text-[12px] leading-5 text-text-secondary"
+                    title={t}
+                  >
+                    {t || "Untitled chat"}
+                  </p>
+                ))}
+                {extra > 40 && (
+                  <p className="text-[12px] leading-5 text-text-muted">
+                    and {extra - 40} more…
+                  </p>
+                )}
+              </div>
+            )}
+
+            <p className="mt-1 text-[12px] text-text-muted">
+              {totalChats > 1
+                ? `${totalChats} chats, and every message in them, will be deleted.`
+                : messageCount === undefined
+                  ? "Every message in it will be deleted."
+                  : `${messageCount} message${
+                      messageCount === 1 ? "" : "s"
+                    } will be deleted.`}
             </p>
           </div>
         </div>
@@ -162,7 +206,13 @@ export function DeleteChatDialog({
             onClick={() => armed && onConfirm()}
             disabled={!armed}
             aria-disabled={!armed}
-            title={armed ? "Delete this chat" : `Unlocks in ${remaining}s`}
+            title={
+              armed
+                ? totalChats > 1
+                  ? `Delete these ${totalChats} chats`
+                  : "Delete this chat"
+                : `Unlocks in ${remaining}s`
+            }
             className={`relative flex-none overflow-hidden rounded-lg px-3 py-1.5 text-[13px] font-medium text-white transition-colors ${
               armed
                 ? "cursor-pointer bg-danger/90 hover:bg-danger"
@@ -179,7 +229,11 @@ export function DeleteChatDialog({
               />
             )}
             <span className="relative">
-              {armed ? "Delete" : `Delete (${remaining})`}
+              {armed
+                ? totalChats > 1
+                  ? `Delete ${totalChats}`
+                  : "Delete"
+                : `Delete (${remaining})`}
             </span>
           </button>
         </div>

@@ -894,6 +894,68 @@ export default function Home() {
     [currentConvId, startNewChat, refreshConversations]
   );
 
+  /**
+   * Delete several chats in one request.
+   *
+   * Returns the ids that actually went, so the sidebar can keep any that
+   * failed still ticked and let the user retry exactly those.
+   *
+   * Batched at 200 to match the server's per-request cap. Anything larger is
+   * split rather than rejected: the limit exists so one request cannot ask
+   * the server to walk an unbounded number of folders, not to stop the user
+   * clearing out a lot of chats at once.
+   */
+  const deleteConversations = useCallback(
+    async (ids: string[]): Promise<string[]> => {
+      const removed: string[] = [];
+      const failed: string[] = [];
+
+      for (let i = 0; i < ids.length; i += 200) {
+        const batch = ids.slice(i, i + 200);
+        try {
+          const res = await fetch("/api/conversations/bulk-delete", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ids: batch }),
+          });
+          if (!res.ok) {
+            failed.push(...batch);
+            continue;
+          }
+          const data = (await res.json()) as {
+            deleted?: string[];
+            failed?: string[];
+          };
+          removed.push(...(data.deleted ?? []));
+          failed.push(...(data.failed ?? []));
+        } catch {
+          failed.push(...batch);
+        }
+      }
+
+      if (removed.length > 0) {
+        // Drop the cached transcripts too, or reopening a same-id chat would
+        // show the deleted messages from memory.
+        removed.forEach((id) => conversationCache.current.delete(id));
+        const gone = new Set(removed);
+        setConversations((prev) => prev.filter((c) => !gone.has(c.id)));
+        if (currentConvId && gone.has(currentConvId)) startNewChat();
+      }
+
+      if (failed.length > 0) {
+        setDeleteError(
+          failed.length === ids.length
+            ? "Those chats couldn't be deleted. Please try again."
+            : `${removed.length} deleted, ${failed.length} couldn't be. The rest are still selected.`
+        );
+        void refreshConversations();
+      }
+
+      return removed;
+    },
+    [currentConvId, startNewChat, refreshConversations]
+  );
+
   const sendMessage = useCallback(
     async (
       content: string,
@@ -1916,6 +1978,7 @@ export default function Home() {
         onImported={() => void refreshConversations()}
         onNew={startNewChat}
         onDelete={deleteConversation}
+        onDeleteMany={deleteConversations}
         onRename={renameConversation}
         onArchive={archiveConversation}
         onOpenSettings={() => setShowSettings(true)}

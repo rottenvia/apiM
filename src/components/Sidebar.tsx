@@ -12,6 +12,8 @@ interface SidebarProps {
   onSelect: (id: string) => void;
   onNew: () => void;
   onDelete: (id: string) => void;
+  /** Delete several at once. Resolves to the ids that actually went. */
+  onDeleteMany: (ids: string[]) => Promise<string[]>;
   onRename: (id: string, title: string) => void;
   onArchive: (id: string, archived: boolean) => void;
   onOpenSearch: () => void;
@@ -35,6 +37,7 @@ export function Sidebar({
   onSelect,
   onNew,
   onDelete,
+  onDeleteMany,
   onRename,
   onArchive,
   onOpenSearch,
@@ -48,6 +51,18 @@ export function Sidebar({
   const [draft, setDraft] = useState("");
   const [showArchived, setShowArchived] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  /*
+   * Multi-select.
+   *
+   * Off by default and entered deliberately. Checkboxes always on screen
+   * would make the ordinary case — open a chat — look like a form to fill
+   * in, and the list is something you click through far more often than you
+   * prune.
+   */
+  const [selecting, setSelecting] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [confirmBulk, setConfirmBulk] = useState(false);
+  const [bulkBusy, setBulkBusy] = useState(false);
   const [importState, setImportState] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const importRef = useRef<HTMLInputElement>(null);
@@ -88,6 +103,32 @@ export function Sidebar({
   );
 
   const visible = showArchived ? archived : active;
+
+  /*
+   * Selection is scoped to the tab you are looking at.
+   *
+   * Ticking rows, switching to Archive and pressing Delete should not remove
+   * chats you can no longer see. Anything selected on the other tab is
+   * dropped when the tab changes, below.
+   */
+  const selectedHere = visible.filter((c) => selected.has(c.id));
+  const allHereSelected =
+    visible.length > 0 && selectedHere.length === visible.length;
+
+  const toggleOne = (id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const exitSelecting = () => {
+    setSelecting(false);
+    setSelected(new Set());
+    setConfirmBulk(false);
+  };
 
   // Resolved from the full list, not the filtered one: the dialog must stay
   // open even if the chat scrolls out of view or the archive tab is switched.
@@ -236,6 +277,25 @@ export function Sidebar({
             </svg>
           </button>
 
+          {/* Multi-select, entered deliberately.
+
+              Checkboxes permanently on screen would turn a list you click
+              through into a form you fill in. This is the rarer action, so it
+              asks for one click first. */}
+          <button
+            onClick={() => (selecting ? exitSelecting() : setSelecting(true))}
+            title={selecting ? "Done selecting" : "Select several chats"}
+            aria-label={selecting ? "Done selecting" : "Select several chats"}
+            aria-pressed={selecting}
+            data-open={selecting}
+            className="sidebar-icon-btn data-[open=true]:text-accent-light"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 11l3 3L22 4" />
+              <path strokeLinecap="round" strokeLinejoin="round" d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" />
+            </svg>
+          </button>
+
         </div>
 
         {importState && (
@@ -251,7 +311,10 @@ export function Sidebar({
               <button
                 role="tab"
                 aria-selected={!showArchived}
-                onClick={() => setShowArchived(false)}
+                onClick={() => {
+                  setShowArchived(false);
+                  setSelected(new Set());
+                }}
                 data-active={!showArchived}
                 className="segmented-item"
               >
@@ -263,7 +326,10 @@ export function Sidebar({
               <button
                 role="tab"
                 aria-selected={showArchived}
-                onClick={() => setShowArchived(true)}
+                onClick={() => {
+                  setShowArchived(true);
+                  setSelected(new Set());
+                }}
                 data-active={showArchived}
                 className="segmented-item"
               >
@@ -273,6 +339,54 @@ export function Sidebar({
                 )}
               </button>
             </div>
+          </div>
+        )}
+
+        {/* Selection bar — only while selecting, so it never takes space
+            from the list in the ordinary case. */}
+        {selecting && (
+          <div className="mx-3 mb-2 flex items-center gap-2 rounded-xl border border-border bg-bg-tertiary px-2.5 py-2 animate-fade-in">
+            <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 text-[13px] text-text-secondary">
+              <input
+                type="checkbox"
+                checked={allHereSelected}
+                /* Indeterminate when some but not all are ticked: a plain
+                   unchecked box would suggest nothing is selected. */
+                ref={(el) => {
+                  if (el)
+                    el.indeterminate =
+                      selectedHere.length > 0 && !allHereSelected;
+                }}
+                onChange={() => {
+                  setSelected((prev) => {
+                    const next = new Set(prev);
+                    if (allHereSelected) visible.forEach((c) => next.delete(c.id));
+                    else visible.forEach((c) => next.add(c.id));
+                    return next;
+                  });
+                }}
+                className="h-4 w-4 flex-none accent-[#c96442]"
+              />
+              <span className="truncate">
+                {selectedHere.length > 0
+                  ? `${selectedHere.length} selected`
+                  : "Select all"}
+              </span>
+            </label>
+
+            <button
+              onClick={() => setConfirmBulk(true)}
+              disabled={selectedHere.length === 0 || bulkBusy}
+              className="flex-none rounded-lg bg-danger/90 px-2.5 py-1 text-[12px] font-medium text-white transition-colors hover:bg-danger disabled:cursor-not-allowed disabled:bg-danger/25"
+            >
+              {bulkBusy ? "Deleting…" : "Delete"}
+            </button>
+            <button
+              onClick={exitSelecting}
+              className="flex-none rounded-lg border border-border px-2.5 py-1 text-[12px] font-medium text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
+            >
+              Cancel
+            </button>
           </div>
         )}
 
@@ -332,14 +446,33 @@ export function Sidebar({
                   </div>
                 ) : (
                   <>
-                    {/* Covers the row's padding so the whole card is
-                        clickable, not just the text. */}
+                    {/* While selecting, the whole row toggles the tick rather
+                        than opening the chat. Two different things on one
+                        click target is how you delete something you meant to
+                        read — and the checkbox alone is a small target. */}
                     <button
-                      onClick={() => onSelect(conv.id)}
-                      onDoubleClick={() => startRename(conv)}
-                      aria-label={conv.title}
+                      onClick={() =>
+                        selecting ? toggleOne(conv.id) : onSelect(conv.id)
+                      }
+                      onDoubleClick={() => !selecting && startRename(conv)}
+                      aria-label={
+                        selecting
+                          ? `${selected.has(conv.id) ? "Deselect" : "Select"} ${conv.title}`
+                          : conv.title
+                      }
                       className="absolute inset-0 rounded-lg"
                     />
+                    {selecting && (
+                      <input
+                        type="checkbox"
+                        checked={selected.has(conv.id)}
+                        onChange={() => toggleOne(conv.id)}
+                        onClick={(e) => e.stopPropagation()}
+                        tabIndex={-1}
+                        aria-hidden="true"
+                        className="relative z-10 h-4 w-4 flex-none accent-[#c96442]"
+                      />
+                    )}
                     <span
                       className="pointer-events-none relative min-w-0 flex-1 truncate text-left text-sm leading-5"
                       title={conv.title}
@@ -349,7 +482,7 @@ export function Sidebar({
                   </>
                 )}
 
-                {editingId !== conv.id && (
+                {editingId !== conv.id && !selecting && (
                   <button
                     data-menu-root
                     onClick={(e) => {
@@ -476,6 +609,45 @@ export function Sidebar({
           </button>
         </div>
       </div>
+
+      {/* Bulk confirmation — the same dialog, so the countdown and the
+          focus-on-Cancel behaviour are identical whether you delete one chat
+          or twenty. A second, simpler dialog for the bulk case would be the
+          one that quietly loses the safeguards. */}
+      {confirmBulk && selectedHere.length > 0 && (
+        <DeleteChatDialog
+          title={selectedHere[0].title}
+          messageCount={
+            selectedHere.length === 1 ? selectedHere[0].messageCount : undefined
+          }
+          alsoTitles={selectedHere.slice(1).map((c) => c.title)}
+          delaySeconds={deleteDelay}
+          onCancel={() => setConfirmBulk(false)}
+          onConfirm={() => {
+            const ids = selectedHere.map((c) => c.id);
+            setConfirmBulk(false);
+            setBulkBusy(true);
+            void onDeleteMany(ids)
+              .then((removed) => {
+                /*
+                 * Only clear what actually went.
+                 *
+                 * If three of twelve failed, those three stay ticked so a
+                 * second press retries exactly them — rather than the
+                 * selection emptying and the user having to work out which
+                 * survived.
+                 */
+                setSelected((prev) => {
+                  const next = new Set(prev);
+                  removed.forEach((id) => next.delete(id));
+                  return next;
+                });
+                if (removed.length === ids.length) setSelecting(false);
+              })
+              .finally(() => setBulkBusy(false));
+          }}
+        />
+      )}
 
       {pendingDelete && (
         <DeleteChatDialog
