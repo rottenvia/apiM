@@ -86,6 +86,8 @@ const GROUPS: {
 interface SettingsModalProps {
   deepseekKey: string;
   tavilyKey: string;
+  exaKey: string;
+  onExaKeyChange: (v: string) => void;
   visionKey: string;
   visionModel: string;
   model: string;
@@ -113,6 +115,8 @@ interface SettingsModalProps {
 export function SettingsModal({
   deepseekKey,
   tavilyKey,
+  exaKey,
+  onExaKeyChange,
   visionKey,
   visionModel,
   model,
@@ -140,6 +144,7 @@ export function SettingsModal({
 
   const [showDsKey, setShowDsKey] = useState(false);
   const [showTvKey, setShowTvKey] = useState(false);
+  const [showExaKey, setShowExaKey] = useState(false);
   const [showVsKey, setShowVsKey] = useState(false);
 
   return (
@@ -316,6 +321,68 @@ export function SettingsModal({
                   <div className="flex items-center gap-1.5 mt-1.5">
                     <div className="w-1.5 h-1.5 rounded-full bg-success" />
                     <span className="text-xs text-success">Key saved</span>
+                  </div>
+                )}
+              </div>
+
+              <div className="h-px bg-border" />
+
+              {/* Exa — the fallback when Tavily refuses.
+
+                  Added after Tavily started answering 432, "this request
+                  exceeds your plan's set usage limit". That is a hard stop
+                  until the month rolls over, and with one provider it made
+                  search a dead feature. Optional: leave it empty and nothing
+                  changes. */}
+              <div>
+                <label className="block text-sm font-semibold text-text-primary mb-1.5">
+                  Exa API Key
+                  <span className="text-text-muted ml-1 text-xs font-normal">
+                    (optional — used when Tavily fails)
+                  </span>
+                </label>
+                <p className="text-xs text-text-secondary mb-2">
+                  Get your key from{" "}
+                  <a
+                    href="https://dashboard.exa.ai/api-keys"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-accent-light underline underline-offset-2"
+                  >
+                    dashboard.exa.ai
+                  </a>{" "}
+                  — $10 free credit. Only used if Tavily returns an error, so
+                  it costs nothing while Tavily is working.
+                </p>
+                <div className="relative">
+                  <input
+                    type={showExaKey ? "text" : "password"}
+                    value={exaKey}
+                    onChange={(e) => onExaKeyChange(e.target.value)}
+                    placeholder="Leave empty to skip"
+                    className="w-full px-4 py-2.5 rounded-xl bg-bg-tertiary border border-border text-sm text-text-primary placeholder-text-muted outline-none focus:border-search/50 focus:ring-1 focus:ring-search/25 transition-all"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowExaKey(!showExaKey)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-text-muted hover:text-text-secondary transition-colors"
+                  >
+                    {showExaKey ? (
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
+                      </svg>
+                    ) : (
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                      </svg>
+                    )}
+                  </button>
+                </div>
+                {exaKey && (
+                  <div className="flex items-center gap-1.5 mt-1.5">
+                    <div className="w-1.5 h-1.5 rounded-full bg-success" />
+                    <span className="text-xs text-success">Fallback ready</span>
                   </div>
                 )}
               </div>

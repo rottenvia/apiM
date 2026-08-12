@@ -263,7 +263,10 @@ check(
 );
 check(
   "and the route hides it from the model entirely",
-  /t\.function\.name === "web_search"\) return Boolean\(tavilyApiKey\)/.test(route)
+  /t\.function\.name === "web_search"\)\s*\n?\s*return Boolean\(tavilyApiKey \|\| exaApiKey\)/.test(
+    route
+  ),
+  "withheld only when NEITHER provider has a key"
 );
 
 // write_files
@@ -522,14 +525,32 @@ check(
   /find: \{\s*type: "string"/.test(toolsSrc3),
   "a 477KB JSON body truncated at 200k can cut off the answer"
 );
+/*
+ * Windowed on character offsets, not lines.
+ *
+ * The first version kept matching LINES with two either side. That does
+ * nothing on minified JSON — reported from a real test against PyPI, where
+ * the whole 477KB document is one line, so "the matching line" was the entire
+ * file and find filtered one line down to one line.
+ */
 check(
   "matches carry surrounding context",
-  /i - 2\); j <= Math\.min\(lines\.length - 1, i \+ 2\)/.test(toolsSrc3),
-  "one line out of JSON is meaningless without the object around it"
+  /const WINDOW = 300;/.test(toolsSrc3) &&
+    /m\.index - WINDOW/.test(toolsSrc3),
+  "a window works on minified JSON; a line does not"
+);
+check(
+  "overlapping windows are merged",
+  /if \(last && from <= last\[1\]\)/.test(toolsSrc3),
+  "a dense cluster of matches should read as one passage, not repeat"
+);
+check(
+  "and it stops after a sane number of matches",
+  /MAX_MATCHES = 20/.test(toolsSrc3)
 );
 check(
   "an invalid regex falls back to a literal search",
-  /catch \{\s*re = new RegExp\(find\.replace/.test(toolsSrc3),
+  /catch \{[\s\S]{0,200}re = new RegExp\(find\.replace/.test(toolsSrc3),
   'a model writing "info.version[" means the text, not a character class'
 );
 check(
@@ -539,8 +560,77 @@ check(
 );
 check(
   "the header still reports the real page size",
-  toolsSrc3.indexOf("KB`") < toolsSrc3.indexOf("Showing ${picked.length}"),
+  toolsSrc3.indexOf("KB`") < toolsSrc3.indexOf("Showing ${merged.length}"),
   "so you can tell whether you narrowed a big page or a small one"
+);
+
+/*
+ * A second provider, because one is a single point of failure.
+ *
+ * Reported: Tavily started answering 432 — "This request exceeds your plan's
+ * set usage limit". That is a hard stop until the month rolls over, and with
+ * one provider it made search a dead feature for the rest of the month.
+ */
+console.log("\n11. Exa takes over when Tavily refuses");
+
+check(
+  "there is an Exa base URL, overridable for tests",
+  /EXA_BASE_URL = process\.env\.EXA_BASE_URL/.test(searchSrc)
+);
+check(
+  "auth uses x-api-key, the header Exa verifies",
+  /"x-api-key": exaKey/.test(searchSrc),
+  "the docs also list Bearer, but x-api-key is the one confirmed to work"
+);
+check(
+  "content fields are nested under contents",
+  /contents: \{ text: \{ maxCharacters/.test(searchSrc),
+  "a top-level text:true returns 400 — the documented #1 mistake"
+);
+check(
+  "only a refusal falls through to Exa, never an empty result",
+  /if \(!\(error instanceof SearchProviderError\) \|\| !exaKey\) throw error;/.test(
+    searchSrc
+  ),
+  "re-asking a second provider for the same nothing costs money"
+);
+check(
+  "Tavily is still tried first when it has a key",
+  searchSrc.indexOf("const results = await tavilySearch(query, tavilyKey") <
+    searchSrc.indexOf("const results = await exaSearch(query, exaKey"),
+  "it returns cleaned full-page markdown; Exa is the backup"
+);
+check(
+  "Exa alone is enough to search",
+  /if \(exaKey\) \{/.test(searchSrc),
+  "someone with only an Exa key should still get search"
+);
+check(
+  "and with neither, it says so rather than returning nothing",
+  /no search provider is configured/.test(searchSrc)
+);
+
+check(
+  "either key enables the web_search tool",
+  /return Boolean\(tavilyApiKey \|\| exaApiKey\)/.test(routeSrc3),
+  "it was withheld unless Tavily specifically was set"
+);
+check(
+  "and either key enables the automatic search",
+  /\(tavilyApiKey \|\| exaApiKey\) && webSearchMode !== "off"/.test(routeSrc3)
+);
+
+const settingsSrc = readSourceSync(
+  path.join(ROOT, "src/components/SettingsModal.tsx")
+);
+check(
+  "the key can be entered in Settings",
+  /Exa API Key/.test(settingsSrc) && /dashboard\.exa\.ai/.test(settingsSrc)
+);
+check(
+  "and is described as optional, with when it is used",
+  /used when Tavily fails/.test(settingsSrc),
+  "so nobody thinks they have to buy a second subscription"
 );
 
 console.log(

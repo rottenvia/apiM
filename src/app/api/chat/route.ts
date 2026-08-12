@@ -144,6 +144,8 @@ interface ChatRequestBody {
   conversationId?: string | null;
   deepseekApiKey?: string;
   tavilyApiKey?: string;
+  /** Optional fallback search provider, used when Tavily refuses. */
+  exaApiKey?: string;
   model?: string;
   thinkingEffort?: string;
   /** "off" | "auto" | "always" — "auto" lets the model decide per message. */
@@ -352,6 +354,7 @@ export async function POST(req: NextRequest) {
     conversationId,
     deepseekApiKey,
     tavilyApiKey,
+    exaApiKey,
     model = "deepseek-v4-pro",
     thinkingEffort = "auto",
     webSearchMode = "off",
@@ -392,7 +395,9 @@ export async function POST(req: NextRequest) {
   // Searching is only possible with a Tavily key. Whether one actually happens
   // is decided inside the stream: "always" every turn, "auto" asks the model,
   // "off" never.
-  const canSearch = Boolean(tavilyApiKey && webSearchMode !== "off");
+  const canSearch = Boolean(
+    (tavilyApiKey || exaApiKey) && webSearchMode !== "off"
+  );
 
   const derivedTitle = deriveTitle(displayContent?.trim() || message);
 
@@ -638,7 +643,8 @@ export async function POST(req: NextRequest) {
               deepseekApiKey,
               tavilyApiKey as string,
               runSignal,
-              searchProfile
+              searchProfile,
+              exaApiKey
             );
           } catch (searchError) {
             /*
@@ -1315,7 +1321,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
              */
             dsRequestBody.tools = WORKSPACE_TOOLS.filter((t) => {
               if (t.function.name === "view_image") return Boolean(visionApiKey);
-              if (t.function.name === "web_search") return Boolean(tavilyApiKey);
+              if (t.function.name === "web_search")
+                return Boolean(tavilyApiKey || exaApiKey);
               // The browser is an optional install. Offering it when Chromium
               // is absent buys an error, an apology and a worse fallback.
               if (t.function.name === "browse") return hasBrowser;
@@ -1954,6 +1961,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   visionKey: visionApiKey,
                   visionModel,
                   searchKey: tavilyApiKey,
+                  exaKey: exaApiKey,
                   deepseekKey: deepseekApiKey,
                   searchProfile,
                 }).catch((error) => ({
@@ -2356,6 +2364,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                       visionKey: visionApiKey,
                       visionModel,
                       searchKey: tavilyApiKey,
+                  exaKey: exaApiKey,
                       deepseekKey: deepseekApiKey,
                       searchProfile,
                     }
@@ -2393,6 +2402,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   visionKey: visionApiKey,
                   visionModel,
                   searchKey: tavilyApiKey,
+                  exaKey: exaApiKey,
                   deepseekKey: deepseekApiKey,
                   searchProfile,
                 }
