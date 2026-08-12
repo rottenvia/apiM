@@ -681,19 +681,27 @@ async function tavilySearch(
 }
 
 /**
- * One search, with a fallback provider.
+ * One search, across every configured provider.
  *
- * Tavily first when a key exists, because it returns cleaned full-page
- * markdown and this app was built around that. Exa when Tavily refuses.
+ * Peers, not a primary and a spare. Asked for directly, and it is the better
+ * design: Tavily returns cleaned full-page markdown, Exa is a neural index
+ * that finds things keyword matching misses, and they disagree about which
+ * pages matter. Running both and merging beats picking one and hoping.
  *
- * Only a REFUSAL falls through, never an empty result. A provider that
- * answers "nothing matched" has done its job, and re-asking a second provider
- * for the same nothing costs money and time. A 401, a 429/432 or a 5xx is a
- * different thing entirely: the query never ran.
+ * Three properties worth stating, because each was a decision:
  *
- * Reported: Tavily began returning 432, "This request exceeds your plan's set
- * usage limit". That is a hard stop until the month rolls over, and with one
- * provider it made search a dead feature for the rest of the month.
+ *   - Both are queried IN PARALLEL, so two providers cost the same wall-clock
+ *     time as one. This is the reason peer-instead-of-fallback is affordable
+ *     at all.
+ *   - One provider failing does not fail the search. With a fallback chain a
+ *     Tavily 432 meant waiting for Tavily to fail before Exa even started;
+ *     now Exa's results are already in hand.
+ *   - It only throws when EVERY provider failed. That distinction is what
+ *     stopped a rejected key looking like an empty index — see
+ *     SearchProviderError.
+ *
+ * Deduplication happens in the caller, which already drops repeat URLs, so a
+ * page both providers return is charged once and shown once.
  */
 async function searchOnce(
   query: string,
@@ -707,36 +715,81 @@ async function searchOnce(
     depth?: SearchDepth;
     useCache?: boolean;
     onCacheHit?: () => void;
-    /** Told which provider actually answered, for the UI and the ledger. */
+    /** Told which providers actually answered, for the UI and the ledger. */
     onProvider?: (id: string) => void;
   } = {}
 ): Promise<Omit<SearchResultItem, "domain">[]> {
   const { tavilyKey, exaKey, timeRange, onProvider, ...rest } = options;
 
+  if (!tavilyKey && !exaKey) {
+    throw new SearchProviderError(0, "no search provider is configured");
+  }
+
+  const attempts: Promise<{
+    id: string;
+    results?: Omit<SearchResultItem, "domain">[];
+    error?: unknown;
+  }>[] = [];
+
   if (tavilyKey) {
-    try {
-      const results = await tavilySearch(query, tavilyKey, { ...rest, timeRange });
-      onProvider?.("tavily");
-      return results;
-    } catch (error) {
-      if (!(error instanceof SearchProviderError) || !exaKey) throw error;
+    attempts.push(
+      tavilySearch(query, tavilyKey, { ...rest, timeRange })
+        .then((results) => ({ id: "tavily", results }))
+        .catch((error) => ({ id: "tavily", error }))
+    );
+  }
+  if (exaKey) {
+    // Exa has no time_range parameter, so a recency-limited query loses that
+    // filter on this side. Tavily still applies it when both are on.
+    attempts.push(
+      exaSearch(query, exaKey, rest)
+        .then((results) => ({ id: "exa", results }))
+        .catch((error) => ({ id: "exa", error }))
+    );
+  }
+
+  const settled = await Promise.all(attempts);
+
+  const merged: Omit<SearchResultItem, "domain">[] = [];
+  const seen = new Set<string>();
+  const failures: { id: string; error: unknown }[] = [];
+
+  for (const outcome of settled) {
+    if (outcome.error !== undefined) {
+      failures.push({ id: outcome.id, error: outcome.error });
       console.warn(
-        `Tavily failed (${error.status}); falling back to Exa: ${error.message}`
+        `${outcome.id} search failed:`,
+        outcome.error instanceof Error ? outcome.error.message : outcome.error
       );
-      // Fall through to Exa below.
+      continue;
+    }
+    onProvider?.(outcome.id);
+    for (const r of outcome.results ?? []) {
+      if (!r.url || seen.has(r.url)) continue;
+      seen.add(r.url);
+      merged.push(r);
     }
   }
 
-  if (exaKey) {
-    // Exa has no time_range parameter, so a recency-limited query loses that
-    // filter here. Better than no answer, and the caller sees which provider
-    // ran.
-    const results = await exaSearch(query, exaKey, rest);
-    onProvider?.("exa");
-    return results;
+  /*
+   * Only a total failure is a failure.
+   *
+   * If Tavily is out of quota and Exa answered, that is a successful search —
+   * the user does not need to hear about a provider that was covered for. If
+   * BOTH failed, the first real error is rethrown so the message stays
+   * specific ("the Tavily key was rejected") rather than becoming a generic
+   * "search unavailable".
+   */
+  if (merged.length === 0 && failures.length === attempts.length) {
+    const providerError = failures.find(
+      (f) => f.error instanceof SearchProviderError
+    );
+    throw providerError
+      ? (providerError.error as SearchProviderError)
+      : new SearchProviderError(0, "every search provider failed");
   }
 
-  throw new SearchProviderError(0, "no search provider is configured");
+  return merged;
 }
 
 /**

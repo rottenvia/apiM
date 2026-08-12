@@ -571,7 +571,7 @@ check(
  * set usage limit". That is a hard stop until the month rolls over, and with
  * one provider it made search a dead feature for the rest of the month.
  */
-console.log("\n11. Exa takes over when Tavily refuses");
+console.log("\n11. Exa is a peer provider, not a spare");
 
 check(
   "there is an Exa base URL, overridable for tests",
@@ -587,26 +587,39 @@ check(
   /contents: \{ text: \{ maxCharacters/.test(searchSrc),
   "a top-level text:true returns 400 — the documented #1 mistake"
 );
+
+/*
+ * Peers, not primary-and-spare. Asked for directly, and it is the better
+ * design: the two indexes disagree about which pages matter, so running both
+ * and merging beats picking one. In parallel, so two providers cost the same
+ * wall-clock time as one.
+ */
 check(
-  "only a refusal falls through to Exa, never an empty result",
-  /if \(!\(error instanceof SearchProviderError\) \|\| !exaKey\) throw error;/.test(
+  "both providers are queried in parallel, not in sequence",
+  /const settled = await Promise\.all\(attempts\)/.test(searchSrc),
+  "a fallback chain waits for the first to fail before starting the second"
+);
+check(
+  "a failing provider does not fail the search",
+  /if \(merged\.length === 0 && failures\.length === attempts\.length\)/.test(
     searchSrc
   ),
-  "re-asking a second provider for the same nothing costs money"
+  "only a TOTAL failure is a failure"
 );
 check(
-  "Tavily is still tried first when it has a key",
-  searchSrc.indexOf("const results = await tavilySearch(query, tavilyKey") <
-    searchSrc.indexOf("const results = await exaSearch(query, exaKey"),
-  "it returns cleaned full-page markdown; Exa is the backup"
+  "and when everything fails the specific reason survives",
+  /providerError\s*\n?\s*\? \(providerError\.error as SearchProviderError\)/.test(
+    searchSrc
+  ),
+  '"the Tavily key was rejected" beats a generic "search unavailable"'
 );
 check(
-  "Exa alone is enough to search",
-  /if \(exaKey\) \{/.test(searchSrc),
-  "someone with only an Exa key should still get search"
+  "results are merged with duplicate URLs dropped",
+  /if \(!r\.url \|\| seen\.has\(r\.url\)\) continue;/.test(searchSrc),
+  "a page both providers return is shown once"
 );
 check(
-  "and with neither, it says so rather than returning nothing",
+  "with neither key it says so rather than returning nothing",
   /no search provider is configured/.test(searchSrc)
 );
 
@@ -627,11 +640,49 @@ check(
   "the key can be entered in Settings",
   /Exa API Key/.test(settingsSrc) && /dashboard\.exa\.ai/.test(settingsSrc)
 );
+
+/*
+ * The report that was invented rather than run.
+ *
+ * Asked to TEST a tool, the agent produced a three-row table of results
+ * across three attempts and a score out of ten — on a turn where no search
+ * ran. checkAnswerClaims only covered FILE claims, so it sailed through.
+ */
+console.log("\n12. A claimed tool result must correspond to a tool that ran");
+
+const { checkAnswerClaims } = await load("src/lib/plan.ts");
+
+for (const [label, text] of [
+  ["a fabricated search report", "Attempt 3: web_search came back empty. So the fallback isn't firing."],
+  ["a fabricated 'I ran the search'", "I ran the search and it returned no results."],
+  ["a fabricated fetch result", "fetch_url returned HTTP 200 · application/json · 477KB"],
+  ["a fabricated test run", "run_tests came back failed — 3 of 40 suites are red."],
+  ["a fabricated exit code", "The script exited code 0, so the fix works."],
+]) {
+  check(`${label} is caught`, checkAnswerClaims(text, []) !== null);
+}
+
 check(
-  "and is described as optional, with when it is used",
-  /used when Tavily fails/.test(settingsSrc),
-  "so nobody thinks they have to buy a second subscription"
+  "a real search is not flagged",
+  checkAnswerClaims("web_search came back empty.", ["web_search"]) === null
 );
+check(
+  "any tool in the group counts",
+  checkAnswerClaims("fetch_url returned HTTP 200.", ["browse"]) === null,
+  "browse and fetch_url are alternatives for the same job"
+);
+for (const [label, text] of [
+  ["a proposal", "I could use web_search here if you add a key."],
+  ["a suggestion", "You should run the tests before merging."],
+  ["explaining a tool", "web_search takes a query and returns titles and URLs."],
+  ["an ordinary answer", "Python's sorted() returns a new list."],
+]) {
+  check(
+    `${label} is NOT flagged`,
+    checkAnswerClaims(text, []) === null,
+    "the first false accusation is the last one anyone reads"
+  );
+}
 
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
