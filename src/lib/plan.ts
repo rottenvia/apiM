@@ -241,10 +241,9 @@ function claimsACheck(text: string): boolean {
 /**
  * Claims of a FILE operation, for checking the closing summary.
  *
- * Separate from CHECK_WORDS, which is about things being run. Reported: the
- * agent ended replies with lines like "Actions taken: [read 3412321]" and
- * "edited the file" on turns where no file tool had been called at all. The
- * work was never done and the tokens were spent anyway.
+ * Reported: the agent ended replies with lines like "Actions taken: [read
+ * 3412321]" and "edited the file" on turns where no file tool had been called
+ * at all. The work was never done and the tokens were spent anyway.
  */
 const FILE_CLAIM_WORDS = [
   /\b(read|opened)\s+(the\s+)?(file|files)\b/i,
@@ -274,30 +273,107 @@ const FILE_TOOLS = new Set([
 ]);
 
 /**
+ * Every tool, and the phrases that assert it was used.
+ *
+ * The file check above only covered files. Reported after asking the agent to
+ * TEST a tool: it produced a detailed report — "Attempt 3: web_search came
+ * back empty", a three-row table of results across attempts, a score of 2/10
+ * — on a turn where no search ran at all. The user paid for the reasoning
+ * that invented it, and the report was indistinguishable from a real one.
+ *
+ * That is the same failure as the file case, one category over, and the fix
+ * generalises: if the answer names a tool as something it DID, that tool has
+ * to appear in the list of what actually ran.
+ *
+ * Matching is on the tool's own name plus the few natural phrasings for it.
+ * Deliberately not clever: a model writing "I could use web_search here" is
+ * not claiming to have used it, so the patterns require a past-tense frame or
+ * the bold-name convention the UI itself prints.
+ */
+const TOOL_CLAIM_PATTERNS: [string[], RegExp[]][] = [
+  [
+    ["web_search"],
+    [
+      /\bweb_search\b[^.\n]{0,40}\b(returned|came back|gave|found|failed|errored|empty|no results)/i,
+      /\b(ran|used|tried|called|performed|attempted)\s+(a\s+|the\s+)?web[_ ]search\b/i,
+      // "I ran the search and it returned nothing" — the bare word "search"
+      // with a past-tense frame, which is how it reads in prose rather than
+      // in a tool name.
+      /\b(I|I've|I have)\s+(ran|run|used|tried|performed)\s+(a\s+|the\s+)?(web\s+)?search\b/i,
+      /\bsearch(ed)?\s+(returned|came back|gave)\b/i,
+    ],
+  ],
+  [
+    ["fetch_url", "browse", "inspect_page", "http_request", "download_file"],
+    [
+      /\b(fetch_url|inspect_page|http_request)\b[^.\n]{0,40}\b(returned|came back|gave|responded|failed)/i,
+      /\b(ran|used|tried|called|fetched with)\s+(a\s+|the\s+)?(fetch_url|inspect_page|http_request|browse)\b/i,
+      /\bHTTP\s+\d{3}\b[^.\n]{0,30}\b(response|status|came back)/i,
+    ],
+  ],
+  [
+    ["run_command", "run_tests", "start_process", "write_process", "read_process"],
+    [
+      /\b(run_command|run_tests|write_process)\b[^.\n]{0,40}\b(returned|came back|gave|exited|failed|passed)/i,
+      /\b(ran|executed)\s+(the\s+)?(tests?|command|script)\b[^.\n]{0,30}\b(and|which|it)\b/i,
+      /\bexit(ed)?\s+(code\s+)?[01]\b/i,
+    ],
+  ],
+];
+
+/**
  * Did the closing answer claim work that no tool performed?
  *
- * Returns a note to append when the reply asserts it read or changed files
- * and not one file tool ran in the whole reply. Deliberately narrow: it fires
- * only on the total-absence case, where there is no ambiguity about whether
- * something happened. A model that read one file and describes two is not
- * caught here, and should not be — a false accusation is worse than a missed
- * one, because it teaches the user to ignore the warning.
+ * Returns a note to append when the reply asserts it used something and that
+ * something never ran. Two families are checked: file operations, and named
+ * tools.
  *
- * This does not stop the model lying. It stops the lie being invisible.
+ * Deliberately narrow, and this matters more than the detection. It fires
+ * only when the named tool is COMPLETELY ABSENT from the run — a model that
+ * searched once and describes two searches is not caught, and should not be.
+ * A false accusation is worse than a missed one, because the first time this
+ * warning is wrong the user stops reading it.
+ *
+ * This does not stop the model lying. It stops the lie being invisible, which
+ * is the only part a program can actually do.
  */
 export function checkAnswerClaims(
   answer: string,
   toolsUsedThisRun: string[]
 ): string | null {
   if (!answer.trim()) return null;
-  if (toolsUsedThisRun.some((t) => FILE_TOOLS.has(t))) return null;
-  if (!FILE_CLAIM_WORDS.some((re) => re.test(answer))) return null;
 
-  return (
-    `This reply describes reading or changing files, but no file tool ran ` +
-    `in it — nothing on disk was touched. Treat the summary above as a ` +
-    `proposal, not a record of work done.`
-  );
+  const used = new Set(toolsUsedThisRun);
+
+  // Files first: the original case, and the most common one.
+  if (
+    !toolsUsedThisRun.some((t) => FILE_TOOLS.has(t)) &&
+    FILE_CLAIM_WORDS.some((re) => re.test(answer))
+  ) {
+    return (
+      `This reply describes reading or changing files, but no file tool ran ` +
+      `in it — nothing on disk was touched. Treat the summary above as a ` +
+      `proposal, not a record of work done.`
+    );
+  }
+
+  for (const [tools, patterns] of TOOL_CLAIM_PATTERNS) {
+    // Any tool in the group having run is enough: they are alternatives for
+    // the same job, and "I looked it up" is true whether it was fetch_url or
+    // browse.
+    if (tools.some((t) => used.has(t))) continue;
+    if (!patterns.some((re) => re.test(answer))) continue;
+
+    const named = tools[0];
+    return (
+      `This reply describes using ${named} and reports what it returned, ` +
+      `but ${named} did not run in this reply — the result described above ` +
+      `was not produced by a tool. Treat it as invented until it is actually ` +
+      `run.`
+    );
+  }
+
+  return null;
 }
 
 /**

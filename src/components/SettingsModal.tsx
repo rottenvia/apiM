@@ -338,7 +338,7 @@ export function SettingsModal({
                 <label className="block text-sm font-semibold text-text-primary mb-1.5">
                   Exa API Key
                   <span className="text-text-muted ml-1 text-xs font-normal">
-                    (optional — used when Tavily fails)
+                    (optional — searched alongside Tavily)
                   </span>
                 </label>
                 <p className="text-xs text-text-secondary mb-2">
@@ -351,8 +351,9 @@ export function SettingsModal({
                   >
                     dashboard.exa.ai
                   </a>{" "}
-                  — $10 free credit. Only used if Tavily returns an error, so
-                  it costs nothing while Tavily is working.
+                  — $10 free credit. Searched at the same time as Tavily and
+                  the results merged, so a quota error on one side no longer
+                  stops the search. Set either key, or both.
                 </p>
                 <div className="relative">
                   <input
@@ -382,7 +383,7 @@ export function SettingsModal({
                 {exaKey && (
                   <div className="flex items-center gap-1.5 mt-1.5">
                     <div className="w-1.5 h-1.5 rounded-full bg-success" />
-                    <span className="text-xs text-success">Fallback ready</span>
+                    <span className="text-xs text-success">Key saved</span>
                   </div>
                 )}
               </div>
