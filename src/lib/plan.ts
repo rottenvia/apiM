@@ -249,7 +249,30 @@ const FILE_CLAIM_WORDS = [
   /\b(read|opened)\s+(the\s+)?(file|files)\b/i,
   /\b(edited|modified|updated|patched|rewrote|wrote)\s+(the\s+)?(file|files)\b/i,
   /\b(created|added|deleted|removed|renamed|moved)\s+(the\s+)?(file|files)\b/i,
-  /\bactions?\s+taken\s*:/i,
+  /*
+   * "Actions taken:" is NOT a file claim on its own.
+   *
+   * It was in this list, so a reply ending "[Actions taken: web_search — ...]"
+   * — after a web_search that really ran — was told "no file tool ran in it,
+   * nothing on disk was touched". True, and completely beside the point: the
+   * reply never claimed to touch disk.
+   *
+   * A warning that fires for the wrong reason is worse than one that misses,
+   * because the next real one gets ignored. Reported immediately, which is
+   * exactly what a false positive earns.
+   *
+   * The block only counts as a file claim when it NAMES a file operation,
+   * which is what the original report ("Actions taken: [read 3412321]")
+   * actually did.
+   *
+   * Scanned across newlines, up to 400 characters. My first attempt used
+   * [^\n]* and so only looked at the heading LINE — which misses the common
+   * shape entirely, because these blocks are usually a bulleted list on the
+   * lines below. Caught by an existing fixture that used exactly that shape.
+   * The 400-character bound keeps "Actions taken:" near the top of a long
+   * reply from matching an unrelated "read" a page later.
+   */
+  /\bactions?\s+taken\s*:[\s\S]{0,400}?\b(read|wrote|write|edit|edited|created|deleted|removed|renamed|moved|patched)\b/i,
   /\b(I|I've|I have)\s+(read|edited|created|written|wrote|updated|deleted)\b/i,
 ];
 
@@ -355,6 +378,30 @@ export function checkAnswerClaims(
       `in it — nothing on disk was touched. Treat the summary above as a ` +
       `proposal, not a record of work done.`
     );
+  }
+
+  /*
+   * An "Actions taken:" block that names a tool is a claim it ran.
+   *
+   * This is the most direct form of the fabrication and it needs no verb
+   * around it: writing "[Actions taken: web_search — ...]" asserts the call
+   * happened. Checked before the phrase patterns below because it is exact
+   * — the tool's own name inside a block that exists to list what was done.
+   */
+  const actionsBlock = /\bactions?\s+taken\s*:([\s\S]{0,400})/i.exec(answer);
+  if (actionsBlock) {
+    for (const [tools] of TOOL_CLAIM_PATTERNS) {
+      if (tools.some((t) => used.has(t))) continue;
+      const named = tools.find((t) =>
+        new RegExp(`\\b${t}\\b`, "i").test(actionsBlock[1])
+      );
+      if (!named) continue;
+      return (
+        `This reply lists ${named} under "Actions taken", but ${named} did ` +
+        `not run in this reply — nothing was actually called. Treat that ` +
+        `line as invented.`
+      );
+    }
   }
 
   for (const [tools, patterns] of TOOL_CLAIM_PATTERNS) {
