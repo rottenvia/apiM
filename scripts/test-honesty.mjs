@@ -80,10 +80,67 @@ for (const [label, text] of [
   ["I edited the file", "I edited the file to add the header."],
   ["I read the file", "I have read the file and it looks fine."],
   ["created the files", "I created the files you asked for."],
-  ["actions taken block", "Actions taken:\n- looked at main.ts"],
+  /*
+   * The block has to NAME a file operation.
+   *
+   * This case used to be "Actions taken:\n- looked at main.ts", and it
+   * passed because the heading alone was treated as a file claim. That is
+   * what made the check fire on a reply ending "[Actions taken: web_search
+   * — ...]" after a search that really ran — a warning for the wrong reason,
+   * reported the moment it shipped. "looked at" is not a file verb, so the
+   * old fixture was asserting the bug.
+   */
+  ["actions taken block", "Actions taken:\n- read main.ts and edited it"],
 ]) {
   check(`"${label}" is recognised as a claim`, P.checkAnswerClaims(text, []) !== null);
 }
+
+check(
+  "an Actions-taken block that names no file operation is not a file claim",
+  P.checkAnswerClaims("Actions taken:\n- looked at main.ts", []) === null,
+  "the heading alone says nothing about disk"
+);
+check(
+  "and a real search reported that way is left alone",
+  P.checkAnswerClaims(
+    "[Actions taken: web_search — Playwright version]",
+    ["web_search"]
+  ) === null,
+  "the false positive that prompted this"
+);
+
+/*
+ * The block is usually a bulleted list on the lines BELOW the heading.
+ *
+ * My first fix scanned only the heading line, which misses that shape
+ * entirely — caught by an existing fixture that used it. Scanning across
+ * newlines with a 400-character bound covers the real form without letting
+ * "Actions taken:" near the top of a long reply match an unrelated "read" a
+ * page later.
+ */
+check(
+  "a multi-line block naming a file operation is caught",
+  P.checkAnswerClaims("Actions taken:\n- read main.ts and edited it", []) !== null,
+  "the heading line alone is not where the claim lives"
+);
+check(
+  "and not when the file tool really ran",
+  P.checkAnswerClaims("Actions taken:\n- read main.ts", ["read_file"]) === null
+);
+check(
+  "a 'read' far below the block does not reach back",
+  P.checkAnswerClaims(
+    "Actions taken:\n- ok\n" + "x".repeat(500) + "\nread the docs",
+    []
+  ) === null,
+  "the bound is what stops a heading matching the whole reply"
+);
+check(
+  "naming a TOOL in the block is itself a claim it ran",
+  P.checkAnswerClaims("[Actions taken: web_search — Playwright version]", []) !==
+    null,
+  "no verb needed: listing it under Actions taken asserts the call happened"
+);
 
 for (const [label, text] of [
   ["a plain answer", "Python's sorted() returns a new list; .sort() is in place."],

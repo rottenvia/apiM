@@ -682,7 +682,19 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
         properties: {
           find: {
             type: "string",
-            description: "Exact text to find. Not a regular expression.",
+            description:
+              "Text to find. Exact by default; set regex to true to treat it " +
+              "as a regular expression.",
+          },
+          regex: {
+            type: "boolean",
+            description:
+              "Treat find as a JavaScript regular expression, and allow $1, " +
+              "$2 in replace for captured groups. Use this when the text " +
+              "varies — whitespace, a changing identifier, an optional " +
+              "argument — which is where an exact match fails and costs you " +
+              "a round. Run with preview first: a loose pattern matches more " +
+              "than you meant.",
           },
           replace: { type: "string", description: "What to put in its place." },
           glob: {
@@ -1896,10 +1908,44 @@ export async function runTool(
 
         const preview = args.preview === true;
         const glob = typeof args.glob === "string" ? args.glob : undefined;
+        const useRegex = args.regex === true;
+
+        /*
+         * Regex, because exact-match is the most common self-inflicted
+         * failure.
+         *
+         * Reported: "one drifted space or shifted line and the edit dies".
+         * edit_file already tolerates whitespace across three passes, but
+         * replace_in_files was strictly literal — so a rename where the
+         * surrounding text varies had no tool at all, and the fallback was
+         * one edit per file.
+         *
+         * searchFiles already understood regex; this simply stopped throwing
+         * that away. Validated here rather than at match time so a bad
+         * pattern is a clear error instead of a silent zero-match.
+         */
+        let pattern: RegExp | null = null;
+        if (useRegex) {
+          try {
+            pattern = new RegExp(find, "g");
+          } catch (error) {
+            return {
+              ok: false,
+              content:
+                `Error: "${find}" is not a valid regular expression — ` +
+                `${error instanceof Error ? error.message : "could not be parsed"}. ` +
+                `Fix the pattern, or drop regex to search for it literally.`,
+              summary: "Bad pattern",
+            };
+          }
+        }
 
         // Reuses the same matcher the search tool uses, so a preview and the
         // real thing can never disagree about which files are in scope.
-        const hits = await searchFiles(workspaceId, find, { glob });
+        const hits = await searchFiles(workspaceId, find, {
+          glob,
+          regex: useRegex,
+        });
         const paths = [...new Set(hits.hits.map((h) => h.path))];
 
         if (paths.length === 0) {
@@ -1919,16 +1965,27 @@ export async function runTool(
         for (const filePath of paths) {
           try {
             const file = await readFile(workspaceId, filePath);
-            const count = file.content.split(find).length - 1;
+
+            let count: number;
+            let updated: string;
+            if (pattern) {
+              // A fresh lastIndex per file: a /g regex is stateful, and
+              // reusing one across files silently skips matches.
+              const re = new RegExp(pattern.source, pattern.flags);
+              count = [...file.content.matchAll(re)].length;
+              updated = file.content.replace(
+                new RegExp(pattern.source, pattern.flags),
+                replace
+              );
+            } else {
+              count = file.content.split(find).length - 1;
+              updated = file.content.split(find).join(replace);
+            }
             if (count === 0) continue;
 
             occurrences += count;
             if (!preview) {
-              await writeFile(
-                workspaceId,
-                filePath,
-                file.content.split(find).join(replace)
-              );
+              await writeFile(workspaceId, filePath, updated);
             }
             changed.push(`${filePath} (${count})`);
           } catch (error) {

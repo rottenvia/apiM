@@ -770,6 +770,79 @@ check(
     /Use Exa for web search/.test(settingsSrc)
 );
 
+/*
+ * A warning that fires for the wrong reason.
+ *
+ * Reported immediately, which is exactly what a false positive earns. A reply
+ * ending "[Actions taken: web_search — ...]" — after a web_search that really
+ * ran — was told "no file tool ran in it, nothing on disk was touched". True,
+ * and completely beside the point: the reply never claimed to touch disk.
+ *
+ * "Actions taken:" was in the FILE claim list unconditionally. It only counts
+ * as a file claim when it NAMES a file operation, which is what the original
+ * report ("Actions taken: [read 3412321]") did.
+ */
+console.log("\n16. The claim check does not fire for the wrong reason");
+
+check(
+  "a real search with an Actions-taken block is not flagged",
+  checkAnswerClaims(
+    "Search works.\n\n[Actions taken: web_search — Playwright version]",
+    ["web_search"]
+  ) === null,
+  "the next real warning gets ignored once one is wrong"
+);
+check(
+  "an Actions-taken block naming a file op, with no file tool, still is",
+  checkAnswerClaims(
+    "Done.\n\nActions taken: [read 3412321] [edited config.ts]",
+    []
+  ) !== null,
+  "the original report, which must stay caught"
+);
+check(
+  "and not when a file tool did run",
+  checkAnswerClaims("Actions taken: read src/app.ts", ["read_file"]) === null
+);
+check(
+  "a bare Actions-taken block claims nothing",
+  checkAnswerClaims("Actions taken: thought about it", []) === null
+);
+
+/*
+ * Exact-match replacement was the last real self-inflicted failure.
+ *
+ * edit_file already tolerates whitespace across three passes, but
+ * replace_in_files was strictly literal — so a rename where the surrounding
+ * text varies had no tool, and the fallback was one edit per file.
+ * searchFiles already understood regex; this stopped throwing it away.
+ */
+console.log("\n17. replace_in_files accepts a regular expression");
+
+check(
+  "there is a regex option",
+  /regex: \{\s*\n?\s*type: "boolean"/.test(toolsSrc3) &&
+    /const useRegex = args\.regex === true;/.test(toolsSrc3)
+);
+check(
+  "a bad pattern is a clear error, not a silent zero-match",
+  /is not a valid regular expression/.test(toolsSrc3)
+);
+check(
+  "the pattern is passed to the file matcher too",
+  /regex: useRegex,/.test(toolsSrc3),
+  "otherwise preview and the real thing disagree about which files are in scope"
+);
+check(
+  "a fresh regex per file, because /g is stateful",
+  /new RegExp\(pattern\.source, pattern\.flags\)/.test(toolsSrc3),
+  "reusing one across files silently skips matches"
+);
+check(
+  "literal replacement still works unchanged",
+  /count = file\.content\.split\(find\)\.length - 1;/.test(toolsSrc3)
+);
+
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
 );
