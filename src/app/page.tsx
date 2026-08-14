@@ -23,6 +23,15 @@ import { warmRoutes } from "@/lib/warmup";
 
 export interface Message {
   id: string;
+  /**
+   * Stable React identity for a reply created in this browser.
+   *
+   * The server replaces the temporary streaming id with the persisted message
+   * id on `done`. Using `id` as the React key remounted the whole bubble at
+   * that exact moment and erased its open thinking panel. This key never
+   * changes during the live reply and is intentionally not persisted.
+   */
+  clientRenderKey?: string;
   role: "user" | "assistant";
   content: string;
   reasoningContent?: string | null;
@@ -1030,6 +1039,10 @@ export default function Home() {
       const streamingId = resumeMessageId ?? `stream-${Date.now()}`;
       const assistantMsg: Message = {
         id: streamingId,
+        // `id` becomes the server's persisted id when the stream finishes.
+        // Keep React's key stable across that change or every local control in
+        // the bubble resets at completion — including the open thinking box.
+        clientRenderKey: existing?.clientRenderKey ?? streamingId,
         role: "assistant",
         // Carry the interrupted text forward so it does not blank out and
         // refill as the continuation streams in.

@@ -1516,9 +1516,13 @@ const MessageList = memo(function MessageList({
            * bubble opens. The prop was accepted and typed above but omitted
            * here, so the optional call in MessageBubble did nothing and the
            * panel stayed on Loading forever.
+           *
+           * The server also swaps a temporary id for the persisted id on done.
+           * A stable client key prevents that from remounting the bubble and
+           * collapsing its live reasoning panel at the exact moment it ends.
            */
           <MessageBubble
-            key={msg.id}
+            key={msg.clientRenderKey ?? msg.id}
             message={msg}
             isLast={msg.id === lastId}
             onRegenerate={onRegenerate}

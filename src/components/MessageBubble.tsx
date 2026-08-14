@@ -266,12 +266,20 @@ function MessageBubbleImpl({
    * both sources have to be considered or an old chat shows nothing.
    */
   const reasoningChars = reasoningLen || message.reasoningLength || 0;
-  const hasThinking = Boolean(
-    reasoningChars > 0 ||
-      (message.isStreaming &&
-        message.thinkingEffort &&
-        message.thinkingEffort !== "none")
+  const thinkingRequested = Boolean(
+    message.thinkingEffort && message.thinkingEffort !== "none"
   );
+  /*
+   * The panel represents the configured thinking mode, not only text that
+   * happened to arrive.
+   *
+   * The previous gate included `message.isStreaming`, so a high-effort reply
+   * with no `reasoning_content` vanished as soon as `done` changed that flag
+   * to false. The screenshot then showed the timeline's divider and fetch_url
+   * with no thinking control anywhere. If DeepSeek returns no trace, keep the
+   * box and say so; absence of data must not masquerade as absence of UI.
+   */
+  const hasThinking = reasoningChars > 0 || thinkingRequested;
   const reasoningGrewRef = useRef({ len: 0, done: false });
   if (reasoningLen > reasoningGrewRef.current.len) {
     // Still growing. Only clears `done` before any prose has arrived — after
@@ -932,6 +940,7 @@ function MessageBubbleImpl({
                             } characters`
                           : "Thinking"}
                     </span>
+                    {isThinkingPhase && <Dots size={3} />}
                   </button>
 
                   {/* Only while reasoning is actually arriving.
@@ -967,20 +976,6 @@ function MessageBubbleImpl({
                   )}
                 </div>
 
-                {/* A hairline under the label while reasoning is arriving.
-                    
-                    Bouncing dots read as a stalled spinner — motion that
-                    repeats forever says "waiting", not "working". A bar that
-                    sweeps once and fades is closer to progress, and because
-                    it is one pixel of low-contrast colour it registers
-                    without competing with the reply. */}
-                {isThinkingPhase && (
-                  <span
-                    className="thinking-line"
-                    aria-hidden="true"
-                  />
-                )}
-
                 {/* Always mounted, so the body can animate its height open
                     and shut. Rendering it only when open meant the text
                     appeared instantly at full size with nothing to ease. */}
@@ -1005,7 +1000,7 @@ function MessageBubbleImpl({
                           <span className="thinking-loading">Thinking…</span>
                         ) : (
                           <span className="opacity-60">
-                            No thinking was recorded for this reply.
+                            Thinking was enabled, but no reasoning text was received for this reply.
                           </span>
                         )
                       ) : showThinking ? (

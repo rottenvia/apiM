@@ -31,6 +31,8 @@ import { pathToFileURL } from "node:url";
 import { readFile } from "node:fs/promises";
 import { rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 /*
@@ -170,8 +172,8 @@ check(
   "`undefined` is 'not fetched'; `\"\"` is 'nothing was recorded'"
 );
 check(
-  "empty finished reasoning says so instead of showing a spinner",
-  /No thinking was recorded/.test(bubble)
+  "empty finished reasoning names the missing provider data instead of vanishing",
+  /Thinking was enabled, but no reasoning text was received/.test(bubble)
 );
 check(
   "an empty LIVE value says Thinking rather than falsely claiming nothing was recorded",
@@ -182,7 +184,57 @@ check(
   /showThinking \? \([\s\S]{0,80}thinking-loading[^>]*>Loading…/.test(bubble)
 );
 
-console.log("\n6. End to end, against a real stored chat");
+console.log("\n6. The reported completed-high state renders a panel");
+const { MessageBubble } = await load("src/components/MessageBubble.tsx");
+const noTraceHtml = renderToStaticMarkup(
+  createElement(MessageBubble, {
+    message: {
+      id: "finished-high",
+      role: "assistant",
+      content: "",
+      reasoningContent: "",
+      thinkingEffort: "high",
+      isStreaming: false,
+      tokenCount: 16657,
+      toolEvents: [
+        {
+          id: "fetch",
+          name: "fetch_url",
+          args: '{"url":"https://example.com"}',
+          ok: true,
+          summary: "Fetched URL",
+        },
+      ],
+    },
+  })
+);
+check(
+  "a completed high-effort reply with no trace still renders the thinking shell",
+  noTraceHtml.includes("thinking-shell") &&
+    noTraceHtml.includes("Thinking") &&
+    noTraceHtml.includes("no reasoning text was received"),
+  "this is the exact metadata + fetch_url + empty reasoning shape from the screenshot"
+);
+const liveHtml = renderToStaticMarkup(
+  createElement(MessageBubble, {
+    message: {
+      id: "live-high",
+      clientRenderKey: "stable-live-high",
+      role: "assistant",
+      content: "",
+      reasoningContent: "Working through the request.",
+      thinkingEffort: "high",
+      isStreaming: true,
+    },
+  })
+);
+check(
+  "a live high-effort reply renders the box open with its text inside",
+  liveHtml.includes('data-open="true"') &&
+    liveHtml.includes("Working through the request.")
+);
+
+console.log("\n7. End to end, against a real stored chat");
 
 const convId = randomUUID();
 await store.upsertMessage(convId, "Old chat", {
