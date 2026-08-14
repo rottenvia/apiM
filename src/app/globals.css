@@ -744,18 +744,20 @@ input:focus-visible {
  * label is readable while the box is still settling.
  *
  * Timings stay on the three-value scale the design tests enforce. */
-@keyframes thinking-fade {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
-}
-
 .thinking-panel {
   display: grid;
-  grid-template-rows: 0fr;
+  /*
+   * The resting state is the finished, VISIBLE state.
+   *
+   * This used to be 0fr and relied on `thinking-open` to reach 1fr. But the
+   * reduced-motion rule correctly disables that animation, leaving the panel
+   * permanently collapsed to the one-pixel border shown in Screenshot_166.
+   * Animations must decorate a working layout, never be required to reveal
+   * information. With 1fr here, unsupported/disabled animation means a box;
+   * the keyframe can still start at 0fr when motion is allowed.
+   */
+  grid-template-rows: 1fr;
+  opacity: 1;
   animation: thinking-open 0.3s cubic-bezier(0.32, 0.72, 0, 1) both;
 }
 
@@ -900,6 +902,7 @@ input:focus-visible {
 
 @media (prefers-reduced-motion: reduce) {
   .thinking-panel {
+    /* Base state is 1fr/opaque, so disabling motion reveals the whole box. */
     animation: none;
   }
   .thinking-body,

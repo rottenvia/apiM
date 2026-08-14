@@ -456,6 +456,21 @@ check(
   "a finished panel still needs an outline, or its text looks out of place"
 );
 check(
+  "the outer panel is visible before animation does anything",
+  /\.thinking-panel\s*\{[^}]*grid-template-rows:\s*1fr;[^}]*opacity:\s*1;/s.test(css),
+  "0fr as the base state turns the whole box into a one-pixel border when animation is unavailable"
+);
+check(
+  "reduced motion disables decoration without hiding information",
+  /@media \(prefers-reduced-motion: reduce\)[\s\S]{0,180}\.thinking-panel\s*\{[^}]*animation:\s*none/s.test(
+    css.slice(css.indexOf("/* Expanding to reveal the text."))
+  ) &&
+    !/@media \(prefers-reduced-motion: reduce\)[\s\S]{0,180}\.thinking-panel\s*\{[^}]*grid-template-rows:\s*0fr/s.test(
+      css
+    ),
+  "Windows reduced-motion reproduced Screenshot_166 exactly: animation off, base row still 0fr"
+);
+check(
   "everything that changes shares one duration",
   (css.match(/\.thinking-(shell|toggle|body-text)[^{]*\{[^}]*0\.3s/gs) ?? []).length >= 3,
   "staggered easings read as several things happening, not one"
