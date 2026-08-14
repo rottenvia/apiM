@@ -71,6 +71,10 @@ const chatArea = (await readFile(
   path.join(ROOT, "src/components/ChatArea.tsx"),
   "utf8"
 )).replace(/\r\n/g, "\n");
+const css = (await readFile(
+  path.join(ROOT, "src/app/globals.css"),
+  "utf8"
+)).replace(/\r\n/g, "\n");
 
 console.log("\napiM thinking-panel checks\n");
 
@@ -232,6 +236,14 @@ check(
   "a live high-effort reply renders the box open with its text inside",
   liveHtml.includes('data-open="true"') &&
     liveHtml.includes("Working through the request.")
+);
+check(
+  "the CSS cannot squash that rendered shell when entrance motion is disabled",
+  /\.thinking-panel\s*\{[^}]*grid-template-rows:\s*1fr;[^}]*opacity:\s*1;/s.test(css) &&
+    /@media \(prefers-reduced-motion: reduce\)[\s\S]{0,180}\.thinking-panel\s*\{[^}]*animation:\s*none/s.test(
+      css.slice(css.indexOf("/* Expanding to reveal the text."))
+    ),
+  "the previous HTML test passed while computed height was 0fr — only the one-pixel border remained"
 );
 
 console.log("\n7. End to end, against a real stored chat");

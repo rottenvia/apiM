@@ -403,6 +403,11 @@ check(
   "expanded reasoning must read as a box, not text between hairlines"
 );
 check(
+  "the outer animation has a visible fallback",
+  /\.thinking-panel\s*\{[^}]*grid-template-rows:\s*1fr;[^}]*opacity:\s*1;/s.test(css),
+  "the old 0fr fallback left only the border whenever reduced motion disabled the animation"
+);
+check(
   "the empty live box says Thinking rather than claiming nothing was recorded",
   /isThinkingPhase \? \([\s\S]{0,100}thinking-loading[^>]*>Thinking…/.test(bubble)
 );
