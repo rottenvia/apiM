@@ -38,6 +38,7 @@ const check = (label, ok, detail = "") => {
 };
 
 const bubble = await read("src/components/MessageBubble.tsx");
+const chatArea = await read("src/components/ChatArea.tsx");
 const route = await read("src/app/api/chat/route.ts");
 
 console.log("\napiM — the reported interface problems\n");
@@ -76,10 +77,13 @@ check(
 console.log('\n2. "thinking literally hidden now, i cant see thinking process"');
 
 check(
-  "the panel is open while reasoning is the only content",
-  /const showThinking = userSetThinking \?\? autoOpen;/.test(bubble) &&
-    /const autoOpen = Boolean\(\s*message\.isStreaming/.test(bubble),
-  "it used to default to closed, so the only thing on screen was hidden"
+  "a reply watched live opens its reasoning as a box",
+  /const \[startedLive\] = useState\(\(\) => Boolean\(message\.isStreaming\)\)/.test(
+    bubble
+  ) &&
+    /const autoOpen = Boolean\(startedLive && hasThinking\)/.test(bubble) &&
+    /const showThinking = userSetThinking \?\? autoOpen;/.test(bubble),
+  "the old derived rule collapsed on the first prose token and left only a line"
 );
 check(
   "it is derived during render, not set from an effect",
@@ -93,10 +97,15 @@ check(
   "nothing should move the panel under someone who chose"
 );
 check(
-  "a finished reply still opens closed",
-  // autoOpen requires isStreaming, so a stored reply can never auto-open.
-  /const autoOpen = Boolean\(\s*message\.isStreaming &&/.test(bubble),
-  "reopening an old chat should show the answer, not the reasoning"
+  "a reply mounted from history still starts compact",
+  /startedLive.*Boolean\(message\.isStreaming\)/.test(bubble) &&
+    /startedLive && hasThinking/.test(bubble),
+  "a stored reply mounts with isStreaming false; the live reply stays open"
+);
+check(
+  "the saved-reasoning loader reaches every bubble",
+  (chatArea.match(/onLoadReasoning=\{onLoadReasoning\}/g) ?? []).length === 2,
+  "one handoff is ChatArea -> MessageList; the second must be MessageList -> MessageBubble"
 );
 
 const css = await read("src/app/globals.css");
@@ -231,9 +240,9 @@ console.log('\n6. "no thinking showing"');
  */
 check(
   "the panel mounts when reasoning is expected, not only once text arrives",
-  /message\.isStreaming &&\s*message\.thinkingEffort &&\s*message\.thinkingEffort !== "none"/.test(
+  /const hasThinking = Boolean\([\s\S]{0,180}message\.isStreaming &&[\s\S]{0,120}thinkingEffort !== "none"/.test(
     bubble
-  ),
+  ) && /\{hasThinking && \(/.test(bubble),
   'reasoningContent starts as "" and "" is falsy'
 );
 check(
@@ -338,7 +347,7 @@ check(
  * The open test was `isStreaming && !message.content`, so the first content
  * token shut it. One frame open, then a line.
  */
-console.log('\n8. The thinking panel stays open while reasoning arrives');
+console.log('\n8. The thinking panel stays a box long enough to read');
 
 check(
   "the open state no longer keys off the answer being empty",
@@ -350,23 +359,39 @@ check(
 check(
   "it tracks whether reasoning is still GROWING",
   /reasoningGrewRef/.test(bubble) && /reasoningLen > reasoningGrewRef\.current\.len/.test(bubble),
-  "the honest signal for 'still thinking'"
+  "the honest signal for the active amber/progress treatment"
 );
 check(
-  "the amber tint and progress line use the same signal",
-  /isThinkingPhase = Boolean\(\s*message\.isStreaming && reasoningLen > 0 && !reasoningGrewRef/.test(
+  "the amber tint and progress line use the active signal",
+  /isThinkingPhase = Boolean\([\s\S]{0,120}message\.isStreaming &&[\s\S]{0,80}hasThinking &&[\s\S]{0,80}!reasoningGrewRef/.test(
     bubble
-  ),
-  "both switched off on the first answer token before this"
+  ) && /data-thinking=\{isThinkingPhase\}/.test(bubble),
+  "the box can stay open after the active animation correctly finishes"
 );
 check(
-  "once prose is underway the panel latches shut",
+  "once prose is underway only the active animation latches off",
   /reasoningGrewRef\.current\.done = true;/.test(bubble) &&
-    /done: reasoningGrewRef\.current\.done,/.test(bubble),
-  "a late burst of reasoning must not pop the panel open mid-answer"
+    /done: reasoningGrewRef\.current\.done,/.test(bubble) &&
+    !/autoOpen = Boolean\([^;]*reasoningGrewRef/s.test(bubble),
+  "the old latch collapsed the entire panel into the reported line"
 );
 check(
-  "a ref, so this schedules no extra render",
+  "finishing the stream does not collapse a live panel",
+  /const autoOpen = Boolean\(startedLive && hasThinking\)/.test(bubble),
+  "autoOpen intentionally has no live isStreaming dependency"
+);
+check(
+  "the open shell is explicitly styled as a surface",
+  /data-open=\{showThinking\}/.test(bubble) &&
+    /\.thinking-shell\[data-open='true'\]/.test(css),
+  "expanded reasoning must read as a box, not text between hairlines"
+);
+check(
+  "the empty live box says Thinking rather than claiming nothing was recorded",
+  /isThinkingPhase \? \([\s\S]{0,100}thinking-loading[^>]*>Thinking…/.test(bubble)
+);
+check(
+  "a ref, so active-phase tracking schedules no extra render",
   /useRef\(\{ len: 0, done: false \}\)/.test(bubble)
 );
 check(

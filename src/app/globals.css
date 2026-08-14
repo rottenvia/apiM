@@ -801,9 +801,15 @@ input:focus-visible {
     border-color 0.3s ease,
     background-color 0.3s ease;
 }
+/* Expanded means a real surface, not a label sitting between two hairlines.
+ * The active amber state below still wins while tokens are arriving. */
+.thinking-shell[data-open='true'] {
+  border-color: var(--color-border-light);
+  background: color-mix(in oklab, var(--color-bg-tertiary) 72%, transparent);
+}
 .thinking-shell[data-thinking='true'] {
-  border-color: color-mix(in oklab, #cfa25a 22%, transparent);
-  background: color-mix(in oklab, #cfa25a 7%, transparent);
+  border-color: color-mix(in oklab, #cfa25a 32%, transparent);
+  background: color-mix(in oklab, #cfa25a 8%, transparent);
 }
 
 .thinking-toggle {
