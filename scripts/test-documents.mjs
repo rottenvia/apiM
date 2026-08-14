@@ -43,6 +43,33 @@ const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "apim-docs-"));
 const read = async (name) =>
   new Uint8Array(await fs.readFile(path.join(tmp, name)));
 
+/** A real one-page PDF with accurate byte offsets, built without extra tools. */
+function textPdf(text) {
+  const escaped = text.replace(/([\\()])/g, "\\$1");
+  const stream = `BT\n/F1 12 Tf\n72 720 Td\n(${escaped}) Tj\nET\n`;
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}endstream`,
+  ];
+  let pdf = "%PDF-1.4\n";
+  const offsets = [0];
+  objects.forEach((obj, i) => {
+    offsets.push(Buffer.byteLength(pdf));
+    pdf += `${i + 1} 0 obj\n${obj}\nendobj\n`;
+  });
+  const xref = Buffer.byteLength(pdf);
+  pdf += `xref\n0 ${objects.length + 1}\n`;
+  pdf += "0000000000 65535 f \n";
+  for (const offset of offsets.slice(1)) {
+    pdf += `${String(offset).padStart(10, "0")} 00000 n \n`;
+  }
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  return new Uint8Array(Buffer.from(pdf, "ascii"));
+}
+
 console.log("\napiM document checks\n");
 
 // -------------------------------------------------------------- detection
@@ -226,9 +253,36 @@ if (!zipAvailable) {
   check("entities are decoded", res.text.includes("& an entity"));
 }
 
+// -------------------------------------------------------------------- PDF
+
+console.log("\n7. PDF through the version-matched worker");
+
+const pdfText = "PDF worker survives the Next server bundle";
+const pdf = textPdf(pdfText);
+const pdfResult = await D.readDocument("pdf", pdf);
+check("PDF text is extracted", pdfResult.text.includes(pdfText));
+check("the page count is reported", pdfResult.sections === 1);
+
+const documentsSource = await fs.readFile(
+  path.join(ROOT, "src/lib/documents.ts"),
+  "utf8"
+);
+const nextConfig = await fs.readFile(path.join(ROOT, "next.config.ts"), "utf8");
+check(
+  "pdfjs stays external to Next's server chunks",
+  /serverExternalPackages:\s*\["pdfjs-dist"\]/.test(nextConfig),
+  "bundling pdf.mjs without its sibling created the missing .next/dev/server/chunks/pdf.worker.mjs path"
+);
+check(
+  "the shared reader stays browser-compatible",
+  /import\("pdfjs-dist\/legacy\/build\/pdf\.mjs"\)/.test(documentsSource) &&
+    !/node:(module|path|url)/.test(documentsSource),
+  "attachments parse locally in the browser, so the server fix cannot add Node-only imports here"
+);
+
 // ------------------------------------------------------------------ limits
 
-console.log("\n7. Limits and failure");
+console.log("\n8. Limits and failure");
 
 check(
   "a character cap exists, sized for the model in use",

@@ -34,6 +34,16 @@ export const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 /** Stop the cache directory growing without bound. */
 export const MAX_CACHE_ENTRIES = 500;
 
+/**
+ * Bump whenever the meaning of a cached field changes.
+ *
+ * Version 1 wrote an omitted Exa score as numeric zero. Even after fixing the
+ * mapper, those entries would remain zero-score rejects for 24 hours and make
+ * the user's first post-update test look unchanged. A key version invalidates
+ * them without deleting unrelated workspace data.
+ */
+export const CACHE_SCHEMA_VERSION = 2;
+
 interface CacheEntry {
   /** Stored for debugging; the filename is the hash, not this. */
   query: string;
@@ -61,6 +71,7 @@ export interface CacheKeyParts {
 
 function keyFor(parts: CacheKeyParts): string {
   const normalised = [
+    `v${CACHE_SCHEMA_VERSION}`,
     parts.query.trim().toLowerCase().replace(/\s+/g, " "),
     parts.provider,
     parts.depth,

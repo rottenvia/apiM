@@ -10,7 +10,11 @@ export interface SearchResultItem {
   title: string;
   url: string;
   content: string;
-  score: number;
+  /**
+   * Provider relevance when supplied. Exa's auto search may omit this field;
+   * missing is not zero, and must not be filtered as a bad result.
+   */
+  score?: number;
   domain: string;
   /** Publication date, when the provider supplies one. */
   publishedDate?: string;

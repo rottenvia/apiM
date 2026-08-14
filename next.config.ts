@@ -20,6 +20,19 @@ import { fileURLToPath } from "node:url";
 const projectRoot = path.dirname(fileURLToPath(import.meta.url));
 
 const nextConfig: NextConfig = {
+  /*
+   * Keep pdf.js and its worker together in node_modules.
+   *
+   * Bundling the main module into `.next/server/chunks` changed the base URL
+   * of pdf.js's relative `./pdf.worker.mjs` import. The worker itself was not
+   * emitted beside that chunk, so read_document failed only through Next dev
+   * with "Cannot find module .next/dev/server/chunks/pdf.worker.mjs" while
+   * direct tests passed. The read_document tool parses on the server, so keep
+   * that server import at its physical package location; browser attachments
+   * still use the ordinary client bundle.
+   */
+  serverExternalPackages: ["pdfjs-dist"],
+
   // Hide the floating Next.js dev-tools badge (the small "N" circle in the
   // bottom-left corner during `next dev`). It never ships in production
   // builds, but it overlaps the sidebar's Settings button, so switch it off.

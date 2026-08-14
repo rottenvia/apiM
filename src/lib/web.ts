@@ -41,7 +41,27 @@ export class WebError extends Error {}
  * link to 169.254.169.254 or localhost:3000 would otherwise let a page the
  * model was told to visit pull internal services or cloud credentials.
  */
-export function assertPublicUrl(raw: string): URL {
+export interface UrlPolicy {
+  /** Allow only loopback hosts, for explicitly requested local API testing. */
+  allowLoopback?: boolean;
+}
+
+/** Loopback only — never private LAN ranges or cloud metadata. */
+export function isLoopbackHost(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  if (
+    host === "localhost" ||
+    host === "::1" ||
+    host === "[::1]" ||
+    host.endsWith(".localhost")
+  ) {
+    return true;
+  }
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  return Boolean(v4 && Number(v4[1]) === 127);
+}
+
+export function assertPublicUrl(raw: string, policy: UrlPolicy = {}): URL {
   let url: URL;
   try {
     url = new URL(raw);
@@ -57,20 +77,24 @@ export function assertPublicUrl(raw: string): URL {
 
   const host = url.hostname.toLowerCase();
 
-  // Literal loopback and link-local names.
+  // Loopback is available only to http_request's explicit local-dev mode.
+  // fetch_url, inspect_page, download_file and browse remain public-web-only.
+  if (isLoopbackHost(host)) {
+    if (policy.allowLoopback) return url;
+    throw new WebError(
+      "That address is on this machine, not the public web. " +
+        "For a local development API, use http_request with allow_local=true."
+    );
+  }
+
+  // Names that may resolve inside the local network are never opted in.
   if (
-    host === "localhost" ||
-    host === "127.0.0.1" ||
     host === "0.0.0.0" ||
-    host === "::1" ||
-    host === "[::1]" ||
-    host.endsWith(".localhost") ||
     host.endsWith(".local") ||
     host.endsWith(".internal")
   ) {
     throw new WebError(
-      "That address is on this machine, not the public web. " +
-        "Use read_file for local files."
+      "That address is on this machine or its private network, which this tool will not fetch."
     );
   }
 
