@@ -378,9 +378,10 @@ check(
   "a vertical rule across stacked content is just a line through it"
 );
 check(
-  "the agent's work is separated from what came before",
-  /h-px w-full[^"]*bg-border/.test(timeline),
-  "faint and full width, so it divides without announcing itself"
+  "the first tool row has no ornamental page-break line",
+  !/h-px w-full[^"]*bg-border/.test(timeline) &&
+    /i > 0 \? "mt-4 border-t/.test(timeline),
+  "the reported screenshot showed that line as the only thing where thinking belonged"
 );
 
 // Attachment progress
@@ -460,22 +461,18 @@ check(
   "staggered easings read as several things happening, not one"
 );
 check(
-  "progress is a sweeping line, not repeating dots",
-  // Scoped to the panel. `<Dots>` also appears further down the file as the
-  // placeholder for a code block still being written, which is a different
-  // control with a different job — checking the whole file caught that one
-  // and reported a regression that did not exist.
-  panel.includes("thinking-line") && !panel.includes("<Dots"),
-  "a loop that never advances reads as a stall"
+  "thinking progress stays inside the box header",
+  panel.includes("<Dots size={3}") && !panel.includes("thinking-line"),
+  "a full-width line was mistaken for the missing thinking panel"
 );
 check(
-  "the sweep fades rather than looping visibly",
-  /@keyframes thinking-sweep[\s\S]*?opacity: 0;[\s\S]*?\}/.test(css)
+  "there is no orphaned thinking-line animation",
+  !/@keyframes thinking-sweep/.test(css) && !/\.thinking-line/.test(css)
 );
 check(
-  "the divider above the agent's work spans the column",
-  /h-px w-full/.test(timeline),
-  "a 40px stub reads as a stray mark, not a divider"
+  "there is no divider above the first tool action",
+  !/h-px w-full/.test(timeline),
+  "effort metadata followed by a line and fetch_url reproduced the screenshot exactly"
 );
 
 // The workspace shows a tree, not a list of paths

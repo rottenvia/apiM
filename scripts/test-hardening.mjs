@@ -734,11 +734,14 @@ check(
  * thinking phase, which is why it was reported as "no thinking showing".
  */
 check(
-  "and while reasoning is only expected, not yet arrived",
-  /message\.isStreaming &&\s*message\.thinkingEffort &&\s*message\.thinkingEffort !== "none"/.test(
+  "and while reasoning is only expected, not yet arrived — even after done",
+  /const thinkingRequested = Boolean\([\s\S]{0,100}thinkingEffort !== "none"/.test(
     read("src/components/MessageBubble.tsx")
-  ),
-  'an empty string is falsy, so "" read as "no reasoning at all"'
+  ) &&
+    /const hasThinking = reasoningChars > 0 \|\| thinkingRequested/.test(
+      read("src/components/MessageBubble.tsx")
+    ),
+  "the streaming-only gate removed the box from completed high-effort replies"
 );
 check(
   "expanding it triggers the fetch",

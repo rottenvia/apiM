@@ -837,61 +837,10 @@ input:focus-visible {
   border-top-color: color-mix(in oklab, #cfa25a 14%, transparent);
 }
 
-/* Progress under the label.
- *
- * Bouncing dots repeat forever, which reads as a stalled spinner — the eye
- * learns the loop and stops believing anything is happening. A travelling
- * highlight says the work is ongoing without pretending to know how far
- * along it is.
- *
- * The previous version scaled the element itself with `transform: scaleX()`
- * from 0 to 1. That is why it looked like "a tiny line": for most of every
- * cycle the element genuinely was a few pixels wide, growing from the left
- * edge, and any glance — or screenshot — caught it as a stub rather than a
- * rule. It also faded to nothing at both ends, so the panel header had a
- * gap under it that flickered in and out.
- *
- * The element is now always the full width of the panel. Only the highlight
- * inside it travels, by moving the gradient rather than resizing the box, so
- * the line reads as a continuous rule with a glint passing along it and the
- * layout never changes. */
-@keyframes thinking-sweep {
-  from {
-    background-position: 200% 0;
-  }
-  to {
-    background-position: -200% 0;
-  }
-}
-
-.thinking-line {
-  display: block;
-  height: 1px;
-  width: 100%;
-  /* A dim constant rule, so there is always a line, plus a brighter band
-     that travels along it. */
-  background-image: linear-gradient(
-    90deg,
-    color-mix(in oklab, #cfa25a 14%, transparent) 0%,
-    color-mix(in oklab, #cfa25a 14%, transparent) 35%,
-    color-mix(in oklab, #cfa25a 70%, transparent) 50%,
-    color-mix(in oklab, #cfa25a 14%, transparent) 65%,
-    color-mix(in oklab, #cfa25a 14%, transparent) 100%
-  );
-  background-size: 200% 100%;
-  background-repeat: no-repeat;
-  animation: thinking-sweep 1.5s linear infinite;
-}
-
+/* Progress lives in the header as three quiet dots. There is deliberately no
+ * full-width progress rule: in a tool-only reply it was indistinguishable from
+ * the separate timeline divider and looked like the missing panel itself. */
 @media (prefers-reduced-motion: reduce) {
-  .thinking-line {
-    animation: none;
-    background-image: linear-gradient(
-      90deg,
-      color-mix(in oklab, #cfa25a 22%, transparent),
-      color-mix(in oklab, #cfa25a 22%, transparent)
-    );
-  }
   .thinking-shell,
   .thinking-toggle,
   .thinking-body-text {

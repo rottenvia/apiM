@@ -33,16 +33,15 @@ export function MessageTimeline({
   if (rows.length === 0) return null;
 
   return (
-    // A short rule above the whole block, separating the agent's work from
-    // whatever was said before it. Deliberately not full width: an edge-to-
-    // edge line reads as a page break, a short one reads as "a new thing
-    // starts here".
+    /*
+     * No ornamental rule above the first action.
+     *
+     * In the reported tool-only reply the screen was: effort/tokens, one
+     * full-width line, then `fetch_url`. With the reasoning panel absent, that
+     * line looked exactly like a collapsed/broken thinking box. Rows after the
+     * first still separate themselves below; the first needs no page break.
+     */
     <div className="flex flex-col">
-      <span
-        className="mb-3.5 h-px w-full flex-none bg-border/60"
-        aria-hidden="true"
-      />
-
       {rows.map((row, i) => {
         const hasText = row.text.trim().length > 0;
         const hasTools = row.tools.length > 0;

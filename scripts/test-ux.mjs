@@ -110,9 +110,11 @@ check(
 
 const css = await read("src/app/globals.css");
 check(
-  "the progress line under the label still exists",
-  /\.thinking-line/.test(css),
-  "reported as invisible — it only ran while the panel was collapsed"
+  "progress is inside the header, not a line pretending to be the panel",
+  /isThinkingPhase && <Dots size=\{3\}/.test(bubble) &&
+    !/thinking-line/.test(bubble) &&
+    !/\.thinking-line/.test(css),
+  "the screenshot showed a line where the missing box should have been"
 );
 check(
   "the panel keeps a visible border when idle",
@@ -239,11 +241,13 @@ console.log('\n6. "no thinking showing"');
  * lives inside that block, so it could not run either.
  */
 check(
-  "the panel mounts when reasoning is expected, not only once text arrives",
-  /const hasThinking = Boolean\([\s\S]{0,180}message\.isStreaming &&[\s\S]{0,120}thinkingEffort !== "none"/.test(
+  "the panel mounts whenever thinking was requested, not only once text arrives",
+  /const thinkingRequested = Boolean\([\s\S]{0,100}thinkingEffort !== "none"/.test(
     bubble
-  ) && /\{hasThinking && \(/.test(bubble),
-  'reasoningContent starts as "" and "" is falsy'
+  ) &&
+    /const hasThinking = reasoningChars > 0 \|\| thinkingRequested;/.test(bubble) &&
+    /\{hasThinking && \(/.test(bubble),
+  "a completed high-effort reply with no returned trace must still have a box"
 );
 check(
   "an effort of none still shows nothing",
@@ -362,7 +366,7 @@ check(
   "the honest signal for the active amber/progress treatment"
 );
 check(
-  "the amber tint and progress line use the active signal",
+  "the amber tint and header progress use the active signal",
   /isThinkingPhase = Boolean\([\s\S]{0,120}message\.isStreaming &&[\s\S]{0,80}hasThinking &&[\s\S]{0,80}!reasoningGrewRef/.test(
     bubble
   ) && /data-thinking=\{isThinkingPhase\}/.test(bubble),
@@ -379,6 +383,18 @@ check(
   "finishing the stream does not collapse a live panel",
   /const autoOpen = Boolean\(startedLive && hasThinking\)/.test(bubble),
   "autoOpen intentionally has no live isStreaming dependency"
+);
+check(
+  "the bubble is not remounted when its temporary id becomes the saved id",
+  /clientRenderKey: existing\?\.clientRenderKey \?\? streamingId/.test(page) &&
+    /key=\{msg\.clientRenderKey \?\? msg\.id\}/.test(chatArea),
+  "changing the React key erased startedLive at the exact moment done arrived"
+);
+check(
+  "a finished configured mode keeps the panel even with no returned trace",
+  /const hasThinking = reasoningChars > 0 \|\| thinkingRequested;/.test(bubble) &&
+    /no reasoning text was received/.test(bubble),
+  "the box should explain missing provider data, not vanish"
 );
 check(
   "the open shell is explicitly styled as a surface",
