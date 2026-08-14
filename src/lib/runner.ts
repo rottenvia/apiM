@@ -614,8 +614,11 @@ function venvDir(cwd: string): string {
  * Only python3 is remapped. Windows venvs do create pip3.exe, so pip and
  * pip3 both resolve correctly and are left alone.
  */
-export function platformCommandName(command: string): string {
-  if (process.platform !== "win32") return command;
+export function platformCommandName(
+  command: string,
+  platform: NodeJS.Platform = process.platform
+): string {
+  if (platform !== "win32") return command;
   return command === "python3" ? "python" : command;
 }
 

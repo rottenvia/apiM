@@ -8,7 +8,12 @@
  */
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { rm, writeFile as fsWrite, mkdir } from "node:fs/promises";
+import {
+  rm,
+  writeFile as fsWrite,
+  mkdir,
+  readFile,
+} from "node:fs/promises";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 /*
@@ -64,6 +69,16 @@ await fsWrite(path.join(DIR, "noisy.js"),
   "for (let i = 0; i < 200000; i++) console.log('x'.repeat(100));\nsetTimeout(() => {}, 30000);\n");
 
 console.log("\napiM background process checks\n");
+
+const processSource = await readFile(
+  path.join(ROOT, "src/lib/processes.ts"),
+  "utf8"
+);
+check(
+  "background and foreground commands share the platform-name resolver",
+  /platformCommandName\(check\.command\)/.test(processSource),
+  "run_command mapped python3 on Windows while start_process hit the Store shim"
+);
 
 console.log("1. Starting something that keeps running");
 let res = await runTool(WS, "start_process", { command: "node", args: ["server.js"] });

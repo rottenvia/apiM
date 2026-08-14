@@ -66,6 +66,28 @@ const tavily = createServer((req, res) => {
   });
 });
 
+// --------------------------------------------------------------- fake Exa
+
+const exaCalls = [];
+const exa = createServer((req, res) => {
+  let body = "";
+  req.on("data", (c) => (body += c));
+  req.on("end", () => {
+    const parsed = JSON.parse(body || "{}");
+    exaCalls.push(parsed);
+    const results = Array.from({ length: parsed.numResults ?? 10 }, (_, i) => ({
+      title: `Exa result ${i} for ${parsed.query}`,
+      url: `https://exa-result${i}.example/${encodeURIComponent(parsed.query)}`,
+      text: `Exa page text about ${parsed.query}. `.repeat(40),
+      highlights: [`Relevant passage about ${parsed.query}. `.repeat(5)],
+      // Deliberately NO score. Exa documents it as optional and real auto
+      // searches omit it; converting this absence to zero emptied the result.
+    }));
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ results }));
+  });
+});
+
 // ---------------------------------------------------------- fake DeepSeek
 
 /** Flipped by each test to control how many rounds the engine runs. */
@@ -112,9 +134,11 @@ const listen = (server, port) =>
 
 await listen(tavily, 8831);
 await listen(deepseek, 8832);
+await listen(exa, 8833);
 
 process.env.TAVILY_BASE_URL = "http://127.0.0.1:8831";
 process.env.DEEPSEEK_BASE_URL = "http://127.0.0.1:8832";
+process.env.EXA_BASE_URL = "http://127.0.0.1:8833";
 
 await rm(path.join(DATA_ROOT, "search-cache"), { recursive: true, force: true });
 await rm(path.join(DATA_ROOT, "search-usage.json"), { force: true });
@@ -227,12 +251,42 @@ check(
   calls.length > 0 && calls.every((c) => c.depth === "advanced")
 );
 
+// ----------------------------------------------- Exa without a score field
+
+console.log("\n4. Exa auto results without optional scores");
+
+exaCalls.length = 0;
+await C.clearCache();
+const exaOnly = await S.smartSearch(
+  "python playwright install chromium",
+  "",
+  "deepseek-key",
+  "",
+  undefined,
+  "balanced",
+  "exa-key"
+);
+check("Exa was actually called", exaCalls.length === 3, `${exaCalls.length} queries`);
+check(
+  "content options are nested under contents",
+  exaCalls.every((c) => c.contents?.text && c.contents?.highlights === true)
+);
+check(
+  "scoreless Exa results reach the model instead of becoming zero-score rejects",
+  exaOnly.sourcesUsed > 0 && exaOnly.results.some((r) => r.provider === "exa"),
+  `${exaOnly.sourcesUsed} sources survived`
+);
+check(
+  "missing scores remain missing rather than being forged as zero",
+  exaOnly.results.every((r) => r.score === undefined)
+);
+
 // ------------------------------------------------------------ the meter
 
-console.log("\n4. The meter");
+console.log("\n5. The meter");
 
 const summary = await U.usageSummary();
-check("questions were counted", summary.questions === 5);
+check("questions were counted", summary.questions === 6);
 check("billed requests were counted", summary.totalRequests > 0);
 check("cache hits were counted separately", summary.totalCached === 3);
 check(
@@ -247,7 +301,7 @@ check(
 
 // ------------------------------------------------------------- the saving
 
-console.log("\n5. What this saves over a working session");
+console.log("\n6. What this saves over a working session");
 
 // A realistic burst: 30 questions, a third of them repeats.
 const perQuestionOld = 8; // 4 queries, advanced, as it was
@@ -272,6 +326,7 @@ await rm(path.join(DATA_ROOT, "search-cache"), { recursive: true, force: true })
 await rm(path.join(DATA_ROOT, "search-usage.json"), { force: true });
 tavily.close();
 deepseek.close();
+exa.close();
 
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`

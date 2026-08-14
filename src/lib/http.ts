@@ -15,9 +15,10 @@
  * This is the direct route. The agent can now build something, call it, read
  * the status, and fix it — the same loop `run_tests` gives it for tests.
  *
- * Security is the same boundary as `fetch_url`: `assertPublicUrl` refuses
- * loopback, private ranges and the cloud metadata endpoint, so an agent
- * pointed at a URL cannot reach services on the machine it runs on.
+ * Public URLs use the same SSRF boundary as fetch_url. Local development APIs
+ * are a narrow opt-in: only localhost, 127.0.0.0/8 and ::1, never private LAN
+ * ranges or cloud metadata. Every redirect is validated again before it is
+ * followed, so a public URL cannot bounce around the guard.
  */
 
 import { assertPublicUrl, WebError } from "@/lib/web";
@@ -72,10 +73,14 @@ export async function httpRequest(options: {
   headers?: Record<string, string>;
   body?: string;
   signal?: AbortSignal;
+  /** Explicit opt-in for localhost/127.0.0.0/8/[::1] dev servers only. */
+  allowLocal?: boolean;
 }): Promise<HttpResult> {
-  const url = assertPublicUrl(options.url);
+  let url = assertPublicUrl(options.url, {
+    allowLoopback: options.allowLocal === true,
+  });
 
-  const method = (options.method ?? "GET").toUpperCase();
+  let method = (options.method ?? "GET").toUpperCase();
   if (!METHODS.has(method)) {
     throw new WebError(
       `"${method}" is not a supported method. Use one of ${[...METHODS].join(", ")}.`
@@ -102,18 +107,49 @@ export async function httpRequest(options: {
 
   const started = Date.now();
   let res: Response;
+  let requestBody = options.body;
+  const signal = options.signal
+    ? AbortSignal.any([options.signal, AbortSignal.timeout(HTTP_TIMEOUT_MS)])
+    : AbortSignal.timeout(HTTP_TIMEOUT_MS);
+
   try {
-    res = await fetch(url, {
-      method,
-      headers,
-      // GET and HEAD cannot carry one, and sending it is a TypeError.
-      body: method === "GET" || method === "HEAD" ? undefined : options.body,
-      redirect: "follow",
-      signal: options.signal
-        ? AbortSignal.any([options.signal, AbortSignal.timeout(HTTP_TIMEOUT_MS)])
-        : AbortSignal.timeout(HTTP_TIMEOUT_MS),
-    });
+    /*
+     * Follow redirects ourselves and re-check every destination.
+     *
+     * Native `redirect: "follow"` validates only the URL we started with. A
+     * public endpoint could redirect to 169.254.169.254 or a private service
+     * and cross the boundary after the guard had already passed. Local mode
+     * makes this especially important: it opts into loopback, not the whole
+     * private network.
+     */
+    for (let redirects = 0; ; redirects += 1) {
+      res = await fetch(url, {
+        method,
+        headers,
+        // GET and HEAD cannot carry one, and sending it is a TypeError.
+        body: method === "GET" || method === "HEAD" ? undefined : requestBody,
+        redirect: "manual",
+        signal,
+      });
+
+      const location = res.headers.get("location");
+      if (![301, 302, 303, 307, 308].includes(res.status) || !location) break;
+      if (redirects >= 5) throw new WebError("Too many redirects (more than 5).");
+
+      url = assertPublicUrl(new URL(location, url).toString(), {
+        allowLoopback: options.allowLocal === true,
+      });
+
+      // Match normal browser/fetch semantics: 303, and POST on 301/302,
+      // becomes GET. 307/308 deliberately preserve method and body.
+      if (res.status === 303 || ((res.status === 301 || res.status === 302) && method === "POST")) {
+        method = "GET";
+        requestBody = undefined;
+        delete headers["content-type"];
+      }
+    }
   } catch (error) {
+    if (error instanceof WebError) throw error;
     if (error instanceof Error && error.name === "TimeoutError") {
       throw new WebError(
         `${url.hostname} did not respond within ${HTTP_TIMEOUT_MS / 1000} seconds.`

@@ -34,6 +34,7 @@ const load = (p) => import(pathToFileURL(path.join(ROOT, p)).href);
 const read = (p) => readFileSync(path.join(ROOT, p), "utf8");
 
 const web = await load("src/lib/web.ts");
+const http = await load("src/lib/http.ts");
 const { validateCommand } = await load("src/lib/runner.ts");
 const { WORKSPACE_TOOLS } = await load("src/lib/tools.ts");
 const route = read("src/app/api/chat/route.ts");
@@ -72,6 +73,12 @@ const names = WORKSPACE_TOOLS.map((t) => t.function.name);
 check("fetch_url is available", names.includes("fetch_url"));
 check("inspect_page is available", names.includes("inspect_page"));
 check("download_file is available", names.includes("download_file"));
+const httpTool = WORKSPACE_TOOLS.find((t) => t.function.name === "http_request");
+check(
+  "http_request exposes a narrow localhost opt-in",
+  Boolean(httpTool?.function.parameters?.properties?.allow_local),
+  "public-by-default, explicit only for a development API"
+);
 
 const inspect = WORKSPACE_TOOLS.find((t) => t.function.name === "inspect_page");
 check(
@@ -167,6 +174,16 @@ const server = createServer((req, res) => {
     res.end(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
     return;
   }
+  if (req.url === "/api") {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ local: true, method: req.method }));
+    return;
+  }
+  if (req.url === "/redirect-private") {
+    res.writeHead(302, { location: "http://169.254.169.254/latest/meta-data/" });
+    res.end();
+    return;
+  }
   res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
   res.end(PAGE);
 });
@@ -189,6 +206,39 @@ check(
   "binaries are identified by content type",
   /^image\//.test(binary.headers.get("content-type") ?? ""),
   "fetchPage refuses these before downloading the body"
+);
+
+let localBlocked = false;
+try {
+  await http.httpRequest({ url: `http://127.0.0.1:${port}/api` });
+} catch {
+  localBlocked = true;
+}
+check("http_request still blocks localhost by default", localBlocked);
+
+const localApi = await http.httpRequest({
+  url: `http://127.0.0.1:${port}/api`,
+  allowLocal: true,
+});
+check(
+  "an explicit local-dev request reaches localhost and parses JSON",
+  localApi.status === 200 && localApi.json?.local === true,
+  `${localApi.status} ${JSON.stringify(localApi.json)}`
+);
+
+let redirectBlocked = false;
+try {
+  await http.httpRequest({
+    url: `http://127.0.0.1:${port}/redirect-private`,
+    allowLocal: true,
+  });
+} catch (error) {
+  redirectBlocked = /private network/.test(String(error));
+}
+check(
+  "local mode cannot redirect into cloud metadata or a private LAN",
+  redirectBlocked,
+  "every Location header is validated before the next request"
 );
 server.close();
 
@@ -487,6 +537,16 @@ check(
 
 const toolsSrc3 = readSourceSync(path.join(ROOT, "src/lib/tools.ts"));
 check(
+  "a selector-free static page is not accused of needing JavaScript",
+  /valid for a simple static page built from plain tags/.test(toolsSrc3) &&
+    /there is no evidence here that JavaScript is involved/.test(toolsSrc3),
+  "example.com is plain static HTML with no ids or classes"
+);
+check(
+  "the tool's allow_local argument reaches the HTTP client",
+  /allowLocal: args\.allow_local === true/.test(toolsSrc3)
+);
+check(
   "web_search reports the failure as a failure",
   /Search FAILED —/.test(toolsSrc3) && /summary: `Search failed/.test(toolsSrc3)
 );
@@ -706,9 +766,26 @@ check(
   "0.3 is right for Tavily and discards nearly everything from Exa"
 );
 check(
-  "the filter uses the per-provider floor",
-  /r\.score < scoreFloor\(r\.provider\)/.test(searchSrc),
-  "a single threshold is what silently emptied the results"
+  "the filter uses the per-provider floor only when a score exists",
+  /r\.score !== undefined && r\.score < scoreFloor\(r\.provider\)/.test(
+    searchSrc
+  ),
+  "Exa auto may omit its optional score; missing is not zero"
+);
+check(
+  "an omitted Exa score is preserved as missing",
+  /typeof r\.score === "number" && Number\.isFinite\(r\.score\)/.test(searchSrc) &&
+    /score,\s*\n\s*provider: "exa"/.test(searchSrc),
+  "Number(undefined ?? 0) fabricated the zero that deleted every result"
+);
+const searchCacheSrc = readSourceSync(
+  path.join(ROOT, "src/lib/search-cache.ts")
+);
+check(
+  "old cached fabricated zeroes are invalidated",
+  /CACHE_SCHEMA_VERSION = 2/.test(searchCacheSrc) &&
+    /`v\$\{CACHE_SCHEMA_VERSION\}`/.test(searchCacheSrc),
+  "otherwise the broken result survives for 24 hours after the code is fixed"
 );
 check(
   "results are tagged with the provider that returned them",

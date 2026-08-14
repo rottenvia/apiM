@@ -2,7 +2,11 @@ import { spawn, type ChildProcess } from "node:child_process";
 import crossSpawn from "cross-spawn";
 import { promises as fs } from "node:fs";
 import { workspaceDirectory } from "@/lib/workspace";
-import { validateCommand, describeCommand } from "@/lib/runner";
+import {
+  validateCommand,
+  describeCommand,
+  platformCommandName,
+} from "@/lib/runner";
 
 /**
  * Long-running processes: dev servers, watchers, anything that never exits.
@@ -227,10 +231,16 @@ export async function startProcess(
 
   let child: ChildProcess;
   try {
+    // Resolve platform aliases through the SAME function as run_command.
+    // On Windows `python3` is commonly the Microsoft Store shim while the
+    // installed interpreter is `python`; running tools disagreed because only
+    // run_command applied this mapping.
+    const executable = platformCommandName(check.command);
+
     // cross-spawn for the same reason as run_command: `npm run dev` is a
     // .cmd shim on Windows and a plain spawn cannot start it. See the long
     // note in lib/runner.ts.
-    child = crossSpawn(check.command, check.args, {
+    child = crossSpawn(executable, check.args, {
       cwd,
       shell: false,
       windowsHide: true,

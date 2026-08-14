@@ -501,11 +501,24 @@ async function exaSearch(
           ? (r.highlights as unknown[]).map(String).join("\n\n")
           : "";
         const best = text.length > highlights.length ? text : highlights;
+        const score =
+          typeof r.score === "number" && Number.isFinite(r.score)
+            ? r.score
+            : undefined;
         return {
           title: String(r.title ?? ""),
           url: String(r.url ?? ""),
           content: best.slice(0, MAX_SOURCE_CHARS),
-          score: Number(r.score ?? 0),
+          /*
+           * Exa documents score as optional, and auto searches do omit it.
+           *
+           * `Number(r.score ?? 0)` turned that absence into a real zero. The
+           * provider had answered with pages, but the provider-specific 0.12
+           * floor then deleted every one and the tool reported a genuine
+           * empty search. Preserve "not supplied" instead; only an actual
+           * numeric score is eligible for score filtering.
+           */
+          score,
           provider: "exa",
           publishedDate: r.publishedDate ? String(r.publishedDate) : undefined,
         };
@@ -966,7 +979,10 @@ export async function smartSearch(
     const trusted = TRUSTED_DOMAINS.some(
       (d) => r.domain === d || r.domain.endsWith(`.${d}`)
     );
-    return r.score + (trusted ? 0.25 : 0);
+    // A missing provider score is neutral, not worst-possible. It passed the
+    // quality gate below because there was no number to judge; the provider's
+    // calibrated floor is a conservative ranking value among scored results.
+    return (r.score ?? scoreFloor(r.provider)) + (trusted ? 0.25 : 0);
   };
 
   const runQueries = async (
@@ -1016,7 +1032,14 @@ export async function smartSearch(
       searchesPerformed += 1;
       for (const r of results) {
         if (!r.url || seenUrls.has(r.url)) continue;
-        if (r.score < scoreFloor(r.provider) || r.content.length < 50) continue;
+        // Scores are optional. Missing means "provider did not grade it", not
+        // zero relevance. Only reject a score that was actually supplied.
+        if (
+          (r.score !== undefined && r.score < scoreFloor(r.provider)) ||
+          r.content.length < 50
+        ) {
+          continue;
+        }
         seenUrls.add(r.url);
         collected.push({ ...r, domain: domainOf(r.url) });
       }

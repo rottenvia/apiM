@@ -84,20 +84,21 @@ const TOOLS = [
   // --- execution -----------------------------------------------------------
   ["run_command", 78, 88, 92, 88, 95, "no shell by design; read-only exempt; timeouts fixed; approval still gates the rest"],
   ["run_tests", 88, 94, 94, 96, 95, "detects the runner; NEVER claims a pass it did not parse"],
-  ["start_process", 88, 90, 88, 92, 90, "leftover processes are now named in the reply instead of leaking silently"],
+  ["start_process", 90, 90, 90, 92, 92, "shared Windows command resolver; process tree and early failure tested"],
   ["read_process", 92, 96, 88, 96, 90, "tail avoids re-reading a whole log every poll; wait_for_output covers timing"],
+  ["write_process", 90, 94, 90, 96, 92, "interactive stdin is scoped, echoed and rejected after stop"],
   ["wait_for_output", 92, 96, 92, 96, 92, "returns on match OR exit; whole-log match fixed by testing"],
   ["stop_process", 94, 94, 85, 96, 88, "kills the tree, not just the parent"],
   ["list_processes", 94, 96, 85, 96, 88, "state and command line"],
   // --- web -----------------------------------------------------------------
   ["fetch_url", 88, 94, 92, 88, 95, "warns on app shells instead of returning an empty page as success"],
-  ["inspect_page", 84, 94, 94, 96, 95, "refuses on app shells; 10x cheaper than fetch on static pages"],
+  ["inspect_page", 84, 94, 96, 96, 95, "app shells are distinct from valid selector-free static pages"],
   ["browse", 90, 92, 88, 70, 62, "renders JS, console, screenshots; adapter itself cannot run in this sandbox"],
-  ["web_search", 85, 92, 82, 82, 90, "budgeted, cached, domain filtering"],
+  ["web_search", 88, 92, 86, 82, 94, "scoreless Exa responses, cache migration, budgets and provider diagnostics tested"],
   ["download_file", 88, 90, 82, 92, 85, "size capped; stays in the workspace"],
-  ["http_request", 92, 94, 92, 92, 95, "status, timing, parsed JSON; same public-URL boundary as fetch"],
+  ["http_request", 96, 96, 94, 92, 97, "public by default; loopback opt-in; every redirect revalidated"],
   // --- documents and vision ------------------------------------------------
-  ["read_document", 92, 94, 90, 88, 92, "PDF, Office, EPUB; a scan is explained, not reported empty"],
+  ["read_document", 94, 94, 92, 88, 97, "real PDF plus Next dev bundle, Office and EPUB tested"],
   ["view_image", 78, 90, 80, 78, 80, "needs a separate vision key; withheld when absent"],
   // --- direction -----------------------------------------------------------
   ["make_plan", 92, 94, 94, 96, 96, "replacement cannot drop outstanding work; min lengths enforced"],

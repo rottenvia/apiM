@@ -188,6 +188,12 @@ check(
   `platform is ${process.platform}`
 );
 check(
+  "both platform branches are testable on every OS",
+  R.platformCommandName("python3", "win32") === "python" &&
+    R.platformCommandName("python3", "linux") === "python3",
+  "a Linux-only test previously could not prove the Windows mapping"
+);
+check(
   "plain python is never renamed",
   R.platformCommandName("python") === "python",
   "it is correct on every platform already"

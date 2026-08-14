@@ -286,7 +286,15 @@ export async function readDocument(
  * reported as success.
  */
 async function readPdf(buf: Uint8Array): Promise<DocumentResult> {
-  // The legacy build is the one that runs under Node without a DOM.
+  /*
+   * The legacy build is the one that runs under Node without a DOM. It is
+   * listed in Next's serverExternalPackages so the server loads this physical
+   * file from node_modules beside its matching pdf.worker.mjs instead of
+   * relocating only the main module into `.next/server/chunks`.
+   *
+   * Keep this module browser-compatible too: attachments are parsed locally
+   * in the user's browser, so Node-only path/require helpers cannot live here.
+   */
   const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
 
   const doc = await pdfjs.getDocument({

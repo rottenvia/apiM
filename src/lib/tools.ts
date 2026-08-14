@@ -766,7 +766,7 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
     function: {
       name: "http_request",
       description:
-        "Call an HTTP API directly and see the status code, headers and body. Use this to test an endpoint you or someone else built — it is the API equivalent of run_tests. Prefer it over run_command with curl: no approval prompt, no shell quoting to get wrong, and JSON comes back parsed.",
+        "Call an HTTP API directly and see the status code, headers and body. Use this to test an endpoint you or someone else built — it is the API equivalent of run_tests. Prefer it over run_command with curl: no approval prompt, no shell quoting to get wrong, and JSON comes back parsed. Public URLs are the default; set allow_local only for a development server on this machine.",
       parameters: {
         type: "object",
         properties: {
@@ -783,6 +783,13 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
           body: {
             type: "string",
             description: "Request body, for POST/PUT/PATCH.",
+          },
+          allow_local: {
+            type: "boolean",
+            description:
+              "Set true only to test a development server on localhost, " +
+              "127.0.0.0/8 or [::1]. Private LAN addresses and cloud metadata " +
+              "remain blocked. Leave false for public APIs.",
           },
         },
         required: ["url"],
@@ -1731,9 +1738,11 @@ export async function runTool(
               ? `No ids, classes or data-attributes on ${page.url} contain "${filter}". ` +
                 `The page has ${found.ids.length} ids and ${found.classes.length} ` +
                 `classes in total — try a different word, or call again without a filter.`
-              : `${page.url} has no usable ids or classes. It is probably rendered ` +
-                `by JavaScript after load, so the served HTML is nearly empty. ` +
-                `Ask the user to paste the element from their browser's inspector.`,
+              : `${page.url} has no ids, classes or data attributes to list. ` +
+                `That is valid for a simple static page built from plain tags; ` +
+                `there is no evidence here that JavaScript is involved. Read ` +
+                `the raw HTML with fetch_url if tag structure is enough, or ` +
+                `inspect a more specific page.`,
             summary: "No selectors found",
           };
         }
@@ -2179,6 +2188,7 @@ export async function runTool(
             method: typeof args.method === "string" ? args.method : "GET",
             headers,
             body: typeof args.body === "string" ? args.body : undefined,
+            allowLocal: args.allow_local === true,
           });
           return {
             // A 404 or a 500 is a true answer to the question asked, not a
