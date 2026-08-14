@@ -1510,12 +1510,20 @@ const MessageList = memo(function MessageList({
             ? activeMatch - entry.offset
             : -1;
         return (
+          /*
+           * Do not stop the loader at MessageList. Historical messages only
+           * carry `reasoningLength`; their actual text is fetched when this
+           * bubble opens. The prop was accepted and typed above but omitted
+           * here, so the optional call in MessageBubble did nothing and the
+           * panel stayed on Loading forever.
+           */
           <MessageBubble
             key={msg.id}
             message={msg}
             isLast={msg.id === lastId}
             onRegenerate={onRegenerate}
             onResume={onResume}
+            onLoadReasoning={onLoadReasoning}
             onEdit={msg.role === "user" ? onEdit : undefined}
             onDelete={msg.role === "user" ? onDeleteMessage : undefined}
             searchQuery={searchQuery}

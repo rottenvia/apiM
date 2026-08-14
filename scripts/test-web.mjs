@@ -769,6 +769,23 @@ check(
     /Use Tavily for web search/.test(settingsSrc) &&
     /Use Exa for web search/.test(settingsSrc)
 );
+check(
+  "the track has identical geometry in both states",
+  /h-5 w-9[^`]*overflow-hidden[^`]*rounded-full border/.test(settingsSrc) &&
+    /border-transparent bg-success/.test(settingsSrc) &&
+    /border-border bg-bg-tertiary/.test(settingsSrc),
+  "a border that exists only while off makes the switch change shape"
+);
+check(
+  "the knob is anchored before it moves",
+  /absolute left-0\.5 top-0\.5/.test(settingsSrc),
+  "absolute + translate with left:auto used the static inline position and appeared to expand right"
+);
+check(
+  "off is left and on is exactly one knob-width to the right",
+  /on \? "translate-x-4" : "translate-x-0"/.test(settingsSrc),
+  "36px track - two 2px insets - 16px knob = 16px of travel"
+);
 
 /*
  * A warning that fires for the wrong reason.

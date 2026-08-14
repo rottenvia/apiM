@@ -220,36 +220,25 @@ function MessageBubbleImpl({
   onAnswerQuestion,
 }: MessageBubbleProps) {
   /**
-   * Open while the model is thinking, closed once it has answered.
+   * Whether this bubble was born as the live reply.
    *
-   * This defaulted to false with a note saying nothing should expand
-   * underneath the reader mid-answer. That reasoning was about the wrong
-   * moment: while reasoning is the ONLY thing happening there is nothing to
-   * push down, and collapsing it means the one part of the reply that exists
-   * yet is the part you cannot see. Reported as "thinking literally hidden
-   * now, i cant see thinking process".
+   * A live panel must stay a BOX after prose begins and after the stream ends.
+   * Collapsing it on the first answer token is exactly the reported "thinking
+   * is a line" regression: the text technically existed, but disappeared
+   * before there was time to read it. Capturing this once gives the useful
+   * distinction we actually need:
    *
-   * `useState(() => ...)` so it is decided once, at mount. A message that is
-   * already finished when it first renders — reopening an old chat — starts
-   * shut, which is right: there the answer is the point.
+   * - a reply watched live stays expanded so its reasoning remains readable;
+   * - a reply mounted later from chat history starts compact, and opens on
+   *   request.
+   *
+   * A click still wins permanently through `userSetThinking` below.
    */
+  const [startedLive] = useState(() => Boolean(message.isStreaming));
   const [userSetThinking, setUserSetThinking] = useState<boolean | null>(null);
 
   /*
-   * Derived, not stored, so it needs no effect to keep it in step.
-   *
-   * Open while reasoning is the only thing on screen; closed once the answer
-   * begins, because then the answer is what you came for and a tall block of
-   * reasoning above it is in the way. An explicit click wins over both — once
-   * the reader has chosen, nothing moves the panel under them again.
-   *
-   * Writing this as a useEffect that called setShowThinking was my first
-   * attempt, and lint was right to reject it: state that can be computed from
-   * props during render should be, or the panel renders once wrong and then
-   * corrects itself.
-   */
-  /*
-   * Open while reasoning is arriving — which is NOT the same as "before the
+   * Detect while reasoning is arriving — which is NOT the same as "before the
    * answer starts".
    *
    * The previous rule was `isStreaming && !message.content`, and it was wrong
@@ -277,6 +266,12 @@ function MessageBubbleImpl({
    * both sources have to be considered or an old chat shows nothing.
    */
   const reasoningChars = reasoningLen || message.reasoningLength || 0;
+  const hasThinking = Boolean(
+    reasoningChars > 0 ||
+      (message.isStreaming &&
+        message.thinkingEffort &&
+        message.thinkingEffort !== "none")
+  );
   const reasoningGrewRef = useRef({ len: 0, done: false });
   if (reasoningLen > reasoningGrewRef.current.len) {
     // Still growing. Only clears `done` before any prose has arrived — after
@@ -306,13 +301,14 @@ function MessageBubbleImpl({
     reasoningGrewRef.current.done = true;
   }
 
-  const autoOpen = Boolean(
-    message.isStreaming &&
-      // Something is expected, or already here.
-      (reasoningLen > 0 ||
-        (message.thinkingEffort && message.thinkingEffort !== "none")) &&
-      !reasoningGrewRef.current.done
-  );
+  /*
+   * Keep the reasoning visible for the lifetime of a reply that was watched
+   * live. This intentionally does not depend on `isStreaming` now: that flag
+   * turning false must not collapse a box the reader is in the middle of
+   * reading. A historical bubble mounts with `startedLive === false`, so old
+   * conversations remain compact until asked for.
+   */
+  const autoOpen = Boolean(startedLive && hasThinking);
 
   const showThinking = userSetThinking ?? autoOpen;
   const setShowThinking = (next: boolean | ((v: boolean) => boolean)) =>
@@ -376,7 +372,9 @@ function MessageBubbleImpl({
    * appear and vanish was this.
    */
   const isThinkingPhase = Boolean(
-    message.isStreaming && reasoningLen > 0 && !reasoningGrewRef.current.done
+    message.isStreaming &&
+      hasThinking &&
+      !reasoningGrewRef.current.done
   );
 
   // Keep the reasoning panel pinned to the newest text while "Follow" is on.
@@ -881,16 +879,13 @@ function MessageBubbleImpl({
               is coming. "none" means the model was told not to think, and
               then there is correctly nothing to show.
             */}
-            {(message.reasoningContent ||
-              message.reasoningLength ||
-              (message.isStreaming &&
-                message.thinkingEffort &&
-                message.thinkingEffort !== "none")) && (
+            {hasThinking && (
               <div className="thinking-panel">
-              <div
-                data-thinking={isThinkingPhase}
-                className="thinking-shell overflow-hidden rounded-lg"
-              >
+                <div
+                  data-thinking={isThinkingPhase}
+                  data-open={showThinking}
+                  className="thinking-shell overflow-hidden rounded-lg"
+                >
                 {/* The box and the amber arrive, rather than appearing.
                     
                     Previously the row was plain text one frame and a filled
@@ -921,11 +916,11 @@ function MessageBubbleImpl({
                     </svg>
                     {/* The collapsed row has to say there is something in it.
 
-                        Once the answer starts the panel closes, and a bare
-                        word "Thinking" gives no hint that it holds anything —
-                        so it reads as a decorative line rather than a control,
-                        which is exactly how it was described: "its an line".
-                        A length makes it obviously openable. */}
+                        Historical replies intentionally start compact. A bare
+                        word "Thinking" gives no hint that it holds anything,
+                        so it reads as a decorative line rather than a control.
+                        A length makes it obviously openable; replies watched
+                        live remain expanded instead of collapsing into it. */}
                     <span className="truncate">
                       {isThinkingPhase
                         ? "Thinking"
@@ -997,15 +992,17 @@ function MessageBubbleImpl({
                       className="thinking-body-text max-h-80 overflow-y-auto whitespace-pre-wrap break-words px-3 pb-2.5 font-sans text-[13px] leading-5 [overscroll-behavior:contain]"
                     >
                       {/*
-                        Three distinct states, not two. `undefined` means the
-                        text has not been fetched yet; `""` means it was
-                        fetched and there is genuinely nothing there. Treating
-                        both as "no content" is what left an empty panel
-                        looking identical to a broken one.
+                        Four states, not two. `undefined` on a stored reply
+                        means its text has not been fetched. An empty string on
+                        a LIVE reply means the first reasoning token has not
+                        landed yet. Only an empty finished reply means there
+                        genuinely was nothing to record.
                       */}
                       {typeof message.reasoningContent === "string" ? (
                         message.reasoningContent.trim() ? (
                           message.reasoningContent
+                        ) : isThinkingPhase ? (
+                          <span className="thinking-loading">Thinking…</span>
                         ) : (
                           <span className="opacity-60">
                             No thinking was recorded for this reply.

@@ -65,6 +65,10 @@ const bubble = (await readFile(
   path.join(ROOT, "src/components/MessageBubble.tsx"),
   "utf8"
 )).replace(/\r\n/g, "\n");
+const chatArea = (await readFile(
+  path.join(ROOT, "src/components/ChatArea.tsx"),
+  "utf8"
+)).replace(/\r\n/g, "\n");
 
 console.log("\napiM thinking-panel checks\n");
 
@@ -147,7 +151,12 @@ check(
   "otherwise the cached pre-fetch copy comes back and it loads again"
 );
 
-console.log("\n4. The memo comparator cannot drop the callback again");
+console.log("\n4. The callback reaches the bubble and cannot go stale");
+check(
+  "ChatArea hands the loader to MessageList and MessageList hands it to the bubble",
+  (chatArea.match(/onLoadReasoning=\{onLoadReasoning\}/g) ?? []).length === 2,
+  "accepting a prop is not forwarding it — the missing second handoff left Loading forever"
+);
 check(
   "onLoadReasoning is compared",
   /prev\.onLoadReasoning === next\.onLoadReasoning/.test(bubble),
@@ -161,12 +170,16 @@ check(
   "`undefined` is 'not fetched'; `\"\"` is 'nothing was recorded'"
 );
 check(
-  "empty reasoning says so instead of showing a spinner",
+  "empty finished reasoning says so instead of showing a spinner",
   /No thinking was recorded/.test(bubble)
 );
 check(
-  "Loading is shown only while genuinely pending",
-  /thinking-loading/.test(bubble)
+  "an empty LIVE value says Thinking rather than falsely claiming nothing was recorded",
+  /isThinkingPhase \? \([\s\S]{0,100}thinking-loading[^>]*>Thinking…/.test(bubble)
+);
+check(
+  "Loading is shown only while stored reasoning is genuinely pending",
+  /showThinking \? \([\s\S]{0,80}thinking-loading[^>]*>Loading…/.test(bubble)
 );
 
 console.log("\n6. End to end, against a real stored chat");

@@ -720,9 +720,9 @@ check(
 );
 check(
   "the panel still appears before its text has loaded",
-  /message\.reasoningContent \|\|\s*message\.reasoningLength/.test(
+  /const reasoningChars = reasoningLen \|\| message\.reasoningLength \|\| 0/.test(
     read("src/components/MessageBubble.tsx")
-  ),
+  ) && /\{hasThinking && \(/.test(read("src/components/MessageBubble.tsx")),
   "otherwise a stored reply would look as though it never reasoned"
 );
 /*

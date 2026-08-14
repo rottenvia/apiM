@@ -138,14 +138,32 @@ function ProviderToggle({
       role="switch"
       aria-checked={on}
       aria-label={label}
+      data-state={on ? "on" : "off"}
       onClick={() => onChange(!on)}
-      className={`relative h-5 w-9 flex-none rounded-full transition-colors duration-150 ${
-        on ? "bg-success/70" : "bg-bg-tertiary border border-border"
+      className={`relative inline-flex h-5 w-9 flex-none overflow-hidden rounded-full border p-0 transition-colors duration-150 ${
+        on
+          ? "border-transparent bg-success/70"
+          : "border-border bg-bg-tertiary"
       }`}
     >
+      {/*
+       * A switch moves its knob; its track never changes size.
+       *
+       * The first version had `position: absolute` and a transform, but no
+       * horizontal anchor. CSS therefore used the span's static inline
+       * position as its starting point. On some browser/font combinations the
+       * apparent motion began at the right edge and looked like the control
+       * was growing outwards instead of travelling left <-> right. The border
+       * also existed only while off, so the two states did not share identical
+       * geometry.
+       *
+       * A fixed left inset, a fixed border in both states, and clipping make
+       * the invariant explicit: 36px track, 16px knob, 16px of travel.
+       */}
       <span
-        className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform duration-150 ${
-          on ? "translate-x-4" : "translate-x-0.5"
+        aria-hidden="true"
+        className={`pointer-events-none absolute left-0.5 top-0.5 block h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-150 ${
+          on ? "translate-x-4" : "translate-x-0"
         }`}
       />
     </button>
