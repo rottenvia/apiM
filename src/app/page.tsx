@@ -35,6 +35,8 @@ export interface Message {
   role: "user" | "assistant";
   content: string;
   reasoningContent?: string | null;
+  /** Why a requested trace is absent, based on upstream stream metadata. */
+  reasoningNotice?: string;
   thinkingEffort?: string;
   webSearchUsed?: boolean;
   searchResults?: { title: string; url: string; domain: string }[] | null;
@@ -165,6 +167,14 @@ type StreamEvent =
     }
   | { type: "reasoning"; delta: string }
   | {
+      type: "reasoning_status";
+      status: "missing_round";
+      round: number;
+      model: string;
+      effort: string;
+      fieldsSeen: string[];
+    }
+  | {
       type: "retrying";
       attempt: number;
       attempts: number;
@@ -223,6 +233,12 @@ type StreamEvent =
       usage: unknown;
       durationMs: number;
       model: string;
+      reasoningDiagnostic: {
+        expected: boolean;
+        chars: number;
+        fieldsUsed: string[];
+        fieldsSeen: string[];
+      };
     }
   | { type: "error"; error: string };
 
@@ -1164,6 +1180,9 @@ export default function Home() {
               ...m,
               content: m.content + c,
               reasoningContent: (m.reasoningContent ?? "") + r,
+              // A later round may provide reasoning after an earlier one did
+              // not. Real text supersedes the diagnostic immediately.
+              reasoningNotice: r ? undefined : m.reasoningNotice,
               timeline,
             };
           })
@@ -1413,6 +1432,25 @@ export default function Home() {
                 scheduleFlush();
                 break;
 
+              case "reasoning_status": {
+                const fields = evt.fieldsSeen.length
+                  ? evt.fieldsSeen.join(", ")
+                  : "no delta fields";
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === streamingId && !m.reasoningContent?.trim()
+                      ? {
+                          ...m,
+                          reasoningNotice:
+                            `Round ${evt.round}: ${evt.model} returned no ` +
+                            `plain-text reasoning (${evt.effort}; saw ${fields}).`,
+                        }
+                      : m
+                  )
+                );
+                break;
+              }
+
               // Tool frames are applied immediately rather than batched:
               // there are only a handful per reply, and the delay would make
               // the "Writing app.py" line appear after the file already
@@ -1567,8 +1605,17 @@ export default function Home() {
 
               case "done": {
                 const usage = evt.usage as Record<string, number> | null;
+                const diagnostic = evt.reasoningDiagnostic;
+                const reasoningNotice =
+                  diagnostic.expected && diagnostic.chars === 0
+                    ? `No plain-text reasoning was present in the upstream ` +
+                      `stream. Fields seen: ${
+                        diagnostic.fieldsSeen.join(", ") || "none"
+                      }. Model: ${evt.model}.`
+                    : undefined;
                 finish({
                   ...finalMeta,
+                  reasoningNotice,
                   id: evt.id || streamingId,
                   tokenCount: usage?.total_tokens,
                   usage,

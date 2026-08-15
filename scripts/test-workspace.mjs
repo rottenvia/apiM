@@ -196,6 +196,16 @@ async function main() {
     .filter((f) => f.type === "content")
     .map((f) => f.delta)
     .join("");
+  const reasoning = frames
+    .filter((f) => f.type === "reasoning")
+    .map((f) => f.delta)
+    .join("");
+
+  check(
+    "reasoning from documented and compatible fields reaches the browser",
+    reasoning.includes("I should create") && reasoning.includes("Now I read it back"),
+    `${reasoning.length} characters`
+  );
 
   check(
     "the model called a tool",

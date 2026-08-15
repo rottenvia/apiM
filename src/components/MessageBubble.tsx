@@ -997,6 +997,10 @@ function MessageBubbleImpl({
                       {typeof message.reasoningContent === "string" ? (
                         message.reasoningContent.trim() ? (
                           message.reasoningContent
+                        ) : message.reasoningNotice ? (
+                          <span className="opacity-70">
+                            {message.reasoningNotice}
+                          </span>
                         ) : isThinkingPhase ? (
                           <span className="thinking-loading">
                             Waiting for reasoning text…
@@ -1415,6 +1419,7 @@ export const MessageBubble = memo(MessageBubbleImpl, (prev, next) => {
     a.id === b.id &&
     a.content === b.content &&
     a.reasoningContent === b.reasoningContent &&
+    a.reasoningNotice === b.reasoningNotice &&
     a.isStreaming === b.isStreaming &&
     a.isError === b.isError &&
     a.incomplete === b.incomplete &&

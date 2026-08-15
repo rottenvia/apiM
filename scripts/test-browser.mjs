@@ -521,6 +521,12 @@ check(
   /if \(challenge\) out\.blocked = challenge;/.test(browserSrc)
 );
 check(
+  "challenge detection reports after the action loop, not before click",
+  browserSrc.indexOf("for (const [i, step] of actions.entries())") <
+    browserSrc.indexOf("const challenge = detectChallenge"),
+  "a hidden/cross-origin checkbox failure is a Playwright iframe result, not an early wrapper branch"
+);
+check(
   "the warning is printed BEFORE the scraped content",
   browserSrc.indexOf("BLOCKED: this page is") <
     browserSrc.indexOf("Selectors on the rendered page"),

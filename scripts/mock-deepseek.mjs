@@ -142,7 +142,10 @@ createServer((req, res) => {
     } else if (round === 2) {
       send({
         choices: [
-          { delta: { reasoning_content: "Now I read it back to verify." } },
+          // Compatible gateways sometimes use `reasoning` instead of
+          // DeepSeek's documented `reasoning_content`. The app must normalize
+          // both or this whole round disappears from the thinking panel.
+          { delta: { reasoning: "Now I read it back to verify." } },
         ],
       });
       send({
