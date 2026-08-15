@@ -251,7 +251,7 @@ export function PluginsModal({
             <p className="mt-0.5 text-xs text-text-secondary">
               {draft
                 ? "Instructions added to the system prompt when enabled"
-                : "Styles and preprompts that shape how the assistant replies"}
+                : "Active styles are sent as a dedicated system instruction every round"}
             </p>
           </div>
           <button

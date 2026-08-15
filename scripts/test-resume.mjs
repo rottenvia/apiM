@@ -424,9 +424,10 @@ check(
   "as a user message it looked like the request and buried the real question"
 );
 check(
-  "the system message no longer mentions it",
-  /systemPrompt \+[\s\S]{0,200}pluginDirectives,/.test(route) &&
-    !/workspaceFiles \+/.test(route)
+  "the base system message contains neither tree nor plugin directives",
+  /workspaceInstruction \+\s*lessonsBlock,/.test(route) &&
+    !/workspaceFiles \+/.test(route) &&
+    /role: "system", content: pluginDirectives/.test(route)
 );
 
 // The refresh must never split a tool_call from its reply, which is a 400.

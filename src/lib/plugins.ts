@@ -290,6 +290,9 @@ export function buildSystemPrompt(
  * Returns an empty string when nothing is enabled, so the prompt is
  * byte-identical to before for anyone not using plugins.
  */
+export const PLUGIN_DIRECTIVES_MARKER =
+  "ACTIVE USER CONFIGURATION — RESPONSE BEHAVIOR";
+
 export function buildPluginDirectives(
   plugins: (Plugin & { enabled?: boolean })[]
 ): string {
@@ -363,13 +366,15 @@ export function buildPluginDirectives(
    * before, and still says to apply it silently. Those are the three things
    * that changed behaviour. The rest was restating them.
    */
-  return `\n\n---\n\nHIGHEST PRIORITY — THE USER'S STANDING ORDERS
+  return `${PLUGIN_DIRECTIVES_MARKER}
+
+Apply user-selected system-level response settings throughout this conversation:
 
 ${rules}
 
-They outrank everything above, for every reply for the whole conversation.
-Follow them silently — do not announce them. On conflict follow the one listed
-first; only the user's newest message overrides. Check your reply against this.${overflow}`;
+Follow silently. First listed wins conflicts; the newest user message may
+refine them. Check each reply. They govern behavior, not accuracy, tool
+evidence, or platform safety.${overflow}`;
 }
 
 /**
