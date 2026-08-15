@@ -60,7 +60,8 @@
     "test:dispatch": "tsx scripts/test-dispatch.mjs",
     "test:honesty": "tsx scripts/test-honesty.mjs",
     "test:ux": "tsx scripts/test-ux.mjs",
-    "test:github": "tsx scripts/test-github.mjs"
+    "test:github": "tsx scripts/test-github.mjs",
+    "test:isolation": "tsx scripts/test-chat-isolation.mjs"
   },
   "dependencies": {
     "@types/cross-spawn": "^6.0.6",

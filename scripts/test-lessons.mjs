@@ -19,7 +19,7 @@
  */
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { rm, readFile } from "node:fs/promises";
+import { rm, readFile, access } from "node:fs/promises";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 /*
@@ -51,6 +51,7 @@ const check = (label, ok, detail = "") => {
   console.log(`  ${ok ? g("PASS") : r("FAIL")}  ${label}${detail ? d("  " + detail) : ""}`);
   ok ? pass++ : fail++;
 };
+const fsExists = async (file) => access(file).then(() => true).catch(() => false);
 
 const WS = "lessontest";
 await rm(path.join(DATA_ROOT, "workspaces", WS), { recursive: true, force: true });
@@ -76,6 +77,31 @@ check(
 check(
   "an empty lesson is refused",
   (await L.applyLessons(WS, [{ text: "   ", evidence: "x" }])).added === 0
+);
+
+console.log("\n1b. Lessons are isolated to exactly one chat");
+const OTHER_WS = "lessontest-other-chat";
+await rm(path.join(DATA_ROOT, "workspaces", OTHER_WS), {
+  recursive: true,
+  force: true,
+});
+await L.applyLessons(WS, [
+  {
+    text: "Call the user Moon-Captain and answer in violet prose",
+    evidence: "User requested that name in Chat A",
+  },
+]);
+check(
+  "Chat B cannot read Chat A's lesson records",
+  (await L.readLessons(OTHER_WS)).length === 0
+);
+check(
+  "Chat B's prompt contains no phrase, nickname or tone from Chat A",
+  !L.formatLessonsForPrompt(await L.readLessons(OTHER_WS)).includes("Moon-Captain")
+);
+check(
+  "the two chats resolve to different lesson files",
+  !(await fsExists(path.join(DATA_ROOT, "workspaces", OTHER_WS, "LESSONS.md")))
 );
 
 // ------------------------------------------------------------------
@@ -230,6 +256,11 @@ check(
   ) === "max"
 );
 check("a greeting still costs nothing", autoThinkingEffort("hi") === "none");
+
+await rm(path.join(DATA_ROOT, "workspaces", OTHER_WS), {
+  recursive: true,
+  force: true,
+});
 
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
