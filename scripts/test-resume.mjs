@@ -186,8 +186,11 @@ check(
   "continuing keeps the files already written"
 );
 check(
-  "resume does not resend the reply as history",
-  /const stopBefore = regenerateFromId \?\? resumeMessageId/.test(page)
+  "resume does not resend the reply as browser-supplied history",
+  /Conversation history is intentionally NOT sent/.test(page) &&
+    !/conversationHistory:\s*historyForApi/.test(page) &&
+    /loadScopedConversationHistory\(convId/.test(route),
+  "the server rebuilds context from the addressed conversation only"
 );
 
 // ------------------------------------------------------- task 3b

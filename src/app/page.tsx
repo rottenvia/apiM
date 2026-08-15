@@ -420,7 +420,7 @@ export default function Home() {
   const hasKeys = deepseekKey.length > 0;
   const initialLoadDone = useRef(false);
   /** Current workspace id, readable from callbacks without re-creating them. */
-  const workspaceIdRef = useRef<string | null>(null);
+  const workspaceIdRef = useRef<string | null>(workspaceId);
   /** Latest conversation list, so rename can restore the old title on failure. */
   const conversationsRef = useRef<Conversation[]>([]);
   /** Lets the Stop button cancel an in-flight stream. */
@@ -780,15 +780,25 @@ export default function Home() {
   const loadSeq = useRef(0);
 
   const loadConversation = useCallback(async (id: string) => {
+    // Detach any stream belonging to the previously selected chat. It keeps
+    // running server-side, but its frames cannot enter this transcript.
+    abortRef.current?.abort();
+    btwAbortRef.current?.abort();
     // Each load gets a sequence number; a slower earlier response is ignored
     // once a newer one starts, so rapidly switching chats can't leave the
     // wrong transcript on screen.
     const seq = ++loadSeq.current;
+    workspaceIdRef.current = id;
     setCurrentConvId(id);
+    setIsLoading(false);
+    setStatusStage(null);
+    setRetryNotice(null);
+    runMessageIdRef.current = null;
 
     // Show the cached copy immediately, then refresh from disk.
-    const cached = conversationCache.current.get(id);
-    setMessages(cached ?? []);
+    const cached = conversationCache.current.get(id) ?? [];
+    messagesRef.current = cached;
+    setMessages(cached);
 
     try {
       const res = await fetch(`/api/conversations/${id}`);
@@ -838,6 +848,8 @@ export default function Home() {
       });
 
       conversationCache.current.set(id, parsed);
+      if (workspaceIdRef.current !== id) return;
+      messagesRef.current = parsed;
       setMessages(parsed);
     } catch {
       /* ignore */
@@ -845,9 +857,25 @@ export default function Home() {
   }, []);
 
   const startNewChat = useCallback(() => {
+    // Detach the browser from any old stream. The server deliberately keeps
+    // that run alive and saves it, but no later frame may repopulate this new
+    // chat or switch the selected conversation back.
+    abortRef.current?.abort();
+    btwAbortRef.current?.abort();
+    loadSeq.current += 1;
+    const nextId = uuidv4();
+    workspaceIdRef.current = nextId;
+    messagesRef.current = [];
     setCurrentConvId(null);
-    setDraftConvId(uuidv4());
+    setDraftConvId(nextId);
     setMessages([]);
+    setBtwEntry(null);
+    setIsLoading(false);
+    runMessageIdRef.current = null;
+    setStatusStage(null);
+    setRetryNotice(null);
+    setRecentlyChanged([]);
+    setWorkspaceFiles([]);
   }, []);
 
   const renameConversation = useCallback(
@@ -1033,6 +1061,9 @@ export default function Home() {
       // applies to this reply only, so the next message uses the model the
       // user actually selected.
       const activeModel = options?.modelOverride ?? model;
+      // Read at send time, not from a render closure. New-chat/select-chat
+      // writes this ref synchronously before React commits the new screen.
+      const requestConversationId = workspaceIdRef.current ?? workspaceId;
       const userMsg: Message = {
         id: `temp-${Date.now()}`,
         role: "user",
@@ -1091,48 +1122,13 @@ export default function Home() {
       setIsLoading(true);
       setStatusStage(webSearchMode === "off" ? "thinking" : "deciding");
 
-      // For a regenerate, history must stop before the reply being replaced.
-      // Same for a resume: the server replays the saved transcript, so the
-      // reply being continued must not also arrive as history.
-      const stopBefore = regenerateFromId ?? resumeMessageId;
-      const sourceHistory = stopBefore
-        ? messages.slice(
-            0,
-            Math.max(0, messages.findIndex((m) => m.id === stopBefore))
-          )
-        : messages;
-      // Only the recent turns are sent. The server also caps this, but
-      // trimming here keeps the request body small in very long chats — with
-      // thousands of messages the payload alone would be megabytes.
-      // Drop errors and any reply that was cut short with no content: sending
-      // a blank assistant turn makes the model continue the abandoned answer
-      // rather than respond to the new question.
-      // Tool calls were previously stripped here, so on the next message the
-      // model knew it had *said* "I created main.py" but not that it had done
-      // it — and would offer to create the file again. A short note of what
-      // each reply actually did is appended instead. Full tool calls can't be
-      // replayed: DeepSeek requires reasoning_content alongside them, and
-      // that isn't kept once a reply is finished.
-      const historyForApi = sourceHistory
-        .filter((m) => m.content.trim() && !m.isError)
-        .slice(-20)
-        .map((m) => {
-          const done = (m.toolEvents ?? [])
-            .filter((t) => t.ok && t.summary)
-            .map((t) => t.summary as string);
-
-          if (m.role !== "assistant" || done.length === 0) {
-            return { role: m.role, content: m.content };
-          }
-
-          // Deduplicated: reading the same file three times while working is
-          // normal and repeating it adds nothing.
-          const unique = [...new Set(done)];
-          return {
-            role: m.role,
-            content: `${m.content}\n\n[Actions taken: ${unique.join("; ")}]`,
-          };
-        });
+      /*
+       * Conversation history is intentionally NOT sent by the browser.
+       *
+       * The server loads it from `requestConversationId`, which makes the id
+       * the security boundary. A stale React closure can no longer pair Chat
+       * B's id with Chat A's messages, tone, names, or generated action notes.
+       */
 
       const controller = new AbortController();
       abortRef.current = controller;
@@ -1219,7 +1215,7 @@ export default function Home() {
             // The model gets `message`; the transcript stores these instead.
             displayContent: options?.displayContent,
             attachments: options?.attachments,
-            conversationId: currentConvId ?? draftConvId,
+            conversationId: requestConversationId,
             deepseekApiKey: deepseekKey,
             // A disabled provider is simply not sent, so the server
             // never sees a key it must not use.
@@ -1229,7 +1225,6 @@ export default function Home() {
             thinkingEffort,
             webSearchMode,
             enabledPluginIds: enabledPlugins,
-            conversationHistory: historyForApi,
             regenerateFromId,
             resumeMessageId,
             resumeNote,
@@ -1244,9 +1239,9 @@ export default function Home() {
             // ones attached to a message.
             visionApiKey: visionKey || undefined,
             visionModel,
-            // A new chat has no id yet; the server falls back to the
-            // conversation id it creates, which is what we adopt below.
-            workspaceId,
+            // Conversation and workspace identities must agree. The server
+            // rejects a mismatch rather than reading another chat's files or lessons.
+            workspaceId: requestConversationId,
           }),
         });
 
@@ -1299,6 +1294,11 @@ export default function Home() {
             } catch {
               continue;
             }
+
+            // The user switched chats while this run continued server-side.
+            // Ignore every late frame; it belongs exclusively to the id that
+            // started the request and must never repopulate the active chat.
+            if (workspaceIdRef.current !== requestConversationId) continue;
 
             /*
              * Preserve stream order at visible boundaries.
@@ -1419,9 +1419,10 @@ export default function Home() {
                       : m
                   )
                 );
-                if (!currentConvId && evt.conversationId) {
-                  // Ref first: `finally` reads it to refresh the file count,
-                  // and a brand-new chat only learns its id here.
+                if (evt.conversationId) {
+                  // Ref first: `finally` reads it to refresh the file count.
+                  // The active-request guard above guarantees this event still
+                  // belongs to the selected chat.
                   workspaceIdRef.current = evt.conversationId;
                   setCurrentConvId(evt.conversationId);
                 }
@@ -1715,28 +1716,31 @@ export default function Home() {
         }
       } finally {
         if (frame !== null) cancelAnimationFrame(frame);
-        abortRef.current = null;
-        setIsLoading(false);
-        setStatusStage(null);
-        setRetryNotice(null);
-        // Re-sync with disk so ordering, titles and counts match what was
-        // actually written.
+        // A newer chat may already own abortRef. Never let the detached old
+        // request erase the new request's Stop controller or UI state.
+        if (abortRef.current === controller) abortRef.current = null;
+        const stillActive = workspaceIdRef.current === requestConversationId;
+        if (stillActive) {
+          setIsLoading(false);
+          setStatusStage(null);
+          setRetryNotice(null);
+        }
+        // Re-sync the global chat list; this does not enter any transcript.
         void refreshConversations();
-        // The balance only moves when a reply finishes, so this is the one
-        // moment worth re-reading it. Polling on a timer would spend requests
-        // to learn nothing between messages.
-        void refreshBalanceRef.current?.();
-        if (sawToolWrite) {
-          setRecentlyChanged([...changedPaths]);
-          void refreshWorkspaceFiles();
+        if (stillActive) {
+          // The balance only moves when a reply finishes, so this is the one
+          // moment worth re-reading it.
+          void refreshBalanceRef.current?.();
+          if (sawToolWrite) {
+            setRecentlyChanged([...changedPaths]);
+            void refreshWorkspaceFiles();
+          }
         }
       }
     },
     [
       isLoading,
       hasKeys,
-      currentConvId,
-      draftConvId,
       workspaceId,
       deepseekKey,
       tavilyKey,
@@ -1747,7 +1751,6 @@ export default function Home() {
       thinkingEffort,
       webSearchMode,
       enabledPlugins,
-      messages,
       refreshConversations,
       scheduleWorkspaceRefresh,
       workspaceEnabled,
@@ -1774,14 +1777,16 @@ export default function Home() {
   // Each conversation owns a workspace folder. Switching chats therefore
   // switches workspaces, so the file count has to be re-read.
   useEffect(() => {
-    workspaceIdRef.current = currentConvId;
+    // Includes the reserved id of an unsaved new chat. Setting this to only
+    // currentConvId made the ref null between chats and weakened isolation.
+    workspaceIdRef.current = workspaceId;
     // Deferred so the state update doesn't cascade through this commit,
     // matching how the rest of this file loads data on mount.
     queueMicrotask(() => {
       if (workspaceEnabled) void refreshWorkspaceFiles();
       else setWorkspaceFiles([]);
     });
-  }, [currentConvId, workspaceEnabled, refreshWorkspaceFiles]);
+  }, [workspaceId, workspaceEnabled, refreshWorkspaceFiles]);
 
   useEffect(() => {
     sendMessageRef.current = sendMessage;
