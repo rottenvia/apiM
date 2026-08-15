@@ -20,6 +20,7 @@ import {
   BASE_PROMPT,
   buildLegacyPrompt,
   buildPluginDirectives,
+  PLUGIN_DIRECTIVES_MARKER,
 } from "@/lib/plugins";
 import { WORKSPACE_TOOLS, runTool } from "@/lib/tools";
 import type { ToolResult } from "@/lib/tools";
@@ -879,17 +880,15 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         const transcript: TranscriptMessage[] = [
           {
             role: "system",
-            // The user's standing orders go last on purpose: the workspace
-            // rules that precede them run to several thousand characters, and
-            // whatever sits after that block is what the model weighs most
-            // heavily.
+            // Stable base instructions only. Active plugin settings are a
+            // separate system message re-appended at the end of every round,
+            // where role plus recency give them real weight.
             content:
               systemPrompt +
               searchSummary +
               clarifyInstruction +
               workspaceInstruction +
-              lessonsBlock +
-              pluginDirectives,
+              lessonsBlock,
           },
         ];
 
@@ -902,6 +901,32 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           );
         }
         transcript.push({ role: "user", content: message });
+
+        /**
+         * Re-append active plugins as the newest system instruction.
+         *
+         * Concatenating them into the first system message made them older
+         * than the whole transcript, file tree and plan. Calling the block
+         * "highest priority" could not compensate for that structural weight.
+         * One dedicated system message is the highest supported API role, and
+         * moving the stable block to the tail each round preserves prompt-cache
+         * prefix hits while keeping it more recent than every dynamic input.
+         */
+        const appendPluginDirectives = () => {
+          for (let i = transcript.length - 1; i >= 0; i--) {
+            const entry = transcript[i];
+            if (
+              entry.role === "system" &&
+              typeof entry.content === "string" &&
+              entry.content.startsWith(PLUGIN_DIRECTIVES_MARKER)
+            ) {
+              transcript.splice(i, 1);
+            }
+          }
+          if (pluginDirectives) {
+            transcript.push({ role: "system", content: pluginDirectives });
+          }
+        };
 
         /*
          * The file tree, as the last message before the model replies.
@@ -1321,6 +1346,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
 
         while (true) {
           round += 1;
+          appendPluginDirectives();
           const toolAcc = new ToolCallAccumulator();
           let roundContent = "";
           let roundReasoning = "";

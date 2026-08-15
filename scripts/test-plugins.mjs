@@ -45,35 +45,35 @@ check(
 const one = P.buildPluginDirectives(withEnabled("caveman"));
 check("one enabled plugin produces a block", one.length > 0);
 check(
-  "the block states that it is the highest priority",
-  /HIGHEST PRIORITY/.test(one)
+  "the block is explicitly active user configuration",
+  one.startsWith(P.PLUGIN_DIRECTIVES_MARKER)
 );
 check(
-  "it says the orders outrank what came before",
-  /outrank everything above/i.test(one),
-  "a conflict needs a stated winner, not a length contest"
+  "it is framed as system-level response behavior",
+  /user-selected system-level response settings/i.test(one),
+  "authority comes from its own system message, not jailbreak wording"
 );
 check(
   "it applies for the whole conversation, not one reply",
-  /every reply for the whole\s+conversation/i.test(one),
+  /throughout this\s+conversation/i.test(one),
   "wording may change; the standing-order property must not"
 );
 check(
   "the model is told to apply them silently",
-  /Do not announce them/i.test(one),
+  /Follow silently/i.test(one),
   "or every reply opens by narrating its own settings"
 );
 check(
-  "the user's newest message can still override",
-  /newest\s+message/i.test(one)
+  "the user's newest message can still refine behavior",
+  /newest\s+user message\s+may\s+refine/i.test(one)
 );
 check(
   "conflicting orders have a deterministic resolution",
-  /follow the one listed\s+first/i.test(one)
+  /First listed wins conflicts/i.test(one)
 );
 check(
   "the model is told to check its reply against the list",
-  /check (your reply|it) against/i.test(one),
+  /check each reply/i.test(one),
   "the self-check property, not one exact sentence"
 );
 
@@ -132,38 +132,36 @@ check(
 
 console.log("\n3. Position in the assembled prompt");
 
-// Mirrors how the chat route concatenates the sections.
-const searchSummary = "";
-const clarify = "";
-const workspace =
-  "\n\nYou have a workspace on the user's machine and tools to work in it. " +
-  "Prefer creating real files over printing code in chat. ".repeat(30);
-
-const assembled =
-  P.BASE_PROMPT + searchSummary + clarify + workspace + two;
+const { readFileSync: readNow } = await import("node:fs");
+const routeAssembly = readNow(
+  path.join(ROOT, "src/app/api/chat/route.ts"),
+  "utf8"
+).replace(/\r\n/g, "\n");
 
 check(
-  "the persona still comes first",
-  assembled.indexOf(P.BASE_PROMPT) === 0
+  "the stable base system message no longer contains plugin text",
+  /workspaceInstruction \+\s*lessonsBlock,/.test(routeAssembly) &&
+    !/lessonsBlock \+\s*pluginDirectives/.test(routeAssembly)
 );
 check(
-  "the directives come after the workspace rules",
-  assembled.indexOf("HIGHEST PRIORITY") >
-    assembled.indexOf("You have a workspace"),
-  "whatever sits after several thousand characters is what carries weight"
+  "plugins are appended as their own system message",
+  /transcript\.push\(\{ role: "system", content: pluginDirectives \}\)/.test(
+    routeAssembly
+  ),
+  "the API role now carries authority structurally"
 );
 check(
-  "the directives are the last thing in the prompt",
-  assembled.trimEnd().endsWith(two.trimEnd()),
-  "last position in a system prompt is the strongest"
+  "the plugin message is moved to the tail every agent round",
+  /while \(true\) \{\s*round \+= 1;\s*appendPluginDirectives\(\)/.test(
+    routeAssembly
+  ),
+  "history, file tree and plan can no longer bury it"
 );
-
-const tailShare =
-  (assembled.length - assembled.indexOf("HIGHEST PRIORITY")) / assembled.length;
 check(
-  "the block is a meaningful share of the prompt, not a footnote",
-  tailShare > 0.15,
-  `${(tailShare * 100).toFixed(0)}% of the prompt — was about 2%`
+  "only one plugin directive message exists at a time",
+  /entry\.content\.startsWith\(PLUGIN_DIRECTIVES_MARKER\)[\s\S]{0,120}transcript\.splice/.test(
+    routeAssembly
+  )
 );
 
 // ------------------------------------------------- the old blended builder
@@ -284,8 +282,9 @@ check(
 
 const currentOnly = withEnabled("caveman");
 check(
-  "a current plugin produces a priority block",
-  P.buildPluginDirectives(currentOnly).includes("Caveman Mode")
+  "a current plugin produces a dedicated behavior block",
+  P.buildPluginDirectives(currentOnly).includes("Caveman Mode") &&
+    P.buildPluginDirectives(currentOnly).startsWith(P.PLUGIN_DIRECTIVES_MARKER)
 );
 check(
   "a current plugin adds nothing to the persona",
@@ -320,9 +319,9 @@ check(
   "early and outweighed — the old behaviour"
 );
 check(
-  "current text sits after them",
-  full.indexOf("HIGHEST PRIORITY") > full.indexOf("You have a workspace"),
-  "last and dominant — the new behaviour"
+  "current text is a separately marked behavior instruction",
+  full.indexOf(P.PLUGIN_DIRECTIVES_MARKER) > full.indexOf("You have a workspace"),
+  "the route sends this tail as its own system message"
 );
 check(
   "enabling neither leaves the prompt untouched",
