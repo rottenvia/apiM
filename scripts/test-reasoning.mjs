@@ -180,8 +180,21 @@ check(
   /Thinking was enabled, but no reasoning text was received/.test(bubble)
 );
 check(
-  "an empty LIVE value says Thinking rather than falsely claiming nothing was recorded",
-  /isThinkingPhase \? \([\s\S]{0,100}thinking-loading[^>]*>Thinking…/.test(bubble)
+  "an empty LIVE value distinguishes waiting for data from actual reasoning",
+  /isThinkingPhase \? \([\s\S]{0,160}thinking-loading[^>]*>[\s\S]{0,80}Waiting for reasoning text…/.test(
+    bubble
+  )
+);
+check(
+  "reasoning has a timer fallback when animation frames are throttled",
+  /flushTimer = setTimeout\(flush, 50\)/.test(page) &&
+    /clearTimeout\(flushTimer\)/.test(page),
+  "requestAnimationFrame alone can pause indefinitely in a background or throttled tab"
+);
+check(
+  "reasoning is flushed before a plan or tool event is rendered",
+  /evt\.type !== "reasoning" && evt\.type !== "content"\) flush\(\)/.test(page),
+  "otherwise the action appears while the reasoning before it is still buffered"
 );
 check(
   "Loading is shown only while stored reasoning is genuinely pending",

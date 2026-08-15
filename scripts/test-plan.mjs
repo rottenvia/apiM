@@ -113,6 +113,23 @@ const p0 = plan.createPlan("Build a scraper", [
 check("steps are numbered from one", p0.steps[0].id === 1 && p0.steps[2].id === 3);
 check("everything starts as todo", p0.steps.every((s) => s.state === "todo"));
 
+const structured = plan.createPlan("Audit every broken tool", [
+  {
+    title: "Retest web search",
+    description: "Run a real Exa query and confirm sources reach the answer",
+  },
+  { name: "Retest PDF reading", details: "Generate and read a valid PDF" },
+]);
+check(
+  "structured model steps become readable title and detail",
+  structured.steps[0].text ===
+    "Retest web search — Run a real Exa query and confirm sources reach the answer"
+);
+check(
+  "no plan step can become JavaScript's object placeholder",
+  structured.steps.every((s) => !s.text.includes("[object Object]"))
+);
+
 // ---------------------------------------------------------------------------
 console.log("\n2. 'Done' has to be earned");
 

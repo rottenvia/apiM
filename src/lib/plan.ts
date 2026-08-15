@@ -35,6 +35,7 @@
 
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { normalisePlanStepText } from "@/lib/plan-view";
 
 export type StepState = "todo" | "doing" | "done" | "blocked";
 
@@ -88,7 +89,7 @@ export const MIN_TEXT = 12;
  */
 export const MIN_EVIDENCE = 15;
 
-export function createPlan(goal: string, steps: string[]): Plan {
+export function createPlan(goal: string, steps: unknown[]): Plan {
   const cleanGoal = goal.trim();
   if (!cleanGoal) throw new PlanError("A plan needs a goal.");
   if (cleanGoal.length < MIN_TEXT) {
@@ -98,7 +99,7 @@ export function createPlan(goal: string, steps: string[]): Plan {
     );
   }
 
-  const cleaned = steps.map((s) => String(s).trim()).filter(Boolean);
+  const cleaned = steps.map(normalisePlanStepText).filter(Boolean);
   if (cleaned.length === 0) {
     throw new PlanError("A plan needs at least one step.");
   }

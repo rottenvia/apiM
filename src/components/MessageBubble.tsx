@@ -26,6 +26,7 @@ import { estimateCost, formatCost, formatDuration } from "@/lib/pricing";
 import { CodeBlock } from "@/components/CodeBlock";
 import { PlanPanel } from "@/components/PlanPanel";
 import type { PlanView } from "@/components/PlanPanel";
+import { normalisePlanStepText } from "@/lib/plan-view";
 
 /**
  * Render fenced code blocks with a language label and copy button.
@@ -711,7 +712,7 @@ function MessageBubbleImpl({
                     }}
                     title={
                       planCurrent
-                        ? `Step ${planCurrent.id}: ${planCurrent.text}`
+                        ? `Step ${planCurrent.id}: ${normalisePlanStepText(planCurrent.text) || "Untitled step"}`
                         : "Every step is done"
                     }
                     className={`inline-flex items-center gap-1 rounded-lg border px-1.5 py-0.5 text-[11px] font-medium transition-colors ${
@@ -997,7 +998,9 @@ function MessageBubbleImpl({
                         message.reasoningContent.trim() ? (
                           message.reasoningContent
                         ) : isThinkingPhase ? (
-                          <span className="thinking-loading">Thinking…</span>
+                          <span className="thinking-loading">
+                            Waiting for reasoning text…
+                          </span>
                         ) : (
                           <span className="opacity-60">
                             Thinking was enabled, but no reasoning text was received for this reply.

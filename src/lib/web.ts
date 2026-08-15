@@ -173,6 +173,87 @@ export function extractTitle(html: string): string {
   return match ? htmlToText(match[1]).slice(0, 200) : "";
 }
 
+export interface DownloadedResource {
+  url: string;
+  status: number;
+  contentType: string;
+  data: Uint8Array;
+}
+
+/** Binary downloads may be larger than text handed to the model, but bounded. */
+export const MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024;
+
+/**
+ * Download bytes without trying to interpret them as a web page.
+ *
+ * fetchPage deliberately rejects images, PDFs and archives because decoding
+ * them as UTF-8 is useless. download_file has the opposite job: preserve the
+ * bytes so read_document/view_image can consume them afterwards.
+ */
+export async function downloadResource(
+  rawUrl: string,
+  options: { signal?: AbortSignal; allowLocal?: boolean } = {}
+): Promise<DownloadedResource> {
+  let url = assertPublicUrl(rawUrl, {
+    allowLoopback: options.allowLocal === true,
+  });
+  const requestSignal = options.signal
+    ? AbortSignal.any([options.signal, AbortSignal.timeout(FETCH_TIMEOUT_MS)])
+    : AbortSignal.timeout(FETCH_TIMEOUT_MS);
+
+  let response: Response;
+  for (let redirects = 0; ; redirects += 1) {
+    response = await fetch(url, {
+      redirect: "manual",
+      signal: requestSignal,
+      headers: {
+        "User-Agent": USER_AGENT,
+        Accept: "*/*",
+      },
+    });
+
+    const location = response.headers.get("location");
+    if (![301, 302, 303, 307, 308].includes(response.status) || !location) break;
+    if (redirects >= 5) throw new WebError("Too many redirects (more than 5).");
+    // Re-check every hop. Local mode permits loopback only; neither mode may
+    // redirect into cloud metadata or a private-LAN service.
+    url = assertPublicUrl(new URL(location, url).toString(), {
+      allowLoopback: options.allowLocal === true,
+    });
+  }
+
+  if (!response.ok) {
+    throw new WebError(
+      `Download failed: HTTP ${response.status} ${response.statusText || "Error"}.`
+    );
+  }
+
+  const declared = Number(response.headers.get("content-length") ?? 0);
+  if (Number.isFinite(declared) && declared > MAX_DOWNLOAD_BYTES) {
+    throw new WebError(
+      `That file is ${(declared / 1024 / 1024).toFixed(1)}MB, over the ${
+        MAX_DOWNLOAD_BYTES / 1024 / 1024
+      }MB download limit.`
+    );
+  }
+
+  const data = new Uint8Array(await response.arrayBuffer());
+  if (data.byteLength > MAX_DOWNLOAD_BYTES) {
+    throw new WebError(
+      `That file is ${(data.byteLength / 1024 / 1024).toFixed(1)}MB, over the ${
+        MAX_DOWNLOAD_BYTES / 1024 / 1024
+      }MB download limit.`
+    );
+  }
+
+  return {
+    url: response.url || url.toString(),
+    status: response.status,
+    contentType: (response.headers.get("content-type") ?? "unknown").split(";")[0],
+    data,
+  };
+}
+
 export interface FetchedPage {
   url: string;
   status: number;

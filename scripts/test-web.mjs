@@ -36,7 +36,7 @@ const read = (p) => readFileSync(path.join(ROOT, p), "utf8");
 const web = await load("src/lib/web.ts");
 const http = await load("src/lib/http.ts");
 const { validateCommand } = await load("src/lib/runner.ts");
-const { WORKSPACE_TOOLS } = await load("src/lib/tools.ts");
+const { WORKSPACE_TOOLS, runTool } = await load("src/lib/tools.ts");
 const route = read("src/app/api/chat/route.ts");
 
 const COLOR = process.stdout.isTTY && !process.env.NO_COLOR;
@@ -174,6 +174,11 @@ const server = createServer((req, res) => {
     res.end(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
     return;
   }
+  if (req.url === "/pdf") {
+    res.writeHead(200, { "content-type": "application/pdf" });
+    res.end(Buffer.from("%PDF-1.4\nexact binary payload\n%%EOF", "ascii"));
+    return;
+  }
   if (req.url === "/api") {
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ local: true, method: req.method }));
@@ -206,6 +211,41 @@ check(
   "binaries are identified by content type",
   /^image\//.test(binary.headers.get("content-type") ?? ""),
   "fetchPage refuses these before downloading the body"
+);
+
+const downloadWs = "download-bytes";
+await (await import("node:fs/promises")).rm(
+  path.join(DATA_ROOT, "workspaces", downloadWs),
+  { recursive: true, force: true }
+);
+let downloaded = await runTool(downloadWs, "download_file", {
+  url: `http://127.0.0.1:${port}/pdf`,
+  path: "sample.pdf",
+  allow_local: true,
+});
+check("download_file accepts a real PDF content type", downloaded.ok, downloaded.content);
+let savedBytes = await (await import("node:fs/promises")).readFile(
+  path.join(DATA_ROOT, "workspaces", downloadWs, "sample.pdf")
+);
+check(
+  "downloaded PDF bytes are preserved exactly",
+  savedBytes.subarray(0, 4).toString("ascii") === "%PDF"
+);
+downloaded = await runTool(downloadWs, "download_file", {
+  url: `http://127.0.0.1:${port}/binary`,
+  path: "pixel.png",
+  allow_local: true,
+});
+savedBytes = await (await import("node:fs/promises")).readFile(
+  path.join(DATA_ROOT, "workspaces", downloadWs, "pixel.png")
+);
+check(
+  "download_file accepts images without UTF-8 corruption",
+  downloaded.ok && savedBytes.equals(Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+);
+await (await import("node:fs/promises")).rm(
+  path.join(DATA_ROOT, "workspaces", downloadWs),
+  { recursive: true, force: true }
 );
 
 let localBlocked = false;
@@ -284,7 +324,6 @@ check(
 // ------------------------------------------------------------------
 console.log("\n6. The rest of the gaps");
 
-const { runTool } = await load("src/lib/tools.ts");
 const wsLib = await load("src/lib/workspace.ts");
 const snapLib = await load("src/lib/snapshots.ts");
 const { createZip } = await load("src/lib/zip.ts");

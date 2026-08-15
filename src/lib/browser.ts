@@ -40,11 +40,12 @@
 /** One instruction in a browser session. */
 export type BrowserAction =
   | { action: "goto"; url: string }
-  | { action: "click"; selector: string }
-  | { action: "type"; selector: string; text: string }
+  | { action: "html"; selector?: string }
+  | { action: "click"; selector: string; force?: boolean }
+  | { action: "type"; selector: string; text: string; pressEnter?: boolean }
   | { action: "wait_for"; selector?: string; ms?: number }
   | { action: "scroll"; to: "top" | "bottom" | number }
-  | { action: "screenshot"; name?: string }
+  | { action: "screenshot"; name?: string; fullPage?: boolean }
   | { action: "evaluate"; script: string }
   | { action: "extract"; selector: string };
 
@@ -57,6 +58,8 @@ export interface ActionResult {
 
 export interface BrowserSessionResult {
   results: ActionResult[];
+  /** Final URL after redirects/navigation. */
+  finalUrl?: string;
   /** Final page title, when a page was loaded. */
   title?: string;
   /** Visible text of the rendered page, capped. */
@@ -87,21 +90,22 @@ export interface BrowserSessionResult {
  * adapter has nowhere to hide a bug that the fake would not also have.
  */
 export interface BrowserDriver {
-  goto(url: string): Promise<void>;
-  click(selector: string): Promise<void>;
-  type(selector: string, text: string): Promise<void>;
+  goto(url: string): Promise<{ url: string; status: number | null }>;
+  click(selector: string, force?: boolean): Promise<void>;
+  type(selector: string, text: string, pressEnter?: boolean): Promise<void>;
   waitForSelector(selector: string, timeoutMs: number): Promise<void>;
   waitMs(ms: number): Promise<void>;
   scroll(to: "top" | "bottom" | number): Promise<void>;
-  screenshot(): Promise<Buffer>;
+  screenshot(fullPage?: boolean): Promise<Buffer>;
   evaluate(script: string): Promise<unknown>;
   /** Text content of every node matching a selector. */
   extract(selector: string): Promise<string[]>;
+  url(): Promise<string>;
   title(): Promise<string>;
   /** Rendered visible text. */
   innerText(): Promise<string>;
-  /** Full HTML after scripts have run. */
-  html(): Promise<string>;
+  /** Full rendered HTML, or one element's outerHTML. */
+  html(selector?: string): Promise<string>;
   close(): Promise<void>;
 }
 
@@ -159,9 +163,23 @@ export function validateActions(raw: unknown): BrowserAction[] {
         }
         out.push(
           kind === "click"
-            ? { action: "click", selector: a.selector.trim() }
+            ? {
+                action: "click",
+                selector: a.selector.trim(),
+                force: a.force === true,
+              }
             : { action: "extract", selector: a.selector.trim() }
         );
+        break;
+      }
+      case "html": {
+        out.push({
+          action: "html",
+          selector:
+            typeof a.selector === "string" && a.selector.trim()
+              ? a.selector.trim()
+              : undefined,
+        });
         break;
       }
       case "type": {
@@ -171,7 +189,12 @@ export function validateActions(raw: unknown): BrowserAction[] {
         if (typeof a.text !== "string") {
           throw new BrowserError(`${where}: type needs text.`);
         }
-        out.push({ action: "type", selector: a.selector.trim(), text: a.text });
+        out.push({
+          action: "type",
+          selector: a.selector.trim(),
+          text: a.text,
+          pressEnter: a.press_enter === true || a.pressEnter === true,
+        });
         break;
       }
       case "wait_for": {
@@ -205,6 +228,7 @@ export function validateActions(raw: unknown): BrowserAction[] {
         out.push({
           action: "screenshot",
           name: typeof a.name === "string" ? a.name.trim() : undefined,
+          fullPage: a.full_page === true || a.fullPage === true,
         });
         break;
       }
@@ -217,8 +241,8 @@ export function validateActions(raw: unknown): BrowserAction[] {
       }
       default:
         throw new BrowserError(
-          `${where}: unknown action "${kind}". Valid actions are goto, click, ` +
-            `type, wait_for, scroll, screenshot, evaluate and extract.`
+          `${where}: unknown action "${kind}". Valid actions are goto, html, ` +
+            `click, type, wait_for, scroll, screenshot, evaluate and extract.`
         );
     }
   }
@@ -266,18 +290,31 @@ export async function runSession(
     for (const [i, step] of actions.entries()) {
       try {
         switch (step.action) {
-          case "goto":
-            await driver.goto(step.url);
+          case "goto": {
+            const navigation = await driver.goto(step.url);
             navigated = true;
             results.push({
               action: "goto",
               ok: true,
-              detail: `Loaded ${step.url}`,
+              detail:
+                `Loaded ${navigation.url}` +
+                (navigation.status === null ? "" : ` — HTTP ${navigation.status}`),
             });
             break;
+          }
+
+          case "html": {
+            const html = await driver.html(step.selector);
+            results.push({
+              action: "html",
+              ok: true,
+              detail: html.slice(0, MAX_TEXT_CHARS),
+            });
+            break;
+          }
 
           case "click":
-            await driver.click(step.selector);
+            await driver.click(step.selector, step.force);
             results.push({
               action: "click",
               ok: true,
@@ -286,7 +323,7 @@ export async function runSession(
             break;
 
           case "type":
-            await driver.type(step.selector, step.text);
+            await driver.type(step.selector, step.text, step.pressEnter);
             results.push({
               action: "type",
               ok: true,
@@ -322,7 +359,7 @@ export async function runSession(
             break;
 
           case "screenshot": {
-            const data = await driver.screenshot();
+            const data = await driver.screenshot(step.fullPage);
             const saved = await saveScreenshot(safeName(step.name, i), data);
             screenshots.push(saved);
             results.push({
@@ -387,6 +424,7 @@ export async function runSession(
     };
 
     if (navigated) {
+      out.finalUrl = await driver.url().catch(() => "");
       out.title = await driver.title().catch(() => "");
       const text = await driver.innerText().catch(() => "");
       out.text = text.slice(0, MAX_TEXT_CHARS);
@@ -515,7 +553,8 @@ export function formatSession(result: BrowserSessionResult): string {
     lines.push(`${r.ok ? "OK  " : "FAIL"} ${r.action}: ${r.detail}`);
   }
 
-  if (result.title) lines.push("", `Page title: ${result.title}`);
+  if (result.finalUrl) lines.push("", `Final URL: ${result.finalUrl}`);
+  if (result.title) lines.push(`Page title: ${result.title}`);
 
   if (result.console.length) {
     lines.push("", "Browser console:");

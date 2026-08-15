@@ -93,9 +93,9 @@ const TOOLS = [
   // --- web -----------------------------------------------------------------
   ["fetch_url", 88, 94, 92, 88, 95, "warns on app shells instead of returning an empty page as success"],
   ["inspect_page", 84, 94, 96, 96, 95, "app shells are distinct from valid selector-free static pages"],
-  ["browse", 90, 92, 88, 70, 62, "renders JS, console, screenshots; adapter itself cannot run in this sandbox"],
+  ["browse", 92, 92, 90, 72, 68, "six-operation rendered-page wrapper; real adapter remains optional/live-tested separately"],
   ["web_search", 88, 92, 86, 82, 94, "scoreless Exa responses, cache migration, budgets and provider diagnostics tested"],
-  ["download_file", 88, 90, 82, 92, 85, "size capped; stays in the workspace"],
+  ["download_file", 94, 94, 88, 94, 95, "exact PDF/image/archive bytes, redirect-safe and workspace-contained"],
   ["http_request", 96, 96, 94, 92, 97, "public by default; loopback opt-in; every redirect revalidated"],
   // --- documents and vision ------------------------------------------------
   ["read_document", 94, 94, 92, 88, 97, "real PDF plus Next dev bundle, Office and EPUB tested"],

@@ -408,8 +408,10 @@ check(
   "the old 0fr fallback left only the border whenever reduced motion disabled the animation"
 );
 check(
-  "the empty live box says Thinking rather than claiming nothing was recorded",
-  /isThinkingPhase \? \([\s\S]{0,100}thinking-loading[^>]*>Thinking…/.test(bubble)
+  "the empty live box says it is waiting for text, not duplicate Thinking",
+  /Waiting for reasoning text…/.test(bubble) &&
+    /flushTimer = setTimeout\(flush, 50\)/.test(page),
+  "the header owns Thinking; the body should become real text within the fallback window"
 );
 check(
   "a ref, so active-phase tracking schedules no extra render",
