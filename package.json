@@ -59,7 +59,8 @@
     "test:autonomy": "tsx scripts/test-autonomy.mjs",
     "test:dispatch": "tsx scripts/test-dispatch.mjs",
     "test:honesty": "tsx scripts/test-honesty.mjs",
-    "test:ux": "tsx scripts/test-ux.mjs"
+    "test:ux": "tsx scripts/test-ux.mjs",
+    "test:github": "tsx scripts/test-github.mjs"
   },
   "dependencies": {
     "@types/cross-spawn": "^6.0.6",
