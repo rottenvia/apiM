@@ -316,8 +316,8 @@ check(
  * wrapper must not quietly undo it.
  */
 check(
-  "the block still states that it outranks what came before",
-  /outrank/i.test(caveBlock)
+  "the block is framed as direct system-level behavior",
+  /system-level response settings/i.test(caveBlock)
 );
 check(
   "and is still applied silently",
@@ -325,9 +325,10 @@ check(
   "announcing the plugin wastes the tokens it exists to save"
 );
 check(
-  "and is still the last thing in the system prompt",
-  /lessonsBlock \+\s*pluginDirectives/.test(route),
-  "later text wins the argument; that is why it moved here originally"
+  "and is a dedicated system message moved to the tail each round",
+  /role: "system", content: pluginDirectives/.test(route) &&
+    /round \+= 1;\s*appendPluginDirectives\(\)/.test(route),
+  "role plus recency, not rhetorical jailbreak wording, gives it weight"
 );
 
 const modal = await read("src/components/PluginsModal.tsx");
