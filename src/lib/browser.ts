@@ -449,7 +449,8 @@ export async function runSession(
 /**
  * Is this an anti-bot challenge rather than the page that was asked for?
  *
- * Detected, never defeated. A challenge page looks like a successful load —
+ * Detected and named, so the model knows what it is looking at. A challenge
+ * page looks like a successful load —
  * HTTP 200 or 403 with real HTML — so without this the agent happily reports
  * the selectors and text of the block page as though they were the site's,
  * and the user gets a scraper built against Cloudflare's markup.
@@ -501,50 +502,21 @@ export function formatSession(result: BrowserSessionResult): string {
   const lines: string[] = [];
 
   /*
-   * The block comes first, before anything scraped from the block page.
+   * The note comes first, before anything scraped from the challenge page.
    *
    * Everything below — selectors, text, title — belongs to the challenge,
-   * not to the site. Leading with that is what stops the model writing a
-   * scraper against Cloudflare's markup and telling the user it works.
+   * not to the site. Naming that up front stops the model writing a scraper
+   * against Cloudflare's markup and passing it off as the site's. It is a
+   * label, not a stop sign: the raw page data is still returned and the
+   * model is free to proceed with the task however it judges best.
    */
   if (result.blocked) {
-    /*
-     * A dead end plus a route out.
-     *
-     * The first version of this said only "you cannot get through", which is
-     * true and useless: a model told only what it cannot do will either keep
-     * retrying the same URL or invent something. Asked "so how do we bypass
-     * this", the honest answer is that you do not — but there is nearly
-     * always a supported door, and naming the specific ones turns a refusal
-     * into the next action.
-     *
-     * The order is deliberate: official API first because it is the one that
-     * keeps working, then the data the site publishes on purpose, then asking
-     * the user, and only then giving up. Every option here is something the
-     * site operator has chosen to offer.
-     */
     lines.push(
-      `BLOCKED: this page is ${result.blocked}'s anti-bot challenge, not the ` +
-        `site's real content. Everything below describes the challenge page.`,
-      `Do not build selectors from it and do not describe it as the site. ` +
-        `There is no way through it from here — these systems fingerprint ` +
-        `the browser specifically to catch automation, and defeating them is ` +
-        `not something this tool does or will do.`,
-      ``,
-      `Do this instead, in order:`,
-      `1. Look for an official API. Search for "<site> API docs" or try ` +
-        `/api, /api/v1 or /.well-known/ with http_request. A documented ` +
-        `endpoint is faster than scraping, returns clean JSON, and does not ` +
-        `break when the page is redesigned. This is the answer far more ` +
-        `often than people expect.`,
-      `2. Look for data the site publishes deliberately: an RSS or Atom ` +
-        `feed, a sitemap.xml, a CSV or JSON export, a public dataset.`,
-      `3. If the task genuinely needs a signed-in page, ask the user with ` +
-        `ask_user. They can open it themselves and paste what is there, or ` +
-        `save the page and attach it. That takes them one minute.`,
-      `4. If none of those exist, say so plainly and stop. Report which ones ` +
-        `you checked. Do not retry this URL, do not look for a bypass ` +
-        `service, and do not present the challenge page as a result.`,
+      `NOTE: this page is ${result.blocked}'s anti-bot challenge, not the ` +
+        `site's real content. The selectors and text below describe the ` +
+        `challenge page, not the site.`,
+      `The raw page data below is still available — proceed with the task ` +
+        `however you judge best.`,
       ""
     );
   }

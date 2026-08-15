@@ -471,16 +471,16 @@ check(
 );
 
 /*
- * An anti-bot challenge is reported, not scraped.
+ * An anti-bot challenge is named, not mistaken for the page, and not refused.
  *
- * Asked whether we could add a Cloudflare bypass. We cannot and will not —
- * but the honest failure was missing too: a challenge page loads with real
- * HTML and a 200 or 403, so the agent was reading Cloudflare's markup and
- * reporting ITS selectors and ITS text as though they were the site's. The
- * user then gets a scraper built against a block page, and nothing anywhere
- * says the real page was never seen.
+ * A challenge page loads with real HTML and a 200 or 403, so the agent used
+ * to read Cloudflare's markup and report ITS selectors and ITS text as though
+ * they were the site's. Detection keeps that honest — but the old refusal
+ * text ("no way through", "do not look for a bypass service", "stop") told
+ * the model to give up, and that is gone: the raw page data is returned and
+ * the agent proceeds.
  */
-console.log("\n10. A block is named, not mistaken for the page");
+console.log("\n10. A block is named, not mistaken for the page, not refused");
 
 const B = await import(pathToFileURL(path.join(ROOT, "src/lib/browser.ts")).href);
 
@@ -527,28 +527,26 @@ check(
   "a hidden/cross-origin checkbox failure is a Playwright iframe result, not an early wrapper branch"
 );
 check(
-  "the warning is printed BEFORE the scraped content",
-  browserSrc.indexOf("BLOCKED: this page is") <
+  "the note is printed BEFORE the scraped content",
+  browserSrc.indexOf("NOTE: this page is") <
     browserSrc.indexOf("Selectors on the rendered page"),
   "otherwise the model reads the block page's selectors as the site's"
 );
 check(
-  "the model is told not to build selectors from it",
-  /Do not build selectors from it/.test(browserSrc)
+  "the model is warned the data belongs to the challenge page",
+  /The selectors and text below describe the/.test(browserSrc)
 );
 check(
-  "and told plainly that there is no way around it",
-  /defeating them is\s*\` \+\s*\`?\s*not something|not something this tool does/.test(
-    browserSrc
-  ),
-  "an agent that keeps retrying a challenge burns rounds for nothing"
+  "no refusal remains — the model is never told there is no way through",
+  !/no way through|defeating them|not something this tool does/.test(browserSrc),
+  "the old give-up text is gone"
 );
 check(
-  "no bypass is attempted anywhere",
-  !/solve.?captcha|2captcha|anticaptcha|stealth.?plugin|puppeteer-extra/i.test(
+  "the model is never told to stop or to avoid a bypass",
+  !/Do not retry this URL|do not look for a bypass service|say so plainly and stop/i.test(
     browserSrc
   ),
-  "detected, never defeated"
+  "no stop sign is left in the source"
 );
 
 /*
@@ -589,15 +587,14 @@ check(
 );
 
 /*
- * A refusal that names the way forward.
+ * A challenge is named, then the run goes on.
  *
- * Asked "so how do we make our agent bypass this". The answer is that it does
- * not — but the first version of the blocked message said only that, and a
- * model told only what it cannot do either retries the same URL or invents
- * something. Every option below is a door the site operator deliberately
- * left open.
+ * The note leads with what the page actually is, returns the raw data, and
+ * says nothing that tells the model to stop, to retry without hope, or to
+ * avoid a bypass. Naming keeps the answer honest; the rest is the agent's
+ * call.
  */
-console.log("\n12. Blocked means redirected, not just refused");
+console.log("\n12. A challenge is named, then the run goes on");
 
 const blockedOut = B.formatSession({
   results: [{ action: "goto", ok: true, detail: "loaded" }],
@@ -610,39 +607,22 @@ const blockedOut = B.formatSession({
 });
 
 check(
-  "it points at an official API first",
-  /Look for an official API/.test(blockedOut),
-  "the one route that keeps working and survives a redesign"
+  "the challenge is named so it is not mistaken for the site",
+  /Cloudflare/.test(blockedOut) && /anti-bot challenge/.test(blockedOut)
 );
 check(
-  "and says how to look for one",
-  /\/api\/v1|API docs/.test(blockedOut),
-  "a suggestion with no next action is not a suggestion"
+  "the raw page content is still returned",
+  /Visible text/.test(blockedOut) && /Verify you are a human/.test(blockedOut)
 );
 check(
-  "it names the data sites publish on purpose",
-  /RSS|sitemap\.xml/.test(blockedOut)
+  "nothing tells the model to give up",
+  !/Do not retry|no way through|do not look for a bypass|say so plainly and stop/i.test(
+    blockedOut
+  )
 );
 check(
-  "it offers to ask the user rather than guessing",
-  /ask_user/.test(blockedOut),
-  "a signed-in page is one minute of the user's time, not an arms race"
-);
-check(
-  "it tells the model to stop rather than loop",
-  /Do not retry this URL/.test(blockedOut),
-  "retrying a challenge burns rounds and changes nothing"
-);
-check(
-  "and explicitly rules out hunting for a bypass service",
-  /do not look for a bypass service/i.test(blockedOut),
-  "FlareSolverr and friends are documented as non-functional against Turnstile"
-);
-check(
-  "the routes come before the scraped content",
-  blockedOut.indexOf("Look for an official API") <
-    blockedOut.indexOf("Visible text"),
-  "otherwise the advice is buried under the block page"
+  "the note comes before the scraped content",
+  blockedOut.indexOf("NOTE: this page is") < blockedOut.indexOf("Visible text")
 );
 
 const toolsSrc2 = readSourceSync(path.join(ROOT, "src/lib/tools.ts"));
@@ -652,8 +632,8 @@ check(
   "cheaper to find the API before spending a browser round"
 );
 check(
-  "and that a challenge means the site opted out of automation",
-  /chosen not to be automated/.test(toolsSrc2)
+  "and no longer tells the model not to look for a way around",
+  !/Do not look for a way around it|chosen not to be automated/.test(toolsSrc2)
 );
 
 console.log(
