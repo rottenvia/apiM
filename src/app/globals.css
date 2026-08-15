@@ -1,0 +1,1065 @@
+@import url('https://fonts.googleapis.com/css2?family=Instrument+Sans:ital,wght@0,400..700;1,400..700&family=JetBrains+Mono:wght@400;500&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&display=swap');
+
+@import "tailwindcss";
+
+/* ---------------------------------------------------------------------------
+   Design tokens — warm, neutral dark palette (Claude-inspired).
+   One restrained terracotta accent. No rainbow gradients.
+--------------------------------------------------------------------------- */
+@theme {
+  --color-bg-primary: #191715;
+  --color-bg-secondary: #141210;
+  --color-bg-tertiary: #201e1b;
+  --color-bg-elevated: #2a2723;
+  --color-bg-hover: #33302a;
+  --color-border: #2c2924;
+  --color-border-light: #403c34;
+  --color-text-primary: #ede9e2;
+  --color-text-secondary: #a29d92;
+  --color-text-muted: #6d685d;
+
+  --color-accent: #c96442;
+  --color-accent-light: #d97f5d;
+  --color-accent-glow: rgba(201, 100, 66, 0.14);
+
+  --color-success: #7ba478;
+  --color-warning: #cfa25a;
+  --color-danger: #cf6a5f;
+  --color-info: #6f98bd;
+  --color-search: #6ba3a0;
+  --color-search-glow: rgba(107, 163, 160, 0.12);
+  --color-thinking: #cfa25a;
+  --color-thinking-glow: rgba(207, 162, 90, 0.12);
+
+  --font-sans: 'Instrument Sans', ui-sans-serif, system-ui, -apple-system,
+    'Segoe UI', sans-serif;
+  --font-serif: 'Source Serif 4', Georgia, 'Times New Roman', serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border) transparent;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: var(--color-bg-primary);
+  color: var(--color-text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+button {
+  cursor: pointer;
+}
+button:disabled {
+  cursor: not-allowed;
+}
+
+::selection {
+  background: color-mix(in oklab, var(--color-accent) 32%, transparent);
+}
+
+:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--color-accent) 55%, transparent);
+  outline-offset: 1px;
+}
+textarea:focus-visible,
+input:focus-visible {
+  outline: none;
+}
+
+/* ---------------------------------------------------------------------------
+   Unified controls — every toolbar control shares one geometry so the
+   composer row stays perfectly symmetric at any resolution.
+--------------------------------------------------------------------------- */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  user-select: none;
+  transition:
+    color 0.15s ease,
+    background-color 0.15s ease,
+    border-color 0.15s ease;
+}
+/* Hover only where hovering is a real thing.
+ *
+ * Reported from screenshot 144: after clicking a chip and going back to
+ * typing, the chip stayed lit. Two causes, both fixed here.
+ *
+ * 1. On a device with a mouse this is genuine hover and correct. But the
+ *    plain `:hover` rule also latches on touch and, more importantly, some
+ *    browsers keep the hover state on an element whose dropdown just closed
+ *    because the pointer never technically left it. Scoping to `hover:hover`
+ *    means the rule only exists where the pointer can actually move away
+ *    again.
+ * 2. A click leaves the button focused. The base `:focus-visible` rule draws
+ *    a 2px accent outline, and on a chip sitting in a dense toolbar that
+ *    reads as "still selected" rather than "focused". Keyboard users still
+ *    need it, so it is kept — but tightened to a ring that matches the
+ *    chip's own radius instead of a hard square outline. */
+@media (hover: hover) {
+  .chip:hover {
+    color: var(--color-text-primary);
+    background: var(--color-bg-hover);
+    border-color: var(--color-border-light);
+  }
+}
+.chip:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px
+    color-mix(in oklab, var(--color-accent) 45%, transparent);
+}
+.chip[aria-expanded='true'] {
+  color: var(--color-text-primary);
+  background: var(--color-bg-hover);
+  border-color: var(--color-border-light);
+}
+.chip[data-active='true'] {
+  color: var(--color-accent-light);
+  background: color-mix(in oklab, var(--color-accent) 10%, transparent);
+  border-color: color-mix(in oklab, var(--color-accent) 32%, transparent);
+}
+@media (hover: hover) {
+  .chip[data-active='true']:hover {
+    color: var(--color-accent-light);
+    background: color-mix(in oklab, var(--color-accent) 16%, transparent);
+    border-color: color-mix(in oklab, var(--color-accent) 44%, transparent);
+  }
+}
+.chip > svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  color: var(--color-text-secondary);
+  transition:
+    color 0.15s ease,
+    background-color 0.15s ease;
+}
+.icon-btn:hover {
+  color: var(--color-text-primary);
+  background: var(--color-bg-hover);
+}
+.icon-btn > svg {
+  width: 18px;
+  height: 18px;
+}
+
+.send-btn {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 9999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease,
+    transform 0.15s ease;
+}
+.send-btn > svg {
+  width: 16px;
+  height: 16px;
+}
+.send-btn[data-enabled='true'] {
+  background: var(--color-accent);
+  color: #fff;
+}
+.send-btn[data-enabled='true']:hover {
+  background: var(--color-accent-light);
+}
+.send-btn[data-enabled='true']:active {
+  transform: scale(0.94);
+}
+.send-btn[data-enabled='false'] {
+  background: var(--color-bg-elevated);
+  color: var(--color-text-muted);
+}
+
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 18px;
+  border-radius: 12px;
+  border: none;
+  background: var(--color-accent);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
+  transition:
+    background-color 0.15s ease,
+    transform 0.15s ease;
+}
+.btn-primary:hover {
+  background: var(--color-accent-light);
+}
+.btn-primary:active {
+  transform: scale(0.98);
+}
+.btn-primary > svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* The primary action in the sidebar.
+ *
+ * It previously shared its exact styling with the two icon buttons beside it
+ * — same border, same transparent fill, same radius — so three controls of
+ * very different importance shouted at the same volume and the block read as
+ * a row of boxes rather than as one action with two utilities. A filled
+ * surface separates it without adding a second accent colour. */
+.new-chat-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 38px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: var(--color-bg-elevated);
+  color: var(--color-text-primary);
+  font-size: 13.5px;
+  font-weight: 500;
+  letter-spacing: -0.005em;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease;
+}
+.new-chat-btn:hover {
+  background: var(--color-bg-hover);
+  border-color: var(--color-border-light);
+}
+
+/* Secondary utilities: quiet until reached for, so they read as tools beside
+ * the action rather than as peers of it. */
+.sidebar-icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 38px;
+  height: 38px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--color-text-muted);
+  transition:
+    color 0.15s ease,
+    background-color 0.15s ease,
+    border-color 0.15s ease;
+}
+.sidebar-icon-btn:hover {
+  color: var(--color-text-primary);
+  background: var(--color-bg-tertiary);
+  border-color: var(--color-border);
+}
+
+/* A segmented control on one shared track, rather than two loose buttons each
+ * claiming half the sidebar. The moving thumb is what makes it read as one
+ * control with two states instead of two competing controls. */
+.segmented {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--color-bg-tertiary);
+}
+.segmented-item {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition:
+    color 0.15s ease,
+    background-color 0.15s ease;
+}
+.segmented-item:hover {
+  color: var(--color-text-secondary);
+}
+.segmented-item[data-active='true'] {
+  background: var(--color-bg-elevated);
+  color: var(--color-text-primary);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.25);
+}
+.segmented-item[data-active='true']:hover {
+  color: var(--color-text-primary);
+}
+/* The count is supporting detail, not part of the label. */
+.segmented-count {
+  margin-left: 5px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.55;
+}
+.new-chat-btn > svg {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  color: var(--color-text-secondary);
+  transition: color 0.15s ease;
+}
+.new-chat-btn:hover > svg {
+  color: var(--color-text-primary);
+}
+
+/* ---------------------------------------------------------------------------
+   Popovers — anchored above the composer, centered on the composer column,
+   internally scrollable so they never cover the chat bar.
+--------------------------------------------------------------------------- */
+.popover-card {
+  overflow: hidden;
+  border-radius: 16px;
+  border: 1px solid var(--color-border-light);
+  background: var(--color-bg-elevated);
+  box-shadow:
+    0 18px 48px rgba(0, 0, 0, 0.5),
+    0 2px 8px rgba(0, 0, 0, 0.3);
+  animation: popover-in 0.15s ease-out;
+}
+
+.popover-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  color: var(--color-text-muted);
+  transition:
+    color 0.15s ease,
+    background-color 0.15s ease;
+}
+.popover-close:hover {
+  color: var(--color-text-primary);
+  background: var(--color-bg-hover);
+}
+.popover-close > svg {
+  width: 13px;
+  height: 13px;
+}
+
+.option-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 8px;
+  text-align: left;
+  transition: background-color 0.15s ease;
+}
+.option-item:hover {
+  background: var(--color-bg-hover);
+}
+.option-item[data-active='true'] {
+  background: color-mix(in oklab, var(--color-accent) 8%, transparent);
+}
+
+/* Auto-dismiss margin helpers */
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* ---------------------------------------------------------------------------
+   Markdown content
+--------------------------------------------------------------------------- */
+.prose-chat {
+  line-height: 1.7;
+}
+
+.prose-chat p {
+  margin: 0.5em 0;
+}
+
+.prose-chat h1,
+.prose-chat h2,
+.prose-chat h3 {
+  font-weight: 650;
+  margin-top: 1em;
+  margin-bottom: 0.5em;
+  letter-spacing: -0.01em;
+}
+
+.prose-chat pre {
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 1em;
+  overflow-x: auto;
+  margin: 0.5em 0;
+  font-size: 0.875rem;
+}
+
+.prose-chat code {
+  font-family: var(--font-mono);
+  font-size: 0.875em;
+}
+
+.prose-chat :not(pre) > code {
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  padding: 0.15em 0.4em;
+  border-radius: 8px;
+  font-size: 0.85em;
+}
+
+.prose-chat ul,
+.prose-chat ol {
+  padding-left: 1.5em;
+  margin: 0.5em 0;
+}
+
+.prose-chat li {
+  margin: 0.25em 0;
+}
+
+.prose-chat a {
+  color: var(--color-accent-light);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.prose-chat blockquote {
+  border-left: 3px solid var(--color-accent);
+  padding-left: 1em;
+  margin: 0.5em 0;
+  color: var(--color-text-secondary);
+}
+
+.prose-chat table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.5em 0;
+}
+
+.prose-chat th,
+.prose-chat td {
+  border: 1px solid var(--color-border);
+  padding: 0.5em 0.75em;
+  text-align: left;
+}
+
+.prose-chat th {
+  background: var(--color-bg-elevated);
+  font-weight: 600;
+}
+
+/* ---------------------------------------------------------------------------
+   Streaming + scroll affordances
+--------------------------------------------------------------------------- */
+
+/* Caret that trails the text as tokens arrive. */
+.stream-caret {
+  display: inline-block;
+  width: 2px;
+  height: 1.05em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  border-radius: 1px;
+  background: var(--color-accent);
+  animation: caret-blink 1s steps(2, start) infinite;
+}
+
+@keyframes caret-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
+.scroll-bottom-btn {
+  position: absolute;
+  right: 50%;
+  bottom: 0.75rem;
+  transform: translateX(50%);
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 9999px;
+  border: 1px solid var(--color-border-light);
+  background: var(--color-bg-elevated);
+  color: var(--color-text-secondary);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+  animation: fadeIn 0.15s ease-out;
+  transition:
+    color 0.15s ease,
+    background-color 0.15s ease,
+    transform 0.15s ease;
+}
+.scroll-bottom-btn:hover {
+  color: var(--color-text-primary);
+  background: var(--color-bg-hover);
+}
+.scroll-bottom-btn:active {
+  transform: translateX(50%) scale(0.94);
+}
+.scroll-bottom-btn > svg {
+  width: 16px;
+  height: 16px;
+}
+
+.stop-btn {
+  background: var(--color-bg-elevated) !important;
+  color: var(--color-danger) !important;
+  border: 1px solid color-mix(in oklab, var(--color-danger) 35%, transparent);
+}
+.stop-btn:hover {
+  background: color-mix(in oklab, var(--color-danger) 16%, transparent) !important;
+}
+.stop-btn > svg {
+  width: 12px;
+  height: 12px;
+}
+
+/* ---------------------------------------------------------------------------
+   Animations
+--------------------------------------------------------------------------- */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes popover-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes thinking-pulse {
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.3s ease-out forwards;
+}
+
+.animate-thinking {
+  animation: thinking-pulse 1.5s ease-in-out infinite;
+}
+
+/* A file arriving in the workspace.
+ *
+ * A row that simply appears is easy to miss when the eye is on the reply, so
+ * the panel looked static while the agent was actually working. Expanding
+ * from zero height also pushes the rows below it, which reads as the list
+ * growing rather than as a repaint. */
+@keyframes file-appear {
+  from {
+    opacity: 0;
+    transform: translateX(-6px);
+    max-height: 0;
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+    max-height: 4rem;
+  }
+}
+
+.animate-file-in {
+  animation: file-appear 0.3s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  overflow: hidden;
+}
+
+/* Respect the OS setting — an animated list is decoration, not information. */
+@media (prefers-reduced-motion: reduce) {
+  .animate-file-in {
+    animation: none;
+  }
+}
+
+/* A row in the chat list.
+ *
+ * Two things made hovering down the list feel laggy and made the highlight
+ * appear to skip pixels.
+ *
+ * The rows were separated by a 4px flex gap that belonged to no row, so the
+ * pointer passed through dead space at every boundary and the highlight went
+ * on, off, then on again. The gap is now transparent margin inside the row's
+ * own box: the rows visually sit apart but their hit areas touch, so the
+ * highlight hands straight from one to the next with nothing in between.
+ *
+ * And `transition-colors` eased the hover *in* as well as out, so there were
+ * 150ms before a row looked hovered and another 150ms fading — crossing a gap
+ * fired both. Hover now applies instantly and only the fade-out is eased,
+ * which reads as responsive without hard flicker. Only background-color is
+ * animated; border-color and color are left to snap, since interpolating
+ * alpha on every row in a list is what makes the whole thing feel heavy. */
+.conv-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  /* Vertical margin, not a parent gap, so the gap belongs to a hit area. */
+  margin: 2px 0;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  color: var(--color-text-secondary);
+  /* Out only. The hovered state is applied with no delay below. */
+  transition: background-color 0.15s ease-out;
+}
+.conv-row:hover {
+  background: var(--color-bg-tertiary);
+  border-color: var(--color-border);
+  color: var(--color-text-primary);
+  transition: none;
+}
+.conv-row.is-current {
+  background: var(--color-bg-elevated);
+  border-color: color-mix(in oklab, var(--color-accent) 40%, transparent);
+  color: var(--color-text-primary);
+}
+
+/* A row in the workspace file list and the history list.
+ *
+ * Same reasoning as .conv-row: hover applies instantly and only the fade-out
+ * is eased, so running the pointer down a list of files feels immediate. */
+.list-row {
+  border-radius: 8px;
+  margin: 0 -8px;
+  padding: 6px 8px;
+  transition: background-color 0.15s ease-out;
+}
+.list-row:hover {
+  background: var(--color-bg-hover);
+  transition: none;
+}
+
+/* Settings group rail. Same 10px radius as the sidebar controls, so the two
+ * navigation surfaces in the app read as the same kind of thing. */
+.settings-tab {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 12.5px;
+  font-weight: 500;
+  text-align: left;
+  transition:
+    color 0.15s ease,
+    background-color 0.15s ease;
+}
+.settings-tab:hover {
+  color: var(--color-text-secondary);
+  background: var(--color-bg-tertiary);
+}
+.settings-tab[data-active='true'] {
+  color: var(--color-text-primary);
+  background: var(--color-bg-elevated);
+}
+
+/* ---------------------------------------------------------------------------
+   Thinking panel
+--------------------------------------------------------------------------- */
+
+/* The panel arriving.
+ *
+ * Asked for repeatedly and repeatedly not done, so: what was wrong with it.
+ *
+ * The old version faded in while sliding down from -4px. The slide is the
+ * problem. The panel takes up height the instant it mounts, so everything
+ * below it is shoved down in one frame — and then the panel itself drifts
+ * downward into a gap that has already opened. Two motions disagreeing about
+ * where the content belongs is what read as "ugly": the page jumps, then the
+ * box glides, and the eye tracks both.
+ *
+ * Now nothing slides. The panel grows from zero height using the same
+ * grid 0fr->1fr technique used for the body below, so the text underneath is
+ * eased apart by exactly the amount the panel occupies, at the same rate the
+ * panel fills it. One motion, no jump, and the opacity resolves early so the
+ * label is readable while the box is still settling.
+ *
+ * Timings stay on the three-value scale the design tests enforce. */
+.thinking-panel {
+  display: grid;
+  /*
+   * The resting state is the finished, VISIBLE state.
+   *
+   * This used to be 0fr and relied on `thinking-open` to reach 1fr. But the
+   * reduced-motion rule correctly disables that animation, leaving the panel
+   * permanently collapsed to the one-pixel border shown in Screenshot_166.
+   * Animations must decorate a working layout, never be required to reveal
+   * information. With 1fr here, unsupported/disabled animation means a box;
+   * the keyframe can still start at 0fr when motion is allowed.
+   */
+  grid-template-rows: 1fr;
+  opacity: 1;
+  animation: thinking-open 0.3s cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+
+@keyframes thinking-open {
+  from {
+    grid-template-rows: 0fr;
+    opacity: 0;
+  }
+  to {
+    grid-template-rows: 1fr;
+    opacity: 1;
+  }
+}
+
+/* The row itself must be able to collapse, or the grid animation has nothing
+   to animate against. */
+.thinking-panel > * {
+  min-height: 0;
+}
+
+/* The panel warming up.
+ *
+ * The row used to be plain text one frame and a filled amber panel the next.
+ * Nothing moved, but the colour arrived instantly, and an instant change with
+ * no transition reads as a repaint — which is what made it feel like a glitch
+ * rather than a state.
+ *
+ * Everything that differs between the two states is transitioned over the
+ * same duration, so the label starts as ordinary metadata and warms into the
+ * panel. The amber is worth keeping: reasoning is genuinely a different kind
+ * of content from the answer, and it should look like it. */
+.thinking-shell {
+  /* A resting state that is actually visible.
+   *
+   * This was fully transparent once the model stopped thinking, so a finished
+   * panel had no edge at all and its text sat loose on the page — reported as
+   * "transparent without any outline, text looks out of place". The panel is
+   * a container whether or not it is active, so it now keeps a quiet border
+   * and fill and only warms to amber while reasoning is arriving. */
+  border: 1px solid var(--color-border);
+  background: color-mix(in oklab, var(--color-bg-secondary) 55%, transparent);
+  transition:
+    border-color 0.3s ease,
+    background-color 0.3s ease;
+}
+/* Expanded means a real surface, not a label sitting between two hairlines.
+ * The active amber state below still wins while tokens are arriving. */
+.thinking-shell[data-open='true'] {
+  border-color: var(--color-border-light);
+  background: color-mix(in oklab, var(--color-bg-tertiary) 72%, transparent);
+}
+.thinking-shell[data-thinking='true'] {
+  border-color: color-mix(in oklab, #cfa25a 32%, transparent);
+  background: color-mix(in oklab, #cfa25a 8%, transparent);
+}
+
+.thinking-toggle {
+  color: var(--color-text-muted);
+  transition: color 0.3s ease;
+}
+.thinking-shell[data-thinking='true'] .thinking-toggle {
+  color: #cfa25a;
+}
+.thinking-toggle:hover {
+  color: var(--color-text-secondary);
+}
+.thinking-shell[data-thinking='true'] .thinking-toggle:hover {
+  color: color-mix(in oklab, #cfa25a 80%, white);
+}
+
+.thinking-body-text {
+  color: var(--color-text-muted);
+  border-top: 1px solid transparent;
+  transition:
+    color 0.3s ease,
+    border-color 0.3s ease;
+}
+.thinking-shell[data-thinking='true'] .thinking-body-text {
+  border-top-color: color-mix(in oklab, #cfa25a 14%, transparent);
+}
+
+/* Progress lives in the header as three quiet dots. There is deliberately no
+ * full-width progress rule: in a tool-only reply it was indistinguishable from
+ * the separate timeline divider and looked like the missing panel itself. */
+@media (prefers-reduced-motion: reduce) {
+  .thinking-shell,
+  .thinking-toggle,
+  .thinking-body-text {
+    transition: none;
+  }
+}
+
+/* Expanding to reveal the text.
+ *
+ * A grid row from 0fr to 1fr animates to the content's real height without
+ * anyone having to measure it, so the panel grows rather than snapping open.
+ * max-height would need a guessed ceiling and would ease wrongly whenever the
+ * guess was too large.
+ *
+ * What made the old version look wrong was fading the whole block over the
+ * same 0.3s as the height. Two things changed at once on the same clock: the
+ * box scaled open while the text it contained was still half transparent, so the
+ * words appeared to smear upward out of nothing instead of being uncovered.
+ *
+ * Now the height is the only thing that moves the layout, and it uses a
+ * gentle ease-out so it decelerates into place rather than stopping dead.
+ * The text is handled separately below: it is fully opaque almost
+ * immediately, so what you see is a panel sliding open over finished text —
+ * a reveal, not a fade. */
+.thinking-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.3s cubic-bezier(0.32, 0.72, 0, 1);
+}
+.thinking-body[data-open='true'] {
+  grid-template-rows: 1fr;
+}
+.thinking-body > * {
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* The text being uncovered.
+ *
+ * A short rise with the fade, on the faster tier so it settles while the box
+ * is still opening. Closing uses the same quick timing with no delay — a
+ * lingering fade on the way out is what makes a collapse feel sticky. */
+.thinking-body .thinking-body-text {
+  opacity: 0;
+  transform: translateY(-2px);
+  transition:
+    opacity 0.15s ease,
+    transform 0.15s ease;
+}
+.thinking-body[data-open='true'] .thinking-body-text {
+  opacity: 1;
+  transform: translateY(0);
+  transition:
+    opacity 0.15s ease 0.05s,
+    transform 0.3s cubic-bezier(0.32, 0.72, 0, 1) 0.05s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thinking-panel {
+    /* Base state is 1fr/opaque, so disabling motion reveals the whole box. */
+    animation: none;
+  }
+  .thinking-body,
+  .thinking-body .thinking-body-text,
+  .thinking-body[data-open='true'] .thinking-body-text {
+    transition: none;
+  }
+  /* Still hidden when shut, just without the movement. */
+  .thinking-body .thinking-body-text {
+    transform: none;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   The btw dock — a side question that must not disturb the running task
+--------------------------------------------------------------------------- */
+
+/* Arriving.
+ *
+ * It rises from the composer rather than fading in place, because that is
+ * where it came from: you typed it there. Anything appearing above the reply
+ * you are reading has to explain itself in the motion, or it registers as the
+ * page jumping. */
+@keyframes btw-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.btw-dock {
+  animation: btw-enter 0.3s cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+
+/* Expanding, the same grid-rows approach as the thinking panel: it animates
+ * to the content's real height with nothing measured. The row itself never
+ * moves — only what is underneath it grows — so the composer stays exactly
+ * where your hands already are. */
+.btw-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.3s cubic-bezier(0.32, 0.72, 0, 1);
+}
+.btw-body[data-open='true'] {
+  grid-template-rows: 1fr;
+}
+.btw-body > * {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.btw-body .btw-body-inner {
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.btw-body[data-open='true'] .btw-body-inner {
+  opacity: 1;
+  transition: opacity 0.15s ease 0.05s;
+}
+
+/* The send button while an aside is composed.
+ *
+ * Teal rather than the accent terracotta, matching the dock it will produce.
+ * The point is that at a glance you can tell this press will not touch the
+ * running task — the button that normally says Stop has become something
+ * else, and the colour is what says so before you read the icon. */
+.send-btn.btw-send {
+  background: color-mix(in oklab, var(--color-search) 88%, black);
+  color: #fff;
+}
+.send-btn.btw-send:hover {
+  background: var(--color-search);
+}
+.send-btn.btw-send:active {
+  transform: scale(0.94);
+}
+
+/* Waiting.
+ *
+ * One dot, breathing. A spinner would compete with the main task's own
+ * activity indicator a few pixels above it, and two things spinning at once
+ * reads as one thing broken. */
+@keyframes btw-breathe {
+  0%, 100% {
+    opacity: 0.25;
+    transform: scale(0.8);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.btw-pulse {
+  display: block;
+  height: 6px;
+  width: 6px;
+  border-radius: 9999px;
+  background: var(--color-search);
+  animation: btw-breathe 1.5s ease-in-out infinite;
+}
+
+/* Markdown inside the answer. Tightened, because this is an aside — it should
+ * never look like a second reply competing with the real one. */
+.btw-prose > :first-child {
+  margin-top: 0;
+}
+.btw-prose > :last-child {
+  margin-bottom: 0;
+}
+.btw-prose p {
+  margin: 0 0 0.5em;
+}
+.btw-prose ul,
+.btw-prose ol {
+  margin: 0 0 0.5em;
+  padding-left: 1.1em;
+}
+.btw-prose li {
+  margin: 0.15em 0;
+}
+.btw-prose code {
+  border-radius: 8px;
+  background: var(--color-bg-tertiary);
+  padding: 0.1em 0.32em;
+  font-size: 0.92em;
+}
+.btw-prose pre {
+  overflow-x: auto;
+  border-radius: 8px;
+  background: var(--color-bg-secondary);
+  padding: 0.6em 0.7em;
+  margin: 0 0 0.5em;
+}
+.btw-prose pre code {
+  background: none;
+  padding: 0;
+}
+.btw-prose a {
+  color: var(--color-search);
+  text-decoration: underline;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .btw-dock {
+    animation: none;
+  }
+  .btw-body,
+  .btw-body .btw-body-inner {
+    transition: none;
+  }
+  .btw-pulse {
+    animation: none;
+    opacity: 0.7;
+  }
+}

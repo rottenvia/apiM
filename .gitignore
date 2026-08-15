@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+# Python build output. Anchored to the repo root with a leading slash so it
+# only ever means ./lib, not every folder named "lib" in the project — that
+# silently swallowed src/lib once already, and scripts/lib after it.
+/lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.venv/
+venv/
+ENV/
+env/
+
+# Environment Variables & Secrets
+.env
+*.secret
+
+# OS & Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Node / Web (if applicable)
+node_modules/
+.next/
+dist/
+tsconfig.tsbuildinfo
+
+# Local chat history (file-backed store)
+data/
+
+# Server deployment secrets — contains the app password and session key.
+deploy/.env
+
+# Output of `npm run cost:lab` — a measurement artefact, regenerated on demand.
+scripts/.cost-report.json
+scripts/tmp/
+
+# Per-suite test data, created by `npm test`.
+.test-data/
+
+# Output of `npm run report`, meant to be attached rather than committed.
+report.txt

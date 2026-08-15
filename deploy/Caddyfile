@@ -1,0 +1,27 @@
+# Caddy sits in front of the app and terminates HTTPS.
+#
+# With a domain in SITE_ADDRESS it fetches and renews a free Let's Encrypt
+# certificate automatically. With a bare `:80` it serves plain HTTP.
+
+{$SITE_ADDRESS} {
+	reverse_proxy app:3000
+
+	# Streaming responses must not be buffered, or the chat would arrive in
+	# one lump at the end instead of token by token.
+	encode zstd gzip
+
+	header {
+		# Don't advertise the server software.
+		-Server
+		# Block the page being framed by another site.
+		X-Frame-Options DENY
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+	}
+
+	request_body {
+		# Screenshots and file attachments are sent inline as base64, which
+		# is larger than the default cap allows.
+		max_size 32MB
+	}
+}
