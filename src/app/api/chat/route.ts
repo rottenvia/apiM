@@ -73,6 +73,7 @@ import {
 import type { RebuiltResume } from "@/lib/rebuild-resume";
 import { fetchWithRetry } from "@/lib/retry";
 import { extractReasoningDelta } from "@/lib/reasoning-stream";
+import { loadScopedConversationHistory } from "@/lib/chat-history";
 import {
   GITHUB_TOKEN_COOKIE,
   githubConfig,
@@ -382,7 +383,6 @@ export async function POST(req: NextRequest) {
     thinkingEffort = "auto",
     webSearchMode = "off",
     enabledPluginIds = [],
-    conversationHistory = [],
     regenerateFromId,
     resumeMessageId,
     resumeNote,
@@ -457,6 +457,21 @@ export async function POST(req: NextRequest) {
       const startedAt = Date.now();
       const convId: string = conversationId ?? uuidv4();
 
+      /*
+       * A normal UI request uses the same id for conversation and workspace.
+       * Refuse a disagreement instead of letting Chat B point at Chat A's
+       * LESSONS.md, plan, GitHub checkout or files. Direct API callers that
+       * omit conversationId may still name a standalone workspace.
+       */
+      if (conversationId && workspaceId && workspaceId !== conversationId) {
+        send({
+          type: "error",
+          error: "Conversation/workspace mismatch. Start a new request from the active chat.",
+        });
+        close();
+        return;
+      }
+
       // Two chats opened with the same first message would otherwise want the
       // same title, and the second would land in the first's folder. Only new
       // chats are adjusted; an existing one keeps whatever it is called.
@@ -511,6 +526,24 @@ export async function POST(req: NextRequest) {
           } catch (e) {
             console.error("Failed to truncate for regenerate:", e);
           }
+        }
+
+        /*
+         * History is loaded by conversation id on the server.
+         *
+         * The browser used to send an arbitrary `conversationHistory` array.
+         * During a fast New chat / Select chat transition, a stale callback
+         * could address Chat B while still carrying Chat A's messages — a
+         * direct cross-chat memory leak. Client history is now ignored; a new
+         * id has no stored history, and an existing id can only read itself.
+         */
+        let scopedHistory: ChatMessage[] = [];
+        try {
+          scopedHistory = await loadScopedConversationHistory(convId, {
+            dropLastUser: Boolean(regenerateFromId || resumeMessageId),
+          });
+        } catch (e) {
+          console.error("Could not load scoped conversation history:", e);
         }
 
         /*
@@ -622,7 +655,7 @@ export async function POST(req: NextRequest) {
         let searchContext: SmartSearchContext | null = null;
         let searchSummary = "";
 
-        const recentContext = conversationHistory
+        const recentContext = scopedHistory
           .slice(-4)
           .map((m) => `${m.role}: ${m.content}`)
           .join("\n");
@@ -860,7 +893,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           },
         ];
 
-        for (const msg of conversationHistory.slice(-20)) {
+        for (const msg of scopedHistory) {
           if (!msg.content?.trim()) continue;
           transcript.push(
             msg.role === "assistant"
