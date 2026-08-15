@@ -178,16 +178,24 @@ export async function launch(workspaceDir: string): Promise<LaunchResult> {
       // "domcontentloaded" rather than "load": a page with a slow analytics
       // beacon is usable long before `load` fires, and waiting for it is the
       // most common cause of a pointless 30-second timeout.
-      await page.goto(url, {
+      const response = await page.goto(url, {
         waitUntil: "domcontentloaded",
         timeout: NAV_TIMEOUT_MS,
       });
+      return { url: page.url(), status: response?.status() ?? null };
     },
-    async click(selector) {
-      await page.click(selector);
+    async click(selector, force = false) {
+      await page.locator(selector).scrollIntoViewIfNeeded();
+      await page.click(selector, { force });
     },
-    async type(selector, text) {
-      await page.fill(selector, text);
+    async type(selector, text, pressEnter = false) {
+      const target = page.locator(selector);
+      await target.click();
+      // Real keyboard events work with React-controlled inputs that ignore a
+      // direct value assignment. Clear first so this retains fill semantics.
+      await target.fill("");
+      await target.pressSequentially(text);
+      if (pressEnter) await target.press("Enter");
     },
     async waitForSelector(selector, timeoutMs) {
       await page.waitForSelector(selector, { timeout: timeoutMs });
@@ -203,18 +211,34 @@ export async function launch(workspaceDir: string): Promise<LaunchResult> {
         else window.scrollTo(0, target as number);
       }, to);
     },
-    async screenshot() {
-      return (await page.screenshot({ type: "png" })) as Buffer;
+    async screenshot(fullPage = false) {
+      return (await page.screenshot({ type: "png", fullPage })) as Buffer;
     },
     async evaluate(script) {
-      // Wrapped so both an expression and a statement body work — models
-      // write either, and rejecting one costs a round.
-      return await page.evaluate(`(() => { return (${script}); })()`);
+      const serialise = (value: string) =>
+        `(() => { const value = ${value}; ` +
+        `if (value instanceof Element) return value.outerHTML; ` +
+        `if (typeof value === "number" && !Number.isFinite(value)) return null; ` +
+        `return value === undefined ? null : value; })()`;
+      try {
+        // Expression form: document.title, Array.from(...), etc.
+        return await page.evaluate(serialise(`(${script})`));
+      } catch (error) {
+        if (!(error instanceof SyntaxError) && !/SyntaxError/.test(String(error))) {
+          throw error;
+        }
+        // Statement form: const x = ...; return x. Wrapped so return is legal
+        // and variables do not leak into the page global.
+        return await page.evaluate(serialise(`(() => { ${script} })()`));
+      }
     },
     async extract(selector) {
       return (await page.$$eval(selector, (nodes: Element[]) =>
         nodes.map((n) => (n.textContent ?? "").trim()).filter(Boolean)
       )) as string[];
+    },
+    async url() {
+      return page.url();
     },
     async title() {
       return await page.title();
@@ -222,8 +246,10 @@ export async function launch(workspaceDir: string): Promise<LaunchResult> {
     async innerText() {
       return await page.evaluate(() => document.body?.innerText ?? "");
     },
-    async html() {
-      return await page.content();
+    async html(selector) {
+      return selector
+        ? await page.locator(selector).evaluate((element: Element) => element.outerHTML)
+        : await page.content();
     },
     async close() {
       await context.close();

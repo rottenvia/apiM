@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { normalisePlanStepText } from "@/lib/plan-view";
 
 export interface PlanStepView {
   id: number;
@@ -81,7 +82,7 @@ export function PlanPanel({ plan }: { plan: PlanView }) {
               {complete
                 ? "All steps done"
                 : current
-                  ? `Now: ${current.text}`
+                  ? `Now: ${normalisePlanStepText(current.text) || "Untitled step"}`
                   : plan.summary}
             </p>
           )}
@@ -126,7 +127,7 @@ export function PlanPanel({ plan }: { plan: PlanView }) {
                         : "text-text-secondary"
                     }`}
                   >
-                    {step.text}
+                    {normalisePlanStepText(step.text) || "Untitled step"}
                   </span>
                   {/* Shown because it is the evidence, not decoration: a step
                       marked done without it cannot exist. */}

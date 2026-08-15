@@ -2066,7 +2066,11 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   plan,
                   createPlan(
                     String(pArgs.goal ?? ""),
-                    Array.isArray(pArgs.steps) ? pArgs.steps.map(String) : []
+                    // The schema asks for strings, but some models send
+                    // {title, description}. createPlan normalises that shape;
+                    // String(object) is the literal "[object Object]" shown in
+                    // every plan row in Screenshot_168.
+                    Array.isArray(pArgs.steps) ? pArgs.steps : []
                   )
                 );
                 replanCount += 1;

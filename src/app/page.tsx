@@ -1126,9 +1126,16 @@ export default function Home() {
       let pendingContent = "";
       let pendingReasoning = "";
       let frame: number | null = null;
+      let flushTimer: ReturnType<typeof setTimeout> | null = null;
 
       const flush = () => {
+        // Whichever scheduler won cancels the other. requestAnimationFrame can
+        // pause in a throttled/background window; the timer is the guarantee
+        // that real reasoning does not sit behind a permanent "Thinking…".
+        if (frame !== null) cancelAnimationFrame(frame);
+        if (flushTimer !== null) clearTimeout(flushTimer);
         frame = null;
+        flushTimer = null;
         if (!pendingContent && !pendingReasoning) return;
         const c = pendingContent;
         const r = pendingReasoning;
@@ -1164,6 +1171,10 @@ export default function Home() {
       };
       const scheduleFlush = () => {
         if (frame === null) frame = requestAnimationFrame(flush);
+        // Frames may be delayed indefinitely when Chromium throttles the tab.
+        // Fifty milliseconds still batches a fast stream while making the
+        // first reasoning text visibly replace the placeholder immediately.
+        if (flushTimer === null) flushTimer = setTimeout(flush, 50);
       };
 
       /** Set when a tool changed the workspace, so the list can refresh. */
@@ -1171,7 +1182,6 @@ export default function Home() {
       const changedPaths = new Set<string>();
 
       const finish = (patch: Partial<Message>) => {
-        if (frame !== null) cancelAnimationFrame(frame);
         flush();
         setMessages((prev) =>
           prev.map((m) =>
@@ -1270,6 +1280,17 @@ export default function Home() {
             } catch {
               continue;
             }
+
+            /*
+             * Preserve stream order at visible boundaries.
+             *
+             * Reasoning/content deltas are batched, while plans and tool rows
+             * are applied immediately. Without flushing here, a tool could
+             * appear while the reasoning that led to it was still waiting for
+             * a browser frame — exactly the intermittent double-"Thinking…"
+             * state in Screenshot_169.
+             */
+            if (evt.type !== "reasoning" && evt.type !== "content") flush();
 
             switch (evt.type) {
               case "status":

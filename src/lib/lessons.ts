@@ -91,8 +91,8 @@ function serialise(lessons: Lesson[]): string {
     "",
     "Written by the agent from things that actually happened — a command that",
     "failed, a test that passed, a tool that errored. Each entry keeps the",
-    "evidence behind it, and is revised automatically when a later run proves",
-    "it wrong. Safe to edit or delete by hand.",
+    "evidence behind it. When Learning is enabled, a later completed run can",
+    "revise a contradicted entry. Safe to edit or delete by hand.",
     "",
   ];
 

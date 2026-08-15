@@ -16,6 +16,7 @@ import { listSnapshots, restoreSnapshot } from "@/lib/snapshots";
 import { documentKind, readDocument } from "@/lib/documents";
 import {
   fetchPage,
+  downloadResource,
   extractSelectors,
   MAX_FETCH_CHARS,
   WebError,
@@ -832,7 +833,7 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
           actions: {
             type: "array",
             description:
-              'Steps to perform, in order. The first must be goto. Examples: {"action":"goto","url":"https://..."}, {"action":"wait_for","selector":".match-score"}, {"action":"click","selector":"#accept"}, {"action":"type","selector":"#q","text":"hello"}, {"action":"scroll","to":"bottom"}, {"action":"screenshot","name":"after-load"}, {"action":"extract","selector":".score"}, {"action":"evaluate","script":"document.querySelectorAll(\'.row\').length"}.',
+              'Steps to perform in one shared live page; the first must be goto. Examples: {"action":"goto","url":"https://..."}, {"action":"html","selector":".game"}, {"action":"wait_for","selector":".match-score"}, {"action":"click","selector":"#accept","force":false}, {"action":"type","selector":"#q","text":"hello","press_enter":true}, {"action":"screenshot","name":"after-load","full_page":true}, {"action":"evaluate","script":"document.querySelectorAll(\'.row\').length"}.',
             items: { type: "object" },
           },
         },
@@ -975,9 +976,10 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
     function: {
       name: "download_file",
       description:
-        "Save a file from a URL straight into the workspace — a dataset, an " +
-        "icon, a reference document. Use this instead of asking the user to " +
-        "download something and attach it.",
+        "Save the exact bytes from a URL straight into the workspace — PDFs, " +
+        "images, archives, datasets, or text. A downloaded PDF can be passed " +
+        "to read_document and an image to view_image. Use this instead of " +
+        "asking the user to download something and attach it.",
       parameters: {
         type: "object",
         properties: {
@@ -985,6 +987,12 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
           path: {
             type: "string",
             description: "Where to save it, relative to the workspace root.",
+          },
+          allow_local: {
+            type: "boolean",
+            description:
+              "Set true only when downloading from a development server on " +
+              "localhost/127.0.0.1/[::1]. Private LAN and metadata addresses remain blocked.",
           },
         },
         required: ["url", "path"],
@@ -1772,19 +1780,23 @@ export async function runTool(
 
       case "download_file": {
         const target = str(args, "path");
-        const page = await fetchPage(str(args, "url"), { raw: true });
-        // Raw body when it is a document, decoded text otherwise, so a saved
-        // page is the actual page rather than a stripped rendering of it.
-        const body = page.html ?? page.text;
-        const written = await writeFile(workspaceId, target, body);
+        const resource = await downloadResource(str(args, "url"), {
+          allowLocal: args.allow_local === true,
+        });
+        // Bytes, never decoded text. This is what lets a downloaded PDF flow
+        // directly into read_document and an image into view_image without
+        // being corrupted or refused as "not a page".
+        const written = await writeFileBytes(
+          workspaceId,
+          target,
+          Buffer.from(resource.data)
+        );
 
         return {
           ok: true,
           content:
-            `Saved ${page.url} to ${written.path} (${written.bytes} bytes).` +
-            (page.truncated
-              ? " The response was truncated at the size limit."
-              : ""),
+            `Saved ${resource.url} to ${written.path} (${written.bytes} bytes, ` +
+            `${resource.contentType}).`,
           summary: `Downloaded ${written.path}`,
           changedPath: written.path,
         };

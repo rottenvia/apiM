@@ -57,6 +57,7 @@ function makeDriver(overrides = {}) {
     '<div class="match-header"><span id="score" class="match-header__score">16-14</span>' +
     '<div data-testid="team-a" class="team team--home">NAVI</div></div>';
   let loaded = false;
+  let loadedUrl = "";
 
   return {
     calls,
@@ -64,12 +65,14 @@ function makeDriver(overrides = {}) {
       async goto(url) {
         calls.push(`goto:${url}`);
         loaded = true;
+        loadedUrl = `${url}/final`;
+        return { url: loadedUrl, status: 200 };
       },
-      async click(sel) {
-        calls.push(`click:${sel}`);
+      async click(sel, force = false) {
+        calls.push(`click:${sel}:${force}`);
       },
-      async type(sel, text) {
-        calls.push(`type:${sel}:${text}`);
+      async type(sel, text, pressEnter = false) {
+        calls.push(`type:${sel}:${text}:${pressEnter}`);
       },
       async waitForSelector(sel) {
         calls.push(`wait:${sel}`);
@@ -80,8 +83,8 @@ function makeDriver(overrides = {}) {
       async scroll(to) {
         calls.push(`scroll:${to}`);
       },
-      async screenshot() {
-        calls.push("screenshot");
+      async screenshot(fullPage = false) {
+        calls.push(`screenshot:${fullPage}`);
         return Buffer.from("PNGDATA");
       },
       async evaluate(script) {
@@ -92,13 +95,17 @@ function makeDriver(overrides = {}) {
         calls.push(`extract:${sel}`);
         return ["16-14", "NAVI"];
       },
+      async url() {
+        return loadedUrl;
+      },
       async title() {
         return "FACEIT Match";
       },
       async innerText() {
         return "16-14 NAVI";
       },
-      async html() {
+      async html(selector) {
+        calls.push(`html:${selector ?? "all"}`);
         return loaded ? RENDERED : SHELL;
       },
       async close() {
@@ -187,6 +194,11 @@ check(
   "a static fetch sees only id=root"
 );
 check("the page title is reported", result.title === "FACEIT Match");
+check(
+  "navigation reports final URL and HTTP status",
+  result.finalUrl === "https://faceit.com/m/1/final" &&
+    /HTTP 200/.test(result.results[0].detail)
+);
 check("visible text is returned", result.text === "16-14 NAVI");
 check("the browser is always closed", calls.includes("close"));
 
@@ -194,26 +206,32 @@ check("the browser is always closed", calls.includes("close"));
 console.log("\n3. Every action reaches the driver, in order");
 
 ({ driver, calls } = makeDriver());
-await browser.runSession(
+result = await browser.runSession(
   driver,
   browser.validateActions([
     { action: "goto", url: "https://x" },
+    { action: "html", selector: ".match-header" },
     { action: "wait_for", selector: ".ready" },
-    { action: "click", selector: "#accept" },
-    { action: "type", selector: "#q", text: "hello" },
+    { action: "click", selector: "#accept", force: true },
+    { action: "type", selector: "#q", text: "hello", press_enter: true },
     { action: "scroll", to: "bottom" },
     { action: "extract", selector: ".score" },
     { action: "evaluate", script: "1+1" },
-    { action: "screenshot", name: "final" },
+    { action: "screenshot", name: "final", full_page: true },
   ]),
   saveShot,
   noLogs()
 );
 check(
   "the order is preserved exactly",
-  calls.slice(0, 8).join("|") ===
-    "goto:https://x|wait:.ready|click:#accept|type:#q:hello|scroll:bottom|extract:.score|eval:1+1|screenshot",
+  calls.slice(0, 9).join("|") ===
+    "goto:https://x|html:.match-header|wait:.ready|click:#accept:true|type:#q:hello:true|scroll:bottom|extract:.score|eval:1+1|screenshot:true",
   calls.slice(0, 3).join(" ")
+);
+check(
+  "html returns rendered DOM, optionally scoped to a selector",
+  result.results[1].action === "html" &&
+    result.results[1].detail.includes("match-header__score")
 );
 
 // ---------------------------------------------------------------------------
@@ -349,6 +367,18 @@ check(
 check(
   "and uses the agent's own profile, never the user's",
   /AGENT_PROFILE_DIR/.test(adapter)
+);
+check(
+  "the six requested browser operations are one browse action language",
+  /action: "html"/.test(readSourceSync(path.join(ROOT, "src/lib/browser.ts"))) &&
+    /action: "evaluate"/.test(readSourceSync(path.join(ROOT, "src/lib/browser.ts"))) &&
+    /pressSequentially/.test(adapter) &&
+    /fullPage/.test(adapter),
+  "goto, rendered html, evaluate, click, type and screenshot share one page within the call"
+);
+check(
+  "evaluate serializes DOM nodes and non-finite values safely",
+  /value instanceof Element/.test(adapter) && /Number\.isFinite/.test(adapter)
 );
 check(
   "playwright is optional, so the app runs without it",
