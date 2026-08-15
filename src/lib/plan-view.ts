@@ -8,7 +8,13 @@
  * else instead of leaking JavaScript coercion into the UI and saved plan.
  */
 export function normalisePlanStepText(value: unknown): string {
-  if (typeof value === "string") return value.trim();
+  if (typeof value === "string") {
+    const text = value.trim();
+    // Already-corrupted plans from older builds stored the coercion result,
+    // so the original title cannot be recovered. Never keep displaying the
+    // JavaScript placeholder; the UI will show "Untitled step" instead.
+    return /^\[object Object\]$/i.test(text) ? "" : text;
+  }
   if (!value || typeof value !== "object" || Array.isArray(value)) return "";
 
   const item = value as Record<string, unknown>;

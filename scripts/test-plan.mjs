@@ -42,6 +42,7 @@ const DATA_ROOT = process.env.APIM_DATA_ROOT
 const load = (p) => import(pathToFileURL(path.join(ROOT, p)).href);
 
 const plan = await load("src/lib/plan.ts");
+const planView = await load("src/lib/plan-view.ts");
 const { WORKSPACE_TOOLS } = await load("src/lib/tools.ts");
 
 const COLOR = process.stdout.isTTY && !process.env.NO_COLOR;
@@ -127,7 +128,9 @@ check(
 );
 check(
   "no plan step can become JavaScript's object placeholder",
-  structured.steps.every((s) => !s.text.includes("[object Object]"))
+  structured.steps.every((s) => !s.text.includes("[object Object]")) &&
+    planView.normalisePlanStepText("[object Object]") === "",
+  "old corrupted plans fall back to Untitled step; new structured plans keep their title"
 );
 
 // ---------------------------------------------------------------------------
