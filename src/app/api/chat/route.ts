@@ -2903,7 +2903,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           });
         }
 
-        endRun(assistantMsgId);
+        endRun(assistantMsgId, runSignal);
         send({
           type: "done",
           id: assistantMsgId,
@@ -2929,7 +2929,26 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         });
         close();
       } catch (error) {
-        endRun(assistantMsgId);
+        endRun(assistantMsgId, runSignal);
+
+        /*
+         * Stop is normal control flow, not a server failure.
+         *
+         * Aborting the run rejects whichever signal-aware operation is
+         * currently awaited (fetch, retry delay, approval, command, and so
+         * on). That rejection reaches this outer boundary with an AbortError.
+         * Logging it as "Chat API error" made every deliberate Stop look like
+         * a crash and could send a fake internal-error frame to the UI.
+         *
+         * Check the signal rather than the error name: this suppresses only an
+         * abort initiated through the run registry. An unrelated AbortError
+         * still takes the real error path below.
+         */
+        if (runSignal.aborted) {
+          close();
+          return;
+        }
+
         console.error("Chat API error:", error);
         send({
           type: "error",

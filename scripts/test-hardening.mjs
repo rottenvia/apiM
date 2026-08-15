@@ -779,14 +779,40 @@ check(
   runs.stopRun("t-1") === false,
   "a Stop that silently did nothing is worse than an honest answer"
 );
-runs.beginRun("t-2", "c-1");
-runs.endRun("t-2");
+const finishingSignal = runs.beginRun("t-2", "c-1");
+runs.endRun("t-2", finishingSignal);
 check("finishing releases the run", runs.runCount() === 0);
+
+/*
+ * Reusing a message id aborts the old run. Its async catch executes after the
+ * replacement is registered, so unconditional cleanup there used to delete
+ * the new run and make its Stop button silently miss.
+ */
+const staleSignal = runs.beginRun("retry-1", "c-1");
+const replacementSignal = runs.beginRun("retry-1", "c-1");
+check(
+  "retrying the same message aborts the superseded run",
+  staleSignal.aborted && !replacementSignal.aborted
+);
+runs.endRun("retry-1", staleSignal);
+check(
+  "late cleanup from the superseded run preserves its replacement",
+  runs.isRunning("retry-1") && runs.activeRuns("c-1").includes("retry-1")
+);
+runs.endRun("retry-1", replacementSignal);
+check("the replacement can clean up its own entry", !runs.isRunning("retry-1"));
 
 check(
   "the work watches the run, not the request",
   /const runSignal = beginRun\(assistantMsgId, convId\)/.test(routeSrc) &&
     /const stopped = \(\) => runSignal\.aborted/.test(routeSrc)
+);
+check(
+  "deliberate Stop is not reported as a Chat API error",
+  /catch \(error\) \{[\s\S]{0,300}endRun\(assistantMsgId, runSignal\);[\s\S]{0,800}if \(runSignal\.aborted\) \{[\s\S]{0,100}close\(\);[\s\S]{0,100}return;[\s\S]{0,300}console\.error\("Chat API error:"/.test(
+    routeSrc
+  ),
+  "the outer catch still treats an expected AbortError as a server failure"
 );
 check(
   "prompts that need a person still follow the connection",
