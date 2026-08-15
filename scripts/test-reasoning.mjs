@@ -49,6 +49,7 @@ const DATA_ROOT = process.env.APIM_DATA_ROOT
 const load = (p) => import(pathToFileURL(path.join(ROOT, p)).href);
 
 const store = await load("src/lib/store.ts");
+const reasoningStream = await load("src/lib/reasoning-stream.ts");
 
 const COLOR = process.stdout.isTTY && !process.env.NO_COLOR;
 const g = (s) => (COLOR ? `\x1b[32m${s}\x1b[0m` : s);
@@ -63,6 +64,10 @@ const check = (label, ok, detail = "") => {
 };
 
 const page = (await readFile(path.join(ROOT, "src/app/page.tsx"), "utf8")).replace(/\r\n/g, "\n");
+const route = (await readFile(
+  path.join(ROOT, "src/app/api/chat/route.ts"),
+  "utf8"
+)).replace(/\r\n/g, "\n");
 const bubble = (await readFile(
   path.join(ROOT, "src/components/MessageBubble.tsx"),
   "utf8"
@@ -75,10 +80,39 @@ const css = (await readFile(
   path.join(ROOT, "src/app/globals.css"),
   "utf8"
 )).replace(/\r\n/g, "\n");
+const mockDeepseek = (await readFile(
+  path.join(ROOT, "scripts/mock-deepseek.mjs"),
+  "utf8"
+)).replace(/\r\n/g, "\n");
 
 console.log("\napiM thinking-panel checks\n");
 
-console.log("1. The loader cannot capture a stale conversation");
+console.log("0. Upstream reasoning fields are normalized");
+check(
+  "DeepSeek's documented reasoning_content field is read",
+  reasoningStream.extractReasoningDelta({ reasoning_content: "official" })?.text ===
+    "official"
+);
+check(
+  "compatible reasoning/thinking aliases are not silently discarded",
+  reasoningStream.extractReasoningDelta({ reasoning: "alias" })?.text === "alias" &&
+    reasoningStream.extractReasoningDelta({ thinking: { text: "object" } })?.text ===
+      "object" &&
+    reasoningStream.extractReasoningDelta({
+      reasoningContent: [{ type: "reasoning_text", text: "block" }],
+    })?.text === "block"
+);
+check(
+  "ordinary answer content is never relabelled as reasoning",
+  reasoningStream.extractReasoningDelta({ content: "answer" }) === null
+);
+check(
+  "the end-to-end mock uses an alternate field in a real agent round",
+  /delta: \{ reasoning: "Now I read it back/.test(mockDeepseek),
+  "workspace integration now fails if only reasoning_content is accepted"
+);
+
+console.log("\n1. The loader cannot capture a stale conversation");
 
 const loader = page.slice(
   page.indexOf("const loadReasoning = useCallback"),
@@ -195,6 +229,23 @@ check(
   "reasoning is flushed before a plan or tool event is rendered",
   /evt\.type !== "reasoning" && evt\.type !== "content"\) flush\(\)/.test(page),
   "otherwise the action appears while the reasoning before it is still buffered"
+);
+check(
+  "the server normalizes reasoning fields and reports a missing round",
+  /extractReasoningDelta\(/.test(route) &&
+    /type: "reasoning_status"/.test(route) &&
+    /fieldsSeen: \[\.\.\.roundDeltaFields\]/.test(route)
+);
+check(
+  "the done event carries field names and counts, never private text",
+  /reasoningDiagnostic: \{[\s\S]{0,180}chars: reasoningContent\.length[\s\S]{0,180}fieldsSeen:/s.test(
+    route
+  ) && /No plain-text reasoning was present in the upstream/.test(page)
+);
+check(
+  "a precise upstream notice replaces the generic waiting placeholder",
+  /message\.reasoningNotice \?/.test(bubble) &&
+    /a\.reasoningNotice === b\.reasoningNotice/.test(bubble)
 );
 check(
   "Loading is shown only while stored reasoning is genuinely pending",

@@ -72,6 +72,7 @@ import {
 } from "@/lib/rebuild-resume";
 import type { RebuiltResume } from "@/lib/rebuild-resume";
 import { fetchWithRetry } from "@/lib/retry";
+import { extractReasoningDelta } from "@/lib/reasoning-stream";
 import {
   createBudget,
   chargeRound,
@@ -228,6 +229,15 @@ type StreamEvent =
     }
   | { type: "reasoning"; delta: string }
   | {
+      type: "reasoning_status";
+      status: "missing_round";
+      round: number;
+      model: string;
+      effort: string;
+      /** Upstream delta keys only — never the private text itself. */
+      fieldsSeen: string[];
+    }
+  | {
       /**
        * The model hit the output ceiling mid-answer and is being asked to
        * carry on, rather than the reply simply stopping short.
@@ -331,6 +341,12 @@ type StreamEvent =
       /** Wall-clock milliseconds from request start to final token. */
       durationMs: number;
       model: string;
+      reasoningDiagnostic: {
+        expected: boolean;
+        chars: number;
+        fieldsUsed: string[];
+        fieldsSeen: string[];
+      };
     }
   | { type: "error"; error: string };
 
@@ -1170,6 +1186,11 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         // message grows rather than being overwritten by only the new half.
         let assistantContent = resumedContent;
         let reasoningContent = resumedReasoning;
+        // Diagnostics contain field NAMES and counts only, never private text.
+        // They tell us whether the provider omitted reasoning or used an
+        // alternate compatible field that the parser normalized.
+        const reasoningFieldsUsed = new Set<string>();
+        const upstreamDeltaFields = new Set<string>();
         // Mirrors what the client is shown, so a reopened chat still lists
         // the files this reply touched.
         const toolEvents: {
@@ -1244,6 +1265,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           const toolAcc = new ToolCallAccumulator();
           let roundContent = "";
           let roundReasoning = "";
+          const roundDeltaFields = new Set<string>();
           /** "stop" if the model finished, "length" if it ran out of room. */
           let roundFinishReason = "";
 
@@ -1549,7 +1571,10 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 choices?: {
                   delta?: {
                   content?: string;
-                  reasoning_content?: string;
+                  reasoning_content?: unknown;
+                  reasoning?: unknown;
+                  thinking?: unknown;
+                  reasoningContent?: unknown;
                   tool_calls?: {
                     index?: number;
                     id?: string;
@@ -1615,23 +1640,23 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               const delta = chunk.choices?.[0]?.delta;
               if (!delta) continue;
 
-              if (delta.reasoning_content) {
+              for (const key of Object.keys(delta)) {
+                upstreamDeltaFields.add(key);
+                roundDeltaFields.add(key);
+              }
+              const reasoningDelta = extractReasoningDelta(
+                delta as Record<string, unknown>
+              );
+              if (reasoningDelta) {
+                reasoningFieldsUsed.add(reasoningDelta.field);
                 /*
                  * Separate one round's thinking from the next.
                  *
                  * Reported as "blah blah blah.blah" — a missing space in the
                  * thinking panel. It is not a lost token and not a
                  * token-saving trick: the agent loop makes one API call per
-                 * round, each returns its own `reasoning_content`, and the
-                 * displayed panel is every round concatenated. Round N ends
-                 * with "...check the file." and round N+1 starts with "Now
-                 * I..." so the join reads "file.Now I".
-                 *
-                 * A blank line at each boundary is inserted rather than a
-                 * space, because these really are separate passes of thought
-                 * and running them into one paragraph is what made the panel
-                 * hard to read in the first place. Only when the round has
-                 * produced nothing yet, so it never lands mid-sentence.
+                 * round, each returns its own reasoning, and the displayed
+                 * panel is every round concatenated.
                  */
                 if (!roundReasoning && reasoningContent) {
                   const gap = /\n\s*$/.test(reasoningContent) ? "" : "\n\n";
@@ -1640,9 +1665,9 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                     send({ type: "reasoning", delta: gap });
                   }
                 }
-                reasoningContent += delta.reasoning_content;
-                roundReasoning += delta.reasoning_content;
-                send({ type: "reasoning", delta: delta.reasoning_content });
+                reasoningContent += reasoningDelta.text;
+                roundReasoning += reasoningDelta.text;
+                send({ type: "reasoning", delta: reasoningDelta.text });
               }
               if (delta.tool_calls) {
                 for (const tc of delta.tool_calls) toolAcc.add(tc);
@@ -1661,6 +1686,16 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             }
           }
 
+          if (thinkingEnabled && !roundReasoning) {
+            send({
+              type: "reasoning_status",
+              status: "missing_round",
+              round,
+              model,
+              effort: resolvedEffort,
+              fieldsSeen: [...roundDeltaFields].sort(),
+            });
+          }
 
           // Record this turn verbatim so reasoning and tool calls survive
           // into the next request — omitting reasoning_content on a
@@ -2702,6 +2737,19 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           }
         }
 
+        if (thinkingEnabled && !reasoningContent) {
+          recordAsync({
+            kind: "api_error",
+            subject: "reasoning stream",
+            detail: "Thinking was enabled but no plain-text reasoning field was received.",
+            context: {
+              model,
+              effort: resolvedEffort,
+              fieldsSeen: [...upstreamDeltaFields].sort().join(", ") || "none",
+            },
+          });
+        }
+
         endRun(assistantMsgId);
         send({
           type: "done",
@@ -2719,6 +2767,12 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           usage: totalUsage.total_tokens ? { ...totalUsage } : usage,
           durationMs: Date.now() - startedAt,
           model,
+          reasoningDiagnostic: {
+            expected: thinkingEnabled,
+            chars: reasoningContent.length,
+            fieldsUsed: [...reasoningFieldsUsed].sort(),
+            fieldsSeen: [...upstreamDeltaFields].sort(),
+          },
         });
         close();
       } catch (error) {
