@@ -97,6 +97,7 @@ const TOOLS = [
   ["web_search", 88, 92, 86, 82, 94, "scoreless Exa responses, cache migration, budgets and provider diagnostics tested"],
   ["download_file", 94, 94, 88, 94, 95, "exact PDF/image/archive bytes, redirect-safe and workspace-contained"],
   ["http_request", 96, 96, 94, 92, 97, "public by default; loopback opt-in; every redirect revalidated"],
+  ["github_push", 92, 98, 94, 90, 94, "dedicated branch only, no force, OAuth token hidden, user approval required"],
   // --- documents and vision ------------------------------------------------
   ["read_document", 94, 94, 92, 88, 97, "real PDF plus Next dev bundle, Office and EPUB tested"],
   ["view_image", 78, 90, 80, 78, 80, "needs a separate vision key; withheld when absent"],

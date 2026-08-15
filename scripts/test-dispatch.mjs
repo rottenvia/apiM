@@ -730,6 +730,7 @@ const all = WORKSPACE_TOOLS.map((t) => t.function.name).sort();
  */
 const CANNOT = new Map([
   ["run_command", "lives in the chat route because it needs approval; covered by test-runner"],
+  ["github_push", "lives in the chat route because it needs OAuth plus approval; covered by test-github"],
   ["make_plan", "handled in the chat route; its logic is called directly above"],
   ["update_plan", "handled in the chat route; its logic is called directly above"],
   ["ask_user", "blocks for a human; covered by mocks in plan and autonomy"],
