@@ -74,6 +74,13 @@ import type { RebuiltResume } from "@/lib/rebuild-resume";
 import { fetchWithRetry } from "@/lib/retry";
 import { extractReasoningDelta } from "@/lib/reasoning-stream";
 import {
+  GITHUB_TOKEN_COOKIE,
+  githubConfig,
+  openGitHubToken,
+  pushGitHubWorkspace,
+  readGitHubConnection,
+} from "@/lib/github";
+import {
   createBudget,
   chargeRound,
   checkBudget,
@@ -741,6 +748,16 @@ export async function POST(req: NextRequest) {
           : "";
 
         const workspace = workspaceId ?? convId;
+        const githubConnection = workspaceEnabled
+          ? await readGitHubConnection(workspace)
+          : null;
+        const githubOauth = githubConfig();
+        const githubToken = githubOauth
+          ? await openGitHubToken(
+              req.cookies.get(GITHUB_TOKEN_COOKIE)?.value,
+              githubOauth.tokenSecret
+            )
+          : null;
         // The model is otherwise blind to what already exists, and will
         // happily create a second copy of a file it never knew was there.
         const workspaceFiles = workspaceEnabled
@@ -773,6 +790,15 @@ Work to the end. Do not hand back a half-finished task with a summary that reads
 Ask before you build the wrong thing. If a choice would change what you produce and you cannot settle it by reading a file or looking it up, call ask_user — one question up front is far cheaper than twenty rounds of work in the wrong direction, and the user would rather be asked than handed something they have to throw away. Ask early, while the work is cheap to redo, not after you have committed to an approach. Offer concrete options with a sensible default so it is one click. Do not ask about things you can find out yourself, and do not ask the same thing twice. When you are done, briefly say what you changed and whether it ran.\n\nUse search_files to find where something lives rather than opening files one at a time, and read_files when you already know you need several — each separate call costs a whole round.\n\nYou can also look at the live web. When a task depends on what is actually on a page — its markup, its data, its exact wording — fetch it rather than reasoning from memory. Before writing anything that targets a site, such as a content script, a userscript or a scraper, call inspect_page on the real URL and use the ids and classes it returns. Never invent a selector you have not seen: a plausible-looking one that does not exist produces code that runs and does nothing, which is worse than admitting you need to look. Use fetch_url to read a page, fetch_url with raw for its HTML, and download_file to save something from a URL straight into the workspace. ${canSearch ? "When you hit something you do not know — an unfamiliar error, a library's current API — use web_search rather than guessing, because a wrong assumption compounds over every round after it. One web_search costs several model calls of its own, so make the query specific and read what comes back before searching again." : "There is no web_search in this workspace — no Tavily key is set in Settings. fetch_url still works if you already know the URL. When you genuinely do not know something and cannot look it up, say so instead of guessing, and name what you would have searched for."}\n\nIf an edit turns out to be wrong, undo_file puts that file back exactly as it was; reverting is safer than patching your own mistake. restore_snapshot rolls the whole workspace back to a restore point, which is a much larger step — list_snapshots first, and say what you are undoing before you do it. read_document opens Word, Excel, PowerPoint, EPUB and ODT files, which read_file cannot. write_files creates several files in one call, which is worth using whenever you are scaffolding.\n\nBatch the changes that belong together. move_file renames in one step instead of read-write-delete. edit_files applies several replacements at once, across one file or many. replace_in_files changes the same text everywhere it appears, which is what you want for renaming a function or an import path — doing that file by file costs a round each. When a string might occur somewhere you did not intend, run it with preview first and read the list before committing.${
               visionApiKey
                 ? " You can also view_image to look at a screenshot or mockup saved in the workspace."
+                : ""
+            }${
+              githubConnection
+                ? `\n\nThis workspace is connected to GitHub repository ${githubConnection.repo}. ` +
+                  `The selected base is ${githubConnection.baseBranch}; your writable branch is ` +
+                  `${githubConnection.workingBranch}. Work only on that branch. You may inspect ` +
+                  `other branches with read-only git show/log/branch commands. Use git status and ` +
+                  `git diff before committing, commit through run_command after approval, and call ` +
+                  `github_push only when the committed work is ready. Never merge or force-push.`
                 : ""
             }${hasBrowser ? BROWSER_POLICY_PROMPT : NO_BROWSER_PROMPT}`
           : "";
@@ -1348,6 +1374,9 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               // The browser is an optional install. Offering it when Chromium
               // is absent buys an error, an apology and a worse fallback.
               if (t.function.name === "browse") return hasBrowser;
+              if (t.function.name === "github_push") {
+                return Boolean(githubConnection && githubToken);
+              }
               return true;
             });
             dsRequestBody.tool_choice = "auto";
@@ -2284,6 +2313,71 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                         content: `The user answered: ${answer}`,
                         summary: `Asked: ${question.slice(0, 60)}`,
                       };
+              }
+            } else if (call.function.name === "github_push") {
+              if (!githubConnection || !githubToken) {
+                result = {
+                  ok: false,
+                  content: "GitHub is not connected to this workspace. Open the GitHub connector and choose a repository first.",
+                  summary: "GitHub not connected",
+                };
+              } else {
+                const args = ["push", "origin", githubConnection.workingBranch];
+                const reason =
+                  typeof parsed.value.reason === "string"
+                    ? parsed.value.reason.trim()
+                    : "Publish committed work to the dedicated GitHub branch";
+                const preApproved =
+                  autoRunCommands || isRemembered(workspace, "git", args);
+                let approved = true;
+                if (!preApproved) {
+                  send({
+                    type: "approval_request",
+                    id: call.id,
+                    command: "git",
+                    args,
+                    display: `git push origin ${githubConnection.workingBranch}`,
+                    reason,
+                  });
+                  const decision = await requestApproval(
+                    {
+                      id: call.id,
+                      workspaceId: workspace,
+                      command: "git",
+                      args,
+                      reason,
+                    },
+                    AbortSignal.any([req.signal, runSignal])
+                  );
+                  approved = decision.approved;
+                  send({ type: "approval_resolved", id: call.id, approved });
+                }
+                if (!approved) {
+                  result = {
+                    ok: false,
+                    content: "The GitHub push was not run. Do not retry until the user asks.",
+                    summary: "GitHub push skipped",
+                  };
+                } else {
+                  try {
+                    const pushed = await pushGitHubWorkspace(workspace, githubToken);
+                    result = {
+                      ok: true,
+                      content:
+                        `Pushed committed work to ${pushed.connection.repo} branch ` +
+                        `${pushed.connection.workingBranch}.\n\n${pushed.output || "Push completed."}`,
+                      summary: `Pushed ${pushed.connection.workingBranch}`,
+                    };
+                  } catch (error) {
+                    result = {
+                      ok: false,
+                      content: `GitHub push failed: ${
+                        error instanceof Error ? error.message : "unknown error"
+                      }`,
+                      summary: "GitHub push failed",
+                    };
+                  }
+                }
               }
             } else if (
               call.function.name === "run_command" ||

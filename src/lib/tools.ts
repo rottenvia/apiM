@@ -974,6 +974,26 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "github_push",
+      description:
+        "Push committed work from this workspace's dedicated GitHub branch. " +
+        "Use git status/diff/log first, commit with run_command, then call this. " +
+        "Never pushes the selected base branch and never force-pushes. Requires user approval.",
+      parameters: {
+        type: "object",
+        properties: {
+          reason: {
+            type: "string",
+            description: "One short line explaining what is ready to publish.",
+          },
+        },
+        required: ["reason"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "download_file",
       description:
         "Save the exact bytes from a URL straight into the workspace — PDFs, " +

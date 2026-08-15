@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ImportFilesDialog } from "@/components/ImportFilesDialog";
+import { GitHubConnector } from "@/components/GitHubConnector";
 import {
   allDirPaths,
   buildFileTree,
@@ -177,6 +178,16 @@ export function WorkspaceSidePanel({
   const [history, setHistory] = useState<SnapshotInfo[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [githubOpen, setGithubOpen] = useState(false);
+
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("github")) {
+      queueMicrotask(() => setGithubOpen(true));
+      url.searchParams.delete("github");
+      window.history.replaceState({}, "", url.pathname + url.search + url.hash);
+    }
+  }, []);
 
   const tree = useMemo(
     () => collapseChains(buildFileTree(files)),
@@ -388,6 +399,17 @@ export function WorkspaceSidePanel({
 
         <div className="flex items-center gap-0.5">
           <button
+            onClick={() => setGithubOpen(true)}
+            className="sidebar-icon-btn h-7 w-7"
+            title="Connect a GitHub repository"
+            aria-label="Connect GitHub repository"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M12 .8a11.2 11.2 0 00-3.5 21.9c.6.1.8-.3.8-.6V20c-3.2.7-3.9-1.4-3.9-1.4-.5-1.3-1.3-1.7-1.3-1.7-1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.7 1.3 3.4 1 .1-.8.4-1.3.8-1.6-2.6-.3-5.3-1.3-5.3-5.8 0-1.3.5-2.4 1.2-3.1-.1-.3-.5-1.6.1-3.1 0 0 1-.3 3.2 1.2a10.9 10.9 0 015.8 0C17.5 4.7 18.5 5 18.5 5c.6 1.5.2 2.8.1 3.1.7.8 1.2 1.8 1.2 3.1 0 4.5-2.7 5.5-5.3 5.8.4.4.8 1.1.8 2.1v3c0 .3.2.7.8.6A11.2 11.2 0 0012 .8z" />
+            </svg>
+          </button>
+
+          <button
             onClick={() => setShowHistory((v) => !v)}
             className="sidebar-icon-btn h-7 w-7"
             data-active={showHistory}
@@ -582,6 +604,16 @@ export function WorkspaceSidePanel({
           workspaceId={workspaceId}
           onClose={() => setImporting(false)}
           onImported={() => onRestored?.()}
+        />
+      )}
+      {githubOpen && workspaceId && (
+        <GitHubConnector
+          workspaceId={workspaceId}
+          onClose={() => setGithubOpen(false)}
+          onConnected={() => {
+            onRestored?.();
+            setGithubOpen(false);
+          }}
         />
       )}
     </aside>
