@@ -60,9 +60,18 @@ export function beginRun(
   return controller.signal;
 }
 
-/** Called when the run finishes, however it finished. */
-export function endRun(messageId: string): void {
-  runs.delete(messageId);
+/**
+ * Called when the run finishes, however it finished.
+ *
+ * A retry can replace a run under the same message id before the old async
+ * route has unwound from its abort. The old route must not then delete the
+ * replacement from the registry, or its Stop button can no longer reach it.
+ * Passing the signal makes cleanup generation-aware: only the route that owns
+ * the current entry may remove it.
+ */
+export function endRun(messageId: string, signal: AbortSignal): void {
+  const run = runs.get(messageId);
+  if (run?.controller.signal === signal) runs.delete(messageId);
 }
 
 /**
@@ -75,8 +84,12 @@ export function endRun(messageId: string): void {
 export function stopRun(messageId: string): boolean {
   const run = runs.get(messageId);
   if (!run) return false;
-  run.controller.abort();
+
+  // Remove first. Abort listeners resume async work immediately, and cleanup
+  // from that old work must never race with a replacement registered under
+  // the same id.
   runs.delete(messageId);
+  run.controller.abort();
   return true;
 }
 
