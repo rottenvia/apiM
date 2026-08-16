@@ -27,6 +27,7 @@ import {
 } from "@/lib/binary-decompiler";
 import {
   generateStaticBinaryArtifacts,
+  type StaticArtifactLayers,
   type StaticBinaryArtifacts,
 } from "@/lib/binary-artifacts";
 import {
@@ -175,8 +176,9 @@ export interface InspectBinaryOptions {
   maxStrings?: number;
   dependencies?: boolean;
   maxDepth?: number;
-  /** Generate exhaustive strings, entropy and carving artifacts. */
+  /** Generate exhaustive static artifacts; true without layers means all. */
   artifacts?: boolean;
+  artifactLayers?: Partial<StaticArtifactLayers>;
   runCapa?: boolean;
   deep?: boolean;
   forceDeep?: boolean;
@@ -1390,8 +1392,12 @@ export async function inspectWorkspaceBinary(
     localFilesInspected = ctx.count;
   }
 
+  const staticLayers = options.artifactLayers;
+  const staticRequested =
+    options.artifacts !== false &&
+    (staticLayers === undefined || Object.values(staticLayers).some(Boolean));
   const artifacts =
-    options.artifacts === false
+    !staticRequested
       ? {
           root: "",
           outputs: [],
@@ -1411,8 +1417,14 @@ export async function inspectWorkspaceBinary(
             outputs: [],
           },
           carved: [],
+          layers: {
+            summary: false,
+            strings: false,
+            entropy: false,
+            carve: false,
+          },
           cached: false,
-          summary: "Exhaustive static artifacts were disabled for this call.",
+          summary: "No exhaustive static artifact layer was requested.",
         } satisfies StaticBinaryArtifacts
       : await generateStaticBinaryArtifacts(
           workspaceId,
@@ -1424,6 +1436,7 @@ export async function inspectWorkspaceBinary(
             // must not regenerate already complete strings/entropy/carves.
             force: false,
             signal: options.signal,
+            layers: staticLayers,
           }
         );
 
@@ -1577,13 +1590,26 @@ export function formatBinaryInspection(result: WorkspaceBinaryInspection): strin
     for (const value of p.strings) lines.push(`  ${JSON.stringify(value)}`);
   }
 
-  lines.push(
-    "",
-    `Static artifacts${result.artifacts.cached ? " (cached)" : ""}: ${result.artifacts.summary}`,
-    `  Full strings: ${result.artifacts.strings.count.toLocaleString()} record(s)${result.artifacts.strings.truncated ? " (output cap reached)" : ""}`,
-    `  Entropy map: ${result.artifacts.entropy.windows.toLocaleString()} × ${result.artifacts.entropy.windowBytes}-byte windows; min ${result.artifacts.entropy.min}, average ${result.artifacts.entropy.average}, max ${result.artifacts.entropy.max}`,
-    `  Carved blobs: ${result.artifacts.carved.length}`,
-  );
+  const staticLayers = result.artifacts.layers;
+  if (Object.values(staticLayers).some(Boolean)) {
+    lines.push(
+      "",
+      `Static artifacts${result.artifacts.cached ? " (cached)" : ""}: ${result.artifacts.summary}`
+    );
+    if (staticLayers.strings) {
+      lines.push(
+        `  Full strings: ${result.artifacts.strings.count.toLocaleString()} record(s)${result.artifacts.strings.truncated ? " (output cap reached)" : ""}`
+      );
+    }
+    if (staticLayers.entropy) {
+      lines.push(
+        `  Entropy map: ${result.artifacts.entropy.windows.toLocaleString()} × ${result.artifacts.entropy.windowBytes}-byte windows; min ${result.artifacts.entropy.min}, average ${result.artifacts.entropy.average}, max ${result.artifacts.entropy.max}`
+      );
+    }
+    if (staticLayers.carve) {
+      lines.push(`  Carved blobs: ${result.artifacts.carved.length}`);
+    }
+  }
   if (result.artifacts.outputs.length) {
     lines.push(
       "Static artifact files:",
@@ -1591,19 +1617,23 @@ export function formatBinaryInspection(result: WorkspaceBinaryInspection): strin
     );
   }
 
-  lines.push(
-    "",
-    `capa: ${result.capa.status}${result.capa.cached ? " (cached)" : ""}`,
-    result.capa.summary,
-  );
-  if (result.capa.output) lines.push(`  ${result.capa.output}`);
-  if (result.capa.setup) lines.push(`capa setup needed: ${result.capa.setup}`);
+  if (result.capa.status !== "disabled") {
+    lines.push(
+      "",
+      `capa: ${result.capa.status}${result.capa.cached ? " (cached)" : ""}`,
+      result.capa.summary,
+    );
+    if (result.capa.output) lines.push(`  ${result.capa.output}`);
+    if (result.capa.setup) lines.push(`capa setup needed: ${result.capa.setup}`);
+  }
 
-  lines.push(
-    "",
-    `Deep decompilation: ${result.deep.status} via ${result.deep.engine}${result.deep.cached ? " (cached)" : ""}`,
-    result.deep.summary,
-  );
+  if (result.deep.status !== "disabled") {
+    lines.push(
+      "",
+      `Deep decompilation: ${result.deep.status} via ${result.deep.engine}${result.deep.cached ? " (cached)" : ""}`,
+      result.deep.summary,
+    );
+  }
   if (result.deep.outputs.length) {
     lines.push(
       "Decompiler artifact files:",

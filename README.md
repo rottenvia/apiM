@@ -58,7 +58,7 @@ The executable will be in the `dist` folder. Just double-click to run!
 npm test
 ```
 
-Runs every suite — currently 1,884 checks across 47 suites — without calling
+Runs every suite — currently 1,888 checks across 47 suites — without calling
 the paid API; `npm run test:real` does that and is opt-in.
 
 ```bash
@@ -99,6 +99,20 @@ writes persistent artifacts under `analysis/<binary>-<hash>/`:
 
 "Signing envelope present" does not claim the certificate is trusted, and an
 import is capability evidence rather than a malware verdict.
+
+The model selects only the analysis layers needed by the request. Omitted
+selection is a cheap PE summary; it does not silently run every expensive
+engine:
+
+```json
+{"path":"app.exe","analyses":["decompile"]}
+{"path":"app.exe","analyses":["strings"]}
+{"path":"app.exe","analyses":["capa","carve"]}
+{"path":"app.exe","analyses":["all"]}
+```
+
+Layer caches are incremental: adding entropy later preserves an existing full
+strings dump, and `force_decompile` does not rerun capa or static artifacts.
 
 For a capa report, the simplest option is the official standalone capa
 release: it embeds the engine, rules and library signatures. Point to it only

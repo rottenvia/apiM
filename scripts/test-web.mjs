@@ -447,7 +447,9 @@ check(
   "the prompt introduces all of them",
   /undo_file puts that file back/.test(route) &&
     /read_document opens PDF, Word/.test(route) &&
-    /inspect_binary statically reads and decompiles/.test(route) &&
+    /inspect_binary statically reads Windows/.test(route) &&
+    /analyses:\["decompile"\]/.test(route) &&
+    /\["all"\] only/.test(route) &&
     /write_files creates several files/.test(route),
   "a tool the model is not told about is a tool it will not use"
 );
