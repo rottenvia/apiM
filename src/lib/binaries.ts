@@ -20,9 +20,15 @@ import {
   WorkspaceError,
 } from "@/lib/workspace";
 import {
+  runCapaAnalysis,
   runDeepDecompilation,
+  type CapaAnalysisResult,
   type DeepDecompilationResult,
 } from "@/lib/binary-decompiler";
+import {
+  generateStaticBinaryArtifacts,
+  type StaticBinaryArtifacts,
+} from "@/lib/binary-artifacts";
 import {
   isPeFilename,
   MAX_PE_UPLOAD_BYTES,
@@ -74,6 +80,24 @@ export interface ManagedAssembly {
   references: { name: string; version: string; flags: number }[];
 }
 
+export interface PackingAssessment {
+  status: "unknown" | "unlikely" | "possible" | "likely";
+  score: number;
+  reasons: string[];
+  knownPacker?: string;
+}
+
+export interface HighlightedImport {
+  dll: string;
+  function: string;
+  category:
+    | "Lua API"
+    | "process injection/memory"
+    | "library loading/API resolution"
+    | "process creation";
+  delayLoaded: boolean;
+}
+
 export interface PeInspection {
   format: "PE32" | "PE32+" | "DOS/NE" | "DOS/LE" | "DOS/LX" | "DOS/MZ";
   architecture: string;
@@ -104,7 +128,9 @@ export interface PeInspection {
   versionInfo: Record<string, string>;
   strings: string[];
   possibleDynamicLibraries: string[];
+  highlightedImports: HighlightedImport[];
   overlayBytes: number;
+  packing: PackingAssessment;
   mitigations: {
     aslr: boolean;
     highEntropyVa: boolean;
@@ -137,6 +163,8 @@ export interface WorkspaceBinaryInspection {
   dependencies: DependencyNode[];
   localFilesInspected: number;
   unresolvedLibraries: string[];
+  artifacts: StaticBinaryArtifacts;
+  capa: CapaAnalysisResult;
   deep: DeepDecompilationResult;
 }
 
@@ -147,8 +175,13 @@ export interface InspectBinaryOptions {
   maxStrings?: number;
   dependencies?: boolean;
   maxDepth?: number;
+  /** Generate exhaustive strings, entropy and carving artifacts. */
+  artifacts?: boolean;
+  runCapa?: boolean;
   deep?: boolean;
   forceDeep?: boolean;
+  focusTerms?: string[];
+  focusedOnly?: boolean;
   signal?: AbortSignal;
 }
 
@@ -873,6 +906,137 @@ function dynamicLibraries(strings: string[], imported: PeImport[]): string[] {
   return [...out].sort((a, b) => a.localeCompare(b));
 }
 
+function highlightImports(imports: PeImport[]): HighlightedImport[] {
+  const out: HighlightedImport[] = [];
+  const exact = new Map<string, HighlightedImport["category"]>([
+    ["createremotethread", "process injection/memory"],
+    ["createremotethreadex", "process injection/memory"],
+    ["writeprocessmemory", "process injection/memory"],
+    ["readprocessmemory", "process injection/memory"],
+    ["virtualallocex", "process injection/memory"],
+    ["virtualprotectex", "process injection/memory"],
+    ["openprocess", "process injection/memory"],
+    ["ntwritevirtualmemory", "process injection/memory"],
+    ["ntreadvirtualmemory", "process injection/memory"],
+    ["ntmapviewofsection", "process injection/memory"],
+    ["queueuserapc", "process injection/memory"],
+    ["setthreadcontext", "process injection/memory"],
+    ["resumethread", "process injection/memory"],
+    ["loadlibrarya", "library loading/API resolution"],
+    ["loadlibraryw", "library loading/API resolution"],
+    ["loadlibraryexa", "library loading/API resolution"],
+    ["loadlibraryexw", "library loading/API resolution"],
+    ["getprocaddress", "library loading/API resolution"],
+    ["ldrloaddll", "library loading/API resolution"],
+    ["ldrgetprocedureaddress", "library loading/API resolution"],
+    ["createprocessa", "process creation"],
+    ["createprocessw", "process creation"],
+    ["createprocessasusera", "process creation"],
+    ["createprocessasuserw", "process creation"],
+    ["createprocesswithtokenw", "process creation"],
+    ["createprocesswithlogonw", "process creation"],
+    ["ntcreateuserprocess", "process creation"],
+    ["shellexecutea", "process creation"],
+    ["shellexecutew", "process creation"],
+    ["winexec", "process creation"],
+  ]);
+
+  for (const item of imports) {
+    for (const fn of item.functions) {
+      const lower = fn.toLowerCase();
+      const category = /^lual?_/.test(lower)
+        ? "Lua API"
+        : exact.get(lower);
+      if (!category) continue;
+      out.push({
+        dll: item.dll,
+        function: fn,
+        category,
+        delayLoaded: item.delayLoaded,
+      });
+    }
+  }
+  return out;
+}
+
+function assessPacking(
+  sections: PeSection[],
+  imports: PeImport[],
+  strings: string[],
+  entryPointRva: number,
+  overlayBytes: number
+): PackingAssessment {
+  let score = 0;
+  const reasons: string[] = [];
+  let knownPacker: string | undefined;
+  const joinedNames = sections.map((section) => section.name).join(" ");
+  const joinedStrings = strings.slice(0, 1_000).join("\n");
+  const markers: [RegExp, string][] = [
+    [/\bUPX[0-9!]?\b/i, "UPX"],
+    [/\.aspack|ASPack/i, "ASPack"],
+    [/MPRESS/i, "MPRESS"],
+    [/Themida|WinLicense/i, "Themida/WinLicense"],
+    [/VMProtect/i, "VMProtect"],
+    [/\.petite|Petite/i, "Petite"],
+  ];
+  for (const [pattern, name] of markers) {
+    if (pattern.test(joinedNames) || pattern.test(joinedStrings)) {
+      knownPacker = name;
+      score += 70;
+      reasons.push(`Known packer marker detected: ${name}.`);
+      break;
+    }
+  }
+
+  const highEntropy = sections.filter(
+    (section) => section.rawSize >= 4096 && section.entropy >= 7.2
+  );
+  if (highEntropy.length >= 2) {
+    score += 25;
+    reasons.push(`${highEntropy.length} sections have entropy at or above 7.2.`);
+  } else if (highEntropy.length === 1) {
+    score += 12;
+    reasons.push(`${highEntropy[0].name} has entropy ${highEntropy[0].entropy}.`);
+  }
+  const entry = sections.find(
+    (section) =>
+      entryPointRva >= section.virtualAddress &&
+      entryPointRva <
+        section.virtualAddress + Math.max(section.virtualSize, section.rawSize)
+  );
+  if (entry && entry.entropy >= 7.2) {
+    score += 18;
+    reasons.push(`The entry point is in high-entropy section ${entry.name}.`);
+  }
+  if (sections.some((section) => section.virtualSize > 64 * 1024 && section.rawSize === 0)) {
+    score += 20;
+    reasons.push("A large virtual section has no raw bytes, a common unpacking destination.");
+  }
+  const importedFunctions = imports.reduce(
+    (total, item) => total + item.functions.length + item.ordinals.length,
+    0
+  );
+  if (importedFunctions <= 5) {
+    score += 14;
+    reasons.push(`Only ${importedFunctions} static import(s) were recovered.`);
+  }
+  if (overlayBytes >= 1024 * 1024) {
+    score += 10;
+    reasons.push(`${overlayBytes.toLocaleString()} overlay bytes may hold a packed payload or installer data.`);
+  }
+  score = Math.min(100, score);
+  return {
+    status:
+      score >= 65 ? "likely" : score >= 30 ? "possible" : "unlikely",
+    score,
+    reasons:
+      reasons.length > 0
+        ? reasons
+        : ["No common packer markers or strong structural packing indicators were found."],
+    knownPacker,
+  };
+}
+
 function imphash(imports: PeImport[]): string | undefined {
   const parts: string[] = [];
   for (const item of imports.filter((x) => !x.delayLoaded)) {
@@ -925,7 +1089,13 @@ export function inspectPortableExecutable(
       authenticode: { present: false, size: 0, verified: false },
       pdbPaths: [], versionInfo: {}, strings: stringResult.strings,
       possibleDynamicLibraries: dynamicLibraries(stringResult.strings, []),
+      highlightedImports: [],
       overlayBytes: 0,
+      packing: {
+        status: "unknown",
+        score: 0,
+        reasons: ["Legacy executable format: PE packing heuristics do not apply."],
+      },
       mitigations: { aslr: false, highEntropyVa: false, dep: false, controlFlowGuard: false, forceIntegrity: false },
       indicators: ["Legacy MZ executable: modern PE import/decompile metadata is unavailable."],
       truncated: { imports: false, exports: false, strings: stringResult.truncated },
@@ -1002,6 +1172,13 @@ export function inspectPortableExecutable(
   const overlayBytes = Math.max(0, bytes.length - Math.min(bytes.length, explainedEnd));
   if (overlayBytes > 1024) indicators.push(`${overlayBytes} byte(s) follow the mapped image/certificate (overlay or appended payload).`);
 
+  const packing = assessPacking(
+    sections,
+    imports,
+    stringResult.strings,
+    entryPointRva,
+    overlayBytes
+  );
   hashes.imphash = imphash(imports);
   return {
     format: pe64 ? "PE32+" : "PE32",
@@ -1032,7 +1209,9 @@ export function inspectPortableExecutable(
     versionInfo: readVersionInfo(r),
     strings: stringResult.strings,
     possibleDynamicLibraries: dynamicLibraries(stringResult.strings, imports),
+    highlightedImports: highlightImports(imports),
     overlayBytes,
+    packing,
     mitigations: {
       highEntropyVa: Boolean(dllCharacteristics & 0x0020),
       aslr: Boolean(dllCharacteristics & 0x0040),
@@ -1211,12 +1390,64 @@ export async function inspectWorkspaceBinary(
     localFilesInspected = ctx.count;
   }
 
-  const deep = options.deep === false
-    ? { attempted: false, status: "disabled", engine: "none", outputs: [], cached: false, summary: "Deep decompilation was disabled." } satisfies DeepDecompilationResult
+  const artifacts =
+    options.artifacts === false
+      ? {
+          root: "",
+          outputs: [],
+          strings: {
+            count: 0,
+            ascii: 0,
+            utf16: 0,
+            outputs: [],
+            truncated: false,
+          },
+          entropy: {
+            windowBytes: 4096,
+            windows: 0,
+            min: 0,
+            max: 0,
+            average: 0,
+            outputs: [],
+          },
+          carved: [],
+          cached: false,
+          summary: "Exhaustive static artifacts were disabled for this call.",
+        } satisfies StaticBinaryArtifacts
+      : await generateStaticBinaryArtifacts(
+          workspaceId,
+          target,
+          bytes,
+          inspection,
+          {
+            force: options.forceDeep === true,
+            signal: options.signal,
+          }
+        );
+
+  // capa and a decompiler are both CPU-heavy external processes. Run them in
+  // sequence instead of turning one user's laptop into a benchmark furnace.
+  const capa = await runCapaAnalysis(workspaceId, target, inspection, {
+    force: options.forceDeep === true,
+    signal: options.signal,
+    enabled: options.runCapa !== false,
+  });
+  const deep =
+    options.deep === false
+      ? {
+          attempted: false,
+          status: "disabled",
+          engine: "none",
+          outputs: [],
+          cached: false,
+          summary: "Deep decompilation was disabled.",
+        } satisfies DeepDecompilationResult
       : await runDeepDecompilation(workspaceId, target, inspection, {
-        force: options.forceDeep === true,
-        signal: options.signal,
-      });
+          force: options.forceDeep === true,
+          signal: options.signal,
+          focusTerms: options.focusTerms,
+          focusedOnly: options.focusedOnly,
+        });
 
   return {
     path: target,
@@ -1224,6 +1455,8 @@ export async function inspectWorkspaceBinary(
     dependencies,
     localFilesInspected,
     unresolvedLibraries: [...unresolved].sort((a, b) => a.localeCompare(b)),
+    artifacts,
+    capa,
     deep,
   };
 }
@@ -1264,6 +1497,8 @@ export function formatBinaryInspection(result: WorkspaceBinaryInspection): strin
       `Build timestamp: ${p.timestampIso ?? `unreliable/raw ${p.timestamp}`}`,
       `Mitigations: ASLR ${p.mitigations.aslr ? "yes" : "no"}, DEP ${p.mitigations.dep ? "yes" : "no"}, CFG ${p.mitigations.controlFlowGuard ? "yes" : "no"}, high-entropy VA ${p.mitigations.highEntropyVa ? "yes" : "no"}`,
       `Authenticode envelope: ${p.authenticode.present ? `present (${p.authenticode.size} bytes; trust NOT verified)` : "not present"}`,
+      `Packed assessment: ${p.packing.status} (${p.packing.score}/100 heuristic)${p.packing.knownPacker ? ` · marker ${p.packing.knownPacker}` : ""}`,
+      ...p.packing.reasons.map((reason) => `  - ${reason}`),
     );
   }
 
@@ -1306,6 +1541,15 @@ export function formatBinaryInspection(result: WorkspaceBinaryInspection): strin
     }
   }
 
+  if (p.highlightedImports.length) {
+    lines.push("", "High-interest imported APIs (capability evidence, not a malware verdict):");
+    for (const item of p.highlightedImports) {
+      lines.push(
+        `  ${item.category}: ${item.dll}!${item.function}${item.delayLoaded ? " (delay-loaded)" : ""}`
+      );
+    }
+  }
+
   if (p.exports.length) {
     lines.push("", `Exports (${p.exports.length}${p.truncated.exports ? ", truncated" : ""}):`);
     for (const item of p.exports.slice(0, 1000)) {
@@ -1332,11 +1576,36 @@ export function formatBinaryInspection(result: WorkspaceBinaryInspection): strin
 
   lines.push(
     "",
+    `Static artifacts${result.artifacts.cached ? " (cached)" : ""}: ${result.artifacts.summary}`,
+    `  Full strings: ${result.artifacts.strings.count.toLocaleString()} record(s)${result.artifacts.strings.truncated ? " (output cap reached)" : ""}`,
+    `  Entropy map: ${result.artifacts.entropy.windows.toLocaleString()} × ${result.artifacts.entropy.windowBytes}-byte windows; min ${result.artifacts.entropy.min}, average ${result.artifacts.entropy.average}, max ${result.artifacts.entropy.max}`,
+    `  Carved blobs: ${result.artifacts.carved.length}`,
+  );
+  if (result.artifacts.outputs.length) {
+    lines.push(
+      "Static artifact files:",
+      ...result.artifacts.outputs.slice(0, 200).map((output) => `  ${output}`)
+    );
+  }
+
+  lines.push(
+    "",
+    `capa: ${result.capa.status}${result.capa.cached ? " (cached)" : ""}`,
+    result.capa.summary,
+  );
+  if (result.capa.output) lines.push(`  ${result.capa.output}`);
+  if (result.capa.setup) lines.push(`capa setup needed: ${result.capa.setup}`);
+
+  lines.push(
+    "",
     `Deep decompilation: ${result.deep.status} via ${result.deep.engine}${result.deep.cached ? " (cached)" : ""}`,
     result.deep.summary,
   );
   if (result.deep.outputs.length) {
-    lines.push("Generated analysis files:", ...result.deep.outputs.slice(0, 200).map((x) => `  ${x}`));
+    lines.push(
+      "Decompiler artifact files:",
+      ...result.deep.outputs.slice(0, 200).map((output) => `  ${output}`)
+    );
   }
   if (result.deep.setup) lines.push(`Setup needed for deeper output: ${result.deep.setup}`);
 
