@@ -444,7 +444,10 @@ async function runIlSpy(
     };
   }
 
-  if (force) await fs.rm(output, { recursive: true, force: true });
+  // A cache miss means the hash/profile does not describe what is on disk.
+  // Generated output is reproducible, so rebuild it from empty rather than
+  // mixing a new focused run with stale files from an older profile.
+  await fs.rm(output, { recursive: true, force: true });
   await fs.mkdir(projectOutput, { recursive: true });
   const result = await runCaptured(
     command,
@@ -574,7 +577,9 @@ async function runGhidra(
     };
   }
 
-  if (force) await fs.rm(output, { recursive: true, force: true });
+  // Cache/profile miss: never let stale chunks make an empty/new run look
+  // successful. Everything below is generated and can be rebuilt exactly.
+  await fs.rm(output, { recursive: true, force: true });
   await fs.mkdir(output, { recursive: true });
   const projectDir = path.join(root, ".ghidra-project");
   await fs.mkdir(projectDir, { recursive: true });
