@@ -610,6 +610,11 @@ async function runGhidra(
     ...focusTerms,
   ];
   const result = await runCaptured(command, args, workspaceRoot, signal);
+  const launcherFact =
+    `The apiM server resolved and started the Ghidra launcher at ${command}. ` +
+    `Agent run_command processes use a separate scrubbed environment, so ` +
+    `echoing APIM_GHIDRA_HOME or running where from them cannot diagnose this ` +
+    `server-side launch.`;
   await fs.rm(projectDir, { recursive: true, force: true }).catch(() => {});
   if (!result.started) {
     return {
@@ -684,11 +689,14 @@ async function runGhidra(
     cached: false,
     focusTerms,
     focusedOnly,
-    summary: emptySuccess
-      ? `Ghidra exited successfully but decompiled zero functions. This is not accepted as a completed analysis; inspect summary.txt/log output for loader, language or packing failures.`
-      : result.timedOut
-        ? `Ghidra exceeded the configured time limit; ${outputs.length} partial output file(s) were kept. Increase APIM_BINARY_DECOMPILE_TIMEOUT_MS only for binaries that justify it.`
-        : `Ghidra exited with code ${result.code ?? "unknown"}; ${outputs.length} partial output file(s) were kept. Packing, anti-analysis, an unsupported CPU, corruption, or exhausted memory can prevent complete recovery.`,
+    summary:
+      launcherFact +
+      " " +
+      (emptySuccess
+        ? `Ghidra exited successfully but decompiled zero functions. This is not accepted as a completed analysis; inspect the log tail below for loader, language or packing failures.`
+        : result.timedOut
+          ? `Ghidra exceeded the configured time limit; ${outputs.length} partial output file(s) were kept. Increase APIM_BINARY_DECOMPILE_TIMEOUT_MS only for binaries that justify it.`
+          : `Ghidra exited with code ${result.code ?? "unknown"}; ${outputs.length} partial output file(s) were kept. The log tail below contains the actual Java, loader or post-script error.`),
     logTail: tail(result.output),
   };
 }
