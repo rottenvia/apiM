@@ -86,6 +86,21 @@ export interface ToolDefinition {
 export const MAX_READ_FILES = 60;
 
 /**
+ * Hard ceiling on the combined size of one read_files result.
+ *
+ * Pruning never touches the CURRENT round's results — they are what the
+ * model is actively reasoning over — so reading sixty 200k files at once
+ * would be 12M chars and blow the context window before prune could help.
+ * This is a safety bound against that wall, not a token ration: it is set
+ * at ~1.2M chars (~330k tokens), a third of DeepSeek's 1M window, so a
+ * normal project (many small files) reads whole, and only a pathological
+ * "read every huge file" request is cut short. Files past the cap are
+ * named explicitly with an instruction to read them separately, so the
+ * model never silently treats them as read.
+ */
+export const MAX_READ_TOTAL_CHARS = 1_200_000;
+
+/**
  * How many files one write_files call may create.
  *
  * Lower than the read limit on purpose: writing is destructive, and a single
@@ -1319,6 +1334,7 @@ export async function runTool(
         const paths = raw.slice(0, MAX_READ_FILES).map((p) => String(p));
         const parts: string[] = [];
         let read = 0;
+        const includedPaths = new Set<string>();
 
         // Read together, reported in the order asked for. Sixty local files
         // is only a few milliseconds either way, but the ordering guarantee
@@ -1333,16 +1349,28 @@ export async function runTool(
 
         for (const entry of results) {
           if (entry.result) {
+            const block = `--- ${entry.result.path} ---\n${entry.result.content}`;
+            // Stop before this file would push the combined result past the
+            // same-round safety bound. It is named below so the model reads
+            // it individually rather than believing it was included.
+            if (
+              parts.join("\n\n").length + block.length >
+              MAX_READ_TOTAL_CHARS
+            ) {
+              break;
+            }
             read++;
+            includedPaths.add(entry.filePath);
             const note = entry.result.truncated
               ? "\n\n[truncated — file is larger than the read limit]"
               : "";
-            parts.push(
-              `--- ${entry.result.path} ---\n${entry.result.content}${note}`
-            );
+            parts.push(`${block}${note}`);
           } else {
             // One missing file must not lose the others: report it inline and
-            // keep going, so the model still gets what does exist.
+            // keep going, so the model still gets what does exist. Counted as
+            // "included" only in the sense that the slot was filled with an
+            // error — it must not be reported again as NOT READ below.
+            includedPaths.add(entry.filePath);
             parts.push(
               `--- ${entry.filePath} ---\n[could not read: ${
                 entry.error instanceof WorkspaceError
@@ -1353,16 +1381,18 @@ export async function runTool(
           }
         }
 
-        if (raw.length > paths.length) {
-          // Named explicitly, with an instruction. A bare "ignored" note was
-          // treated as commentary: the model carried on and answered as if it
-          // had read everything, so files silently missing from the answer
-          // looked like the agent giving up early.
-          const dropped = raw.slice(paths.length).map((p) => String(p));
+        // Paths requested but not actually returned — either past the
+        // per-call count, or past the same-round size bound. Named explicitly
+        // so the model never describes an unread file as if it had read it.
+        const notRead = raw
+          .map((p) => String(p))
+          .filter((p) => !includedPaths.has(p));
+        if (notRead.length > 0) {
           parts.push(
-            `[NOT READ — ${dropped.length} path(s) exceeded the ${MAX_READ_FILES}-per-call limit: ` +
-              `${dropped.join(", ")}. ` +
-              `Call read_files again with these before you answer. Do not ` +
+            `[NOT READ — ${notRead.length} path(s) were not included: ` +
+              `${notRead.join(", ")}. Reading them all in one call would ` +
+              `exceed the size/count limit. Call read_files again with ` +
+              `these (or read_file for each) before you answer. Do not ` +
               `describe them as if you had read them.]`
           );
         }

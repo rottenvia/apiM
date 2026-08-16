@@ -288,6 +288,33 @@ check(
   /Call read_files again/.test(overRes.content)
 );
 
+// The current round is never pruned, so read_files must not be able to
+// blow the context window by returning many huge files at once.
+const HUGE = "hugefiles";
+await rm(path.join(WORK, HUGE), { recursive: true, force: true });
+const hugePaths = [];
+// Each file ~150k chars; 12 of them is 1.8M chars, over the 1.2M bound.
+for (let i = 0; i < 12; i++) {
+  const p = `big-${i}.txt`;
+  hugePaths.push(p);
+  await ws.writeFile(HUGE, p, "y".repeat(150_000));
+}
+const hugeRes = await tools.runTool(HUGE, "read_files", {
+  paths: hugePaths,
+});
+const returnedHuge = (hugeRes.content.match(/^--- /gm) ?? []).length;
+check(
+  "a batch of huge files is capped before it exceeds the window",
+  returnedHuge < hugePaths.length && hugeRes.content.includes("NOT READ"),
+  `${returnedHuge} of ${hugePaths.length} returned`
+);
+check(
+  "and the unread files are named, not silently dropped",
+  hugePaths
+    .slice(returnedHuge)
+    .every((p) => hugeRes.content.includes(p))
+);
+
 // --------------------------------------------------------------------------
 console.log("\n6. A mistyped path is recoverable");
 
