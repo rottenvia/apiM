@@ -56,6 +56,10 @@ await fs.writeFile(path.join(proj, "main.py"), 'print("hello")\n');
 await fs.writeFile(path.join(proj, "src", "util.py"), "x = 1\n");
 await fs.writeFile(path.join(proj, "README.md"), "# Readme\n");
 await fs.writeFile(path.join(proj, "logo.png"), Buffer.alloc(3000, 7));
+const peFixture = Buffer.alloc(64);
+peFixture[0] = 0x4d;
+peFixture[1] = 0x5a;
+await fs.writeFile(path.join(proj, "native.dll"), peFixture);
 await fs.writeFile(path.join(proj, "node_modules", "dep", "index.js"), "// dep\n");
 
 const have = async (cmd) =>
@@ -114,9 +118,18 @@ if (!(await have("zip"))) {
     "a dependency tree would crowd out the actual code"
   );
   check(
-    "binaries are left out",
+    "opaque binaries are left out",
     !paths.some((p) => p.endsWith(".png")),
-    "they would arrive as mojibake"
+    "images would arrive as mojibake"
+  );
+  check(
+    "PE binaries are preserved as exact bytes instead of discarded",
+    res.binaries?.some(
+      (entry) =>
+        entry.path === "proj/native.dll" &&
+        entry.data.length === peFixture.length &&
+        entry.data[0] === 0x4d
+    )
   );
   check(
     "skipped files are reported, not silently dropped",
@@ -158,6 +171,11 @@ if (!(await have("tar"))) {
   check(
     "tar skips the same things",
     !gzRes.entries.some((e) => e.path.includes("node_modules"))
+  );
+  check(
+    "tar and tar.gz also preserve executable members",
+    tarRes.binaries?.some((e) => e.path === "proj/native.dll") &&
+      gzRes.binaries?.some((e) => e.path === "proj/native.dll")
   );
 }
 
@@ -252,7 +270,7 @@ const emptyText = A.formatArchive("empty.zip", {
 });
 check(
   "an archive with nothing readable says so",
-  emptyText.includes("no readable text files")
+  emptyText.includes("no readable text or supported Windows executable files")
 );
 
 // ------------------------------------------------------------ robustness
@@ -299,8 +317,9 @@ check(
   "it is a different, binary format with no open layout"
 );
 check(
-  "a plain binary is named for what it is",
-  /an executable/.test(AT.binaryFormatNote("thing.exe") ?? "")
+  "an executable points to its real reader",
+  /inspect_binary/.test(AT.binaryFormatNote("thing.exe") ?? ""),
+  "decoding it as text is wrong, but refusing it outright is no longer necessary"
 );
 
 check(

@@ -740,6 +740,7 @@ const CANNOT = new Map([
   ["inspect_page", "needs the internet"],
   ["view_image", "needs a vision API key"],
   ["read_document", "covered by test-documents, which owns the fixtures"],
+  ["inspect_binary", "covered by test-binaries with synthetic PE/.NET fixtures and a local DLL graph"],
   ["restore_snapshot", "covered by test-snapshots end to end"],
   ["list_snapshots", "covered by test-snapshots"],
   ["read_process", "covered by test-processes"],

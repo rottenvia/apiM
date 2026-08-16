@@ -14,6 +14,10 @@
  */
 
 import { looksUtf16 } from "./attachments";
+import {
+  isPeFilename,
+  MAX_PE_UPLOAD_BYTES,
+} from "./binary-types";
 
 /** Entries that are never worth reading out of an archive. */
 const SKIP_DIRS = [
@@ -48,8 +52,16 @@ export interface ArchiveEntry {
   truncated: boolean;
 }
 
+export interface ArchiveBinaryEntry {
+  path: string;
+  data: Uint8Array;
+  bytes: number;
+}
+
 export interface ArchiveResult {
   entries: ArchiveEntry[];
+  /** PE files preserved as exact bytes for inspect_binary, never decoded. */
+  binaries?: ArchiveBinaryEntry[];
   /** Files deliberately left out, with a one-line reason each. */
   skipped: { path: string; reason: string }[];
   /** True when the archive held more files than the cap allows. */
@@ -75,6 +87,9 @@ export const MAX_ENTRIES = 800;
 export const MAX_ENTRY_CHARS = 300_000;
 /** Across the whole archive. */
 export const MAX_TOTAL_CHARS = 1_500_000;
+/** Keep folder/archive executable sets bounded independently from text. */
+export const MAX_BINARY_ENTRIES = 128;
+export const MAX_TOTAL_BINARY_BYTES = 512 * 1024 * 1024;
 
 /**
  * A folder name for an unpacked archive.
@@ -158,8 +173,10 @@ export async function readFolderTree(
   files: File[]
 ): Promise<ArchiveResult> {
   const entries: ArchiveEntry[] = [];
+  const binaries: ArchiveBinaryEntry[] = [];
   const skipped: { path: string; reason: string }[] = [];
   let totalChars = 0;
+  let totalBinaryBytes = 0;
   let hitLimit = false;
 
   // Stable order, so the manifest reads like a directory listing rather than
@@ -173,6 +190,30 @@ export async function readFolderTree(
     // they are inside an archive.
     const full = folderPathOf(file) || file.name;
     const path = full.split("/").slice(1).join("/") || file.name;
+
+    if (isPeFilename(full)) {
+      if (
+        file.size > MAX_PE_UPLOAD_BYTES ||
+        binaries.length >= MAX_BINARY_ENTRIES ||
+        totalBinaryBytes + file.size > MAX_TOTAL_BINARY_BYTES
+      ) {
+        hitLimit = true;
+        skipped.push({ path, reason: "executable binary limit exceeded" });
+        continue;
+      }
+      try {
+        const data = new Uint8Array(await file.arrayBuffer());
+        if (data.length < 64 || data[0] !== 0x4d || data[1] !== 0x5a) {
+          skipped.push({ path, reason: "executable extension but no MZ header" });
+          continue;
+        }
+        binaries.push({ path, data, bytes: data.length });
+        totalBinaryBytes += data.length;
+      } catch {
+        skipped.push({ path, reason: "could not read executable bytes" });
+      }
+      continue;
+    }
 
     const reason = shouldSkip(full);
     if (reason) {
@@ -208,7 +249,7 @@ export async function readFolderTree(
     totalChars += content.length;
   }
 
-  return { entries, skipped, hitLimit };
+  return { entries, binaries, skipped, hitLimit };
 }
 
 /** Decode as UTF-8 or UTF-16, refusing anything that is clearly not text. */
@@ -340,7 +381,9 @@ export async function zipMembers(
 async function readZip(buf: Uint8Array): Promise<ArchiveResult> {
   const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   const entries: ArchiveEntry[] = [];
+  const binaries: ArchiveBinaryEntry[] = [];
   const skipped: { path: string; reason: string }[] = [];
+  let totalBinaryBytes = 0;
   let hitLimit = false;
 
   // End-of-central-directory record: scan back for its signature, since a
@@ -364,6 +407,7 @@ async function readZip(buf: Uint8Array): Promise<ArchiveResult> {
 
     const method = view.getUint16(offset + 10, true);
     const compressedSize = view.getUint32(offset + 20, true);
+    const uncompressedSize = view.getUint32(offset + 24, true);
     const nameLen = view.getUint16(offset + 28, true);
     const extraLen = view.getUint16(offset + 30, true);
     const commentLen = view.getUint16(offset + 32, true);
@@ -376,13 +420,24 @@ async function readZip(buf: Uint8Array): Promise<ArchiveResult> {
 
     if (name.endsWith("/")) continue;
 
+    const isProgram = isPeFilename(name);
     const reason = shouldSkip(name);
-    if (reason) {
+    if (reason && !isProgram) {
       skipped.push({ path: name, reason });
       continue;
     }
 
-    if (entries.length >= MAX_ENTRIES || totalChars >= MAX_TOTAL_CHARS) {
+    if (isProgram) {
+      if (
+        uncompressedSize > MAX_PE_UPLOAD_BYTES ||
+        binaries.length >= MAX_BINARY_ENTRIES ||
+        totalBinaryBytes + uncompressedSize > MAX_TOTAL_BINARY_BYTES
+      ) {
+        hitLimit = true;
+        skipped.push({ path: name, reason: "executable binary limit exceeded" });
+        continue;
+      }
+    } else if (entries.length >= MAX_ENTRIES || totalChars >= MAX_TOTAL_CHARS) {
       hitLimit = true;
       continue;
     }
@@ -407,6 +462,19 @@ async function readZip(buf: Uint8Array): Promise<ArchiveResult> {
       continue;
     }
 
+    if (isProgram) {
+      if (bytes.length < 64 || bytes[0] !== 0x4d || bytes[1] !== 0x5a) {
+        skipped.push({ path: name, reason: "executable extension but no MZ header" });
+      } else {
+        // Copy out of the archive buffer. Stored entries may otherwise retain
+        // the entire ZIP through a small subarray view.
+        const data = new Uint8Array(bytes);
+        binaries.push({ path: name, data, bytes: data.length });
+        totalBinaryBytes += data.length;
+      }
+      continue;
+    }
+
     const text = decodeText(bytes);
     if (text === null) {
       skipped.push({ path: name, reason: "binary file" });
@@ -419,7 +487,7 @@ async function readZip(buf: Uint8Array): Promise<ArchiveResult> {
     entries.push({ path: name, content, bytes: bytes.length, truncated });
   }
 
-  return { entries, skipped, hitLimit };
+  return { entries, binaries, skipped, hitLimit };
 }
 
 /**
@@ -430,9 +498,11 @@ async function readZip(buf: Uint8Array): Promise<ArchiveResult> {
  */
 function readTar(buf: Uint8Array): ArchiveResult {
   const entries: ArchiveEntry[] = [];
+  const binaries: ArchiveBinaryEntry[] = [];
   const skipped: { path: string; reason: string }[] = [];
   let hitLimit = false;
   let totalChars = 0;
+  let totalBinaryBytes = 0;
   let offset = 0;
 
   const str = (start: number, len: number) =>
@@ -460,9 +530,30 @@ function readTar(buf: Uint8Array): ArchiveResult {
     if (typeFlag !== "0" && typeFlag !== "\0" && typeFlag !== "") continue;
     if (full.endsWith("/")) continue;
 
+    const isProgram = isPeFilename(full);
     const reason = shouldSkip(full);
-    if (reason) {
+    if (reason && !isProgram) {
       skipped.push({ path: full, reason });
+      continue;
+    }
+    if (isProgram) {
+      if (
+        size > MAX_PE_UPLOAD_BYTES ||
+        binaries.length >= MAX_BINARY_ENTRIES ||
+        totalBinaryBytes + size > MAX_TOTAL_BINARY_BYTES
+      ) {
+        hitLimit = true;
+        skipped.push({ path: full, reason: "executable binary limit exceeded" });
+        continue;
+      }
+      const bytes = buf.subarray(dataStart, dataStart + size);
+      if (bytes.length < 64 || bytes[0] !== 0x4d || bytes[1] !== 0x5a) {
+        skipped.push({ path: full, reason: "executable extension but no MZ header" });
+      } else {
+        const data = new Uint8Array(bytes);
+        binaries.push({ path: full, data, bytes: data.length });
+        totalBinaryBytes += data.length;
+      }
       continue;
     }
     if (entries.length >= MAX_ENTRIES || totalChars >= MAX_TOTAL_CHARS) {
@@ -483,7 +574,7 @@ function readTar(buf: Uint8Array): ArchiveResult {
     entries.push({ path: full, content, bytes: size, truncated });
   }
 
-  return { entries, skipped, hitLimit };
+  return { entries, binaries, skipped, hitLimit };
 }
 
 /** Unpack an archive into its readable text files. */
@@ -523,54 +614,63 @@ export function formatArchiveManifest(
   result: ArchiveResult
 ): string {
   const { entries, skipped, hitLimit } = result;
+  const binaries = result.binaries ?? [];
 
-  const tree = entries
-    .map((e) => `  ${dir}/${e.path}${e.truncated ? "  (truncated)" : ""}`)
-    .join("\n");
+  const tree = [
+    ...entries.map(
+      (e) => `  ${dir}/${e.path}${e.truncated ? "  (truncated)" : ""}`
+    ),
+    ...binaries.map((e) => `  ${dir}/${e.path}  (executable bytes)`),
+  ].join("\n");
 
   const notes: string[] = [];
   if (skipped.length > 0) {
-    notes.push(`${skipped.length} skipped (binaries, dependencies)`);
+    notes.push(`${skipped.length} skipped (dependencies or unsupported binaries)`);
   }
-  if (hitLimit) notes.push(`only the first ${entries.length} were unpacked`);
+  if (hitLimit) notes.push("an extraction limit was reached");
+  const count = entries.length + binaries.length;
 
   return [
-    `${name} was unpacked into the workspace at ${dir}/ — ${entries.length} file(s)${
+    `${name} was unpacked into the workspace at ${dir}/ — ${count} file(s)${
       notes.length ? `, ${notes.join(", ")}` : ""
     }.`,
     "",
     tree,
     "",
-    "These are real files on disk. Read the ones you need with read_file, or search across them with search_files — do not ask for the archive to be re-sent.",
+    "These are real files on disk. Read text with read_file, search source with search_files, and use inspect_binary on an EXE/DLL — do not ask for the archive to be re-sent.",
   ].join("\n");
 }
 
 export function formatArchive(name: string, result: ArchiveResult): string {
   const { entries, skipped, hitLimit } = result;
+  const binaries = result.binaries ?? [];
 
-  if (entries.length === 0) {
-    return `[${name} contained no readable text files]`;
+  if (entries.length === 0 && binaries.length === 0) {
+    return `[${name} contained no readable text or supported Windows executable files]`;
   }
 
-  const tree = entries
-    .map((e) => `  ${e.path}${e.truncated ? "  (truncated)" : ""}`)
-    .join("\n");
+  const tree = [
+    ...entries.map((e) => `  ${e.path}${e.truncated ? "  (truncated)" : ""}`),
+    ...binaries.map((e) => `  ${e.path}  (executable bytes; saving to workspace)`),
+  ].join("\n");
 
   const notes: string[] = [];
   if (skipped.length > 0) {
-    notes.push(`${skipped.length} file(s) skipped (binaries, dependencies)`);
+    notes.push(`${skipped.length} file(s) skipped (dependencies or unsupported binaries)`);
   }
-  if (hitLimit) {
-    notes.push(`only the first ${entries.length} files are included`);
-  }
+  if (hitLimit) notes.push("an extraction limit was reached");
 
   const body = entries
     .map((e) => `--- ${e.path} ---\n${e.content}`)
     .join("\n\n");
+  const count = entries.length + binaries.length;
 
   return [
-    `Contents of ${name} (${entries.length} file(s))`,
+    `Contents of ${name} (${count} file(s))`,
     notes.length ? `Note: ${notes.join("; ")}` : "",
+    binaries.length
+      ? `${binaries.length} executable/library file(s) will be stored as exact bytes for inspect_binary; they are not executed.`
+      : "",
     "",
     tree,
     "",

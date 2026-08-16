@@ -293,6 +293,7 @@ const FILE_TOOLS = new Set([
   "list_files",
   "search_files",
   "read_document",
+  "inspect_binary",
   "restore_snapshot",
 ]);
 
@@ -341,6 +342,14 @@ const TOOL_CLAIM_PATTERNS: [string[], RegExp[]][] = [
       /\b(run_command|run_tests|write_process)\b[^.\n]{0,40}\b(returned|came back|gave|exited|failed|passed)/i,
       /\b(ran|executed)\s+(the\s+)?(tests?|command|script)\b[^.\n]{0,30}\b(and|which|it)\b/i,
       /\bexit(ed)?\s+(code\s+)?[01]\b/i,
+    ],
+  ],
+  [
+    ["inspect_binary"],
+    [
+      /\binspect_binary\b[^.\n]{0,60}\b(returned|found|reported|decompiled|failed|completed)/i,
+      /\b(I|I've|I have)\s+(used|ran|called)\s+inspect_binary\b/i,
+      /\b(I|I've|I have)\s+(decompiled|inspected)\s+(the\s+)?(executable|binary|EXE|DLL)\b/i,
     ],
   ],
 ];
@@ -438,6 +447,7 @@ const VERIFYING_TOOLS = new Set([
   "browse",
   "read_file",
   "read_files",
+  "inspect_binary",
   "read_process",
   "wait_for_output",
 ]);

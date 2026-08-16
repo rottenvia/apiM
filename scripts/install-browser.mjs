@@ -5,14 +5,15 @@
  *
  * Separate from `npm install` on purpose. Chromium is about 150MB, and most
  * people never ask the agent to look at a page — making everyone download it
- * to enable a feature they may not use is a poor trade. So `playwright-core`
- * is an optional dependency, the `browse` tool is only offered to the model
- * once this has been run, and everything else works exactly the same without
- * it.
+ * to enable a feature they may not use is a poor trade. The comparatively
+ * small `playwright-core` adapter is a normal dependency so this installer
+ * never dirties package.json/package-lock.json and blocks the next git pull;
+ * the large Chromium binary remains opt-in. `browse` is only offered to the
+ * model once that binary exists.
  *
- * Two steps, because they fail for different reasons and the messages should
+ * Two checks, because they fail for different reasons and the messages should
  * say which:
- *   1. install the playwright-core package (needs npm)
+ *   1. ensure the playwright-core package is installed (normally npm install did it)
  *   2. download the Chromium binary (needs Playwright's CDN)
  */
 import { spawnSync } from "node:child_process";

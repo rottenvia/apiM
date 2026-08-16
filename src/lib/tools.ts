@@ -15,6 +15,10 @@ import { smartSearch } from "@/lib/smart-search";
 import { listSnapshots, restoreSnapshot } from "@/lib/snapshots";
 import { documentKind, readDocument } from "@/lib/documents";
 import {
+  formatBinaryInspection,
+  inspectWorkspaceBinary,
+} from "@/lib/binaries";
+import {
   fetchPage,
   downloadResource,
   extractSelectors,
@@ -935,6 +939,75 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "inspect_binary",
+      description:
+        "Statically inspect and decompile a Windows executable or library " +
+        "without running it. Use for .exe, .dll, .sys, .ocx, .scr, .cpl, " +
+        ".drv and .efi files. Always returns built-in PE architecture, " +
+        "headers, sections/entropy, hashes, Authenticode envelope, imports " +
+        "with function names, exports, PDB paths, selected strings, .NET " +
+        "metadata and a recursive graph of DLLs supplied in the workspace. " +
+        "For managed code it also uses ILSpy when installed; for native code " +
+        "it uses headless Ghidra when installed and writes searchable " +
+        "source-like output under analysis/. Packed, encrypted or obfuscated " +
+        "files may only be partially recoverable, and the result says so.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description: "Executable/library path relative to the workspace.",
+          },
+          deep: {
+            type: "boolean",
+            description:
+              "Run the optional ILSpy/Ghidra decompiler. Defaults to true. " +
+              "Set false for a fast metadata-only pass.",
+          },
+          force_decompile: {
+            type: "boolean",
+            description:
+              "Ignore a completed hash cache and run the deep decompiler " +
+              "again. Leave false unless generated output is damaged or the " +
+              "decompiler configuration changed.",
+          },
+          dependencies: {
+            type: "boolean",
+            description:
+              "Recursively inspect matching local DLLs. Defaults to true.",
+          },
+          max_depth: {
+            type: "number",
+            description:
+              "Local DLL recursion depth, 0-8. Defaults to 4. System DLLs " +
+              "are named but not read from outside the workspace.",
+          },
+          include_strings: {
+            type: "boolean",
+            description: "Extract and rank readable ASCII/UTF-16 strings. Defaults to true.",
+          },
+          string_filter: {
+            type: "string",
+            description:
+              "Only return strings containing this text. Useful for URLs, " +
+              "errors, paths, product names or a suspected runtime-loaded DLL.",
+          },
+          min_string_length: {
+            type: "number",
+            description: "Minimum string length, 4-64. Defaults to 6.",
+          },
+          max_strings: {
+            type: "number",
+            description: "Maximum selected strings to return, 1-300. Defaults to 160.",
+          },
+        },
+        required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "list_processes",
       description:
         "List the background processes you started, with their state and " +
@@ -1072,6 +1145,8 @@ export interface ToolContext {
   /** Needed by the search planner, which uses a cheap model to pick queries. */
   deepseekKey?: string;
   searchProfile?: string;
+  /** Explicit Stop signal; expensive static/decompiler work must release promptly. */
+  signal?: AbortSignal;
 }
 
 export async function runTool(
@@ -2476,6 +2551,39 @@ export async function runTool(
           content:
             `${target} (${kind}${doc.truncated ? ", truncated" : ""}):\n\n${doc.text}`,
           summary: `Read ${target}`,
+        };
+      }
+
+      case "inspect_binary": {
+        const target = str(args, "path");
+        const result = await inspectWorkspaceBinary(workspaceId, target, {
+          deep: args.deep !== false,
+          forceDeep: args.force_decompile === true,
+          signal: context.signal,
+          dependencies: args.dependencies !== false,
+          maxDepth: num(args, "max_depth") ?? undefined,
+          includeStrings: args.include_strings !== false,
+          stringFilter:
+            typeof args.string_filter === "string"
+              ? args.string_filter
+              : undefined,
+          minStringLength: num(args, "min_string_length") ?? undefined,
+          maxStrings: num(args, "max_strings") ?? undefined,
+        });
+        const p = result.inspection;
+        const generated = result.deep.outputs.length;
+        return {
+          ok: true,
+          content: formatBinaryInspection(result),
+          summary:
+            `Inspected ${target} — ${p.architecture}, ` +
+            `${p.imports.length} libraries, ${p.exports.length} exports` +
+            (generated
+              ? `, ${generated} decompiler output file${generated === 1 ? "" : "s"}`
+              : ""),
+          changedPath: generated
+            ? result.deep.outputs[0]?.split("/").slice(0, 2).join("/")
+            : undefined,
         };
       }
 

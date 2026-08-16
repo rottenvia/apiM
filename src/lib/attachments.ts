@@ -24,12 +24,14 @@ import { documentKind, readDocument } from "@/lib/documents";
  */
 export type AttachStage =
   | "reading"
+  | "saving"
   | "unpacking"
   | "extracting"
   | "analyzing";
 
 export const STAGE_LABELS: Record<AttachStage, string> = {
   reading: "Reading",
+  saving: "Saving binary",
   unpacking: "Unpacking",
   extracting: "Extracting text",
   analyzing: "Looking at image",
@@ -47,6 +49,14 @@ export interface Attachment {
    * workspace rather than inlined into a message and lost with it.
    */
   entries?: { path: string; content: string }[];
+  /**
+   * Archive/folder PE files carried only until multipart upload finishes.
+   * Cleared before the attachment enters a chat message, so raw executable
+   * bytes are never base64/JSON-inlined into model context.
+   */
+  binaryEntries?: { path: string; data: Uint8Array; bytes: number }[];
+  /** Executable members already saved as raw workspace files. */
+  binaryPaths?: string[];
   /** Archives only: where they were written, once they have been. */
   unpackedTo?: string;
   /** Size of the original file in bytes. */
@@ -129,8 +139,14 @@ const BINARY_FORMATS: Record<string, string> = {
   pdf: "PDFs need a parser this app doesn't have yet — copy the text out, or say the word and I'll add one.",
   doc: "The old .doc format isn't readable. Save as .docx and it will work.",
   xls: "The old .xls format isn't readable. Save as .xlsx or .csv and it will work.",
-  exe: "an executable",
-  dll: "a library",
+  exe: "Windows executables must be saved as raw bytes and opened with inspect_binary, not decoded as text.",
+  dll: "Windows libraries must be saved as raw bytes and opened with inspect_binary, not decoded as text.",
+  sys: "Windows drivers must be saved as raw bytes and opened with inspect_binary, not decoded as text.",
+  ocx: "Windows OCX libraries must be saved as raw bytes and opened with inspect_binary, not decoded as text.",
+  scr: "Windows screen-saver executables must be saved as raw bytes and opened with inspect_binary, not decoded as text.",
+  cpl: "Windows Control Panel libraries must be saved as raw bytes and opened with inspect_binary, not decoded as text.",
+  drv: "Windows driver libraries must be saved as raw bytes and opened with inspect_binary, not decoded as text.",
+  efi: "EFI executables must be saved as raw bytes and opened with inspect_binary, not decoded as text.",
   so: "a library",
   dylib: "a library",
   bin: "a binary",
@@ -309,8 +325,8 @@ export async function readFolder(
 
   try {
     const result = await readFolderTree(files);
-    if (result.entries.length === 0) {
-      return { error: `${name} had no readable text files in it` };
+    if (result.entries.length === 0 && !(result.binaries?.length)) {
+      return { error: `${name} had no readable text or supported Windows executables in it` };
     }
     return {
       attachment: {
@@ -320,11 +336,12 @@ export async function readFolder(
         content: formatArchive(name, result),
         truncated: result.hitLimit || result.entries.some((e) => e.truncated),
         kind: "text",
-        fileCount: result.entries.length,
+        fileCount: result.entries.length + (result.binaries?.length ?? 0),
         entries: result.entries.map((e) => ({
           path: e.path,
           content: e.content,
         })),
+        binaryEntries: result.binaries,
       },
     };
   } catch (error) {
@@ -365,8 +382,10 @@ export async function readTextFile(
       // busy inflating; otherwise the label only appears after the work.
       await new Promise((r) => setTimeout(r, 0));
       const result = await readArchive(file.name, data);
-      if (result.entries.length === 0) {
-        return { error: `${file.name} had no readable text files in it` };
+      if (result.entries.length === 0 && !(result.binaries?.length)) {
+        return {
+          error: `${file.name} had no readable text or supported Windows executables in it`,
+        };
       }
       return {
         attachment: {
@@ -378,11 +397,12 @@ export async function readTextFile(
           content: formatArchive(file.name, result),
           truncated: result.hitLimit || result.entries.some((e) => e.truncated),
           kind: "text",
-          fileCount: result.entries.length,
+          fileCount: result.entries.length + (result.binaries?.length ?? 0),
           entries: result.entries.map((e) => ({
             path: e.path,
             content: e.content,
           })),
+          binaryEntries: result.binaries,
         },
       };
     } catch (error) {
