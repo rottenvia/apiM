@@ -536,7 +536,7 @@ await fs.writeFile(
     `fs.mkdirSync(out,{recursive:true});\n` +
     `fs.writeFileSync(path.join(out,'functions.tsv'),'address\\tname\\n');\n` +
     `fs.writeFileSync(path.join(out,'summary.txt'),'Functions decompiled: 0\\nFocus fallback used: false\\n');\n` +
-    `console.error('GHIDRA_POSTSCRIPT_COMPILE_ERROR fixture');\n`
+    `console.error('GHIDRA_POSTSCRIPT_COMPILE_ERROR fixture APPDATA=' + process.env.APPDATA);\n`
 );
 await fs.writeFile(
   fakeHeadless,
@@ -545,6 +545,9 @@ await fs.writeFile(
     : `#!/bin/sh\nexec "${process.execPath}" "${fakeGhidraScript}" "$@"\n`
 );
 if (process.platform !== "win32") await fs.chmod(fakeHeadless, 0o755);
+const previousAppData = process.env.APPDATA;
+const fakeAppData = path.join(DATA_ROOT, "roaming-appdata");
+process.env.APPDATA = fakeAppData;
 process.env.APIM_GHIDRA_HOME = fakeGhidra;
 const emptyGhidra = await B.inspectWorkspaceBinary(
   WS,
@@ -562,6 +565,8 @@ const emptyGhidra = await B.inspectWorkspaceBinary(
 );
 if (previousGhidra === undefined) delete process.env.APIM_GHIDRA_HOME;
 else process.env.APIM_GHIDRA_HOME = previousGhidra;
+if (previousAppData === undefined) delete process.env.APPDATA;
+else process.env.APPDATA = previousAppData;
 check(
   "a header-only zero-function Ghidra run is rejected, not called complete",
   emptyGhidra.deep.status === "failed" &&
@@ -576,7 +581,8 @@ check(
     /scrubbed environment/.test(emptyGhidra.deep.summary) &&
     /GHIDRA_POSTSCRIPT_COMPILE_ERROR/.test(
       B.formatBinaryInspection(emptyGhidra)
-    )
+    ) &&
+    B.formatBinaryInspection(emptyGhidra).includes(fakeAppData)
 );
 
 await fs.writeFile(
