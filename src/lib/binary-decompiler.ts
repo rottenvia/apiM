@@ -73,7 +73,10 @@ function minimalEnv(): NodeJS.ProcessEnv {
   for (const key of [
     "SystemRoot", "SYSTEMROOT", "windir", "COMSPEC", "PATHEXT",
     "ProgramFiles", "ProgramFiles(x86)", "JAVA_HOME", "DOTNET_ROOT",
-    "USERPROFILE", "LOCALAPPDATA",
+    // Ghidra 12 LaunchSupport persists/reads its selected JDK beneath the
+    // roaming profile. Omitting APPDATA makes its Java process throw before
+    // it can validate the JDK, even when java.exe is already on PATH.
+    "USERPROFILE", "LOCALAPPDATA", "APPDATA",
     "APIM_BINARY_MAX_OUTPUT_MB",
   ]) {
     if (process.env[key]) env[key] = process.env[key];
