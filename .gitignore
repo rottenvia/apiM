@@ -58,5 +58,10 @@ scripts/tmp/
 # Per-suite test data, created by `npm test`.
 .test-data/
 
+# Optional local reverse-engineering resources. These are large external Git
+# checkouts installed by the user, not application source.
+tools/capa/
+tools/capa-rules/
+
 # Output of `npm run report`, meant to be attached rather than committed.
 report.txt
