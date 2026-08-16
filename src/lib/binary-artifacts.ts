@@ -31,7 +31,15 @@ export interface EntropyMapResult {
 
 export interface CarvedBlob {
   index: number;
-  kind: "PE" | "Lua bytecode" | "Lua source" | "ZIP" | "PNG" | "PDF";
+  kind:
+    | "PE"
+    | "Lua bytecode"
+    | "Lua source"
+    | "ZIP"
+    | "PNG"
+    | "PDF"
+    | "opaque high-entropy section"
+    | "opaque overlay";
   offset: number;
   bytes: number;
   path: string;
@@ -49,7 +57,7 @@ export interface StaticBinaryArtifacts {
   summary: string;
 }
 
-const STATIC_SCHEMA = 3;
+const STATIC_SCHEMA = 4;
 // search_files reads up to 512KB per file. Stay below that so exhaustive
 // artifacts are genuinely searchable instead of merely present on disk.
 const STRINGS_CHUNK_BYTES = 350_000;
@@ -498,8 +506,46 @@ function carveCandidates(bytes: Uint8Array): CarveCandidate[] {
     .sort((a, b) => a.offset - b.offset || b.end - a.end);
 }
 
+function opaqueCandidates(
+  bytes: Uint8Array,
+  inspection: PeInspection
+): CarveCandidate[] {
+  const candidates: CarveCandidate[] = [];
+  for (const section of inspection.sections) {
+    if (
+      section.rawSize < 512 ||
+      section.entropy < 7.2 ||
+      section.rawOffset < 0 ||
+      section.rawOffset >= bytes.length
+    ) continue;
+    candidates.push({
+      kind: "opaque high-entropy section",
+      offset: section.rawOffset,
+      end: Math.min(bytes.length, section.rawOffset + section.rawSize),
+      extension: "bin",
+      note:
+        `Section ${section.name} has entropy ${section.entropy}. It is preserved ` +
+        `as opaque compressed/encrypted data; no plaintext payload signature ` +
+        `was claimed.`,
+    });
+  }
+  if (inspection.overlayBytes >= 4096) {
+    candidates.push({
+      kind: "opaque overlay",
+      offset: Math.max(0, bytes.length - inspection.overlayBytes),
+      end: bytes.length,
+      extension: "bin",
+      note:
+        `The PE overlay has ${inspection.overlayBytes} bytes and is preserved ` +
+        `even though no plaintext child format was identified.`,
+    });
+  }
+  return candidates;
+}
+
 async function carveBlobs(
   bytes: Uint8Array,
+  inspection: PeInspection,
   dir: string,
   workspaceRoot: string,
   signal?: AbortSignal
@@ -511,7 +557,14 @@ async function carveBlobs(
   const occupied: [number, number][] = [];
   let total = 0;
 
-  for (const candidate of carveCandidates(bytes)) {
+  // Strong magic-based children first, then overlapping opaque regions. This
+  // preserves a real embedded PE/Lua/PDF and the encrypted section containing
+  // it instead of letting the broad section carve hide the specific child.
+  const candidates = [
+    ...carveCandidates(bytes),
+    ...opaqueCandidates(bytes, inspection),
+  ];
+  for (const candidate of candidates) {
     stopped(signal);
     if (carved.length >= MAX_CARVED_BLOBS) break;
     const size = Math.min(candidate.end - candidate.offset, MAX_CARVED_SINGLE_BYTES);
@@ -642,6 +695,7 @@ export async function generateStaticBinaryArtifacts(
   );
   const carved = await carveBlobs(
     bytes,
+    inspection,
     staticDir,
     workspaceRoot,
     options.signal
