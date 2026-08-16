@@ -58,17 +58,67 @@ The executable will be in the `dist` folder. Just double-click to run!
 npm test
 ```
 
-Runs every suite — 1,361 checks — in about 90 seconds. It never calls the
-paid API; `npm run test:real` does that and is opt-in.
+Runs every suite — currently 1,862 checks across 47 suites — without calling
+the paid API; `npm run test:real` does that and is opt-in.
 
 ```bash
 npm test plan       # one suite
 npm run typecheck   # types
 npm run lint        # unused code, React mistakes
-npm run score       # rates all 33 agent tools
+npm run score       # rates all 36 agent tools
 ```
 
 See [docs/testing.md](docs/testing.md).
+
+## Executable and DLL analysis
+
+Attach a Windows `.exe`, `.dll`, `.sys`, `.ocx`, `.scr`, `.cpl`, `.drv` or
+`.efi` file to a chat. apiM stores the exact bytes under `uploads/binaries/`
+and the agent can call `inspect_binary`. A picked folder preserves up to 128
+executables/libraries together so the main EXE's local DLL graph can be
+followed recursively.
+
+The built-in pass needs no extra software and never launches the target. It
+reports PE32/PE32+, CPU architecture, hashes/imphash, sections and entropy,
+mitigations, imports and imported function names, exports, version resources,
+PDB paths, .NET assembly references, likely runtime-loaded DLL names, selected
+ASCII/UTF-16 strings, signing-envelope presence, overlays and matching local
+DLL dependencies. "Signing envelope present" does not claim the certificate is
+trusted; trust verification is deliberately reported separately.
+
+For the deepest source-like recovery, install the decompiler matching the
+binary:
+
+```bat
+:: Managed .NET assemblies — requires the .NET SDK
+dotnet tool install --global ilspycmd
+```
+
+For native x86/x64/ARM binaries, install Ghidra plus Java 21, then set the
+extracted Ghidra directory in `.env.local`:
+
+```env
+APIM_GHIDRA_HOME=C:\tools\ghidra_11.x_PUBLIC
+```
+
+That directory must contain `support\analyzeHeadless.bat`. Restart apiM after
+changing `.env.local`. Ghidra output is written in searchable ~350KB chunks
+under `analysis/<binary>-<hash>/ghidra/`; ILSpy writes a C# project under the
+matching `ilspy/` directory. Completed results are cached by SHA-256. Defaults
+limit native analysis to four minutes, four CPU cores and 100MB of recovered
+text; tune only when needed:
+
+```env
+APIM_BINARY_DECOMPILE_TIMEOUT_MS=240000
+APIM_BINARY_MAX_CPU=4
+APIM_BINARY_MAX_OUTPUT_MB=100
+```
+
+Decompilation is approximate: optimised native code has lost original names,
+comments and types, while packing, encryption or obfuscation can prevent full
+recovery. The report distinguishes complete, partial, unavailable and failed
+analysis rather than pretending source was recovered. Run the offline parser
+regressions with `npm run test:binaries`.
 
 ## Requirements
 

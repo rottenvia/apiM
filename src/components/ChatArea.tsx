@@ -16,6 +16,12 @@ import {
 } from "@/lib/attachments";
 import { isImageFile } from "@/lib/vision";
 import {
+  binaryFolderUploadPath,
+  binaryUploadPath,
+  isPeFilename,
+  MAX_PE_UPLOAD_BYTES,
+} from "@/lib/binary-types";
+import {
   archiveFolderName,
   formatArchiveManifest,
   folderPathOf,
@@ -289,7 +295,12 @@ export function ChatArea({
       truncated: false,
       kind:
         item.kind === "file" && isImageFile(item.file) ? "image" : "text",
-      stage: item.kind === "folder" ? "unpacking" : "reading",
+      stage:
+        item.kind === "folder"
+          ? "unpacking"
+          : isPeFilename(item.file.name)
+            ? "saving"
+            : "reading",
     }));
     // Room is computed here, not inside the updater below.
     //
@@ -316,6 +327,37 @@ export function ChatArea({
       );
     };
 
+    const saveProgram = async (
+      file: File,
+      target: string
+    ): Promise<{ path?: string; bytes?: number; error?: string }> => {
+      if (!workspaceId) {
+        return { error: "this chat has no workspace yet" };
+      }
+      if (file.size > MAX_PE_UPLOAD_BYTES) {
+        return {
+          error:
+            `${file.name} is ${(file.size / 1024 / 1024).toFixed(1)}MB; ` +
+            `the per-executable limit is ${MAX_PE_UPLOAD_BYTES / 1024 / 1024}MB`,
+        };
+      }
+      const body = new FormData();
+      body.set("path", target);
+      body.set("file", file, file.name);
+      const response = await fetch(`/api/workspace/${workspaceId}/binary`, {
+        method: "POST",
+        body,
+      });
+      const saved = (await response.json().catch(() => ({}))) as {
+        path?: string;
+        bytes?: number;
+        error?: string;
+      };
+      return response.ok && saved.path
+        ? saved
+        : { error: saved.error ?? `HTTP ${response.status}` };
+    };
+
     for (let i = 0; i < list.length; i++) {
       const placeholder = pending[i];
       // Beyond the cap the placeholder was never added, so there is nothing
@@ -328,7 +370,124 @@ export function ChatArea({
       let error: string | undefined;
       try {
         if (item.kind === "folder") {
-          ({ attachment, error } = await readFolder(item.name, item.files));
+          /*
+           * Text and executables take different paths from the same folder.
+           * The text reader intentionally skips binaries; losing every DLL at
+           * that point would make a recursive dependency graph impossible.
+           * Preserve PE files as raw multipart uploads, four at a time, while
+           * the ordinary source/config files keep the existing unpack flow.
+           */
+          const programs = item.files.filter((file) => isPeFilename(file.name));
+          const readable = item.files.filter((file) => !isPeFilename(file.name));
+          let textError: string | undefined;
+          if (readable.length) {
+            ({ attachment, error: textError } = await readFolder(
+              item.name,
+              readable
+            ));
+          }
+
+          const savedPrograms: string[] = [];
+          const binaryErrors: string[] = [];
+          const limitedPrograms = programs.slice(0, 128);
+          if (limitedPrograms.length) setStage(placeholder.id, "saving");
+          for (let at = 0; at < limitedPrograms.length; at += 4) {
+            const batch = limitedPrograms.slice(at, at + 4);
+            const outcomes = await Promise.all(
+              batch.map(async (file) => {
+                const full = folderPathOf(file);
+                const relative =
+                  full.split("/").slice(1).join("/") || file.name;
+                const target = binaryFolderUploadPath(item.name, relative);
+                return { file, saved: await saveProgram(file, target) };
+              })
+            );
+            for (const outcome of outcomes) {
+              if (outcome.saved.path) savedPrograms.push(outcome.saved.path);
+              else {
+                binaryErrors.push(
+                  `${outcome.file.name}: ${outcome.saved.error ?? "upload failed"}`
+                );
+              }
+            }
+          }
+          if (programs.length > limitedPrograms.length) {
+            binaryErrors.push(
+              `${programs.length - limitedPrograms.length} executable(s) were not saved; the per-folder cap is 128.`
+            );
+          }
+
+          if (savedPrograms.length) {
+            const binaryNote =
+              `${savedPrograms.length} executable/library file(s) from ` +
+              `${item.name} were saved as exact bytes and were not executed:\n` +
+              `${savedPrograms.map((saved) => `  ${saved}`).join("\n")}\n\n` +
+              `Use inspect_binary on the main EXE. It will recursively match ` +
+              `and inspect these local DLLs.`;
+            if (attachment) {
+              attachment = {
+                ...attachment,
+                content: `${attachment.content}\n\n${binaryNote}`,
+                fileCount:
+                  (attachment.fileCount ?? 0) + savedPrograms.length,
+                binaryPaths: savedPrograms,
+              };
+            } else {
+              attachment = {
+                id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+                name: item.name,
+                size: item.files.reduce((total, file) => total + file.size, 0),
+                content: binaryNote,
+                truncated: programs.length > limitedPrograms.length,
+                kind: "text",
+                fileCount: savedPrograms.length,
+                binaryPaths: savedPrograms,
+              };
+            }
+            onProcessesChanged?.();
+          }
+          const meaningfulErrors = [
+            // "no readable text" is expected for a binary-only folder.
+            textError && !savedPrograms.length ? textError : null,
+            ...binaryErrors,
+          ].filter(Boolean);
+          error = meaningfulErrors.length
+            ? meaningfulErrors.join(" · ")
+            : undefined;
+        } else if (isPeFilename(item.file.name)) {
+          /*
+           * Keep executable bytes exact and put them in the workspace.
+           *
+           * Decoding an EXE as text destroys it; base64-inlining a 50MB file
+           * into every model round is even worse. A multipart upload stores
+           * the raw bytes once, and the message carries only the stable path
+           * that inspect_binary can open. Nothing here executes the target.
+           */
+          setStage(placeholder.id, "saving");
+          const saved = await saveProgram(
+            item.file,
+            binaryUploadPath(item.file.name)
+          );
+          if (!saved.path) {
+            error = `Couldn't save ${item.file.name}: ${saved.error ?? "upload failed"}`;
+          } else {
+            attachment = {
+              id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+              name: item.file.name,
+              size: saved.bytes ?? item.file.size,
+              content:
+                `${item.file.name} was saved as exact executable bytes at ` +
+                `${saved.path}. It was not executed. Use inspect_binary on ` +
+                `that path to recover PE metadata, imported DLLs/functions, ` +
+                `strings, dependency graphs and the deepest available ` +
+                `ILSpy/Ghidra decompilation.`,
+              truncated: false,
+              kind: "text",
+              unpackedTo: saved.path,
+              binaryPaths: [saved.path],
+            };
+            onProcessesChanged?.();
+          }
         } else if (isImageFile(item.file)) {
           ({ attachment, error } = await readImageFile(item.file));
         } else {
@@ -343,6 +502,57 @@ export function ChatArea({
           e instanceof Error
             ? `Couldn't read ${label}: ${e.message}`
             : `Couldn't read ${label}`;
+      }
+
+      /*
+       * ZIP/TAR executable members arrive as raw Uint8Arrays from the archive
+       * reader. Save them before the attachment is allowed into message
+       * state, then discard the bytes: the model needs paths, not a giant JSON
+       * array of numbers resent on every round.
+       */
+      if (attachment?.binaryEntries?.length) {
+        setStage(placeholder.id, "saving");
+        const savedPrograms: string[] = [];
+        const failedPrograms: string[] = [];
+        for (let at = 0; at < attachment.binaryEntries.length; at += 4) {
+          const batch = attachment.binaryEntries.slice(at, at + 4);
+          const outcomes = await Promise.all(
+            batch.map(async (entry) => {
+              const name = entry.path.split("/").pop() || "program.exe";
+              const file = new File([entry.data as BlobPart], name, {
+                type: "application/vnd.microsoft.portable-executable",
+              });
+              const target = binaryFolderUploadPath(
+                archiveFolderName(attachment!.name),
+                entry.path
+              );
+              return { entry, saved: await saveProgram(file, target) };
+            })
+          );
+          for (const outcome of outcomes) {
+            if (outcome.saved.path) savedPrograms.push(outcome.saved.path);
+            else {
+              failedPrograms.push(
+                `${outcome.entry.path}: ${outcome.saved.error ?? "upload failed"}`
+              );
+            }
+          }
+        }
+        const note = savedPrograms.length
+          ? `\n\nExecutable/library members saved as exact bytes (never executed):\n` +
+            `${savedPrograms.map((saved) => `  ${saved}`).join("\n")}\n` +
+            `Use inspect_binary on the main EXE; matching DLLs are followed recursively.`
+          : "";
+        attachment = {
+          ...attachment,
+          content: attachment.content + note,
+          binaryEntries: undefined,
+          binaryPaths: savedPrograms,
+        };
+        if (failedPrograms.length) {
+          error = [error, ...failedPrograms].filter(Boolean).join(" · ");
+        }
+        if (savedPrograms.length) onProcessesChanged?.();
       }
 
       // Swap the placeholder for the real thing, or drop it if it failed.
@@ -379,16 +589,24 @@ export function ChatArea({
                 unpackedTo: dir,
                 // The files are on disk now, so the message carries a map
                 // rather than a second copy of everything.
-                content: formatArchiveManifest(attachment.name, dir, {
-                  entries: attachment.entries.map((e) => ({
-                    path: e.path,
-                    content: "",
-                    bytes: e.content.length,
-                    truncated: false,
-                  })),
-                  skipped: [],
-                  hitLimit: false,
-                }),
+                content:
+                  formatArchiveManifest(attachment.name, dir, {
+                    entries: attachment.entries.map((e) => ({
+                      path: e.path,
+                      content: "",
+                      bytes: e.content.length,
+                      truncated: false,
+                    })),
+                    skipped: [],
+                    hitLimit: false,
+                  }) +
+                  (attachment.binaryPaths?.length
+                    ? `\n\nExecutable/library files saved separately as exact bytes (never executed):\n` +
+                      attachment.binaryPaths
+                        .map((binaryPath) => `  ${binaryPath}`)
+                        .join("\n") +
+                      `\nUse inspect_binary on the main EXE; it follows matching local DLLs.`
+                    : ""),
                 entries: undefined,
               };
               onProcessesChanged?.();
@@ -400,8 +618,18 @@ export function ChatArea({
         }
       }
 
-      if (attachment) accepted.push(attachment);
-      else if (error) errors.push(error);
+      // The archive may have gained workspace paths after the first swap.
+      // Replace that same attachment once more so message state gets the
+      // manifest rather than retaining raw entries or an earlier status.
+      if (attachment) {
+        setAttachments((prev) =>
+          prev.map((current) =>
+            current.id === attachment!.id ? attachment! : current
+          )
+        );
+        accepted.push(attachment);
+      }
+      if (error) errors.push(error);
     }
 
     // Images need a description before they are any use to a text-only model,

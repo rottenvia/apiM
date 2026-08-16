@@ -61,7 +61,8 @@
     "test:honesty": "tsx scripts/test-honesty.mjs",
     "test:ux": "tsx scripts/test-ux.mjs",
     "test:github": "tsx scripts/test-github.mjs",
-    "test:isolation": "tsx scripts/test-chat-isolation.mjs"
+    "test:isolation": "tsx scripts/test-chat-isolation.mjs",
+    "test:binaries": "tsx scripts/test-binaries.mjs"
   },
   "dependencies": {
     "@types/cross-spawn": "^6.0.6",
@@ -72,6 +73,7 @@
     "next": "16.2.6",
     "pdfjs-dist": "^4.10.38",
     "pg": "8.20.0",
+    "playwright-core": "^1.62.1",
     "react": "19.2.6",
     "react-dom": "19.2.6",
     "react-markdown": "^10.1.0",
