@@ -104,25 +104,27 @@ function makePe({ dll = false, managed = false, customImport = true } = {}) {
   v.setUint32(0x400 + 16, 0x2050, true);
   let descriptorEnd = 0x414;
   if (customImport) {
-    v.setUint32(0x414, 0x2060, true);
+    v.setUint32(0x414, 0x20e0, true);
     v.setUint32(0x414 + 12, 0x2090, true);
-    v.setUint32(0x414 + 16, 0x2060, true);
+    v.setUint32(0x414 + 16, 0x20e0, true);
     descriptorEnd = 0x428;
   }
   bytes.fill(0, descriptorEnd, descriptorEnd + 20);
   v.setBigUint64(0x450, BigInt(0x20a0), true);
-  v.setBigUint64(0x458, BigInt(0), true);
+  v.setBigUint64(0x458, BigInt(0x21a0), true);
+  v.setBigUint64(0x460, BigInt(0x21c0), true);
+  v.setBigUint64(0x468, BigInt(0), true);
   if (customImport) {
-    v.setBigUint64(0x460, BigInt(0x20c0), true);
-    v.setBigUint64(0x468, BigInt(0), true);
+    v.setBigUint64(0x4e0, BigInt(0x20c0), true);
+    v.setBigUint64(0x4e8, BigInt(0), true);
   }
   ascii(bytes, 0x480, "KERNEL32.dll");
   if (customImport) ascii(bytes, 0x490, "custom.dll");
   v.setUint16(0x4a0, 0, true);
-  ascii(bytes, 0x4a2, "ExitProcess");
+  ascii(bytes, 0x4a2, "CreateRemoteThread");
   if (customImport) {
     v.setUint16(0x4c0, 0, true);
-    ascii(bytes, 0x4c2, "DoUsefulWork");
+    ascii(bytes, 0x4c2, "WriteProcessMemory");
   }
 
   // IMAGE_DELAYLOAD_DESCRIPTOR and its import-name table.
@@ -134,7 +136,11 @@ function makePe({ dll = false, managed = false, customImport = true } = {}) {
   v.setBigUint64(0x560, BigInt(0x2180), true);
   v.setBigUint64(0x568, BigInt(0), true);
   v.setUint16(0x580, 0, true);
-  ascii(bytes, 0x582, "DelayedCall");
+  ascii(bytes, 0x582, "luaL_loadfilex");
+  v.setUint16(0x5a0, 0, true);
+  ascii(bytes, 0x5a2, "CreateProcessW");
+  v.setUint16(0x5c0, 0, true);
+  ascii(bytes, 0x5c2, "LoadLibraryW");
 
   // One named export at RVA 0x1000.
   const exp = 0x780;
@@ -240,14 +246,14 @@ check("reports ASLR, DEP and CFG", native.mitigations.aslr && native.mitigations
 check("hashes exact bytes", /^[a-f0-9]{64}$/.test(native.hashes.sha256) && /^[a-f0-9]{32}$/.test(native.hashes.md5));
 check("parses sections and permissions", native.sections.length === 2 && native.sections[0].executable && !native.sections[0].writable);
 check("parses imported DLLs", native.imports.some((x) => x.dll === "KERNEL32.dll") && native.imports.some((x) => x.dll === "custom.dll"));
-check("parses imported function names", native.imports.some((x) => x.functions.includes("ExitProcess")) && native.imports.some((x) => x.functions.includes("DoUsefulWork")));
+check("parses imported function names", native.imports.some((x) => x.functions.includes("CreateRemoteThread")) && native.imports.some((x) => x.functions.includes("WriteProcessMemory")));
 check(
   "parses delay-loaded libraries and functions separately",
   native.imports.some(
     (x) =>
       x.dll === "delay.dll" &&
       x.delayLoaded &&
-      x.functions.includes("DelayedCall")
+      x.functions.includes("luaL_loadfilex")
   )
 );
 check(
@@ -257,6 +263,41 @@ check(
   )
 );
 check("computes an imphash", /^[a-f0-9]{32}$/.test(native.hashes.imphash ?? ""));
+check(
+  "reports an explicit packing assessment rather than only raw entropy",
+  native.packing.status === "unlikely" && native.packing.score >= 0,
+  JSON.stringify(native.packing)
+);
+const packedFixture = makePe();
+ascii(packedFixture, 0x188, "UPX0");
+const packed = B.inspectPortableExecutable(packedFixture, {
+  includeStrings: false,
+});
+check(
+  "known packer section markers produce a likely assessment",
+  packed.packing.status === "likely" && packed.packing.knownPacker === "UPX",
+  JSON.stringify(packed.packing)
+);
+check(
+  "high-interest imports are grouped without calling them a malware verdict",
+  native.highlightedImports.some(
+    (item) =>
+      item.function === "CreateRemoteThread" &&
+      item.category === "process injection/memory"
+  ) &&
+    native.highlightedImports.some(
+      (item) => item.function === "luaL_loadfilex" && item.category === "Lua API"
+    ) &&
+    native.highlightedImports.some(
+      (item) =>
+        item.function === "LoadLibraryW" &&
+        item.category === "library loading/API resolution"
+    ) &&
+    native.highlightedImports.some(
+      (item) =>
+        item.function === "CreateProcessW" && item.category === "process creation"
+    )
+);
 check("reads version resources", native.versionInfo.ProductName === "Fixture Analyzer", JSON.stringify(native.versionInfo));
 check("recovers PDB paths", native.pdbPaths.some((x) => x.endsWith("fixture.pdb")), native.pdbPaths.join(", "));
 check("names but does not verify the signing envelope", native.authenticode.present && native.authenticode.verified === false);
@@ -299,6 +340,11 @@ await W.writeFileBytes(
   "uploads/binaries/custom.dll",
   Buffer.from(makePe({ dll: true, customImport: false }))
 );
+await W.writeFileBytes(
+  WS,
+  "uploads/binaries/managed.exe",
+  Buffer.from(makePe({ managed: true }))
+);
 let result = await B.inspectWorkspaceBinary(WS, "uploads/binaries/app.exe", {
   deep: false,
   dependencies: true,
@@ -311,14 +357,117 @@ check("Windows DLLs are labelled without escaping the workspace", system?.kind =
 check("the local child carries its own imports", local?.children?.some((x) => x.name.toLowerCase() === "kernel32.dll"));
 check("dependency parsing is bounded and counted", result.localFilesInspected === 2);
 
-console.log("\n5. Deep results are hash-cached instead of burning CPU twice");
+console.log("\n5. Full static artifacts are exhaustive, mapped and carved");
+const rootBytes = makePe();
+const childBytes = makePe({ dll: true, customImport: false });
+const artifactBytes = new Uint8Array(0x3600);
+artifactBytes.set(rootBytes, 0);
+artifactBytes.set(childBytes, 0x1400);
+artifactBytes.set([0x1b, 0x4c, 0x75, 0x61, 0x54, 0x00, 0x19, 0x93], 0x2800);
+ascii(artifactBytes, 0x2810, "embedded_lua_chunk_string");
+ascii(artifactBytes, 0x2900, "%PDF-1.4\nembedded document\n%%EOF");
+ascii(
+  artifactBytes,
+  0x2a00,
+  "local value = require('game') function CreateMove(cmd) if IN_JUMP then return value end end"
+);
+await W.writeFileBytes(
+  WS,
+  "uploads/binaries/artifact.exe",
+  Buffer.from(artifactBytes)
+);
+const artifactResult = await B.inspectWorkspaceBinary(
+  WS,
+  "uploads/binaries/artifact.exe",
+  {
+    deep: false,
+    runCapa: false,
+    dependencies: false,
+    includeStrings: true,
+    artifacts: true,
+  }
+);
+check(
+  "full strings are written with offsets and both encodings",
+  artifactResult.artifacts.strings.count > 0 &&
+    artifactResult.artifacts.strings.outputs.some((output) =>
+      output.includes("full-strings-ascii")
+    ) &&
+    artifactResult.artifacts.strings.outputs.some((output) =>
+      output.includes("full-strings-utf16le")
+    )
+);
+const fullStringsText = (
+  await Promise.all(
+    artifactResult.artifacts.strings.outputs.map((output) =>
+      fs.readFile(path.join(W.workspaceDirectory(WS), output), "utf8")
+    )
+  )
+).join("\n");
+check(
+  "the full dump contains strings omitted from a bounded chat selection",
+  /CreateMove/.test(fullStringsText) && /^offset\tencoding\tlength\tvalue/m.test(fullStringsText)
+);
+check(
+  "entropy is mapped in 4KB windows with offsets and section names",
+  artifactResult.artifacts.entropy.windowBytes === 4096 &&
+    artifactResult.artifacts.entropy.windows === Math.ceil(artifactBytes.length / 4096) &&
+    artifactResult.artifacts.entropy.outputs.some((output) =>
+      /entropy-map-\d+\.tsv$/.test(output)
+    )
+);
+check(
+  "embedded PE, Lua bytecode, Lua source and PDF blobs are carved",
+  ["PE", "Lua bytecode", "Lua source", "PDF"].every((kind) =>
+    artifactResult.artifacts.carved.some((blob) => blob.kind === kind)
+  ),
+  artifactResult.artifacts.carved.map((blob) => blob.kind).join(", ")
+);
+check(
+  "every carved blob gets its own strings artifacts",
+  artifactResult.artifacts.carved.every(
+    (blob) => blob.strings.length > 0 && blob.strings.every((output) => output.includes("carved/strings"))
+  )
+);
+check(
+  "the complete PE summary is persisted as JSON",
+  artifactResult.artifacts.outputs.some((output) => /pe-summary\.json$/.test(output))
+);
+const artifactCached = await B.inspectWorkspaceBinary(
+  WS,
+  "uploads/binaries/artifact.exe",
+  {
+    deep: false,
+    runCapa: false,
+    dependencies: false,
+    includeStrings: false,
+    artifacts: true,
+  }
+);
+check(
+  "static chunks stay below search_files' per-file ceiling",
+  (
+    await Promise.all(
+      artifactResult.artifacts.outputs
+        .filter((output) => /strings|entropy-map/.test(output))
+        .map((output) => fs.stat(path.join(W.workspaceDirectory(WS), output)))
+    )
+  ).every((stat) => stat.size < 512 * 1024)
+);
+check(
+  "full static artifacts are hash-cached too",
+  artifactCached.artifacts.cached &&
+    artifactCached.artifacts.outputs.length === artifactResult.artifacts.outputs.length
+);
+
+console.log("\n6. Deep results are hash-cached instead of burning CPU twice");
 const hash = result.inspection.hashes.sha256;
 const cacheDir = path.join(W.workspaceDirectory(WS), "analysis", `app-${hash.slice(0, 12)}`, "ghidra");
 await fs.mkdir(cacheDir, { recursive: true });
 await fs.writeFile(path.join(cacheDir, "functions.tsv"), "address\tname\n1000\tmain\n");
 await fs.writeFile(
   path.join(cacheDir, ".apim-analysis.json"),
-  JSON.stringify({ hash, engine: "ghidra", complete: true })
+  JSON.stringify({ hash, engine: "ghidra", profile: "full:", complete: true })
 );
 result = await B.inspectWorkspaceBinary(WS, "uploads/binaries/app.exe", {
   deep: true,
@@ -348,6 +497,8 @@ const controller = new AbortController();
 setTimeout(() => controller.abort(), 100);
 const stopStarted = Date.now();
 const stopped = await B.inspectWorkspaceBinary(WS, "uploads/binaries/app.exe", {
+  artifacts: false,
+  runCapa: false,
   deep: true,
   forceDeep: true,
   dependencies: false,
@@ -362,7 +513,97 @@ check(
   `${Date.now() - stopStarted}ms — ${stopped.deep.summary}`
 );
 
-console.log("\n6. The agent tool and raw-byte upload are actually wired");
+const fakeCapa = path.join(
+  DATA_ROOT,
+  process.platform === "win32" ? "fake-capa.bat" : "fake-capa"
+);
+await fs.writeFile(
+  fakeCapa,
+  process.platform === "win32"
+    ? "@echo off\r\necho capability: process injection\r\necho api: CreateRemoteThread\r\n"
+    : "#!/bin/sh\necho 'capability: process injection'\necho 'api: CreateRemoteThread'\n"
+);
+if (process.platform !== "win32") await fs.chmod(fakeCapa, 0o755);
+const previousCapa = process.env.APIM_CAPA_PATH;
+process.env.APIM_CAPA_PATH = fakeCapa;
+const capaRun = await B.inspectWorkspaceBinary(
+  WS,
+  "uploads/binaries/app.exe",
+  {
+    artifacts: false,
+    runCapa: true,
+    deep: false,
+    forceDeep: true,
+    dependencies: false,
+    includeStrings: false,
+  }
+);
+if (previousCapa === undefined) delete process.env.APIM_CAPA_PATH;
+else process.env.APIM_CAPA_PATH = previousCapa;
+check(
+  "capa output is captured as a persistent report",
+  capaRun.capa.status === "complete" &&
+    Boolean(capaRun.capa.output) &&
+    /CreateRemoteThread/.test(
+      await fs.readFile(
+        path.join(W.workspaceDirectory(WS), capaRun.capa.output),
+        "utf8"
+      )
+    )
+);
+
+const fakeIlSpyScript = path.join(DATA_ROOT, "fake-ilspy.cjs");
+const fakeIlSpyLauncher = path.join(
+  DATA_ROOT,
+  process.platform === "win32" ? "fake-ilspy.cmd" : "fake-ilspy"
+);
+await fs.writeFile(
+  fakeIlSpyScript,
+  `const fs=require('fs'); const path=require('path');\n` +
+    `const at=process.argv.indexOf('--outputdir'); const out=process.argv[at+1];\n` +
+    `fs.mkdirSync(out,{recursive:true});\n` +
+    `fs.writeFileSync(path.join(out,'Game.cs'), ` +
+    "`public class Game {\\n  public void CreateMove(int flags) {\\n    if ((flags & IN_JUMP) != 0) Jump();\\n  }\\n  private void Jump() {}\\n}\\n`);\n"
+);
+await fs.writeFile(
+  fakeIlSpyLauncher,
+  process.platform === "win32"
+    ? `@echo off\r\n"${process.execPath}" "${fakeIlSpyScript}" %*\r\n`
+    : `#!/bin/sh\nexec "${process.execPath}" "${fakeIlSpyScript}" "$@"\n`
+);
+if (process.platform !== "win32") await fs.chmod(fakeIlSpyLauncher, 0o755);
+const previousIlSpy = process.env.APIM_ILSPYCMD_PATH;
+process.env.APIM_ILSPYCMD_PATH = fakeIlSpyLauncher;
+const focusedManaged = await B.inspectWorkspaceBinary(
+  WS,
+  "uploads/binaries/managed.exe",
+  {
+    artifacts: false,
+    runCapa: false,
+    deep: true,
+    forceDeep: true,
+    dependencies: false,
+    includeStrings: false,
+    focusTerms: ["CreateMove", "IN_JUMP"],
+    focusedOnly: true,
+  }
+);
+if (previousIlSpy === undefined) delete process.env.APIM_ILSPYCMD_PATH;
+else process.env.APIM_ILSPYCMD_PATH = previousIlSpy;
+const focusedCs = focusedManaged.deep.outputs.find((output) =>
+  output.endsWith("focused-functions.cs")
+);
+check(
+  "ILSpy focused-only mode keeps matching methods and drops the full project",
+  focusedManaged.deep.status === "complete" &&
+    Boolean(focusedCs) &&
+    /CreateMove/.test(
+      await fs.readFile(path.join(W.workspaceDirectory(WS), focusedCs), "utf8")
+    ) &&
+    !focusedManaged.deep.outputs.some((output) => output.includes("/project/"))
+);
+
+console.log("\n7. The agent tool and raw-byte upload are actually wired");
 const tool = T.WORKSPACE_TOOLS.find((x) => x.function.name === "inspect_binary");
 check("inspect_binary has a dedicated schema", Boolean(tool));
 const toolResult = await T.runTool(WS, "inspect_binary", {
@@ -370,7 +611,7 @@ const toolResult = await T.runTool(WS, "inspect_binary", {
   deep: false,
   include_strings: false,
 });
-check("the dispatcher returns real PE evidence", toolResult.ok && /KERNEL32\.dll/.test(toolResult.content) && /DoUsefulWork/.test(toolResult.content));
+check("the dispatcher returns real PE evidence", toolResult.ok && /KERNEL32\.dll/.test(toolResult.content) && /WriteProcessMemory/.test(toolResult.content));
 check("the summary names architecture and libraries", /x86-64/.test(toolResult.summary) && /3 libraries/.test(toolResult.summary), toolResult.summary);
 check("supported executable extensions are explicit", BT.isPeFilename("APP.EXE") && BT.isPeFilename("driver.sys") && !BT.isPeFilename("notes.txt"));
 check("binary upload paths cannot traverse", BT.binaryUploadPath("../../evil.exe") === "uploads/binaries/evil.exe");
@@ -423,7 +664,26 @@ check(
     Buffer.from(savedThroughRoute).equals(Buffer.from(uploadBytes))
 );
 check("the target is never executed by the analysis path", !/spawn\([^\n]*targetPath/.test(await fs.readFile(path.join(ROOT, "src/lib/binary-decompiler.ts"), "utf8")));
-check("Ghidra output is chunked and capped", /CHUNK_CHARS/.test(await fs.readFile(path.join(ROOT, "scripts/ghidra/ApimDecompile.java"), "utf8")) && /MAX_FUNCTIONS/.test(await fs.readFile(path.join(ROOT, "scripts/ghidra/ApimDecompile.java"), "utf8")));
+const ghidraScript = await fs.readFile(
+  path.join(ROOT, "scripts/ghidra/ApimDecompile.java"),
+  "utf8"
+);
+check(
+  "Ghidra output is chunked and capped",
+  /CHUNK_CHARS/.test(ghidraScript) && /MAX_FUNCTIONS/.test(ghidraScript)
+);
+check(
+  "Ghidra has a true focused-only reference path",
+  /collectFocused/.test(ghidraScript) &&
+    /getReferencesTo/.test(ghidraScript) &&
+    /focused-functions\.c/.test(ghidraScript)
+);
+check(
+  "the tool defaults to CreateMove and IN_JUMP focus",
+  /\["CreateMove", "IN_JUMP"\]/.test(
+    await fs.readFile(path.join(ROOT, "src/lib/tools.ts"), "utf8")
+  )
+);
 check(
   "a fabricated decompilation claim is caught",
   P.checkAnswerClaims(
@@ -438,5 +698,8 @@ check(
 
 await fs.rm(path.join(DATA_ROOT, "workspaces"), { recursive: true, force: true });
 await fs.rm(fakeGhidra, { recursive: true, force: true });
+await fs.rm(fakeCapa, { force: true });
+await fs.rm(fakeIlSpyScript, { force: true });
+await fs.rm(fakeIlSpyLauncher, { force: true });
 console.log(`\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`);
 await finishSuite(fail);
