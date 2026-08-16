@@ -535,7 +535,8 @@ await fs.writeFile(
     `const at=process.argv.indexOf('ApimDecompile.java'); const out=process.argv[at+1];\n` +
     `fs.mkdirSync(out,{recursive:true});\n` +
     `fs.writeFileSync(path.join(out,'functions.tsv'),'address\\tname\\n');\n` +
-    `fs.writeFileSync(path.join(out,'summary.txt'),'Functions decompiled: 0\\nFocus fallback used: false\\n');\n`
+    `fs.writeFileSync(path.join(out,'summary.txt'),'Functions decompiled: 0\\nFocus fallback used: false\\n');\n` +
+    `console.error('GHIDRA_POSTSCRIPT_COMPILE_ERROR fixture');\n`
 );
 await fs.writeFile(
   fakeHeadless,
@@ -566,6 +567,16 @@ check(
   emptyGhidra.deep.status === "failed" &&
     /decompiled zero functions/.test(emptyGhidra.deep.summary),
   emptyGhidra.deep.summary
+);
+check(
+  "failure receipt proves the server launched Ghidra and surfaces its real log",
+  /server resolved and started the Ghidra launcher/.test(
+    emptyGhidra.deep.summary
+  ) &&
+    /scrubbed environment/.test(emptyGhidra.deep.summary) &&
+    /GHIDRA_POSTSCRIPT_COMPILE_ERROR/.test(
+      B.formatBinaryInspection(emptyGhidra)
+    )
 );
 
 await fs.writeFile(

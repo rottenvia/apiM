@@ -1608,6 +1608,12 @@ export function formatBinaryInspection(result: WorkspaceBinaryInspection): strin
     );
   }
   if (result.deep.setup) lines.push(`Setup needed for deeper output: ${result.deep.setup}`);
+  if (result.deep.logTail && result.deep.status !== "complete") {
+    lines.push(
+      "Decompiler log tail (actual captured stdout/stderr):",
+      result.deep.logTail
+    );
+  }
 
   return lines.join("\n");
 }
