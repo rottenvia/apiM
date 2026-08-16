@@ -672,6 +672,32 @@ function capaCommand(): string {
   return process.env.APIM_CAPA_PATH?.trim() || "capa";
 }
 
+interface CapaResourcePath {
+  path: string | null;
+  /** An explicit env setting that points nowhere is a configuration error. */
+  missing?: string;
+}
+
+function capaResourcePath(
+  envName: "APIM_CAPA_RULES_PATH" | "APIM_CAPA_SIGNATURES_PATH",
+  defaults: string[]
+): CapaResourcePath {
+  const configured = process.env[envName]?.trim();
+  if (configured) {
+    const resolved = path.isAbsolute(configured)
+      ? configured
+      : path.resolve(process.cwd(), configured);
+    return fsSync.existsSync(resolved)
+      ? { path: resolved }
+      : { path: null, missing: resolved };
+  }
+  for (const candidate of defaults) {
+    const resolved = path.resolve(process.cwd(), candidate);
+    if (fsSync.existsSync(resolved)) return { path: resolved };
+  }
+  return { path: null };
+}
+
 /** Run Mandiant/FLARE capa when installed; static parser remains independent. */
 export async function runCapaAnalysis(
   workspaceId: string,
@@ -696,14 +722,44 @@ export async function runCapaAnalysis(
     };
   }
 
+  const rules = capaResourcePath("APIM_CAPA_RULES_PATH", [
+    "tools/capa-rules",
+  ]);
+  const signatures = capaResourcePath("APIM_CAPA_SIGNATURES_PATH", [
+    "tools/capa/sigs",
+  ]);
+  const missingResource = rules.missing
+    ? `Configured capa rules path does not exist: ${rules.missing}`
+    : signatures.missing
+      ? `Configured capa signatures path does not exist: ${signatures.missing}`
+      : null;
+  if (missingResource) {
+    return {
+      attempted: false,
+      status: "unavailable",
+      cached: false,
+      summary: missingResource,
+      setup:
+        "Fix APIM_CAPA_RULES_PATH/APIM_CAPA_SIGNATURES_PATH in .env.local. Relative paths are resolved from the apiM folder.",
+    };
+  }
+
   const workspaceRoot = workspaceDirectory(workspaceId);
   const relRoot = binaryAnalysisRoot(target, inspection.hashes.sha256);
   const outputDir = resolveInside(workspaceId, `${relRoot}/capa`);
   const output = path.join(outputDir, "capa-report.txt");
   const marker = path.join(outputDir, ".apim-analysis.json");
+  const resourceProfile =
+    `text-v2:rules=${rules.path ?? "embedded"}:` +
+    `sigs=${signatures.path ?? "embedded"}`;
   if (
     !options.force &&
-    (await readMarker(marker, inspection.hashes.sha256, "capa", "text-v1"))
+    (await readMarker(
+      marker,
+      inspection.hashes.sha256,
+      "capa",
+      resourceProfile
+    ))
   ) {
     return {
       attempted: false,
@@ -722,15 +778,19 @@ export async function runCapaAnalysis(
       cached: false,
       summary: "capa is not installed at the configured path.",
       setup:
-        "Install the official FLARE capa release or run `python -m pip install flare-capa`; make `capa` available on PATH, or set APIM_CAPA_PATH in .env.local, then restart apiM.",
+        "Prefer the official standalone capa release (it embeds rules/signatures), or install flare-capa plus matching rules/signatures. Put capa on PATH or set APIM_CAPA_PATH, then restart apiM.",
     };
   }
 
   await fs.rm(outputDir, { recursive: true, force: true });
   await fs.mkdir(outputDir, { recursive: true });
+  const capaArgs: string[] = [];
+  if (rules.path) capaArgs.push("-r", rules.path);
+  if (signatures.path) capaArgs.push("-s", signatures.path);
+  capaArgs.push(resolveInside(workspaceId, target));
   const result = await runCaptured(
     command,
-    ["-q", resolveInside(workspaceId, target)],
+    capaArgs,
     workspaceRoot,
     options.signal
   );
@@ -750,7 +810,7 @@ export async function runCapaAnalysis(
       marker,
       inspection.hashes.sha256,
       "capa",
-      "text-v1"
+      resourceProfile
     );
     return {
       attempted: true,
@@ -758,6 +818,29 @@ export async function runCapaAnalysis(
       output: relativeOutput(workspaceRoot, output),
       cached: false,
       summary: `capa completed; full report saved to ${relativeOutput(workspaceRoot, output)}.`,
+      logTail: tail(result.output),
+    };
+  }
+  const lowerOutput = result.output.toLowerCase();
+  const missingRules =
+    lowerOutput.includes("default embedded rules not found") ||
+    lowerOutput.includes("provide your own rule set via the `-r`");
+  const missingSignatures =
+    lowerOutput.includes("default signature path") ||
+    lowerOutput.includes("install the signatures first") ||
+    (lowerOutput.includes("signatures path") &&
+      lowerOutput.includes("does not exist"));
+  if (missingRules || missingSignatures) {
+    return {
+      attempted: true,
+      status: "unavailable",
+      output: relativeOutput(workspaceRoot, output),
+      cached: false,
+      summary:
+        `The capa engine is installed, but its pip package is missing ` +
+        `${missingRules && missingSignatures ? "rules and signatures" : missingRules ? "rules" : "signatures"}.`,
+      setup:
+        "Install matching capa-rules and capa/sigs directories, then set APIM_CAPA_RULES_PATH and APIM_CAPA_SIGNATURES_PATH. apiM also auto-detects tools/capa-rules and tools/capa/sigs. The official standalone capa executable is an alternative because it embeds both resources.",
       logTail: tail(result.output),
     };
   }

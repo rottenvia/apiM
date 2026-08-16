@@ -58,7 +58,7 @@ The executable will be in the `dist` folder. Just double-click to run!
 npm test
 ```
 
-Runs every suite — currently 1,877 checks across 47 suites — without calling
+Runs every suite — currently 1,879 checks across 47 suites — without calling
 the paid API; `npm run test:real` does that and is opt-in.
 
 ```bash
@@ -99,14 +99,29 @@ writes persistent artifacts under `analysis/<binary>-<hash>/`:
 "Signing envelope present" does not claim the certificate is trusted, and an
 import is capability evidence rather than a malware verdict.
 
-For a capa report, install FLARE capa or point to its executable:
-
-```bat
-python -m pip install flare-capa
-```
+For a capa report, the simplest option is the official standalone capa
+release: it embeds the engine, rules and library signatures. Point to it only
+when it is not on PATH:
 
 ```env
 APIM_CAPA_PATH=C:\tools\capa\capa.exe
+```
+
+`pip install flare-capa` installs only the engine. It deliberately omits rules
+and signatures. Install matching resources (the tag must match capa's
+version); these conventional paths are auto-detected and ignored by Git:
+
+```bat
+mkdir tools 2>nul
+git clone --depth 1 --branch v9.4.0 https://github.com/mandiant/capa-rules.git tools\capa-rules
+git clone --depth 1 --branch v9.4.0 https://github.com/mandiant/capa.git tools\capa
+```
+
+Custom locations can be set in `.env.local`:
+
+```env
+APIM_CAPA_RULES_PATH=C:\path\to\capa-rules
+APIM_CAPA_SIGNATURES_PATH=C:\path\to\capa\sigs
 ```
 
 For the deepest source-like recovery, install the decompiler matching the

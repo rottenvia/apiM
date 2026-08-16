@@ -517,15 +517,23 @@ const fakeCapa = path.join(
   DATA_ROOT,
   process.platform === "win32" ? "fake-capa.bat" : "fake-capa"
 );
+const fakeCapaRules = path.join(DATA_ROOT, "capa-rules");
+const fakeCapaSignatures = path.join(DATA_ROOT, "capa-sigs");
+await fs.mkdir(fakeCapaRules, { recursive: true });
+await fs.mkdir(fakeCapaSignatures, { recursive: true });
 await fs.writeFile(
   fakeCapa,
   process.platform === "win32"
-    ? "@echo off\r\necho capability: process injection\r\necho api: CreateRemoteThread\r\n"
-    : "#!/bin/sh\necho 'capability: process injection'\necho 'api: CreateRemoteThread'\n"
+    ? "@echo off\r\necho args: %*\r\necho capability: process injection\r\necho api: CreateRemoteThread\r\n"
+    : "#!/bin/sh\necho \"args: $*\"\necho 'capability: process injection'\necho 'api: CreateRemoteThread'\n"
 );
 if (process.platform !== "win32") await fs.chmod(fakeCapa, 0o755);
 const previousCapa = process.env.APIM_CAPA_PATH;
+const previousCapaRules = process.env.APIM_CAPA_RULES_PATH;
+const previousCapaSignatures = process.env.APIM_CAPA_SIGNATURES_PATH;
 process.env.APIM_CAPA_PATH = fakeCapa;
+process.env.APIM_CAPA_RULES_PATH = fakeCapaRules;
+process.env.APIM_CAPA_SIGNATURES_PATH = fakeCapaSignatures;
 const capaRun = await B.inspectWorkspaceBinary(
   WS,
   "uploads/binaries/app.exe",
@@ -540,16 +548,63 @@ const capaRun = await B.inspectWorkspaceBinary(
 );
 if (previousCapa === undefined) delete process.env.APIM_CAPA_PATH;
 else process.env.APIM_CAPA_PATH = previousCapa;
+if (previousCapaRules === undefined) delete process.env.APIM_CAPA_RULES_PATH;
+else process.env.APIM_CAPA_RULES_PATH = previousCapaRules;
+if (previousCapaSignatures === undefined) {
+  delete process.env.APIM_CAPA_SIGNATURES_PATH;
+} else process.env.APIM_CAPA_SIGNATURES_PATH = previousCapaSignatures;
+const capaText = await fs.readFile(
+  path.join(W.workspaceDirectory(WS), capaRun.capa.output),
+  "utf8"
+);
 check(
   "capa output is captured as a persistent report",
   capaRun.capa.status === "complete" &&
     Boolean(capaRun.capa.output) &&
-    /CreateRemoteThread/.test(
-      await fs.readFile(
-        path.join(W.workspaceDirectory(WS), capaRun.capa.output),
-        "utf8"
-      )
-    )
+    /CreateRemoteThread/.test(capaText)
+);
+check(
+  "pip-installed capa receives explicit rules and signatures paths",
+  /args:.*-r .*capa-rules.*-s .*capa-sigs/i.test(capaText),
+  capaText.split("\n")[0]
+);
+
+await fs.writeFile(
+  fakeCapa,
+  process.platform === "win32"
+    ? "@echo off\r\necho ERROR capa: default embedded rules not found! 1>&2\r\necho ERROR capa: provide your own rule set via the `-r` option. 1>&2\r\nexit /b 10\r\n"
+    : "#!/bin/sh\necho 'ERROR capa: default embedded rules not found!' >&2\necho 'ERROR capa: provide your own rule set via the `-r` option.' >&2\nexit 10\n"
+);
+if (process.platform !== "win32") await fs.chmod(fakeCapa, 0o755);
+process.env.APIM_CAPA_PATH = fakeCapa;
+delete process.env.APIM_CAPA_RULES_PATH;
+delete process.env.APIM_CAPA_SIGNATURES_PATH;
+const missingCapaResources = await B.inspectWorkspaceBinary(
+  WS,
+  "uploads/binaries/app.exe",
+  {
+    artifacts: false,
+    runCapa: true,
+    deep: false,
+    forceDeep: true,
+    dependencies: false,
+    includeStrings: false,
+  }
+);
+if (previousCapa === undefined) delete process.env.APIM_CAPA_PATH;
+else process.env.APIM_CAPA_PATH = previousCapa;
+if (previousCapaRules !== undefined) {
+  process.env.APIM_CAPA_RULES_PATH = previousCapaRules;
+}
+if (previousCapaSignatures !== undefined) {
+  process.env.APIM_CAPA_SIGNATURES_PATH = previousCapaSignatures;
+}
+check(
+  "the exact pip-without-rules failure is diagnosed as unavailable setup",
+  missingCapaResources.capa.status === "unavailable" &&
+    /missing rules/.test(missingCapaResources.capa.summary) &&
+    /APIM_CAPA_RULES_PATH/.test(missingCapaResources.capa.setup ?? ""),
+  missingCapaResources.capa.summary
 );
 
 const fakeIlSpyScript = path.join(DATA_ROOT, "fake-ilspy.cjs");
@@ -699,6 +754,8 @@ check(
 await fs.rm(path.join(DATA_ROOT, "workspaces"), { recursive: true, force: true });
 await fs.rm(fakeGhidra, { recursive: true, force: true });
 await fs.rm(fakeCapa, { force: true });
+await fs.rm(fakeCapaRules, { recursive: true, force: true });
+await fs.rm(fakeCapaSignatures, { recursive: true, force: true });
 await fs.rm(fakeIlSpyScript, { force: true });
 await fs.rm(fakeIlSpyLauncher, { force: true });
 console.log(`\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`);
