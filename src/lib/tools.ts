@@ -949,12 +949,14 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
         "metadata and a recursive graph of DLLs supplied in the workspace. " +
         "It writes a full offset-labelled ASCII/UTF-16 strings dump, a " +
         "4KB-window entropy map, explicit packing assessment, carved embedded " +
-        "PE/Lua/ZIP/PNG/PDF blobs with their own strings, highlighted Lua/" +
+        "PE/Lua/ZIP/PNG/PDF blobs plus opaque high-entropy sections/overlays " +
+        "with their own strings, highlighted Lua/" +
         "process-memory/library-loading/process-creation imports, and an " +
         "optional FLARE capa report. For managed code it uses ILSpy when " +
         "installed; for native code it uses headless Ghidra, optionally only " +
         "decompiling functions referencing focus terms such as CreateMove and " +
-        "IN_JUMP. Outputs are cached under analysis/. Packed, encrypted or " +
+        "IN_JUMP, with bounded full fallback when stripped symbols yield zero " +
+        "candidates. Outputs are cached under analysis/. Packed, encrypted or " +
         "obfuscated files may only be partially recoverable, and the result says so.",
       parameters: {
         type: "object",

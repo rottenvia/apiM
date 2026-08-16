@@ -199,12 +199,28 @@ public class ApimDecompile extends GhidraScript {
 
         Map<Function, Set<String>> focused = collectFocused(focusTerms);
         List<Function> work = new ArrayList<>();
+        boolean fallbackFull = false;
         if (focusedOnly) {
             work.addAll(focused.keySet());
+            /*
+             * Stripped/packed programs often contain neither original symbol
+             * names nor the macro text the user knows from source. Returning
+             * a successful empty analysis is worse than spending more CPU:
+             * it looks as though Ghidra proved no relevant code exists. Fall
+             * back to bounded full decompilation and say that focus was lost.
+             */
+            if (work.isEmpty()) {
+                fallbackFull = true;
+                FunctionIterator functions = currentProgram.getFunctionManager().getFunctions(true);
+                while (functions.hasNext() && work.size() < MAX_FUNCTIONS) {
+                    work.add(functions.next());
+                }
+            }
         } else {
             FunctionIterator functions = currentProgram.getFunctionManager().getFunctions(true);
             while (functions.hasNext() && work.size() < MAX_FUNCTIONS) work.add(functions.next());
         }
+        final boolean writeFullOutput = !focusedOnly || fallbackFull;
         Collections.sort(
             work,
             (left, right) -> left.getEntryPoint().compareTo(right.getEntryPoint())
@@ -257,7 +273,7 @@ public class ApimDecompile extends GhidraScript {
                     code + "\n\n";
 
                 String chunkName = "";
-                if (!focusedOnly && !capped) {
+                if (writeFullOutput && !capped) {
                     int destinationChunk = chunkNumber;
                     if (chunk == null || chunkChars + block.length() > CHUNK_CHARS) destinationChunk++;
                     if (!writeFunction(block)) capped = true;
@@ -280,7 +296,13 @@ public class ApimDecompile extends GhidraScript {
                 }
             }
             if (focusedCount == 0) {
-                focusCode.write("/* No function referencing the requested terms was recovered. */\n");
+                focusCode.write(
+                    "/* No surviving symbol/string reference matched the requested terms.\n" +
+                    (fallbackFull
+                        ? " * Full decompilation was generated as a fallback; search those chunks by behavior/API instead.\n"
+                        : "") +
+                    " */\n"
+                );
             }
         } finally {
             closeChunk();
@@ -293,8 +315,15 @@ public class ApimDecompile extends GhidraScript {
             summary.write("Program: " + currentProgram.getName() + "\n");
             summary.write("Language: " + currentProgram.getLanguageID() + "\n");
             summary.write("Compiler: " + currentProgram.getCompilerSpec().getCompilerSpecID() + "\n");
-            summary.write("Mode: " + (focusedOnly ? "focused-only" : "full-plus-focused") + "\n");
+            summary.write(
+                "Mode: " +
+                (fallbackFull
+                    ? "focused-miss-fallback-full"
+                    : focusedOnly ? "focused-only" : "full-plus-focused") +
+                "\n"
+            );
             summary.write("Focus terms: " + String.join(", ", focusTerms) + "\n");
+            summary.write("Focus fallback used: " + fallbackFull + "\n");
             summary.write("Functions selected/visited: " + total + "\n");
             summary.write("Functions decompiled: " + completed + "\n");
             summary.write("Focused functions: " + focusedCount + "\n");
@@ -307,7 +336,8 @@ public class ApimDecompile extends GhidraScript {
 
         println(
             "apiM decompiled " + completed + "/" + total + " selected functions; " +
-            focusedCount + " matched " + String.join(", ", focusTerms)
+            focusedCount + " matched " + String.join(", ", focusTerms) +
+            (fallbackFull ? "; focus miss triggered full fallback" : "")
         );
     }
 }

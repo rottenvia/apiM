@@ -301,7 +301,9 @@ function normaliseFocusTerms(terms: string[] | undefined): string[] {
 }
 
 function focusProfile(terms: string[], focusedOnly: boolean): string {
-  return `${focusedOnly ? "focused" : "full"}:${terms
+  // Versioned so the old focused-mode "success with zero functions" cache is
+  // never reused after fallback/validation behavior changes.
+  return `analysis-v2:${focusedOnly ? "focused" : "full"}:${terms
     .map((term) => term.toLowerCase())
     .sort()
     .join("|")}`;
@@ -618,6 +620,14 @@ async function runGhidra(
   }
 
   const outputs = await listOutputs(output, workspaceRoot);
+  const summaryText = await fs
+    .readFile(path.join(output, "summary.txt"), "utf8")
+    .catch(() => "");
+  const decompiledMatch = /Functions decompiled:\s*(\d+)/i.exec(summaryText);
+  const decompiledFunctions = decompiledMatch
+    ? Number(decompiledMatch[1])
+    : null;
+  const fallbackUsed = /Focus fallback used:\s*true/i.test(summaryText);
   if (result.error === "Executable decompilation was stopped") {
     return {
       attempted: true,
@@ -631,7 +641,12 @@ async function runGhidra(
       logTail: tail(result.output),
     };
   }
-  if (result.code === 0 && outputs.some((x) => /functions\.tsv$/.test(x))) {
+  if (
+    result.code === 0 &&
+    decompiledFunctions !== null &&
+    decompiledFunctions > 0 &&
+    outputs.some((x) => /functions\.tsv$/.test(x))
+  ) {
     await writeMarker(
       marker,
       inspection.hashes.sha256,
@@ -647,23 +662,28 @@ async function runGhidra(
       focusTerms,
       focusedOnly,
       summary:
-        `Ghidra ${focusedOnly ? "targeted" : "full"} analysis produced ` +
-        `${outputs.length} artifact(s) under ${relRoot}/ghidra for focus terms ` +
-        `${focusTerms.join(", ") || "(none)"}.`,
+        `Ghidra decompiled ${decompiledFunctions} function(s) and produced ` +
+        `${outputs.length} artifact(s) under ${relRoot}/ghidra. ` +
+        (fallbackUsed
+          ? `No surviving ${focusTerms.join("/")} references were found, so bounded full decompilation ran automatically.`
+          : `Focus terms: ${focusTerms.join(", ") || "(none)"}.`),
       logTail: tail(result.output),
     };
   }
+  const emptySuccess = result.code === 0 && decompiledFunctions === 0;
   return {
     attempted: true,
-    status: outputs.length ? "partial" : "failed",
+    status: emptySuccess ? "failed" : outputs.length ? "partial" : "failed",
     engine: "ghidra",
     outputs,
     cached: false,
     focusTerms,
     focusedOnly,
-    summary: result.timedOut
-      ? `Ghidra exceeded the configured time limit; ${outputs.length} partial output file(s) were kept. Increase APIM_BINARY_DECOMPILE_TIMEOUT_MS only for binaries that justify it.`
-      : `Ghidra exited with code ${result.code ?? "unknown"}; ${outputs.length} partial output file(s) were kept. Packing, anti-analysis, an unsupported CPU, corruption, or exhausted memory can prevent complete recovery.`,
+    summary: emptySuccess
+      ? `Ghidra exited successfully but decompiled zero functions. This is not accepted as a completed analysis; inspect summary.txt/log output for loader, language or packing failures.`
+      : result.timedOut
+        ? `Ghidra exceeded the configured time limit; ${outputs.length} partial output file(s) were kept. Increase APIM_BINARY_DECOMPILE_TIMEOUT_MS only for binaries that justify it.`
+        : `Ghidra exited with code ${result.code ?? "unknown"}; ${outputs.length} partial output file(s) were kept. Packing, anti-analysis, an unsupported CPU, corruption, or exhausted memory can prevent complete recovery.`,
     logTail: tail(result.output),
   };
 }
