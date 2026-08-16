@@ -969,11 +969,32 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
             type: "string",
             description: "Executable/library path relative to the workspace.",
           },
+          analyses: {
+            type: "array",
+            items: {
+              type: "string",
+              enum: [
+                "summary",
+                "strings",
+                "entropy",
+                "carve",
+                "dependencies",
+                "capa",
+                "decompile",
+                "all",
+              ],
+            },
+            description:
+              "Choose only the layers the request needs. Omitted defaults to " +
+              "cheap summary. Examples: test Ghidra = [\"decompile\"]; dump " +
+              "strings = [\"strings\"]; inspect dependencies and capa = " +
+              "[\"dependencies\",\"capa\"]; check everything = [\"all\"].",
+          },
           deep: {
             type: "boolean",
             description:
-              "Run the optional ILSpy/Ghidra decompiler. Defaults to true. " +
-              "Set false for a fast metadata-only pass.",
+              "Legacy explicit override for the decompile layer. Prefer " +
+              "analyses:[\"decompile\"].",
           },
           force_decompile: {
             type: "boolean",
@@ -985,14 +1006,13 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
           artifacts: {
             type: "boolean",
             description:
-              "Write exhaustive strings, entropy and carved-blob artifacts. " +
-              "Defaults to true. Set false only for the fastest summary pass.",
+              "Legacy override: true requests all static artifact layers; " +
+              "false disables them. Prefer analyses.",
           },
           run_capa: {
             type: "boolean",
             description:
-              "Run FLARE capa when installed. Defaults to true; unavailable is " +
-              "reported with exact setup rather than failing static analysis.",
+              "Legacy explicit override for capa. Prefer analyses:[\"capa\"].",
           },
           focus_terms: {
             type: "array",
@@ -1011,7 +1031,8 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
           dependencies: {
             type: "boolean",
             description:
-              "Recursively inspect matching local DLLs. Defaults to true.",
+              "Legacy explicit override for recursive local DLL inspection. " +
+              "Prefer analyses:[\"dependencies\"].",
           },
           max_depth: {
             type: "number",
@@ -2593,20 +2614,74 @@ export async function runTool(
 
       case "inspect_binary": {
         const target = str(args, "path");
+        const allowed = new Set([
+          "summary",
+          "strings",
+          "entropy",
+          "carve",
+          "dependencies",
+          "capa",
+          "decompile",
+        ]);
+        const requested = new Set<string>();
+        if (Array.isArray(args.analyses)) {
+          for (const value of args.analyses) {
+            const layer = String(value).toLowerCase();
+            if (layer === "all") {
+              for (const name of allowed) requested.add(name);
+            } else if (allowed.has(layer)) requested.add(layer);
+          }
+        }
+        // Cheap and useful rather than "everything" when the model omitted a
+        // choice. The schema/prompt teaches it to select based on user intent.
+        if (requested.size === 0) requested.add("summary");
+
+        const explicitAnalyses = Array.isArray(args.analyses);
+        if (args.artifacts === true && !explicitAnalyses) {
+          requested.add("summary");
+          requested.add("strings");
+          requested.add("entropy");
+          requested.add("carve");
+        }
+        const artifactLayers = {
+          summary: requested.has("summary"),
+          strings: requested.has("strings"),
+          entropy: requested.has("entropy"),
+          carve: requested.has("carve"),
+        };
+        const artifactsEnabled =
+          args.artifacts !== false && Object.values(artifactLayers).some(Boolean);
+        const runCapa =
+          typeof args.run_capa === "boolean"
+            ? args.run_capa
+            : requested.has("capa");
+        const runDeep =
+          typeof args.deep === "boolean"
+            ? args.deep
+            : requested.has("decompile");
+        const inspectDependencies =
+          typeof args.dependencies === "boolean"
+            ? args.dependencies
+            : requested.has("dependencies");
+        const includeSelectedStrings =
+          typeof args.include_strings === "boolean"
+            ? args.include_strings
+            : requested.has("strings") || requested.has("summary");
         const focusTerms = Array.isArray(args.focus_terms)
           ? args.focus_terms.map((term) => String(term))
           : ["CreateMove", "IN_JUMP"];
         const result = await inspectWorkspaceBinary(workspaceId, target, {
-          artifacts: args.artifacts !== false,
-          runCapa: args.run_capa !== false,
-          deep: args.deep !== false,
+          artifacts: artifactsEnabled,
+          artifactLayers,
+          runCapa,
+          deep: runDeep,
           forceDeep: args.force_decompile === true,
           focusTerms,
           focusedOnly: args.focused_only !== false,
           signal: context.signal,
-          dependencies: args.dependencies !== false,
+          dependencies: inspectDependencies,
           maxDepth: num(args, "max_depth") ?? undefined,
-          includeStrings: args.include_strings !== false,
+          includeStrings: includeSelectedStrings,
           stringFilter:
             typeof args.string_filter === "string"
               ? args.string_filter
