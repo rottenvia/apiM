@@ -956,8 +956,11 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
         "installed; for native code it uses headless Ghidra, optionally only " +
         "decompiling functions referencing focus terms such as CreateMove and " +
         "IN_JUMP, with bounded full fallback when stripped symbols yield zero " +
-        "candidates. Outputs are cached under analysis/. Packed, encrypted or " +
-        "obfuscated files may only be partially recoverable, and the result says so.",
+        "candidates. Availability is resolved by the apiM server; do not use " +
+        "run_command/where/environment probes to second-guess it because agent " +
+        "commands intentionally receive a scrubbed environment. Outputs are " +
+        "cached under analysis/. Packed, encrypted or obfuscated files may " +
+        "only be partially recoverable, and the result says so.",
       parameters: {
         type: "object",
         properties: {
