@@ -56,17 +56,20 @@ export const MIN_COLLAPSE_CHARS = 400;
  * Pruning a short conversation saves nothing and only risks dropping context
  * the model still wants.
  *
- * 24_000 chars is about 6.7k tokens — two thirds of one percent of DeepSeek
- * v4's million-token window. It was sized for a 128k model and never revised,
- * so in practice pruning was always on: any conversation that read more than
- * a couple of files immediately started losing them. Reading a medium source
- * file could trip it on its own.
+ * This was 900_000 chars (~250k tokens). That was safe for cache economics
+ * but unsafe for the context window: combined with tool-result caps of
+ * 400k/200k chars, a handful of large reads could push the whole request past
+ * DeepSeek's limit before pruning ever fired — which surfaced to the user as
+ * "chat is too big for the model" mid-task.
  *
- * 900_000 chars is ~250k tokens, a quarter of the window. Below that the
- * whole transcript is sent verbatim, which is what makes "read all of these
- * and compare them" work at all.
+ * 360_000 chars is ~100k tokens: still a tenth of the 1M window, well above
+ * anything an ordinary multi-file task reaches, and low enough that old tool
+ * results are collapsed before they can threaten the limit. The most recent
+ * KEEP_VERBATIM_RESULTS results are never touched, so "read all of these and
+ * compare them" keeps working; pruning only replaces results older than that
+ * with a one-line placeholder the model can re-read if it needs them.
  */
-export const PRUNE_THRESHOLD_CHARS = 900_000;
+export const PRUNE_THRESHOLD_CHARS = 360_000;
 
 export interface PruneStats {
   /** Tool results replaced with a placeholder. */
@@ -134,17 +137,20 @@ export function pruneTranscript(
     keepVerbatim?: number;
     minChars?: number;
     thresholdChars?: number;
+    /** Collapse every eligible old result regardless of transcript size. */
+    force?: boolean;
   } = {}
 ): { messages: TranscriptMessage[]; stats: PruneStats } {
   const {
     keepVerbatim = KEEP_VERBATIM_RESULTS,
     minChars = MIN_COLLAPSE_CHARS,
     thresholdChars = PRUNE_THRESHOLD_CHARS,
+    force = false,
   } = options;
 
   const empty: PruneStats = { collapsed: 0, charsSaved: 0, tokensSaved: 0 };
 
-  if (transcriptChars(messages) < thresholdChars) {
+  if (!force && transcriptChars(messages) < thresholdChars) {
     return { messages, stats: empty };
   }
 

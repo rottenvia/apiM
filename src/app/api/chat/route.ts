@@ -821,7 +821,7 @@ export async function POST(req: NextRequest) {
 
 Work to the end. Do not hand back a half-finished task with a summary that reads as if it is complete: if something cannot be done, say so plainly and say why. Check your own work before claiming it works — run the tests, call the endpoint, open the page.
 
-Ask before you build the wrong thing. If a choice would change what you produce and you cannot settle it by reading a file or looking it up, call ask_user — one question up front is far cheaper than twenty rounds of work in the wrong direction, and the user would rather be asked than handed something they have to throw away. Ask early, while the work is cheap to redo, not after you have committed to an approach. Offer concrete options with a sensible default so it is one click. Do not ask about things you can find out yourself, and do not ask the same thing twice. When you are done, briefly say what you changed and whether it ran.\n\nUse search_files to find where something lives rather than opening files one at a time, and read_files when you already know you need several — each separate call costs a whole round.\n\nYou can also look at the live web. When a task depends on what is actually on a page — its markup, its data, its exact wording — fetch it rather than reasoning from memory. Before writing anything that targets a site, such as a content script, a userscript or a scraper, call inspect_page on the real URL and use the ids and classes it returns. Never invent a selector you have not seen: a plausible-looking one that does not exist produces code that runs and does nothing, which is worse than admitting you need to look. Use fetch_url to read a page, fetch_url with raw for its HTML, and download_file to save something from a URL straight into the workspace. ${canSearch ? "When you hit something you do not know — an unfamiliar error, a library's current API — use web_search rather than guessing, because a wrong assumption compounds over every round after it. One web_search costs several model calls of its own, so make the query specific and read what comes back before searching again." : "There is no web_search in this workspace — no Tavily key is set in Settings. fetch_url still works if you already know the URL. When you genuinely do not know something and cannot look it up, say so instead of guessing, and name what you would have searched for."}\n\nIf an edit turns out to be wrong, undo_file puts that file back exactly as it was; reverting is safer than patching your own mistake. restore_snapshot rolls the whole workspace back to a restore point, which is a much larger step — list_snapshots first, and say what you are undoing before you do it. read_document opens PDF, Word, Excel, PowerPoint, EPUB and ODT files, which read_file cannot. inspect_binary statically reads Windows EXEs/DLLs without executing them. Select only the layers the request needs: analyses:["decompile"] to test Ghidra/ILSpy, ["strings"] for a strings dump, ["entropy"], ["carve"], ["dependencies"], or ["capa"] for those individual jobs, and ["all"] only when the user asks to check everything. Omitted analyses means a cheap summary, not everything. write_files creates several files in one call, which is worth using whenever you are scaffolding.\n\nBatch the changes that belong together. move_file renames in one step instead of read-write-delete. edit_files applies several replacements at once, across one file or many. replace_in_files changes the same text everywhere it appears, which is what you want for renaming a function or an import path — doing that file by file costs a round each. When a string might occur somewhere you did not intend, run it with preview first and read the list before committing.${
+Ask before you build the wrong thing. If a choice would change what you produce and you cannot settle it by reading a file or looking it up, call ask_user — one question up front is far cheaper than twenty rounds of work in the wrong direction, and the user would rather be asked than handed something they have to throw away. Ask early, while the work is cheap to redo, not after you have committed to an approach. Offer concrete options with a sensible default so it is one click. Do not ask about things you can find out yourself, and do not ask the same thing twice. When you are done, briefly say what you changed and whether it ran. The interface already shows every tool call as it happens, its name, arguments and result, so do NOT write an Actions taken list, do not restate the tools you called, and do not repeat a result the tool just returned. Only mention a tool when its outcome changes what the user needs to know (a failure, a choice, or the one-line result). Never describe a tool running that did not run, or a file being read or changed that was not: if you did not call it, do not write as if you did.\n\nUse search_files to find where something lives rather than opening files one at a time, and read_files when you already know you need several — each separate call costs a whole round.\n\nYou can also look at the live web. When a task depends on what is actually on a page — its markup, its data, its exact wording — fetch it rather than reasoning from memory. Before writing anything that targets a site, such as a content script, a userscript or a scraper, call inspect_page on the real URL and use the ids and classes it returns. Never invent a selector you have not seen: a plausible-looking one that does not exist produces code that runs and does nothing, which is worse than admitting you need to look. Use fetch_url to read a page, fetch_url with raw for its HTML, and download_file to save something from a URL straight into the workspace. ${canSearch ? "When you hit something you do not know — an unfamiliar error, a library's current API — use web_search rather than guessing, because a wrong assumption compounds over every round after it. One web_search costs several model calls of its own, so make the query specific and read what comes back before searching again." : "There is no web_search in this workspace — no Tavily key is set in Settings. fetch_url still works if you already know the URL. When you genuinely do not know something and cannot look it up, say so instead of guessing, and name what you would have searched for."}\n\nIf an edit turns out to be wrong, undo_file puts that file back exactly as it was; reverting is safer than patching your own mistake. restore_snapshot rolls the whole workspace back to a restore point, which is a much larger step — list_snapshots first, and say what you are undoing before you do it. read_document opens PDF, Word, Excel, PowerPoint, EPUB and ODT files, which read_file cannot. inspect_binary statically reads Windows EXEs/DLLs without executing them. Select only the layers the request needs: analyses:["decompile"] to test Ghidra/ILSpy, ["strings"] for a strings dump, ["entropy"], ["carve"], ["dependencies"], or ["capa"] for those individual jobs, and ["all"] only when the user asks to check everything. Omitted analyses means a cheap summary, not everything. write_files creates several files in one call, which is worth using whenever you are scaffolding.\n\nBatch the changes that belong together. move_file renames in one step instead of read-write-delete. edit_files applies several replacements at once, across one file or many. replace_in_files changes the same text everywhere it appears, which is what you want for renaming a function or an import path — doing that file by file costs a round each. When a string might occur somewhere you did not intend, run it with preview first and read the list before committing.${
               visionApiKey
                 ? " You can also view_image to look at a screenshot or mockup saved in the workspace."
                 : ""
@@ -1256,6 +1256,12 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         let hitOutputCeiling = false;
         /** Set when the spending limit ended the run rather than the model. */
         let stoppedByBudget = false;
+        /**
+         * Whether a too-large request has already been force-compacted and
+         * retried once. Guards the context-length recovery path so it can
+         * never loop.
+         */
+        let recoveredFromContext = false;
         const budget = createBudget(budgetUsd);
         /**
          * What the previous round cost, used to predict the next one. A limit
@@ -1500,6 +1506,69 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               detail = parsed?.error?.message ?? parsed?.message ?? "";
             } catch {
               detail = errText.slice(0, 200);
+            }
+
+            /*
+             * One-time recovery from a too-large request.
+             *
+             * When the transcript has grown past the model's context window
+             * DeepSeek returns 400 with a context-length message, which used
+             * to surface verbatim as "chat is too big for the model" and end
+             * the run. The per-round prune/compact thresholds make this rare,
+             * but it is still possible after a run that read many large
+             * files. Rather than give up, force-collapse old tool results and
+             * fold every finished round as hard as possible, then retry the
+             * same round once — no work is lost, and the live transcript
+             * shrinks enough to fit. Only one attempt: if it still does not
+             * fit we fall through to the normal error path with the real
+             * message.
+             */
+            const looksTooLong =
+              dsResponse.status === 400 &&
+              /context\s*(length|window)|too (long|large|many tokens)|maximum|token\s*limit/i.test(
+                detail
+              );
+            if (looksTooLong && !recoveredFromContext) {
+              recoveredFromContext = true;
+              const forcedPrune = pruneTranscript(transcript, {
+                force: true,
+                keepVerbatim: 20,
+              });
+              transcript.length = 0;
+              transcript.push(...forcedPrune.messages);
+              const forcedCompact = compactTranscript(transcript, {
+                force: true,
+                keepRecentRounds: 2,
+              });
+              transcript.length = 0;
+              transcript.push(...forcedCompact.messages);
+              if (
+                forcedPrune.stats.collapsed > 0 ||
+                forcedCompact.stats.rounds > 0
+              ) {
+                send({
+                  type: "context_pruned",
+                  collapsed: forcedPrune.stats.collapsed,
+                  tokensSaved: forcedPrune.stats.tokensSaved,
+                });
+                send({
+                  type: "context_compacted",
+                  rounds: forcedCompact.stats.rounds,
+                  tokensSaved: forcedCompact.stats.tokensSaved,
+                });
+              }
+              // Re-append the trailing system blocks (plan, tree, plugins)
+              // that compaction may have removed, then try the round again.
+              appendPluginDirectives();
+              await refreshFileTree();
+              if (plan) {
+                transcript.push({ role: "system", content: formatPlan(plan) });
+              }
+              send({
+                type: "status",
+                stage: thinkingEnabled ? "thinking" : "writing",
+              });
+              continue;
             }
 
             /*

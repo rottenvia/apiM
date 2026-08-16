@@ -29,8 +29,8 @@
  *     of failure; this has to be chosen.
  */
 
-import { estimateCost, MODEL_RATES } from "@/lib/pricing";
-import type { UsageLike } from "@/lib/pricing";
+import { estimateCost, ratesFor, isPeakPricing } from "@/lib/pricing";
+import type { UsageLike, ModelRates } from "@/lib/pricing";
 
 /** Warn once the run passes this share of its cap. */
 export const WARN_AT_FRACTION = 0.8;
@@ -148,8 +148,19 @@ export function maxTokensFor(
 ): number {
   if (budget.limitUsd === null) return ceiling;
 
-  const rates = MODEL_RATES[model];
-  if (!rates) return ceiling;
+  // Use the WORST-CASE output rate for the model across the pricing day, so
+  // a cap set in off-peak hours cannot be blown through simply because the
+  // reply rolled into a peak window. Charging uses the live rate; only this
+  // ceiling estimate is conservative. Peak windows are fixed UTC ranges, so
+  // sample a few hours ahead to find whichever tier applies next.
+  const now = new Date();
+  let outputRate = 0;
+  for (let h = 0; h < 24; h++) {
+    const r = ratesFor(model, new Date(now.getTime() + h * 60 * 60 * 1000));
+    if (r) outputRate = Math.max(outputRate, r.output);
+  }
+  const rates: ModelRates | undefined = ratesFor(model, now);
+  if (!rates || outputRate === 0) return ceiling;
 
   const remaining = budget.limitUsd - budget.spentUsd;
   if (remaining <= 0) return MIN_USEFUL_OUTPUT_TOKENS;
@@ -159,7 +170,7 @@ export function maxTokensFor(
    * committed — the request is about to be sent — so the budget available
    * for generation is what is left after it.
    */
-  const affordable = Math.floor((remaining / rates.output) * 1e6);
+  const affordable = Math.floor((remaining / outputRate) * 1e6);
   return Math.max(MIN_USEFUL_OUTPUT_TOKENS, Math.min(ceiling, affordable));
 }
 

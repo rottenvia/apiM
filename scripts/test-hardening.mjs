@@ -464,14 +464,14 @@ check(
 const withSplit = pricing.estimateCost(
   {
     prompt_tokens: 1_800_000,
-    completion_tokens: 190_000,
-    prompt_cache_hit_tokens: 1_620_000,
-    prompt_cache_miss_tokens: 180_000,
+    completion_tokens: 20_000,
+    prompt_cache_hit_tokens: 1_700_000,
+    prompt_cache_miss_tokens: 100_000,
   },
   "deepseek-v4-pro"
 );
 const withoutSplit = pricing.estimateCost(
-  { prompt_tokens: 1_800_000, completion_tokens: 190_000 },
+  { prompt_tokens: 1_800_000, completion_tokens: 20_000 },
   "deepseek-v4-pro"
 );
 check(
@@ -519,25 +519,24 @@ check(
 );
 check(
   "the token tooltip explains why a huge count can cost almost nothing",
-  /billed at 1\/120th the rate/.test(bubbleSrc),
+  /billed at a fraction of the rate/.test(bubbleSrc),
   "the cache split is the missing explanation"
 );
 
 // The arithmetic behind the reported figures.
+const flashCached = pricing.estimateCost(
+  {
+    prompt_tokens: 160_000,
+    completion_tokens: 1_136,
+    prompt_cache_hit_tokens: 159_000,
+    prompt_cache_miss_tokens: 1_000,
+  },
+  "deepseek-v4-flash"
+);
 check(
-  "a heavily cached 161k really does cost about a tenth of a cent",
-  Math.abs(
-    pricing.estimateCost(
-      {
-        prompt_tokens: 160_000,
-        completion_tokens: 1_136,
-        prompt_cache_hit_tokens: 159_000,
-        prompt_cache_miss_tokens: 1_000,
-      },
-      "deepseek-v4-flash"
-    ) - 0.0009
-  ) < 0.0002,
-  "so the number was right; only its presentation was wrong"
+  "a heavily cached 161k still costs only a few tenths of a cent",
+  flashCached > 0.001 && flashCached < 0.005,
+  `$${flashCached.toFixed(4)} — off-peak V4 Flash, nearly all cache hits`
 );
 
 // ------------------------------------------------------------------
@@ -1249,7 +1248,8 @@ const cached = priceIt(
   },
   "deepseek-v4-pro"
 );
-const naive = (18950 / 1e6) * 0.435 + (497 / 1e6) * 0.87;
+// Naive: everything priced as a cache miss at the current V4 Pro off-peak rate.
+const naive = (18950 / 1e6) * 0.66 + (497 / 1e6) * 1.98;
 check(
   "pricing a cached prompt costs materially less than pricing it naively",
   cached < naive * 0.6,

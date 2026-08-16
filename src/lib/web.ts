@@ -15,8 +15,18 @@
 
 /** Enough for a large page, short of pulling a whole app bundle into context. */
 export const MAX_FETCH_BYTES = 5 * 1024 * 1024;
-/** What reaches the model after extraction. */
-export const MAX_FETCH_CHARS = 200_000;
+/**
+ * What reaches the model after extraction.
+ *
+ * This was 200_000 chars (~55k tokens). A fetched page is resent on every
+ * later agent round, and `pruneTranscript` keeps the most recent results
+ * verbatim, so one big fetch could dominate the whole request and push it
+ * toward the model's context limit. 80_000 chars (~22k tokens) still covers
+ * an ordinary article or API response; for anything larger the tool already
+ * supports `find` to extract just the matching passages, and `browse` renders
+ * JS apps. The truncation note tells the model which to use.
+ */
+export const MAX_FETCH_CHARS = 80_000;
 /** A page that has not responded by now is not going to be useful. */
 export const FETCH_TIMEOUT_MS = 25_000;
 

@@ -1237,8 +1237,9 @@ export async function runTool(
 
       case "read_file": {
         const result = await readFile(workspaceId, str(args, "path"));
+        const totalLines = result.content.split("\n").length;
         const note = result.truncated
-          ? "\n\n[truncated — file is larger than the read limit]"
+          ? `\n\n[truncated at the read limit — showing the first ${totalLines.toLocaleString()} lines of a larger file. Call read_file again with start_line/end_line to read the next range instead of re-reading the whole thing.]`
           : "";
 
         /*
@@ -1250,7 +1251,6 @@ export async function runTool(
          * to change one function is most of a round's budget spent on context
          * that is never used.
          */
-        const total = result.content.split("\n").length;
         const start = num(args, "start_line");
         const end = num(args, "end_line");
 
@@ -1263,12 +1263,12 @@ export async function runTool(
         }
 
         const from = Math.max(1, start ?? 1);
-        const to = Math.min(total, end ?? total);
-        if (from > total) {
+        const to = Math.min(totalLines, end ?? totalLines);
+        if (from > totalLines) {
           return {
             ok: false,
             content:
-              `Error: ${result.path} has ${total} lines, so line ${from} ` +
+              `Error: ${result.path} has ${totalLines} lines, so line ${from} ` +
               `does not exist.`,
             summary: `Line ${from} is past the end of ${result.path}`,
           };
@@ -1291,7 +1291,7 @@ export async function runTool(
         return {
           ok: true,
           content:
-            `${result.path} (lines ${from}-${to} of ${total}):\n\n` +
+            `${result.path} (lines ${from}-${to} of ${totalLines}):\n\n` +
             `${numbered}${note}`,
           summary: `Read ${result.path} lines ${from}-${to}`,
         };
@@ -1843,9 +1843,25 @@ export async function runTool(
             `what you see above.]`
           : "";
 
+        /*
+         * Tell the model how to get the rest when a page was cut.
+         *
+         * Without this a truncated fetch either gets re-requested whole
+         * (paying for the same 80k again) or the model answers as if it had
+         * seen everything. `find` extracts just the passage it needs for a
+         * fraction of the cost; browse is the fallback for an app.
+         */
+        const truncNote =
+          page.truncated && !find
+            ? `\n\n[This page was truncated at ${MAX_FETCH_CHARS.toLocaleString()} characters. ` +
+              `If you need a specific fact beyond what is shown, call fetch_url again with ` +
+              `"find" set to the text or pattern you are looking for — it returns only the ` +
+              `matching passages instead of the whole page. For a JavaScript app, use browse.]`
+            : "";
+
         return {
           ok: true,
-          content: `${header}${warning}${findNote}\n\n${body}`,
+          content: `${header}${warning}${findNote}${truncNote}\n\n${body}`,
           summary: page.needsBrowser
             ? `${new URL(page.url).hostname} needs a browser`
             : `Read ${new URL(page.url).hostname}${

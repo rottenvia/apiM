@@ -217,11 +217,20 @@ check(
   `${untouched.stats.collapsed} collapsed — the agent can describe all 40`
 );
 
-// Big enough to actually exceed the threshold, so the collapse path is still
-// covered. Sized from the constant rather than hardcoded, so raising the
-// budget again does not silently stop testing this.
+// Big enough to actually exceed the threshold AND the verbatim window, so
+// the collapse path is covered. Two conditions gate pruning: the transcript
+// must pass PRUNE_THRESHOLD_CHARS, and there must be more tool results than
+// KEEP_VERBATIM_RESULTS (the recent ones are always kept whole). Sized from
+// the constants rather than hardcoded, so changing either still tests this.
 const perRound = 12_000;
-const rounds = Math.ceil((P.PRUNE_THRESHOLD_CHARS / perRound) * 1.6);
+// Well past both the size threshold and the verbatim window: the most recent
+// KEEP_VERBATIM_RESULTS are deliberately kept whole, so to measure a
+// *substantial* collapse the transcript has to be long enough that the older
+// collapsible results outweigh the recent ones left intact.
+const rounds = Math.max(
+  P.KEEP_VERBATIM_RESULTS * 3,
+  Math.ceil((P.PRUNE_THRESHOLD_CHARS / perRound) * 1.6)
+);
 const long = buildTranscript(rounds, perRound);
 res = P.pruneTranscript(long);
 

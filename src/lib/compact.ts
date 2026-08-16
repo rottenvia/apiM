@@ -44,37 +44,29 @@ import type { TranscriptMessage } from "@/lib/transcript";
 export const KEEP_RECENT_ROUNDS = 4;
 
 /**
- * Don't compact below this size — and this is much larger than it looks.
+ * When finished rounds are folded into a summary.
  *
- * This was 120_000 chars (~33k tokens), on the reasoning that reasoning is
- * 93% of a transcript and therefore worth removing. The first half of that is
- * true. The conclusion was wrong, and measuring it (`npm run cost:lab`)
- * showed compaction was making a 40-round task MORE expensive, not less:
+ * This is the SAFETY valve, not an economic optimization. The old analysis
+ * (kept in git history) proved that, at the pre-2026-08-16 rates where a
+ * cache hit was 120x cheaper than a miss, compaction never paid for itself
+ * inside the 40-round ceiling — rewriting the prefix cost more than the
+ * removed reasoning saved. That ratio is now ~30x, which changes the math at
+ * the margins, but reasoning in the cached prefix is still by far the
+ * cheapest text in the transcript, so compaction stays conservative.
  *
- *     compaction on   $0.5236
- *     compaction off  $0.4929
+ * What it must do is stop the request from exceeding DeepSeek's 1M-token
+ * window, which fails the whole call (the "chat is too big for the model"
+ * error). With the per-tool output caps lowered (read_file 60k, fetch 80k),
+ * runaway growth is mostly old reasoning. 900_000 chars (~250k tokens) leaves
+ * three quarters of the window for the current round, the tools, and the
+ * reply — and folding the oldest rounds reclaims the bulk of a long run
+ * before it can hit the wall. The hard ceiling below is a second, larger
+ * net for transcripts that grow despite this.
  *
- * The arithmetic nobody did:
- *
- * Old reasoning is not expensive. It sits in the cached prefix, where it
- * costs $0.003625/M — a hundred and twenty times less than fresh input. It is
- * the largest thing in the transcript and very nearly the cheapest.
- *
- * Compaction rewrites the middle of that prefix. Everything from the edit
- * point onward stops matching the cache and is re-read at $0.435/M, once, in
- * full. So the trade is: pay full price for the whole remaining transcript
- * today, to save the cached rate on the removed part every round after.
- *
- * Break-even, at these rates, is 120 rounds if compaction removes half the
- * transcript and 480 rounds if it removes a fifth. MAX_TOOL_ROUNDS is 40.
- * There is no task on which the old threshold could ever pay for itself.
- *
- * Compaction still has a real job, just not this one: DeepSeek's window is
- * 1M tokens, and a transcript that reaches it fails outright. So it now fires
- * only as a safety valve, at ~500k tokens — half the window, with plenty of
- * room for the reply. Below that, leaving history alone is strictly cheaper.
+ * `compactForResume` ignores this and always compacts, because a resume
+ * rewrites the prefix exactly once with no cache to thrash.
  */
-export const COMPACT_THRESHOLD_CHARS = 1_800_000;
+export const COMPACT_THRESHOLD_CHARS = 900_000;
 
 /**
  * How far the compaction boundary jumps at a time.
@@ -161,15 +153,24 @@ export function compactTranscript(
     keepRecentRounds?: number;
     thresholdChars?: number;
     step?: number;
+    /**
+     * Fold every compactable round regardless of size.
+     *
+     * Used to recover from a context-length error: the request was already
+     * rejected for being too big, so the size threshold must be bypassed and
+     * as much reclaimed as possible in one pass.
+     */
+    force?: boolean;
   } = {}
 ): { messages: TranscriptMessage[]; stats: CompactStats } {
   const {
     keepRecentRounds = KEEP_RECENT_ROUNDS,
     thresholdChars = COMPACT_THRESHOLD_CHARS,
     step = COMPACT_STEP,
+    force = false,
   } = options;
 
-  if (sizeOf(messages) < thresholdChars) return { messages, stats: EMPTY };
+  if (!force && sizeOf(messages) < thresholdChars) return { messages, stats: EMPTY };
 
   // Index every assistant turn that called tools — one per agent round.
   const roundIndices: number[] = [];

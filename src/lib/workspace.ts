@@ -63,8 +63,17 @@ export const MAX_FILES_PER_WORKSPACE = 100_000;
  * loop that may run forty rounds, and every earlier read is resent on each
  * one. A file it attaches once can afford to be larger than a file it might
  * read repeatedly.
+ *
+ * This was 400_000 chars (~110k tokens). A single read of that size rode
+ * along on every later round, and `pruneTranscript` keeps the most recent 80
+ * results verbatim — so a few large reads could push the whole request past
+ * the model's context window ("chat is too big for the model"). 60_000 chars
+ * is roughly 17k tokens: enough for a large source file, small enough that
+ * even several of them leave the bulk of the 1M window for the rest of the
+ * task. The truncation note tells the model how to read the rest in ranges
+ * rather than re-requesting the whole file, so no capability is lost.
  */
-export const MAX_READ_CHARS = 400_000;
+export const MAX_READ_CHARS = 60_000;
 
 export interface WorkspaceFile {
   path: string;

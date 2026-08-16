@@ -766,16 +766,16 @@ function MessageBubbleImpl({
                      *
                      * "161,136 tokens" beside a cost of a tenth of a cent
                      * looks impossible until you know almost all of those
-                     * tokens were cache hits, which DeepSeek bills at 1/120th
-                     * of the normal input rate. Showing the split turns an
-                     * apparent error into the explanation.
+                     * tokens were cache hits, which DeepSeek bills at a small
+                     * fraction of the normal input rate. Showing the split
+                     * turns an apparent error into the explanation.
                      */
                     title={
                       message.usage
                         ? [
                             `${(message.usage.prompt_tokens ?? 0).toLocaleString()} in · ${(message.usage.completion_tokens ?? 0).toLocaleString()} out`,
                             message.usage.prompt_cache_hit_tokens
-                              ? `${message.usage.prompt_cache_hit_tokens.toLocaleString()} of the input was cached, billed at 1/120th the rate`
+                              ? `${message.usage.prompt_cache_hit_tokens.toLocaleString()} of the input was cached, billed at a fraction of the rate`
                               : null,
                           ]
                             .filter(Boolean)

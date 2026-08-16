@@ -200,9 +200,13 @@ for (const step of ["a", "fix", "done"]) {
 console.log("\n3. Blowing past the spending limit in one round");
 
 const CEILING = 65536;
-let b = budget.createBudget(0.1);
+// A cap large enough that even a full ceiling of output is affordable at
+// current rates (V4 Pro peak output is $3.96/M; 65536 tokens ≈ $0.26), but
+// small enough that one real round of spend shrinks the next allowance.
+const FRESH_CAP = 0.3;
+let b = budget.createBudget(FRESH_CAP);
 check(
-  "a fresh budget allows the full output",
+  "a fresh, generous budget allows the full output",
   budget.maxTokensFor(b, "deepseek-v4-pro", CEILING) === CEILING
 );
 
@@ -220,11 +224,14 @@ const allowed = budget.maxTokensFor(b, "deepseek-v4-pro", CEILING);
 check(
   "a partly-spent budget shrinks the next round",
   allowed < CEILING && allowed > 0,
-  `${allowed} tokens with $${(0.1 - b.spentUsd).toFixed(4)} left`
+  `${allowed} tokens with $${(FRESH_CAP - b.spentUsd).toFixed(4)} left`
 );
+// The ceiling is computed against the worst-case (peak) output rate, so the
+// allowance it returns must never cost more than what remains even at peak.
+const peak = 3.96; // V4 Pro peak output $/M, post 2026-08-16
 check(
   "the allowance cannot exceed what is affordable",
-  (allowed / 1e6) * 0.87 <= 0.1 - b.spentUsd + 0.0001,
+  (allowed / 1e6) * peak <= FRESH_CAP - b.spentUsd + 0.0001,
   "this is the arithmetic that stops the 4.8x overshoot"
 );
 

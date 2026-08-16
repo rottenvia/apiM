@@ -142,17 +142,26 @@ check(
   "500 files at once — the delta would BE the tree"
 );
 
-console.log("\n3. Compaction no longer fires where it loses money");
+console.log("\n3. Compaction stays a safety valve, not an economy measure");
 
 /*
- * The regression this guards: compaction was on from 120k chars, which is
- * reached on any real agent task. Rewriting the middle of the transcript
- * costs a full-price re-read of everything after the edit, and the tokens it
- * removes were cached at 1/120th the price. Measured, it made a 40-round task
- * more expensive, not less.
+ * Compaction rewrites a prefix, which forces a full-price re-read of
+ * everything after the edit point. The tokens it removes were cached at a
+ * discount, so folding them only pays for itself if the run is long enough
+ * for the future savings to exceed the one miss.
+ *
+ * Before 2026-08-16 the miss/hit ratio was ~120x and break-even was ~120
+ * rounds — far past the 40-round cap — so compaction never paid for itself
+ * and the threshold was a 1.8M-char context-window safety valve. DeepSeek's
+ * new pricing dropped the ratio to ~30x, so break-even is now ~30 rounds;
+ * compaction can repay itself on a very long task, but below ~250k tokens it
+ * is still pure cost. The threshold therefore sits in the conservative band:
+ * high enough that ordinary tasks never rewrite the prefix, low enough that
+ * it fires before the model's context window is exhausted.
  */
-const MISS = 0.435 / 1e6;
-const HIT = 0.003625 / 1e6;
+// Dollars per token, V4 Pro off-peak after the 2026-08-16 pricing change.
+const MISS = 0.66 / 1_000_000;
+const HIT = 0.022 / 1_000_000;
 const promptTokens = 100_000;
 const removedFraction = 0.5;
 const rewriteCost = promptTokens * (1 - removedFraction) * MISS;
@@ -160,18 +169,18 @@ const savingPerRound = promptTokens * removedFraction * HIT;
 const breakEvenRounds = rewriteCost / savingPerRound;
 
 check(
-  "compaction cannot pay for itself within one task",
-  breakEvenRounds > 40,
+  "at the new ~30x ratio a long task can still break even",
+  breakEvenRounds <= 40,
   `break-even is ${Math.round(breakEvenRounds)} rounds; the loop caps at 40`
 );
 check(
-  "so the threshold is above anything a normal task reaches",
-  compact.COMPACT_THRESHOLD_CHARS >= 1_000_000,
+  "the threshold is above an ordinary multi-file task",
+  compact.COMPACT_THRESHOLD_CHARS >= 600_000,
   `${compact.COMPACT_THRESHOLD_CHARS.toLocaleString()} chars`
 );
 check(
-  "but it still fires before the context window is exhausted",
-  compact.COMPACT_THRESHOLD_CHARS / 3.6 < 900_000,
+  "and it fires well before the 1M-token window is exhausted",
+  compact.COMPACT_THRESHOLD_CHARS / 3.6 < 400_000,
   `~${Math.round(compact.COMPACT_THRESHOLD_CHARS / 3.6 / 1000)}k tokens, against a 1M window`
 );
 
@@ -401,9 +410,14 @@ check(
   `${inPlaceMiss} in place vs ${appendedMiss} appended`
 );
 check(
+  "appending reclaims a material number of cache-miss tokens",
+  inPlaceMiss - appendedMiss > 20_000,
+  `${(inPlaceMiss - appendedMiss).toLocaleString()} fewer missed tokens on one 40-round task`
+);
+check(
   "the saving is real money, not rounding",
-  ((inPlaceMiss - appendedMiss) / 1e6) * 0.435 > 0.02,
-  `$${(((inPlaceMiss - appendedMiss) / 1e6) * 0.435).toFixed(4)} on one 40-round task`
+  (inPlaceMiss - appendedMiss) * MISS > 0.02,
+  `$${((inPlaceMiss - appendedMiss) * MISS).toFixed(4)} on one 40-round task`
 );
 
 console.log(
