@@ -392,8 +392,12 @@ check(
 const pkg = JSON.parse((await readFile(path.join(ROOT, "package.json"), "utf8")).replace(/\r\n/g, "\n"));
 check(
   "chromium is not forced on everyone at npm install",
-  !pkg.dependencies?.["playwright-core"] && !pkg.dependencies?.playwright,
-  "150MB for a feature most runs never use"
+  Boolean(pkg.dependencies?.["playwright-core"]) &&
+    !pkg.dependencies?.playwright &&
+    /install.*chromium/.test(
+      readSourceSync(path.join(ROOT, "scripts/install-browser.mjs"))
+    ),
+  "the small adapter is tracked so installs do not dirty Git; the 150MB browser remains opt-in"
 );
 check("there is a one-command installer", Boolean(pkg.scripts["browser:install"]));
 

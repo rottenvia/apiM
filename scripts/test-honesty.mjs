@@ -333,9 +333,9 @@ check(
     A.binaryFormatNote("debug.LOG") === null
 );
 check(
-  ".dll is still refused, with a reason",
-  /library/.test(A.binaryFormatNote("thing.dll") ?? ""),
-  "there is genuinely no text in it — but see the folder case below"
+  ".dll is routed to inspect_binary rather than decoded as text",
+  /inspect_binary/.test(A.binaryFormatNote("thing.dll") ?? ""),
+  "it is readable through PE metadata/decompilation, not through text decoding"
 );
 
 // --------------------------------------------------------------- 5. folders
@@ -392,25 +392,29 @@ check(
   tree.entries[0].path.localeCompare(tree.entries[1].path) <= 0
 );
 
+const dllBytes = new Uint8Array(64);
+dllBytes[0] = 0x4d;
+dllBytes[1] = 0x5a;
 const withBinary = await AR.readFolderTree([
   fileFrom("proj/app.ts", "const x = 1;\n"),
   {
     name: "native.dll",
-    size: 4,
+    size: dllBytes.length,
     webkitRelativePath: "proj/native.dll",
-    slice: () => ({
-      arrayBuffer: async () => new Uint8Array([0x4d, 0x5a, 0x00, 0x01]).buffer,
-    }),
+    slice: () => ({ arrayBuffer: async () => dllBytes.buffer }),
+    arrayBuffer: async () => dllBytes.buffer,
   },
 ]);
 /*
- * The reported case: a folder with a .dll in it. One binary must not fail the
- * whole upload — it is skipped by name and the code around it still arrives.
+ * The reported case: a folder with a .dll in it. It used to be skipped. The
+ * source still arrives, and the DLL now stays byte-exact for inspect_binary.
  */
 check(
-  "a .dll inside a folder is skipped without failing the upload",
-  withBinary.entries.length === 1 && withBinary.skipped.length === 1,
-  `${withBinary.entries.length} read, ${withBinary.skipped.length} skipped`
+  "a .dll inside a folder is preserved without breaking text upload",
+  withBinary.entries.length === 1 &&
+    withBinary.binaries?.length === 1 &&
+    withBinary.skipped.length === 0,
+  `${withBinary.entries.length} text, ${withBinary.binaries?.length ?? 0} executable`
 );
 
 const chatSrc = await readSrc("src/components/ChatArea.tsx");

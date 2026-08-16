@@ -32,6 +32,7 @@ const RE_READABLE = new Set([
   "read_files",
   "list_files",
   "search_files",
+  "inspect_binary",
 ]);
 
 /**
