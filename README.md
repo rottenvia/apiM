@@ -58,7 +58,7 @@ The executable will be in the `dist` folder. Just double-click to run!
 npm test
 ```
 
-Runs every suite — currently 1,879 checks across 47 suites — without calling
+Runs every suite — currently 1,881 checks across 47 suites — without calling
 the paid API; `npm run test:real` does that and is opt-in.
 
 ```bash
@@ -89,7 +89,8 @@ writes persistent artifacts under `analysis/<binary>-<hash>/`:
 2. PE summary JSON with sections, sizes, timestamp and packing assessment.
 3. A 4KB-window entropy map with file offsets and section names.
 4. Carved embedded PE/DLL, Lua bytecode/source, ZIP, PNG and PDF payloads,
-   each with its own full strings dump.
+   plus opaque high-entropy sections/overlays when the real payload is still
+   compressed or encrypted; every carve gets its own full strings dump.
 5. A dedicated high-interest import view for `luaL_*`, process-memory/
    injection APIs, `LoadLibrary`/`GetProcAddress`, and process creation APIs.
 6. A FLARE capa report when capa is installed.
@@ -141,9 +142,11 @@ APIM_GHIDRA_HOME=C:\tools\ghidra_11.x_PUBLIC
 
 That directory must contain `support\analyzeHeadless.bat`. Restart apiM after
 changing `.env.local`. By default the tool resolves symbols/strings named
-`CreateMove` and `IN_JUMP`, follows their references and keeps only those
-functions in `focused-functions.c` / `focused-functions.cs`. Set
-`focused_only:false` in a tool call to also retain the full Ghidra output in
+`CreateMove` and `IN_JUMP`, follows their references and keeps those functions
+in `focused-functions.c` / `focused-functions.cs`. If stripped/packed code has
+no surviving focus reference, Ghidra automatically falls back to bounded full
+decompilation instead of reporting an empty success. Set
+`focused_only:false` in a tool call to retain full Ghidra output immediately in
 searchable ~350KB chunks or the complete ILSpy C# project. Completed results
 are cached by SHA-256 plus focus profile. Defaults limit native analysis to
 four minutes, four CPU cores, 100MB of decompiler text and 512MB of exhaustive

@@ -362,6 +362,9 @@ const rootBytes = makePe();
 const childBytes = makePe({ dll: true, customImport: false });
 const artifactBytes = new Uint8Array(0x3600);
 artifactBytes.set(rootBytes, 0);
+// Deterministic uniform byte distribution: entropy 8.0 in the root .text
+// section, standing in for compressed/encrypted payload data.
+for (let i = 0; i < 0x200; i++) artifactBytes[0x200 + i] = i & 0xff;
 artifactBytes.set(childBytes, 0x1400);
 artifactBytes.set([0x1b, 0x4c, 0x75, 0x61, 0x54, 0x00, 0x19, 0x93], 0x2800);
 ascii(artifactBytes, 0x2810, "embedded_lua_chunk_string");
@@ -417,8 +420,15 @@ check(
     )
 );
 check(
-  "embedded PE, Lua bytecode, Lua source and PDF blobs are carved",
-  ["PE", "Lua bytecode", "Lua source", "PDF"].every((kind) =>
+  "embedded PE, Lua and PDF are carved alongside opaque packed data",
+  [
+    "PE",
+    "Lua bytecode",
+    "Lua source",
+    "PDF",
+    "opaque high-entropy section",
+    "opaque overlay",
+  ].every((kind) =>
     artifactResult.artifacts.carved.some((blob) => blob.kind === kind)
   ),
   artifactResult.artifacts.carved.map((blob) => blob.kind).join(", ")
@@ -467,7 +477,12 @@ await fs.mkdir(cacheDir, { recursive: true });
 await fs.writeFile(path.join(cacheDir, "functions.tsv"), "address\tname\n1000\tmain\n");
 await fs.writeFile(
   path.join(cacheDir, ".apim-analysis.json"),
-  JSON.stringify({ hash, engine: "ghidra", profile: "full:", complete: true })
+  JSON.stringify({
+    hash,
+    engine: "ghidra",
+    profile: "analysis-v2:full:",
+    complete: true,
+  })
 );
 result = await B.inspectWorkspaceBinary(WS, "uploads/binaries/app.exe", {
   deep: true,
@@ -511,6 +526,81 @@ check(
   "Stop kills an expensive decompiler process tree promptly",
   Date.now() - stopStarted < 5_000 && /stopped/i.test(stopped.deep.summary),
   `${Date.now() - stopStarted}ms — ${stopped.deep.summary}`
+);
+
+const fakeGhidraScript = path.join(DATA_ROOT, "fake-ghidra-empty.cjs");
+await fs.writeFile(
+  fakeGhidraScript,
+  `const fs=require('fs'); const path=require('path');\n` +
+    `const at=process.argv.indexOf('ApimDecompile.java'); const out=process.argv[at+1];\n` +
+    `fs.mkdirSync(out,{recursive:true});\n` +
+    `fs.writeFileSync(path.join(out,'functions.tsv'),'address\\tname\\n');\n` +
+    `fs.writeFileSync(path.join(out,'summary.txt'),'Functions decompiled: 0\\nFocus fallback used: false\\n');\n`
+);
+await fs.writeFile(
+  fakeHeadless,
+  process.platform === "win32"
+    ? `@echo off\r\n"${process.execPath}" "${fakeGhidraScript}" %*\r\n`
+    : `#!/bin/sh\nexec "${process.execPath}" "${fakeGhidraScript}" "$@"\n`
+);
+if (process.platform !== "win32") await fs.chmod(fakeHeadless, 0o755);
+process.env.APIM_GHIDRA_HOME = fakeGhidra;
+const emptyGhidra = await B.inspectWorkspaceBinary(
+  WS,
+  "uploads/binaries/app.exe",
+  {
+    artifacts: false,
+    runCapa: false,
+    deep: true,
+    forceDeep: true,
+    dependencies: false,
+    includeStrings: false,
+    focusTerms: ["CreateMove", "IN_JUMP"],
+    focusedOnly: true,
+  }
+);
+if (previousGhidra === undefined) delete process.env.APIM_GHIDRA_HOME;
+else process.env.APIM_GHIDRA_HOME = previousGhidra;
+check(
+  "a header-only zero-function Ghidra run is rejected, not called complete",
+  emptyGhidra.deep.status === "failed" &&
+    /decompiled zero functions/.test(emptyGhidra.deep.summary),
+  emptyGhidra.deep.summary
+);
+
+await fs.writeFile(
+  fakeGhidraScript,
+  `const fs=require('fs'); const path=require('path');\n` +
+    `const at=process.argv.indexOf('ApimDecompile.java'); const out=process.argv[at+1];\n` +
+    `fs.mkdirSync(out,{recursive:true});\n` +
+    `fs.writeFileSync(path.join(out,'functions.tsv'),'address\\tname\\n1000\\tentry\\n');\n` +
+    `fs.writeFileSync(path.join(out,'decompiled-0001.c'),'void entry(void) {}\\n');\n` +
+    `fs.writeFileSync(path.join(out,'summary.txt'),'Functions decompiled: 5\\nFocus fallback used: true\\n');\n`
+);
+process.env.APIM_GHIDRA_HOME = fakeGhidra;
+const fallbackGhidra = await B.inspectWorkspaceBinary(
+  WS,
+  "uploads/binaries/app.exe",
+  {
+    artifacts: false,
+    runCapa: false,
+    deep: true,
+    forceDeep: true,
+    dependencies: false,
+    includeStrings: false,
+    focusTerms: ["CreateMove", "IN_JUMP"],
+    focusedOnly: true,
+  }
+);
+if (previousGhidra === undefined) delete process.env.APIM_GHIDRA_HOME;
+else process.env.APIM_GHIDRA_HOME = previousGhidra;
+check(
+  "a focus miss with decompiled fallback is reported as real non-empty work",
+  fallbackGhidra.deep.status === "complete" &&
+    /bounded full decompilation ran automatically/.test(
+      fallbackGhidra.deep.summary
+    ),
+  fallbackGhidra.deep.summary
 );
 
 const fakeCapa = path.join(
@@ -731,7 +821,8 @@ check(
   "Ghidra has a true focused-only reference path",
   /collectFocused/.test(ghidraScript) &&
     /getReferencesTo/.test(ghidraScript) &&
-    /focused-functions\.c/.test(ghidraScript)
+    /focused-functions\.c/.test(ghidraScript) &&
+    /focus miss triggered full fallback/.test(ghidraScript)
 );
 check(
   "the tool defaults to CreateMove and IN_JUMP focus",
@@ -753,6 +844,7 @@ check(
 
 await fs.rm(path.join(DATA_ROOT, "workspaces"), { recursive: true, force: true });
 await fs.rm(fakeGhidra, { recursive: true, force: true });
+await fs.rm(fakeGhidraScript, { force: true });
 await fs.rm(fakeCapa, { force: true });
 await fs.rm(fakeCapaRules, { recursive: true, force: true });
 await fs.rm(fakeCapaSignatures, { recursive: true, force: true });
