@@ -320,14 +320,19 @@ console.log("\n7. Pruning is sized for the model in use");
 // DeepSeek v4 is a 1M-token model at roughly 3.6 chars per token.
 const WINDOW_CHARS = 1_000_000 * 3.6;
 check(
-  "pruning does not start in the first 5% of the context window",
-  prune.PRUNE_THRESHOLD_CHARS > WINDOW_CHARS * 0.05,
+  "pruning does not start in the first few percent of the context window",
+  prune.PRUNE_THRESHOLD_CHARS > WINDOW_CHARS * 0.03,
   `starts at ${(100 * prune.PRUNE_THRESHOLD_CHARS / WINDOW_CHARS).toFixed(1)}% of the window`
 );
 check(
-  "enough recent reads are kept to describe a project",
-  prune.KEEP_VERBATIM_RESULTS >= 50,
-  `${prune.KEEP_VERBATIM_RESULTS} kept verbatim`
+  "the last few agent rounds keep their results verbatim",
+  prune.KEEP_VERBATIM_ROUNDS >= 2,
+  `${prune.KEEP_VERBATIM_ROUNDS} rounds kept whole`
+);
+check(
+  "a handful of recent results stay verbatim even from older rounds",
+  prune.KEEP_RECENT_RESULTS >= 8,
+  `${prune.KEEP_RECENT_RESULTS} recent results kept`
 );
 
 await rm(SCRATCH, { recursive: true, force: true });

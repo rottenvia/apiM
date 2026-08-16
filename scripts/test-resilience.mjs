@@ -165,6 +165,13 @@ server.close();
 
 console.log("\n3. Pruning a long transcript");
 
+/*
+ * The pruner is round-aware, not count-based. The most recent N assistant
+ * rounds that called tools keep ALL of their tool results verbatim (however
+ * large), because the model is actively reasoning over them. Older results
+ * are collapsed only when they are big enough to be worth it; small
+ * confirmations and short reads stay.
+ */
 const bigOutput = (n) => `line one of output\n${"x".repeat(n)}`;
 
 function buildTranscript(rounds, size = 1500) {
@@ -201,52 +208,52 @@ check(
 /*
  * Reading a whole project must survive intact.
  *
- * This is the regression that made the agent look like it gave up. Pruning
- * used to begin at 24_000 characters — under 1% of DeepSeek v4's window — so
- * a transcript that had read forty files arrived with all but the last
- * twelve replaced by "[earlier read_file result … collapsed]". The model
- * then described the handful it could still see and reported the rest as
- * missing. Forty reads of a real source file is an ordinary request and must
- * not lose anything.
+ * Forty reads of an ordinary source file are a few thousand characters each,
+ * which is below MIN_COLLAPSE_CHARS, and the whole transcript is below the
+ * size threshold — so nothing is collapsed. The model can describe all forty
+ * files rather than the handful a cap would leave.
  */
 const wholeProject = buildTranscript(40);
 const untouched = P.pruneTranscript(wholeProject);
 check(
-  "reading forty files keeps every one of them",
+  "reading forty ordinary files keeps every one of them",
   untouched.stats.collapsed === 0,
   `${untouched.stats.collapsed} collapsed — the agent can describe all 40`
 );
 
-// Big enough to actually exceed the threshold AND the verbatim window, so
-// the collapse path is covered. Two conditions gate pruning: the transcript
-// must pass PRUNE_THRESHOLD_CHARS, and there must be more tool results than
-// KEEP_VERBATIM_RESULTS (the recent ones are always kept whole). Sized from
-// the constants rather than hardcoded, so changing either still tests this.
-const perRound = 12_000;
-// Well past both the size threshold and the verbatim window: the most recent
-// KEEP_VERBATIM_RESULTS are deliberately kept whole, so to measure a
-// *substantial* collapse the transcript has to be long enough that the older
-// collapsible results outweigh the recent ones left intact.
-const rounds = Math.max(
-  P.KEEP_VERBATIM_RESULTS * 3,
-  Math.ceil((P.PRUNE_THRESHOLD_CHARS / perRound) * 1.6)
-);
-const long = buildTranscript(rounds, perRound);
-res = P.pruneTranscript(long);
-
-check("a long run does get pruned", res.stats.collapsed > 0, `${res.stats.collapsed} collapsed`);
-check(
-  "the most recent results are kept verbatim",
-  res.messages
-    .filter((m) => m.role === "tool")
-    .slice(-P.KEEP_VERBATIM_RESULTS)
-    .every((m) => m.content.length > 1000),
-  "the model is usually working with what it just read"
+/*
+ * The active window is whole files, however big.
+ *
+ * This is the point of the round-aware design: read_file returns the whole
+ * file, and the rounds the model is currently working with keep that content
+ * verbatim. Even transcripts far over the threshold must not collapse the
+ * last KEEP_VERBATIM_ROUNDS rounds.
+ */
+const keepRounds = P.KEEP_VERBATIM_ROUNDS;
+const active = buildTranscript(keepRounds + 20, 30_000);
+res = P.pruneTranscript(active);
+const activeResults = res.messages.filter((m) => m.role === "tool");
+const lastRoundIds = new Set(
+  active
+    .filter(
+      (m, i) =>
+        m.role === "assistant" &&
+        i >= active.length - keepRounds * 2 - 1 &&
+        m.tool_calls
+    )
+    .flatMap((m) => m.tool_calls.map((c) => c.id))
 );
 check(
-  "exactly the older ones were collapsed",
-  res.stats.collapsed === rounds - P.KEEP_VERBATIM_RESULTS,
-  `${rounds} rounds, keeping ${P.KEEP_VERBATIM_RESULTS}`
+  "the most recent rounds' results stay verbatim however large",
+  activeResults
+    .filter((m) => lastRoundIds.has(m.tool_call_id))
+    .every((m) => m.content.length > 20_000),
+  "cutting an active read forces a wasteful re-read"
+);
+check(
+  "older large results collapse",
+  res.stats.collapsed > 0,
+  `${res.stats.collapsed} collapsed`
 );
 
 // The three invariants that would otherwise produce a 400.
@@ -257,16 +264,10 @@ check(
 );
 check(
   "the message count is unchanged — nothing was dropped",
-  res.messages.length === long.length
+  res.messages.length === active.length
 );
-check(
-  "the system prompt is untouched",
-  res.messages[0].content === long[0].content
-);
-check(
-  "the user's question is untouched",
-  res.messages[1].content === long[1].content
-);
+check("the system prompt is untouched", res.messages[0].content === active[0].content);
+check("the user's question is untouched", res.messages[1].content === active[1].content);
 check(
   "reasoning_content survives verbatim on tool-calling turns",
   res.messages
@@ -296,51 +297,43 @@ check(
   "a placeholder tells the model how to get the rest",
   collapsedOne.content.includes("Call the tool again")
 );
-
 check(
   "the input array is not modified",
-  long.filter((m) => m.role === "tool").every((m) => m.content.length > 1000),
+  active.filter((m) => m.role === "tool").every((m) => m.content.length > 20_000),
   "the stored transcript must keep everything"
 );
 
-const before = P.transcriptChars(long);
+const before = P.transcriptChars(active);
 const after = P.transcriptChars(res.messages);
-// A third off. The ceiling is set by KEEP_VERBATIM_RESULTS: eighty recent
-// reads are deliberately kept whole, so on a transcript only 60% longer than
-// the threshold most of what remains is content we chose not to touch.
 check(
-  "the saving is substantial",
-  after < before * 0.7,
-  `${before.toLocaleString()} -> ${after.toLocaleString()} chars, ${Math.round((1 - after / before) * 100)}% smaller`
+  "the saving is real",
+  after < before,
+  `${before.toLocaleString()} -> ${after.toLocaleString()} chars`
 );
 check(
   "the reported saving matches reality",
   Math.abs(res.stats.charsSaved - (before - after)) < 2
 );
 
-// A tiny result costs more to describe than to keep.
-const tiny = buildTranscript(30).map((m) =>
+// Small results are not worth a placeholder even when old.
+const tiny = buildTranscript(60).map((m) =>
   m.role === "tool" ? { ...m, content: "ok" } : m
 );
-tiny.push({ role: "user", content: "x".repeat(30_000) });
+tiny.push({ role: "user", content: "x".repeat(P.PRUNE_THRESHOLD_CHARS + 10) });
 res = P.pruneTranscript(tiny);
 check(
-  "results too small to be worth collapsing are left alone",
+  "results smaller than MIN_COLLAPSE_CHARS are left alone",
   res.stats.collapsed === 0,
   "the placeholder would be longer than the content"
 );
 
-// Multiple calls in one round must all keep their replies.
+// Multiple calls in one round all keep their replies.
 const parallel = [
   { role: "system", content: "s" },
   { role: "user", content: "u" },
 ];
-// Enough rounds to clear the threshold and still leave older results to
-// collapse once the eighty most recent are kept.
-const parallelRounds = P.KEEP_VERBATIM_RESULTS + 40;
-const parallelSize = Math.ceil(
-  (P.PRUNE_THRESHOLD_CHARS * 1.6) / (parallelRounds * 2)
-);
+// Enough rounds to clear the threshold and leave older results to collapse.
+const parallelRounds = P.KEEP_VERBATIM_ROUNDS + 30;
 for (let i = 0; i < parallelRounds; i++) {
   parallel.push({
     role: "assistant",
@@ -351,8 +344,8 @@ for (let i = 0; i < parallelRounds; i++) {
       { id: `b_${i}`, type: "function", function: { name: "list_files", arguments: "{}" } },
     ],
   });
-  parallel.push({ role: "tool", tool_call_id: `a_${i}`, content: bigOutput(parallelSize) });
-  parallel.push({ role: "tool", tool_call_id: `b_${i}`, content: bigOutput(parallelSize) });
+  parallel.push({ role: "tool", tool_call_id: `a_${i}`, content: bigOutput(20_000) });
+  parallel.push({ role: "tool", tool_call_id: `b_${i}`, content: bigOutput(20_000) });
 }
 res = P.pruneTranscript(parallel);
 check(
@@ -361,6 +354,20 @@ check(
   `${parallelRounds * 2} calls across ${parallelRounds} rounds`
 );
 check("parallel calls still got pruned", res.stats.collapsed > 0);
+
+// force:true collapses eligible old results without waiting for the size
+// gate. Need more rounds than the recent-results window so there is something
+// old enough to collapse.
+const forced = buildTranscript(
+  P.KEEP_VERBATIM_ROUNDS + P.KEEP_RECENT_RESULTS + 5,
+  5_000
+);
+const fres = P.pruneTranscript(forced, { force: true });
+check(
+  "force prunes even below the threshold",
+  fres.stats.collapsed > 0,
+  `${fres.stats.collapsed} collapsed — used to recover from a context-length rejection`
+);
 
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`

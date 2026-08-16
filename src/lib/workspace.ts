@@ -57,23 +57,20 @@ const ROOT = process.env.APIM_DATA_ROOT
 export const MAX_FILE_BYTES = 512 * 1024 * 1024;
 export const MAX_FILES_PER_WORKSPACE = 100_000;
 /**
- * Truncate oversized reads so one file can't swamp the context window.
+ * Truncate oversized reads so one file cannot exceed the model's window on
+ * the round it is read.
  *
- * Lower than the attachment cap on purpose: the agent reads files inside a
- * loop that may run forty rounds, and every earlier read is resent on each
- * one. A file it attaches once can afford to be larger than a file it might
- * read repeatedly.
- *
- * This was 400_000 chars (~110k tokens). A single read of that size rode
- * along on every later round, and `pruneTranscript` keeps the most recent 80
- * results verbatim — so a few large reads could push the whole request past
- * the model's context window ("chat is too big for the model"). 60_000 chars
- * is roughly 17k tokens: enough for a large source file, small enough that
- * even several of them leave the bulk of the 1M window for the rest of the
- * task. The truncation note tells the model how to read the rest in ranges
- * rather than re-requesting the whole file, so no capability is lost.
+ * This is NOT the token-saving mechanism — old results are collapsed by
+ * `pruneTranscript` once the model has acted on them. A file the model asks
+ * for should arrive whole on the round it reads it: cutting it there just
+ * forces a second read_file with line ranges, which costs an extra round and
+ * produces a worse answer. So this is deliberately generous: 200_000 chars
+ * (~55k tokens) covers every normal source file, a minified bundle, or a
+ * large generated file. Only genuinely huge inputs (multi-megabyte logs,
+ * data dumps) are cut, and the truncation note tells the model how to read
+ * the rest in ranges.
  */
-export const MAX_READ_CHARS = 60_000;
+export const MAX_READ_CHARS = 200_000;
 
 export interface WorkspaceFile {
   path: string;

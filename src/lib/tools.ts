@@ -30,6 +30,7 @@ import {
   editFile,
   listFiles,
   readFile,
+  MAX_READ_CHARS,
   readImageAsDataUrl,
   readFileBytes,
   moveFile,
@@ -1239,7 +1240,7 @@ export async function runTool(
         const result = await readFile(workspaceId, str(args, "path"));
         const totalLines = result.content.split("\n").length;
         const note = result.truncated
-          ? `\n\n[truncated at the read limit — showing the first ${totalLines.toLocaleString()} lines of a larger file. Call read_file again with start_line/end_line to read the next range instead of re-reading the whole thing.]`
+          ? `\n\n[truncated at ${MAX_READ_CHARS.toLocaleString()} characters — this is larger than a single read can return. Use start_line/end_line to read the rest in ranges rather than re-reading from the top.]`
           : "";
 
         /*

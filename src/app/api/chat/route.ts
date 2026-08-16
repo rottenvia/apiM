@@ -1532,7 +1532,9 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               recoveredFromContext = true;
               const forcedPrune = pruneTranscript(transcript, {
                 force: true,
-                keepVerbatim: 20,
+                keepVerbatimRounds: 1,
+                keepRecentResults: 6,
+                minChars: 800,
               });
               transcript.length = 0;
               transcript.push(...forcedPrune.messages);
