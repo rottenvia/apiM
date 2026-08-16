@@ -1420,7 +1420,9 @@ export async function inspectWorkspaceBinary(
           bytes,
           inspection,
           {
-            force: options.forceDeep === true,
+            // force_decompile means what it says: a failed Ghidra/ILSpy rerun
+            // must not regenerate already complete strings/entropy/carves.
+            force: false,
             signal: options.signal,
           }
         );
@@ -1428,7 +1430,8 @@ export async function inspectWorkspaceBinary(
   // capa and a decompiler are both CPU-heavy external processes. Run them in
   // sequence instead of turning one user's laptop into a benchmark furnace.
   const capa = await runCapaAnalysis(workspaceId, target, inspection, {
-    force: options.forceDeep === true,
+    // Preserve a completed capa report while retrying only the decompiler.
+    force: false,
     signal: options.signal,
     enabled: options.runCapa !== false,
   });

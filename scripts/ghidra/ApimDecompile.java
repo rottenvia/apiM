@@ -199,16 +199,34 @@ public class ApimDecompile extends GhidraScript {
 
         Map<Function, Set<String>> focused = collectFocused(focusTerms);
         List<Function> work = new ArrayList<>();
+        boolean fallbackBehavior = false;
         boolean fallbackFull = false;
         if (focusedOnly) {
             work.addAll(focused.keySet());
             /*
              * Stripped/packed programs often contain neither original symbol
-             * names nor the macro text the user knows from source. Returning
-             * a successful empty analysis is worse than spending more CPU:
-             * it looks as though Ghidra proved no relevant code exists. Fall
-             * back to bounded full decompilation and say that focus was lost.
+             * names nor the macro text the user knows from source. First find
+             * callers of loader, process-memory and process-creation APIs —
+             * those are the functions most likely to unpack/launch a payload
+             * and are far cheaper to decompile than the entire program.
              */
+            if (work.isEmpty()) {
+                List<String> behaviorTerms = List.of(
+                    "CreateRemoteThread", "WriteProcessMemory", "ReadProcessMemory",
+                    "VirtualAlloc", "VirtualAllocEx", "VirtualProtect",
+                    "LoadLibrary", "GetProcAddress", "CreateProcess",
+                    "NtWriteVirtualMemory", "NtMapViewOfSection", "QueueUserAPC",
+                    "SetThreadContext", "ResumeThread", "RtlDecompressBuffer"
+                );
+                Map<Function, Set<String>> behavior = collectFocused(behaviorTerms);
+                if (!behavior.isEmpty()) {
+                    fallbackBehavior = true;
+                    focused = behavior;
+                    work.addAll(behavior.keySet());
+                }
+            }
+            /* No names, strings, imports or references survived: only now pay
+             * for bounded full decompilation rather than returning emptiness. */
             if (work.isEmpty()) {
                 fallbackFull = true;
                 FunctionIterator functions = currentProgram.getFunctionManager().getFunctions(true);
@@ -298,9 +316,11 @@ public class ApimDecompile extends GhidraScript {
             if (focusedCount == 0) {
                 focusCode.write(
                     "/* No surviving symbol/string reference matched the requested terms.\n" +
-                    (fallbackFull
-                        ? " * Full decompilation was generated as a fallback; search those chunks by behavior/API instead.\n"
-                        : "") +
+                    (fallbackBehavior
+                        ? " * Behavior/API fallback candidates were selected, but none decompiled successfully.\n"
+                        : fallbackFull
+                            ? " * Full decompilation was generated as a fallback; search those chunks by behavior/API instead.\n"
+                            : "") +
                     " */\n"
                 );
             }
@@ -319,11 +339,14 @@ public class ApimDecompile extends GhidraScript {
                 "Mode: " +
                 (fallbackFull
                     ? "focused-miss-fallback-full"
-                    : focusedOnly ? "focused-only" : "full-plus-focused") +
+                    : fallbackBehavior
+                        ? "focused-miss-fallback-behavior"
+                        : focusedOnly ? "focused-only" : "full-plus-focused") +
                 "\n"
             );
             summary.write("Focus terms: " + String.join(", ", focusTerms) + "\n");
-            summary.write("Focus fallback used: " + fallbackFull + "\n");
+            summary.write("Behavior fallback used: " + fallbackBehavior + "\n");
+            summary.write("Full fallback used: " + fallbackFull + "\n");
             summary.write("Functions selected/visited: " + total + "\n");
             summary.write("Functions decompiled: " + completed + "\n");
             summary.write("Focused functions: " + focusedCount + "\n");
@@ -337,7 +360,9 @@ public class ApimDecompile extends GhidraScript {
         println(
             "apiM decompiled " + completed + "/" + total + " selected functions; " +
             focusedCount + " matched " + String.join(", ", focusTerms) +
-            (fallbackFull ? "; focus miss triggered full fallback" : "")
+            (fallbackBehavior
+                ? "; focus miss triggered behavior/API fallback"
+                : fallbackFull ? "; focus miss triggered full fallback" : "")
         );
     }
 }
