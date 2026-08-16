@@ -46,32 +46,38 @@ const EFFORTS = [
  * What the model actually does with the level you pick.
  *
  * From DeepSeek's own mapping table (api-docs.deepseek.com/guides/
- * thinking_mode). V4 Pro silently maps `low` up to `high`, so on Pro the
- * menu was offering a setting that did nothing: picking Low cost exactly the
- * same as picking High, which is the sort of thing you only discover from a
- * bill.
+ * thinking_mode). V4 Pro has no light reasoning mode — it silently maps
+ * `low` up to `high` — so offering Low on Pro would charge for High while
+ * pretending otherwise (the sort of thing you only discover from a bill).
+ * Per request, Low is simply not offered on Pro; the real choices are
+ * Auto, None, High and Max. Flash honours every level, so its menu keeps
+ * Low.
  *
  *   requested   flash     pro
- *   low         low       high
+ *   low         low       high   (not offered)
  *   high        high      high
  *   max         max       max
- *
- * Rather than hide the option — which would make the choice vanish when
- * switching models and lose a setting the user had picked — Low is kept and
- * labelled with what it really does.
  */
 function effortsFor(model: string) {
   const isPro = model !== "deepseek-v4-flash";
-  return EFFORTS.map((e) => {
-    if (isPro && e.id === "low") {
-      return {
-        ...e,
-        description: "Same as High on V4 Pro — this model has no light mode.",
-        warning: "Switch to V4 Flash for genuinely cheaper reasoning.",
-      };
-    }
-    return e;
-  });
+  // On Pro, drop the levels the model ignores. Auto is kept so the default
+  // still exists; None stays because it genuinely disables thinking.
+  return EFFORTS.filter(
+    (e) => !isPro || (e.id !== "low")
+  );
+}
+
+/**
+ * Coerce a stored effort value to one the selected model actually honours.
+ *
+ * If the user had Low picked and then switched to Pro — where Low does not
+ * exist and is treated as High — map it up to High rather than leaving the
+ * selector showing a missing option or silently sending a level the UI hid.
+ */
+export function effectiveEffort(effort: string, model: string): string {
+  const isPro = model !== "deepseek-v4-flash";
+  if (isPro && effort === "low") return "high";
+  return effort;
 }
 
 export function ThinkingEffortSelector({
@@ -84,6 +90,17 @@ export function ThinkingEffortSelector({
 
   const efforts = effortsFor(model);
   const current = efforts.find((e) => e.id === value) || efforts[0];
+
+  // If the selected model no longer honours the current value (e.g. Low was
+  // picked on Flash, then the user switched to Pro, which has no Low),
+  // upgrade it to the nearest real level rather than showing a missing
+  // selection and sending a level the UI hid.
+  useEffect(() => {
+    if (value === "low" && model !== "deepseek-v4-flash") {
+      onChange("high");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [model]);
 
   // Close on outside click
   useEffect(() => {

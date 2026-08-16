@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { v4 as uuidv4 } from "uuid";
 import { Sidebar } from "@/components/Sidebar";
 import { ChatArea } from "@/components/ChatArea";
+import { effectiveEffort } from "@/components/ThinkingEffortSelector";
 import type { BtwEntry } from "@/components/BtwDock";
 import { BalanceWarning, levelFor } from "@/components/BalanceWarning";
 import { SettingsModal } from "@/components/SettingsModal";
@@ -1222,7 +1223,9 @@ export default function Home() {
             tavilyApiKey: tavilyEnabled ? tavilyKey : "",
             exaApiKey: exaEnabled ? exaKey : "",
             model: activeModel,
-            thinkingEffort,
+            // Coerce to a level the selected model actually honours (Pro has
+            // no Low), so the server never receives a level the UI hid.
+            thinkingEffort: effectiveEffort(thinkingEffort, activeModel),
             webSearchMode,
             enabledPluginIds: enabledPlugins,
             regenerateFromId,
