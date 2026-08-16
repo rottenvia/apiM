@@ -45,3 +45,10 @@ export function binaryFolderUploadPath(folder: string, relative: string): string
     .map((part) => safeSegment(part, "file"));
   return `uploads/binaries/${root}/${pieces.join("/") || "program.exe"}`;
 }
+
+/** Deterministic output root shared by static artifacts and decompilers. */
+export function binaryAnalysisRoot(name: string, sha256: string): string {
+  const stem = safeSegment(baseName(name).replace(/\.[^.]+$/, ""), "binary")
+    .slice(0, 80);
+  return `analysis/${stem}-${sha256.slice(0, 12)}`;
+}

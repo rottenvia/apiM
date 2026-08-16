@@ -947,10 +947,15 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
         "headers, sections/entropy, hashes, Authenticode envelope, imports " +
         "with function names, exports, PDB paths, selected strings, .NET " +
         "metadata and a recursive graph of DLLs supplied in the workspace. " +
-        "For managed code it also uses ILSpy when installed; for native code " +
-        "it uses headless Ghidra when installed and writes searchable " +
-        "source-like output under analysis/. Packed, encrypted or obfuscated " +
-        "files may only be partially recoverable, and the result says so.",
+        "It writes a full offset-labelled ASCII/UTF-16 strings dump, a " +
+        "4KB-window entropy map, explicit packing assessment, carved embedded " +
+        "PE/Lua/ZIP/PNG/PDF blobs with their own strings, highlighted Lua/" +
+        "process-memory/library-loading/process-creation imports, and an " +
+        "optional FLARE capa report. For managed code it uses ILSpy when " +
+        "installed; for native code it uses headless Ghidra, optionally only " +
+        "decompiling functions referencing focus terms such as CreateMove and " +
+        "IN_JUMP. Outputs are cached under analysis/. Packed, encrypted or " +
+        "obfuscated files may only be partially recoverable, and the result says so.",
       parameters: {
         type: "object",
         properties: {
@@ -967,9 +972,35 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
           force_decompile: {
             type: "boolean",
             description:
-              "Ignore a completed hash cache and run the deep decompiler " +
-              "again. Leave false unless generated output is damaged or the " +
-              "decompiler configuration changed.",
+              "Ignore completed hash caches and regenerate static artifacts, " +
+              "capa and decompiler output. Leave false unless generated " +
+              "output is damaged or analysis configuration changed.",
+          },
+          artifacts: {
+            type: "boolean",
+            description:
+              "Write exhaustive strings, entropy and carved-blob artifacts. " +
+              "Defaults to true. Set false only for the fastest summary pass.",
+          },
+          run_capa: {
+            type: "boolean",
+            description:
+              "Run FLARE capa when installed. Defaults to true; unavailable is " +
+              "reported with exact setup rather than failing static analysis.",
+          },
+          focus_terms: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Names/strings whose referencing functions should be isolated " +
+              "in Ghidra/ILSpy. Defaults to [\"CreateMove\", \"IN_JUMP\"].",
+          },
+          focused_only: {
+            type: "boolean",
+            description:
+              "Generate only focused decompiler functions instead of a full " +
+              "source dump. Defaults to true for performance. Set false when " +
+              "you need the whole executable decompiled as well.",
           },
           dependencies: {
             type: "boolean",
@@ -2556,9 +2587,16 @@ export async function runTool(
 
       case "inspect_binary": {
         const target = str(args, "path");
+        const focusTerms = Array.isArray(args.focus_terms)
+          ? args.focus_terms.map((term) => String(term))
+          : ["CreateMove", "IN_JUMP"];
         const result = await inspectWorkspaceBinary(workspaceId, target, {
+          artifacts: args.artifacts !== false,
+          runCapa: args.run_capa !== false,
           deep: args.deep !== false,
           forceDeep: args.force_decompile === true,
+          focusTerms,
+          focusedOnly: args.focused_only !== false,
           signal: context.signal,
           dependencies: args.dependencies !== false,
           maxDepth: num(args, "max_depth") ?? undefined,
@@ -2571,19 +2609,22 @@ export async function runTool(
           maxStrings: num(args, "max_strings") ?? undefined,
         });
         const p = result.inspection;
-        const generated = result.deep.outputs.length;
+        const generated =
+          result.artifacts.outputs.length +
+          result.deep.outputs.length +
+          (result.capa.output ? 1 : 0);
         return {
           ok: true,
           content: formatBinaryInspection(result),
           summary:
             `Inspected ${target} — ${p.architecture}, ` +
-            `${p.imports.length} libraries, ${p.exports.length} exports` +
+            `${p.imports.length} libraries, ${p.exports.length} exports, ` +
+            `packing ${p.packing.status}` +
             (generated
-              ? `, ${generated} decompiler output file${generated === 1 ? "" : "s"}`
+              ? `, ${generated} analysis artifact${generated === 1 ? "" : "s"}`
               : ""),
-          changedPath: generated
-            ? result.deep.outputs[0]?.split("/").slice(0, 2).join("/")
-            : undefined,
+          changedPath: result.artifacts.root ||
+            result.deep.outputs[0]?.split("/").slice(0, 2).join("/"),
         };
       }
 

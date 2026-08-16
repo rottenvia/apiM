@@ -58,7 +58,7 @@ The executable will be in the `dist` folder. Just double-click to run!
 npm test
 ```
 
-Runs every suite — currently 1,862 checks across 47 suites — without calling
+Runs every suite — currently 1,877 checks across 47 suites — without calling
 the paid API; `npm run test:real` does that and is opt-in.
 
 ```bash
@@ -79,12 +79,35 @@ executables/libraries together so the main EXE's local DLL graph can be
 followed recursively.
 
 The built-in pass needs no extra software and never launches the target. It
-reports PE32/PE32+, CPU architecture, hashes/imphash, sections and entropy,
-mitigations, imports and imported function names, exports, version resources,
-PDB paths, .NET assembly references, likely runtime-loaded DLL names, selected
-ASCII/UTF-16 strings, signing-envelope presence, overlays and matching local
-DLL dependencies. "Signing envelope present" does not claim the certificate is
-trusted; trust verification is deliberately reported separately.
+reports PE32/PE32+, CPU architecture, hashes/imphash, sections, an explicit
+packing likelihood with reasons, mitigations, imports/ordinals, exports,
+version resources, PDB paths, .NET references, likely runtime-loaded DLLs,
+signing-envelope presence, overlays and matching local dependencies. It also
+writes persistent artifacts under `analysis/<binary>-<hash>/`:
+
+1. Complete offset-labelled ASCII and both-alignment UTF-16LE strings dumps.
+2. PE summary JSON with sections, sizes, timestamp and packing assessment.
+3. A 4KB-window entropy map with file offsets and section names.
+4. Carved embedded PE/DLL, Lua bytecode/source, ZIP, PNG and PDF payloads,
+   each with its own full strings dump.
+5. A dedicated high-interest import view for `luaL_*`, process-memory/
+   injection APIs, `LoadLibrary`/`GetProcAddress`, and process creation APIs.
+6. A FLARE capa report when capa is installed.
+7. Focused Ghidra/ILSpy output for functions referencing `CreateMove` or
+   `IN_JUMP` by default.
+
+"Signing envelope present" does not claim the certificate is trusted, and an
+import is capability evidence rather than a malware verdict.
+
+For a capa report, install FLARE capa or point to its executable:
+
+```bat
+python -m pip install flare-capa
+```
+
+```env
+APIM_CAPA_PATH=C:\tools\capa\capa.exe
+```
 
 For the deepest source-like recovery, install the decompiler matching the
 binary:
@@ -102,16 +125,20 @@ APIM_GHIDRA_HOME=C:\tools\ghidra_11.x_PUBLIC
 ```
 
 That directory must contain `support\analyzeHeadless.bat`. Restart apiM after
-changing `.env.local`. Ghidra output is written in searchable ~350KB chunks
-under `analysis/<binary>-<hash>/ghidra/`; ILSpy writes a C# project under the
-matching `ilspy/` directory. Completed results are cached by SHA-256. Defaults
-limit native analysis to four minutes, four CPU cores and 100MB of recovered
-text; tune only when needed:
+changing `.env.local`. By default the tool resolves symbols/strings named
+`CreateMove` and `IN_JUMP`, follows their references and keeps only those
+functions in `focused-functions.c` / `focused-functions.cs`. Set
+`focused_only:false` in a tool call to also retain the full Ghidra output in
+searchable ~350KB chunks or the complete ILSpy C# project. Completed results
+are cached by SHA-256 plus focus profile. Defaults limit native analysis to
+four minutes, four CPU cores, 100MB of decompiler text and 512MB of exhaustive
+static artifacts; tune only when needed:
 
 ```env
 APIM_BINARY_DECOMPILE_TIMEOUT_MS=240000
 APIM_BINARY_MAX_CPU=4
 APIM_BINARY_MAX_OUTPUT_MB=100
+APIM_BINARY_MAX_STATIC_OUTPUT_MB=512
 ```
 
 Decompilation is approximate: optimised native code has lost original names,
