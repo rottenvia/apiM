@@ -448,6 +448,7 @@ const artifactCached = await B.inspectWorkspaceBinary(
   "uploads/binaries/artifact.exe",
   {
     deep: false,
+    forceDeep: true,
     runCapa: false,
     dependencies: false,
     includeStrings: false,
@@ -465,7 +466,7 @@ check(
   ).every((stat) => stat.size < 512 * 1024)
 );
 check(
-  "full static artifacts are hash-cached too",
+  "force_decompile still reuses full static artifact cache",
   artifactCached.artifacts.cached &&
     artifactCached.artifacts.outputs.length === artifactResult.artifacts.outputs.length
 );
@@ -480,7 +481,7 @@ await fs.writeFile(
   JSON.stringify({
     hash,
     engine: "ghidra",
-    profile: "analysis-v2:full:",
+    profile: "analysis-v3:full:",
     complete: true,
   })
 );
@@ -536,7 +537,7 @@ await fs.writeFile(
     `fs.mkdirSync(out,{recursive:true});\n` +
     `fs.writeFileSync(path.join(out,'functions.tsv'),'address\\tname\\n');\n` +
     `fs.writeFileSync(path.join(out,'summary.txt'),'Functions decompiled: 0\\nFocus fallback used: false\\n');\n` +
-    `console.error('GHIDRA_POSTSCRIPT_COMPILE_ERROR fixture APPDATA=' + process.env.APPDATA);\n`
+    `console.error('GHIDRA_POSTSCRIPT_COMPILE_ERROR fixture APPDATA=' + process.env.APPDATA + ' PROJECT=' + process.argv[2]);\n`
 );
 await fs.writeFile(
   fakeHeadless,
@@ -573,16 +574,24 @@ check(
     /decompiled zero functions/.test(emptyGhidra.deep.summary),
   emptyGhidra.deep.summary
 );
+const emptyGhidraFormatted = B.formatBinaryInspection(emptyGhidra);
 check(
   "failure receipt proves the server launched Ghidra and surfaces its real log",
   /server resolved and started the Ghidra launcher/.test(
     emptyGhidra.deep.summary
   ) &&
     /scrubbed environment/.test(emptyGhidra.deep.summary) &&
-    /GHIDRA_POSTSCRIPT_COMPILE_ERROR/.test(
-      B.formatBinaryInspection(emptyGhidra)
-    ) &&
-    B.formatBinaryInspection(emptyGhidra).includes(fakeAppData)
+    /GHIDRA_POSTSCRIPT_COMPILE_ERROR/.test(emptyGhidraFormatted) &&
+    emptyGhidraFormatted.includes(fakeAppData)
+);
+const projectMatch = /PROJECT=([^\r\n]+)/.exec(emptyGhidraFormatted);
+check(
+  "temporary Ghidra project path has no dot-prefixed element",
+  Boolean(projectMatch) &&
+    !projectMatch[1]
+      .split(/[\\/]/)
+      .some((element) => element.startsWith(".")),
+  projectMatch?.[1] ?? "missing project path"
 );
 
 await fs.writeFile(
@@ -592,7 +601,7 @@ await fs.writeFile(
     `fs.mkdirSync(out,{recursive:true});\n` +
     `fs.writeFileSync(path.join(out,'functions.tsv'),'address\\tname\\n1000\\tentry\\n');\n` +
     `fs.writeFileSync(path.join(out,'decompiled-0001.c'),'void entry(void) {}\\n');\n` +
-    `fs.writeFileSync(path.join(out,'summary.txt'),'Functions decompiled: 5\\nFocus fallback used: true\\n');\n`
+    `fs.writeFileSync(path.join(out,'summary.txt'),'Functions decompiled: 5\\nBehavior fallback used: true\\nFull fallback used: false\\n');\n`
 );
 process.env.APIM_GHIDRA_HOME = fakeGhidra;
 const fallbackGhidra = await B.inspectWorkspaceBinary(
@@ -612,9 +621,9 @@ const fallbackGhidra = await B.inspectWorkspaceBinary(
 if (previousGhidra === undefined) delete process.env.APIM_GHIDRA_HOME;
 else process.env.APIM_GHIDRA_HOME = previousGhidra;
 check(
-  "a focus miss with decompiled fallback is reported as real non-empty work",
+  "a focus miss prefers fast behavioral API callers over full decompilation",
   fallbackGhidra.deep.status === "complete" &&
-    /bounded full decompilation ran automatically/.test(
+    /only callers of high-interest loader\/process-memory APIs/.test(
       fallbackGhidra.deep.summary
     ),
   fallbackGhidra.deep.summary
@@ -653,6 +662,18 @@ const capaRun = await B.inspectWorkspaceBinary(
     includeStrings: false,
   }
 );
+const capaCachedDuringForcedDecompile = await B.inspectWorkspaceBinary(
+  WS,
+  "uploads/binaries/app.exe",
+  {
+    artifacts: false,
+    runCapa: true,
+    deep: false,
+    forceDeep: true,
+    dependencies: false,
+    includeStrings: false,
+  }
+);
 if (previousCapa === undefined) delete process.env.APIM_CAPA_PATH;
 else process.env.APIM_CAPA_PATH = previousCapa;
 if (previousCapaRules === undefined) delete process.env.APIM_CAPA_RULES_PATH;
@@ -669,6 +690,10 @@ check(
   capaRun.capa.status === "complete" &&
     Boolean(capaRun.capa.output) &&
     /CreateRemoteThread/.test(capaText)
+);
+check(
+  "force_decompile reuses completed capa instead of rerunning it",
+  capaCachedDuringForcedDecompile.capa.cached === true
 );
 check(
   "pip-installed capa receives explicit rules and signatures paths",

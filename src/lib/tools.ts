@@ -955,8 +955,9 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
         "optional FLARE capa report. For managed code it uses ILSpy when " +
         "installed; for native code it uses headless Ghidra, optionally only " +
         "decompiling functions referencing focus terms such as CreateMove and " +
-        "IN_JUMP, with bounded full fallback when stripped symbols yield zero " +
-        "candidates. Availability is resolved by the apiM server; do not use " +
+        "IN_JUMP, then callers of high-interest loader/process-memory APIs, " +
+        "with bounded full fallback only when both focused passes find zero. " +
+        "Availability is resolved by the apiM server; do not use " +
         "run_command/where/environment probes to second-guess it because agent " +
         "commands intentionally receive a scrubbed environment. Outputs are " +
         "cached under analysis/. Packed, encrypted or obfuscated files may " +
@@ -977,9 +978,9 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
           force_decompile: {
             type: "boolean",
             description:
-              "Ignore completed hash caches and regenerate static artifacts, " +
-              "capa and decompiler output. Leave false unless generated " +
-              "output is damaged or analysis configuration changed.",
+              "Ignore only the ILSpy/Ghidra hash cache and rerun decompilation. " +
+              "Completed strings, entropy, carving and capa artifacts remain " +
+              "cached so fixing one deep-analysis error does not cost minutes.",
           },
           artifacts: {
             type: "boolean",

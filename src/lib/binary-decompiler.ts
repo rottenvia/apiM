@@ -306,7 +306,7 @@ function normaliseFocusTerms(terms: string[] | undefined): string[] {
 function focusProfile(terms: string[], focusedOnly: boolean): string {
   // Versioned so the old focused-mode "success with zero functions" cache is
   // never reused after fallback/validation behavior changes.
-  return `analysis-v2:${focusedOnly ? "focused" : "full"}:${terms
+  return `analysis-v3:${focusedOnly ? "focused" : "full"}:${terms
     .map((term) => term.toLowerCase())
     .sort()
     .join("|")}`;
@@ -584,7 +584,18 @@ async function runGhidra(
   // successful. Everything below is generated and can be rebuilt exactly.
   await fs.rm(output, { recursive: true, force: true });
   await fs.mkdir(output, { recursive: true });
-  const projectDir = path.join(root, ".ghidra-project");
+  /*
+   * Ghidra rejects any project-location path element beginning with a dot.
+   * The old `<analysis>/.ghidra-project` therefore failed before importing a
+   * single byte. Keep disposable projects in the OS temp directory instead;
+   * output still goes to the workspace, and the project is removed below.
+   */
+  const projectDir = path.join(
+    os.tmpdir(),
+    "apim-ghidra-projects",
+    inspection.hashes.sha256.slice(0, 16)
+  );
+  await fs.rm(projectDir, { recursive: true, force: true });
   await fs.mkdir(projectDir, { recursive: true });
   const scriptDir = path.resolve(process.cwd(), "scripts", "ghidra");
   const maxCpu = numberEnv(
@@ -593,6 +604,18 @@ async function runGhidra(
     1,
     16
   );
+  const defaultAnalysisMs =
+    inspection.packing.status === "likely"
+      ? 90_000
+      : inspection.bytes <= 10 * 1024 * 1024
+        ? 120_000
+        : 180_000;
+  const analysisTimeoutMs = numberEnv(
+    "APIM_GHIDRA_ANALYSIS_TIMEOUT_MS",
+    defaultAnalysisMs,
+    30_000,
+    MAX_TIMEOUT_MS
+  );
   const args = [
     projectDir,
     `apim-${inspection.hashes.sha256.slice(0, 12)}`,
@@ -600,7 +623,7 @@ async function runGhidra(
     targetPath,
     "-overwrite",
     "-analysisTimeoutPerFile",
-    String(Math.ceil(numberEnv("APIM_BINARY_DECOMPILE_TIMEOUT_MS", DEFAULT_TIMEOUT_MS, 30_000, MAX_TIMEOUT_MS) / 1000)),
+    String(Math.ceil(analysisTimeoutMs / 1000)),
     "-max-cpu",
     String(maxCpu),
     "-deleteProject",
@@ -640,7 +663,13 @@ async function runGhidra(
   const decompiledFunctions = decompiledMatch
     ? Number(decompiledMatch[1])
     : null;
-  const fallbackUsed = /Focus fallback used:\s*true/i.test(summaryText);
+  const behaviorFallbackUsed = /Behavior fallback used:\s*true/i.test(
+    summaryText
+  );
+  const fullFallbackUsed =
+    /Full fallback used:\s*true/i.test(summaryText) ||
+    // Backward compatibility with one pre-v3 generated summary.
+    /Focus fallback used:\s*true/i.test(summaryText);
   if (result.error === "Executable decompilation was stopped") {
     return {
       attempted: true,
@@ -677,9 +706,11 @@ async function runGhidra(
       summary:
         `Ghidra decompiled ${decompiledFunctions} function(s) and produced ` +
         `${outputs.length} artifact(s) under ${relRoot}/ghidra. ` +
-        (fallbackUsed
-          ? `No surviving ${focusTerms.join("/")} references were found, so bounded full decompilation ran automatically.`
-          : `Focus terms: ${focusTerms.join(", ") || "(none)"}.`),
+        (behaviorFallbackUsed
+          ? `No surviving ${focusTerms.join("/")} references were found, so only callers of high-interest loader/process-memory APIs were decompiled.`
+          : fullFallbackUsed
+            ? `No surviving ${focusTerms.join("/")} or behavioral API references were found, so bounded full decompilation ran automatically.`
+            : `Focus terms: ${focusTerms.join(", ") || "(none)"}.`),
       logTail: tail(result.output),
     };
   }
