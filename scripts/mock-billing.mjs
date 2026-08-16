@@ -24,10 +24,15 @@ import { writeFileSync } from "node:fs";
 const PORT = Number(process.env.MOCK_PORT ?? 8821);
 const REPORT = process.env.BILL_REPORT ?? "";
 
-/** DeepSeek's published rates, per 1M tokens. */
+/**
+ * DeepSeek's published OFF-PEAK rates, per 1M tokens, after the 2026-08-16
+ * pricing change. The lab compares structure, not absolute dollars; peak is
+ * 2x these and would scale every line equally. The cache discount is now
+ * ~30x (was ~120x), which is what changed compaction economics.
+ */
 const RATES = {
-  "deepseek-v4-pro": { input: 0.435, cached: 0.003625, output: 0.87 },
-  "deepseek-v4-flash": { input: 0.14, cached: 0.0028, output: 0.28 },
+  "deepseek-v4-pro": { input: 0.66, cached: 0.022, output: 1.98 },
+  "deepseek-v4-flash": { input: 0.22, cached: 0.007, output: 0.66 },
 };
 
 /** Cache granularity. A partially matching block is not a hit. */

@@ -957,27 +957,19 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
     function: {
       name: "inspect_binary",
       description:
-        "Statically inspect and decompile a Windows executable or library " +
-        "without running it. Use for .exe, .dll, .sys, .ocx, .scr, .cpl, " +
-        ".drv and .efi files. Always returns built-in PE architecture, " +
-        "headers, sections/entropy, hashes, Authenticode envelope, imports " +
-        "with function names, exports, PDB paths, selected strings, .NET " +
-        "metadata and a recursive graph of DLLs supplied in the workspace. " +
-        "It writes a full offset-labelled ASCII/UTF-16 strings dump, a " +
-        "4KB-window entropy map, explicit packing assessment, carved embedded " +
-        "PE/Lua/ZIP/PNG/PDF blobs plus opaque high-entropy sections/overlays " +
-        "with their own strings, highlighted Lua/" +
-        "process-memory/library-loading/process-creation imports, and an " +
-        "optional FLARE capa report. For managed code it uses ILSpy when " +
-        "installed; for native code it uses headless Ghidra, optionally only " +
-        "decompiling functions referencing focus terms such as CreateMove and " +
-        "IN_JUMP, then callers of high-interest loader/process-memory APIs, " +
-        "with bounded full fallback only when both focused passes find zero. " +
-        "Availability is resolved by the apiM server; do not use " +
-        "run_command/where/environment probes to second-guess it because agent " +
-        "commands intentionally receive a scrubbed environment. Outputs are " +
-        "cached under analysis/. Packed, encrypted or obfuscated files may " +
-        "only be partially recoverable, and the result says so.",
+        "Statically inspect and decompile a Windows PE file without running " +
+        "it (.exe, .dll, .sys, .ocx, .scr, .cpl, .drv, .efi). Returns " +
+        "architecture, headers, sections/entropy, hashes, Authenticode, " +
+        "imports/exports, PDB paths, strings, .NET metadata, and a graph " +
+        "of DLLs in the workspace. Use the analyses parameter to request " +
+        "only the layers you need (decompile, strings, capa, dependencies, " +
+        "entropy, carve) — omitted defaults to a cheap summary. Managed " +
+        "code uses ILSpy; native code uses headless Ghidra, focused on " +
+        "focus_terms by default. Tool availability is resolved by the " +
+        "server — do NOT probe it with run_command/where/environment " +
+        "checks (agent commands get a scrubbed env). Outputs are cached " +
+        "under analysis/. Packed/encrypted files may only be partly " +
+        "recoverable; the result says so.",
       parameters: {
         type: "object",
         properties: {

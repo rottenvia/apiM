@@ -213,8 +213,8 @@ async function main() {
 
   const t = bill.totals;
   const RATE = (bill.requests[0]?.model ?? "deepseek-v4-pro") === "deepseek-v4-flash"
-    ? { input: 0.14, cached: 0.0028, output: 0.28 }
-    : { input: 0.435, cached: 0.003625, output: 0.87 };
+    ? { input: 0.22, cached: 0.007, output: 0.66 }
+    : { input: 0.66, cached: 0.022, output: 1.98 };
   const inCostMiss = (t.missTokens / 1e6) * RATE.input;
   const inCostHit = (t.hitTokens / 1e6) * RATE.cached;
   const outCost = (t.outputTokens / 1e6) * RATE.output;
