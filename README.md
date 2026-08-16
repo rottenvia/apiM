@@ -58,7 +58,7 @@ The executable will be in the `dist` folder. Just double-click to run!
 npm test
 ```
 
-Runs every suite — currently 1,882 checks across 47 suites — without calling
+Runs every suite — currently 1,884 checks across 47 suites — without calling
 the paid API; `npm run test:real` does that and is opt-in.
 
 ```bash
@@ -144,16 +144,19 @@ That directory must contain `support\analyzeHeadless.bat`. Restart apiM after
 changing `.env.local`. By default the tool resolves symbols/strings named
 `CreateMove` and `IN_JUMP`, follows their references and keeps those functions
 in `focused-functions.c` / `focused-functions.cs`. If stripped/packed code has
-no surviving focus reference, Ghidra automatically falls back to bounded full
-decompilation instead of reporting an empty success. Set
-`focused_only:false` in a tool call to retain full Ghidra output immediately in
-searchable ~350KB chunks or the complete ILSpy C# project. Completed results
-are cached by SHA-256 plus focus profile. Defaults limit native analysis to
-four minutes, four CPU cores, 100MB of decompiler text and 512MB of exhaustive
-static artifacts; tune only when needed:
+no surviving focus reference, Ghidra first decompiles callers of high-interest
+loader/process-memory APIs; only when those are also absent does bounded full
+decompilation run. `force_decompile` reruns only Ghidra/ILSpy while preserving
+cached strings, entropy, carving and capa. Set `focused_only:false` to retain
+full Ghidra output immediately in searchable ~350KB chunks or the complete
+ILSpy C# project. Completed results are cached by SHA-256 plus focus profile.
+Packed automatic analysis defaults to 90 seconds (small ordinary files 120s),
+with four CPU cores, 100MB decompiler text and 512MB exhaustive static output;
+tune only when needed:
 
 ```env
 APIM_BINARY_DECOMPILE_TIMEOUT_MS=240000
+APIM_GHIDRA_ANALYSIS_TIMEOUT_MS=120000
 APIM_BINARY_MAX_CPU=4
 APIM_BINARY_MAX_OUTPUT_MB=100
 APIM_BINARY_MAX_STATIC_OUTPUT_MB=512
