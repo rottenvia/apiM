@@ -47,17 +47,34 @@ export interface CarvedBlob {
   note: string;
 }
 
+export interface StaticArtifactLayers {
+  summary: boolean;
+  strings: boolean;
+  entropy: boolean;
+  carve: boolean;
+}
+
 export interface StaticBinaryArtifacts {
   root: string;
   outputs: string[];
   strings: StringsDumpResult;
   entropy: EntropyMapResult;
   carved: CarvedBlob[];
+  layers: StaticArtifactLayers;
   cached: boolean;
   summary: string;
 }
 
-const STATIC_SCHEMA = 4;
+interface StaticArtifactCache {
+  schema: number;
+  hash: string;
+  summaryOutput?: string;
+  strings?: StringsDumpResult;
+  entropy?: EntropyMapResult;
+  carved?: CarvedBlob[];
+}
+
+const STATIC_SCHEMA = 5;
 // search_files reads up to 512KB per file. Stay below that so exhaustive
 // artifacts are genuinely searchable instead of merely present on disk.
 const STRINGS_CHUNK_BYTES = 350_000;
@@ -608,120 +625,181 @@ async function carveBlobs(
   return carved;
 }
 
-async function listFiles(root: string, workspaceRoot: string): Promise<string[]> {
-  const out: string[] = [];
-  async function walk(dir: string): Promise<void> {
-    let entries;
-    try {
-      entries = await fs.readdir(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) await walk(full);
-      else if (entry.isFile() && entry.name !== ".apim-static.json") {
-        out.push(relative(workspaceRoot, full));
-      }
-    }
-  }
-  await walk(root);
-  return out.sort((a, b) => a.localeCompare(b));
+function emptyStrings(): StringsDumpResult {
+  return { count: 0, ascii: 0, utf16: 0, outputs: [], truncated: false };
 }
+
+function emptyEntropy(): EntropyMapResult {
+  return {
+    windowBytes: 4096,
+    windows: 0,
+    min: 0,
+    max: 0,
+    average: 0,
+    outputs: [],
+  };
+}
+
+const ALL_LAYERS: StaticArtifactLayers = {
+  summary: true,
+  strings: true,
+  entropy: true,
+  carve: true,
+};
 
 export async function generateStaticBinaryArtifacts(
   workspaceId: string,
   target: string,
   bytes: Uint8Array,
   inspection: PeInspection,
-  options: { force?: boolean; signal?: AbortSignal } = {}
+  options: {
+    force?: boolean;
+    signal?: AbortSignal;
+    layers?: Partial<StaticArtifactLayers>;
+  } = {}
 ): Promise<StaticBinaryArtifacts> {
   const workspaceRoot = workspaceDirectory(workspaceId);
   const rootRelative = binaryAnalysisRoot(target, inspection.hashes.sha256);
   const staticDir = resolveInside(workspaceId, `${rootRelative}/static`);
   const markerPath = path.join(staticDir, ".apim-static.json");
+  const layers: StaticArtifactLayers = options.layers
+    ? {
+        summary: options.layers.summary === true,
+        strings: options.layers.strings === true,
+        entropy: options.layers.entropy === true,
+        carve: options.layers.carve === true,
+      }
+    : { ...ALL_LAYERS };
+
+  let cache: StaticArtifactCache = {
+    schema: STATIC_SCHEMA,
+    hash: inspection.hashes.sha256,
+  };
   if (!options.force) {
     try {
-      const cached = JSON.parse(await fs.readFile(markerPath, "utf8")) as {
-        schema?: number;
-        hash?: string;
-        result?: StaticBinaryArtifacts;
-      };
+      const loaded = JSON.parse(
+        await fs.readFile(markerPath, "utf8")
+      ) as StaticArtifactCache;
       if (
-        cached.schema === STATIC_SCHEMA &&
-        cached.hash === inspection.hashes.sha256 &&
-        cached.result
+        loaded.schema === STATIC_SCHEMA &&
+        loaded.hash === inspection.hashes.sha256
       ) {
-        return { ...cached.result, cached: true };
+        cache = loaded;
+      } else {
+        await fs.rm(staticDir, { recursive: true, force: true });
       }
     } catch {
-      /* no complete cache */
+      /* no compatible incremental cache */
     }
+  } else {
+    await fs.rm(staticDir, { recursive: true, force: true });
   }
 
-  await fs.rm(staticDir, { recursive: true, force: true });
   await fs.mkdir(staticDir, { recursive: true });
   stopped(options.signal);
+  let allRequestedWereCached = true;
 
-  const summaryPath = path.join(staticDir, "pe-summary.json");
-  await fs.writeFile(
-    summaryPath,
-    JSON.stringify(
-      {
-        path: target,
-        generatedAt: new Date().toISOString(),
-        packedAssessment: inspection.packing,
-        inspection: { ...inspection, strings: undefined },
-      },
-      null,
-      2
-    ) + "\n",
-    "utf8"
-  );
+  if (layers.summary && !cache.summaryOutput) {
+    allRequestedWereCached = false;
+    const summaryPath = path.join(staticDir, "pe-summary.json");
+    await fs.writeFile(
+      summaryPath,
+      JSON.stringify(
+        {
+          path: target,
+          generatedAt: new Date().toISOString(),
+          packedAssessment: inspection.packing,
+          inspection: { ...inspection, strings: undefined },
+        },
+        null,
+        2
+      ) + "\n",
+      "utf8"
+    );
+    cache.summaryOutput = relative(workspaceRoot, summaryPath);
+  }
 
-  const strings = await dumpStrings(
-    bytes,
-    path.join(staticDir, "strings"),
-    "full-strings",
-    workspaceRoot,
-    options.signal
-  );
-  const entropy = await writeEntropyMap(
-    bytes,
-    inspection,
-    staticDir,
-    workspaceRoot,
-    options.signal
-  );
-  const carved = await carveBlobs(
-    bytes,
-    inspection,
-    staticDir,
-    workspaceRoot,
-    options.signal
-  );
+  if (layers.strings && !cache.strings) {
+    allRequestedWereCached = false;
+    const stringsDir = path.join(staticDir, "strings");
+    await fs.rm(stringsDir, { recursive: true, force: true });
+    cache.strings = await dumpStrings(
+      bytes,
+      stringsDir,
+      "full-strings",
+      workspaceRoot,
+      options.signal
+    );
+  }
 
-  const result: StaticBinaryArtifacts = {
+  if (layers.entropy && !cache.entropy) {
+    allRequestedWereCached = false;
+    // Remove only old entropy chunks; other completed layers stay intact.
+    const existing = await fs.readdir(staticDir).catch(() => [] as string[]);
+    await Promise.all(
+      existing
+        .filter((name) => /^entropy-map-\d+\.tsv$/.test(name))
+        .map((name) => fs.rm(path.join(staticDir, name), { force: true }))
+    );
+    cache.entropy = await writeEntropyMap(
+      bytes,
+      inspection,
+      staticDir,
+      workspaceRoot,
+      options.signal
+    );
+  }
+
+  if (layers.carve && !cache.carved) {
+    allRequestedWereCached = false;
+    await fs.rm(path.join(staticDir, "carved"), {
+      recursive: true,
+      force: true,
+    });
+    cache.carved = await carveBlobs(
+      bytes,
+      inspection,
+      staticDir,
+      workspaceRoot,
+      options.signal
+    );
+  }
+
+  await fs.writeFile(markerPath, JSON.stringify(cache, null, 2) + "\n", "utf8");
+
+  const strings = layers.strings ? cache.strings ?? emptyStrings() : emptyStrings();
+  const entropy = layers.entropy ? cache.entropy ?? emptyEntropy() : emptyEntropy();
+  const carved = layers.carve ? cache.carved ?? [] : [];
+  const outputs: string[] = [];
+  if (layers.summary && cache.summaryOutput) outputs.push(cache.summaryOutput);
+  if (layers.strings) outputs.push(...strings.outputs);
+  if (layers.entropy) outputs.push(...entropy.outputs);
+  if (layers.carve) {
+    outputs.push(
+      relative(workspaceRoot, path.join(staticDir, "carved", "index.json"))
+    );
+    for (const blob of carved) outputs.push(blob.path, ...blob.strings);
+  }
+
+  const requested = (Object.keys(layers) as (keyof StaticArtifactLayers)[])
+    .filter((layer) => layers[layer]);
+  const details: string[] = [];
+  if (layers.summary) details.push("PE summary");
+  if (layers.strings) details.push(`${strings.count.toLocaleString()} strings`);
+  if (layers.entropy) details.push(`${entropy.windows.toLocaleString()} entropy windows`);
+  if (layers.carve) details.push(`${carved.length} carved blobs`);
+
+  return {
     root: rootRelative,
-    outputs: [],
+    outputs: [...new Set(outputs)],
     strings,
     entropy,
     carved,
-    cached: false,
+    layers,
+    cached: requested.length > 0 && allRequestedWereCached,
     summary:
-      `Wrote ${strings.count.toLocaleString()} full string record(s), ` +
-      `${entropy.windows.toLocaleString()} entropy window(s), and carved ` +
-      `${carved.length} embedded blob(s).`,
+      requested.length > 0
+        ? `${allRequestedWereCached ? "Reused" : "Prepared"} ${details.join(", ")}.`
+        : "No exhaustive static artifact layer was requested.",
   };
-  result.outputs = await listFiles(staticDir, workspaceRoot);
-  await fs.writeFile(
-    markerPath,
-    JSON.stringify(
-      { schema: STATIC_SCHEMA, hash: inspection.hashes.sha256, result },
-      null,
-      2
-    ) + "\n",
-    "utf8"
-  );
-  return result;
 }

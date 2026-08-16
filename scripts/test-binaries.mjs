@@ -793,6 +793,16 @@ check(
 console.log("\n7. The agent tool and raw-byte upload are actually wired");
 const tool = T.WORKSPACE_TOOLS.find((x) => x.function.name === "inspect_binary");
 check("inspect_binary has a dedicated schema", Boolean(tool));
+const chatRouteSource = await fs.readFile(
+  path.join(ROOT, "src/app/api/chat/route.ts"),
+  "utf8"
+);
+check(
+  "the agent is explicitly taught intent-based binary layer selection",
+  chatRouteSource.includes('analyses:["decompile"]') &&
+    chatRouteSource.includes('["strings"]') &&
+    chatRouteSource.includes('["all"] only')
+);
 const toolResult = await T.runTool(WS, "inspect_binary", {
   path: "uploads/binaries/app.exe",
   deep: false,
@@ -800,6 +810,57 @@ const toolResult = await T.runTool(WS, "inspect_binary", {
 });
 check("the dispatcher returns real PE evidence", toolResult.ok && /KERNEL32\.dll/.test(toolResult.content) && /WriteProcessMemory/.test(toolResult.content));
 check("the summary names architecture and libraries", /x86-64/.test(toolResult.summary) && /3 libraries/.test(toolResult.summary), toolResult.summary);
+
+await W.writeFileBytes(
+  WS,
+  "uploads/binaries/selective.exe",
+  Buffer.from(makePe())
+);
+const selectiveStrings = await T.runTool(WS, "inspect_binary", {
+  path: "uploads/binaries/selective.exe",
+  analyses: ["strings"],
+});
+let selectiveFiles = (await W.listFiles(WS)).map((file) => file.path);
+const selectiveRoot = `analysis/selective-${native.hashes.sha256.slice(0, 12)}`;
+check(
+  "a strings request runs only the strings layer",
+  selectiveStrings.ok &&
+    selectiveFiles.some((file) => file.startsWith(`${selectiveRoot}/static/strings/`)) &&
+    !selectiveFiles.some((file) => file.includes(`${selectiveRoot}/static/entropy-map-`)) &&
+    !selectiveFiles.some((file) => file.startsWith(`${selectiveRoot}/static/carved/`)) &&
+    !/capa:|Deep decompilation:/.test(selectiveStrings.content)
+);
+const selectiveEntropy = await T.runTool(WS, "inspect_binary", {
+  path: "uploads/binaries/selective.exe",
+  analyses: ["entropy"],
+});
+selectiveFiles = (await W.listFiles(WS)).map((file) => file.path);
+check(
+  "a later entropy request adds that layer without deleting strings",
+  selectiveEntropy.ok &&
+    selectiveFiles.some((file) => file.startsWith(`${selectiveRoot}/static/strings/`)) &&
+    selectiveFiles.some((file) => file.includes(`${selectiveRoot}/static/entropy-map-`)) &&
+    !selectiveFiles.some((file) => file.startsWith(`${selectiveRoot}/static/carved/`))
+);
+await W.writeFileBytes(
+  WS,
+  "uploads/binaries/decompile-only.exe",
+  Buffer.from(makePe())
+);
+const decompileOnly = await T.runTool(WS, "inspect_binary", {
+  path: "uploads/binaries/decompile-only.exe",
+  analyses: ["decompile"],
+});
+const decompileRoot = `analysis/decompile-only-${native.hashes.sha256.slice(0, 12)}`;
+const decompileFiles = (await W.listFiles(WS)).map((file) => file.path);
+check(
+  "test Ghidra means decompile only, not all analysis layers",
+  decompileOnly.ok &&
+    /Deep decompilation:/.test(decompileOnly.content) &&
+    !/Static artifacts|capa:/.test(decompileOnly.content) &&
+    !decompileFiles.some((file) => file.startsWith(`${decompileRoot}/static/`)) &&
+    !decompileFiles.some((file) => file.startsWith(`${decompileRoot}/capa/`))
+);
 check("supported executable extensions are explicit", BT.isPeFilename("APP.EXE") && BT.isPeFilename("driver.sys") && !BT.isPeFilename("notes.txt"));
 check("binary upload paths cannot traverse", BT.binaryUploadPath("../../evil.exe") === "uploads/binaries/evil.exe");
 check("folder paths preserve useful DLL layout without traversal", BT.binaryFolderUploadPath("My App", "../lib/x.dll") === "uploads/binaries/My App/lib/x.dll");

@@ -100,7 +100,7 @@ const TOOLS = [
   ["github_push", 92, 98, 94, 90, 94, "dedicated branch only, no force, OAuth token hidden, user approval required"],
   // --- documents and vision ------------------------------------------------
   ["read_document", 94, 94, 92, 88, 97, "real PDF plus Next dev bundle, Office and EPUB tested"],
-  ["inspect_binary", 99, 99, 98, 88, 98, "full strings/entropy/carving, import capabilities, capa, focused cached ILSpy/Ghidra; target never runs"],
+  ["inspect_binary", 99, 99, 98, 95, 99, "model-selected incremental layers, behavior-focused cached capa/ILSpy/Ghidra, exhaustive artifacts only on request"],
   ["view_image", 78, 90, 80, 78, 80, "needs a separate vision key; withheld when absent"],
   // --- direction -----------------------------------------------------------
   ["make_plan", 92, 94, 94, 96, 96, "replacement cannot drop outstanding work; min lengths enforced"],
