@@ -233,36 +233,16 @@ export function Sidebar({
       } flex-shrink-0 overflow-hidden`}
     >
       <div className="flex h-full min-w-[288px] flex-col">
-        {/* New chat */}
+        {/* New chat — fills the row; a single search icon sits at its right
+            edge. Import and multi-select used to be icon buttons here; import
+            lives in the footer next to Settings, and multi-select is entered
+            by right-clicking a chat (see onContextMenu on each row). */}
         <div className="flex h-[56px] flex-none items-center gap-1.5 px-3">
           <button onClick={onNew} className="new-chat-btn">
             <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 5v14M5 12h14" />
             </svg>
             New chat
-          </button>
-
-          <input
-            ref={importRef}
-            type="file"
-            accept="application/json,.json"
-            className="hidden"
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (file) void handleImport(file);
-              e.target.value = "";
-            }}
-          />
-
-          <button
-            onClick={() => importRef.current?.click()}
-            title="Import a chat from a JSON export"
-            aria-label="Import chat"
-            className="sidebar-icon-btn"
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} aria-hidden="true">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 15V3m0 12l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" />
-            </svg>
           </button>
 
           <button
@@ -276,26 +256,6 @@ export function Sidebar({
               <path strokeLinecap="round" d="M21 21l-4.35-4.35" />
             </svg>
           </button>
-
-          {/* Multi-select, entered deliberately.
-
-              Checkboxes permanently on screen would turn a list you click
-              through into a form you fill in. This is the rarer action, so it
-              asks for one click first. */}
-          <button
-            onClick={() => (selecting ? exitSelecting() : setSelecting(true))}
-            title={selecting ? "Done selecting" : "Select several chats"}
-            aria-label={selecting ? "Done selecting" : "Select several chats"}
-            aria-pressed={selecting}
-            data-open={selecting}
-            className="sidebar-icon-btn data-[open=true]:text-accent-light"
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} aria-hidden="true">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M9 11l3 3L22 4" />
-              <path strokeLinecap="round" strokeLinejoin="round" d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" />
-            </svg>
-          </button>
-
         </div>
 
         {importState && (
@@ -399,6 +359,24 @@ export function Sidebar({
             return (
               <div
                 key={conv.id}
+                onContextMenu={(e) => {
+                  // Right-click enters multi-select (or toggles once in it)
+                  // rather than opening the browser menu. The same button
+                  // leaves multi-select, so a second right-click on a
+                  // selected row exits.
+                  e.preventDefault();
+                  if (editingId === conv.id) return;
+                  if (selecting) {
+                    if (selected.has(conv.id) && selectedHere.length === 1) {
+                      exitSelecting();
+                    } else {
+                      toggleOne(conv.id);
+                    }
+                  } else {
+                    setSelecting(true);
+                    setSelected(new Set([conv.id]));
+                  }
+                }}
                 className={`conv-row group ${isCurrent ? "is-current" : ""}`}
               >
                 {editingId === conv.id ? (
@@ -595,18 +573,45 @@ export function Sidebar({
           )}
         </div>
 
-        {/* Settings */}
+        {/* Footer: Import and Settings. The hidden file input lives here so
+            its trigger can sit beside Settings without taking header space. */}
+        <input
+          ref={importRef}
+          type="file"
+          accept="application/json,.json"
+          className="hidden"
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) void handleImport(file);
+            e.target.value = "";
+          }}
+        />
         <div className="border-t border-border px-3 py-3">
-          <button
-            onClick={onOpenSettings}
-            className="flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-sm text-text-secondary transition-colors duration-150 hover:bg-bg-tertiary hover:text-text-primary"
-          >
-            <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-            </svg>
-            Settings
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => importRef.current?.click()}
+              title="Import a chat from a JSON export"
+              aria-label="Import chat"
+              className="flex flex-1 items-center gap-2.5 rounded-xl px-3 py-2.5 text-sm text-text-secondary transition-colors duration-150 hover:bg-bg-tertiary hover:text-text-primary"
+            >
+              <svg className="h-4 w-4 flex-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 15V3m0 12l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" />
+              </svg>
+              Import
+            </button>
+            <button
+              onClick={onOpenSettings}
+              title="Settings"
+              aria-label="Settings"
+              className="flex flex-1 items-center gap-2.5 rounded-xl px-3 py-2.5 text-sm text-text-secondary transition-colors duration-150 hover:bg-bg-tertiary hover:text-text-primary"
+            >
+              <svg className="h-4 w-4 flex-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+              </svg>
+              Settings
+            </button>
+          </div>
         </div>
       </div>
 

@@ -676,7 +676,7 @@ input:focus-visible {
 }
 .conv-row.is-current {
   background: var(--color-bg-elevated);
-  border-color: color-mix(in oklab, var(--color-accent) 40%, transparent);
+  border-color: var(--color-border-light);
   color: var(--color-text-primary);
 }
 

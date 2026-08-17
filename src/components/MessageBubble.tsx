@@ -336,6 +336,9 @@ function MessageBubbleImpl({
   const [comparing, setComparing] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
+  // A small inline confirm for delete, modelled on the chat-delete dialog
+  // but sized for a single message and anchored to its action row.
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const thinkingRef = useRef<HTMLDivElement>(null);
   /** Scroll target for the plan pill in the meta row. */
   const planRef = useRef<HTMLDivElement>(null);
@@ -550,47 +553,30 @@ function MessageBubbleImpl({
             )}
 
             {editing ? (
-              <div className="space-y-2">
-                <textarea
-                  value={draft}
-                  onChange={(e) => setDraft(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Escape") {
-                      e.preventDefault();
-                      setEditing(false);
-                    }
-                    if (e.key === "Enter" && !e.shiftKey) {
-                      e.preventDefault();
-                      if (draft.trim()) {
-                        onEdit?.(message.id, draft.trim());
-                        setEditing(false);
-                      }
-                    }
-                  }}
-                  autoFocus
-                  rows={Math.min(10, draft.split("\n").length + 1)}
-                  className="w-full resize-y rounded-lg border border-accent/40 bg-bg-primary px-3 py-2 text-[15px] leading-6 text-text-primary outline-none"
-                />
-                <div className="flex items-center justify-end gap-1.5">
-                  <button
-                    onClick={() => setEditing(false)}
-                    className="rounded-lg px-2 py-1 text-[11px] text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={() => {
-                      if (!draft.trim()) return;
+              <textarea
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") {
+                    e.preventDefault();
+                    setEditing(false);
+                  }
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    if (draft.trim()) {
                       onEdit?.(message.id, draft.trim());
                       setEditing(false);
-                    }}
-                    disabled={!draft.trim()}
-                    className="rounded-lg bg-accent px-2.5 py-1 text-[11px] font-medium text-white transition-colors hover:bg-accent-light disabled:opacity-40"
-                  >
-                    Send
-                  </button>
-                </div>
-              </div>
+                    }
+                  }
+                }}
+                autoFocus
+                rows={Math.max(1, draft.split("\n").length)}
+                /* Edit in place: same surface, same text metrics, no new
+                   border/background/checkbox, so the bubble keeps its first
+                   size and colour while the text becomes editable. Enter
+                   saves; Shift+Enter newline; Escape cancels. */
+                className="block w-full resize-none bg-transparent px-0 py-0 text-[15px] leading-6 text-text-primary outline-none"
+              />
             ) : (
               message.content && (
                 <div className="group/msg relative">
@@ -604,10 +590,10 @@ function MessageBubbleImpl({
                     </SearchHighlight>
                   </div>
 
-                  {(onEdit || onDelete) && (
+                  {(onEdit || onDelete) && !confirmDelete && (
                     <div className="grid grid-rows-[0fr] opacity-0 transition-all duration-150 focus-within:grid-rows-[1fr] focus-within:opacity-100 group-hover/msg:grid-rows-[1fr] group-hover/msg:opacity-100">
                       <div className="overflow-hidden">
-                        <div className="mt-1 flex items-center justify-between gap-2">
+                        <div className="mt-1 flex items-center gap-2">
                       {onEdit && (
                         <button
                           onClick={() => {
@@ -625,9 +611,23 @@ function MessageBubbleImpl({
                         </button>
                       )}
 
+                      {message.content && (
+                        <button
+                          onClick={copyMessage}
+                          title="Copy message text"
+                          aria-label="Copy message"
+                          className="flex h-6 items-center gap-1 rounded-lg px-1.5 text-[11px] font-medium text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
+                        >
+                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} aria-hidden="true">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-2M8 5a2 2 0 002 2h4a2 2 0 002-2M8 5a2 2 0 012-2h4a2 2 0 012 2m0 0h2a2 2 0 012 2v6" />
+                          </svg>
+                          Copy
+                        </button>
+                      )}
+
                       {onDelete && (
                         <button
-                          onClick={() => onDelete(message.id)}
+                          onClick={() => setConfirmDelete(true)}
                           title="Delete this message and its reply"
                           aria-label="Delete message"
                           className="flex h-6 items-center gap-1 rounded-lg px-1.5 text-[11px] font-medium text-text-muted transition-colors hover:bg-danger/12 hover:text-danger"
@@ -640,6 +640,36 @@ function MessageBubbleImpl({
                       )}
                         </div>
                       </div>
+                    </div>
+                  )}
+
+                  {confirmDelete && (
+                    <div
+                      role="alertdialog"
+                      aria-label="Delete message?"
+                      className="mt-1.5 flex animate-fade-in items-center gap-2 rounded-lg border border-danger/30 bg-danger/[0.07] px-2.5 py-1.5"
+                    >
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="flex-none text-danger" aria-hidden="true">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+                      </svg>
+                      <span className="min-w-0 flex-1 text-[12px] leading-4 text-text-secondary">
+                        Delete this message and its reply?
+                      </span>
+                      <button
+                        onClick={() => setConfirmDelete(false)}
+                        className="flex-none rounded-lg px-2 py-1 text-[11px] font-medium text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={() => {
+                          onDelete?.(message.id);
+                          setConfirmDelete(false);
+                        }}
+                        className="flex-none rounded-lg bg-danger/90 px-2 py-1 text-[11px] font-semibold text-white transition-colors hover:bg-danger"
+                      >
+                        Delete
+                      </button>
                     </div>
                   )}
                 </div>
