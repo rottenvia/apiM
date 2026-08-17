@@ -679,6 +679,11 @@ input:focus-visible {
   border-color: var(--color-border-light);
   color: var(--color-text-primary);
 }
+.conv-row.is-selected {
+  background: color-mix(in oklab, var(--color-accent) 10%, transparent);
+  border-color: color-mix(in oklab, var(--color-accent) 28%, transparent);
+  color: var(--color-text-primary);
+}
 
 /* A row in the workspace file list and the history list.
  *

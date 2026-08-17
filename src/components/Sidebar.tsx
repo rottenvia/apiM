@@ -67,6 +67,18 @@ export function Sidebar({
   const inputRef = useRef<HTMLInputElement>(null);
   const importRef = useRef<HTMLInputElement>(null);
 
+  /* Right-drag multi-select.
+   *
+   * While the right mouse button is held down, moving the pointer over a
+   * row toggles it into the selection — so you can sweep a range without
+   * clicking each one. A right-click with no movement still starts
+   * selecting on the single row. A plain left-click while already
+   * selecting toggles that row too, so both ways work. */
+  const rmbDown = useRef(false);
+  const dragStarted = useRef(false);
+  const dragAnchor = useRef<string | null>(null);
+  const [dragTick, setDragTick] = useState(0); // force hover re-check
+
   const handleImport = async (file: File) => {
     setImportState("Importing…");
     try {
@@ -171,6 +183,21 @@ export function Sidebar({
   useEffect(() => {
     if (editingId) inputRef.current?.select();
   }, [editingId]);
+
+  // End right-drag selection when the button is released anywhere.
+  useEffect(() => {
+    const up = () => {
+      rmbDown.current = false;
+      dragStarted.current = false;
+      dragAnchor.current = null;
+    };
+    window.addEventListener("mouseup", up);
+    window.addEventListener("contextmenu", up);
+    return () => {
+      window.removeEventListener("mouseup", up);
+      window.removeEventListener("contextmenu", up);
+    };
+  }, []);
 
   const startRename = (conv: Conversation) => {
     setEditingId(conv.id);
@@ -359,25 +386,55 @@ export function Sidebar({
             return (
               <div
                 key={conv.id}
-                onContextMenu={(e) => {
-                  // Right-click enters multi-select (or toggles once in it)
-                  // rather than opening the browser menu. The same button
-                  // leaves multi-select, so a second right-click on a
-                  // selected row exits.
+                // Right mouse DOWN starts a drag-sweep. The browser context
+                // menu is suppressed (onContextMenu preventDefault below);
+                // a sweep toggles hovered rows, and a stationary right-click
+                // starts multi-select on this row.
+                onMouseDown={(e) => {
+                  if (e.button !== 2 || editingId === conv.id) return;
                   e.preventDefault();
-                  if (editingId === conv.id) return;
-                  if (selecting) {
-                    if (selected.has(conv.id) && selectedHere.length === 1) {
-                      exitSelecting();
-                    } else {
-                      toggleOne(conv.id);
-                    }
-                  } else {
+                  rmbDown.current = true;
+                  dragStarted.current = false;
+                  dragAnchor.current = conv.id;
+                  if (!selecting) {
                     setSelecting(true);
                     setSelected(new Set([conv.id]));
                   }
                 }}
-                className={`conv-row group ${isCurrent ? "is-current" : ""}`}
+                onMouseEnter={() => {
+                  // While RMB is held and the pointer moved onto a new row,
+                  // toggle it in — the core of sweep-to-select.
+                  if (!rmbDown.current || dragAnchor.current === conv.id)
+                    return;
+                  if (!selecting) setSelecting(true);
+                  dragStarted.current = true;
+                  dragAnchor.current = conv.id;
+                  toggleOne(conv.id);
+                }}
+                onContextMenu={(e) => {
+                  // Always suppress the browser menu on a row. A click with
+                  // no drag toggles selection (or exits when it was the
+                  // only selected row); after a sweep we leave the selection
+                  // exactly as the drag built it.
+                  e.preventDefault();
+                  if (editingId === conv.id) return;
+                  if (dragStarted.current) return;
+                  if (
+                    selecting &&
+                    selected.has(conv.id) &&
+                    selectedHere.length === 1
+                  ) {
+                    exitSelecting();
+                  } else if (!selecting) {
+                    setSelecting(true);
+                    setSelected(new Set([conv.id]));
+                  } else {
+                    toggleOne(conv.id);
+                  }
+                }}
+                className={`conv-row group ${isCurrent ? "is-current" : ""} ${
+                  selecting && selected.has(conv.id) ? "is-selected" : ""
+                }`}
               >
                 {editingId === conv.id ? (
                   <div className="min-w-0 flex-1" data-menu-root>

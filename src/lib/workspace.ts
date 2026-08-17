@@ -72,6 +72,58 @@ export const MAX_FILES_PER_WORKSPACE = 100_000;
  */
 export const MAX_READ_CHARS = 200_000;
 
+/**
+ * Detect whether a buffer is binary.
+ *
+ * A NUL byte in the first few KB is the near-universal signal of non-text.
+ * We only scan the head rather than the whole file so a multi-megabyte dump
+ * does not have to be walked twice.
+ */
+function looksBinary(buf: Buffer): boolean {
+  const head = buf.subarray(0, Math.min(buf.length, 8192));
+  return head.includes(0);
+}
+
+/**
+ * Render binary data as a hex + ASCII dump (the classic `xxd` layout).
+ *
+ * This is what lets the agent read a `.bin`, `.exe`, compiled object, or
+ * any other non-UTF-8 file "fully": every byte is represented, rather than
+ * the UTF-8 decoder replacing it with U+FFFD and producing noise. The
+ * output is truncated at MAX_READ_CHARS like text reads, and the truncation
+ * note tells the model to request another range if it needs more.
+ */
+export function hexDump(buf: Buffer, maxChars = MAX_READ_CHARS): {
+  content: string;
+  truncated: boolean;
+} {
+  const bytesPerLine = 16;
+  const out: string[] = [];
+  out.push("Offset(h)  00 01 02 03 04 05 06 07  08 09 0A 0B 0C 0D 0E 0F   ASCII");
+  out.push("--------------------------------------------------------------------");
+  let truncated = false;
+  for (let off = 0; off < buf.length; off += bytesPerLine) {
+    const slice = buf.subarray(off, Math.min(off + bytesPerLine, buf.length));
+    const hex = Array.from(slice)
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join(" ");
+    const hexPadded = hex.padEnd(47, " ").replace(/^(\S{23}) /, "$1  ");
+    const ascii = Array.from(slice)
+      .map((b) => (b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : "."))
+      .join("");
+    const line = `${off.toString(16).padStart(8, "0")}  ${hexPadded}  ${ascii}`;
+    if (out.join("\n").length + line.length + 1 > maxChars) {
+      truncated = true;
+      out.push(
+        `... truncated at offset 0x${off.toString(16)} (${off} of ${buf.length} bytes); use read_file with start_line/end_line or read a smaller file for the rest`
+      );
+      break;
+    }
+    out.push(line);
+  }
+  return { content: out.join("\n"), truncated };
+}
+
 export interface WorkspaceFile {
   path: string;
   size: number;
@@ -768,7 +820,22 @@ export async function readFile(
     }
   }
 
-  const raw = await fs.readFile(target, "utf8");
+  // Read as bytes first so binary files are not corrupted by a UTF-8
+  // decode. A NUL byte means non-text; render it as a hex+ASCII dump so
+  // the agent can inspect .bin/.exe/.obj and any other opaque file the
+  // same way it reads source.
+  const buf = await fs.readFile(target);
+  if (looksBinary(buf)) {
+    const { content, truncated } = hexDump(buf);
+    return {
+      path: relative,
+      content: `Binary file ${relative} (${stat.size} bytes). Hex dump:\n\n${content}`,
+      truncated,
+      size: stat.size,
+    };
+  }
+
+  const raw = buf.toString("utf8");
   const truncated = raw.length > MAX_READ_CHARS;
   return {
     path: relative,
