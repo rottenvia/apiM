@@ -135,6 +135,16 @@ export const SNIFF_BYTES = 8_000;
  * Naming the common ones gives a better message and, where something could
  * be supported later, says so.
  */
+// Formats that should NOT be turned into a hex dump.
+//
+//  - Windows PE files are saved as raw bytes and opened with inspect_binary
+//    (the composer recognises them before this point), so decoding them here
+//    would only waste tokens.
+//  - PDF / old Office have dedicated converters elsewhere.
+//  - Audio/video/fonts are not useful as byte dumps.
+// Anything else that is binary — .bin, .dat, .o, .pyc, generic blobs, or a
+// file with no extension that sniffs binary — falls through readTextFile and
+// is attached as a hex+ASCII dump.
 const BINARY_FORMATS: Record<string, string> = {
   pdf: "PDFs need a parser this app doesn't have yet — copy the text out, or say the word and I'll add one.",
   doc: "The old .doc format isn't readable. Save as .docx and it will work.",
@@ -147,17 +157,52 @@ const BINARY_FORMATS: Record<string, string> = {
   cpl: "Windows Control Panel libraries must be saved as raw bytes and opened with inspect_binary, not decoded as text.",
   drv: "Windows driver libraries must be saved as raw bytes and opened with inspect_binary, not decoded as text.",
   efi: "EFI executables must be saved as raw bytes and opened with inspect_binary, not decoded as text.",
-  so: "a library",
-  dylib: "a library",
-  bin: "a binary",
-  dat: "a binary data file",
-  db: "a database file",
-  sqlite: "a database file",
   mp3: "audio", wav: "audio", flac: "audio", ogg: "audio",
   mp4: "video", avi: "video", mov: "video", mkv: "video", webm: "video",
   ttf: "a font", otf: "a font", woff: "a font", woff2: "a font",
-  pyc: "compiled Python", class: "compiled Java", o: "an object file",
 };
+
+/**
+ * Render binary data as a hex + ASCII dump (the classic `xxd` layout).
+ *
+ * The composer runs in the browser, so this is a client-side twin of the
+ * workspace hexDump. It lets the user attach a .bin/.dat/.o (or any file
+ * that sniffs as binary and isn't a saved PE) and have every byte shown to
+ * the model instead of being refused with "no text to read". Output is
+ * capped at `maxChars` (default MAX_CHARS) like any other attachment.
+ */
+export function hexDump(
+  bytes: Uint8Array,
+  maxChars = MAX_CHARS
+): { content: string; truncated: boolean } {
+  const bytesPerLine = 16;
+  const lines: string[] = [];
+  lines.push("Offset(h)  00 01 02 03 04 05 06 07  08 09 0A 0B 0C 0D 0E 0F   ASCII");
+  lines.push("--------------------------------------------------------------------");
+  let truncated = false;
+  let running = lines.join("\n").length + 1;
+  for (let off = 0; off < bytes.length; off += bytesPerLine) {
+    const slice = bytes.subarray(off, Math.min(off + bytesPerLine, bytes.length));
+    const hex = Array.from(slice)
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join(" ");
+    const hexPadded = hex.padEnd(47, " ").replace(/^(\S{23}) /, "$1  ");
+    const ascii = Array.from(slice)
+      .map((b) => (b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : "."))
+      .join("");
+    const line = `${off.toString(16).padStart(8, "0")}  ${hexPadded}  ${ascii}`;
+    if (running + line.length + 1 > maxChars) {
+      truncated = true;
+      lines.push(
+        `... truncated at offset 0x${off.toString(16)} (${off} of ${bytes.length} bytes)`
+      );
+      break;
+    }
+    lines.push(line);
+    running += line.length + 1;
+  }
+  return { content: lines.join("\n"), truncated };
+}
 
 export function binaryFormatNote(name: string): string | null {
   const ext = extensionOf(name);
@@ -447,18 +492,16 @@ export async function readTextFile(
     }
   }
 
-  // Known binary formats are refused up front, so a .png or a .pdf gets a
-  // useful message rather than being sniffed and reported as "binary".
+  // Known binary formats that have a better path elsewhere are refused up
+  // front (PE -> inspect_binary; PDF/old Office -> a converter; media/fonts
+  // -> not useful as text). Anything else that is binary — .bin/.dat/.o and
+  // files with no extension that merely sniff binary — is attached as a
+  // hex+ASCII dump so the model can still inspect every byte instead of
+  // being told "there's nothing to read".
   const refusal = binaryFormatNote(file.name);
   if (refusal) return { error: refusal };
 
   // Decide from the first few KB rather than the whole file.
-  //
-  // This used to call file.text(), which decodes everything into a string
-  // before anything is inspected — so a 5MB log became a 5MB string, had
-  // 8000 characters checked, then had 200k kept and the rest discarded. On
-  // the main thread, that decode is the freeze. Worse, it happened even for
-  // files that were then rejected as binary.
   onProgress?.("reading");
 
   let head: Uint8Array;
@@ -471,8 +514,21 @@ export async function readTextFile(
   }
 
   if (bytesLookBinary(head)) {
+    // Read up to a few MB for the dump; the dump itself is capped at
+    // MAX_CHARS by hexDump, so this only bounds the byte read.
+    onProgress?.("reading");
+    const wanted = Math.min(file.size, MAX_CHARS * 4);
+    const buf = new Uint8Array(await file.slice(0, wanted).arrayBuffer());
+    const { content, truncated } = hexDump(buf, MAX_CHARS);
     return {
-      error: `${file.name} looks like a binary file, so there's nothing to read`,
+      attachment: {
+        id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+        name: file.name,
+        size: file.size,
+        content: `Binary file ${file.name} (${file.size} bytes). Hex dump:\n\n${content}`,
+        truncated: truncated || file.size > wanted,
+        kind: "text",
+      },
     };
   }
 
