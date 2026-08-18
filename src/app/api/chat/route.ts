@@ -63,7 +63,7 @@ import {
 } from "@/lib/transcript";
 import type { TranscriptMessage } from "@/lib/transcript";
 import { pruneTranscript } from "@/lib/prune";
-import { compactTranscript, compactForResume } from "@/lib/compact";
+import { compactTranscript, compactForResume, trimReasoning } from "@/lib/compact";
 import { readLessons, applyLessons, formatLessonsForPrompt } from "@/lib/lessons";
 import { runRefine } from "@/lib/refine";
 import { beginRun, endRun } from "@/lib/runs";
@@ -1408,9 +1408,16 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             });
           }
 
+          // Cap old reasoning before sending. The last assistant turn keeps
+          // its full chain-of-thought; every earlier turn is reduced to a
+          // short tail. This is the largest single token saving in the loop
+          // and is what stops a long thinking run re-billing megabytes of
+          // stale reasoning on every round.
+          const trimmed = trimReasoning(compacted.messages);
+
           const dsRequestBody: Record<string, unknown> = {
             model,
-            messages: serializeForApi(compacted.messages),
+            messages: serializeForApi(trimmed),
             stream: true,
             stream_options: { include_usage: true },
             /*
@@ -2026,6 +2033,24 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 continue;
               }
 
+              // A real block (not the decline-the-task case): the agent
+              // tried work and is now waiting on the user. Stop here rather
+              // than spinning through more rounds re-emitting the same
+              // blocked step and paying for another large reasoning turn.
+              // Clear the on-disk plan so it cannot replay on the next
+              // message; the blocked step and its blocker are in the reply.
+              if (stuck && !attemptedNothing) {
+                // The agent tried work and is now blocked on the user.
+                // Stop immediately: another round would just re-emit the
+                // same blocked step and pay for another large reasoning
+                // turn. Clear the saved plan so it cannot replay on the
+                // next message; the blocker is already in the reply.
+                if (workspaceEnabled) {
+                  await writePlan(workspace, null).catch(() => {});
+                }
+                break;
+              }
+
               if (!progress.complete && !stuck && progress.next) {
                 nudgedIncomplete = true;
                 transcript.push({
@@ -2271,14 +2296,25 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                  * rewrite can reorganise what is left but cannot erase what
                  * happened.
                  */
+                // Cap replanning: rewriting the plan over and over burns
+                // rounds and reasoning without advancing work. After a few
+                // rewrites, tell the model to work the current plan instead.
+                if (replanCount >= 3) {
+                  result = {
+                    ok: false,
+                    content:
+                      `You have rewritten the plan ${replanCount} times. ` +
+                      `Stop planning and execute the current plan with ` +
+                      `update_plan. If a step is genuinely blocked, mark ` +
+                      `it blocked and say what is in the way.`,
+                    summary: "Too many plan rewrites",
+                  };
+                  break;
+                }
                 plan = replacePlan(
                   plan,
                   createPlan(
                     String(pArgs.goal ?? ""),
-                    // The schema asks for strings, but some models send
-                    // {title, description}. createPlan normalises that shape;
-                    // String(object) is the literal "[object Object]" shown in
-                    // every plan row in Screenshot_168.
                     Array.isArray(pArgs.steps) ? pArgs.steps : []
                   )
                 );

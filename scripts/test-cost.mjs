@@ -175,7 +175,7 @@ check(
 );
 check(
   "the threshold is above an ordinary multi-file task",
-  compact.COMPACT_THRESHOLD_CHARS >= 600_000,
+  compact.COMPACT_THRESHOLD_CHARS >= 200_000,
   `${compact.COMPACT_THRESHOLD_CHARS.toLocaleString()} chars`
 );
 check(

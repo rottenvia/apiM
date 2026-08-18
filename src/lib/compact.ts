@@ -41,7 +41,7 @@ import type { TranscriptMessage } from "@/lib/transcript";
  * mid-thought rather than restarting. Older rounds have already turned into
  * actions that are visible in the summary.
  */
-export const KEEP_RECENT_ROUNDS = 4;
+export const KEEP_RECENT_ROUNDS = 2;
 
 /**
  * When finished rounds are folded into a summary.
@@ -66,7 +66,7 @@ export const KEEP_RECENT_ROUNDS = 4;
  * `compactForResume` ignores this and always compacts, because a resume
  * rewrites the prefix exactly once with no cache to thrash.
  */
-export const COMPACT_THRESHOLD_CHARS = 900_000;
+export const COMPACT_THRESHOLD_CHARS = 360_000;
 
 /**
  * How far the compaction boundary jumps at a time.
@@ -81,7 +81,7 @@ export const COMPACT_THRESHOLD_CHARS = 900_000;
  * saved. Quantising to a step means the boundary stays put for several rounds
  * and only jumps occasionally, so one miss buys many cheap rounds.
  */
-export const COMPACT_STEP = 8;
+export const COMPACT_STEP = 4;
 
 export interface CompactStats {
   /** Agent rounds folded into a summary. */
@@ -254,6 +254,56 @@ export function compactTranscript(
       reasoningChars,
     },
   };
+}
+
+/**
+ * Cap how much old reasoning is replayed.
+ *
+ * This is the biggest token lever in the agent loop. Every round of
+ * `reasoning_content` is otherwise re-sent verbatim on every later round,
+ * and on long thinking runs a single round can be tens of thousands of
+ * tokens. The model does not need its own chain-of-thought from ten rounds
+ * ago to keep working — once a round is over, its outcome is recorded in
+ * the tool results and (if old enough) the compaction summary.
+ *
+ * The most recent assistant turn keeps its full reasoning: it is the one
+ * the model is actively continuing. Every earlier assistant turn has its
+ * reasoning reduced to a short tail (enough to preserve the last thought,
+ * not the whole deliberation). This runs after compaction, so rounds that
+ * were already folded have no reasoning left to trim.
+ */
+export const MAX_OLD_REASONING_CHARS = 1_200;
+
+export function trimReasoning(
+  messages: TranscriptMessage[],
+  maxChars = MAX_OLD_REASONING_CHARS
+): TranscriptMessage[] {
+  // Find the last assistant turn — it keeps its reasoning verbatim.
+  let lastAssistant = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "assistant") {
+      lastAssistant = i;
+      break;
+    }
+  }
+  if (lastAssistant === -1) return messages;
+
+  return messages.map((m, i) => {
+    if (
+      i === lastAssistant ||
+      m.role !== "assistant" ||
+      !m.reasoning_content ||
+      m.reasoning_content.length <= maxChars
+    ) {
+      return m;
+    }
+    const trimmed = m.reasoning_content.slice(-maxChars);
+    return {
+      ...m,
+      reasoning_content:
+        `[...earlier reasoning trimmed to save context...]\n${trimmed}`,
+    };
+  });
 }
 
 /**
