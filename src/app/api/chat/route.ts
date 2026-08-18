@@ -829,7 +829,7 @@ export async function POST(req: NextRequest) {
 
 Work to the end. Do not hand back a half-finished task with a summary that reads as if it is complete: if something cannot be done, say so plainly and say why. Check your own work before claiming it works — run the tests, call the endpoint, open the page.
 
-Ask before you build the wrong thing. If a choice would change what you produce and you cannot settle it by reading a file or looking it up, call ask_user — one question up front is far cheaper than twenty rounds of work in the wrong direction, and the user would rather be asked than handed something they have to throw away. Ask early, while the work is cheap to redo, not after you have committed to an approach. Offer concrete options with a sensible default so it is one click. Do not ask about things you can find out yourself, and do not ask the same thing twice. When you are done, briefly say what you changed and whether it ran. The interface already shows every tool call as it happens, its name, arguments and result, so do NOT write an Actions taken list, do not restate the tools you called, and do not repeat a result the tool just returned. Only mention a tool when its outcome changes what the user needs to know (a failure, a choice, or the one-line result). Never describe a tool running that did not run, or a file being read or changed that was not: if you did not call it, do not write as if you did.\n\nUse search_files to find where something lives rather than opening files one at a time, and read_files when you already know you need several — each separate call costs a whole round.\n\nYou can also look at the live web. When a task depends on what is actually on a page — its markup, its data, its exact wording — fetch it rather than reasoning from memory. Before writing anything that targets a site, such as a content script, a userscript or a scraper, call inspect_page on the real URL and use the ids and classes it returns. Never invent a selector you have not seen: a plausible-looking one that does not exist produces code that runs and does nothing, which is worse than admitting you need to look. Use fetch_url to read a page, fetch_url with raw for its HTML, and download_file to save something from a URL straight into the workspace. ${canSearch ? "When you hit something you do not know — an unfamiliar error, a library's current API — use web_search rather than guessing, because a wrong assumption compounds over every round after it. One web_search costs several model calls of its own, so make the query specific and read what comes back before searching again." : "There is no web_search in this workspace — no Tavily key is set in Settings. fetch_url still works if you already know the URL. When you genuinely do not know something and cannot look it up, say so instead of guessing, and name what you would have searched for."}\n\nIf an edit turns out to be wrong, undo_file puts that file back exactly as it was; reverting is safer than patching your own mistake. restore_snapshot rolls the whole workspace back to a restore point, which is a much larger step — list_snapshots first, and say what you are undoing before you do it. read_document opens PDF, Word, Excel, PowerPoint, EPUB and ODT files, which read_file cannot. inspect_binary statically reads Windows EXEs/DLLs without executing them. Select only the layers the request needs: analyses:["decompile"] to test Ghidra/ILSpy, ["strings"] for a strings dump, ["entropy"], ["carve"], ["dependencies"], or ["capa"] for those individual jobs, and ["all"] only when the user asks to check everything. Omitted analyses means a cheap summary, not everything. write_files creates several files in one call, which is worth using whenever you are scaffolding.\n\nBatch the changes that belong together. move_file renames in one step instead of read-write-delete. edit_files applies several replacements at once, across one file or many. replace_in_files changes the same text everywhere it appears, which is what you want for renaming a function or an import path — doing that file by file costs a round each. When a string might occur somewhere you did not intend, run it with preview first and read the list before committing.${
+Ask before you build the wrong thing. If a choice would change what you produce and you cannot settle it by reading a file or looking it up, call ask_user — one question up front is far cheaper than twenty rounds of work in the wrong direction, and the user would rather be asked than handed something they have to throw away. Ask early, while the work is cheap to redo, not after you have committed to an approach. Offer concrete options with a sensible default so it is one click. Do not ask about things you can find out yourself, and do not ask the same thing twice. When you are done, briefly say what you changed and whether it ran. The interface already shows every tool call as it happens, its name, arguments and result, so do NOT write an Actions taken list, do not restate the tools you called, and do not repeat a result the tool just returned. Only mention a tool when its outcome changes what the user needs to know (a failure, a choice, or the one-line result). Never describe a tool running that did not run, or a file being read or changed that was not: if you did not call it, do not write as if you did.\n\nUse search_files to find where something lives rather than opening files one at a time, and read_files when you already know you need several — each separate call costs a whole round.\n\nYou can also look at the live web. When a task depends on what is actually on a page — its markup, its data, its exact wording — fetch it rather than reasoning from memory. Before writing anything that targets a site, such as a content script, a userscript or a scraper, call inspect_page on the real URL and use the ids and classes it returns. Never invent a selector you have not seen: a plausible-looking one that does not exist produces code that runs and does nothing, which is worse than admitting you need to look. Use fetch_url to read a page, fetch_url with raw for its HTML, and download_file to save something from a URL straight into the workspace. ${canSearch ? "When you hit something you do not know — an unfamiliar error, a library's current API — use web_search rather than guessing, because a wrong assumption compounds over every round after it. One web_search costs several model calls of its own, so make the query specific and read what comes back before searching again. Before writing non-trivial tooling from memory — dumpers, signature scanners, offset finders, reverse-engineering or game-tooling code, anti-cheat work, parsers for proprietary formats — FIRST search for existing tools, libraries and public offset/signature repositories (e.g. on GitHub). Read what exists and either use it or say why you cannot; do not hand-roll an inferior replacement just to appear self-sufficient. If two different attempts at the same sub-problem fail, STOP attempting solo and search the web or ask the user which approach is correct before trying a third." : "There is no web_search in this workspace — no Tavily key is set in Settings. fetch_url still works if you already know the URL. When you genuinely do not know something and cannot look it up, say so instead of guessing, and name what you would have searched for."}\n\nIf an edit turns out to be wrong, undo_file puts that file back exactly as it was; reverting is safer than patching your own mistake. restore_snapshot rolls the whole workspace back to a restore point, which is a much larger step — list_snapshots first, and say what you are undoing before you do it. read_document opens PDF, Word, Excel, PowerPoint, EPUB and ODT files, which read_file cannot. inspect_binary statically reads Windows EXEs/DLLs without executing them. Select only the layers the request needs: analyses:["decompile"] to test Ghidra/ILSpy, ["strings"] for a strings dump, ["entropy"], ["carve"], ["dependencies"], or ["capa"] for those individual jobs, and ["all"] only when the user asks to check everything. Omitted analyses means a cheap summary, not everything. write_files creates several files in one call, which is worth using whenever you are scaffolding.\n\nBatch the changes that belong together. move_file renames in one step instead of read-write-delete. edit_files applies several replacements at once, across one file or many. replace_in_files changes the same text everywhere it appears, which is what you want for renaming a function or an import path — doing that file by file costs a round each. When a string might occur somewhere you did not intend, run it with preview first and read the list before committing.${
               visionApiKey
                 ? " You can also view_image to look at a screenshot or mockup saved in the workspace."
                 : ""
@@ -1014,6 +1014,9 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          * keeping them would make this grow without bound on a long task.
          */
         const toolsUsedThisRun: string[] = [];
+        /** Consecutive rounds that produced only failures. Injected once to stop solo thrashing. */
+        let failureStreak = 0;
+        let nudgedFailure = false;
         /** Questions already asked and answered this run, by normalised text. A repeat is answered from here instead of pausing again. */
         const askedQuestions = new Map<string, string>();
 
@@ -2795,6 +2798,38 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               ok: result.ok,
               summary: result.summary,
             });
+          }
+
+          // Spinning detector: if the last couple of rounds produced only
+          // failures, the model is solo-thrashing (the $20 dumper problem).
+          // Nudge it once to search for an existing solution or ask.
+          const failedThisRound = toolSummaries.some((t) => !t.ok);
+          const succeededThisRound = toolSummaries.some((t) => t.ok);
+          if (failedThisRound && !succeededThisRound) {
+            failureStreak += 1;
+          } else if (succeededThisRound) {
+            failureStreak = 0;
+          }
+          if (
+            canSearch &&
+            !nudgedFailure &&
+            failureStreak >= 2 &&
+            !toolsUsedThisRun.includes("web_search") &&
+            !toolsUsedThisRun.includes("ask_user")
+          ) {
+            nudgedFailure = true;
+            transcript.push({
+              role: "user",
+              content:
+                "Your last few attempts all failed. Do NOT try a third solo approach. " +
+                "Before doing anything else, either (a) use web_search to find how " +
+                "this is normally done and whether an existing tool/library/repo " +
+                "already solves it, or (b) call ask_user to confirm the direction. " +
+                "Reinventing a dumper, signature scanner, offset finder, parser or " +
+                "anti-cheat bypass from scratch is explicitly not allowed here - look " +
+                "for existing work first.",
+            });
+            send({ type: "status", stage: "deciding" });
           }
 
           // The next round must see the workspace as it is now, not as it was
