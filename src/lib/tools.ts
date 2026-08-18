@@ -350,7 +350,7 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
     function: {
       name: "make_plan",
       description:
-        "Write down the goal and the steps before starting anything that will take more than two or three actions. This is not paperwork: on a long task your own reasoning from twenty rounds ago is gone, and without a plan you will forget requirements from the first message and stop early because the work so far looks finished. Include verification steps — 'run the tests', 'open the page and check it renders' — not just the building. Replaces any existing plan.",
+        "Write down the goal and the steps before starting anything that will take more than two or three actions. This is not paperwork: on a long task your own reasoning from twenty rounds ago is gone, and without a plan you will forget requirements from the first message and stop early because the work so far looks finished. Include verification steps — 'run the tests', 'open the page and check it renders' — not just the building. Steps must be small and sequential: one action per step so you can mark each one as you do it, not big batches. Replaces any existing plan.",
       parameters: {
         type: "object",
         properties: {
@@ -374,7 +374,7 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
     function: {
       name: "update_plan",
       description:
-        "Mark steps as doing, done or blocked as you go. A step can only be marked done if you say how you checked it — the test you ran, the output you saw, the page you opened. If you have not checked it, it is not done.",
+        "Update the plan ONE STEP AT A TIME as you actually work, not all at once at the end. When you START a step, mark it doing. When you have VERIFIED it finished, mark it done in the same round, with how you checked (test output, file written, page opened). Do not plan the whole job in your head and mark several steps done together — the plan is meant to show live progress, and batching defeats it. A step can only be marked done if you say how you checked it; if you have not checked it, it is not done. If something blocks a step, mark it blocked and say what is in the way.",
       parameters: {
         type: "object",
         properties: {

@@ -102,6 +102,11 @@ const SCENARIOS = {
     tool("t7", "update_plan", {
       updates: [
         { id: 2, state: "done", verified: "wrote greet.test.js with an assertion" },
+        { id: 3, state: "doing" },
+      ],
+    }),
+    tool("t8", "update_plan", {
+      updates: [
         { id: 3, state: "done", verified: "ran node greet.test.js and it printed 1 passed" },
       ],
     }),
@@ -136,6 +141,11 @@ const SCENARIOS = {
     tool("t7", "update_plan", {
       updates: [
         { id: 2, state: "done", verified: "wrote the test file out in full" },
+        { id: 3, state: "doing" },
+      ],
+    }),
+    tool("t8", "update_plan", {
+      updates: [
         { id: 3, state: "done", verified: "ran node greet.test.js and saw it print ok" },
       ],
     }),
@@ -166,6 +176,11 @@ const SCENARIOS = {
     tool("t7", "update_plan", {
       updates: [
         { id: 2, state: "done", verified: "wrote the test file out in full" },
+        { id: 3, state: "doing" },
+      ],
+    }),
+    tool("t8", "update_plan", {
+      updates: [
         { id: 3, state: "done", verified: "ran node greet.test.js and saw it print ok" },
       ],
     }),

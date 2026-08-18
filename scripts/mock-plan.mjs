@@ -19,7 +19,8 @@ createServer((req,res)=>{
       send({choices:[{delta:{content:"All done! I have completed the task."}}]});
       send({choices:[{delta:{},finish_reason:"stop"}]});
     }
-    else if (n===4) call("c4","update_plan",{updates:[{id:2,state:"done",verified:"wrote the first module and its helper"},{id:3,state:"done",verified:"wrote the remaining modules out in full"}]});
+    else if (n===4) call("c4","update_plan",{updates:[{id:2,state:"done",verified:"wrote the second module and its helper"},{id:3,state:"doing"}]});
+    else if (n===5) call("c5","update_plan",{updates:[{id:3,state:"done",verified:"wrote the remaining modules out in full"}]});
     else { send({choices:[{delta:{content:"Now genuinely finished."}}]}); send({choices:[{delta:{},finish_reason:"stop"}]}); }
     send({choices:[{delta:{}}],usage:{prompt_tokens:100,completion_tokens:20,total_tokens:120,prompt_cache_hit_tokens:0,prompt_cache_miss_tokens:100}});
     res.write("data: [DONE]\n\n"); res.end();

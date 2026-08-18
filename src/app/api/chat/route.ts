@@ -825,7 +825,7 @@ export async function POST(req: NextRequest) {
         const hasBrowser = workspaceEnabled ? await browserAvailable() : false;
 
         const workspaceInstruction = workspaceEnabled
-          ? `\n\nYou have a workspace on the user's machine and tools to work in it. Prefer creating real files over printing code in chat: the user wants working files, not snippets to copy. List or read before editing so your replacements match exactly.\n\nYou can also run code with run_command. After writing something runnable, run it and check the output rather than assuming it works. If it fails, read the error, fix the file, and run it again. Each command needs the user's approval, so keep them few and purposeful, and say briefly why in the reason field. There is no shell. run_command waits for the program to finish, so use it only for things that exit — scripts, tests, installs. You can install packages: pip install and npm install both work and go into this workspace, not the user's system, so install what you need rather than rewriting code to avoid a dependency. For anything that keeps running, such as a dev server or a watcher, use start_process instead: it returns straight away, and you can read its output with read_process and stop it with stop_process. Always stop what you started once you are done with it. Before anything that takes more than two or three actions, call make_plan: write down what finished looks like and the steps to get there, including how you will CHECK each one. On a long task your own reasoning from twenty rounds ago is gone, so without a written plan you will forget requirements from the first message and stop early because the work so far looks finished. Keep it current with update_plan — a step is only done when you can say how you verified it.
+          ? `\n\nYou have a workspace on the user's machine and tools to work in it. Prefer creating real files over printing code in chat: the user wants working files, not snippets to copy. List or read before editing so your replacements match exactly.\n\nYou can also run code with run_command. After writing something runnable, run it and check the output rather than assuming it works. If it fails, read the error, fix the file, and run it again. Each command needs the user's approval, so keep them few and purposeful, and say briefly why in the reason field. There is no shell. run_command waits for the program to finish, so use it only for things that exit — scripts, tests, installs. You can install packages: pip install and npm install both work and go into this workspace, not the user's system, so install what you need rather than rewriting code to avoid a dependency. For anything that keeps running, such as a dev server or a watcher, use start_process instead: it returns straight away, and you can read its output with read_process and stop it with stop_process. Always stop what you started once you are done with it. Before anything that takes more than two or three actions, call make_plan: write down what finished looks like and the steps to get there, including how you will CHECK each one. On a long task your own reasoning from twenty rounds ago is gone, so without a written plan you will forget requirements from the first message and stop early because the work so far looks finished. Keep it current with update_plan, updating ONE STEP AT A TIME as you work: mark the step you start as 'doing', and when you have actually verified it finished mark that same step 'done' in the next update. Never batch several steps to done in one call — the plan must show live progress, not a summary at the end. A step is only done when you can say how you verified it.
 
 Work to the end. Do not hand back a half-finished task with a summary that reads as if it is complete: if something cannot be done, say so plainly and say why. Check your own work before claiming it works — run the tests, call the endpoint, open the page.
 
@@ -2400,6 +2400,30 @@ Ask before you build the wrong thing. If a choice would change what you produce 
 
                   if (claimIssue) {
                     throw new PlanError(claimIssue);
+                  }
+
+                  // The plan is a live progress indicator, not a final
+                  // report. Reject calls that try to move more than one
+                  // step at a time (e.g. marking 1-6 done in one shot after
+                  // doing all the work in reasoning): one update per step,
+                  // so the UI advances as work actually happens.
+                  const doneCount = raw.filter(
+                    (u) => (u as Record<string, unknown>).state === "done"
+                  ).length;
+                  const doingCount = raw.filter(
+                    (u) => (u as Record<string, unknown>).state === "doing"
+                  ).length;
+                  // Allow the natural hand-off: previous step done + next
+                  // step doing in one call. Reject anything that tries to
+                  // close out several steps at once, which is what makes the
+                  // plan jump instead of progressing step by step.
+                  if (doneCount > 1 || (doneCount === 1 && doingCount > 1)) {
+                    throw new PlanError(
+                      "Update ONE step at a time. When you finish a step, " +
+                        "mark it done and start the next one as 'doing' - that " +
+                        "is the only batch allowed. Do not mark several " +
+                        "steps done in one call."
+                    );
                   }
 
                   plan = updatePlan(
