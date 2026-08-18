@@ -85,6 +85,18 @@ export interface Attachment {
  */
 export const MAX_CHARS = 800_000;
 /**
+ * Binaries larger than this are saved to the workspace instead of inlined.
+ *
+ * A hex dump is ~3.2 characters per byte (two hex digits, a space, and a
+ * share of the offset/ASCII columns), so MAX_CHARS of dump represents
+ * roughly a quarter-megabyte of binary. Files at or below the limit attach
+ * as a complete dump; larger files would truncate at the cap and lose the
+ * end, so they are uploaded whole and the model reads ranges with
+ * read_file (which returns the same dump format for any byte range).
+ */
+export const MAX_INLINE_BINARY_BYTES = Math.floor(MAX_CHARS / 3.2);
+
+/**
  * Reject anything over this outright rather than reading it into memory.
  *
  * Only the first MAX_CHARS worth is ever kept, so this is not a limit on
@@ -202,6 +214,24 @@ export function hexDump(
     running += line.length + 1;
   }
   return { content: lines.join("\n"), truncated };
+}
+
+/**
+ * Extensions that are binary but have no special better path in the
+ * composer (not PE, not media, not a document/archive). Files with these
+ * extensions are the ones that should be attached as a hex dump when small,
+ * or saved to the workspace when large.
+ */
+const GENERIC_BINARY_EXTENSIONS = new Set([
+  "bin", "dat", "db", "sqlite", "o", "obj", "a", "lib", "pyc",
+  "class", "so", "dylib", "wasm", "bin", "rom", "fw", "img",
+  "iso", "vmdk", "qcow2", "pcap", "pcapng", "dmp", "mdmp",
+]);
+
+/** True when the filename looks like a generic binary (not text/media/PE). */
+export function isGenericBinaryFilename(name: string): boolean {
+  const ext = extensionOf(name);
+  return GENERIC_BINARY_EXTENSIONS.has(ext);
 }
 
 export function binaryFormatNote(name: string): string | null {

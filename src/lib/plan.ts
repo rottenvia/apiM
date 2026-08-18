@@ -709,3 +709,20 @@ export async function writePlan(
 export function planIsComplete(plan: Plan): boolean {
   return planProgress(plan).complete;
 }
+
+/**
+ * Is this plan actively in progress, so a new message in the same workspace
+ * should pick it up?
+ *
+ * A saved plan used to be replayed on every new reply whenever it was not
+ * 100% done. That meant a plan with a blocked step ("only the user can do
+ * this") showed on every later message forever, and a plan that was written
+ * but never started attached itself to an unrelated question. The plan is
+ * only live while there is a step marked `doing` — that is the signal the
+ * agent was mid-task when the reply ended. Blocked plans have been handed
+ * to the user; all-todo plans have not begun. Both stay on the previous
+ * bubble but are cleared from disk so they cannot leak forward.
+ */
+export function planIsLive(plan: Plan): boolean {
+  return plan.steps.some((s) => s.state === "doing");
+}

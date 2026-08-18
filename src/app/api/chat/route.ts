@@ -39,6 +39,7 @@ import {
   readPlan,
   writePlan,
   planIsComplete,
+  planIsLive,
   checkAnswerClaims,
 } from "@/lib/plan";
 import type { Plan } from "@/lib/plan";
@@ -973,7 +974,10 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         let plan: Plan | null = null;
         if (workspaceEnabled) {
           const saved = await readPlan(workspace);
-          if (saved && !planIsComplete(saved)) {
+          if (saved && !planIsComplete(saved) && planIsLive(saved)) {
+            // A step was marked doing when the last reply ended, so the
+            // agent was mid-task and this message continues it. Replay the
+            // plan so progress is not lost.
             plan = saved;
             send({
               type: "plan",
@@ -982,7 +986,10 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               summary: planSummary(plan),
             });
           } else if (saved) {
-            // Finished last time: clear it so it cannot leak into this task.
+            // Complete, blocked, or never started: it belongs to the
+            // previous task. Clear it so a completed or blocked step cannot
+            // replay on every later message (the reported "stale plan"
+            // bug). A plan only auto-resumes while a step is `doing`.
             await writePlan(workspace, null);
           }
         }

@@ -396,6 +396,19 @@ function MessageBubbleImpl({
     if (el) el.scrollTop = el.scrollHeight;
   }, [message.reasoningContent, followThinking, showThinking]);
 
+  // A new reply starts streaming: reset Follow/Free to Follow so a "Free"
+  // choice from a previous bubble can never leave the next one stuck grey
+  // and un-scrollable. This only runs when the streaming flag flips on.
+  const wasStreaming = useRef(false);
+  useEffect(() => {
+    if (message.isStreaming && !wasStreaming.current) {
+      wasStreaming.current = true;
+      setFollowThinking(true);
+    } else if (!message.isStreaming) {
+      wasStreaming.current = false;
+    }
+  }, [message.isStreaming]);
+
   const copyMessage = async () => {
     try {
       await navigator.clipboard.writeText(message.content);
@@ -984,7 +997,7 @@ function MessageBubbleImpl({
                       finished. The right-hand margin also read as misaligned
                       because it was 8px against the label's 12px padding; both
                       edges now match. */}
-                  {showThinking && isThinkingPhase && (
+                  {showThinking && reasoningChars > 0 && (
                     <button
                       onClick={() => setFollowThinking((v) => !v)}
                       title={

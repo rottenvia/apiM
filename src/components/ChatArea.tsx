@@ -13,6 +13,8 @@ import {
   readTextFile,
   readFolder,
   MAX_FILES,
+  MAX_INLINE_BINARY_BYTES,
+  isGenericBinaryFilename,
 } from "@/lib/attachments";
 import { isImageFile } from "@/lib/vision";
 import {
@@ -358,6 +360,38 @@ export function ChatArea({
         : { error: saved.error ?? `HTTP ${response.status}` };
     };
 
+    // Save a large generic binary (non-PE) to the workspace. Uses the
+    // generic /upload endpoint, which accepts any bytes (unlike /binary
+    // that requires an MZ header for Windows executables).
+    const saveBinary = async (
+      file: File,
+      target: string
+    ): Promise<{ path?: string; bytes?: number; error?: string }> => {
+      if (!workspaceId) return { error: "this chat has no workspace yet" };
+      if (file.size > MAX_PE_UPLOAD_BYTES) {
+        return {
+          error:
+            `${file.name} is ${(file.size / 1024 / 1024).toFixed(1)}MB; ` +
+            `the per-file limit is ${MAX_PE_UPLOAD_BYTES / 1024 / 1024}MB`,
+        };
+      }
+      const body = new FormData();
+      body.set("path", target);
+      body.set("file", file, file.name);
+      const response = await fetch(`/api/workspace/${workspaceId}/upload`, {
+        method: "POST",
+        body,
+      });
+      const saved = (await response.json().catch(() => ({}))) as {
+        path?: string;
+        bytes?: number;
+        error?: string;
+      };
+      return response.ok && saved.path
+        ? saved
+        : { error: saved.error ?? `HTTP ${response.status}` };
+    };
+
     for (let i = 0; i < list.length; i++) {
       const placeholder = pending[i];
       // Beyond the cap the placeholder was never added, so there is nothing
@@ -481,6 +515,37 @@ export function ChatArea({
                 `that path to recover PE metadata, imported DLLs/functions, ` +
                 `strings, dependency graphs and the deepest available ` +
                 `ILSpy/Ghidra decompilation.`,
+              truncated: false,
+              kind: "text",
+              unpackedTo: saved.path,
+              binaryPaths: [saved.path],
+            };
+            onProcessesChanged?.();
+          }
+        } else if (
+          // A large, non-PE binary: inlining its hex dump would truncate
+          // (the dump is ~3.2 chars/byte and attachments are capped), so
+          // upload the exact bytes to the workspace and hand the model a
+          // path it can read in ranges, the same way big PE files are
+          // handled. Small binaries still inline as a complete dump.
+          item.file.size > MAX_INLINE_BINARY_BYTES &&
+          isGenericBinaryFilename(item.file.name)
+        ) {
+          setStage(placeholder.id, "saving");
+          const target = binaryUploadPath(item.file.name);
+          const saved = await saveBinary(item.file, target);
+          if (!saved.path) {
+            error = `Couldn't save ${item.file.name}: ${saved.error ?? "upload failed"}`;
+          } else {
+            attachment = {
+              id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+              name: item.file.name,
+              size: saved.bytes ?? item.file.size,
+              content:
+                `${item.file.name} is a large binary (${(item.file.size / 1024 / 1024).toFixed(1)}MB). ` +
+                `Its exact bytes were saved at ${saved.path} (not executed). ` +
+                `It is too big to show in full here — use read_file on that path to inspect ranges; ` +
+                `it returns a hex+ASCII dump of the lines you ask for. Start near the RWX regions.`,
               truncated: false,
               kind: "text",
               unpackedTo: saved.path,
