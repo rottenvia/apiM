@@ -325,8 +325,6 @@ function MessageBubbleImpl({
       const current = prev ?? autoOpen;
       return typeof next === "function" ? next(current) : next;
     });
-  /** Open state of the "resume with a different model" menu. */
-  const [resumeMenuOpen, setResumeMenuOpen] = useState(false);
   const [showSources, setShowSources] = useState(false);
   const [followThinking, setFollowThinking] = useState(true);
   const [copiedMessage, setCopiedMessage] = useState(false);
@@ -1065,177 +1063,27 @@ function MessageBubbleImpl({
               </div>
             )}
 
-            {/* Reply was cut short — offer to retry rather than leaving a
-                silently truncated answer looking complete. */}
+            {/* Reply was cut short. A compact notice, not a big button
+                row: typing "resume" continues it (with an optional note),
+                and the model picker in the composer lets you finish on a
+                different model. Start over stays as a quiet text action. */}
             {message.incomplete && !message.isStreaming && (
-              /*
-               * The interrupted banner.
-               *
-               * This was a thin row with an 11px pill on the right, and it was
-               * missed entirely — the reply it belongs to had run for minutes
-               * and the way to recover it was smaller than the timestamp
-               * beneath it. An action worth tens of cents should not be the
-               * quietest thing in its own notice.
-               *
-               * Resume is now a full-width button on its own line, labelled
-               * with what it does rather than with a bare verb.
-               */
-              <div className="overflow-hidden rounded-xl border border-[#cfa25a]/30 bg-[#cfa25a]/[0.07]">
-                <div className="flex items-start gap-2.5 px-3 py-2.5">
-                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} aria-hidden="true" className="mt-0.5 flex-none text-[#cfa25a]">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
-                  </svg>
-
-                  <div className="min-w-0 flex-1">
-                    <p className="text-[13px] font-medium leading-snug text-[#cfa25a]">
-                      {/* The reason, when there is one. "Insufficient balance"
-                          is far more use than a generic "interrupted", and it
-                          names the one thing to fix before Resume will work. */}
-                      {message.errorNotice ?? "This reply stopped before it finished"}
-                    </p>
-                    {message.canResume ? (
-                      <p className="mt-0.5 text-[12px] leading-relaxed text-text-secondary">
-                        Everything it did is saved — the files it wrote, what it
-                        read, and its reasoning. Resuming carries on from there
-                        and only pays for what is left.
-                      </p>
-                    ) : (
-                      <p className="mt-0.5 text-[12px] leading-relaxed text-text-secondary">
-                        This one is from before resuming existed, so it can only
-                        be run again from the start.
-                      </p>
-                    )}
-                    {/*
-                      "Show / Hide what arrived" was here and has been removed.
-                      
-                      It appeared to do nothing, and it genuinely did nothing
-                      on most replies: it gated the plain-markdown branch far
-                      below, but any reply with tool activity renders through
-                      the timeline instead, which was never gated. So on
-                      exactly the long agent runs where an interruption
-                      matters, the button toggled a label and changed no
-                      pixels.
-                      
-                      Rather than extend the gate to the timeline — hiding work
-                      the user just paid for, behind a control they have to
-                      find — the partial reply is now always visible. It is the
-                      most useful thing on screen after an interruption.
-                    */}
-                  </div>
-                </div>
-
-                {/* Actions on their own line, full width. Resume dominates
-                    because it is nearly always right: it keeps every file
-                    already written and pays only for the remaining rounds.
-                    Starting over buys the same work a second time, so it stays
-                    reachable but quiet. */}
-                <div className="flex items-stretch gap-1.5 border-t border-[#cfa25a]/20 p-1.5">
-                  {onResume && message.canResume && (
-                    /*
-                     * Resume, with the option of a different model.
-                     *
-                     * Asked for directly: "idk if I can pick the model when I
-                     * click resume, if it's possible add it, so model sees the
-                     * same thing but I can choose another one."
-                     *
-                     * It is possible, and it is genuinely useful — the saved
-                     * transcript is just messages, so any model can pick it
-                     * up. The common case is a Pro run that stalled: finish it
-                     * on Flash for a sixth of the price, or the reverse when
-                     * Flash got stuck on something hard.
-                     *
-                     * A split button rather than a menu: the plain Resume path
-                     * stays one click, and the chevron is there when the model
-                     * matters. Anything that makes the ordinary case slower to
-                     * save a rare one is a bad trade.
-                     */
-                    <div className="relative flex flex-1 items-stretch">
-                      <button
-                        onClick={() => onResume(message.id)}
-                        title="Carry on from where it stopped, keeping the work already done"
-                        className="flex flex-1 items-center justify-center gap-1.5 rounded-lg rounded-r-none bg-[#cfa25a] px-3 py-2 text-[13px] font-semibold text-[#191715] transition-colors hover:bg-[#dbb271]"
-                      >
-                        <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                          <path d="M8 5v14l11-7z" />
-                        </svg>
-                        Resume
-                      </button>
-                      <button
-                        onClick={() => setResumeMenuOpen((v) => !v)}
-                        aria-expanded={resumeMenuOpen}
-                        aria-haspopup="menu"
-                        title="Resume with a different model"
-                        className="flex flex-none items-center rounded-lg rounded-l-none border-l border-[#191715]/20 bg-[#cfa25a] px-2 text-[#191715] transition-colors hover:bg-[#dbb271]"
-                      >
-                        <svg
-                          width="13" height="13" viewBox="0 0 24 24" fill="none"
-                          stroke="currentColor" strokeWidth={2.4} aria-hidden="true"
-                          className={`transition-transform duration-150 ${resumeMenuOpen ? "rotate-180" : ""}`}
-                        >
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M6 9l6 6 6-6" />
-                        </svg>
-                      </button>
-
-                      {resumeMenuOpen && (
-                        <div className="absolute bottom-full left-0 z-50 mb-1.5 w-64 overflow-hidden rounded-xl border border-border bg-bg-secondary shadow-lg">
-                          <p className="border-b border-border px-3 py-2 text-[11px] leading-4 text-text-muted">
-                            Continue the same work with:
-                          </p>
-                          {[
-                            {
-                              id: "deepseek-v4-pro",
-                              label: "V4 Pro",
-                              blurb: "Best at long agent work",
-                            },
-                            {
-                              id: "deepseek-v4-flash",
-                              label: "V4 Flash",
-                              blurb: "About 6x cheaper",
-                            },
-                          ].map((m) => (
-                            <button
-                              key={m.id}
-                              onClick={() => {
-                                setResumeMenuOpen(false);
-                                onResume(message.id, m.id);
-                              }}
-                              className="flex w-full items-baseline gap-2 px-3 py-2 text-left transition-colors hover:bg-bg-hover"
-                            >
-                              <span className="text-[13px] font-medium text-text-primary">
-                                {m.label}
-                              </span>
-                              <span className="text-[11px] text-text-muted">
-                                {m.blurb}
-                              </span>
-                              {message.model === m.id && (
-                                <span className="ml-auto text-[11px] text-text-muted">
-                                  used before
-                                </span>
-                              )}
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  {onRegenerate && (
-                    <button
-                      onClick={() => onRegenerate(message.id)}
-                      title={
-                        message.canResume
-                          ? "Discard what was done and answer again from scratch"
-                          : "Answer again from the beginning"
-                      }
-                      className={`flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-[13px] font-medium transition-colors ${
-                        message.canResume
-                          ? "flex-none text-[#cfa25a] hover:bg-[#cfa25a]/15"
-                          : "flex-1 bg-[#cfa25a] text-[#191715] hover:bg-[#dbb271]"
-                      }`}
-                    >
-                      {message.canResume ? "Start over" : "Try again"}
-                    </button>
-                  )}
-                </div>
+              <div className="my-1 flex items-center gap-2 rounded-lg border border-[#cfa25a]/25 bg-[#cfa25a]/[0.07] px-3 py-1.5 animate-fade-in">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} aria-hidden="true" className="flex-none text-[#cfa25a]">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+                </svg>
+                <p className="min-w-0 flex-1 truncate text-[12px] leading-4 text-[#cfa25a]/90" title={message.errorNotice ?? "This reply stopped before it finished"}>
+                  {message.errorNotice ?? "This reply stopped before it finished — type \"resume\" to continue where it left off."}
+                </p>
+                {onRegenerate && (
+                  <button
+                    onClick={() => onRegenerate(message.id)}
+                    title={message.canResume ? "Discard what was done and start over" : "Try again from the start"}
+                    className="flex-none rounded-lg px-2 py-0.5 text-[11px] font-medium text-[#cfa25a]/70 transition-colors hover:bg-[#cfa25a]/10 hover:text-[#cfa25a]"
+                  >
+                    {message.canResume ? "Start over" : "Try again"}
+                  </button>
+                )}
               </div>
             )}
 

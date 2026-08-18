@@ -176,14 +176,15 @@ check(
   "it can run to megabytes; the UI only needs a boolean"
 );
 check(
-  "the UI offers Continue only when there is state to resume",
-  /onResume && message\.canResume/.test(bubble)
+  "an interrupted reply gets a compact notice, not a full-width button",
+  /message\.incomplete && !message\.isStreaming/.test(bubble) &&
+    /type \\?"resume\\?" to continue/.test(bubble),
+  "typing resume is the continuation path; the button row did not fit"
 );
 check(
-  "Continue is the primary action, Start over the quiet one",
-  bubble.indexOf("Continue<") < bubble.indexOf("Start over") ||
-    bubble.indexOf(">\n                    Continue") < bubble.indexOf("Start over"),
-  "continuing keeps the files already written"
+  "Start over stays reachable as a quiet action",
+  /message\.canResume \? "Start over" : "Try again"/.test(bubble),
+  "continuing keeps the files already written; starting over is secondary"
 );
 check(
   "resume does not resend the reply as browser-supplied history",
@@ -327,24 +328,20 @@ console.log("\n3d. Resuming is findable");
  * thing in its own notice.
  */
 check(
-  "Resume is a full-width primary button, not a pill",
-  /flex flex-1 items-center justify-center[^"]*bg-\[#cfa25a\]/.test(bubble),
-  "it sat at text-[11px] in a corner and was never found"
+  "there is no big Resume button in the banner",
+  !/flex flex-1 items-center justify-center[^"]*bg-\[#cfa25a\]/.test(bubble) &&
+    !/>\s*Resume\s*</.test(bubble),
+  "the button did not fit the interface; typing resume replaces it"
 );
 check(
-  "it is labelled Resume",
-  />\s*Resume\s*</.test(bubble),
-  "the word the user reached for"
+  "the notice tells the user how to continue",
+  /type \\?"resume\\?" to continue/.test(bubble),
+  "the continuation path has to be discoverable without a button"
 );
 check(
-  "the banner explains what resuming keeps",
-  /Everything it did is saved/.test(bubble),
-  "otherwise there is no reason to prefer it over starting over"
-);
-check(
-  "starting over is de-emphasised when resuming is possible",
-  /message\.canResume\s*\?\s*"flex-none text-\[#cfa25a\]/.test(bubble),
-  "it buys the same work twice"
+  "starting over is a quiet text action",
+  /message\.canResume \? "Start over"/.test(bubble),
+  "it buys the same work twice, so it is secondary to typing resume"
 );
 check(
   "a reply that only got as far as reasoning is still resumable",
@@ -373,10 +370,10 @@ check(
   "otherwise an ordinary message would be swallowed"
 );
 check(
-  "Resume can hand the job to a different model",
+  "resume still accepts a model override for finishing on another model",
   /onResume\?: \(assistantId: string, model\?: string\) => void/.test(bubble) &&
-    /onResume\(message\.id, m\.id\)/.test(bubble),
-  "a run that stalled on Pro can be finished on Flash for a sixth of the price"
+    /modelOverride/.test(page),
+  "a run that stalled on Pro can be finished on Flash by picking Flash then resuming"
 );
 check(
   "the override applies to this reply only",

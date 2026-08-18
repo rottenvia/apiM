@@ -665,12 +665,19 @@ export async function POST(req: NextRequest) {
         // Decide whether this turn needs the web. In "auto" the model itself
         // judges (one cheap Flash call, thinking off) instead of a keyword
         // guess, so ordinary coding questions skip the search entirely.
+        //
+        // A resume ("continue the work") skips this decision: it is carrying
+        // on an in-progress task, and waiting on a search decision added a
+        // round-trip (and sometimes a long stall) before the first token of
+        // a reply the user already waited for. "always" still forces search.
         let doSearch = false;
         let searchReason = "";
         let clarifyHint = "";
         if (canSearch) {
           if (webSearchMode === "always") {
             doSearch = true;
+          } else if (resumeMessageId) {
+            searchReason = "continuing a previous reply";
           } else {
             send({ type: "status", stage: "deciding" });
             const decision = await decideSearch(
