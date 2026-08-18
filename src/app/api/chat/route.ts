@@ -1014,6 +1014,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          * keeping them would make this grow without bound on a long task.
          */
         const toolsUsedThisRun: string[] = [];
+        /** Questions already asked and answered this run, by normalised text. A repeat is answered from here instead of pausing again. */
+        const askedQuestions = new Map<string, string>();
 
         const setFileTree = (text: string) => {
           currentFileTree = text;
@@ -2453,6 +2455,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               };
               const question =
                 typeof qArgs.question === "string" ? qArgs.question.trim() : "";
+              const questionKey = question.toLowerCase().replace(/\s+/g, " ").trim();
 
               if (!question) {
                 result = {
@@ -2467,6 +2470,16 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 const context =
                   typeof qArgs.context === "string" ? qArgs.context.trim() : "";
 
+                const priorAnswer = questionKey
+                  ? askedQuestions.get(questionKey)
+                  : undefined;
+                if (priorAnswer !== undefined) {
+                  result = {
+                    ok: true,
+                    content: `You already asked this. The user answered: ${priorAnswer}. Do not ask the same question again; use that answer.`,
+                    summary: `Reused prior answer to: ${question.slice(0, 60)}`,
+                  };
+                } else {
                 send({
                   type: "question",
                   id: call.id,
@@ -2495,20 +2508,24 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   answered: answer !== null,
                 });
 
+                if (answer !== null && questionKey) {
+                  askedQuestions.set(questionKey, answer);
+                }
                 result =
                   answer === null
                     ? {
                         ok: false,
                         content:
                           "The user did not answer. Make a sensible default " +
-                          "choice, say which you picked and why, and carry on.",
+                          "choice, say which you picked and why, and carry on. Do not ask the same question again.",
                         summary: "No answer",
                       }
                     : {
                         ok: true,
-                        content: `The user answered: ${answer}`,
+                        content: `Question asked: ${question}\nThe user answered: ${answer}\nUse this answer and do not ask the same question again.`,
                         summary: `Asked: ${question.slice(0, 60)}`,
                       };
+                }
               }
             } else if (call.function.name === "github_push") {
               if (!githubConnection || !githubToken) {

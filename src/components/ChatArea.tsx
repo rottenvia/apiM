@@ -898,7 +898,7 @@ export function ChatArea({
   const btwQuestion = isLoading && btwMatch ? btwMatch[1].trim() : "";
   const isBtw = Boolean(btwQuestion) && Boolean(onAskBtw);
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
     // An aside is sendable while the main task runs; a normal message is not.
     if (isBtw) {
       onAskBtw?.(btwQuestion);
@@ -949,9 +949,52 @@ export function ChatArea({
     }
     // A message of only attachments is valid — the files are the content.
     if ((!input.trim() && attachments.length === 0) || isLoading) return;
+
+    // When a workspace exists, persist text attachments as real files under
+    // uploads/ instead of only inlining them. Inlining meant the model saw
+    // the content once in the first message but had no path to re-read it
+    // (read_file('data.json') failed) — the reported "uploads don't land in
+    // the workspace" bug. The message still carries the content inline as a
+    // fallback, so a workspace-less chat works unchanged.
+    let messageText = buildMessageWithAttachments(input, attachments);
+    const textAttachments = attachments.filter((a) => a.kind === "text");
+    if (workspaceId && textAttachments.length > 0) {
+      const saved: { name: string; path: string }[] = [];
+      for (const a of textAttachments) {
+        // Keep the filename but make it path-safe and unique enough that two
+        // uploads of the same name in one chat do not clobber each other.
+        const safe = a.name
+          .replace(/[\\/]+/g, "_")
+          .replace(/[^A-Za-z0-9._-]+/g, "_")
+          .slice(0, 120) || "attachment.txt";
+        const target = `uploads/${Date.now().toString(36)}-${safe}`;
+        try {
+          const res = await fetch(`/api/workspace/${workspaceId}/write`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: target, content: a.content }),
+          });
+          if (res.ok) {
+            saved.push({ name: a.name, path: target });
+          }
+        } catch {
+          /* network error — fall back to inline-only */
+        }
+      }
+      if (saved.length > 0) {
+        const listing = saved
+          .map((f) => `- ${f.name} saved to ${f.path}`)
+          .join("\n");
+        messageText =
+          `The following attached files were saved to the workspace ` +
+          `(read them with read_file; do not ask the user to re-upload):\n${listing}\n\n` +
+          messageText;
+      }
+    }
+
     // The model receives the file contents and image descriptions; the
     // transcript shows only what the user typed, plus attachment chips.
-    onSend(buildMessageWithAttachments(input, attachments), {
+    onSend(messageText, {
       displayContent: input,
       attachments: attachments.map((a) => ({
         name: a.name,
