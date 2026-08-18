@@ -1787,9 +1787,17 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               if (chunk.usage) {
                 usage = chunk.usage;
                 const u = chunk.usage as Record<string, number>;
-                totalUsage.prompt_tokens += u.prompt_tokens ?? 0;
+                // NOTE: do NOT sum u.prompt_tokens across rounds.
+                //
+                // prompt_tokens is the size of THIS round's whole prompt,
+                // most of which is the cached prefix re-sent every round.
+                // Summing it counts the same 100k prefix 40 times and
+                // reports millions of tokens (and a fake cost) that were
+                // never billed. The incremental figures are the cache
+                // split and the completion: hits+misses are charged once
+                // per round (a hit on a re-sent prefix IS a real billable
+                // cache read), and completion is genuinely new each round.
                 totalUsage.completion_tokens += u.completion_tokens ?? 0;
-                totalUsage.total_tokens += u.total_tokens ?? 0;
                 // Kept per round and summed, since each round has its own
                 // split — the first is mostly a miss, later ones mostly hits.
                 const roundHit = u.prompt_cache_hit_tokens ?? 0;
@@ -1797,6 +1805,13 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 totalUsage.prompt_cache_miss_tokens +=
                   u.prompt_cache_miss_tokens ??
                   Math.max(0, (u.prompt_tokens ?? 0) - roundHit);
+                // Recompute prompt/total from the incremental figures so
+                // the UI and saved record reflect what was actually billed.
+                totalUsage.prompt_tokens =
+                  totalUsage.prompt_cache_hit_tokens +
+                  totalUsage.prompt_cache_miss_tokens;
+                totalUsage.total_tokens =
+                  totalUsage.prompt_tokens + totalUsage.completion_tokens;
                 // Charge the running total for this round, at the real
                 // cache-split rates, so the limit is enforced against what is
                 // actually being billed rather than a token count.
@@ -3014,7 +3029,16 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           }
         }
 
-        if (thinkingEnabled && !reasoningContent) {
+        // No reasoning arrived. On Flash low this is normal and not an
+        // error (the model may simply answer without a visible chain of
+        // thought); record it only on Pro / high-or-greater effort where
+        // a missing field is genuinely unexpected.
+        if (
+          thinkingEnabled &&
+          !reasoningContent &&
+          (model === "deepseek-v4-pro" ||
+            ["high", "max"].includes(resolvedEffort))
+        ) {
           recordAsync({
             kind: "api_error",
             subject: "reasoning stream",
