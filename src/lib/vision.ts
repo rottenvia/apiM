@@ -16,6 +16,10 @@ export const VISION_BASE_URL =
 /** Cheap, fast, and good enough for screenshots. */
 export const DEFAULT_VISION_MODEL = "gpt-4o-mini";
 
+function endpointEnd(u: string): string {
+  return u.replace(/\/+$/, "");
+}
+
 export const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 
 export const IMAGE_MIME_TYPES = new Set([
@@ -61,12 +65,15 @@ export async function describeImage(
   dataUrl: string,
   apiKey: string,
   model: string = DEFAULT_VISION_MODEL,
-  userHint?: string
+  userHint?: string,
+  baseUrl?: string
 ): Promise<VisionResult> {
   if (!apiKey) return { error: "No vision API key configured" };
 
+  const endpointBase = (baseUrl && baseUrl.trim()) || VISION_BASE_URL;
+
   try {
-    const response = await fetch(`${VISION_BASE_URL}/chat/completions`, {
+    const response = await fetch(`${endpointBase}/chat/completions`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

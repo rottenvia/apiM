@@ -1204,6 +1204,8 @@ export interface ToolContext {
   /** Vision provider key. Absent means view_image is unavailable. */
   visionKey?: string;
   visionModel?: string;
+  /** Base URL for an OpenAI-compatible vision endpoint (e.g. OpenRouter). */
+  visionBaseUrl?: string;
   /** Tavily key. Absent means web_search is withheld from the model. */
   searchKey?: string;
   /** Optional Exa key, used when Tavily refuses. Either one enables search. */
@@ -1651,7 +1653,8 @@ export async function runTool(
           image.dataUrl,
           context.visionKey,
           context.visionModel,
-          typeof args.question === "string" ? args.question : undefined
+          typeof args.question === "string" ? args.question : undefined,
+          context.visionBaseUrl
         );
 
         if (result.error) {

@@ -201,6 +201,7 @@ interface ChatRequestBody {
   /** Vision provider key, so the agent can look at images in the workspace. */
   visionApiKey?: string;
   visionModel?: string;
+  visionBaseUrl?: string;
   /**
    * Hard ceiling on what this reply may cost, in USD.
    *
@@ -398,6 +399,7 @@ export async function POST(req: NextRequest) {
     autoRunCommands = false,
     visionApiKey,
     visionModel,
+    visionBaseUrl,
     searchProfile,
     // A ceiling on what this one reply may cost, in USD. Absent means no cap.
     budgetUsd,
@@ -2213,6 +2215,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 runTool(workspace, call.function.name, parsedArgs.value, {
                   visionKey: visionApiKey,
                   visionModel,
+                  visionBaseUrl,
                   searchKey: tavilyApiKey,
                   exaKey: exaApiKey,
                   deepseekKey: deepseekApiKey,
@@ -2736,6 +2739,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                     {
                       visionKey: visionApiKey,
                       visionModel,
+                      visionBaseUrl,
                       searchKey: tavilyApiKey,
                   exaKey: exaApiKey,
                       deepseekKey: deepseekApiKey,
@@ -2775,6 +2779,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 {
                   visionKey: visionApiKey,
                   visionModel,
+                  visionBaseUrl,
                   searchKey: tavilyApiKey,
                   exaKey: exaApiKey,
                   deepseekKey: deepseekApiKey,

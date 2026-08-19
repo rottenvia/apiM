@@ -72,6 +72,7 @@ interface ChatAreaProps {
   webSearchMode: "off" | "auto" | "always";
   visionKey: string;
   visionModel: string;
+  visionBaseUrl?: string;
   enabledPlugins: string[];
   sidebarOpen: boolean;
   onSend: (
@@ -128,6 +129,7 @@ export function ChatArea({
   webSearchMode,
   visionKey,
   visionModel,
+  visionBaseUrl,
   enabledPlugins,
   sidebarOpen,
   onSend,
@@ -202,6 +204,7 @@ export function ChatArea({
             dataUrl: image.dataUrl,
             apiKey: visionKey,
             model: visionModel,
+            baseUrl: visionBaseUrl || undefined,
           }),
         });
         const body = (await res.json()) as {
@@ -231,7 +234,7 @@ export function ChatArea({
         );
       }
     },
-    [visionKey, visionModel]
+    [visionKey, visionModel, visionBaseUrl]
   );
 
   const addFiles = useCallback(async (files: FileList | File[]) => {

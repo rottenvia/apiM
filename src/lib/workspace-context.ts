@@ -12,44 +12,53 @@ import { listFiles } from "@/lib/workspace";
 /**
  * Keep the summary well under the point where it crowds out the reply.
  *
- * These were 120 files / 4_000 chars, sized for a small context window. On a
- * real project that meant the model was shown a partial tree — a 203-file
- * extension listed 120 of them and the rest became "… and 83 more". Asked for
- * "the full structure" it answered from the truncated list, because that list
- * was the only structure it had ever been given.
- *
- * A tree is cheap: it is one line per file, no contents. 2000 files at 60_000
- * characters is under 2% of DeepSeek v4's window and covers essentially every
- * project someone drops into a chat.
+ * A tree is cheap: one line per file, no contents. The cap here is the
+ * amount of STANDING context paid on every single round, so it is kept
+ * conservative — 30k chars is roughly 8k tokens, which is small against a
+ * million-token window but compounds across a 40-round task.
  */
 export const MAX_CONTEXT_FILES = 2_000;
-export const MAX_CONTEXT_CHARS = 60_000;
+export const MAX_CONTEXT_CHARS = 30_000;
+
+/** Files larger than this are summarised rather than listed individually
+ *  when a directory is very full, so a single 46MB memory dump cannot
+ *  dominate the tree. They still appear (with size), just grouped. */
+const LARGE_FILE_BYTES = 5 * 1024 * 1024;
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes}B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)}KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+}
+
+interface DirEntries {
+  files: { name: string; size: number }[];
+  large: { name: string; size: number }[];
 }
 
 /**
  * Groups paths by directory so a project reads as a structure rather than a
  * flat list of slash-separated strings.
+ *
+ * Large files (dumps, ISOs, built artifacts) are listed separately and
+ * capped per directory so one binary cannot blow the token budget.
  */
-function renderTree(
-  files: { path: string; size: number }[]
-): string {
-  const byDir = new Map<string, { name: string; size: number }[]>();
+function renderTree(files: { path: string; size: number }[]): string {
+  const byDir = new Map<string, DirEntries>();
 
   for (const file of files) {
     const slash = file.path.lastIndexOf("/");
     const dir = slash === -1 ? "" : file.path.slice(0, slash);
     const name = slash === -1 ? file.path : file.path.slice(slash + 1);
-    const list = byDir.get(dir);
-    if (list) list.push({ name, size: file.size });
-    else byDir.set(dir, [{ name, size: file.size }]);
+    let list = byDir.get(dir);
+    if (!list) {
+      list = { files: [], large: [] };
+      byDir.set(dir, list);
+    }
+    if (file.size >= LARGE_FILE_BYTES) list.large.push({ name, size: file.size });
+    else list.files.push({ name, size: file.size });
   }
 
-  // Root first, then subdirectories alphabetically.
   const dirs = [...byDir.keys()].sort((a, b) => {
     if (a === "") return -1;
     if (b === "") return 1;
@@ -57,11 +66,29 @@ function renderTree(
   });
 
   const lines: string[] = [];
+  let largeCount = 0;
+  let largeBytes = 0;
+
   for (const dir of dirs) {
     if (dir) lines.push(`${dir}/`);
-    for (const entry of byDir.get(dir) ?? []) {
-      lines.push(`${dir ? "  " : ""}${entry.name}  (${formatSize(entry.size)})`);
+    const prefix = dir ? "  " : "";
+    const entry = byDir.get(dir)!;
+
+    for (const f of entry.files) {
+      lines.push(`${prefix}${f.name}  (${formatSize(f.size)})`);
     }
+    for (const f of entry.large) {
+      largeCount += 1;
+      largeBytes += f.size;
+      lines.push(`${prefix}${f.name}  (${formatSize(f.size)}, large binary)`);
+    }
+  }
+
+  if (largeCount > 0) {
+    lines.push(
+      `\n${largeCount} large file(s) totalling ${formatSize(largeBytes)} are listed above. ` +
+        "Do not read them whole unless the user explicitly asks — use inspect_binary, strings, or read a byte range."
+    );
   }
 
   return lines.join("\n");
@@ -111,6 +138,7 @@ export async function buildWorkspaceContext(
     `\n\nFiles already in the workspace:\n\n${tree}\n\n` +
     `These exist right now. Edit the relevant one rather than creating a ` +
     `near-duplicate, and read a file before editing it so your replacement ` +
-    `matches exactly. Sizes are shown so you can tell a stub from a real file.`
+    `matches exactly. Sizes are shown so you can tell a stub from a real file. ` +
+    `Large binaries are marked as such — do not read them fully; use inspect_binary or read_file with a line/byte range.`
   );
 }

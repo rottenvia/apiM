@@ -16,6 +16,7 @@ export async function POST(req: NextRequest) {
     apiKey?: string;
     model?: string;
     hint?: string;
+    baseUrl?: string;
   };
 
   try {
@@ -24,7 +25,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const { dataUrl, apiKey, model, hint } = body;
+  const { dataUrl, apiKey, model, hint, baseUrl } = body;
 
   if (!dataUrl?.startsWith("data:image/")) {
     return NextResponse.json(
@@ -43,7 +44,8 @@ export async function POST(req: NextRequest) {
     dataUrl,
     apiKey,
     model || DEFAULT_VISION_MODEL,
-    hint
+    hint,
+    baseUrl
   );
 
   if (result.error) {

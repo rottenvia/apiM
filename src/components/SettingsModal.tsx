@@ -94,6 +94,8 @@ interface SettingsModalProps {
   onExaEnabledChange: (v: boolean) => void;
   visionKey: string;
   visionModel: string;
+  visionBaseUrl: string;
+  onVisionBaseUrlChange: (v: string) => void;
   model: string;
   defaultEffort: string;
   onDeepseekKeyChange: (key: string) => void;
@@ -181,6 +183,8 @@ export function SettingsModal({
   onExaEnabledChange,
   visionKey,
   visionModel,
+  visionBaseUrl,
+  onVisionBaseUrlChange,
   model,
   defaultEffort,
   onDeepseekKeyChange,
@@ -479,7 +483,7 @@ export function SettingsModal({
                 </label>
                 <p className="text-xs text-text-secondary mb-2">
                   DeepSeek can&apos;t read images, so attached screenshots are
-                  described by an OpenAI vision model first. Get a key from{" "}
+                  described by an OpenAI-compatible vision model first. Get a key from{" "}
                   <a
                     href="https://platform.openai.com/api-keys"
                     target="_blank"
@@ -516,20 +520,71 @@ export function SettingsModal({
                   </button>
                 </div>
 
+                {/* Provider quick-picks. They set base URL + a recommended
+                    model, then you can still edit either field. */}
                 <div className="mt-2 flex flex-wrap gap-1.5">
-                  {["gpt-4o-mini", "gpt-4o"].map((m) => (
+                  {[
+                    { label: "OpenAI", url: "https://api.openai.com/v1", model: "gpt-4o-mini" },
+                    { label: "OpenRouter", url: "https://openrouter.ai/api/v1", model: "google/gemini-2.5-flash" },
+                    { label: "Gemini", url: "https://generativelanguage.googleapis.com/v1beta/openai", model: "gemini-2.5-flash" },
+                    { label: "Ollama", url: "http://localhost:11434/v1", model: "llava" },
+                  ].map((p) => (
+                    <button
+                      key={p.label}
+                      type="button"
+                      onClick={() => {
+                        onVisionBaseUrlChange(p.url);
+                        onVisionModelChange(p.model);
+                      }}
+                      className="rounded-lg border border-border px-2.5 py-1 text-[11px] text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                </div>
+
+                <label className="mt-3 block text-xs font-medium text-text-secondary mb-1">
+                  Base URL <span className="font-normal text-text-muted">(OpenAI-compatible endpoint)</span>
+                </label>
+                <input
+                  type="text"
+                  value={visionBaseUrl}
+                  onChange={(e) => onVisionBaseUrlChange(e.target.value)}
+                  placeholder="https://api.openai.com/v1"
+                  spellCheck={false}
+                  autoComplete="off"
+                  className="w-full px-3 py-2 rounded-lg bg-bg-tertiary border border-border text-xs font-mono text-text-primary placeholder-text-muted outline-none focus:border-accent/50 transition-all"
+                />
+
+                <label className="mt-2 block text-xs font-medium text-text-secondary mb-1">
+                  Model
+                </label>
+                <input
+                  type="text"
+                  value={visionModel}
+                  onChange={(e) => onVisionModelChange(e.target.value)}
+                  placeholder="gpt-4o-mini"
+                  spellCheck={false}
+                  autoComplete="off"
+                  className="w-full px-3 py-2 rounded-lg bg-bg-tertiary border border-border text-xs font-mono text-text-primary placeholder-text-muted outline-none focus:border-accent/50 transition-all"
+                />
+                <div className="mt-1.5 flex flex-wrap gap-1.5">
+                  {[
+                    "gpt-4o-mini",
+                    "google/gemini-2.5-flash",
+                    "qwen/qwen2.5-vl-72b-instruct",
+                    "llava",
+                  ].map((m) => (
                     <button
                       key={m}
+                      type="button"
                       onClick={() => onVisionModelChange(m)}
                       data-active={visionModel === m}
-                      className="rounded-lg border border-border px-2.5 py-1 font-mono text-[11px] text-text-secondary transition-colors hover:bg-bg-hover data-[active=true]:border-accent/50 data-[active=true]:bg-accent/10 data-[active=true]:text-accent-light"
+                      className="rounded-lg border border-border px-2 py-0.5 font-mono text-[11px] text-text-muted transition-colors hover:bg-bg-hover hover:text-text-secondary data-[active=true]:border-accent/50 data-[active=true]:text-accent-light"
                     >
                       {m}
                     </button>
                   ))}
-                  <span className="self-center text-[11px] text-text-muted">
-                    mini is ~10x cheaper and enough for most screenshots
-                  </span>
                 </div>
 
                 {visionKey && (

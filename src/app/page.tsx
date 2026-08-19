@@ -406,6 +406,7 @@ export default function Home() {
   const [exaKey, setExaKey] = useState("");
   const [visionKey, setVisionKey] = useState("");
   const [visionModel, setVisionModel] = useState("gpt-4o-mini");
+  const [visionBaseUrl, setVisionBaseUrl] = useState("");
   const [model, setModel] = useState("deepseek-v4-pro");
   const [thinkingEffort, setThinkingEffort] = useState("auto");
   const [webSearchMode, setWebSearchMode] = useState<"off" | "auto" | "always">("auto");
@@ -553,6 +554,7 @@ export default function Home() {
             if (s.exaEnabled === false) setExaEnabled(false);
             if (s.visionKey) setVisionKey(s.visionKey);
             if (s.visionModel) setVisionModel(s.visionModel);
+            if (s.visionBaseUrl) setVisionBaseUrl(s.visionBaseUrl);
             if (s.model) setModel(s.model);
             if (s.thinkingEffort) setThinkingEffort(s.thinkingEffort);
             if (s.enabledPlugins) setEnabledPlugins(s.enabledPlugins);
@@ -597,6 +599,7 @@ export default function Home() {
           exaEnabled,
           visionKey,
           visionModel,
+          visionBaseUrl,
           model,
           thinkingEffort,
           enabledPlugins,
@@ -618,6 +621,7 @@ export default function Home() {
     exaEnabled,
     visionKey,
     visionModel,
+    visionBaseUrl,
     model,
     thinkingEffort,
     enabledPlugins,
@@ -1242,6 +1246,7 @@ export default function Home() {
             // ones attached to a message.
             visionApiKey: visionKey || undefined,
             visionModel,
+            visionBaseUrl: visionBaseUrl || undefined,
             // Conversation and workspace identities must agree. The server
             // rejects a mismatch rather than reading another chat's files or lessons.
             workspaceId: requestConversationId,
@@ -1762,6 +1767,7 @@ export default function Home() {
       searchProfile,
       visionKey,
       visionModel,
+      visionBaseUrl,
       budgetUsd,
       refreshWorkspaceFiles,
     ]
@@ -2150,6 +2156,7 @@ export default function Home() {
         webSearchMode={webSearchMode}
         visionKey={visionKey}
         visionModel={visionModel}
+        visionBaseUrl={visionBaseUrl}
         enabledPlugins={enabledPlugins}
         sidebarOpen={sidebarOpen}
         onSend={sendMessage}
@@ -2203,6 +2210,8 @@ export default function Home() {
           onExaEnabledChange={setExaEnabled}
           visionKey={visionKey}
           visionModel={visionModel}
+          visionBaseUrl={visionBaseUrl}
+          onVisionBaseUrlChange={setVisionBaseUrl}
           onVisionKeyChange={setVisionKey}
           onVisionModelChange={setVisionModel}
           model={model}
