@@ -439,7 +439,7 @@ async function migrateLayout(root: string): Promise<void> {
   }
 }
 
-async function ensureRoot(workspaceId: string): Promise<string> {
+export async function ensureRoot(workspaceId: string): Promise<string> {
   const root = workspaceRoot(workspaceId);
   await fs.mkdir(root, { recursive: true });
   await migrateLayout(root);
