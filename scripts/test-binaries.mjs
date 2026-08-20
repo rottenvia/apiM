@@ -883,7 +883,12 @@ check(
 const chatSource = await fs.readFile(path.join(ROOT, "src/components/ChatArea.tsx"), "utf8");
 const routeSource = await fs.readFile(path.join(ROOT, "src/app/api/workspace/[id]/binary/route.ts"), "utf8");
 check("composer sends executable bytes as multipart", /FormData/.test(chatSource) && /\/binary/.test(chatSource));
-check("upload endpoint validates MZ and writes bytes", /assertPeUpload/.test(routeSource) && /writeFileBytes/.test(routeSource));
+check(
+  "upload endpoint validates MZ and writes bytes",
+  /assertPeUpload/.test(routeSource) &&
+    // Streamed raw path writes directly to disk; multipart path still uses writeFile.
+    (/createWriteStream/.test(routeSource) || /writeFile/.test(routeSource))
+);
 const Upload = await load("src/app/api/workspace/[id]/binary/route.ts");
 const { NextRequest } = await import("next/server");
 const uploadBytes = makePe();
@@ -910,6 +915,34 @@ check(
   "multipart upload preserves every byte end to end",
   response.status === 200 &&
     Buffer.from(savedThroughRoute).equals(Buffer.from(uploadBytes))
+);
+
+// The raw octet-stream path streams to disk and must not be truncated by any
+// framework body limit (the bug that saved a 37MB DLL as 10MB). Build a PE
+// over 10MB so the test would actually catch a 10MB cap.
+const big = Buffer.concat([
+  Buffer.from(makePe()),
+  Buffer.alloc(11 * 1024 * 1024, 0x41),
+]);
+const bigTarget = "uploads/binaries/big-raw.exe";
+const rawRes = await Upload.POST(
+  new NextRequest("http://localhost/api/workspace/test/binary", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/octet-stream",
+      "X-Binary-Path": bigTarget,
+      "Content-Length": String(big.length),
+    },
+    body: big,
+  }),
+  { params: Promise.resolve({ id: WS }) }
+);
+const savedBig = await W.readFileBytes(WS, bigTarget);
+check(
+  "raw streaming upload preserves every byte (no 10MB truncation)",
+  rawRes.status === 200 &&
+    Buffer.from(savedBig).equals(Buffer.from(big)),
+  `status ${rawRes.status}, sent ${big.length}, got ${savedBig?.length}`
 );
 check("the target is never executed by the analysis path", !/spawn\([^\n]*targetPath/.test(await fs.readFile(path.join(ROOT, "src/lib/binary-decompiler.ts"), "utf8")));
 const ghidraScript = await fs.readFile(
