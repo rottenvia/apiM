@@ -64,7 +64,9 @@
     "test:isolation": "tsx scripts/test-chat-isolation.mjs",
     "test:binaries": "tsx scripts/test-binaries.mjs",
     "test:build": "tsx scripts/test-build.mjs",
-    "test:findings": "tsx scripts/test-findings.mjs"
+    "test:findings": "tsx scripts/test-findings.mjs",
+    "devserver": "node server.mjs",
+    "start:custom": "cross-env NODE_ENV=production node server.mjs"
   },
   "dependencies": {
     "@types/cross-spawn": "^6.0.6",
