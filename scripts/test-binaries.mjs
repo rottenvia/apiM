@@ -481,7 +481,7 @@ await fs.writeFile(
   JSON.stringify({
     hash,
     engine: "ghidra",
-    profile: "analysis-v8:full:",
+    profile: "analysis-v9:full:",
     complete: true,
   })
 );

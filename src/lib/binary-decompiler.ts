@@ -331,7 +331,7 @@ function focusProfile(terms: string[], focusedOnly: boolean): string {
   // flushes output per function so a SIGKILL at the timeout keeps partial
   // decompilation rather than an empty directory, and raises the per-function
   // timeout for large routines.
-  return `analysis-v8:${focusedOnly ? "focused" : "full"}:${terms
+  return `analysis-v9:${focusedOnly ? "focused" : "full"}:${terms
     .map((term) => term.toLowerCase())
     .sort()
     .join("|")}`;
@@ -558,6 +558,28 @@ async function runIlSpy(
   };
 }
 
+/** Analyzers that add substantial time and whose output we do not surface. */
+const FAST_DISABLED_ANALYZERS = [
+  "Decompiler Parameter ID",
+  "Decompiler Switch Analysis",
+  "Stack",
+];
+
+function resolveAnalyzerConfig(
+  overrides: AnalyzerOverrides | undefined
+): { disable: string[]; enable: string[] } {
+  if (overrides?.disable?.length || overrides?.enable?.length) {
+    return {
+      disable: overrides.disable ?? [],
+      enable: overrides.enable ?? [],
+    };
+  }
+  if (overrides?.preset === "full") return { disable: [], enable: [] };
+  // Default "fast": skip the heavy decompiler-driven analyzers. The
+  // post-script decompiles the functions we actually output.
+  return { disable: FAST_DISABLED_ANALYZERS, enable: [] };
+}
+
 async function runGhidra(
   workspaceId: string,
   target: string,
@@ -565,6 +587,7 @@ async function runGhidra(
   force: boolean,
   focusTerms: string[],
   focusedOnly: boolean,
+  analyzers: AnalyzerOverrides | undefined,
   signal?: AbortSignal
 ): Promise<DeepDecompilationResult> {
   const workspaceRoot = workspaceDirectory(workspaceId);
@@ -645,6 +668,17 @@ async function runGhidra(
     30_000,
     MAX_TIMEOUT_MS
   );
+  // Write the analyzer overrides chosen for this binary next to the output
+  // (in the project dir), and have the pre-script also dump the available
+  // analyzer list into the output dir so the model can see exact names.
+  const cfg = resolveAnalyzerConfig(analyzers);
+  const analyzerCfgPath = path.join(projectDir, "analyzers.json");
+  await fs.mkdir(output, { recursive: true });
+  await fs.writeFile(
+    analyzerCfgPath,
+    JSON.stringify({ disable: cfg.disable, enable: cfg.enable }, null, 2),
+    "utf8"
+  );
   const args = [
     projectDir,
     `apim-${inspection.hashes.sha256.slice(0, 12)}`,
@@ -656,10 +690,12 @@ async function runGhidra(
     "-max-cpu",
     String(maxCpu),
     "-deleteProject",
-    // Pre-script disables the heavy analyzers whose results we never surface
-    // (Decompiler Parameter ID decompiles every function during import).
+    // Pre-script applies the chosen analyzer overrides. Its first arg is the
+    // overrides JSON, second is where to write the available-analyzer list.
     "-preScript",
     "ApimAnalysisOptions.java",
+    analyzerCfgPath,
+    output,
     "-scriptPath",
     scriptDir,
     "-postScript",
@@ -960,6 +996,20 @@ function relativeOutput(workspaceRoot: string, full: string): string {
   return path.relative(workspaceRoot, full).split(path.sep).join("/");
 }
 
+/**
+ * Caller-chosen Ghidra analyzer overrides.
+ *
+ * disable/enable are exact analyzer names (see analyzers.txt written next to
+ * the output). preset "fast" trims the known-expensive analyzers whose
+ * results we do not surface (Decompiler Parameter ID etc.); "full" leaves
+ * every analyzer on. The model picks per binary.
+ */
+export interface AnalyzerOverrides {
+  disable?: string[];
+  enable?: string[];
+  preset?: "fast" | "full";
+}
+
 export async function runDeepDecompilation(
   workspaceId: string,
   target: string,
@@ -969,6 +1019,7 @@ export async function runDeepDecompilation(
     signal?: AbortSignal;
     focusTerms?: string[];
     focusedOnly?: boolean;
+    analyzers?: AnalyzerOverrides;
   } = {}
 ): Promise<DeepDecompilationResult> {
   if (!inspection.format.startsWith("PE")) {
@@ -985,8 +1036,10 @@ export async function runDeepDecompilation(
   const engine = inspection.managed ? "ilspy" : "ghidra";
   const focusTerms = normaliseFocusTerms(options.focusTerms);
   const focusedOnly = options.focusedOnly === true && focusTerms.length > 0;
+  // Distinct analyzer settings must not collide in the in-flight cache.
+  const analyzerKey = JSON.stringify(options.analyzers ?? { preset: "fast" });
   const profile = focusProfile(focusTerms, focusedOnly);
-  const key = `${workspaceId}:${inspection.hashes.sha256}:${engine}:${profile}:${options.force === true}`;
+  const key = `${workspaceId}:${inspection.hashes.sha256}:${engine}:${profile}:${analyzerKey}:${options.force === true}`;
   const existing = active.get(key);
   if (existing) return existing;
 
@@ -1007,6 +1060,7 @@ export async function runDeepDecompilation(
         options.force === true,
         focusTerms,
         focusedOnly,
+        options.analyzers,
         options.signal
       )
   ).finally(() => active.delete(key));

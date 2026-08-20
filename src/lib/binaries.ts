@@ -186,6 +186,8 @@ export interface InspectBinaryOptions {
   forceDeep?: boolean;
   focusTerms?: string[];
   focusedOnly?: boolean;
+  /** Caller/model-chosen Ghidra analyzer overrides for this binary. */
+  analyzers?: import("./binary-decompiler").AnalyzerOverrides;
   signal?: AbortSignal;
 }
 
@@ -1465,6 +1467,7 @@ export async function inspectWorkspaceBinary(
           signal: options.signal,
           focusTerms: options.focusTerms,
           focusedOnly: options.focusedOnly,
+          analyzers: options.analyzers,
         });
 
   const result: WorkspaceBinaryInspection = {
