@@ -180,8 +180,24 @@ export interface DownloadedResource {
   data: Uint8Array;
 }
 
-/** Binary downloads may be larger than text handed to the model, but bounded. */
-export const MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024;
+/**
+ * Binary downloads may be larger than text handed to the model.
+ *
+ * This used to be 25MB, which was pointless: the agent can already download
+ * anything of any size via `run_command` (curl/python), so the cap only made
+ * the built-in tool refuse the legitimately large file - a game client.dll,
+ * an installer, a dataset - and forced a slow shell round-trip. Set high
+ * enough for real binaries, overridable for the self-hosted case. The hard
+ * ceiling remains writeFileBytes' MAX_FILE_BYTES (512MB) and free disk space.
+ */
+export const DEFAULT_MAX_DOWNLOAD_BYTES = 200 * 1024 * 1024;
+export const MAX_DOWNLOAD_BYTES =
+  Number(process.env.APIM_MAX_DOWNLOAD_MB) > 0
+    ? Number(process.env.APIM_MAX_DOWNLOAD_MB) * 1024 * 1024
+    : DEFAULT_MAX_DOWNLOAD_BYTES;
+
+/** Enough for a large binary download; page fetches keep the shorter limit. */
+const DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000;
 
 /**
  * Download bytes without trying to interpret them as a web page.
@@ -198,8 +214,8 @@ export async function downloadResource(
     allowLoopback: options.allowLocal === true,
   });
   const requestSignal = options.signal
-    ? AbortSignal.any([options.signal, AbortSignal.timeout(FETCH_TIMEOUT_MS)])
-    : AbortSignal.timeout(FETCH_TIMEOUT_MS);
+    ? AbortSignal.any([options.signal, AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS)])
+    : AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS);
 
   let response: Response;
   for (let redirects = 0; ; redirects += 1) {

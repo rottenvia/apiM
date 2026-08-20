@@ -33,7 +33,9 @@ import {
 import {
   isPeFilename,
   MAX_PE_UPLOAD_BYTES,
+  binaryAnalysisRoot,
 } from "@/lib/binary-types";
+import { recordBinaryInspection } from "@/lib/binary-ledger";
 
 export const MAX_BINARY_ANALYSIS_BYTES = MAX_PE_UPLOAD_BYTES;
 export const MAX_IMPORT_DLLS = 512;
@@ -1465,7 +1467,7 @@ export async function inspectWorkspaceBinary(
           focusedOnly: options.focusedOnly,
         });
 
-  return {
+  const result: WorkspaceBinaryInspection = {
     path: target,
     inspection,
     dependencies,
@@ -1475,6 +1477,47 @@ export async function inspectWorkspaceBinary(
     capa,
     deep,
   };
+
+  // Persist what was done so the next message cannot re-decompile the same
+  // hash after Stop/compaction. Awaited (rather than fire-and-forget) so a
+  // follow-up read in the same turn sees it: it is one small local file.
+  // deepRan distinguishes a real CPU run from a cache hit, which is what
+  // makes "already decompiled" trustworthy.
+  const deepRan =
+    deep.attempted === true &&
+    deep.cached !== true &&
+    (deep.status === "complete" ||
+      deep.status === "partial" ||
+      deep.status === "failed");
+  try {
+    await recordBinaryInspection(workspaceId, {
+      path: target,
+      sha256: inspection.hashes.sha256,
+      size: inspection.bytes,
+      architecture: inspection.architecture,
+      isDll: inspection.isDll,
+      managed: inspection.managed !== null,
+      staticStatus: "ok",
+      deepStatus: deep.status,
+      deepEngine: deep.engine,
+      deepCached: deep.cached,
+      deepFocusTerms: options.focusTerms,
+      capaStatus: capa.status,
+      outputs: [
+        ...(artifacts.outputs ?? []),
+        ...(deep.outputs ?? []),
+        ...(capa.output ? [capa.output] : []),
+      ],
+      analysisRoot: binaryAnalysisRoot(target, inspection.hashes.sha256),
+      deepRan,
+    });
+  } catch (err) {
+    // The ledger is an optimisation, never a requirement: a disk error must
+    // not turn a successful inspection into a failure.
+    console.error("binary ledger record failed:", err);
+  }
+
+  return result;
 }
 
 function hex(value: number, width = 8): string {

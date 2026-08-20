@@ -319,14 +319,18 @@ console.log("\n7. Pruning is sized for the model in use");
 
 // DeepSeek v4 is a 1M-token model at roughly 3.6 chars per token.
 const WINDOW_CHARS = 1_000_000 * 3.6;
+// Pruning starts early and collapses old LARGE outputs, because the real cost
+// problem on long reverse-engineering threads was giant decompiles being
+// re-sent every round. Small/recent results are always preserved; the model is
+// not left with nothing (findings/ledger carry conclusions across rounds).
 check(
-  "pruning does not start in the first 5% of the context window",
-  prune.PRUNE_THRESHOLD_CHARS > WINDOW_CHARS * 0.05,
-  `starts at ${(100 * prune.PRUNE_THRESHOLD_CHARS / WINDOW_CHARS).toFixed(1)}% of the window`
+  "pruning starts early enough to stop re-billing giant old outputs",
+  prune.PRUNE_THRESHOLD_CHARS <= WINDOW_CHARS * 0.02,
+  `starts at ${(100 * prune.PRUNE_THRESHOLD_CHARS / WINDOW_CHARS).toFixed(2)}% of the window`
 );
 check(
-  "enough recent reads are kept to describe a project",
-  prune.KEEP_VERBATIM_RESULTS >= 50,
+  "a working window of recent reads is kept verbatim",
+  prune.KEEP_VERBATIM_RESULTS >= 6,
   `${prune.KEEP_VERBATIM_RESULTS} kept verbatim`
 );
 
