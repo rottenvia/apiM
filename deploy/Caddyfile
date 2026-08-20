@@ -21,7 +21,9 @@
 
 	request_body {
 		# Screenshots and file attachments are sent inline as base64, which
-		# is larger than the default cap allows.
-		max_size 32MB
+		# is larger than a typical cap. Executables (DLL/EXE) are uploaded as
+		# multipart and can be hundreds of MB - a retail client.dll is 35MB+
+		# and larger games easily exceed 32MB. Match the app's file cap.
+		max_size 512MB
 	}
 }
