@@ -475,6 +475,9 @@ const PACKAGE_DIR = ".packages";
 const IGNORED = new Set([
   ...INTERNAL_DIRS,
   PACKAGE_DIR,
+  // Machine-maintained analysis ledger; injected via the system prompt, never
+  // listed as a user file or read back as source.
+  ".analysis",
   // Bookkeeping, not the user's file — it must never reach the model or the
   // file panel, or every workspace would appear to contain a stray dotfile.
   MAPPING_FILE,

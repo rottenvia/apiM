@@ -52,8 +52,13 @@ interface RunResult {
 
 const active = new Map<string, Promise<DeepDecompilationResult>>();
 const MAX_LOG_CHARS = 32_000_000;
-const DEFAULT_TIMEOUT_MS = 4 * 60 * 1000;
-const MAX_TIMEOUT_MS = 10 * 60 * 1000;
+const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
+// No hard ceiling by default. A 46MB full decompile can run far longer than
+// the old 10-minute cap, and a SIGKILL there is exactly what produced
+// "exited code 1, zero output kept". APIM_BINARY_DECOMPILE_TIMEOUT_MS can
+// still bound it; set it to 0 to disable the Node-side timer entirely and
+// rely on the user's Stop button (which aborts the signal).
+const MAX_TIMEOUT_MS = Number.MAX_SAFE_INTEGER;
 
 function numberEnv(name: string, fallback: number, min: number, max: number): number {
   const n = Number(process.env[name]);
@@ -67,6 +72,13 @@ function minimalEnv(): NodeJS.ProcessEnv {
     TEMP: process.env.TEMP ?? os.tmpdir(),
     TMP: process.env.TMP ?? os.tmpdir(),
     NO_COLOR: "1",
+    // Ghidra's analyzeHeadless launcher reads MAX_MEMORY for the JVM heap.
+    // A 46MB full decompile can exhaust the default and the JVM exits with
+    // code 1 and no output. Default high, overridable for low-memory hosts.
+    MAX_MEMORY:
+      process.env.APIM_GHIDRA_MAX_MEMORY?.trim() ||
+      process.env.MAX_MEMORY?.trim() ||
+      "4G",
   };
   // Java, .NET and Windows process creation need these. API keys and app
   // secrets are intentionally not copied into a third-party decompiler.
@@ -78,6 +90,9 @@ function minimalEnv(): NodeJS.ProcessEnv {
     // it can validate the JDK, even when java.exe is already on PATH.
     "USERPROFILE", "LOCALAPPDATA", "APPDATA",
     "APIM_BINARY_MAX_OUTPUT_MB",
+    "APIM_GHIDRA_MAX_MEMORY",
+    "APIM_DECOMPILE_TIMEOUT",
+    "APIM_GHIDRA_ANALYSIS_TIMEOUT_MS",
   ]) {
     if (process.env[key]) env[key] = process.env[key];
   }
@@ -132,9 +147,10 @@ function runCaptured(
     const timeoutMs = numberEnv(
       "APIM_BINARY_DECOMPILE_TIMEOUT_MS",
       DEFAULT_TIMEOUT_MS,
-      30_000,
+      0,
       MAX_TIMEOUT_MS
     );
+    let timer: NodeJS.Timeout | undefined;
     let child: ReturnType<typeof crossSpawn>;
     try {
       child = crossSpawn(command, args, {
@@ -193,11 +209,16 @@ function runCaptured(
       finish({ started, code, timedOut: false, output });
     });
 
-    const timer = setTimeout(() => {
-      void killTree(child).finally(() =>
-        finish({ started, code: null, timedOut: true, output })
-      );
-    }, timeoutMs);
+    // Optional wall timer. Disabled entirely when timeoutMs is 0, so a large
+    // full decompile is never killed by an artificial cap - Stop aborts the
+    // passed-in signal instead.
+    if (timeoutMs > 0 && timeoutMs < Number.MAX_SAFE_INTEGER) {
+      timer = setTimeout(() => {
+        void killTree(child).finally(() =>
+          finish({ started, code: null, timedOut: true, output })
+        );
+      }, timeoutMs);
+    }
   });
 }
 
@@ -304,9 +325,13 @@ function normaliseFocusTerms(terms: string[] | undefined): string[] {
 }
 
 function focusProfile(terms: string[], focusedOnly: boolean): string {
-  // Versioned so the old focused-mode "success with zero functions" cache is
-  // never reused after fallback/validation behavior changes.
-  return `analysis-v3:${focusedOnly ? "focused" : "full"}:${terms
+  // Versioned so old results never outlive the script that produced them.
+  // v6 streams memory scans in fixed windows instead of allocating one block
+  // per byte[] (which OOM-killed Ghidra headlessly on huge client.dll files),
+  // flushes output per function so a SIGKILL at the timeout keeps partial
+  // decompilation rather than an empty directory, and raises the per-function
+  // timeout for large routines.
+  return `analysis-v8:${focusedOnly ? "focused" : "full"}:${terms
     .map((term) => term.toLowerCase())
     .sort()
     .join("|")}`;
@@ -598,18 +623,22 @@ async function runGhidra(
   await fs.rm(projectDir, { recursive: true, force: true });
   await fs.mkdir(projectDir, { recursive: true });
   const scriptDir = path.resolve(process.cwd(), "scripts", "ghidra");
+  // Parallel analysis. The old default capped at 4 cores even on big
+  // machines; raising it makes auto-analysis of large binaries much faster
+  // (it is highly parallel) without changing what is reported.
+  const cpus = os.availableParallelism?.() ?? os.cpus().length;
   const maxCpu = numberEnv(
     "APIM_BINARY_MAX_CPU",
-    Math.max(1, Math.min(4, (os.availableParallelism?.() ?? os.cpus().length) - 1)),
+    Math.max(1, Math.min(16, cpus - 1)),
     1,
-    16
+    64
   );
   const defaultAnalysisMs =
     inspection.packing.status === "likely"
-      ? 90_000
+      ? 15 * 60_000
       : inspection.bytes <= 10 * 1024 * 1024
-        ? 120_000
-        : 180_000;
+        ? 10 * 60_000
+        : 30 * 60_000;
   const analysisTimeoutMs = numberEnv(
     "APIM_GHIDRA_ANALYSIS_TIMEOUT_MS",
     defaultAnalysisMs,
@@ -627,6 +656,10 @@ async function runGhidra(
     "-max-cpu",
     String(maxCpu),
     "-deleteProject",
+    // Pre-script disables the heavy analyzers whose results we never surface
+    // (Decompiler Parameter ID decompiles every function during import).
+    "-preScript",
+    "ApimAnalysisOptions.java",
     "-scriptPath",
     scriptDir,
     "-postScript",

@@ -64,6 +64,16 @@ import type { TranscriptMessage } from "@/lib/transcript";
 import { pruneTranscript } from "@/lib/prune";
 import { compactTranscript, compactForResume } from "@/lib/compact";
 import { readLessons, applyLessons, formatLessonsForPrompt } from "@/lib/lessons";
+import {
+  readBinaryLedger,
+  formatBinaryLedgerForPrompt,
+  replaceBinaryLedger,
+} from "@/lib/binary-ledger";
+import {
+  readFindings,
+  formatFindingsForPrompt,
+  replaceFindings,
+} from "@/lib/findings";
 import { runRefine } from "@/lib/refine";
 import { beginRun, endRun } from "@/lib/runs";
 import { listProcesses, isRunning } from "@/lib/processes";
@@ -817,11 +827,11 @@ export async function POST(req: NextRequest) {
         const hasBrowser = workspaceEnabled ? await browserAvailable() : false;
 
         const workspaceInstruction = workspaceEnabled
-          ? `\n\nYou have a workspace on the user's machine and tools to work in it. Prefer creating real files over printing code in chat: the user wants working files, not snippets to copy. List or read before editing so your replacements match exactly.\n\nYou can also run code with run_command. After writing something runnable, run it and check the output rather than assuming it works. If it fails, read the error, fix the file, and run it again. Each command needs the user's approval, so keep them few and purposeful, and say briefly why in the reason field. There is no shell. run_command waits for the program to finish, so use it only for things that exit — scripts, tests, installs. You can install packages: pip install and npm install both work and go into this workspace, not the user's system, so install what you need rather than rewriting code to avoid a dependency. For anything that keeps running, such as a dev server or a watcher, use start_process instead: it returns straight away, and you can read its output with read_process and stop it with stop_process. Always stop what you started once you are done with it. Before anything that takes more than two or three actions, call make_plan: write down what finished looks like and the steps to get there, including how you will CHECK each one. On a long task your own reasoning from twenty rounds ago is gone, so without a written plan you will forget requirements from the first message and stop early because the work so far looks finished. Keep it current with update_plan — a step is only done when you can say how you verified it.
+          ? `\n\nYou have a workspace on the user's machine and tools to work in it. Prefer creating real files over printing code in chat: the user wants working files, not snippets to copy. List or read before editing so your replacements match exactly.\n\nYou can also run code with run_command. After writing something runnable, run it and check the output rather than assuming it works. If it fails, read the error, fix the file, and run it again. Each command needs the user's approval, so keep them few and purposeful, and say briefly why in the reason field. There is no shell. run_command waits for the program to finish, so use it only for things that exit — scripts, tests, installs. You can install packages: pip install and npm install both work and go into this workspace, not the user's system, so install what you need rather than rewriting code to avoid a dependency. For anything that keeps running, such as a dev server or a watcher, use start_process instead: it returns straight away, and you can read its output with read_process and stop it with stop_process. Always stop what you started once you are done with it. Before anything that takes more than two or three actions, call make_plan: write down what finished looks like and the steps to get there, including how you will CHECK each one. On a long task your own reasoning from twenty rounds ago is gone, so without a written plan you will forget requirements from the first message and stop early because the work so far looks finished. When you work something out that a later turn would need - why an approach is dead, what a function actually does, which build or file is correct and why - call note_finding immediately instead of waiting; those conclusions are shown to you every turn and survive compaction, so you stop re-reading your own reports to rediscover them. Keep it current with update_plan — a step is only done when you can say how you verified it.
 
-Work to the end. Do not hand back a half-finished task with a summary that reads as if it is complete: if something cannot be done, say so plainly and say why. Check your own work before claiming it works — run the tests, call the endpoint, open the page.
+Work to the end. Do not hand back a half-finished task with a summary that reads as if it is complete: if something cannot be done, say so plainly and say why. Check your own work before claiming it works — run the tests, call the endpoint, open the page. To compile or build anything, call build_project instead of typing msbuild/cmake/dotnet/cargo yourself: it finds the installed Visual Studio/MSBuild/compiler automatically (including vswhere), restores packages, builds Release x64 by default, and hands you the compiler errors so you can fix them and rebuild.
 
-Ask before you build the wrong thing. If a choice would change what you produce and you cannot settle it by reading a file or looking it up, call ask_user — one question up front is far cheaper than twenty rounds of work in the wrong direction, and the user would rather be asked than handed something they have to throw away. Ask early, while the work is cheap to redo, not after you have committed to an approach. Offer concrete options with a sensible default so it is one click. Do not ask about things you can find out yourself, and do not ask the same thing twice. When you are done, briefly say what you changed and whether it ran.\n\nUse search_files to find where something lives rather than opening files one at a time, and read_files when you already know you need several — each separate call costs a whole round.\n\nYou can also look at the live web. When a task depends on what is actually on a page — its markup, its data, its exact wording — fetch it rather than reasoning from memory. Before writing anything that targets a site, such as a content script, a userscript or a scraper, call inspect_page on the real URL and use the ids and classes it returns. Never invent a selector you have not seen: a plausible-looking one that does not exist produces code that runs and does nothing, which is worse than admitting you need to look. Use fetch_url to read a page, fetch_url with raw for its HTML, and download_file to save something from a URL straight into the workspace. ${canSearch ? "When you hit something you do not know — an unfamiliar error, a library's current API — use web_search rather than guessing, because a wrong assumption compounds over every round after it. One web_search costs several model calls of its own, so make the query specific and read what comes back before searching again." : "There is no web_search in this workspace — no Tavily key is set in Settings. fetch_url still works if you already know the URL. When you genuinely do not know something and cannot look it up, say so instead of guessing, and name what you would have searched for."}\n\nIf an edit turns out to be wrong, undo_file puts that file back exactly as it was; reverting is safer than patching your own mistake. restore_snapshot rolls the whole workspace back to a restore point, which is a much larger step — list_snapshots first, and say what you are undoing before you do it. read_document opens PDF, Word, Excel, PowerPoint, EPUB and ODT files, which read_file cannot. inspect_binary statically reads Windows EXEs/DLLs without executing them. Select only the layers the request needs: analyses:["decompile"] to test Ghidra/ILSpy, ["strings"] for a strings dump, ["entropy"], ["carve"], ["dependencies"], or ["capa"] for those individual jobs, and ["all"] only when the user asks to check everything. Omitted analyses means a cheap summary, not everything. write_files creates several files in one call, which is worth using whenever you are scaffolding.\n\nBatch the changes that belong together. move_file renames in one step instead of read-write-delete. edit_files applies several replacements at once, across one file or many. replace_in_files changes the same text everywhere it appears, which is what you want for renaming a function or an import path — doing that file by file costs a round each. When a string might occur somewhere you did not intend, run it with preview first and read the list before committing.${
+Ask before you build the wrong thing. If a choice would change what you produce and you cannot settle it by reading a file or looking it up, call ask_user — one question up front is far cheaper than twenty rounds of work in the wrong direction, and the user would rather be asked than handed something they have to throw away. Ask early, while the work is cheap to redo, not after you have committed to an approach. Offer concrete options with a sensible default so it is one click. Do not ask about things you can find out yourself, and do not ask the same thing twice. When you are done, briefly say what you changed and whether it ran.\n\nUse search_files to find where something lives rather than opening files one at a time, and read_files when you already know you need several — each separate call costs a whole round.\n\nYou can also look at the live web. When a task depends on what is actually on a page — its markup, its data, its exact wording — fetch it rather than reasoning from memory. Before writing anything that targets a site, such as a content script, a userscript or a scraper, call inspect_page on the real URL and use the ids and classes it returns. Never invent a selector you have not seen: a plausible-looking one that does not exist produces code that runs and does nothing, which is worse than admitting you need to look. Use fetch_url to read a page, fetch_url with raw for its HTML, and download_file to save something from a URL straight into the workspace. ${canSearch ? "When you hit something you do not know — an unfamiliar error, a library's current API — use web_search rather than guessing, because a wrong assumption compounds over every round after it. One web_search costs several model calls of its own, so make the query specific and read what comes back before searching again." : "There is no web_search in this workspace — no Tavily key is set in Settings. fetch_url still works if you already know the URL. When you genuinely do not know something and cannot look it up, say so instead of guessing, and name what you would have searched for."}\n\nIf an edit turns out to be wrong, undo_file puts that file back exactly as it was; reverting is safer than patching your own mistake. restore_snapshot rolls the whole workspace back to a restore point, which is a much larger step — list_snapshots first, and say what you are undoing before you do it. read_document opens PDF, Word, Excel, PowerPoint, EPUB and ODT files, which read_file cannot. inspect_binary statically reads Windows EXEs/DLLs without executing them. Select only the layers the request needs: analyses:["decompile"] to test Ghidra/ILSpy, ["strings"] for a strings dump, ["entropy"], ["carve"], ["dependencies"], or ["capa"] for those individual jobs, and ["all"] only when the user asks to check everything. Omitted analyses means a cheap summary, not everything. Decompiling is expensive and its artifacts persist on disk; the system message lists every executable already analyzed in this workspace with its hash and artifact paths - if the binary you need is already there, read those artifacts with read_file instead of running inspect_binary again, and never re-decompile the same hash unless the user asks you to. The moment you reach a conclusion about a binary - which one works, what is flawed, where the good build is, what a hook actually does - call note_binary so that verdict survives Stop and compaction instead of being paid for twice. write_files creates several files in one call, which is worth using whenever you are scaffolding.\n\nBatch the changes that belong together. move_file renames in one step instead of read-write-delete. edit_files applies several replacements at once, across one file or many. replace_in_files changes the same text everywhere it appears, which is what you want for renaming a function or an import path — doing that file by file costs a round each. When a string might occur somewhere you did not intend, run it with preview first and read the list before committing.${
               visionApiKey
                 ? " You can also view_image to look at a screenshot or mockup saved in the workspace."
                 : ""
@@ -854,6 +864,37 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           }
         }
         const lessonsBlock = formatLessonsForPrompt(existingLessons);
+
+        // Durable record of executables already inspected/decompiled in this
+        // workspace, plus any verdict the agent recorded. Survives Stop and
+        // compaction so the next message cannot re-run Ghidra on a hash it
+        // already spent minutes on. Unlike the lessons file this is
+        // machine-maintained on every inspect_binary call, so it updates even
+        // when the user pressed Stop (which deliberately skips lesson refine).
+        let binaryLedgerBlock = "";
+        if (workspaceEnabled) {
+          try {
+            binaryLedgerBlock = formatBinaryLedgerForPrompt(
+              await readBinaryLedger(workspace)
+            );
+          } catch (e) {
+            console.error("Could not read binary ledger:", e);
+          }
+        }
+
+        // Established conclusions, separate from the binary record. This is
+        // the durable memory that stops the model re-deriving an answer it
+        // worked out three turns ago ("oh yeah, that is the way!"). Read once
+        // per request and refreshed in place on resume, the same as the
+        // binary ledger, so it survives Stop and compaction.
+        let findingsBlock = "";
+        if (workspaceEnabled) {
+          try {
+            findingsBlock = formatFindingsForPrompt(await readFindings(workspace));
+          } catch (e) {
+            console.error("Could not read findings:", e);
+          }
+        }
 
 
         /*
@@ -888,6 +929,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               searchSummary +
               clarifyInstruction +
               workspaceInstruction +
+              binaryLedgerBlock +
+              findingsBlock +
               lessonsBlock,
           },
         ];
@@ -1224,6 +1267,55 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   `work — follow it:\n${resumeNote.trim()}`
                 : ""),
           });
+
+          // Refresh the binary ledger. The saved first system message carries
+          // a snapshot taken when the interrupted reply STARTED, before any
+          // of its inspect_binary calls ran, so on resume it would tell the
+          // model nothing was analyzed yet and it would re-decompile every
+          // DLL. Replace that block in place with the current ledger from
+          // disk, where every completed inspection has already been recorded.
+          try {
+            const fresh = formatBinaryLedgerForPrompt(
+              await readBinaryLedger(workspace)
+            );
+            if (fresh) {
+              for (let i = 0; i < transcript.length; i++) {
+                const m = transcript[i];
+                if (m.role === "system" && typeof m.content === "string") {
+                  const updated = replaceBinaryLedger(m.content, fresh);
+                  if (updated !== m.content) {
+                    transcript[i] = { ...m, content: updated };
+                    break;
+                  }
+                }
+              }
+            }
+          } catch (e) {
+            console.error("Could not refresh binary ledger on resume:", e);
+          }
+
+          // Refresh findings the same way: conclusions recorded during the
+          // interrupted run are on disk but absent from the replayed first
+          // system message, which froze the (empty) block at request start.
+          try {
+            const fresh = formatFindingsForPrompt(
+              await readFindings(workspace)
+            );
+            if (fresh) {
+              for (let i = 0; i < transcript.length; i++) {
+                const m = transcript[i];
+                if (m.role === "system" && typeof m.content === "string") {
+                  const updated = replaceFindings(m.content, fresh);
+                  if (updated !== m.content) {
+                    transcript[i] = { ...m, content: updated };
+                    break;
+                  }
+                }
+              }
+            }
+          } catch (e) {
+            console.error("Could not refresh findings on resume:", e);
+          }
 
           await refreshFileTree();
         }

@@ -40,7 +40,13 @@ import type { TranscriptMessage } from "@/lib/transcript";
  * 80 is sized for the model actually in use. DeepSeek v4 has a 1M-token
  * window; eighty reads of a few thousand characters is a few percent of it.
  */
-export const KEEP_VERBATIM_RESULTS = 80;
+// How many of the MOST RECENT tool results stay verbatim. Everything older
+// is eligible for collapse. This was 80, which is what made long reverse-
+// engineering runs cost a fortune: a single decompiled .c is 100k+ chars and
+// 80 of them resent every round is millions of tokens. Eight recent results
+// is plenty for what the model is actively working on; older large outputs
+// are collapsed to a preview below.
+export const KEEP_VERBATIM_RESULTS = 8;
 
 /**
  * Only results above this size are worth collapsing.
@@ -48,7 +54,10 @@ export const KEEP_VERBATIM_RESULTS = 80;
  * A short "wrote 12 lines" confirmation is already smaller than the
  * placeholder that would replace it.
  */
-export const MIN_COLLAPSE_CHARS = 400;
+// Anything larger than this in an older tool result gets collapsed. Kept low
+// so a single big read/decompile/inspect_binary stops being re-billed on
+// every later round.
+export const MIN_COLLAPSE_CHARS = 1_500;
 
 /**
  * Leave the transcript alone until it is actually large.
@@ -66,7 +75,12 @@ export const MIN_COLLAPSE_CHARS = 400;
  * whole transcript is sent verbatim, which is what makes "read all of these
  * and compare them" work at all.
  */
-export const PRUNE_THRESHOLD_CHARS = 900_000;
+// Start pruning as soon as the transcript is non-trivial. The old 900k char
+// threshold meant pruning only switched on after ~250k tokens had already
+// accumulated - by then every round was re-sending giant decompiles. With
+// the aggressive collapse below, pruning early is safe: small/recent results
+// are preserved, only old LARGE outputs become previews.
+export const PRUNE_THRESHOLD_CHARS = 24_000;
 
 export interface PruneStats {
   /** Tool results replaced with a placeholder. */
@@ -113,13 +127,32 @@ function toolNameFor(
  * status, or the start of an error — plus the size so the model knows how
  * much it is choosing not to look at.
  */
+/**
+ * A collapsed tool result still carries enough to be useful without being
+ * re-billed in full: its size, the first non-trivial line(s), and any file
+ * paths or "VERDICT:" lines it mentioned. A 100k-char decompile becomes a
+ * 600-char pointer, but the model can still see which file it was and what
+ * it concluded - which is what stops it re-reading the same file.
+ */
 function placeholder(name: string, content: string): string {
   const lines = content.split("\n");
-  const firstMeaningful = lines.find((l) => l.trim().length > 0) ?? "";
-  const head = firstMeaningful.slice(0, 120).trim();
+  const meaningful = lines.filter((l) => l.trim().length > 0);
+  const head = meaningful.slice(0, 3).map((l) => l.trim().slice(0, 160)).join(" | ");
+  const paths = Array.from(
+    new Set(
+      (content.match(/[\w./\\-]+\.(?:c|cpp|h|hpp|cs|ts|js|py|json|md|txt|sln|vcxproj|dll|exe)\b/gi) ?? [])
+        .slice(0, 6)
+    )
+  ).join(", ");
+  const verdict = meaningful.find((l) => /verdict|conclusion|found|proves?|^- \[/.test(l))?.trim().slice(0, 200);
 
-  const detail = head ? ` — ${head}` : "";
-  return `[earlier ${name} result, ${lines.length} lines / ${content.length} chars, collapsed to save context${detail}. Call the tool again if you need the full output.]`;
+  const bits = [
+    `${lines.length} lines / ${content.length} chars`,
+    head ? `starts: ${head}` : "",
+    paths ? `files: ${paths}` : "",
+    verdict ? `note: ${verdict}` : "",
+  ].filter(Boolean);
+  return `[earlier ${name} result collapsed to save context — ${bits.join("; ")}. Re-run the tool or read the listed file if you need the full text.]`;
 }
 
 /**

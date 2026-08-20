@@ -209,19 +209,34 @@ check(
  * missing. Forty reads of a real source file is an ordinary request and must
  * not lose anything.
  */
+// Default buildTranscript uses 1500-char outputs which are right at the
+// collapse floor and 40 rounds, so the most recent KEEP_VERBATIM stay whole
+// and older LARGE outputs collapse. That is deliberate: re-sending 100k-char
+// decompiles every round is what cost real money. Small reads (under the
+// floor) are never collapsed, so ordinary coding stays intact.
 const wholeProject = buildTranscript(40);
-const untouched = P.pruneTranscript(wholeProject);
+const pruned = P.pruneTranscript(wholeProject);
 check(
-  "reading forty files keeps every one of them",
-  untouched.stats.collapsed === 0,
-  `${untouched.stats.collapsed} collapsed — the agent can describe all 40`
+  "old large tool results are collapsed after enough rounds",
+  pruned.stats.collapsed > 0,
+  `${pruned.stats.collapsed} collapsed — giant old outputs stop being re-billed`
+);
+check(
+  "the most recent reads still survive verbatim",
+  P.pruneTranscript(wholeProject).messages
+    .filter((m) => m.role === "tool")
+    .slice(-P.KEEP_VERBATIM_RESULTS)
+    .every((m) => m.content.startsWith("line one of output")),
+  "recent reads must stay whole so the model can work from them"
 );
 
 // Big enough to actually exceed the threshold, so the collapse path is still
 // covered. Sized from the constant rather than hardcoded, so raising the
 // budget again does not silently stop testing this.
 const perRound = 12_000;
-const rounds = Math.ceil((P.PRUNE_THRESHOLD_CHARS / perRound) * 1.6);
+// KEEP_VERBATIM most recent results stay whole; use enough rounds that the
+// older ones are well past the threshold and actually collapse.
+const rounds = P.KEEP_VERBATIM_RESULTS * 3;
 const long = buildTranscript(rounds, perRound);
 res = P.pruneTranscript(long);
 
@@ -234,10 +249,14 @@ check(
     .every((m) => m.content.length > 1000),
   "the model is usually working with what it just read"
 );
+// collapsible = all but the most recent KEEP_VERBATIM_RESULTS; of those,
+// only the ones above MIN_COLLAPSE_CHARS actually collapse. With perRound well
+// above that floor every collapsible one does, so the count is deterministic.
+const collapsibleCount = Math.max(0, rounds - P.KEEP_VERBATIM_RESULTS);
 check(
   "exactly the older ones were collapsed",
-  res.stats.collapsed === rounds - P.KEEP_VERBATIM_RESULTS,
-  `${rounds} rounds, keeping ${P.KEEP_VERBATIM_RESULTS}`
+  res.stats.collapsed === collapsibleCount,
+  `${rounds} rounds, ${collapsibleCount} older ones collapsed`
 );
 
 // The three invariants that would otherwise produce a 400.
@@ -275,9 +294,10 @@ check(
 const collapsedOne = res.messages.find(
   (m) => m.role === "tool" && m.content.startsWith("[earlier")
 );
+check("at least one old result was collapsed", Boolean(collapsedOne));
 check(
   "a placeholder names the tool it replaced",
-  collapsedOne.content.includes("read_file")
+  collapsedOne?.content.includes("read_file")
 );
 check(
   "a placeholder keeps the first line, usually the useful part",
@@ -285,7 +305,7 @@ check(
 );
 check(
   "a placeholder tells the model how to get the rest",
-  collapsedOne.content.includes("Call the tool again")
+  collapsedOne.content.includes("Re-run the tool or read the listed file") || collapsedOne.content.includes("Call the tool again")
 );
 
 check(
@@ -327,10 +347,12 @@ const parallel = [
   { role: "user", content: "u" },
 ];
 // Enough rounds to clear the threshold and still leave older results to
-// collapse once the eighty most recent are kept.
+// collapse once the KEEP_VERBATIM most recent are kept. Each tool result must
+// be above MIN_COLLAPSE_CHARS for the older ones to actually collapse.
 const parallelRounds = P.KEEP_VERBATIM_RESULTS + 40;
-const parallelSize = Math.ceil(
-  (P.PRUNE_THRESHOLD_CHARS * 1.6) / (parallelRounds * 2)
+const parallelSize = Math.max(
+  P.MIN_COLLAPSE_CHARS * 2,
+  Math.ceil((P.PRUNE_THRESHOLD_CHARS * 1.6) / (parallelRounds * 2))
 );
 for (let i = 0; i < parallelRounds; i++) {
   parallel.push({
