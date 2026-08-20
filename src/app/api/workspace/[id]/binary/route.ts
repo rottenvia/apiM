@@ -9,8 +9,10 @@ export const dynamic = "force-dynamic";
  *
  * Text attachments can be decoded in the browser and sent inline. Doing that
  * to an EXE corrupts it and base64-inlining tens of megabytes into a chat is
- * worse. Multipart keeps the bytes exact and puts them where inspect_binary
- * can read them. The target is stored, never launched.
+ * worse. Large binaries are uploaded as a raw octet-stream (the destination
+ * path is passed in the X-Binary-Path header) to avoid Next.js' multipart
+ * parser failing on large bodies; the legacy multipart path is still accepted.
+ * The target is stored, never launched.
  */
 export async function POST(
   req: NextRequest,
@@ -18,29 +20,75 @@ export async function POST(
 ) {
   try {
     const { id } = await params;
-    const form = await req.formData();
-    const file = form.get("file");
-    const target = form.get("path");
+    const contentType = req.headers.get("content-type") ?? "";
 
-    if (!(file instanceof File) || typeof target !== "string" || !target.trim()) {
-      return NextResponse.json(
-        { error: "file and path are required" },
-        { status: 400 }
-      );
-    }
-    if (file.size > MAX_BINARY_ANALYSIS_BYTES) {
-      return NextResponse.json(
-        {
-          error:
-            `${file.name} is ${(file.size / 1024 / 1024).toFixed(1)}MB; ` +
-            `executable uploads are capped at ${MAX_BINARY_ANALYSIS_BYTES / 1024 / 1024}MB.`,
-        },
-        { status: 413 }
-      );
+    let filename: string;
+    let target: string;
+    let bytes: Uint8Array;
+
+    if (contentType.includes("multipart/form-data")) {
+      // Legacy/compat path. formData() can fail on very large bodies in some
+      // runtimes; the UI uses the octet-stream path below for big files.
+      const form = await req.formData();
+      const file = form.get("file");
+      const pathValue = form.get("path");
+      if (!(file instanceof File) || typeof pathValue !== "string" || !pathValue.trim()) {
+        return NextResponse.json(
+          { error: "file and path are required" },
+          { status: 400 }
+        );
+      }
+      filename = file.name;
+      target = pathValue;
+      if (file.size > MAX_BINARY_ANALYSIS_BYTES) {
+        return NextResponse.json(
+          {
+            error:
+              `${file.name} is ${(file.size / 1024 / 1024).toFixed(1)}MB; ` +
+              `executable uploads are capped at ${MAX_BINARY_ANALYSIS_BYTES / 1024 / 1024}MB.`,
+          },
+          { status: 413 }
+        );
+      }
+      bytes = new Uint8Array(await file.arrayBuffer());
+    } else {
+      // Raw bytes. Content-Length is used to reject oversize uploads early.
+      target = decodeURIComponent(
+        req.headers.get("x-binary-path") ?? ""
+      ).trim();
+      filename = target.split(/[\\/]/).pop() ?? "binary";
+      if (!target) {
+        return NextResponse.json(
+          { error: "X-Binary-Path header is required" },
+          { status: 400 }
+        );
+      }
+      const declared = Number(req.headers.get("content-length") ?? "0");
+      if (declared > MAX_BINARY_ANALYSIS_BYTES) {
+        return NextResponse.json(
+          {
+            error:
+              `${filename} is ${(declared / 1024 / 1024).toFixed(1)}MB; ` +
+              `executable uploads are capped at ${MAX_BINARY_ANALYSIS_BYTES / 1024 / 1024}MB.`,
+          },
+          { status: 413 }
+        );
+      }
+      const buf = Buffer.from(await req.arrayBuffer());
+      if (buf.byteLength > MAX_BINARY_ANALYSIS_BYTES) {
+        return NextResponse.json(
+          {
+            error:
+              `${filename} is ${(buf.byteLength / 1024 / 1024).toFixed(1)}MB; ` +
+              `executable uploads are capped at ${MAX_BINARY_ANALYSIS_BYTES / 1024 / 1024}MB.`,
+          },
+          { status: 413 }
+        );
+      }
+      bytes = buf;
     }
 
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    assertPeUpload(bytes, file.name);
+    assertPeUpload(bytes, filename);
     const written = await writeFileBytes(id, target, Buffer.from(bytes));
     return NextResponse.json({
       path: written.path,
