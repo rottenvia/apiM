@@ -341,12 +341,17 @@ export function ChatArea({
             `the per-executable limit is ${MAX_PE_UPLOAD_BYTES / 1024 / 1024}MB`,
         };
       }
-      const body = new FormData();
-      body.set("path", target);
-      body.set("file", file, file.name);
+      // Upload the raw bytes with the destination path in a header, instead
+      // of multipart/form-data. Next.js' formData() parser fails on very
+      // large bodies ("Failed to parse body as FormData"); a raw octet-stream
+      // avoids that whole path.
       const response = await fetch(`/api/workspace/${workspaceId}/binary`, {
         method: "POST",
-        body,
+        headers: {
+          "Content-Type": "application/octet-stream",
+          "X-Binary-Path": encodeURIComponent(target),
+        },
+        body: file,
       });
       const saved = (await response.json().catch(() => ({}))) as {
         path?: string;
