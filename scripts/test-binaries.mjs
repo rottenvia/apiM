@@ -481,7 +481,7 @@ await fs.writeFile(
   JSON.stringify({
     hash,
     engine: "ghidra",
-    profile: "analysis-v3:full:",
+    profile: "analysis-v8:full:",
     complete: true,
   })
 );
@@ -928,6 +928,47 @@ check(
     /focus miss triggered full fallback/.test(ghidraScript)
 );
 check(
+  "Ghidra recovers undefined strings so auto-analysis gaps cannot hide xrefs",
+  /scanUndefinedStrings/.test(ghidraScript) &&
+    /DataUtilities\.createData/.test(ghidraScript) &&
+    /CLEAR_ALL_UNDEFINED_CONFLICT_DATA/.test(ghidraScript) &&
+    /Undefined strings recovered/.test(ghidraScript) &&
+    /isScannable/.test(ghidraScript)
+);
+check(
+  "Ghidra reads memory through the Memory interface, not MemoryBlock.getBytes(...,monitor)",
+  // MemoryBlock has no getBytes(Address,byte[],int,int,TaskMonitor) overload;
+  // that 4-arg monitored read lives on Memory. The old call compiled in no
+  // environment and made the whole post-script fail to load under real
+  // Ghidra, which looked like a broken decompiler.
+  /currentProgram\.getMemory\(\)/.test(ghidraScript) &&
+    /memory\.getBytes\(/.test(ghidraScript) &&
+    !/block\.getBytes\([^)]*monitor/.test(ghidraScript)
+);
+check(
+  "Ghidra streams large memory blocks in windows instead of one giant byte[]",
+  // A 100MB .rdata must not become one 100MB byte[] (it OOMs the JVM
+  // headlessly on large game DLLs). Fixed windows with overlap straddle
+  // boundaries without loading the whole block.
+  /SCAN_WINDOW/.test(ghidraScript) &&
+    /SCAN_OVERLAP/.test(ghidraScript) &&
+    /scanWindow/.test(ghidraScript)
+);
+check(
+  "Ghidra flushes output per function so a timeout keeps partial results",
+  /flushAllOutputs/.test(ghidraScript) &&
+    /indexWriter\.flush/.test(ghidraScript) &&
+    /decompileFunction\(function, decompileTimeout/.test(ghidraScript) &&
+    /DECOMPILE_TIMEOUT_SECONDS = 300/.test(ghidraScript)
+);
+check(
+  "Ghidra emits raw disassembly when a focused function fails to decompile",
+  /disassemble\(/.test(ghidraScript) &&
+    /getInstructions\(/.test(ghidraScript) &&
+    /Raw disassembly fallback/.test(ghidraScript) &&
+    /Decompilation failed/.test(ghidraScript)
+);
+check(
   "the tool defaults to CreateMove and IN_JUMP focus",
   /\["CreateMove", "IN_JUMP"\]/.test(
     await fs.readFile(path.join(ROOT, "src/lib/tools.ts"), "utf8")
@@ -944,6 +985,122 @@ check(
       ["inspect_binary"]
     ) === null
 );
+
+console.log("\n8. The binary ledger stops re-decompilation after Stop/compaction");
+const BL = await load("src/lib/binary-ledger.ts");
+const ledgerWs = "binary-ledger-test";
+await fs.rm(path.join(DATA_ROOT, "workspaces", ledgerWs), { recursive: true, force: true });
+await W.writeFileBytes(
+  ledgerWs,
+  "uploads/binaries/ledger.exe",
+  Buffer.from(makePe())
+);
+// Fake ghidra that completes, so a deep run counts as a real attempt.
+await fs.writeFile(
+  fakeGhidraScript,
+  `const fs=require('fs'); const path=require('path');\n` +
+    `const at=process.argv.indexOf('ApimDecompile.java'); const out=process.argv[at+1];\n` +
+    `fs.mkdirSync(out,{recursive:true});\n` +
+    `fs.writeFileSync(path.join(out,'functions.tsv'),'address\\tname\\n1000\\tentry\\n');\n` +
+    `fs.writeFileSync(path.join(out,'focused-functions.c'),'void entry(void){}\\n');\n` +
+    `fs.writeFileSync(path.join(out,'summary.txt'),'Functions decompiled: 1\\n');\n`
+);
+process.env.APIM_GHIDRA_HOME = fakeGhidra;
+const ledgerInspect = await B.inspectWorkspaceBinary(
+  ledgerWs,
+  "uploads/binaries/ledger.exe",
+  {
+    artifacts: false,
+    runCapa: false,
+    deep: true,
+    forceDeep: true,
+    dependencies: false,
+    includeStrings: false,
+  }
+);
+check(
+  "a deep inspection records one ledger entry with its outputs",
+  ledgerInspect.deep.status === "complete"
+);
+let ledger = await BL.readBinaryLedger(ledgerWs);
+let entry = Object.values(ledger.entries).find(
+  (e) => e.path === "uploads/binaries/ledger.exe"
+);
+check(
+  "the ledger entry records a real deep run and the artifact root",
+  Boolean(entry) &&
+    entry.deepRuns === 1 &&
+    entry.inspectCount === 1 &&
+    entry.deepStatus === "complete" &&
+    entry.outputs.some((o) => o.includes("focused-functions.c")),
+  JSON.stringify(entry && { deepRuns: entry.deepRuns, outputs: entry.outputs })
+);
+
+// A second, cached inspection must NOT count as another deep run.
+await B.inspectWorkspaceBinary(ledgerWs, "uploads/binaries/ledger.exe", {
+  artifacts: false,
+  runCapa: false,
+  deep: true,
+  dependencies: false,
+  includeStrings: false,
+});
+ledger = await BL.readBinaryLedger(ledgerWs);
+entry = Object.values(ledger.entries).find(
+  (e) => e.path === "uploads/binaries/ledger.exe"
+);
+check(
+  "a cached Ghidra hit does not bump deepRuns (no CPU was spent)",
+  entry.deepRuns === 1 && entry.inspectCount === 2,
+  JSON.stringify({ deepRuns: entry?.deepRuns, inspectCount: entry?.inspectCount })
+);
+
+// The ledger is injected into the system message and must be replaceable in
+// place on resume: a saved transcript freezes the ledger from BEFORE the
+// interrupted run decompiled anything, and replaying that stale block makes
+// the model re-run Ghidra.
+const staleSystem =
+  "stable instructions\n\n" +
+  "<binary-analysis-ledger>\nExecutables already analyzed...\n- old.dll stale\n</binary-analysis-ledger>\n" +
+  "more instructions";
+const freshBlock = BL.formatBinaryLedgerForPrompt(
+  await BL.readBinaryLedger(ledgerWs)
+);
+const replaced = BL.replaceBinaryLedger(staleSystem, freshBlock);
+check(
+  "a stale ledger block inside a saved system message is replaced, not duplicated",
+  replaced.includes("uploads/binaries/ledger.exe") &&
+    !replaced.includes("old.dll stale") &&
+    (replaced.match(/<binary-analysis-ledger>/g) || []).length === 1 &&
+    replaced.startsWith("stable instructions") &&
+    replaced.includes("more instructions"),
+  replaced.slice(0, 200)
+);
+check(
+  "replaceBinaryLedger appends when no block exists yet",
+  BL.replaceBinaryLedger("no ledger here", freshBlock).includes(
+    "uploads/binaries/ledger.exe"
+  )
+);
+
+// A verdict written by note_binary survives and is rendered in the prompt.
+const noted = await BL.noteBinaryInspection(ledgerWs, {
+  path: "uploads/binaries/ledger.exe",
+  note: "Works but CreateMove reads a stale cmd pointer; the good build is cleanroom_bhop.dll.",
+});
+check("note_binary attaches a verdict", noted.updated === 1 && noted.entry?.note);
+const promptBlock = BL.formatBinaryLedgerForPrompt(
+  await BL.readBinaryLedger(ledgerWs)
+);
+check(
+  "the prompt block names the binary, its deep-run count and the verdict",
+  /ledger\.exe/.test(promptBlock) &&
+    /1 deep run/.test(promptBlock) &&
+    /stale cmd pointer/.test(promptBlock) &&
+    /do not re-decompile/i.test(promptBlock),
+  promptBlock.slice(0, 400)
+);
+delete process.env.APIM_GHIDRA_HOME;
+await fs.rm(path.join(DATA_ROOT, "workspaces", ledgerWs), { recursive: true, force: true });
 
 await fs.rm(path.join(DATA_ROOT, "workspaces"), { recursive: true, force: true });
 await fs.rm(fakeGhidra, { recursive: true, force: true });

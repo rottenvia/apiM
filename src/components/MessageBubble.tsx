@@ -236,6 +236,14 @@ function MessageBubbleImpl({
    * A click still wins permanently through `userSetThinking` below.
    */
   const [startedLive] = useState(() => Boolean(message.isStreaming));
+  // Latches true once this bubble is observed streaming. Leaving/returning to
+  // the site and pressing Resume flips isStreaming to true on a bubble that
+  // mounted as a completed (non-live) message; without this the thinking
+  // panel never auto-opens for the continuation and the existing reasoning
+  // appears to vanish until manually expanded.
+  const wentLiveRef = useRef(startedLive);
+  if (message.isStreaming) wentLiveRef.current = true;
+  const wentLive = wentLiveRef.current;
   const [userSetThinking, setUserSetThinking] = useState<boolean | null>(null);
 
   /*
@@ -317,7 +325,7 @@ function MessageBubbleImpl({
    * reading. A historical bubble mounts with `startedLive === false`, so old
    * conversations remain compact until asked for.
    */
-  const autoOpen = Boolean(startedLive && hasThinking);
+  const autoOpen = Boolean(wentLive && hasThinking);
 
   const showThinking = userSetThinking ?? autoOpen;
   const setShowThinking = (next: boolean | ((v: boolean) => boolean)) =>

@@ -461,7 +461,7 @@ const total = WORKSPACE_TOOLS.length;
 const schemaChars = JSON.stringify(WORKSPACE_TOOLS).length;
 check(
   "the schemas are still a rounding error on the bill",
-  schemaChars / 3.6 < 8_000,
+  schemaChars / 3.6 < 9_000,
   `${total} tools, ~${Math.round(schemaChars / 3.6)} tokens, sent once and cached`
 );
 

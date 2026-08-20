@@ -18,6 +18,11 @@ import {
   formatBinaryInspection,
   inspectWorkspaceBinary,
 } from "@/lib/binaries";
+import { noteBinaryInspection } from "@/lib/binary-ledger";
+import {
+  addFinding,
+  reviseFinding,
+} from "@/lib/findings";
 import {
   fetchPage,
   downloadResource,
@@ -56,6 +61,7 @@ import {
   formatTestSummary,
 } from "@/lib/testing";
 import { runCommand } from "@/lib/runner";
+import { detectBuild, BuildError } from "@/lib/build";
 
 /**
  * Tool definitions exposed to the model, and the dispatcher that runs them.
@@ -867,6 +873,46 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "build_project",
+      description:
+        "Compile the workspace automatically using the installed toolchain - a Visual Studio solution (.sln/.vcxproj/.csproj), CMake, dotnet, npm, cargo, go, make, a Python package, or a single .cpp/.cs file. Finds MSBuild/your compiler itself (no vcvars, no flag guessing), restores NuGet/packages, builds Release x64 by default, and returns compiler errors so you can fix them without the user running anything. Prefer this over run_command for building.",
+      parameters: {
+        type: "object",
+        properties: {
+          config: {
+            type: "string",
+            enum: ["Release", "Debug"],
+            description: "Build configuration. Defaults to Release.",
+          },
+          platform: {
+            type: "string",
+            description:
+              "Target platform, e.g. x64 (default), Win32, Any CPU, ARM64.",
+          },
+          restore: {
+            type: "boolean",
+            description:
+              "Restore NuGet/packages before building. Defaults to true for MSBuild/dotnet.",
+          },
+          extra_args: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Additional raw arguments appended to the build command (e.g. ['/t:Rebuild', '/p:WarningLevel=0']).",
+          },
+          dry_run: {
+            type: "boolean",
+            description:
+              "If true, only report which command would run without executing it.",
+          },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "apply_patch",
       description:
         "Apply a unified diff to one file — the same format as `git diff`. Use this instead of edit_file when you are changing several separate places in one file: a patch carries its own line context, so it applies cleanly where a series of edits can drift as each one shifts the lines below it.",
@@ -1066,6 +1112,75 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "note_binary",
+      description:
+        "Record your verdict about an executable you inspected - works, " +
+        "flawed, where the good build is, what a hook does. Persists across " +
+        "messages and after Stop, and is shown every later turn, so you do " +
+        "not re-decompile the same DLL. Call it the moment you conclude; one " +
+        "short specific sentence.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Workspace path of the executable/DLL." },
+          note: {
+            type: "string",
+            description:
+              "The verdict, e.g. 'Works but CreateMove reads a stale cmd pointer; fixed build is cleanroom_bhop.dll.' Max 500 chars.",
+          },
+          sha256: {
+            type: "string",
+            description: "Optional hash (or 12-char prefix) pinning the note to one build.",
+          },
+        },
+        required: ["path", "note"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "note_finding",
+      description:
+        "Record a conclusion you reached so you do not re-derive or forget it in a later message after context is compacted. Use it for anything established by reading files, running commands, or decompiling: why an approach is dead, what a function actually does, which option works and why, what an error meant. One specific, factual line with the evidence. The finding is shown to you every later turn; if it turns out wrong, call note_finding again with status 'disproved'. Record findings as you go, not only at the end.",
+      parameters: {
+        type: "object",
+        properties: {
+          claim: {
+            type: "string",
+            description:
+              "The conclusion, one sentence. e.g. 'bar.dll is the correct build: its CreateMove reads the live cmd pointer, unlike foo.dll which reads a stale copy.'",
+          },
+          refs: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Files, functions, symbols or addresses this is about, e.g. ['bar.dll', 'CreateMove'] or ['src/hook.cpp:42'].",
+          },
+          evidence: {
+            type: "string",
+            description:
+              "What established it - a command, a file/line read, a decompiled function. Short.",
+          },
+          id: {
+            type: "string",
+            description:
+              "Id [f...] of an existing finding to correct. Provide this with status to mark it wrong instead of adding a new one.",
+          },
+          status: {
+            type: "string",
+            enum: ["active", "disproved"],
+            description:
+              "Use 'disproved' with an id to retire a prior finding; give the corrected claim in claim.",
+          },
+        },
+        required: ["claim"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "list_processes",
       description:
         "List the background processes you started, with their state and " +
@@ -1127,10 +1242,11 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
     function: {
       name: "download_file",
       description:
-        "Save the exact bytes from a URL straight into the workspace — PDFs, " +
-        "images, archives, datasets, or text. A downloaded PDF can be passed " +
-        "to read_document and an image to view_image. Use this instead of " +
-        "asking the user to download something and attach it.",
+        "Save the exact bytes from a URL straight into the workspace - up " +
+        "to 200MB by default (PDFs, images, archives, installers, DLLs, " +
+        "datasets). A downloaded PDF can be passed to read_document and an " +
+        "image to view_image. Use this instead of curl in run_command, and " +
+        "instead of asking the user to download and attach the file.",
       parameters: {
         type: "object",
         properties: {
@@ -1164,9 +1280,13 @@ export interface ToolResult {
 
 function str(args: Record<string, unknown>, key: string): string {
   const value = args[key];
-  if (typeof value !== "string") {
-    throw new WorkspaceError(`"${key}" must be a string`);
-  }
+  // An absent optional argument is "not given", not an error. Only a present
+  // value of a non-coercible type is a malformed call worth rejecting —
+  // otherwise every optional field (note_finding's id, note_binary's sha256)
+  // throws "must be a string" the first time the model omits it, costing a
+  // round.
+  if (value === undefined || value === null) return "";
+  if (typeof value !== "string") return String(value);
   return value;
 }
 
@@ -2512,6 +2632,111 @@ export async function runTool(
         };
       }
 
+      case "build_project": {
+        let plan;
+        try {
+          plan = await detectBuild(workspaceId, {
+            config: args.config === "Debug" ? "Debug" : "Release",
+            platform: typeof args.platform === "string" ? args.platform : undefined,
+            restore: typeof args.restore === "boolean" ? args.restore : undefined,
+            extraArgs: Array.isArray(args.extra_args)
+              ? args.extra_args.map((a) => String(a))
+              : undefined,
+            dryRun: args.dry_run === true,
+          });
+        } catch (error) {
+          return {
+            ok: false,
+            content:
+              error instanceof BuildError
+                ? error.message
+                : `Could not determine how to build: ${
+                    error instanceof Error ? error.message : "unknown error"
+                  }`,
+            summary: "No buildable project found",
+          };
+        }
+
+        const { runner, restore, target } = plan;
+        const argv = [runner.command, ...runner.args].join(" ");
+
+        if (args.dry_run === true) {
+          return {
+            ok: true,
+            content:
+              `Would build ${target.path || "the workspace"} using ` +
+              `${runner.name}.\n\nCommand: ${argv}\n\nReason: ${runner.reason}` +
+              (restore
+                ? `\n\nRestore first: ${[restore.command, ...restore.args].join(" ")}`
+                : ""),
+            summary: `Build plan: ${runner.name}`,
+          };
+        }
+
+        // Run restore first when separate (NuGet restore for MSBuild).
+        const logs: string[] = [];
+        if (restore) {
+          const r = await runCommand(
+            workspaceId,
+            restore.command,
+            restore.args,
+            context.signal,
+            // Restore can take a while on first run.
+            10 * 60 * 1000
+          );
+          logs.push(
+            `$ ${[restore.command, ...restore.args].join(" ")}` +
+              `\n[exit ${r.exitCode ?? "?"}${r.timedOut ? ", timed out" : ""}]\n` +
+              `${r.stdout}\n${r.stderr}`
+          );
+          if (r.exitCode !== 0) {
+            return {
+              ok: false,
+              content:
+                `Dependency restore failed (exit ${r.exitCode ?? "?"}) ` +
+                `before the build:\n\n${logs[0]}\n\nFix the error above and rebuild.`,
+              summary: "Restore failed",
+            };
+          }
+        }
+
+        const run = await runCommand(
+          workspaceId,
+          runner.command,
+          runner.args,
+          context.signal,
+          // Compiles can run long; no artificial cap here — the signal
+          // (Stop) is the only abort.
+          null
+        );
+
+        const combined =
+          (restore ? logs.join("\n\n") + "\n\n" : "") +
+          `$ ${argv}\n[exit ${run.exitCode ?? "?"}${
+            run.timedOut ? ", timed out" : ""
+          }]\n${run.stdout}\n${run.stderr}`;
+
+        return {
+          // A failed compile is a successful tool CALL (we asked to build
+          // and got the true result), same as run_tests: marking ok:false
+          // would route it through the error path and invite a blind retry.
+          ok: true,
+          content:
+            (run.exitCode === 0
+              ? `Build succeeded: ${runner.name}.\n\n`
+              : `Build FAILED (exit ${run.exitCode ?? "?"}). ` +
+                `Read the compiler errors below, fix them in the source, ` +
+                `and call build_project again.\n\n`) +
+            `Target: ${target.path || "(workspace)"}\n` +
+            `Command: ${argv}\n\n${combined}`.slice(0, 60_000),
+          summary:
+            run.exitCode === 0
+              ? `Built ${target.path || "workspace"} (${runner.name})`
+              : `Build failed: ${runner.name}`,
+          changedPath: "build",
+        };
+      }
+
       case "apply_patch": {
         const relative = str(args, "path");
         const patch = str(args, "patch");
@@ -2706,6 +2931,80 @@ export async function runTool(
               : ""),
           changedPath: result.artifacts.root ||
             result.deep.outputs[0]?.split("/").slice(0, 2).join("/"),
+        };
+      }
+
+      case "note_binary": {
+        const notePath = str(args, "path");
+        const noteText = str(args, "note");
+        if (!notePath || !noteText) {
+          return {
+            ok: false,
+            content: "note_binary requires path and note.",
+            summary: "Missing path or note",
+          };
+        }
+        const sha = str(args, "sha256");
+        const wrote = await noteBinaryInspection(workspaceId, {
+          path: notePath,
+          note: noteText,
+          ...(sha ? { sha256: sha } : {}),
+        });
+        return {
+          ok: wrote.updated > 0,
+          content:
+            wrote.updated > 0
+              ? `Verdict saved for ${notePath}. It will be shown in this workspace's binary analysis record on every later turn, so you will not need to re-inspect it to remember what you concluded.`
+              : `Could not save a verdict for ${notePath}.`,
+          summary: wrote.updated > 0 ? `Noted: ${notePath}` : "Note not saved",
+        };
+      }
+
+      case "note_finding": {
+        const claim = str(args, "claim");
+        if (!claim) {
+          return {
+            ok: false,
+            content: "note_finding requires a claim (the conclusion).",
+            summary: "Missing claim",
+          };
+        }
+        const id = str(args, "id");
+        const status = str(args, "status");
+        if (id && status === "disproved") {
+          const reason = str(args, "evidence") || "Corrected by later analysis.";
+          const revised = await reviseFinding(
+            workspaceId,
+            { id, reason, status: "disproved" },
+            {
+              claim,
+              refs: Array.isArray(args.refs)
+                ? args.refs.map((r) => String(r))
+                : undefined,
+              evidence: reason,
+            }
+          );
+          return {
+            ok: revised.updated,
+            content: revised.updated
+              ? `Finding ${id} marked disproved and replaced with the corrected conclusion. It will no longer steer later turns.`
+              : `No active finding with id ${id} was found to revise.`,
+            summary: revised.updated ? "Finding corrected" : "Finding not found",
+          };
+        }
+        const refs = Array.isArray(args.refs)
+          ? args.refs.map((r) => String(r))
+          : [];
+        const evidence = str(args, "evidence");
+        const finding = await addFinding(workspaceId, {
+          claim,
+          refs,
+          evidence,
+        });
+        return {
+          ok: true,
+          content: `Finding recorded [${finding.id}]. It will be shown on every later turn in this workspace so you do not re-derive it. If it turns out wrong, note_finding again with id=${finding.id} and status='disproved'.`,
+          summary: "Finding recorded",
         };
       }
 
