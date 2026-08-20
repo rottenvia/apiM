@@ -750,6 +750,7 @@ const CANNOT = new Map([
   ["apply_patch", "covered by test-tools3"],
   ["move_file", "covered by test-tools2"],
   ["undo_file", "covered by test-tools2"],
+  ["clear_memory", "covered by test-lessons"],
   ["read_files", "covered by test-hardening for ordering"],
   ["write_files", "covered by test-tools2"],
   ["replace_in_files", "covered by test-tools2"],

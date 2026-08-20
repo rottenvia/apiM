@@ -85,6 +85,79 @@ function looksBinary(buf: Buffer): boolean {
 }
 
 /**
+ * Extract printable strings from a binary buffer.
+ *
+ * This is what makes a 10-100MB binary affordable to inspect: a hex dump
+ * is ~3.2 characters per byte (a 46MB file would be 150MB of text and
+ * blow the context immediately), while the readable strings in a binary —
+ * imports, exports, function names, URLs, error messages, config keys — are
+ * usually a few hundred KB and contain nearly everything useful. It is the
+ * same thing `strings(1)` and Claude do.
+ *
+ * ASCII strings of at least `min` printable characters are returned, each
+ * capped to `maxLine` characters, up to `maxChars` total. A short UTF-16LE
+ * pass catches Windows wide strings (common in PE files).
+ */
+export function extractStrings(
+  buf: Buffer,
+  opts: { min?: number; maxChars?: number; maxLine?: number } = {}
+): { content: string; truncated: boolean; stringsFound: number } {
+  const min = opts.min ?? 5;
+  const maxChars = opts.maxChars ?? MAX_READ_CHARS;
+  const maxLine = opts.maxLine ?? 500;
+
+  const out: string[] = [];
+  let size = 0;
+  let truncated = false;
+  let stringsFound = 0;
+
+  const push = (s: string): boolean => {
+    if (s.length < min) return true;
+    const line = s.length > maxLine ? s.slice(0, maxLine) + "…" : s;
+    const add = line.length + 1;
+    if (size + add > maxChars) {
+      truncated = true;
+      return false;
+    }
+    out.push(line);
+    size += add;
+    stringsFound += 1;
+    return true;
+  };
+
+  // ASCII / UTF-8 run.
+  let run = "";
+  for (let i = 0; i < buf.length; i++) {
+    const b = buf[i];
+    if (b >= 0x20 && b < 0x7f) {
+      run += String.fromCharCode(b);
+    } else {
+      if (!push(run)) break;
+      run = "";
+    }
+  }
+  if (run !== "") push(run);
+
+  // UTF-16LE pass only if we have room and the buffer looks like it might
+  // contain wide strings (odd NUL pattern). Kept cheap: scan for printable
+  // ASCII in the even positions with NUL in the odd positions.
+  if (!truncated && buf.length >= 2) {
+    let w = "";
+    for (let i = 0; i + 1 < buf.length; i += 2) {
+      if (buf[i + 1] === 0 && buf[i] >= 0x20 && buf[i] < 0x7f) {
+        w += String.fromCharCode(buf[i]);
+      } else {
+        if (!push(w)) break;
+        w = "";
+      }
+    }
+    if (w !== "") push(w);
+  }
+
+  return { content: out.join("\n"), truncated, stringsFound };
+}
+
+/**
  * Render binary data as a hex + ASCII dump (the classic `xxd` layout).
  *
  * This is what lets the agent read a `.bin`, `.exe`, compiled object, or
@@ -821,15 +894,32 @@ export async function readFile(
   }
 
   // Read as bytes first so binary files are not corrupted by a UTF-8
-  // decode. A NUL byte means non-text; render it as a hex+ASCII dump so
-  // the agent can inspect .bin/.exe/.obj and any other opaque file the
-  // same way it reads source.
+  // decode. A NUL byte means non-text. Small binaries get a full hex
+  // dump (every byte matters for a tiny struct or patch); large
+  // binaries get their printable STRINGS extracted instead of a hex
+  // dump — at ~3.2 chars/byte a multi-megabyte file would flood the
+  // window, while its imports/exports/names/URLs are almost all the
+  // model actually needs (the same approach strings(1) and Claude use).
   const buf = await fs.readFile(target);
   if (looksBinary(buf)) {
-    const { content, truncated } = hexDump(buf);
+    // Below this, a hex dump is small enough to be useful and exact.
+    const HEX_DUMP_LIMIT = 256 * 1024; // 256KB
+    if (stat.size <= HEX_DUMP_LIMIT) {
+      const { content, truncated } = hexDump(buf);
+      return {
+        path: relative,
+        content: `Binary file ${relative} (${stat.size} bytes). Hex dump:\n\n${content}`,
+        truncated,
+        size: stat.size,
+      };
+    }
+    const { content, truncated, stringsFound } = extractStrings(buf);
     return {
       path: relative,
-      content: `Binary file ${relative} (${stat.size} bytes). Hex dump:\n\n${content}`,
+      content:
+        `Binary file ${relative} (${stat.size} bytes). ` +
+        `Showing ${stringsFound} printable strings (use inspect_binary for decompile/imports/exports, ` +
+        `or read the file for a small sub-range if you need raw bytes):\n\n${content}`,
       truncated,
       size: stat.size,
     };

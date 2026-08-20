@@ -64,7 +64,7 @@ import {
 import type { TranscriptMessage } from "@/lib/transcript";
 import { pruneTranscript } from "@/lib/prune";
 import { compactTranscript, compactForResume, trimReasoning } from "@/lib/compact";
-import { readLessons, applyLessons, formatLessonsForPrompt } from "@/lib/lessons";
+import { readLessons, applyLessons, formatLessonsForPrompt, pruneLessons } from "@/lib/lessons";
 import { runRefine } from "@/lib/refine";
 import { beginRun, endRun } from "@/lib/runs";
 import { listProcesses, isRunning } from "@/lib/processes";
@@ -858,6 +858,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         let existingLessons: Awaited<ReturnType<typeof readLessons>> = [];
         if (workspaceEnabled && lessonsEnabled) {
           try {
+            await pruneLessons(workspace);
             existingLessons = await readLessons(workspace);
           } catch (e) {
             console.error("Could not read lessons:", e);

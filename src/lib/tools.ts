@@ -1,5 +1,6 @@
 import { diffLines, diffStats, diffHunks } from "@/lib/diff";
 import { describeImage } from "@/lib/vision";
+import { clearLessons } from "@/lib/lessons";
 import {
   startProcess,
   stopProcess,
@@ -780,6 +781,17 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
         },
         required: ["path"],
       },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "clear_memory",
+      description:
+        "Forget everything learned about this workspace (the LESSONS.md file). " +
+        "Use this when the user asks to clear/clean memory, or when a lesson refers " +
+        "to a file or sample that no longer exists. No arguments.",
+      parameters: { type: "object", properties: {} },
     },
   },
   {
@@ -2376,6 +2388,17 @@ export async function runTool(
             `${steps === 1 ? "" : "s"} ago (${written.bytes} bytes).`,
           summary: `Reverted ${written.path}`,
           changedPath: written.path,
+        };
+      }
+
+      case "clear_memory": {
+        const removed = await clearLessons(workspaceId);
+        return {
+          ok: true,
+          content: removed
+            ? `Cleared ${removed} learned lesson(s) from this workspace's memory.`
+            : "No learned lessons were stored for this workspace.",
+          summary: removed ? `Cleared ${removed} lessons` : "Memory already empty",
         };
       }
 

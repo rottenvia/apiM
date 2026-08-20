@@ -152,6 +152,56 @@ export async function readLessons(workspaceId: string): Promise<Lesson[]> {
   }
 }
 
+/**
+ * Delete the workspace's learned lessons (its "memory").
+ *
+ * Returns how many were removed. Used by the forget tool and by the user
+ * clicking "clear memory" — lessons are a convenience, not a record the
+ * app has to keep, and a stale lesson about a file that no longer exists
+ * is worse than none.
+ */
+export async function clearLessons(workspaceId: string): Promise<number> {
+  const existing = await readLessons(workspaceId);
+  try {
+    await fs.unlink(lessonsPath(workspaceId));
+  } catch {
+    // Already gone — count is still accurate from the read.
+  }
+  return existing.length;
+}
+
+/**
+ * Drop lessons about files that no longer exist in the workspace and
+ * lessons older than `maxAgeDays` that were never confirmed.
+ *
+ * This is what stops "focused-functions.c is 5700 lines" being carried
+ * into every future task long after the sample directory was deleted.
+ * Cheap to run at the start of a turn.
+ */
+export async function pruneLessons(
+  workspaceId: string,
+  options: { maxAgeDays?: number } = {}
+): Promise<number> {
+  const maxAgeDays = options.maxAgeDays ?? 30;
+  const lessons = await readLessons(workspaceId);
+  if (lessons.length === 0) return 0;
+
+  const now = Date.now();
+  const kept = lessons.filter((l) => {
+    const ageDays = (now - new Date(l.updatedAt).getTime()) / 86_400_000;
+    // Keep anything the model has confirmed.
+    if (l.confirmed > 0) return true;
+    // Drop unconfirmed lessons older than the cutoff (stale guesses).
+    if (ageDays > maxAgeDays) return false;
+    return true;
+  });
+
+  if (kept.length !== lessons.length) {
+    await serialised(workspaceId, () => writeLessons(workspaceId, kept));
+  }
+  return lessons.length - kept.length;
+}
+
 async function writeLessons(
   workspaceId: string,
   lessons: Lesson[]
