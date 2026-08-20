@@ -51,7 +51,13 @@ export async function POST(
     if (error instanceof WorkspaceError) {
       return NextResponse.json({ error: error.message }, { status: 400 });
     }
+    // Surface the real cause (e.g. a reverse-proxy body cap, EACCES, disk
+    // full) instead of a generic 500, so "Binary upload failed" is debuggable.
+    const detail = error instanceof Error ? error.message : String(error);
     console.error("Binary upload failed:", error);
-    return NextResponse.json({ error: "Binary upload failed" }, { status: 500 });
+    return NextResponse.json(
+      { error: `Binary upload failed: ${detail}` },
+      { status: 500 }
+    );
   }
 }
