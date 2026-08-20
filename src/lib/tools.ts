@@ -1074,6 +1074,32 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
               "source dump. Defaults to true for performance. Set false when " +
               "you need the whole executable decompiled as well.",
           },
+          analyzer_preset: {
+            type: "string",
+            enum: ["fast", "full"],
+            description:
+              "Which Ghidra auto-analyzers to run. 'fast' (default) disables " +
+              "the expensive Decompiler Parameter ID / Switch Analysis / Stack " +
+              "analyzers that our post-script does not use, which can cut large " +
+              "binary analysis time substantially with no loss of reported " +
+              "information. Use 'full' to leave every analyzer on (slower, " +
+              "maximum fidelity, e.g. when you need parameter-type inference).",
+          },
+          disable_analyzers: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Exact names of Ghidra analyzers to turn OFF for this binary, in " +
+              "addition to the preset. Use analyzers.txt in the output folder " +
+              "for exact names. You decide per binary what you do not need.",
+          },
+          enable_analyzers: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Exact names of Ghidra analyzers to turn ON (overrides the " +
+              "preset for those). You are the judge of what this target needs.",
+          },
           dependencies: {
             type: "boolean",
             description:
@@ -2895,6 +2921,17 @@ export async function runTool(
         const focusTerms = Array.isArray(args.focus_terms)
           ? args.focus_terms.map((term) => String(term))
           : ["CreateMove", "IN_JUMP"];
+        const analyzerPreset: "fast" | "full" =
+          args.analyzer_preset === "full" ? "full" : "fast";
+        const analyzers = {
+          preset: analyzerPreset,
+          ...(Array.isArray(args.disable_analyzers)
+            ? { disable: args.disable_analyzers.map((a) => String(a)) }
+            : {}),
+          ...(Array.isArray(args.enable_analyzers)
+            ? { enable: args.enable_analyzers.map((a) => String(a)) }
+            : {}),
+        };
         const result = await inspectWorkspaceBinary(workspaceId, target, {
           artifacts: artifactsEnabled,
           artifactLayers,
@@ -2903,6 +2940,7 @@ export async function runTool(
           forceDeep: args.force_decompile === true,
           focusTerms,
           focusedOnly: args.focused_only !== false,
+          analyzers,
           signal: context.signal,
           dependencies: inspectDependencies,
           maxDepth: num(args, "max_depth") ?? undefined,
