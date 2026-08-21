@@ -882,7 +882,11 @@ check(
 );
 const chatSource = await fs.readFile(path.join(ROOT, "src/components/ChatArea.tsx"), "utf8");
 const routeSource = await fs.readFile(path.join(ROOT, "src/app/api/workspace/[id]/binary/route.ts"), "utf8");
-check("composer sends executable bytes as multipart", /FormData/.test(chatSource) && /\/binary/.test(chatSource));
+check(
+  "composer uploads binaries to the raw or multipart binary endpoint",
+  /\/binary(-raw)?/.test(chatSource) &&
+    (/application\/octet-stream/.test(chatSource) || /FormData/.test(chatSource))
+);
 check(
   "upload endpoint validates MZ and writes bytes",
   /assertPeUpload/.test(routeSource) &&
