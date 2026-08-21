@@ -31,41 +31,48 @@ const OFFPEAK_START = 16 * 60 + 30; // 16:30
 
 export function getDeepSeekPeriod(date = new Date()): {
   period: DeepSeekPeriod;
-  /** Minutes until the next peak/off-peak transition (in Beijing time). */
   nextChangeInMinutes: number;
-  /** Wall-clock label for the next transition, e.g. "16:30 Beijing". */
-  nextChangeAt: string;
+  nextChangeAtLocal: string;
+  nextChangeAtBeijing: string;
+  localTimezone: string;
 } {
   const m = beijingMinutesNow(date);
   let period: DeepSeekPeriod;
   let nextMin: number;
 
   if (m >= PEAK_START && m < OFFPEAK_START) {
-    // Currently peak (00:30 -> 16:30); next is off-peak at 16:30.
     period = "peak";
     nextMin = OFFPEAK_START;
   } else {
-    // Currently off-peak (16:30 -> 00:30); next is peak at 00:30.
     period = "offpeak";
     nextMin = PEAK_START;
   }
 
   let delta = nextMin - m;
-  if (delta <= 0) delta += 24 * 60; // wraps past midnight
+  if (delta <= 0) delta += 24 * 60;
 
-  const hh = Math.floor(nextMin / 60)
-    .toString()
-    .padStart(2, "0");
-  const mm = (nextMin % 60).toString().padStart(2, "0");
+  // The transition is 'delta' minutes from now; show it in the user's local
+  // wall-clock so anyone in any timezone sees their own time.
+  const changeDate = new Date(date.getTime() + delta * 60_000);
+  const localLabel = changeDate.toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  const bh = Math.floor(nextMin / 60).toString().padStart(2, "0");
+  const bm = (nextMin % 60).toString().padStart(2, "0");
 
   return {
     period,
     nextChangeInMinutes: delta,
-    nextChangeAt: `${hh}:${mm} Beijing`,
+    nextChangeAtLocal: localLabel,
+    nextChangeAtBeijing: `${bh}:${bm} Beijing`,
+    localTimezone:
+      (typeof Intl !== "undefined" &&
+        Intl.DateTimeFormat().resolvedOptions().timeZone) ||
+      "local",
   };
 }
 
-/** "16:30 Beijing" style label, and a human countdown. */
 export function formatCountdown(minutes: number): string {
   if (minutes <= 0) return "now";
   const h = Math.floor(minutes / 60);
