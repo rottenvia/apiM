@@ -111,6 +111,8 @@ export interface RunResult {
   timedOut: boolean;
   durationMs: number;
   truncated: boolean;
+  /** Set when the program could not be spawned at all (missing binary, etc). */
+  error?: string;
 }
 
 /**
@@ -775,6 +777,7 @@ export async function runCommand(
     let stderr = "";
     let timedOut = false;
     let settled = false;
+    let spawnError: string | undefined;
 
     const finish = (exitCode: number | null) => {
       if (settled) return;
@@ -793,6 +796,7 @@ export async function runCommand(
         timedOut,
         durationMs: Date.now() - started,
         truncated: out.truncated || err.truncated,
+        error: spawnError,
       });
     };
 
@@ -831,6 +835,7 @@ export async function runCommand(
     });
 
     child.on("error", (err) => {
+      spawnError = err.message;
       stderr += `\nFailed to start ${check.command}: ${err.message}`;
       finish(null);
     });
@@ -843,37 +848,39 @@ export async function runCommand(
 export function formatRunResult(result: RunResult): string {
   const parts: string[] = [];
 
-  parts.push(`$ ${describeCommand(result.command, result.args)}`);
+  // Status FIRST, so the model sees whether the command ran at all before the
+  // (often long) output. Distinguishes: could-not-start vs ran-and-failed vs
+  // succeeded.
+  const cmd = describeCommand(result.command, result.args);
+  parts.push(`$ ${cmd}`);
 
-  if (result.timedOut) {
+  if (result.error) {
+    parts.push(`\nSTATUS: could not run - ${result.error}`);
+  } else if (result.timedOut) {
     parts.push(
-      `\nTimed out and was stopped.` +
-        `\n\nThree reasons this happens, in order of likelihood:` +
-        `\n  1. It is a server or a watcher, which never exits on its own. ` +
-        `Use start_process instead, then wait_for_output to know when it is ready.` +
-        `\n  2. It is waiting for input that will never arrive. Add the flag ` +
-        `that makes it non-interactive (-y, --yes, --no-input).` +
-        `\n  3. It is genuinely slow. Pass timeout_ms to allow longer.`
+      `\nSTATUS: timed out and was stopped after the time limit. ` +
+        `If this is a server/watcher use start_process; if it waits for ` +
+        `input add a non-interactive flag (-y/--yes/--no-input); if it is ` +
+        `genuinely slow pass a larger timeout_ms.`
+    );
+  } else if (result.exitCode === 0) {
+    parts.push(`\nSTATUS: ok (exit 0)`);
+  } else {
+    parts.push(
+      `\nSTATUS: failed (exit ${result.exitCode ?? "unknown"}). ` +
+        `Read Errors/Output below, fix the actual cause, then re-run. ` +
+        `Do not retry the identical command.`
     );
   }
 
-  if (result.stdout.trim()) parts.push(`\nOutput:\n${result.stdout.trim()}`);
   if (result.stderr.trim()) parts.push(`\nErrors:\n${result.stderr.trim()}`);
+  if (result.stdout.trim()) parts.push(`\nOutput:\n${result.stdout.trim()}`);
 
-  if (!result.stdout.trim() && !result.stderr.trim() && !result.timedOut) {
+  if (!result.stdout.trim() && !result.stderr.trim() && !result.timedOut && !result.error) {
     parts.push("\n(no output)");
   }
 
-  if (!result.timedOut) {
-    parts.push(
-      `\nExit code: ${result.exitCode ?? "unknown"}` +
-        (result.exitCode === 0 ? " (success)" : " (failed)")
-    );
-  }
-
-  if (result.truncated) {
-    parts.push("\n(output was long; only the end is shown)");
-  }
+  if (result.truncated) parts.push("\n(output was long; only the end is shown)");
 
   return parts.join("\n");
 }
