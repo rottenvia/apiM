@@ -2,16 +2,18 @@
  * Token pricing, used to show what a reply actually cost.
  *
  * Rates are per 1M tokens, from DeepSeek's published pricing (verified
- * 2026-08-03). They are only used for display, so a stale rate misleads
- * rather than overcharges — worth re-checking if DeepSeek changes pricing.
+ * 2026-08-03). DeepSeek prices in Beijing time: off-peak (16:30-00:30
+ * Beijing, UTC+8) is roughly half price on input/output (cache-hit is
+ * already so cheap it is left unchanged). Used for display, so a stale
+ * rate misleads rather than overcharges.
  */
 
+import { getDeepSeekPeriod, type DeepSeekPeriod } from "./deepseek-hours";
+export { getDeepSeekPeriod };
+
 export interface ModelRates {
-  /** Cache-miss input, per 1M tokens. */
   input: number;
-  /** Cache-hit input, per 1M tokens. */
   cachedInput: number;
-  /** Output, per 1M tokens. */
   output: number;
 }
 
@@ -20,35 +22,63 @@ export const MODEL_RATES: Record<string, ModelRates> = {
   "deepseek-v4-flash": { input: 0.14, cachedInput: 0.0028, output: 0.28 },
 };
 
+/** Off-peak multiplier for input/output (Beijing 16:30-00:30). Cache-hit unchanged. */
+const OFFPEAK_FACTOR = 0.5;
+
+export function ratesFor(
+  model: string,
+  period: DeepSeekPeriod = getDeepSeekPeriod().period
+): ModelRates | null {
+  const base = MODEL_RATES[model];
+  if (!base) return null;
+  if (period === "offpeak") {
+    return {
+      input: +(base.input * OFFPEAK_FACTOR).toFixed(6),
+      cachedInput: base.cachedInput,
+      output: +(base.output * OFFPEAK_FACTOR).toFixed(6),
+    };
+  }
+  return base;
+}
+
 export interface UsageLike {
   prompt_tokens?: number;
   completion_tokens?: number;
   total_tokens?: number;
-  /** DeepSeek reports how much of the prompt hit its cache. */
   prompt_cache_hit_tokens?: number;
   prompt_cache_miss_tokens?: number;
+  /**
+   * Reasoning tokens, when reported separately (completion_tokens_details.
+   * reasoning_tokens). They are a subset of completion_tokens and are billed
+   * as output; kept so the UI can prove thinking was counted.
+   */
+  completion_tokens_details?: { reasoning_tokens?: number };
 }
 
 /**
- * Estimate the cost of one exchange in USD.
+ * Cost of one exchange in USD at the current peak/off-peak rate.
  *
- * Returns null for an unknown model rather than guessing, so the UI can stay
- * silent instead of showing a number that might be wrong.
+ * Every billed token is counted:
+ *   prompt miss -> input rate
+ *   prompt hit  -> cache-hit rate
+ *   completion  -> output rate (INCLUDES reasoning: completion_tokens sums
+ *                  visible text + thinking, and providers bill thinking as
+ *                  output)
  */
 export function estimateCost(
   usage: UsageLike | null | undefined,
-  model: string
+  model: string,
+  period?: DeepSeekPeriod
 ): number | null {
   if (!usage) return null;
-  const rates = MODEL_RATES[model];
+  const rates = ratesFor(model, period);
   if (!rates) return null;
 
   const completion = usage.completion_tokens ?? 0;
   const prompt = usage.prompt_tokens ?? 0;
-
-  // Prefer the reported cache split; fall back to treating everything as a miss.
   const hit = usage.prompt_cache_hit_tokens ?? 0;
-  const miss = usage.prompt_cache_miss_tokens ?? Math.max(0, prompt - hit);
+  const miss =
+    usage.prompt_cache_miss_tokens ?? Math.max(0, prompt - hit);
 
   return (
     (miss / 1e6) * rates.input +
@@ -57,14 +87,16 @@ export function estimateCost(
   );
 }
 
-/** Format a cost for display, keeping very small amounts legible. */
+export function reasoningTokens(usage: UsageLike | null | undefined): number {
+  return usage?.completion_tokens_details?.reasoning_tokens ?? 0;
+}
+
 export function formatCost(usd: number): string {
   if (usd < 0.01) return `$${usd.toFixed(4)}`;
   if (usd < 1) return `$${usd.toFixed(3)}`;
   return `$${usd.toFixed(2)}`;
 }
 
-/** Format an elapsed duration compactly. */
 export function formatDuration(ms: number): string {
   if (ms < 1000) return `${Math.round(ms)}ms`;
   const seconds = ms / 1000;
