@@ -96,8 +96,8 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
           aria-hidden
           title={
             period.period === "offpeak"
-              ? `DeepSeek off-peak (discount) — off-peak ends ${period.nextChangeAt}, in ${formatCountdown(period.nextChangeInMinutes)}`
-              : `DeepSeek peak pricing — off-peak starts ${period.nextChangeAt}, in ${formatCountdown(period.nextChangeInMinutes)}`
+              ? `DeepSeek off-peak (discount) — ends ${period.nextChangeAtLocal} your time (${period.nextChangeAtBeijing}), in ${formatCountdown(period.nextChangeInMinutes)}`
+              : `DeepSeek peak pricing — off-peak starts ${period.nextChangeAtLocal} your time (${period.nextChangeAtBeijing}), in ${formatCountdown(period.nextChangeInMinutes)}`
           }
           className={`ml-0.5 h-1.5 w-1.5 rounded-full ${
             period.period === "offpeak" ? "bg-emerald-400" : "bg-amber-400"
@@ -172,9 +172,10 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
                     ? "Discount pricing active"
                     : "Standard pricing"}{" "}
                   · switches to{" "}
-                  {period.period === "offpeak" ? "peak" : "off-peak"} in{" "}
-                  {formatCountdown(period.nextChangeInMinutes)} (
-                  {period.nextChangeAt})
+                  {period.period === "offpeak" ? "peak" : "off-peak"} at{" "}
+                  {period.nextChangeAtLocal} your time (
+                  {period.nextChangeAtBeijing}, in{" "}
+                  {formatCountdown(period.nextChangeInMinutes)})
                 </span>
               </div>
             </div>

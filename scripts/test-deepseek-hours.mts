@@ -24,7 +24,7 @@ const check = (name, cond, detail = "") => {
 // 12:00 Beijing -> peak (00:30-16:30 peak)
 let r = getDeepSeekPeriod(atBeijing(12, 0));
 check("noon Beijing is peak", r.period === "peak", r.period);
-check("noon switches to off-peak at 16:30", r.nextChangeAt === "16:30 Beijing");
+check("noon switches to off-peak at 16:30", r.nextChangeAtBeijing === "16:30 Beijing");
 check(
   "noon countdown to 16:30 is 4h30m",
   r.nextChangeInMinutes === 4 * 60 + 30,
@@ -43,7 +43,7 @@ check(
 // 17:00 Beijing -> off-peak (16:30-00:30)
 r = getDeepSeekPeriod(atBeijing(17, 0));
 check("17:00 Beijing is off-peak", r.period === "offpeak", r.period);
-check("17:00 switches to peak at 00:30", r.nextChangeAt === "00:30 Beijing");
+check("17:00 switches to peak at 00:30", r.nextChangeAtBeijing === "00:30 Beijing");
 check(
   "17:00 countdown to 00:30 is 7h30m",
   r.nextChangeInMinutes === 7 * 60 + 30,
