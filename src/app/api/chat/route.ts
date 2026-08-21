@@ -99,6 +99,7 @@ import {
   budgetStopMessage,
   maxTokensFor,
 } from "@/lib/budget";
+import { estimateCost, getDeepSeekPeriod } from "@/lib/pricing";
 import { listCustomPlugins } from "@/lib/plugin-store";
 
 export const maxDuration = 300;
@@ -318,6 +319,8 @@ type StreamEvent =
       type: "usage";
       usage: Record<string, number>;
       model: string;
+      /** Peak/off-peak period the running cost was computed at. */
+      period?: "peak" | "offpeak";
       /** Running cost of this reply, for the live budget readout. */
       spentUsd?: number;
       /** The cap in force, if any. */
@@ -1802,11 +1805,16 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 // actually being billed rather than a token count.
                 lastRoundCost = chargeRound(budget, u, model);
 
+                const period = getDeepSeekPeriod().period;
                 send({
                   type: "usage",
                   usage: { ...totalUsage },
                   model,
-                  spentUsd: budget.spentUsd,
+                  period,
+                  // Recompute from the summed split so the live figure always
+                  // uses the period active right now, proving cache-hit/miss,
+                  // output and reasoning are all included in the number.
+                  spentUsd: estimateCost(totalUsage, model, period) ?? budget.spentUsd,
                   limitUsd: budget.limitUsd ?? undefined,
                 });
               }
