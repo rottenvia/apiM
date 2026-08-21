@@ -66,7 +66,8 @@
     "test:build": "tsx scripts/test-build.mjs",
     "test:findings": "tsx scripts/test-findings.mjs",
     "devserver": "node server.mjs",
-    "start:custom": "cross-env NODE_ENV=production node server.mjs"
+    "start:custom": "cross-env NODE_ENV=production node server.mjs",
+    "test:hours": "tsx scripts/test-deepseek-hours.mts"
   },
   "dependencies": {
     "@types/cross-spawn": "^6.0.6",
