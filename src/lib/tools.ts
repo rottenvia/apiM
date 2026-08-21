@@ -212,7 +212,11 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
         "Find text across every file in the workspace at once, with the file " +
         "and line number of each match. Use this to locate where something is " +
         "defined or used, instead of reading files one by one — it is far " +
-        "cheaper than guessing which file to open.",
+        "cheaper than guessing which file to open. Query is PLAIN TEXT by " +
+        "default. Only set regex:true when you intentionally want a pattern; " +
+        "an ordinary word or a symbol like '.', '(', '+' or '?' is NOT a " +
+        "regex and will error if you mark it one - leave regex off for normal " +
+        "searches.",
       parameters: {
         type: "object",
         properties: {
