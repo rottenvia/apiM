@@ -424,7 +424,13 @@ export default function Home() {
   /** Latest conversation list, so rename can restore the old title on failure. */
   const conversationsRef = useRef<Conversation[]>([]);
   /** Lets the Stop button cancel an in-flight stream. */
-  const abortRef = useRef<AbortController | null>(null);
+  // One AbortController per in-flight conversation. Switching chats must NOT
+  // abort another chat's generation; frames route to their own conversation
+  // by message id, so multiple chats can generate simultaneously and the user
+  // can browse another chat while one streams.
+  const abortRefs = useRef<Map<string, AbortController>>(new Map());
+  const abortFor = (id: string | null | undefined) =>
+    id ? abortRefs.current.get(id) : undefined;
   /** Server-side id of the reply in flight, for the stop endpoint. */
   const runMessageIdRef = useRef<string | null>(null);
 
@@ -780,9 +786,11 @@ export default function Home() {
   const loadSeq = useRef(0);
 
   const loadConversation = useCallback(async (id: string) => {
-    // Detach any stream belonging to the previously selected chat. It keeps
-    // running server-side, but its frames cannot enter this transcript.
-    abortRef.current?.abort();
+    // Switching chats deliberately does NOT abort the other chat's stream:
+    // it keeps generating server-side and its frames route back to its own
+    // conversation by message id, so you can watch one chat while another
+    // generates. Only an explicit Stop (or navigating away from the app)
+    // cancels a run.
     btwAbortRef.current?.abort();
     // Each load gets a sequence number; a slower earlier response is ignored
     // once a newer one starts, so rapidly switching chats can't leave the
@@ -857,10 +865,8 @@ export default function Home() {
   }, []);
 
   const startNewChat = useCallback(() => {
-    // Detach the browser from any old stream. The server deliberately keeps
-    // that run alive and saves it, but no later frame may repopulate this new
-    // chat or switch the selected conversation back.
-    abortRef.current?.abort();
+    // Starting a new chat does not cancel other chats' streams; they keep
+    // running and saving to their own conversations.
     btwAbortRef.current?.abort();
     loadSeq.current += 1;
     const nextId = uuidv4();
@@ -1131,7 +1137,10 @@ export default function Home() {
        */
 
       const controller = new AbortController();
-      abortRef.current = controller;
+      // Keyed to the conversation this run belongs to (the one currently
+      // active when Send was pressed), so aborting/stopping only this run.
+      const runConvId = workspaceIdRef.current;
+      if (runConvId) abortRefs.current.set(runConvId, controller);
 
       // Batch deltas into one state update per animation frame. Without this a
       // fast stream triggers hundreds of re-renders a second and the UI janks.
@@ -1716,9 +1725,8 @@ export default function Home() {
         }
       } finally {
         if (frame !== null) cancelAnimationFrame(frame);
-        // A newer chat may already own abortRef. Never let the detached old
-        // request erase the new request's Stop controller or UI state.
-        if (abortRef.current === controller) abortRef.current = null;
+        // Drop this run's controller now that it has finished.
+        if (runConvId) abortRefs.current.delete(runConvId);
         const stillActive = workspaceIdRef.current === requestConversationId;
         if (stillActive) {
           setIsLoading(false);
@@ -1832,8 +1840,11 @@ export default function Home() {
         keepalive: true,
       }).catch(() => {});
     }
-    abortRef.current?.abort();
-  }, []);
+    // Stop the stream for whichever conversation is currently visible. The
+    // server-side stop by message id above halts generation even if the user
+    // has switched to a different chat than the one running.
+    abortRefs.current.get(currentConvId ?? "")?.abort();
+  }, [currentConvId]);
 
   /** Resend an edited user message, discarding everything after it. */
   const editMessage = useCallback((messageId: string, newContent: string) => {
