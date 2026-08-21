@@ -194,6 +194,18 @@ const ALLOWED = new Set([
   "git",
   "unzip",
   "tar",
+  // Read-only inspection tools the model uses to diagnose its own work.
+  // They take their target as an argument; shells stay blocked.
+  "grep",
+  "rg",
+  "find",
+  "diff",
+  "cat",
+  "wc",
+  "head",
+  "tail",
+  "ls",
+  "echo",
 ]);
 
 /** Rejected outright: these exist to run arbitrary shell text. */

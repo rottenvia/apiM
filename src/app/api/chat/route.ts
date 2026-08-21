@@ -2333,7 +2333,17 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 };
               } else {
                 const uArgs = parsed.value as { updates?: unknown };
-                const raw = Array.isArray(uArgs.updates) ? uArgs.updates : [];
+                if (!Array.isArray(uArgs.updates)) {
+                  result = {
+                    ok: false,
+                    content:
+                      "update_plan needs an 'updates' array of {id, state, verified}. " +
+                      "Call make_plan first if there is no plan, then send the " +
+                      "steps you are changing.",
+                    summary: "update_plan missing updates",
+                  };
+                } else {
+                const raw = uArgs.updates;
                 try {
                   /*
                    * Cross-check the claim against what actually ran.
@@ -2404,6 +2414,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                     }`,
                     summary: "Could not update plan",
                   };
+                }
                 }
               }
             } else if (call.function.name === "ask_user") {
@@ -2554,6 +2565,20 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 reason?: unknown;
                 timeout_ms?: unknown;
               };
+
+              // A missing/empty command (the model sent {} or command:"") is
+              // a malformed call, not a refusal - give an actionable message.
+              if (typeof args.command !== "string" || !args.command.trim()) {
+                result = {
+                  ok: false,
+                  content:
+                    `No command was given. Pass command as a string and args as ` +
+                    `a list of strings, e.g. {"command":"python3","args":["app.py"]}. ` +
+                    `There is no shell, so do not pass "?", "true", or a full ` +
+                    `command line in one string.`,
+                  summary: "Missing command",
+                };
+              } else {
               const check = validateCommand(
                 args.command,
                 args.args,
@@ -2683,6 +2708,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                       : `${run.exitCode === 0 ? "Ran" : "Failed"}: ${display}`,
                   };
                 }
+              }
               }
             } else if (prefetched.has(call.id)) {
               // Already in flight since the top of the round.
