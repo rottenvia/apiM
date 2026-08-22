@@ -425,7 +425,9 @@ check(
 );
 check(
   "the base system message contains neither tree nor plugin directives",
-  /workspaceInstruction \+\s*lessonsBlock,/.test(route) &&
+  // Later additive blocks (binary ledger, findings, ...) are allowed to sit
+  // between workspaceInstruction and lessonsBlock; tree and plugins are not.
+  /workspaceInstruction \+(\s*\w+Block \+)*\s*lessonsBlock,/.test(route) &&
     !/workspaceFiles \+/.test(route) &&
     /role: "system", content: pluginDirectives/.test(route)
 );
