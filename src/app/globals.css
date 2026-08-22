@@ -233,13 +233,8 @@ input:focus-visible {
   height: 16px;
 }
 
-/* The primary action in the sidebar.
- *
- * It previously shared its exact styling with the two icon buttons beside it
- * — same border, same transparent fill, same radius — so three controls of
- * very different importance shouted at the same volume and the block read as
- * a row of boxes rather than as one action with two utilities. A filled
- * surface separates it without adding a second accent colour. */
+/* The primary action in the sidebar. It is the only control in its row
+ * and stretches the full column width. */
 .new-chat-btn {
   display: flex;
   align-items: center;

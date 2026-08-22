@@ -2108,7 +2108,6 @@ export default function Home() {
         isOpen={sidebarOpen}
         onToggle={() => setSidebarOpen(!sidebarOpen)}
         onSelect={loadConversation}
-        onOpenSearch={() => setShowSearch(true)}
         onImported={() => void refreshConversations()}
         onNew={startNewChat}
         onDelete={deleteConversation}
