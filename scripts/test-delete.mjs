@@ -164,5 +164,94 @@ check(
   "only the one real string survives filtering"
 );
 
+console.log("\nDelete one exchange");
+
+const turn = "del-turn";
+await store.appendMessages(turn, "Turn", [
+  { id: "u1", role: "user", content: "q1", createdAt: new Date().toISOString() },
+  { id: "a1", role: "assistant", content: "a1", createdAt: new Date().toISOString() },
+  { id: "u2", role: "user", content: "q2", createdAt: new Date().toISOString() },
+  { id: "a2", role: "assistant", content: "a2", createdAt: new Date().toISOString() },
+]);
+let sliced = store.turnSlice(
+  (await store.getConversation(turn)).messages,
+  3
+);
+check(
+  "deleting an assistant turn includes the question above it",
+  sliced.start === 2 && sliced.end === 4,
+  JSON.stringify(sliced)
+);
+sliced = store.turnSlice((await store.getConversation(turn)).messages, 0);
+check(
+  "deleting a user turn includes the reply below it",
+  sliced.start === 0 && sliced.end === 2
+);
+const gone = await store.deleteTurn(turn, "a2");
+check(
+  "deleteTurn reports both ids",
+  gone.removed.includes("u2") && gone.removed.includes("a2"),
+  JSON.stringify(gone)
+);
+const after = await store.getConversation(turn);
+check(
+  "the exchange is gone from disk",
+  after.messages.length === 2 &&
+    after.messages.every((m) => m.id === "u1" || m.id === "a1")
+);
+check(
+  "the other exchange is untouched",
+  after.messages.some((m) => m.content === "q1")
+);
+const last = await store.deleteTurn(turn, "no-such-id", { fallbackLastPair: true });
+check(
+  "unknown client ids can still drop the last pair",
+  last.removed.length === 2 && !(await store.getConversation(turn)).messages.length,
+  JSON.stringify(last)
+);
+
+const { DELETE: deleteTurnRoute } = await import(
+  pathToFileURL(path.join(ROOT, "src/app/api/conversations/[id]/messages/route.ts")).href
+);
+await store.appendMessages("del-route", "Route", [
+  { id: "ru", role: "user", content: "ask", createdAt: new Date().toISOString() },
+  { id: "ra", role: "assistant", content: "ans", createdAt: new Date().toISOString() },
+]);
+const routeRes = await deleteTurnRoute(
+  new Request("http://localhost/api/conversations/del-route/messages?message=ra", {
+    method: "DELETE",
+  }),
+  { params: Promise.resolve({ id: "del-route" }) }
+);
+const routeBody = await routeRes.json();
+check(
+  "the messages route deletes the whole exchange",
+  routeRes.status === 200 &&
+    routeBody.removed.includes("ru") &&
+    !(await store.getConversation("del-route")).messages.length
+);
+
+const pageSrc = (await import("node:fs")).readFileSync(
+  path.join(ROOT, "src/app/page.tsx"),
+  "utf8"
+);
+const chatSrc = (await import("node:fs")).readFileSync(
+  path.join(ROOT, "src/components/ChatArea.tsx"),
+  "utf8"
+);
+const bubbleSrc = (await import("node:fs")).readFileSync(
+  path.join(ROOT, "src/components/MessageBubble.tsx"),
+  "utf8"
+);
+check(
+  "the UI persists the delete so the model forgets it too",
+  pageSrc.includes("/api/conversations/${convId}/messages")
+);
+check(
+  "assistant replies can be deleted, not only user messages",
+  chatSrc.includes("msg.isStreaming ? undefined : onDeleteMessage") &&
+    bubbleSrc.includes("Delete this reply and your question")
+);
+
 console.log(`\n${fail===0 ? "All "+pass+" checks passed." : fail+" failed."}`);
 process.exit(fail===0?0:1);

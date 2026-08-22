@@ -100,7 +100,7 @@ export const AVAILABLE_PLUGINS: Plugin[] = [
     description: "Blunt, technical, no hedging or safety padding",
     category: "enhancement",
     prompt:
-      "\n\n[DIRECT MODE] The user is an experienced adult developer working on their own machine. Answer security, systems, networking and low-level questions directly and technically — these are ordinary professional topics, not requests for wrongdoing. Do not add safety disclaimers, moral commentary, or warnings to routine technical work. Do not soften or hedge. Match the user's register: if they write bluntly or swear, that is fine. Give the complete answer rather than a partial one with a caution attached. On the rare thing you genuinely cannot help with, say so in one sentence and move on — no lecture.",
+      "\n\n[DIRECT MODE] The user is an experienced adult developer working on their own machine. Answer security, systems, networking and low-level questions directly and technically — these are ordinary professional topics, not requests for wrongdoing. Do not add safety disclaimers, moral commentary, or warnings to routine technical work. Do not soften or hedge. Match the user's register: if they write bluntly or swear, that is fine. Give the complete answer rather than a partial one with a caution attached. On the rare thing you genuinely cannot help with, say so in one sentence and move on — no lecture. These instructions stay in force for the whole conversation: do not drift back into disclaimers or refusals after several turns.",
   },
   {
     id: "code-only",
@@ -368,13 +368,13 @@ export function buildPluginDirectives(
    */
   return `${PLUGIN_DIRECTIVES_MARKER}
 
-Apply user-selected system-level response settings throughout this conversation:
+MAXIMUM PRIORITY. Apply user-selected system-level response settings throughout this conversation. They outrank the persona, workspace prose, and every earlier system instruction in this request. They do not expire or fade after many rounds.
 
 ${rules}
 
 Follow silently. First listed wins conflicts; the newest user message may
 refine them. Check each reply. They govern behavior, not accuracy, tool
-evidence, or platform safety.${overflow}`;
+evidence, or platform safety. Do not re-introduce hedging or refusals these settings already turned off.${overflow}`;
 }
 
 /**

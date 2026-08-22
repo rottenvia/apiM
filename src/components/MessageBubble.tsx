@@ -636,8 +636,8 @@ function MessageBubbleImpl({
                       {onDelete && (
                         <button
                           onClick={() => onDelete(message.id)}
-                          title="Delete this message and its reply"
-                          aria-label="Delete message"
+                          title="Delete this question and the reply — both forget it"
+                          aria-label="Delete this exchange"
                           className="flex h-6 items-center gap-1 rounded-lg px-1.5 text-[11px] font-medium text-text-muted transition-colors hover:bg-danger/12 hover:text-danger"
                         >
                           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} aria-hidden="true">
@@ -1295,6 +1295,22 @@ function MessageBubbleImpl({
             )}
 
             {/* Placeholder while a code block is still being generated */}
+            {onDelete && !isLast && !message.isStreaming && (
+              <div className="group/del pt-0.5">
+                <button
+                  onClick={() => onDelete(message.id)}
+                  title="Delete this reply and your question — both forget it"
+                  aria-label="Delete this exchange"
+                  className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-[11px] font-medium text-[#6d685d] opacity-0 transition-opacity hover:bg-danger/12 hover:text-danger group-hover/del:opacity-100 focus:opacity-100"
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} aria-hidden="true">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M4 7h16" />
+                  </svg>
+                  Delete
+                </button>
+              </div>
+            )}
+
             {hasPendingCode && (
               <div className="my-3 flex w-full items-center gap-3 rounded-xl border border-[#2c2924] bg-[#141210] px-3 py-2.5">
                 <span className="flex h-9 w-9 flex-none items-center justify-center rounded-lg bg-[#2a2723] text-[#d97f5d]">
@@ -1385,7 +1401,38 @@ function MessageBubbleImpl({
                       Regenerate
                     </button>
                   )}
+
+                  {onDelete && (
+                    <button
+                      onClick={() => onDelete(message.id)}
+                      title="Delete this reply and your question — both forget it"
+                      aria-label="Delete this exchange"
+                      className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-[11px] font-medium text-[#6d685d] transition-colors hover:bg-danger/12 hover:text-danger"
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} aria-hidden="true">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M4 7h16" />
+                      </svg>
+                      Delete
+                    </button>
+                  )}
                 </div>
+              )}
+
+            {isLast &&
+              onDelete &&
+              !message.isStreaming &&
+              (message.isError || !message.content) && (
+                <button
+                  onClick={() => onDelete(message.id)}
+                  title="Delete this reply and your question — both forget it"
+                  aria-label="Delete this exchange"
+                  className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-[11px] font-medium text-[#6d685d] transition-colors hover:bg-danger/12 hover:text-danger"
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} aria-hidden="true">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M4 7h16" />
+                  </svg>
+                  Delete
+                </button>
               )}
           </div>
         )}

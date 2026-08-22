@@ -1900,17 +1900,59 @@ export default function Home() {
     void sendMessageRef.current?.(newContent);
   }, []);
 
-  /** Remove a user message and the reply it produced. */
+  /** Remove a whole exchange — the question and the reply — from UI and disk. */
   const deleteMessage = useCallback((messageId: string) => {
-    setMessages((prev) => {
-      const index = prev.findIndex((m) => m.id === messageId);
-      if (index === -1) return prev;
-      // Drop the following assistant turn too, so the transcript never shows
-      // an answer with no question.
-      const removeCount =
-        prev[index + 1]?.role === "assistant" ? 2 : 1;
-      return [...prev.slice(0, index), ...prev.slice(index + removeCount)];
-    });
+    const list = messagesRef.current;
+    const index = list.findIndex((m) => m.id === messageId);
+    if (index === -1) return;
+
+    let start = index;
+    let end = index + 1;
+    if (list[index].role === "user" && list[index + 1]?.role === "assistant") {
+      end = index + 2;
+    } else if (
+      list[index].role === "assistant" &&
+      index > 0 &&
+      list[index - 1]?.role === "user"
+    ) {
+      start = index - 1;
+    }
+    const pair = list.slice(start, end);
+    const isLastPair = end === list.length;
+
+    if (pair.some((m) => m.isStreaming)) {
+      const runId = runMessageIdRef.current;
+      if (runId) {
+        void fetch("/api/chat/stop", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ messageId: runId }),
+          keepalive: true,
+        }).catch(() => {});
+      }
+      abortRefs.current.get(workspaceIdRef.current ?? "")?.abort();
+    }
+
+    const next = [...list.slice(0, start), ...list.slice(end)];
+    messagesRef.current = next;
+    setMessages(next);
+
+    const convId = workspaceIdRef.current;
+    if (convId) conversationCache.current.set(convId, next);
+
+    const persistId = pair.find(
+      (m) =>
+        !m.id.startsWith("temp-") &&
+        !m.id.startsWith("stream-")
+    )?.id;
+    if (!convId || (!persistId && !isLastPair)) return;
+
+    const params = new URLSearchParams();
+    params.set("message", persistId ?? pair[0].id);
+    if (!persistId && isLastPair) params.set("last", "1");
+    void fetch(`/api/conversations/${convId}/messages?${params}`, {
+      method: "DELETE",
+    }).catch(() => {});
   }, []);
 
   /** Re-run the user turn that produced `assistantId`. */
