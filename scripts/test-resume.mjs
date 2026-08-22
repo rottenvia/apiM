@@ -42,6 +42,7 @@ const check = (label, ok, detail = "") => {
 };
 
 const route = read("src/app/api/chat/route.ts");
+const providers = read("src/lib/providers.ts");
 const store = read("src/lib/store.ts");
 const bubble = read("src/components/MessageBubble.tsx");
 const panel = read("src/components/WorkspaceSidePanel.tsx");
@@ -128,9 +129,9 @@ check(
   "compacted on the way in — see lib/compact"
 );
 check(
-  "rounds already spent count against the limit",
+  "rounds already spent are carried over on resume",
   /toolRounds = resumed\?\.toolRounds \?\? 0/.test(route),
-  "resuming with a fresh budget would let a task run forever"
+  "the ask-early nudge and plan checks need the real length of the run"
 );
 check(
   "continuations already used carry over too",
@@ -265,7 +266,7 @@ check(
 check(
   "rounds already spent are counted, not reset",
   /toolRounds: \(prior\.toolEvents \?\? \[\]\)\.length/.test(route),
-  "a fresh budget would let an old task run indefinitely"
+  "an old reply still has to know how long it already worked"
 );
 check(
   "a reply with nothing in it is not offered as resumable",
@@ -287,8 +288,9 @@ console.log("\n3c. Running out of balance mid-task keeps the work");
  */
 check(
   "work is checkpointed before the API error is surfaced",
-  route.indexOf("Could not save work before failing") <
-    route.indexOf("Your DeepSeek API key was rejected"),
+  route.indexOf("Could not save work before failing") !== -1 &&
+    route.indexOf("Could not save work before failing") <
+      route.indexOf("providerHttpError("),
   "it returned first and saved nothing"
 );
 check(
@@ -298,7 +300,7 @@ check(
 );
 check(
   "the balance message says the work is safe",
-  /add credit and press Continue/.test(route),
+  /add credit and press Continue/.test(providers),
   "otherwise the user assumes it is all gone"
 );
 check(

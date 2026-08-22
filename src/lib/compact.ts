@@ -66,8 +66,8 @@ export const KEEP_RECENT_ROUNDS = 4;
  * today, to save the cached rate on the removed part every round after.
  *
  * Break-even, at these rates, is 120 rounds if compaction removes half the
- * transcript and 480 rounds if it removes a fifth. MAX_TOOL_ROUNDS is 40.
- * There is no task on which the old threshold could ever pay for itself.
+ * transcript and 480 rounds if it removes a fifth. Most tasks never get
+ * there, so the old threshold could not pay for itself.
  *
  * Compaction still has a real job, just not this one: DeepSeek's window is
  * 1M tokens, and a transcript that reaches it fails outright. So it now fires

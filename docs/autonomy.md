@@ -24,8 +24,8 @@ cheaper than twenty rounds in the wrong direction.
 
 ### The agent knew what it had done, but not what it was doing
 
-The loop runs up to 40 rounds. Everything it *did* survives into the
-transcript. Nothing recorded what it was *trying to do*.
+The loop runs as many rounds as the task needs. Everything it *did*
+survives into the transcript. Nothing recorded what it was *trying to do*.
 
 That produces three failures, all of which look like the model being stupid
 and none of which are:

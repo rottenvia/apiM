@@ -94,7 +94,7 @@ the *cached* rate on the removed part every round after. Break-even:
 | 50% of the transcript | 120 rounds |
 | 20% of the transcript | 480 rounds |
 
-`MAX_TOOL_ROUNDS` is 40. It could never pay for itself. Measured:
+Most tasks never reach that many rounds. It could never pay for itself. Measured:
 
 | | 20 rounds | 40 rounds | 60 rounds |
 |---|---|---|---|

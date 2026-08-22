@@ -3,12 +3,12 @@
  *
  * ## The gap this fills
  *
- * The agent loop can run forty rounds. Everything it *did* survives — tool
- * calls are summarised into the transcript — but nothing records what it was
- * *trying* to do. Round thirty has an accurate log of twenty-nine actions and
- * no statement of the goal, so "am I finished?" is answered by re-reading its
- * own history and inferring, which is exactly the kind of reasoning that
- * drifts.
+ * The agent loop can run as many rounds as the task needs. Everything it
+ * *did* survives — tool calls are summarised into the transcript — but
+ * nothing records what it was *trying* to do. Round thirty has an accurate
+ * log of twenty-nine actions and no statement of the goal, so "am I
+ * finished?" is answered by re-reading its own history and inferring, which
+ * is exactly the kind of reasoning that drifts.
  *
  * Three failure modes come from that, all reported or observed:
  *
