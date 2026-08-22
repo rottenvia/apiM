@@ -83,6 +83,11 @@ import {
 } from "@/lib/rebuild-resume";
 import type { RebuiltResume } from "@/lib/rebuild-resume";
 import { fetchWithRetry } from "@/lib/retry";
+import {
+  MAX_AUTO_REVIVES,
+  detectPrematureStop,
+  reviveInstruction,
+} from "@/lib/revive";
 import { extractReasoningDelta } from "@/lib/reasoning-stream";
 import { loadScopedConversationHistory } from "@/lib/chat-history";
 import {
@@ -1393,6 +1398,12 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         // Carried across a resume, so continuing cannot reset the guard and
         // spend another eight budgets on a model that never stops.
         let continuations = resumed?.continuations ?? 0;
+        /**
+         * Times we auto-continued a mid-task stop that was not an output
+         * ceiling. Separate from MAX_CONTINUATIONS, and not carried across
+         * Resume: an explicit continue is the user asking us to try again.
+         */
+        let autoRevives = 0;
         /** Set when the reply stopped because it ran out of room. */
         let hitOutputCeiling = false;
         /** Set when the spending limit ended the run rather than the model. */
@@ -2044,6 +2055,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   `direction. If nothing is genuinely ambiguous, ignore this ` +
                   `and carry on.`,
               });
+              send({ type: "status", stage: "working" });
+              continue;
             }
 
             if (plan && !nudgedIncomplete) {
@@ -2098,6 +2111,46 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 send({ type: "status", stage: "working" });
                 continue;
               }
+            }
+
+            /*
+             * The model stopped without a tool call, and it does not look
+             * finished. Ox in particular will halt on an inner limit the
+             * app never set, or write "say continue" and wait. Resume
+             * already exists for that — this fires it automatically,
+             * from the same transcript, a couple of times at most.
+             */
+            const premature = detectPrematureStop({
+              content: assistantContent,
+              roundContent,
+              toolRounds,
+              toolsUsed: toolsUsedThisRun,
+              planComplete: plan ? planProgress(plan).complete : null,
+              planBlocked: plan
+                ? plan.steps.some((s) => s.state === "blocked")
+                : false,
+              finishReason: roundFinishReason,
+            });
+            if (premature && autoRevives < MAX_AUTO_REVIVES) {
+              autoRevives += 1;
+              transcript.push({
+                role: "user",
+                content: reviveInstruction(premature),
+              });
+              send({
+                type: "continuing",
+                reason: premature,
+                n: autoRevives,
+                of: MAX_AUTO_REVIVES,
+              });
+              recordAsync({
+                kind: "run_stopped",
+                subject: "premature stop",
+                detail: `Auto-continued a mid-task stop (${premature}).`,
+                context: { n: autoRevives, rounds: toolRounds },
+              });
+              send({ type: "status", stage: "working" });
+              continue;
             }
             break;
           }
