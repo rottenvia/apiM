@@ -5,34 +5,19 @@ import {
   getDeepSeekPeriod,
   formatCountdown,
 } from "@/lib/deepseek-hours";
+import { MODELS, getModel } from "@/lib/models";
 
 interface ModelSelectorProps {
   value: string;
   onChange: (value: string) => void;
 }
 
-const MODELS = [
-  {
-    id: "deepseek-v4-pro",
-    label: "DeepSeek V4 Pro",
-    shortLabel: "V4 Pro",
-    description: "49B parameters. Frontier-level quality for the hardest tasks.",
-    specs: "1M context · 384K max output",
-  },
-  {
-    id: "deepseek-v4-flash",
-    label: "DeepSeek V4 Flash",
-    shortLabel: "V4 Flash",
-    description: "13B parameters. Fast and economical for quick tasks.",
-    specs: "1M context · 384K max output",
-  },
-];
-
 export function ModelSelector({ value, onChange }: ModelSelectorProps) {
   const [isOpen, setIsOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
-  const current = MODELS.find((m) => m.id === value) || MODELS[0];
+  const current = getModel(value);
+  const showPeakHours = current.peakHours;
 
   // DeepSeek peak/off-peak indicator. Off-peak (16:30-00:30 Beijing time,
   // UTC+8) gives roughly half-price cache tokens; it updates every minute.
@@ -92,6 +77,7 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
           />
         </svg>
         <span>{current.shortLabel}</span>
+        {showPeakHours && (
         <span
           aria-hidden
           title={
@@ -103,6 +89,7 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
             period.period === "offpeak" ? "bg-emerald-400" : "bg-amber-400"
           }`}
         />
+        )}
         <svg
           style={{ width: 11, height: 11 }}
           className={`opacity-60 transition-transform duration-150 ${isOpen ? "rotate-180" : ""}`}
@@ -125,7 +112,7 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
                   Model
                 </p>
                 <p className="mt-0.5 text-[11px] leading-4 text-text-muted">
-                  Which DeepSeek model answers your messages
+                  DeepSeek or OpenCode Ox Alpha
                 </p>
               </div>
               <button
@@ -148,7 +135,8 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
               </button>
             </div>
 
-            {/* Peak/off-peak indicator for DeepSeek's Beijing-time pricing. */}
+            {/* Peak/off-peak is DeepSeek-only. Ox Alpha is free on OpenCode. */}
+            {showPeakHours && (
             <div className="border-b border-border px-4 py-2.5">
               <div className="flex items-center gap-2">
                 <span
@@ -179,6 +167,7 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
                 </span>
               </div>
             </div>
+            )}
 
             {/* Scrollable list */}
             <div

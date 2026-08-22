@@ -363,7 +363,8 @@ check(
 );
 check(
   "the route passes it in",
-  /runSignal,[\s\S]{0,300}pluginDirectives\s*\n\s*\);/.test(routeSrc2)
+  /runSignal,[\s\S]{0,400}pluginDirectives/.test(routeSrc2),
+  "decideSearch still receives the plugin block; a planner arg may follow"
 );
 check(
   "the judge is told the orders apply to this decision",
