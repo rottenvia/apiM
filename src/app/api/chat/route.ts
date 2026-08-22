@@ -953,6 +953,22 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           },
         ];
 
+        /*
+         * Ox / OpenCode often treats only the first system message as binding
+         * and ignores a later "priority" one after a few rounds. Pin the
+         * same standing orders onto that first message so Direct Mode cannot
+         * fade. DeepSeek still gets the tail-only copy (cache prefix).
+         */
+        const opening = transcript[0];
+        if (
+          target.providerId === "opencode" &&
+          pluginDirectives &&
+          opening?.role === "system" &&
+          !opening.content.includes(PLUGIN_DIRECTIVES_MARKER)
+        ) {
+          opening.content += `\n\n${pluginDirectives}`;
+        }
+
         for (const msg of scopedHistory) {
           if (!msg.content?.trim()) continue;
           transcript.push(
@@ -1336,6 +1352,20 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           }
 
           await refreshFileTree();
+        }
+
+        if (
+          target.providerId === "opencode" &&
+          pluginDirectives
+        ) {
+          const first = transcript.find((m) => m.role === "system");
+          if (
+            first &&
+            typeof first.content === "string" &&
+            !first.content.includes(PLUGIN_DIRECTIVES_MARKER)
+          ) {
+            first.content += `\n\n${pluginDirectives}`;
+          }
         }
 
         // ---------------- Agent loop ----------------

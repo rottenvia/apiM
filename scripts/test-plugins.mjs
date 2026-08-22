@@ -76,6 +76,10 @@ check(
   /check each reply/i.test(one),
   "the self-check property, not one exact sentence"
 );
+check(
+  "the block claims maximum priority so it cannot fade mid-conversation",
+  /MAXIMUM PRIORITY/i.test(one) && /do not expire or fade/i.test(one)
+);
 
 // ------------------------------------------------------------- the content
 
@@ -165,6 +169,12 @@ check(
     routeAssembly
   )
 );
+check(
+  "Ox pins the same standing orders onto the first system message",
+  /providerId === "opencode"/.test(routeAssembly) &&
+    /opening\.content \+=/.test(routeAssembly),
+  "OpenCode often ignores a later system message after a few rounds"
+);
 
 // ------------------------------------------------- the old blended builder
 
@@ -206,6 +216,10 @@ check(
   "it establishes audience and context instead",
   /experienced adult developer/i.test(direct.prompt),
   "which is what actually reduces false refusals"
+);
+check(
+  "Direct Mode stays in force after many rounds",
+  /stay in force for the whole conversation/i.test(direct.prompt)
 );
 
 // Vague instructions lose to specific ones, so none should be trivially short.
