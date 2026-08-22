@@ -79,6 +79,17 @@ check(
   /platformCommandName\(check\.command\)/.test(processSource),
   "run_command mapped python3 on Windows while start_process hit the Store shim"
 );
+check(
+  "Ghidra leftovers can be adopted, listed and killed",
+  /export function adoptProcess/.test(processSource) &&
+    /export function listLeftoverDecompilers/.test(processSource) &&
+    /export function stopLeftoverDecompilers/.test(processSource)
+);
+const leftover = await runTool(WS, "stop_process", { id: "leftover" });
+check(
+  "stop leftover is a real tool path even when nothing is running",
+  leftover.ok && /leftover/i.test(leftover.content + leftover.summary)
+);
 
 console.log("1. Starting something that keeps running");
 let res = await runTool(WS, "start_process", { command: "node", args: ["server.js"] });

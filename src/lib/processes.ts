@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import crossSpawn from "cross-spawn";
 import { promises as fs } from "node:fs";
 import { workspaceDirectory } from "@/lib/workspace";
@@ -26,6 +26,8 @@ export const MAX_PROCESSES_PER_WORKSPACE = 4;
 /** Long enough for a slow toolchain to bind a port, short enough to notice. */
 export const STARTUP_GRACE_MS = 4_000;
 
+export type ProcessKind = "user" | "decompiler";
+
 export interface TrackedProcess {
   id: string;
   workspaceId: string;
@@ -41,6 +43,23 @@ export interface TrackedProcess {
   log: string;
   truncated: boolean;
   child: ChildProcess;
+  /**
+   * Decompiler jobs (Ghidra/ILSpy) are adopted into this map so they show in
+   * the dock and can be killed after a tab refresh. They do not count against
+   * the per-workspace start_process limit.
+   */
+  kind?: ProcessKind;
+}
+
+/** Command lines that belong to apiM's headless decompilers, never the user's app. */
+export const DECOMPILER_CMDLINE =
+  /analyzeHeadless|apim-ghidra-projects|ApimDecompile\.java|\bilspycmd\b/i;
+
+export interface LeftoverDecompiler {
+  id: string;
+  pid: number;
+  display: string;
+  command: string;
 }
 
 const processes = new Map<string, TrackedProcess>();
@@ -73,6 +92,190 @@ export function listProcesses(workspaceId: string): TrackedProcess[] {
 
 export function getProcess(id: string): TrackedProcess | undefined {
   return processes.get(id);
+}
+
+export function listAllRunning(): TrackedProcess[] {
+  return [...processes.values()].filter(isRunning);
+}
+
+function trackedPids(): Set<number> {
+  const out = new Set<number>();
+  for (const proc of processes.values()) {
+    if (proc.pid && isRunning(proc)) out.add(proc.pid);
+  }
+  return out;
+}
+
+function leftoverDisplay(command: string): string {
+  if (/analyzeHeadless|ApimDecompile|apim-ghidra/i.test(command)) {
+    return "Leftover Ghidra";
+  }
+  if (/ilspycmd/i.test(command)) return "Leftover ILSpy";
+  return "Leftover decompiler";
+}
+
+/**
+ * Headless Ghidra/ILSpy still on the machine.
+ *
+ * Closing or refreshing the tab does not abort the chat run, and Ghidra is
+ * spawned detached so a hot-reload also orphans the JVM. Those leftovers had
+ * no row in the dock and no tool the model could use to kill them.
+ */
+export function listOsDecompilers(): { pid: number; command: string }[] {
+  let text = "";
+  try {
+    if (process.platform === "win32") {
+      text = execFileSync(
+        "wmic",
+        ["process", "get", "ProcessId,CommandLine", "/FORMAT:CSV"],
+        { encoding: "utf8", timeout: 5_000, windowsHide: true }
+      );
+    } else {
+      text = execFileSync("ps", ["-eo", "pid=,args="], {
+        encoding: "utf8",
+        timeout: 5_000,
+      });
+    }
+  } catch {
+    return [];
+  }
+
+  const found: { pid: number; command: string }[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    if (!DECOMPILER_CMDLINE.test(line)) continue;
+    if (process.platform === "win32") {
+      const parts = line.split(",");
+      const pid = Number(parts[parts.length - 1]);
+      const command = parts.slice(1, -1).join(",");
+      if (Number.isFinite(pid) && pid > 1) found.push({ pid, command });
+    } else {
+      const match = /^\s*(\d+)\s+(.*)$/.exec(line);
+      if (match) found.push({ pid: Number(match[1]), command: match[2] });
+    }
+  }
+  return found;
+}
+
+export function listLeftoverDecompilers(): LeftoverDecompiler[] {
+  const tracked = trackedPids();
+  const out: LeftoverDecompiler[] = [];
+  const seen = new Set<string>();
+
+  for (const proc of processes.values()) {
+    if (proc.kind !== "decompiler" || !isRunning(proc)) continue;
+    seen.add(proc.id);
+    out.push({
+      id: proc.id,
+      pid: proc.pid ?? 0,
+      display: proc.display,
+      command: [proc.command, ...proc.args].join(" "),
+    });
+  }
+
+  for (const os of listOsDecompilers()) {
+    if (tracked.has(os.pid) || os.pid === process.pid) continue;
+    const id = `orphan-${os.pid}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push({
+      id,
+      pid: os.pid,
+      display: leftoverDisplay(os.command),
+      command: os.command,
+    });
+  }
+  return out;
+}
+
+export function killPidTree(pid: number): boolean {
+  if (!Number.isFinite(pid) || pid <= 1) return false;
+  try {
+    if (process.platform === "win32") {
+      spawn("taskkill", ["/pid", String(pid), "/T", "/F"], {
+        windowsHide: true,
+      });
+    } else {
+      try {
+        process.kill(-pid, "SIGKILL");
+      } catch {
+        process.kill(pid, "SIGKILL");
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function stopLeftoverById(id: string): boolean {
+  if (id.startsWith("orphan-")) {
+    return killPidTree(Number(id.slice("orphan-".length)));
+  }
+  const proc = processes.get(id);
+  if (!proc) return false;
+  return stopProcess(id);
+}
+
+/** Kill every tracked decompiler job and every leftover analyzeHeadless JVM. */
+export function stopLeftoverDecompilers(): number {
+  let stopped = 0;
+  for (const proc of processes.values()) {
+    if (proc.kind === "decompiler" && isRunning(proc)) {
+      stopProcess(proc.id);
+      stopped++;
+    }
+  }
+  const tracked = trackedPids();
+  for (const os of listOsDecompilers()) {
+    if (tracked.has(os.pid) || os.pid === process.pid) continue;
+    if (killPidTree(os.pid)) stopped++;
+  }
+  return stopped;
+}
+
+/**
+ * Register a child the agent did not start via start_process.
+ *
+ * Ghidra/ILSpy used to live only inside inspect_binary. After a refresh there
+ * was no dock row and stop_process could not see them.
+ */
+export function adoptProcess(opts: {
+  workspaceId: string;
+  command: string;
+  args: string[];
+  display: string;
+  child: ChildProcess;
+  kind?: ProcessKind;
+}): TrackedProcess {
+  registerShutdownCleanup();
+  const proc: TrackedProcess = {
+    id: nextId(),
+    workspaceId: opts.workspaceId,
+    command: opts.command,
+    args: opts.args,
+    display: opts.display,
+    pid: opts.child.pid,
+    startedAt: Date.now(),
+    exitedAt: null,
+    exitCode: null,
+    stoppedByUser: false,
+    log: "",
+    truncated: false,
+    child: opts.child,
+    kind: opts.kind ?? "user",
+  };
+  opts.child.stdout?.on("data", (d) => append(proc, d.toString()));
+  opts.child.stderr?.on("data", (d) => append(proc, d.toString()));
+  opts.child.on("error", (err) => {
+    append(proc, `\n[failed to start: ${err.message}]\n`);
+    proc.exitedAt = Date.now();
+  });
+  opts.child.on("close", (code) => {
+    proc.exitedAt = Date.now();
+    proc.exitCode = code;
+  });
+  processes.set(proc.id, proc);
+  return proc;
 }
 
 /** Longest a single wait may block. A dev server that slow has a problem. */
@@ -215,7 +418,9 @@ export async function startProcess(
   const check = validateCommand(command, args, workspaceDirectory(workspaceId));
   if (!check.ok) return { ok: false, reason: check.reason };
 
-  const running = listProcesses(workspaceId).filter(isRunning);
+  const running = listProcesses(workspaceId).filter(
+    (p) => isRunning(p) && p.kind !== "decompiler"
+  );
   if (running.length >= MAX_PROCESSES_PER_WORKSPACE) {
     return {
       ok: false,
