@@ -793,7 +793,7 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
           headers: {
             type: "object",
             description:
-              'Request headers, e.g. {"authorization": "Bearer ..."}. Content-Type is set to application/json automatically when the body looks like JSON.',
+              'Request headers, e.g. {"authorization": "Bearer ..."}. Content-Type becomes application/json when the body looks like JSON.',
           },
           body: {
             type: "string",
@@ -824,7 +824,7 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
           pattern: {
             type: "string",
             description:
-              "Text or a regular expression to wait for, e.g. 'Ready in' or 'listening on'. Omit to just wait for the process to exit.",
+              "Text or regex to wait for, e.g. 'Ready in' or 'listening on'; omit to wait for exit.",
           },
           timeout_ms: {
             type: "number",
@@ -867,7 +867,7 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
           filter: {
             type: "string",
             description:
-              "Only run tests matching this name or path, e.g. 'test_login' or 'tests/test_auth.py'. Use it after a failure to re-run just the broken test.",
+              "Only run tests matching this name or path, e.g. 'test_login' or 'tests/test_auth.py'. Use it to re-run just a broken test.",
           },
         },
         required: [],
@@ -879,7 +879,7 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
     function: {
       name: "build_project",
       description:
-        "Compile the workspace automatically using the installed toolchain - a Visual Studio solution (.sln/.vcxproj/.csproj), CMake, dotnet, npm, cargo, go, make, a Python package, or a single .cpp/.cs file. Finds MSBuild/your compiler itself (no vcvars, no flag guessing), restores NuGet/packages, builds Release x64 by default, and returns compiler errors so you can fix them without the user running anything. Prefer this over run_command for building.",
+        "Build the workspace with the installed toolchain: Visual Studio solutions/projects (.sln/.vcxproj/.csproj), CMake, dotnet, npm, cargo, go, make, Python, or a single .cpp/.cs file. Finds the compiler itself (no vcvars, no flag guessing), restores packages, builds Release x64 by default, and returns compiler errors so you can fix them without the user running anything. Prefer this over run_command for building.",
       parameters: {
         type: "object",
         properties: {
@@ -1002,11 +1002,11 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
         "PE/Lua/ZIP/PNG/PDF blobs plus opaque high-entropy sections/overlays " +
         "with their own strings, highlighted Lua/" +
         "process-memory/library-loading/process-creation imports, and an " +
-        "optional FLARE capa report. For managed code it uses ILSpy when " +
-        "installed; for native code it uses headless Ghidra, optionally only " +
-        "decompiling functions referencing focus terms such as CreateMove and " +
-        "IN_JUMP, then callers of high-interest loader/process-memory APIs, " +
-        "with bounded full fallback only when both focused passes find zero. " +
+        "optional FLARE capa report. Managed code uses ILSpy when " +
+        "installed; native code uses headless Ghidra, decompiling only " +
+        "functions referencing focus terms (default CreateMove, IN_JUMP), " +
+        "then callers of loader/process-memory APIs, with bounded full " +
+        "fallback when focused passes find nothing. " +
         "Availability is resolved by the apiM server; do not use " +
         "run_command/where/environment probes to second-guess it because agent " +
         "commands intentionally receive a scrubbed environment. Outputs are " +
@@ -1035,86 +1035,75 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
               ],
             },
             description:
-              "Choose only the layers the request needs. Omitted defaults to " +
-              "cheap summary. Examples: test Ghidra = [\"decompile\"]; dump " +
-              "strings = [\"strings\"]; inspect dependencies and capa = " +
-              "[\"dependencies\",\"capa\"]; check everything = [\"all\"].",
+              "Only the layers the request needs; omitted = cheap summary. " +
+              "Examples: test Ghidra = [\"decompile\"]; dump strings = " +
+              "[\"strings\"]; dependencies + capa = " +
+              "[\"dependencies\",\"capa\"]; everything = [\"all\"].",
           },
           deep: {
             type: "boolean",
-            description:
-              "Legacy explicit override for the decompile layer. Prefer " +
-              "analyses:[\"decompile\"].",
+            description: "Legacy override; prefer analyses:[\"decompile\"].",
           },
           force_decompile: {
             type: "boolean",
             description:
-              "Ignore only the ILSpy/Ghidra hash cache and rerun decompilation. " +
-              "Completed strings, entropy, carving and capa artifacts remain " +
-              "cached so fixing one deep-analysis error does not cost minutes.",
+              "Rerun decompilation, ignoring only its hash cache — completed " +
+              "strings, entropy, carving and capa artifacts stay cached.",
           },
           artifacts: {
             type: "boolean",
             description:
-              "Legacy override: true requests all static artifact layers; " +
-              "false disables them. Prefer analyses.",
+              "Legacy override: true = all static artifact layers, false = " +
+              "none. Prefer analyses.",
           },
           run_capa: {
             type: "boolean",
-            description:
-              "Legacy explicit override for capa. Prefer analyses:[\"capa\"].",
+            description: "Legacy override; prefer analyses:[\"capa\"].",
           },
           focus_terms: {
             type: "array",
             items: { type: "string" },
             description:
-              "Names/strings whose referencing functions should be isolated " +
-              "in Ghidra/ILSpy. Defaults to [\"CreateMove\", \"IN_JUMP\"].",
+              "Names/strings whose referencing functions are isolated in " +
+              "Ghidra/ILSpy (default [\"CreateMove\", \"IN_JUMP\"]).",
           },
           focused_only: {
             type: "boolean",
             description:
-              "Generate only focused decompiler functions instead of a full " +
-              "source dump. Defaults to true for performance. Set false when " +
-              "you need the whole executable decompiled as well.",
+              "Focused functions only instead of a full dump. Defaults to " +
+              "true; set false to decompile the whole executable as well.",
           },
           analyzer_preset: {
             type: "string",
             enum: ["fast", "full"],
             description:
-              "Which Ghidra auto-analyzers to run. 'fast' (default) disables " +
-              "the expensive Decompiler Parameter ID / Switch Analysis / Stack " +
-              "analyzers that our post-script does not use, which can cut large " +
-              "binary analysis time substantially with no loss of reported " +
-              "information. Use 'full' to leave every analyzer on (slower, " +
-              "maximum fidelity, e.g. when you need parameter-type inference).",
+              "Ghidra auto-analyzers to run: 'fast' (default) skips the " +
+              "expensive analyzers the post-script does not use — much " +
+              "faster, no loss of reported information; 'full' keeps every " +
+              "analyzer on (slower, maximum fidelity).",
           },
           disable_analyzers: {
             type: "array",
             items: { type: "string" },
             description:
-              "Exact names of Ghidra analyzers to turn OFF for this binary, in " +
-              "addition to the preset. Use analyzers.txt in the output folder " +
-              "for exact names. You decide per binary what you do not need.",
+              "Exact Ghidra analyzer names to turn OFF in addition to the " +
+              "preset; analyzers.txt in the output folder lists them.",
           },
           enable_analyzers: {
             type: "array",
             items: { type: "string" },
             description:
-              "Exact names of Ghidra analyzers to turn ON (overrides the " +
-              "preset for those). You are the judge of what this target needs.",
+              "Exact Ghidra analyzer names to turn ON, overriding the preset.",
           },
           dependencies: {
             type: "boolean",
-            description:
-              "Legacy explicit override for recursive local DLL inspection. " +
-              "Prefer analyses:[\"dependencies\"].",
+            description: "Legacy override; prefer analyses:[\"dependencies\"].",
           },
           max_depth: {
             type: "number",
             description:
-              "Local DLL recursion depth, 0-8. Defaults to 4. System DLLs " +
-              "are named but not read from outside the workspace.",
+              "Local DLL recursion depth, 0-8 (default 4). System DLLs are " +
+              "named but not read from outside the workspace.",
           },
           include_strings: {
             type: "boolean",
@@ -1128,11 +1117,11 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
           },
           min_string_length: {
             type: "number",
-            description: "Minimum string length, 4-64. Defaults to 6.",
+            description: "Minimum string length, 4-64 (default 6).",
           },
           max_strings: {
             type: "number",
-            description: "Maximum selected strings to return, 1-300. Defaults to 160.",
+            description: "Maximum selected strings to return, 1-300 (default 160).",
           },
         },
         required: ["path"],
@@ -1146,8 +1135,8 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
       description:
         "Record your verdict about an executable you inspected - works, " +
         "flawed, where the good build is, what a hook does. Persists across " +
-        "messages and after Stop, and is shown every later turn, so you do " +
-        "not re-decompile the same DLL. Call it the moment you conclude; one " +
+        "messages and after Stop, shown every later turn, so you do " +
+        "not re-decompile the same DLL. Call it the moment you conclude: one " +
         "short specific sentence.",
       parameters: {
         type: "object",
@@ -1172,7 +1161,7 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
     function: {
       name: "note_finding",
       description:
-        "Record a conclusion you reached so you do not re-derive or forget it in a later message after context is compacted. Use it for anything established by reading files, running commands, or decompiling: why an approach is dead, what a function actually does, which option works and why, what an error meant. One specific, factual line with the evidence. The finding is shown to you every later turn; if it turns out wrong, call note_finding again with status 'disproved'. Record findings as you go, not only at the end.",
+        "Record a conclusion you reached so you do not re-derive or forget it after context is compacted. Use it for anything established by reading files, running commands or decompiling: a dead approach, what a function actually does, which option works and why, what an error meant. One specific, factual line with the evidence. Shown to you every later turn; if it turns out wrong, call note_finding again with status 'disproved'. Record findings as you go, not only at the end.",
       parameters: {
         type: "object",
         properties: {
@@ -1195,7 +1184,7 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
           id: {
             type: "string",
             description:
-              "Id [f...] of an existing finding to correct. Provide this with status to mark it wrong instead of adding a new one.",
+              "Id [f...] of an existing finding to correct; with status, marks it wrong instead of adding a new one.",
           },
           status: {
             type: "string",

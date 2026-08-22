@@ -55,7 +55,21 @@ const newChat = page.slice(
   page.indexOf("const startNewChat = useCallback"),
   page.indexOf("const renameConversation")
 );
-check("New chat aborts the old browser stream", /abortRef\.current\?\.abort/.test(newChat));
+// Streams are per-conversation now: switching must NOT kill another chat's
+// in-flight reply. What New chat severs is the side channel (the aside is
+// scoped to the visible chat), while the old stream keeps saving to its own
+// conversation. The shared abortRef made switching cancel the wrong reply.
+check(
+  "New chat severs the side channel, not other chats' streams",
+  /btwAbortRef\.current\?\.abort\(\)/.test(newChat) &&
+    /Starting a new chat does not cancel other chats' streams/.test(newChat)
+);
+check(
+  "every chat's stream gets its own abort controller",
+  /useRef<Map<string, AbortController>>/.test(page) &&
+    /abortRefs\.current\.set\(runConvId, controller\)/.test(page),
+  "one shared controller let a switched-away chat cancel the visible reply"
+);
 check("New chat allocates and synchronously stores a fresh workspace id", /const nextId = uuidv4\(\)/.test(newChat) && /workspaceIdRef\.current = nextId/.test(newChat));
 check("New chat clears the synchronous message ref", /messagesRef\.current = \[\]/.test(newChat));
 check(
@@ -64,7 +78,9 @@ check(
 );
 check(
   "an old request cannot clear the new request controller or final UI state",
-  /if \(abortRef\.current === controller\) abortRef\.current = null/.test(page) &&
+  // A finished run only ever deletes its own map entry (its run's key), so a
+  // newer chat's controller is untouched; stillActive gates the UI resets.
+  /abortRefs\.current\.delete\(runConvId\)/.test(page) &&
     /const stillActive = workspaceIdRef\.current === requestConversationId/.test(page)
 );
 check(

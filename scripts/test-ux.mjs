@@ -78,10 +78,13 @@ console.log('\n2. "thinking literally hidden now, i cant see thinking process"')
 
 check(
   "a reply watched live opens its reasoning as a box",
+  // wentLive latches from startedLive: a reply watched live opens, and a
+  // resumed historical reply that later starts streaming opens too.
   /const \[startedLive\] = useState\(\(\) => Boolean\(message\.isStreaming\)\)/.test(
     bubble
   ) &&
-    /const autoOpen = Boolean\(startedLive && hasThinking\)/.test(bubble) &&
+    /const wentLiveRef = useRef\(startedLive\)/.test(bubble) &&
+    /const autoOpen = Boolean\(wentLive && hasThinking\)/.test(bubble) &&
     /const showThinking = userSetThinking \?\? autoOpen;/.test(bubble),
   "the old derived rule collapsed on the first prose token and left only a line"
 );
@@ -98,8 +101,11 @@ check(
 );
 check(
   "a reply mounted from history still starts compact",
+  // The wentLive latch starts from the mount-time value, so a historical
+  // bubble (isStreaming false at mount) stays compact until it is resumed.
   /startedLive.*Boolean\(message\.isStreaming\)/.test(bubble) &&
-    /startedLive && hasThinking/.test(bubble),
+    /const wentLiveRef = useRef\(startedLive\)/.test(bubble) &&
+    /wentLive && hasThinking/.test(bubble),
   "a stored reply mounts with isStreaming false; the live reply stays open"
 );
 check(
@@ -382,7 +388,8 @@ check(
 );
 check(
   "finishing the stream does not collapse a live panel",
-  /const autoOpen = Boolean\(startedLive && hasThinking\)/.test(bubble),
+  /const autoOpen = Boolean\(wentLive && hasThinking\)/.test(bubble) &&
+    !/autoOpen = Boolean\([^;]*message\.isStreaming/.test(bubble),
   "autoOpen intentionally has no live isStreaming dependency"
 );
 check(
