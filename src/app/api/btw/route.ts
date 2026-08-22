@@ -24,8 +24,7 @@ import { buildWorkspaceContext } from "@/lib/workspace-context";
  * longer than the question is worth.
  */
 
-const DEEPSEEK_BASE_URL =
-  process.env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com";
+import { resolveHelperTarget } from "@/lib/providers";
 
 /** Long enough for a real answer, short enough that it stays an aside. */
 const MAX_OUTPUT_TOKENS = 1200;
@@ -41,6 +40,7 @@ const SYSTEM_PROMPT =
 interface Incoming {
   question?: unknown;
   deepseekApiKey?: unknown;
+  opencodeApiKey?: unknown;
   workspaceId?: unknown;
   /** The user's last real message, purely as context for pronouns. */
   lastUserMessage?: unknown;
@@ -56,15 +56,19 @@ export async function POST(req: NextRequest) {
 
   const question =
     typeof body.question === "string" ? body.question.trim() : "";
-  const apiKey =
-    typeof body.deepseekApiKey === "string" ? body.deepseekApiKey : "";
+  const helper = resolveHelperTarget({
+    deepseekApiKey:
+      typeof body.deepseekApiKey === "string" ? body.deepseekApiKey : "",
+    opencodeApiKey:
+      typeof body.opencodeApiKey === "string" ? body.opencodeApiKey : "",
+  });
 
   if (!question) {
     return NextResponse.json({ error: "A question is required" }, { status: 400 });
   }
-  if (!apiKey) {
+  if (!helper) {
     return NextResponse.json(
-      { error: "Add your DeepSeek API key in Settings first" },
+      { error: "Add a DeepSeek or OpenCode API key in Settings first" },
       { status: 400 }
     );
   }
@@ -86,18 +90,20 @@ export async function POST(req: NextRequest) {
       : "";
 
   try {
-    const res = await fetch(`${DEEPSEEK_BASE_URL}/chat/completions`, {
+    const res = await fetch(`${helper.baseUrl}/chat/completions`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
+        Authorization: `Bearer ${helper.apiKey}`,
       },
       // Its own signal. Dismissing the aside must not touch the main task,
       // and stopping the main task must not kill the aside.
       signal: AbortSignal.any([req.signal, AbortSignal.timeout(60_000)]),
       body: JSON.stringify({
-        model: "deepseek-v4-flash",
-        thinking: { type: "disabled" },
+        model: helper.apiModel,
+        ...(helper.thinkingStyle === "openai"
+          ? {}
+          : { thinking: { type: "disabled" } }),
         max_tokens: MAX_OUTPUT_TOKENS,
         // Deliberately no `tools`. See the note at the top of the file.
         messages: [
@@ -109,7 +115,7 @@ export async function POST(req: NextRequest) {
 
     if (!res.ok) {
       const detail = await res.text().catch(() => "");
-      let message = `DeepSeek returned ${res.status}`;
+      let message = `${helper.providerName} returned ${res.status}`;
       try {
         const parsed = JSON.parse(detail);
         message = parsed?.error?.message ?? message;
@@ -120,7 +126,7 @@ export async function POST(req: NextRequest) {
         {
           error:
             res.status === 402
-              ? "Insufficient DeepSeek balance for the side question."
+              ? `Insufficient ${helper.providerName} balance for the side question.`
               : message,
         },
         { status: 502 }

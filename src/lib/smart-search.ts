@@ -11,6 +11,45 @@
 const DEEPSEEK_BASE_URL =
   process.env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com";
 
+/**
+ * Which Chat Completions endpoint plans searches.
+ *
+ * DeepSeek Flash is the default. Ox Alpha-only setups pass OpenCode Zen
+ * instead so search still works without a DeepSeek key.
+ */
+export interface SearchPlanner {
+  apiKey: string;
+  baseUrl: string;
+  apiModel: string;
+  thinkingStyle?: "deepseek" | "openai";
+}
+
+function plannerFrom(
+  deepseekKey: string,
+  planner?: SearchPlanner
+): SearchPlanner {
+  if (planner?.apiKey) return planner;
+  return {
+    apiKey: deepseekKey,
+    baseUrl: DEEPSEEK_BASE_URL,
+    apiModel: "deepseek-v4-flash",
+    thinkingStyle: "deepseek",
+  };
+}
+
+function plannerHeaders(planner: SearchPlanner): Record<string, string> {
+  return {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${planner.apiKey}`,
+  };
+}
+
+function plannerThinking(planner: SearchPlanner): Record<string, unknown> {
+  return planner.thinkingStyle === "openai"
+    ? {}
+    : { thinking: { type: "disabled" } };
+}
+
 /** Overridable so the search path can be exercised against a stub in tests. */
 const TAVILY_BASE_URL =
   process.env.TAVILY_BASE_URL ?? "https://api.tavily.com";
@@ -217,23 +256,23 @@ export async function decideSearch(
    * Passed as extra system text rather than woven into the JSON contract, so
    * the response shape is unchanged and a plugin cannot break the parser.
    */
-  standingOrders?: string
+  standingOrders?: string,
+  planner?: SearchPlanner
 ): Promise<{ needed: boolean; reason: string; clarify?: string }> {
   if (obviouslyNoSearch(message)) {
     return { needed: false, reason: "no external information required" };
   }
 
+  const llm = plannerFrom(deepseekKey, planner);
+
   try {
     const response = await fetch(
-      `${DEEPSEEK_BASE_URL}/chat/completions`,
+      `${llm.baseUrl}/chat/completions`,
       {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${deepseekKey}`,
-        },
+        headers: plannerHeaders(llm),
         body: JSON.stringify({
-          model: "deepseek-v4-flash",
+          model: llm.apiModel,
           messages: [
             {
               role: "system",
@@ -272,7 +311,7 @@ Respond with JSON only:
           response_format: { type: "json_object" },
           temperature: 0,
           max_tokens: 60,
-          thinking: { type: "disabled" },
+          ...plannerThinking(llm),
         }),
         signal: withTimeout(signal, 12_000),
       }
@@ -330,19 +369,18 @@ async function generateSearchQueries(
   message: string,
   context: string,
   deepseekKey: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  planner?: SearchPlanner
 ): Promise<QueryPlan> {
+  const llm = plannerFrom(deepseekKey, planner);
   try {
     const response = await fetch(
-      `${DEEPSEEK_BASE_URL}/chat/completions`,
+      `${llm.baseUrl}/chat/completions`,
       {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${deepseekKey}`,
-        },
+        headers: plannerHeaders(llm),
         body: JSON.stringify({
-          model: "deepseek-v4-flash",
+          model: llm.apiModel,
           messages: [
             {
               role: "system",
@@ -377,8 +415,9 @@ Respond in JSON ONLY:
           // Query planning is a mechanical extraction task — reasoning adds
           // seconds of latency before the real answer even starts. This is a
           // top-level API parameter (not `extra_body`, which only the Python
-          // SDK understands and the REST API silently ignores).
-          thinking: { type: "disabled" },
+          // SDK understands and the REST API silently ignores). OpenCode
+          // models skip DeepSeek's `thinking` object.
+          ...plannerThinking(llm),
         }),
         signal: withTimeout(signal, 30_000),
       }
@@ -836,7 +875,8 @@ async function assessSufficiency(
   message: string,
   results: SearchResultItem[],
   deepseekKey: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  planner?: SearchPlanner
 ): Promise<{ sufficient: boolean; missing: string }> {
   if (results.length === 0) return { sufficient: false, missing: message };
 
@@ -848,15 +888,14 @@ async function assessSufficiency(
     )
     .join("\n\n");
 
+  const llm = plannerFrom(deepseekKey, planner);
+
   try {
-    const response = await fetch(`${DEEPSEEK_BASE_URL}/chat/completions`, {
+    const response = await fetch(`${llm.baseUrl}/chat/completions`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${deepseekKey}`,
-      },
+      headers: plannerHeaders(llm),
       body: JSON.stringify({
-        model: "deepseek-v4-flash",
+        model: llm.apiModel,
         messages: [
           {
             role: "system",
@@ -877,7 +916,7 @@ Respond in JSON ONLY:
         response_format: { type: "json_object" },
         temperature: 0,
         max_tokens: 120,
-        thinking: { type: "disabled" },
+        ...plannerThinking(llm),
       }),
       signal: withTimeout(signal, 20_000),
     });
@@ -953,10 +992,17 @@ export async function smartSearch(
    * Appended rather than inserted so every existing caller keeps working
    * unchanged — this function is called from three places.
    */
-  exaKey?: string
+  exaKey?: string,
+  planner?: SearchPlanner
 ): Promise<SmartSearchContext> {
   const profile: ProfileSettings = profileSettings(profileName);
-  const plan = await generateSearchQueries(message, context, deepseekKey, signal);
+  const plan = await generateSearchQueries(
+    message,
+    context,
+    deepseekKey,
+    signal,
+    planner
+  );
 
   const seenUrls = new Set<string>();
   const seenQueries = new Set<string>();
@@ -1071,7 +1117,8 @@ export async function smartSearch(
       message,
       collected,
       deepseekKey,
-      signal
+      signal,
+      planner
     );
     if (verdict.sufficient) {
       stopReason =
@@ -1083,7 +1130,8 @@ export async function smartSearch(
       `${message}\n\nStill missing: ${verdict.missing}`,
       context,
       deepseekKey,
-      signal
+      signal,
+      planner
     );
 
     // The judge found a concrete gap, so this round is the one that earns a

@@ -65,6 +65,8 @@ interface ChatAreaProps {
   retryNotice?: string | null;
   onStop: () => void;
   hasKeys: boolean;
+  /** Which provider key is missing for the selected model. */
+  missingKeyLabel?: string;
   model: string;
   thinkingEffort: string;
   webSearchMode: "off" | "auto" | "always";
@@ -121,6 +123,7 @@ export function ChatArea({
   retryNotice,
   onStop,
   hasKeys,
+  missingKeyLabel = "DeepSeek",
   model,
   thinkingEffort,
   webSearchMode,
@@ -1137,7 +1140,11 @@ export function ChatArea({
         className="relative flex-1 overflow-y-auto overflow-x-hidden"
       >
         {messages.length === 0 ? (
-          <EmptyState hasKeys={hasKeys} onOpenSettings={onOpenSettings} />
+          <EmptyState
+            hasKeys={hasKeys}
+            missingKeyLabel={missingKeyLabel}
+            onOpenSettings={onOpenSettings}
+          />
         ) : (
           <div
             className={`mx-auto w-full px-4 sm:px-6 py-6 transition-[max-width] duration-300 ${columnWidth}`}
@@ -1561,9 +1568,11 @@ export function ChatArea({
 
 function EmptyState({
   hasKeys,
+  missingKeyLabel,
   onOpenSettings,
 }: {
   hasKeys: boolean;
+  missingKeyLabel: string;
   onOpenSettings: () => void;
 }) {
   return (
@@ -1608,8 +1617,9 @@ function EmptyState({
         ) : (
           <>
             <p className="mt-3 text-sm leading-6 text-text-secondary">
-              Connect your DeepSeek API key to start chatting. Your keys stay
-              in your browser — nothing leaves this app except your requests.
+              Connect a {missingKeyLabel} API key to start chatting. DeepSeek
+              and OpenCode (Ox Alpha) both work. Your keys stay in your
+              browser — nothing leaves this app except your requests.
             </p>
             <div className="mt-6 flex justify-center">
               <button onClick={onOpenSettings} className="btn-primary">

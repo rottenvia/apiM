@@ -61,7 +61,7 @@ const EFFORTS = [
  * labelled with what it really does.
  */
 function effortsFor(model: string) {
-  const isPro = model !== "deepseek-v4-flash";
+  const isPro = model === "deepseek-v4-pro";
   return EFFORTS.map((e) => {
     if (isPro && e.id === "low") {
       return {
@@ -163,9 +163,9 @@ export function ThinkingEffortSelector({
                   Thinking effort
                 </p>
                 <p className="mt-0.5 text-[11px] leading-4 text-text-muted">
-                  {model === "deepseek-v4-flash"
-                    ? "How deeply the model reasons before replying"
-                    : "V4 Pro has two real depths: High and Max"}
+                  {model === "deepseek-v4-pro"
+                    ? "V4 Pro has two real depths: High and Max"
+                    : "How deeply the model reasons before replying"}
                 </p>
               </div>
               <button
