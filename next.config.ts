@@ -41,6 +41,23 @@ const nextConfig: NextConfig = {
   turbopack: {
     root: projectRoot,
   },
+
+  // proxy.ts clones every request body. The default 10MB cap silently
+  // truncated a 37MB client.dll even after /binary-raw stopped 404ing.
+  experimental: {
+    proxyClientMaxBodySize: "256mb",
+  },
+
+  // Composer posts huge DLLs to /binary-raw. The custom server handles that
+  // path itself; under `next dev` this rewrite keeps the request from 404ing.
+  async rewrites() {
+    return [
+      {
+        source: "/api/workspace/:id/binary-raw",
+        destination: "/api/workspace/:id/binary",
+      },
+    ];
+  },
 };
 
 export default nextConfig;

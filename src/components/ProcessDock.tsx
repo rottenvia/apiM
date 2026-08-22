@@ -10,6 +10,7 @@ export interface RunningProcess {
   exitCode: number | null;
   stoppedByUser: boolean;
   logTail: string;
+  leftover?: boolean;
 }
 
 /**
@@ -57,8 +58,12 @@ export function ProcessDock({
   const anyRunning = processes.some((p) => p.running);
 
   useEffect(() => {
-    if (!anyRunning && !open) return;
-    const timer = setInterval(() => void refresh(), open ? 1500 : 4000);
+    // Always poll: leftover Ghidra after a refresh has no chat UI, so an
+    // idle dock still has to notice an orphaned analyzeHeadless JVM.
+    const timer = setInterval(
+      () => void refresh(),
+      open || anyRunning ? 1500 : 5000
+    );
     return () => clearInterval(timer);
   }, [anyRunning, open, refresh]);
 
@@ -131,7 +136,7 @@ export function ProcessDock({
                   Background processes
                 </p>
                 <p className="mt-0.5 text-[11px] leading-4 text-text-muted">
-                  Started by the assistant in this chat
+                  Servers and leftover Ghidra from a closed tab
                 </p>
               </div>
               {running.length > 0 && (
@@ -160,6 +165,11 @@ export function ProcessDock({
                     >
                       {proc.display}
                     </span>
+                    {proc.leftover && (
+                      <span className="flex-none rounded bg-bg-primary px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text-muted">
+                        leftover
+                      </span>
+                    )}
 
                     {proc.logTail.trim() && (
                       <button

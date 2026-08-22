@@ -97,8 +97,8 @@ writes persistent artifacts under `analysis/<binary>-<hash>/`:
 5. A dedicated high-interest import view for `luaL_*`, process-memory/
    injection APIs, `LoadLibrary`/`GetProcAddress`, and process creation APIs.
 6. A FLARE capa report when capa is installed.
-7. Focused Ghidra/ILSpy output for functions referencing `CreateMove` or
-   `IN_JUMP` by default.
+7. Focused Ghidra/ILSpy output for the functions/strings you name in
+   `focus_terms`. There is no default hook list and no automatic full dump.
 
 "Signing envelope present" does not claim the certificate is trusted, and an
 import is capability evidence rather than a malware verdict.
@@ -158,15 +158,24 @@ APIM_GHIDRA_HOME=C:\tools\ghidra_11.x_PUBLIC
 ```
 
 That directory must contain `support\analyzeHeadless.bat`. Restart apiM after
-changing `.env.local`. By default the tool resolves symbols/strings named
-`CreateMove` and `IN_JUMP`, follows their references and keeps those functions
-in `focused-functions.c` / `focused-functions.cs`. If stripped/packed code has
-no surviving focus reference, Ghidra first decompiles callers of high-interest
-loader/process-memory APIs; only when those are also absent does bounded full
-decompilation run. `force_decompile` reruns only Ghidra/ILSpy while preserving
-cached strings, entropy, carving and capa. Set `focused_only:false` to retain
-full Ghidra output immediately in searchable ~350KB chunks or the complete
-ILSpy C# project. Completed results are cached by SHA-256 plus focus profile.
+changing `.env.local`. Name the functions or strings for **this** binary in
+`focus_terms` (from a summary/strings pass or its exports). Ghidra does not
+start until those are set. Enable a specific analyzer such as
+`Decompiler Parameter ID` with `enable_analyzers` when you need it. Set
+`allow_full_fallback:true` only if a focus miss should try loader/process-memory
+APIs and then a bounded full dump. `force_decompile` reruns only Ghidra/ILSpy
+while preserving cached strings, entropy, carving and capa. Set
+`focused_only:false` to retain full Ghidra output immediately in searchable
+~350KB chunks or the complete ILSpy C# project. Completed results are cached
+by SHA-256 plus focus profile.
+
+Closing or refreshing the tab does not kill a running Ghidra job. The header
+process dock lists leftover decompilers, and the agent can call
+`stop_process` with `id: "leftover"`. Huge DLL drops use
+`/api/workspace/:id/binary-raw` (or `/binary` if that path 404s) so a 37MB
+`client.dll` is stored as exact bytes. `next dev` raises the proxy body
+limit to 256MB so Next does not silently keep only the first 10MB.
+
 Packed automatic analysis defaults to 90 seconds (small ordinary files 120s),
 with four CPU cores, 100MB decompiler text and 512MB exhaustive static output;
 tune only when needed:
