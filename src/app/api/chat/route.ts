@@ -580,8 +580,8 @@ export async function POST(req: NextRequest) {
          * model's reasoning, every tool call it made and everything those
          * tools returned, so it resumes knowing what it already found rather
          * than rediscovering it. Rounds already spent are carried over too —
-         * otherwise a reply that stopped at the round limit would resume with
-         * a fresh budget and could loop indefinitely.
+         * the ask-early nudge and plan checks need the real length of the
+         * run, not a counter that resets every time someone presses Resume.
          */
         let resumed: {
           toolRounds: number;
@@ -627,7 +627,7 @@ export async function POST(req: NextRequest) {
               if (rebuilt) {
                 resumed = {
                   // Unknown for an old reply. Counted from the calls that
-                  // were made, so the round budget is not silently reset.
+                  // were made, so the run's length is not silently reset.
                   toolRounds: (prior.toolEvents ?? []).length,
                   continuations: 0,
                   messages: rebuilt.messages,
@@ -1374,11 +1374,12 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         // messages before the next pass.
         // Write, run, read the error, fix, run again is four rounds for a
         // single bug. Real work is several of those plus the reading it takes
-        // to find the right file, so 20 ran out mid-task.
-        const MAX_TOOL_ROUNDS = 40;
+        // to find the right file, so a hard cap used to cut tasks off mid-fix.
+        // There is no round budget: the model keeps going until it stops,
+        // the user presses Stop, or a spending limit (if one is set) fires.
         let round = 0;
-        // Rounds already spent count against the limit. A resumed reply that
-        // started over at zero could work indefinitely by being interrupted.
+        // Carried across Resume so the ask-early nudge and plan checks still
+        // see how long this reply has already been working.
         let toolRounds = resumed?.toolRounds ?? 0;
 
         /**
@@ -2156,33 +2157,6 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             // paying to redo everything.
             stoppedByBudget = true;
             break;
-          }
-
-          if (toolRounds >= MAX_TOOL_ROUNDS) {
-            // Guard against a model that keeps calling tools forever. Every
-            // pending call needs a reply or the next request is a 400, so all
-            // of them are answered rather than only the first.
-            for (const call of calls) {
-              transcript.push({
-                role: "tool",
-                tool_call_id: call.id,
-                content:
-                  `Tool limit reached for this message (${MAX_TOOL_ROUNDS} rounds). ` +
-                  `Stop here and tell the user: what you finished, what is ` +
-                  `left, and the exact next step so they can say "continue". ` +
-                  `Do not pretend the task is complete.`,
-              });
-            }
-            recordAsync({
-              kind: "limit_hit",
-              subject: "tool rounds",
-              detail:
-                `The agent used all ${MAX_TOOL_ROUNDS} rounds without ` +
-                `finishing, so it was told to stop and summarise.`,
-              context: { rounds: toolRounds },
-            });
-            send({ type: "status", stage: "writing" });
-            continue;
           }
 
           toolRounds += 1;

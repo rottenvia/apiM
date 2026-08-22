@@ -160,9 +160,9 @@ const savingPerRound = promptTokens * removedFraction * HIT;
 const breakEvenRounds = rewriteCost / savingPerRound;
 
 check(
-  "compaction cannot pay for itself within one task",
+  "compaction cannot pay for itself on a typical task",
   breakEvenRounds > 40,
-  `break-even is ${Math.round(breakEvenRounds)} rounds; the loop caps at 40`
+  `break-even is ${Math.round(breakEvenRounds)} rounds at these rates`
 );
 check(
   "so the threshold is above anything a normal task reaches",
@@ -279,6 +279,11 @@ check(
   "pending tool calls are still answered when stopping",
   /Not run — the spending limit/.test(route),
   "a tool_call with no reply is a 400 and an unresumable transcript"
+);
+check(
+  "there is no hard cap on tool rounds",
+  !/MAX_TOOL_ROUNDS/.test(route) && !/Tool limit reached for this message/.test(route),
+  "a 40-round ceiling used to stop real work mid-fix; Stop and the spending limit are the only brakes"
 );
 
 const page = (await readFile(path.join(ROOT, "src/app/page.tsx"), "utf8")).replace(/\r\n/g, "\n");

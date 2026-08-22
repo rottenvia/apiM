@@ -3,11 +3,11 @@
  *
  * Run:  npm run test:plan
  *
- * The agent loop can run forty rounds. Everything it DID survives — tool
- * calls are summarised into the transcript — but nothing recorded what it was
- * TRYING to do. From inside round twelve, the work so far looks like a
- * complete answer, so the model writes a confident summary and stops with
- * requirements from the first message still unmet.
+ * The agent loop can run as many rounds as the task needs. Everything it DID
+ * survives — tool calls are summarised into the transcript — but nothing
+ * recorded what it was TRYING to do. From inside round twelve, the work so
+ * far looks like a complete answer, so the model writes a confident summary
+ * and stops with requirements from the first message still unmet.
  *
  * That is not a model being lazy. It is a missing input.
  *
