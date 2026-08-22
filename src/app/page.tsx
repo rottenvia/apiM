@@ -1341,11 +1341,14 @@ export default function Home() {
                 break;
 
               case "continuing":
-                // The answer was too long for one response and is being
-                // continued. Said plainly, because otherwise a long pause
-                // mid-file looks like the app has hung.
+                // Either the answer was too long for one response, or the
+                // model stopped mid-task (Ox does this on its own limits).
+                // Said plainly, because otherwise a long pause mid-file
+                // looks like the app has hung.
                 setRetryNotice(
-                  `Answer was longer than one response allows — continuing (${evt.n}/${evt.of})`
+                  evt.reason === "output_limit"
+                    ? `Answer was longer than one response allows — continuing (${evt.n}/${evt.of})`
+                    : `The model stopped mid-task — continuing from where it left off (${evt.n}/${evt.of})`
                 );
                 break;
 
