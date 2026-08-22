@@ -140,7 +140,9 @@ const routeAssembly = readNow(
 
 check(
   "the stable base system message no longer contains plugin text",
-  /workspaceInstruction \+\s*lessonsBlock,/.test(routeAssembly) &&
+  // Additive blocks (binary ledger, findings, ...) may sit between the two;
+  // what matters is that plugin text is not one of them and never will match.
+  /workspaceInstruction \+(\s*\w+Block \+)*\s*lessonsBlock,/.test(routeAssembly) &&
     !/lessonsBlock \+\s*pluginDirectives/.test(routeAssembly)
 );
 check(

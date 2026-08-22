@@ -152,7 +152,7 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
             <div className="border-b border-border px-4 py-2.5">
               <div className="flex items-center gap-2">
                 <span
-                  className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
+                  className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wide ${
                     period.period === "offpeak"
                       ? "bg-emerald-500/15 text-emerald-300"
                       : "bg-amber-500/15 text-amber-300"
