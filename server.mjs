@@ -15,7 +15,14 @@
  * For production: NEXT_PHASE=production node server.mjs
  */
 import { createServer } from "node:http";
-import { createWriteStream, mkdirSync, existsSync } from "node:fs";
+import {
+  createWriteStream,
+  mkdirSync,
+  existsSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { stat, rename, unlink, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,11 +36,35 @@ const HOST = process.env.HOST || "127.0.0.1";
 
 // Match the app's limits.
 const MAX_BINARY_BYTES = 256 * 1024 * 1024;
-const DATA_DIR = path.join(__dirname, "data", "workspaces");
+const DATA_DIR = process.env.APIM_DATA_ROOT
+  ? path.join(path.resolve(process.env.APIM_DATA_ROOT), "workspaces")
+  : path.join(__dirname, "data", "workspaces");
 
 // Crude guard: a workspace id used on disk is a short slug.
 function safeId(id) {
-  return /^[A-Za-z0-9_-]{1,64}$/.test(id) ? id : null;
+  return /^[A-Za-z0-9_-]{1,128}$/.test(id) ? id : null;
+}
+
+/** Same id → folder mapping as src/lib/workspace.ts (.workspace-id marker). */
+function resolveWorkspaceDir(id) {
+  const direct = path.join(DATA_DIR, id);
+  if (existsSync(direct)) return direct;
+  try {
+    for (const name of readdirSync(DATA_DIR)) {
+      try {
+        const marker = readFileSync(
+          path.join(DATA_DIR, name, ".workspace-id"),
+          "utf8"
+        ).trim();
+        if (marker === id) return path.join(DATA_DIR, name);
+      } catch {
+        /* not a workspace */
+      }
+    }
+  } catch {
+    /* no workspaces yet */
+  }
+  return direct;
 }
 function safeRel(p) {
   // Reject absolute paths and traversal.
@@ -80,7 +111,7 @@ function handleBinaryUpload(req, res, workspaceId) {
     });
   }
 
-  const wsDir = path.join(DATA_DIR, id);
+  const wsDir = resolveWorkspaceDir(id);
   mkdirSync(wsDir, { recursive: true });
   const dest = path.join(wsDir, rel);
   mkdirSync(path.dirname(dest), { recursive: true });
@@ -129,7 +160,12 @@ function handleBinaryUpload(req, res, workspaceId) {
           return send(res, 400, { error: `invalid file size: ${info.size}` });
         }
         await rename(tmp, dest);
-        // Write the .workspace-id marker like the app does (best effort).
+        try {
+          const marker = path.join(wsDir, ".workspace-id");
+          if (!existsSync(marker)) writeFileSync(marker, id, "utf8");
+        } catch {
+          /* best effort — the in-app route also stamps this */
+        }
         send(res, 200, {
           path: rel.split(path.sep).join("/"),
           bytes: info.size,

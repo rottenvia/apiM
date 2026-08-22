@@ -188,6 +188,8 @@ export interface InspectBinaryOptions {
   focusedOnly?: boolean;
   /** Caller/model-chosen Ghidra analyzer overrides for this binary. */
   analyzers?: import("./binary-decompiler").AnalyzerOverrides;
+  /** Opt in to the expensive "focus miss → decompile everything" path. */
+  allowFullFallback?: boolean;
   signal?: AbortSignal;
 }
 
@@ -1468,6 +1470,7 @@ export async function inspectWorkspaceBinary(
           focusTerms: options.focusTerms,
           focusedOnly: options.focusedOnly,
           analyzers: options.analyzers,
+          allowFullFallback: options.allowFullFallback,
         });
 
   const result: WorkspaceBinaryInspection = {
@@ -1673,7 +1676,10 @@ export function formatBinaryInspection(result: WorkspaceBinaryInspection): strin
     if (result.capa.setup) lines.push(`capa setup needed: ${result.capa.setup}`);
   }
 
-  if (result.deep.status !== "disabled") {
+  if (
+    result.deep.status !== "disabled" ||
+    /was not started/.test(result.deep.summary)
+  ) {
     lines.push(
       "",
       `Deep decompilation: ${result.deep.status} via ${result.deep.engine}${result.deep.cached ? " (cached)" : ""}`,

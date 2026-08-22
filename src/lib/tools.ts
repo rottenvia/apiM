@@ -10,6 +10,9 @@ import {
   describeProcess,
   isRunning,
   waitForOutput,
+  listLeftoverDecompilers,
+  stopLeftoverDecompilers,
+  stopLeftoverById,
 } from "@/lib/processes";
 import { smartSearch } from "@/lib/smart-search";
 import type { SearchPlanner } from "@/lib/smart-search";
@@ -539,13 +542,15 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
       description:
         "Stop a background process. Always stop anything you started once " +
         "you are finished with it, so it does not keep running and holding " +
-        "a port.",
+        "a port. Use id leftover or ghidra to kill leftover Ghidra/ILSpy " +
+        "from a closed or refreshed tab — those have no chat UI.",
       parameters: {
         type: "object",
         properties: {
           id: {
             type: "string",
-            description: 'Process id, or "all" to stop everything.',
+            description:
+              'Process id, "all" for this workspace, or "leftover"/"ghidra" for orphaned decompilers.',
           },
         },
         required: ["id"],
@@ -1004,10 +1009,13 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
         "with their own strings, highlighted Lua/" +
         "process-memory/library-loading/process-creation imports, and an " +
         "optional FLARE capa report. Managed code uses ILSpy when " +
-        "installed; native code uses headless Ghidra, decompiling only " +
-        "functions referencing focus terms (default CreateMove, IN_JUMP), " +
-        "then callers of loader/process-memory APIs, with bounded full " +
-        "fallback when focused passes find nothing. " +
+        "installed; native code uses headless Ghidra. Decompile ONLY the " +
+        "functions/strings you name in focus_terms — there is no default " +
+        "hook list and no automatic full-binary decompile. Enable specific " +
+        "Ghidra analyzers (e.g. Decompiler Parameter ID) with " +
+        "enable_analyzers when you need them. Leftover Ghidra after a " +
+        "closed tab is listed by list_processes and killed with " +
+        "stop_process id=leftover. " +
         "Availability is resolved by the apiM server; do not use " +
         "run_command/where/environment probes to second-guess it because agent " +
         "commands intentionally receive a scrubbed environment. Outputs are " +
@@ -1065,14 +1073,22 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
             type: "array",
             items: { type: "string" },
             description:
-              "Names/strings whose referencing functions are isolated in " +
-              "Ghidra/ILSpy (default [\"CreateMove\", \"IN_JUMP\"]).",
+              "Functions/strings to decompile on THIS binary. Required " +
+              "before Ghidra starts. Pick them from a summary/strings pass " +
+              "or from exports — do not invent game-specific names.",
           },
           focused_only: {
             type: "boolean",
             description:
-              "Focused functions only instead of a full dump. Defaults to " +
-              "true; set false to decompile the whole executable as well.",
+              "Decompile only functions that reference focus_terms. " +
+              "Defaults to true. Set false only to dump the whole binary.",
+          },
+          allow_full_fallback: {
+            type: "boolean",
+            description:
+              "If focus_terms miss, also try loader/process-memory APIs " +
+              "and then a bounded full dump. Defaults to false. Do not " +
+              "enable on a huge downloaded DLL unless the user asked.",
           },
           analyzer_preset: {
             type: "string",
@@ -1203,9 +1219,10 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
     function: {
       name: "list_processes",
       description:
-        "List the background processes you started, with their state and " +
-        "how they were launched. Use it to check what is still running " +
-        "before starting another, and to find an id you have lost.",
+        "List the background processes you started, plus leftover " +
+        "Ghidra/ILSpy from a closed or refreshed tab (those have no " +
+        "inspect UI). Use leftover ids with stop_process, or id leftover " +
+        "to kill every orphaned decompiler.",
       parameters: { type: "object", properties: {}, required: [] },
     },
   },
@@ -1721,8 +1738,20 @@ export async function runTool(
       case "stop_process": {
         const id = str(args, "id").trim();
 
+        if (id === "leftover" || id === "ghidra") {
+          const stopped = stopLeftoverDecompilers();
+          return {
+            ok: true,
+            content:
+              stopped === 0
+                ? "No leftover Ghidra/ILSpy was running."
+                : `Stopped ${stopped} leftover decompiler${stopped === 1 ? "" : "s"}.`,
+            summary: `Stopped ${stopped} leftover`,
+          };
+        }
+
         if (id === "all") {
-          const stopped = stopAll(workspaceId);
+          const stopped = stopAll(workspaceId) + stopLeftoverDecompilers();
           return {
             ok: true,
             content:
@@ -1730,6 +1759,18 @@ export async function runTool(
                 ? "Nothing was running."
                 : `Stopped ${stopped} process${stopped === 1 ? "" : "es"}.`,
             summary: `Stopped ${stopped}`,
+          };
+        }
+
+        if (id.startsWith("orphan-") || getProcess(id)?.kind === "decompiler") {
+          const leftover = listLeftoverDecompilers().find((item) => item.id === id);
+          const ok = stopLeftoverById(id);
+          return {
+            ok,
+            content: ok
+              ? `Stopped ${leftover?.display ?? id}.`
+              : `No leftover decompiler with id "${id}".`,
+            summary: ok ? `Stopped ${leftover?.display ?? id}` : "Unknown process",
           };
         }
 
@@ -2087,11 +2128,24 @@ export async function runTool(
           Buffer.from(resource.data)
         );
 
+        const looksPe =
+          /\.(exe|dll|sys|ocx|scr|cpl|drv|efi)$/i.test(written.path) ||
+          (resource.data.length >= 2 &&
+            resource.data[0] === 0x4d &&
+            resource.data[1] === 0x5a);
+        const peHint = looksPe
+          ? `\n\nThis is a Windows executable/library. Do not decompile the whole file. ` +
+            `Call inspect_binary with analyses:["summary"] or ["strings"] first, then ` +
+            `decompile only the functions/strings you need via focus_terms. Enable a ` +
+            `specific Ghidra analyzer such as "Decompiler Parameter ID" with ` +
+            `enable_analyzers if you need it. Leftover Ghidra is stop_process id=leftover.`
+          : "";
+
         return {
           ok: true,
           content:
             `Saved ${resource.url} to ${written.path} (${written.bytes} bytes, ` +
-            `${resource.contentType}).`,
+            `${resource.contentType}).${peHint}`,
           summary: `Downloaded ${written.path}`,
           changedPath: written.path,
         };
@@ -2920,7 +2974,7 @@ export async function runTool(
             : requested.has("strings") || requested.has("summary");
         const focusTerms = Array.isArray(args.focus_terms)
           ? args.focus_terms.map((term) => String(term))
-          : ["CreateMove", "IN_JUMP"];
+          : [];
         const analyzerPreset: "fast" | "full" =
           args.analyzer_preset === "full" ? "full" : "fast";
         const analyzers = {
@@ -2940,6 +2994,7 @@ export async function runTool(
           forceDeep: args.force_decompile === true,
           focusTerms,
           focusedOnly: args.focused_only !== false,
+          allowFullFallback: args.allow_full_fallback === true,
           analyzers,
           signal: context.signal,
           dependencies: inspectDependencies,
@@ -3048,7 +3103,8 @@ export async function runTool(
 
       case "list_processes": {
         const running = listProcesses(workspaceId);
-        if (running.length === 0) {
+        const leftovers = listLeftoverDecompilers();
+        if (running.length === 0 && leftovers.length === 0) {
           return {
             ok: true,
             content: "No background processes are running in this workspace.",
@@ -3068,10 +3124,15 @@ export async function runTool(
          * reading the output while testing wait_for_output.
          */
         const listing = running.map((proc) => describeProcess(proc)).join("\n");
+        const leftoverLines = leftovers
+          .filter((item) => !running.some((proc) => proc.id === item.id))
+          .map((item) => `${item.id}: ${item.display} — leftover (stop_process id=leftover)`);
+        const lines = [listing, ...leftoverLines].filter(Boolean).join("\n");
+        const total = running.length + leftoverLines.length;
         return {
           ok: true,
-          content: `${running.length} process(es):\n${listing}`,
-          summary: `Listed ${running.length} process(es)`,
+          content: `${total} process(es):\n${lines}`,
+          summary: `Listed ${total} process(es)`,
         };
       }
 

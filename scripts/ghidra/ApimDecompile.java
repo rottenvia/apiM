@@ -610,7 +610,9 @@ public class ApimDecompile extends GhidraScript {
         if (!outputDir.exists() && !outputDir.mkdirs()) {
             throw new IllegalStateException("Could not create " + outputDir);
         }
-        boolean focusedOnly = args.length > 1 && "focused".equalsIgnoreCase(args[1]);
+        String mode = args.length > 1 ? args[1] : "focused";
+        boolean focusedOnly = !"full".equalsIgnoreCase(mode);
+        boolean allowFullFallback = "focused-fallback".equalsIgnoreCase(mode);
         List<String> focusTerms = new ArrayList<>();
         for (int i = 2; i < args.length; i++) {
             String term = args[i].trim();
@@ -651,7 +653,7 @@ public class ApimDecompile extends GhidraScript {
              * those are the functions most likely to unpack/launch a payload
              * and are far cheaper to decompile than the entire program.
              */
-            if (work.isEmpty()) {
+            if (work.isEmpty() && allowFullFallback) {
                 List<String> behaviorTerms = List.of(
                     "CreateRemoteThread", "WriteProcessMemory", "ReadProcessMemory",
                     "VirtualAlloc", "VirtualAllocEx", "VirtualProtect",
@@ -667,8 +669,10 @@ public class ApimDecompile extends GhidraScript {
                 }
             }
             /* No names, strings, imports or references survived: only now pay
-             * for bounded full decompilation rather than returning emptiness. */
-            if (work.isEmpty()) {
+             * for bounded full decompilation rather than returning emptiness.
+             * Gated: a huge downloaded DLL must not auto-decompile every
+             * function just because the chosen focus terms were absent. */
+            if (work.isEmpty() && allowFullFallback) {
                 fallbackFull = true;
                 FunctionIterator functions = currentProgram.getFunctionManager().getFunctions(true);
                 while (functions.hasNext() && work.size() < MAX_FUNCTIONS) {

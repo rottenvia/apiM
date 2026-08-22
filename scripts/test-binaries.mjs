@@ -487,6 +487,7 @@ await fs.writeFile(
 );
 result = await B.inspectWorkspaceBinary(WS, "uploads/binaries/app.exe", {
   deep: true,
+  focusedOnly: false,
   dependencies: false,
   includeStrings: false,
 });
@@ -517,6 +518,7 @@ const stopped = await B.inspectWorkspaceBinary(WS, "uploads/binaries/app.exe", {
   runCapa: false,
   deep: true,
   forceDeep: true,
+  focusedOnly: false,
   dependencies: false,
   includeStrings: false,
   signal: controller.signal,
@@ -616,6 +618,7 @@ const fallbackGhidra = await B.inspectWorkspaceBinary(
     includeStrings: false,
     focusTerms: ["CreateMove", "IN_JUMP"],
     focusedOnly: true,
+    allowFullFallback: true,
   }
 );
 if (previousGhidra === undefined) delete process.env.APIM_GHIDRA_HOME;
@@ -1005,11 +1008,89 @@ check(
     /Raw disassembly fallback/.test(ghidraScript) &&
     /Decompilation failed/.test(ghidraScript)
 );
+const toolsSource = await fs.readFile(path.join(ROOT, "src/lib/tools.ts"), "utf8");
 check(
-  "the tool defaults to CreateMove and IN_JUMP focus",
-  /\["CreateMove", "IN_JUMP"\]/.test(
-    await fs.readFile(path.join(ROOT, "src/lib/tools.ts"), "utf8")
+  "the tool does not default to game-specific focus terms",
+  /focusTerms = Array\.isArray\(args\.focus_terms\)/.test(toolsSource) &&
+    !/:\s*\[\s*"CreateMove",\s*"IN_JUMP"\s*\]/.test(toolsSource)
+);
+check(
+  "allow_full_fallback is opt-in on inspect_binary",
+  /allow_full_fallback/.test(toolsSource) &&
+    /stop_process id=leftover/.test(toolsSource)
+);
+const skippedDeep = await T.runTool(WS, "inspect_binary", {
+  path: "uploads/binaries/app.exe",
+  analyses: ["decompile"],
+});
+check(
+  "decompile without focus_terms does not start Ghidra",
+  skippedDeep.ok && /was not started/.test(skippedDeep.content),
+  skippedDeep.content.slice(0, 240)
+);
+const chatAreaSource = await fs.readFile(
+  path.join(ROOT, "src/components/ChatArea.tsx"),
+  "utf8"
+);
+check(
+  "huge DLL uploads fall back from binary-raw 404 to /binary",
+  /binary-raw/.test(chatAreaSource) &&
+    /status === 404/.test(chatAreaSource)
+);
+const rawRoute = await fs
+  .readFile(
+    path.join(ROOT, "src/app/api/workspace/[id]/binary-raw/route.ts"),
+    "utf8"
   )
+  .catch(() => "");
+check(
+  "binary-raw exists as a Next route so next dev does not 404",
+  /export \{ POST \}/.test(rawRoute)
+);
+const leftoverSource = await fs.readFile(
+  path.join(ROOT, "src/lib/processes.ts"),
+  "utf8"
+);
+check(
+  "leftover Ghidra can be listed and killed after a refresh",
+  /listLeftoverDecompilers/.test(leftoverSource) &&
+    /stopLeftoverDecompilers/.test(leftoverSource) &&
+    /adoptProcess/.test(leftoverSource) &&
+    /DECOMPILER_CMDLINE/.test(leftoverSource)
+);
+check(
+  "Ghidra full fallback is gated behind focused-fallback",
+  /allowFullFallback/.test(ghidraScript)
+);
+const binariesSource = await fs.readFile(
+  path.join(ROOT, "src/lib/binaries.ts"),
+  "utf8"
+);
+check(
+  "inspectWorkspaceBinary forwards allowFullFallback to Ghidra",
+  /allowFullFallback:\s*options\.allowFullFallback/.test(binariesSource)
+);
+const nextConfigSource = await fs.readFile(
+  path.join(ROOT, "next.config.ts"),
+  "utf8"
+);
+check(
+  "next dev accepts 256MB bodies so a 37MB DLL is not truncated",
+  /proxyClientMaxBodySize:\s*[\"']256mb[\"']/.test(nextConfigSource)
+);
+const serverSource = await fs.readFile(path.join(ROOT, "server.mjs"), "utf8");
+check(
+  "custom server writes huge uploads into the mapped workspace folder",
+  /resolveWorkspaceDir\(id\)/.test(serverSource)
+);
+const decompilerSource = await fs.readFile(
+  path.join(ROOT, "src/lib/binary-decompiler.ts"),
+  "utf8"
+);
+check(
+  "enable_analyzers can turn Parameter ID on without dropping the fast preset",
+  /disable\.delete\(trimmed\)/.test(decompilerSource) &&
+    /enable\.add\(trimmed\)/.test(decompilerSource)
 );
 check(
   "a fabricated decompilation claim is caught",
@@ -1051,6 +1132,7 @@ const ledgerInspect = await B.inspectWorkspaceBinary(
     runCapa: false,
     deep: true,
     forceDeep: true,
+    focusedOnly: false,
     dependencies: false,
     includeStrings: false,
   }

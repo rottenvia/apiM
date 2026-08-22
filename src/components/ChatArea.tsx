@@ -344,22 +344,27 @@ export function ChatArea({
             `the per-executable limit is ${MAX_PE_UPLOAD_BYTES / 1024 / 1024}MB`,
         };
       }
-      // Upload the raw bytes. Files >9MB go through the custom Node server's
-      // /binary-raw endpoint (server.mjs), which streams straight to disk and
-      // bypasses Next's hard 10MB request-body cap; smaller files use the
-      // in-app route. The destination path is in X-Binary-Path.
+      // Large files go to /binary-raw first (custom server streams past
+      // Next's 10MB clone cap). Under `next dev` that path used to 404 —
+      // fall back to /binary so a 37MB client.dll still lands.
       const useRawStream = file.size > 9 * 1024 * 1024;
-      const endpoint = useRawStream
-        ? `/api/workspace/${workspaceId}/binary-raw`
-        : `/api/workspace/${workspaceId}/binary`;
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/octet-stream",
-          "X-Binary-Path": encodeURIComponent(target),
-        },
-        body: file,
-      });
+      const post = (url: string) =>
+        fetch(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/octet-stream",
+            "X-Binary-Path": encodeURIComponent(target),
+          },
+          body: file,
+        });
+      let response = await post(
+        useRawStream
+          ? `/api/workspace/${workspaceId}/binary-raw`
+          : `/api/workspace/${workspaceId}/binary`
+      );
+      if (useRawStream && (response.status === 404 || response.status === 405)) {
+        response = await post(`/api/workspace/${workspaceId}/binary`);
+      }
       const saved = (await response.json().catch(() => ({}))) as {
         path?: string;
         bytes?: number;
@@ -490,9 +495,10 @@ export function ChatArea({
               content:
                 `${item.file.name} was saved as exact executable bytes at ` +
                 `${saved.path}. It was not executed. Use inspect_binary on ` +
-                `that path to recover PE metadata, imported DLLs/functions, ` +
-                `strings, dependency graphs and the deepest available ` +
-                `ILSpy/Ghidra decompilation.`,
+                `that path: start with analyses:["summary"] or ["strings"], ` +
+                `then decompile only the functions you name in focus_terms. ` +
+                `Enable "Decompiler Parameter ID" via enable_analyzers if you ` +
+                `need that analyzer. Do not dump the whole binary.`,
               truncated: false,
               kind: "text",
               unpackedTo: saved.path,

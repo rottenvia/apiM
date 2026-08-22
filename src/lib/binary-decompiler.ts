@@ -18,6 +18,7 @@ import crossSpawn from "cross-spawn";
 import { workspaceDirectory, resolveInside } from "@/lib/workspace";
 import { binaryAnalysisRoot } from "@/lib/binary-types";
 import type { PeInspection } from "@/lib/binaries";
+import { adoptProcess } from "@/lib/processes";
 
 export interface DeepDecompilationResult {
   attempted: boolean;
@@ -131,7 +132,8 @@ function runCaptured(
   command: string,
   args: string[],
   cwd: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  adopt?: { workspaceId: string; display: string }
 ): Promise<RunResult> {
   return new Promise((resolve) => {
     if (signal?.aborted) {
@@ -170,6 +172,16 @@ function runCaptured(
         error: error instanceof Error ? error.message : "could not start",
       });
       return;
+    }
+    if (adopt?.workspaceId && child.pid) {
+      adoptProcess({
+        workspaceId: adopt.workspaceId,
+        command,
+        args,
+        display: adopt.display,
+        child,
+        kind: "decompiler",
+      });
     }
 
     let output = "";
@@ -481,7 +493,8 @@ async function runIlSpy(
     command,
     ["--project", "--outputdir", projectOutput, targetPath],
     workspaceRoot,
-    signal
+    signal,
+    { workspaceId, display: `ILSpy · ${path.basename(target)}` }
   );
   if (!result.started) {
     return {
@@ -568,16 +581,25 @@ const FAST_DISABLED_ANALYZERS = [
 function resolveAnalyzerConfig(
   overrides: AnalyzerOverrides | undefined
 ): { disable: string[]; enable: string[] } {
-  if (overrides?.disable?.length || overrides?.enable?.length) {
-    return {
-      disable: overrides.disable ?? [],
-      enable: overrides.enable ?? [],
-    };
+  // Preset first, then the caller's enable/disable so the model can turn
+  // Parameter ID on without also paying for Switch Analysis and Stack.
+  const disable = new Set(
+    overrides?.preset === "full" ? [] : FAST_DISABLED_ANALYZERS
+  );
+  const enable = new Set<string>();
+  for (const name of overrides?.disable ?? []) {
+    const trimmed = name.trim();
+    if (!trimmed) continue;
+    disable.add(trimmed);
+    enable.delete(trimmed);
   }
-  if (overrides?.preset === "full") return { disable: [], enable: [] };
-  // Default "fast": skip the heavy decompiler-driven analyzers. The
-  // post-script decompiles the functions we actually output.
-  return { disable: FAST_DISABLED_ANALYZERS, enable: [] };
+  for (const name of overrides?.enable ?? []) {
+    const trimmed = name.trim();
+    if (!trimmed) continue;
+    enable.add(trimmed);
+    disable.delete(trimmed);
+  }
+  return { disable: [...disable], enable: [...enable] };
 }
 
 async function runGhidra(
@@ -588,7 +610,8 @@ async function runGhidra(
   focusTerms: string[],
   focusedOnly: boolean,
   analyzers: AnalyzerOverrides | undefined,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  allowFullFallback = false
 ): Promise<DeepDecompilationResult> {
   const workspaceRoot = workspaceDirectory(workspaceId);
   const targetPath = resolveInside(workspaceId, target);
@@ -701,10 +724,13 @@ async function runGhidra(
     "-postScript",
     "ApimDecompile.java",
     output,
-    focusedOnly ? "focused" : "full",
+    focusedOnly ? (allowFullFallback ? "focused-fallback" : "focused") : "full",
     ...focusTerms,
   ];
-  const result = await runCaptured(command, args, workspaceRoot, signal);
+  const result = await runCaptured(command, args, workspaceRoot, signal, {
+    workspaceId,
+    display: `Ghidra · ${path.basename(target)}`,
+  });
   const launcherFact =
     `The apiM server resolved and started the Ghidra launcher at ${command}. ` +
     `Agent run_command processes use a separate scrubbed environment, so ` +
@@ -1020,6 +1046,12 @@ export async function runDeepDecompilation(
     focusTerms?: string[];
     focusedOnly?: boolean;
     analyzers?: AnalyzerOverrides;
+    /**
+     * When focused decompilation finds nothing, also try behavioral APIs and
+     * then a bounded full dump. Off by default: a 37MB downloaded DLL must
+     * not auto-decompile every function just because CreateMove was absent.
+     */
+    allowFullFallback?: boolean;
   } = {}
 ): Promise<DeepDecompilationResult> {
   if (!inspection.format.startsWith("PE")) {
@@ -1035,11 +1067,41 @@ export async function runDeepDecompilation(
 
   const engine = inspection.managed ? "ilspy" : "ghidra";
   const focusTerms = normaliseFocusTerms(options.focusTerms);
-  const focusedOnly = options.focusedOnly === true && focusTerms.length > 0;
+  const focusedOnly = options.focusedOnly !== false;
+  const allowFullFallback = options.allowFullFallback === true;
+
+  /*
+   * Do not launch Ghidra/ILSpy until the caller named what they want.
+   *
+   * A download of client.dll followed by inspect_binary(decompile) used to
+   * start auto-analysis plus the old "focus miss → decompile everything"
+   * fallback. On a 37MB game DLL that ran for hours and survived a page
+   * refresh with no UI to stop it.
+   */
+  if (focusedOnly && focusTerms.length === 0 && !allowFullFallback) {
+    return {
+      attempted: false,
+      status: "disabled",
+      engine,
+      outputs: [],
+      cached: false,
+      focusTerms,
+      focusedOnly,
+      summary:
+        `Deep decompilation was not started. Name the functions or strings ` +
+        `you need in focus_terms (from a summary/strings pass), enable a ` +
+        `specific analyzer such as "Decompiler Parameter ID" via ` +
+        `enable_analyzers, or set focused_only=false / allow_full_fallback=` +
+        `true only if you really want the whole ${
+          engine === "ghidra" ? "binary" : "assembly"
+        }.`,
+    };
+  }
+
   // Distinct analyzer settings must not collide in the in-flight cache.
   const analyzerKey = JSON.stringify(options.analyzers ?? { preset: "fast" });
   const profile = focusProfile(focusTerms, focusedOnly);
-  const key = `${workspaceId}:${inspection.hashes.sha256}:${engine}:${profile}:${analyzerKey}:${options.force === true}`;
+  const key = `${workspaceId}:${inspection.hashes.sha256}:${engine}:${profile}:${analyzerKey}:${options.force === true}:${allowFullFallback}`;
   const existing = active.get(key);
   if (existing) return existing;
 
@@ -1061,7 +1123,8 @@ export async function runDeepDecompilation(
         focusTerms,
         focusedOnly,
         options.analyzers,
-        options.signal
+        options.signal,
+        allowFullFallback
       )
   ).finally(() => active.delete(key));
   active.set(key, work);
