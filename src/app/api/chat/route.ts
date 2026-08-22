@@ -101,14 +101,16 @@ import {
 } from "@/lib/budget";
 import { estimateCost, getDeepSeekPeriod } from "@/lib/pricing";
 import { listCustomPlugins } from "@/lib/plugin-store";
+import {
+  applyThinking,
+  providerHttpError,
+  providerTimedOut,
+  providerUnreachable,
+  resolveChatTarget,
+  resolveHelperTarget,
+} from "@/lib/providers";
 
 export const maxDuration = 300;
-
-/**
- * Overridable for local testing / proxies. Defaults to DeepSeek directly.
- */
-const DEEPSEEK_BASE_URL =
-  process.env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com";
 
 /**
  * Ceiling on generated tokens. The model supports up to 384K; 8192 was far too
@@ -116,9 +118,6 @@ const DEEPSEEK_BASE_URL =
  * This is only a cap — it costs nothing when responses are short.
  */
 const MAX_OUTPUT_TOKENS = 65536;
-
-/** Effort levels the API accepts once thinking is enabled. */
-const VALID_EFFORTS = new Set(["low", "high", "max"]);
 
 /**
  * Derive a readable conversation title from the first user message.
@@ -164,6 +163,8 @@ interface ChatRequestBody {
   }[];
   conversationId?: string | null;
   deepseekApiKey?: string;
+  /** OpenCode Zen key — required when the selected model is Ox Alpha. */
+  opencodeApiKey?: string;
   tavilyApiKey?: string;
   /** Optional fallback search provider, used when Tavily refuses. */
   exaApiKey?: string;
@@ -391,6 +392,7 @@ export async function POST(req: NextRequest) {
     message,
     conversationId,
     deepseekApiKey,
+    opencodeApiKey,
     tavilyApiKey,
     exaApiKey,
     model = "deepseek-v4-pro",
@@ -415,12 +417,23 @@ export async function POST(req: NextRequest) {
     budgetUsd,
   } = body;
 
-  if (!message || !deepseekApiKey) {
-    return NextResponse.json(
-      { error: "Message and DeepSeek API key are required" },
-      { status: 400 }
-    );
+  if (!message) {
+    return NextResponse.json({ error: "A message is required" }, { status: 400 });
   }
+
+  const creds = { deepseekApiKey, opencodeApiKey };
+  const resolved = resolveChatTarget(model, creds);
+  if (!resolved.ok) {
+    return NextResponse.json({ error: resolved.error }, { status: 400 });
+  }
+  const target = resolved.target;
+  const helper = resolveHelperTarget(creds) ?? target;
+  const planner = {
+    apiKey: helper.apiKey,
+    baseUrl: helper.baseUrl,
+    apiModel: helper.apiModel,
+    thinkingStyle: helper.thinkingStyle,
+  };
 
   // Resolve "auto" to a concrete level based on the message.
   const resolvedEffort =
@@ -688,12 +701,13 @@ export async function POST(req: NextRequest) {
             const decision = await decideSearch(
               message,
               recentContext,
-              deepseekApiKey,
+              helper.apiKey,
               runSignal,
               // The plugin block governs this call too. Without it a plugin
               // that says "always look it up" or "never ask me questions"
               // had no effect on the one decision it most clearly applies to.
-              pluginDirectives
+              pluginDirectives,
+              planner
             );
             doSearch = decision.needed;
             searchReason = decision.reason;
@@ -710,11 +724,12 @@ export async function POST(req: NextRequest) {
             searchContext = await smartSearch(
               message,
               recentContext,
-              deepseekApiKey,
+              helper.apiKey,
               tavilyApiKey as string,
               runSignal,
               searchProfile,
-              exaApiKey
+              exaApiKey,
+              planner
             );
           } catch (searchError) {
             /*
@@ -1484,7 +1499,10 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           }
 
           const dsRequestBody: Record<string, unknown> = {
-            model,
+            // On the wire this may differ from the app id (Ox Alpha is
+            // `x-preview-f-free` on OpenCode Zen). Saved usage still uses
+            // the app id so pricing looks it up correctly.
+            model: target.apiModel,
             messages: serializeForApi(compacted.messages),
             stream: true,
             stream_options: { include_usage: true },
@@ -1498,19 +1516,14 @@ Ask before you build the wrong thing. If a choice would change what you produce 
              * more than is left.
              */
             max_tokens: maxTokensFor(budget, model, MAX_OUTPUT_TOKENS),
-            // NOTE: `thinking` is a REAL top-level parameter of DeepSeek's REST
-            // API. It previously sat inside `extra_body`, which only exists as a
-            // passthrough convention in the *Python OpenAI SDK*. Sending it over
-            // plain fetch meant DeepSeek never saw it, silently defaulted to
-            // thinking-enabled/high, and the "None" option did nothing.
-            thinking: { type: thinkingEnabled ? "enabled" : "disabled" },
           };
 
-          if (thinkingEnabled) {
-            dsRequestBody.reasoning_effort = VALID_EFFORTS.has(resolvedEffort)
-              ? resolvedEffort
-              : "high";
-          }
+          applyThinking(
+            dsRequestBody,
+            target.thinkingStyle,
+            thinkingEnabled,
+            resolvedEffort
+          );
 
           if (workspaceEnabled) {
             /*
@@ -1545,11 +1558,11 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           // or an empty balance fails the same way every time.
           const attempt = await fetchWithRetry(
             () =>
-              fetch(`${DEEPSEEK_BASE_URL}/chat/completions`, {
+              fetch(`${target.baseUrl}/chat/completions`, {
                 method: "POST",
                 headers: {
                   "Content-Type": "application/json",
-                  Authorization: `Bearer ${deepseekApiKey}`,
+                  Authorization: `Bearer ${target.apiKey}`,
                 },
                 body: JSON.stringify(dsRequestBody),
                 signal: AbortSignal.any([
@@ -1576,8 +1589,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             send({
               type: "error",
               error: timedOut
-                ? `The DeepSeek API took too long to respond, after ${attempt.attempts} attempt(s).`
-                : `Couldn't reach the DeepSeek API after ${attempt.attempts} attempt(s). Check the network connection and try again.`,
+                ? providerTimedOut(target.providerName, attempt.attempts)
+                : providerUnreachable(target.providerName, attempt.attempts),
             });
             close();
             return;
@@ -1640,14 +1653,11 @@ Ask before you build the wrong thing. If a choice would change what you produce 
 
             send({
               type: "error",
-              error:
-                dsResponse.status === 401
-                  ? "Your DeepSeek API key was rejected. Check it in Settings."
-                  : dsResponse.status === 402
-                    ? "Your DeepSeek account has insufficient balance. Everything done so far is saved — add credit and press Continue on the reply above."
-                    : dsResponse.status === 429
-                      ? "Rate limited by DeepSeek. Please wait a moment and try again."
-                      : `DeepSeek API error (${dsResponse.status})${detail ? `: ${detail}` : ""}`,
+              error: providerHttpError(
+                dsResponse.status,
+                target.providerName,
+                detail
+              ),
             });
             close();
             return;
@@ -2185,7 +2195,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   visionModel,
                   searchKey: tavilyApiKey,
                   exaKey: exaApiKey,
-                  deepseekKey: deepseekApiKey,
+                  deepseekKey: helper.apiKey,
+                  planner,
                   searchProfile,
                   signal: runSignal,
                 }).catch((error) => ({
@@ -2683,7 +2694,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                       visionModel,
                       searchKey: tavilyApiKey,
                   exaKey: exaApiKey,
-                      deepseekKey: deepseekApiKey,
+                      deepseekKey: helper.apiKey,
+                  planner,
                       searchProfile,
                       signal: runSignal,
                     }
@@ -2723,7 +2735,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   visionModel,
                   searchKey: tavilyApiKey,
                   exaKey: exaApiKey,
-                  deepseekKey: deepseekApiKey,
+                  deepseekKey: helper.apiKey,
+                  planner,
                   searchProfile,
                   signal: runSignal,
                 }
@@ -2993,9 +3006,13 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             const refined = await runRefine(
               outcomes,
               existingLessons,
-              deepseekApiKey,
-              DEEPSEEK_BASE_URL,
-              runSignal
+              helper.apiKey,
+              helper.baseUrl,
+              runSignal,
+              {
+                model: helper.apiModel,
+                thinkingStyle: helper.thinkingStyle,
+              }
             );
 
             if (refined.lessons.length > 0 || refined.confirms.length > 0) {

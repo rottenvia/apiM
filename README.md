@@ -8,6 +8,7 @@ The smartest API manager with intelligent web search, thinking effort control, a
 ## Features
 
 - 🚀 **DeepSeek V4 Pro & Flash** - Switch between models instantly
+- 🐂 **Ox Alpha via OpenCode** - Same Chat Completions loop, free stealth preview
 - 🔍 **Smart Web Search** - Multi-step query planning with Tavily
 - 💡 **Thinking Modes** - Auto/None/Low/High/Max reasoning effort
 - 🧩 **8 Plugins** - Caveman, God Mode, Code Only, Expert, and more
@@ -27,7 +28,9 @@ cp .env.example .env   # then edit DATABASE_URL
 npm run dev
 ```
 
-Open http://localhost:3000 and add your DeepSeek API key via **Settings**.
+Open http://localhost:3000 and add a provider key via **Settings** —
+DeepSeek (V4 Pro / Flash) or an [OpenCode Zen](https://opencode.ai/auth)
+key for **Ox Alpha**.
 
 `DATABASE_URL` is **optional**: without it the app still runs and answers
 messages, but conversations aren't persisted and the history sidebar stays
@@ -185,7 +188,10 @@ regressions with `npm run test:binaries`.
 ## Requirements
 
 - Python 3.10+
-- DeepSeek API key from [platform.deepseek.com](https://platform.deepseek.com)
+- A model provider key:
+  - DeepSeek from [platform.deepseek.com](https://platform.deepseek.com), or
+  - OpenCode Zen from [opencode.ai/auth](https://opencode.ai/auth) for Ox Alpha
+    (`x-preview-f-free` on `https://opencode.ai/zen/v1`)
 - (Optional) Tavily API key from [app.tavily.com](https://app.tavily.com) for web search
 
 ## Files

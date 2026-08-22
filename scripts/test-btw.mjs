@@ -44,7 +44,7 @@ console.log("1. It cannot derail the running task");
 /** Body of askBtw, which is the only place an aside is handled. */
 const askBtw = page.slice(
   page.indexOf("const askBtw = useCallback("),
-  page.indexOf("[deepseekKey, workspaceId]")
+  page.indexOf("/** Latest messages + sender")
 );
 
 check(
@@ -155,11 +155,14 @@ check(
 console.log("\n6. It stays cheap");
 
 check(
-  "it runs on Flash, not Pro",
-  /deepseek-v4-flash/.test(api),
+  "it uses the cheap helper, never Pro",
+  /resolveHelperTarget/.test(api) && !/deepseek-v4-pro/.test(api),
   "an aside costing more than the task's next round defeats the point"
 );
-check("thinking is disabled", /thinking: \{ type: "disabled" \}/.test(api));
+check(
+  "thinking is disabled on DeepSeek helpers",
+  /thinking: \{ type: "disabled" \}/.test(api)
+);
 check("output is capped", /MAX_OUTPUT_TOKENS = \d+/.test(api));
 check(
   "only one aside at a time",

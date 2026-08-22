@@ -150,6 +150,9 @@ export function maxTokensFor(
 
   const rates = MODEL_RATES[model];
   if (!rates) return ceiling;
+  // A free model (Ox Alpha during preview) has a zero output rate. Dividing
+  // the remaining budget by zero is Infinity; the ceiling is the real cap.
+  if (rates.output <= 0) return ceiling;
 
   const remaining = budget.limitUsd - budget.spentUsd;
   if (remaining <= 0) return MIN_USEFUL_OUTPUT_TOKENS;

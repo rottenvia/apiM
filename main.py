@@ -274,6 +274,7 @@ class NohomoApp:
             options=[
                 ft.dropdown.Option("deepseek-v4-pro", "🚀 V4 Pro"),
                 ft.dropdown.Option("deepseek-v4-flash", "⚡ V4 Flash"),
+                ft.dropdown.Option("ox-alpha", "🐂 Ox Alpha"),
             ],
             width=130,
             height=36,

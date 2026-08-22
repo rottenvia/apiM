@@ -1,0 +1,191 @@
+/**
+ * A second LLM provider — OpenCode Zen serving Ox Alpha.
+ *
+ * Run:  npm run test:providers
+ *
+ * DeepSeek used to be the only Chat Completions host. Ox Alpha is a stealth
+ * model on OpenCode Zen (`x-preview-f-free` at opencode.ai/zen/v1). The
+ * agent loop stays identical; only the URL, key and on-the-wire model id
+ * change. Plugin directive priority is left alone.
+ */
+import path from "node:path";
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const ROOT = path.resolve(import.meta.dirname, "..");
+const read = (p) => readFileSync(path.join(ROOT, p), "utf8").replace(/\r\n/g, "\n");
+const load = (p) => import(pathToFileURL(path.join(ROOT, p)).href);
+
+const COLOR = process.stdout.isTTY && !process.env.NO_COLOR;
+const g = (s) => (COLOR ? `\x1b[32m${s}\x1b[0m` : s);
+const r = (s) => (COLOR ? `\x1b[31m${s}\x1b[0m` : s);
+const d = (s) => (COLOR ? `\x1b[2m${s}\x1b[0m` : s);
+
+let pass = 0,
+  fail = 0;
+const check = (label, ok, detail = "") => {
+  console.log(`  ${ok ? g("PASS") : r("FAIL")}  ${label}${detail ? d("  " + detail) : ""}`);
+  ok ? pass++ : fail++;
+};
+
+const models = await load("src/lib/models.ts");
+const providers = await load("src/lib/providers.ts");
+const pricing = await load("src/lib/pricing.ts");
+const budget = await load("src/lib/budget.ts");
+
+const route = read("src/app/api/chat/route.ts");
+const page = read("src/app/page.tsx");
+const settings = read("src/components/SettingsModal.tsx");
+const selector = read("src/components/ModelSelector.tsx");
+const plugins = read("src/lib/plugins.ts");
+const effort = read("src/components/ThinkingEffortSelector.tsx");
+
+console.log("\napiM provider checks\n");
+
+console.log("1. The catalog");
+
+check("DeepSeek V4 Pro is still listed", models.MODELS.some((m) => m.id === "deepseek-v4-pro"));
+check("DeepSeek V4 Flash is still listed", models.MODELS.some((m) => m.id === "deepseek-v4-flash"));
+const ox = models.MODELS.find((m) => m.id === "ox-alpha");
+check("Ox Alpha is listed", Boolean(ox));
+check(
+  "Ox Alpha is served by OpenCode",
+  ox?.provider === "opencode",
+  ox?.provider
+);
+check(
+  "the wire id is the official Zen model",
+  ox?.apiModel === "x-preview-f-free",
+  "opencode.ai/docs/zen lists Ox Alpha Free as x-preview-f-free"
+);
+check(
+  "unknown ids fall back to the default DeepSeek model",
+  models.getModel("nope").id === models.DEFAULT_MODEL_ID
+);
+
+console.log("\n2. Resolution");
+
+const ds = providers.resolveChatTarget("deepseek-v4-pro", {
+  deepseekApiKey: "sk-ds",
+});
+check("DeepSeek resolves with a DeepSeek key", ds.ok && ds.target.apiModel === "deepseek-v4-pro");
+check(
+  "DeepSeek hits the DeepSeek host",
+  ds.ok && ds.target.baseUrl.includes("api.deepseek.com")
+);
+
+const noDs = providers.resolveChatTarget("deepseek-v4-pro", { opencodeApiKey: "sk-zen" });
+check("DeepSeek refuses without its own key", !noDs.ok);
+
+const oxOk = providers.resolveChatTarget("ox-alpha", { opencodeApiKey: "sk-zen-1" });
+check("Ox Alpha resolves with an OpenCode key", oxOk.ok);
+check(
+  "and sends x-preview-f-free on the wire",
+  oxOk.ok && oxOk.target.apiModel === "x-preview-f-free"
+);
+check(
+  "and hits OpenCode Zen",
+  oxOk.ok && oxOk.target.baseUrl.includes("opencode.ai/zen/v1"),
+  oxOk.ok ? oxOk.target.baseUrl : ""
+);
+
+const noOx = providers.resolveChatTarget("ox-alpha", { deepseekApiKey: "sk-ds" });
+check("Ox Alpha refuses a DeepSeek-only setup", !noOx.ok);
+
+const helperDs = providers.resolveHelperTarget({
+  deepseekApiKey: "sk-ds",
+  opencodeApiKey: "sk-zen",
+});
+check(
+  "the helper prefers Flash when a DeepSeek key exists",
+  helperDs?.model.id === "deepseek-v4-flash",
+  "existing DeepSeek setups keep the same cheap planning path"
+);
+
+const helperOx = providers.resolveHelperTarget({ opencodeApiKey: "sk-zen" });
+check(
+  "the helper falls back to Ox Alpha without DeepSeek",
+  helperOx?.model.id === "ox-alpha"
+);
+
+check("no keys means no helper", providers.resolveHelperTarget({}) === null);
+
+console.log("\n3. Thinking fields");
+
+const dsBody = {};
+providers.applyThinking(dsBody, "deepseek", true, "high");
+check("DeepSeek thinking-on sends the thinking object", dsBody.thinking?.type === "enabled");
+check("and reasoning_effort", dsBody.reasoning_effort === "high");
+
+const dsOff = {};
+providers.applyThinking(dsOff, "deepseek", false, "none");
+check("DeepSeek thinking-off still sends the disable", dsOff.thinking?.type === "disabled");
+check("and no effort", dsOff.reasoning_effort === undefined);
+
+const ocBody = {};
+providers.applyThinking(ocBody, "openai", true, "max");
+check(
+  "OpenCode thinking-on does NOT send DeepSeek's thinking object",
+  ocBody.thinking === undefined,
+  "that field 400s on OpenAI-compatible hosts"
+);
+check("OpenCode thinking-on sends reasoning_effort", ocBody.reasoning_effort === "max");
+
+const ocOff = {};
+providers.applyThinking(ocOff, "openai", false, "none");
+check("OpenCode thinking-off sends neither field", ocOff.thinking === undefined && ocOff.reasoning_effort === undefined);
+
+console.log("\n4. Pricing");
+
+check("Ox Alpha is in the rate table", Boolean(pricing.MODEL_RATES["ox-alpha"]));
+check(
+  "the preview is free",
+  pricing.estimateCost(
+    { prompt_tokens: 10_000, completion_tokens: 2_000, prompt_cache_miss_tokens: 10_000 },
+    "ox-alpha"
+  ) === 0
+);
+check(
+  "a free model does not divide-by-zero the budget cap",
+  budget.maxTokensFor(budget.createBudget(0.1), "ox-alpha", 65_536) === 65_536
+);
+check(
+  "DeepSeek Pro rates are unchanged",
+  pricing.MODEL_RATES["deepseek-v4-pro"].input === 0.435
+);
+
+console.log("\n5. The chat route actually uses the resolver");
+
+check("the route accepts an OpenCode key", /opencodeApiKey/.test(route));
+check("it no longer requires a DeepSeek key for every request", !/Message and DeepSeek API key are required/.test(route));
+check("it resolves the target before opening the stream", /resolveChatTarget\(model, creds\)/.test(route));
+check("the fetch uses the resolved host", /target\.baseUrl/.test(route) && /target\.apiKey/.test(route));
+check("the wire model is the resolved one", /model: target\.apiModel/.test(route));
+check("thinking is applied per provider", /applyThinking\(/.test(route));
+check(
+  "plugin directives are still appended last every round",
+  /while \(true\) \{\s*round \+= 1;\s*appendPluginDirectives\(\)/.test(route),
+  "this is the priority system — do not move it"
+);
+check(
+  "the directive marker is unchanged",
+  /ACTIVE USER CONFIGURATION — RESPONSE BEHAVIOR/.test(plugins)
+);
+
+console.log("\n6. The UI offers both providers");
+
+check("Settings has an OpenCode key field", /OpenCode API Key/.test(settings));
+check("Settings offers Ox Alpha as a model", /onModelChange\("ox-alpha"\)/.test(settings));
+check("the composer selector lists the catalog", /from "@\/lib\/models"/.test(selector));
+check("the page persists the OpenCode key", /opencodeKey/.test(page));
+check("the page sends the OpenCode key with the chat request", /opencodeApiKey: opencodeKey/.test(page));
+check(
+  "Low effort is only remapped on V4 Pro",
+  /const isPro = model === "deepseek-v4-pro"/.test(effort),
+  "Ox Alpha must not inherit Pro's silent low→high mapping"
+);
+
+console.log(
+  `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
+);
+process.exit(fail ? 1 : 0);

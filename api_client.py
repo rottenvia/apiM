@@ -1,8 +1,19 @@
-"""DeepSeek API Client for nohomo API Manager"""
+"""LLM API client for nohomo API Manager (DeepSeek + OpenCode Ox Alpha)."""
 
 import httpx
-from typing import Optional, AsyncIterator
+from typing import AsyncIterator
 import json
+
+
+def _endpoint_for(model: str) -> tuple[str, str, dict]:
+    """Return (url, wire model id, extra body fields) for a catalog model."""
+    if model in ("ox-alpha", "x-preview-f-free"):
+        return (
+            "https://opencode.ai/zen/v1/chat/completions",
+            "x-preview-f-free",
+            {},
+        )
+    return "https://api.deepseek.com/chat/completions", model, {}
 
 
 async def chat_completion(
@@ -21,16 +32,20 @@ async def chat_completion(
         "max_tokens": 8192,
     }
     
-    # Add thinking parameters
+    url, wire_model, extra = _endpoint_for(model)
+    body["model"] = wire_model
+    if extra:
+        body.update(extra)
     if thinking_effort != "none":
         body["reasoning_effort"] = thinking_effort
-        body["extra_body"] = {"thinking": {"type": "enabled"}}
-    else:
-        body["extra_body"] = {"thinking": {"type": "disabled"}}
-    
+        if model not in ("ox-alpha", "x-preview-f-free"):
+            body["thinking"] = {"type": "enabled"}
+    elif model not in ("ox-alpha", "x-preview-f-free"):
+        body["thinking"] = {"type": "disabled"}
+
     async with httpx.AsyncClient(timeout=120.0) as client:
         response = await client.post(
-            "https://api.deepseek.com/chat/completions",
+            url,
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {api_key}",
@@ -71,16 +86,21 @@ async def stream_chat_completion(
         "max_tokens": 8192,
     }
     
+    url, wire_model, extra = _endpoint_for(model)
+    body["model"] = wire_model
+    if extra:
+        body.update(extra)
     if thinking_effort != "none":
         body["reasoning_effort"] = thinking_effort
-        body["extra_body"] = {"thinking": {"type": "enabled"}}
-    else:
-        body["extra_body"] = {"thinking": {"type": "disabled"}}
+        if "ox-alpha" not in model and model != "x-preview-f-free":
+            body["thinking"] = {"type": "enabled"}
+    elif "ox-alpha" not in model and model != "x-preview-f-free":
+        body["thinking"] = {"type": "disabled"}
     
     async with httpx.AsyncClient(timeout=120.0) as client:
         async with client.stream(
             "POST",
-            "https://api.deepseek.com/chat/completions",
+            url,
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {api_key}",

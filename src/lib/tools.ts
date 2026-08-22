@@ -12,6 +12,7 @@ import {
   waitForOutput,
 } from "@/lib/processes";
 import { smartSearch } from "@/lib/smart-search";
+import type { SearchPlanner } from "@/lib/smart-search";
 import { listSnapshots, restoreSnapshot } from "@/lib/snapshots";
 import { documentKind, readDocument } from "@/lib/documents";
 import {
@@ -1341,6 +1342,8 @@ export interface ToolContext {
   exaKey?: string;
   /** Needed by the search planner, which uses a cheap model to pick queries. */
   deepseekKey?: string;
+  /** Overrides DeepSeek Flash when the user is on OpenCode / Ox Alpha. */
+  planner?: SearchPlanner;
   searchProfile?: string;
   /** Explicit Stop signal; expensive static/decompiler work must release promptly. */
   signal?: AbortSignal;
@@ -2335,7 +2338,10 @@ export async function runTool(
         if (!query) {
           return { ok: false, content: "Error: a query is required.", summary: "Empty query" };
         }
-        if ((!context.searchKey && !context.exaKey) || !context.deepseekKey) {
+        if (
+          (!context.searchKey && !context.exaKey) ||
+          !(context.planner?.apiKey || context.deepseekKey)
+        ) {
           return {
             ok: false,
             content:
@@ -2351,11 +2357,12 @@ export async function runTool(
           found = await smartSearch(
             query,
             "",
-            context.deepseekKey,
+            context.planner?.apiKey || context.deepseekKey || "",
             context.searchKey ?? "",
             undefined,
             context.searchProfile,
-            context.exaKey
+            context.exaKey,
+            context.planner
           );
         } catch (error) {
           /*

@@ -1,0 +1,140 @@
+/**
+ * Models the user can pick, and which provider serves each one.
+ *
+ * Kept free of Node-only APIs so Settings and the composer can import it.
+ * Resolution of keys and base URLs lives in `providers.ts`.
+ */
+
+export type ProviderId = "deepseek" | "opencode";
+
+export type ThinkingStyle = "deepseek" | "openai";
+
+export interface ProviderInfo {
+  id: ProviderId;
+  name: string;
+  /** Where to mint a key. */
+  authUrl: string;
+  authLabel: string;
+  keyPlaceholder: string;
+  /** Shown under the key field. */
+  keyBlurb: string;
+  thinkingStyle: ThinkingStyle;
+}
+
+export interface ModelInfo {
+  id: string;
+  /** Sent in the Chat Completions `model` field. May differ from `id`. */
+  apiModel: string;
+  provider: ProviderId;
+  label: string;
+  shortLabel: string;
+  description: string;
+  specs: string;
+  resumeBlurb: string;
+  settingsSubtitle: string;
+  /** DeepSeek V4 Pro silently maps requested `low` up to `high`. */
+  mapsLowToHigh: boolean;
+  /** Cheap enough (or free) to use for search planning / refine / asides. */
+  helper: boolean;
+  /** Show DeepSeek's Beijing-time peak/off-peak chip. */
+  peakHours: boolean;
+}
+
+export const DEFAULT_MODEL_ID = "deepseek-v4-pro";
+
+export const PROVIDER_INFO: Record<ProviderId, ProviderInfo> = {
+  deepseek: {
+    id: "deepseek",
+    name: "DeepSeek",
+    authUrl: "https://platform.deepseek.com",
+    authLabel: "platform.deepseek.com",
+    keyPlaceholder: "sk-...",
+    keyBlurb: "Required for V4 Pro and V4 Flash.",
+    thinkingStyle: "deepseek",
+  },
+  opencode: {
+    id: "opencode",
+    name: "OpenCode",
+    authUrl: "https://opencode.ai/auth",
+    authLabel: "opencode.ai/auth",
+    keyPlaceholder: "sk-zen-...",
+    keyBlurb:
+      "A Zen API key from OpenCode. Required for Ox Alpha — the same OpenAI-compatible Chat Completions API DeepSeek uses.",
+    thinkingStyle: "openai",
+  },
+};
+
+/**
+ * App-level catalog.
+ *
+ * `id` is what Settings, localStorage and saved replies store.
+ * `apiModel` is what goes on the wire — OpenCode serves Ox Alpha as
+ * `x-preview-f-free` (see opencode.ai/docs/zen).
+ */
+export const MODELS: ModelInfo[] = [
+  {
+    id: "deepseek-v4-pro",
+    apiModel: "deepseek-v4-pro",
+    provider: "deepseek",
+    label: "DeepSeek V4 Pro",
+    shortLabel: "V4 Pro",
+    description: "49B parameters. Frontier-level quality for the hardest tasks.",
+    specs: "1M context · 384K max output",
+    resumeBlurb: "Best at long agent work",
+    settingsSubtitle: "49B params • Frontier",
+    mapsLowToHigh: true,
+    helper: false,
+    peakHours: true,
+  },
+  {
+    id: "deepseek-v4-flash",
+    apiModel: "deepseek-v4-flash",
+    provider: "deepseek",
+    label: "DeepSeek V4 Flash",
+    shortLabel: "V4 Flash",
+    description: "13B parameters. Fast and economical for quick tasks.",
+    specs: "1M context · 384K max output",
+    resumeBlurb: "About 6x cheaper",
+    settingsSubtitle: "13B params • Fast",
+    mapsLowToHigh: false,
+    helper: true,
+    peakHours: true,
+  },
+  {
+    id: "ox-alpha",
+    apiModel: "x-preview-f-free",
+    provider: "opencode",
+    label: "Ox Alpha",
+    shortLabel: "Ox Alpha",
+    description:
+      "Stealth reasoning model on OpenCode Zen. 1M context, multimodal, free during the preview.",
+    specs: "1M context · 128K max output · free preview",
+    resumeBlurb: "Free on OpenCode Zen",
+    settingsSubtitle: "OpenCode · 1M context · free",
+    mapsLowToHigh: false,
+    helper: true,
+    peakHours: false,
+  },
+];
+
+export function getModel(id: string | null | undefined): ModelInfo {
+  return MODELS.find((m) => m.id === id) ?? MODELS[0];
+}
+
+export function getProviderInfo(id: ProviderId): ProviderInfo {
+  return PROVIDER_INFO[id];
+}
+
+export function isKnownModel(id: string | null | undefined): boolean {
+  return Boolean(id && MODELS.some((m) => m.id === id));
+}
+
+/** True when the selected model has a saved key. */
+export function hasKeyForModel(
+  modelId: string | null | undefined,
+  keys: { deepseekKey?: string; opencodeKey?: string }
+): boolean {
+  const provider = getModel(modelId).provider;
+  const raw = provider === "opencode" ? keys.opencodeKey : keys.deepseekKey;
+  return Boolean(raw && raw.trim());
+}

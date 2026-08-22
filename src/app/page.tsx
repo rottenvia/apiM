@@ -20,6 +20,7 @@ import type { PlanView, PlanStepView } from "@/components/PlanPanel";
 import type { TimelineEntry } from "@/components/MessageTimeline";
 import { clampDeleteDelay, DEFAULT_DELETE_DELAY } from "@/components/DeleteChatDialog";
 import { warmRoutes } from "@/lib/warmup";
+import { getModel, hasKeyForModel } from "@/lib/models";
 
 export interface Message {
   id: string;
@@ -332,6 +333,7 @@ export default function Home() {
 
   // Settings
   const [deepseekKey, setDeepseekKey] = useState("");
+  const [opencodeKey, setOpencodeKey] = useState("");
 
   /*
    * What is actually left in the DeepSeek account.
@@ -417,7 +419,7 @@ export default function Home() {
    */
   const [budgetUsd, setBudgetUsd] = useState<number | null>(null);
 
-  const hasKeys = deepseekKey.length > 0;
+  const hasKeys = hasKeyForModel(model, { deepseekKey, opencodeKey });
   const initialLoadDone = useRef(false);
   /** Current workspace id, readable from callbacks without re-creating them. */
   const workspaceIdRef = useRef<string | null>(workspaceId);
@@ -456,7 +458,7 @@ export default function Home() {
 
   const askBtw = useCallback(
     async (question: string) => {
-      if (!question.trim() || !deepseekKey) return;
+      if (!question.trim() || !hasKeys) return;
 
       // One at a time. A second aside replaces the first rather than stacking,
       // because a dock with a queue in it stops being an aside.
@@ -481,6 +483,7 @@ export default function Home() {
           body: JSON.stringify({
             question,
             deepseekApiKey: deepseekKey,
+            opencodeApiKey: opencodeKey,
             workspaceId,
             lastUserMessage: lastUser?.content?.slice(0, 500),
           }),
@@ -520,7 +523,7 @@ export default function Home() {
         );
       }
     },
-    [deepseekKey, workspaceId]
+    [deepseekKey, opencodeKey, hasKeys, workspaceId]
   );
   /** Latest messages + sender, so stable callbacks can read them. */
   const messagesRef = useRef<Message[]>([]);
@@ -550,6 +553,7 @@ export default function Home() {
           try {
             const s = JSON.parse(saved);
             if (s.deepseekKey) setDeepseekKey(s.deepseekKey);
+            if (s.opencodeKey) setOpencodeKey(s.opencodeKey);
             if (s.tavilyKey) setTavilyKey(s.tavilyKey);
             if (s.exaKey) setExaKey(s.exaKey);
             // Explicit false only: an older saved settings object has neither
@@ -596,6 +600,7 @@ export default function Home() {
         "nexusai-settings",
         JSON.stringify({
           deepseekKey,
+          opencodeKey,
           tavilyKey,
           exaKey,
           tavilyEnabled,
@@ -617,6 +622,7 @@ export default function Home() {
     }
   }, [
     deepseekKey,
+    opencodeKey,
     tavilyKey,
     exaKey,
     tavilyEnabled,
@@ -1226,6 +1232,7 @@ export default function Home() {
             attachments: options?.attachments,
             conversationId: requestConversationId,
             deepseekApiKey: deepseekKey,
+            opencodeApiKey: opencodeKey,
             // A disabled provider is simply not sent, so the server
             // never sees a key it must not use.
             tavilyApiKey: tavilyEnabled ? tavilyKey : "",
@@ -1751,6 +1758,7 @@ export default function Home() {
       hasKeys,
       workspaceId,
       deepseekKey,
+      opencodeKey,
       tavilyKey,
       exaKey,
       tavilyEnabled,
@@ -2153,6 +2161,9 @@ export default function Home() {
         retryNotice={retryNotice}
         onStop={stopGeneration}
         hasKeys={hasKeys}
+        missingKeyLabel={
+          getModel(model).provider === "opencode" ? "OpenCode" : "DeepSeek"
+        }
         model={model}
         thinkingEffort={thinkingEffort}
         webSearchMode={webSearchMode}
@@ -2202,6 +2213,7 @@ export default function Home() {
       {showSettings && (
         <SettingsModal
           deepseekKey={deepseekKey}
+          opencodeKey={opencodeKey}
           tavilyKey={tavilyKey}
           exaKey={exaKey}
           onExaKeyChange={setExaKey}
@@ -2216,6 +2228,14 @@ export default function Home() {
           model={model}
           defaultEffort={thinkingEffort}
           onDeepseekKeyChange={setDeepseekKey}
+          onOpencodeKeyChange={(key) => {
+            setOpencodeKey(key);
+            // A user who only connected OpenCode should land on Ox Alpha
+            // rather than a DeepSeek model they cannot call.
+            if (key.trim() && !deepseekKey && getModel(model).provider === "deepseek") {
+              setModel("ox-alpha");
+            }
+          }}
           onTavilyKeyChange={setTavilyKey}
           onModelChange={setModel}
           onDefaultEffortChange={setThinkingEffort}

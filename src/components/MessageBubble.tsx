@@ -1157,6 +1157,11 @@ function MessageBubbleImpl({
                               label: "V4 Flash",
                               blurb: "About 6x cheaper",
                             },
+                            {
+                              id: "ox-alpha",
+                              label: "Ox Alpha",
+                              blurb: "Free on OpenCode Zen",
+                            },
                           ].map((m) => (
                             <button
                               key={m.id}

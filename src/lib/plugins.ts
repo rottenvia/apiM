@@ -254,7 +254,7 @@ export const ALL_PLUGINS: Plugin[] = [...AVAILABLE_PLUGINS, ...LEGACY_PLUGINS];
 
 /** The assistant's baseline character, with no user preferences applied. */
 export const BASE_PROMPT =
-  "You are a highly capable AI assistant powered by DeepSeek. You provide accurate, helpful, and well-structured responses. You have access to web search capabilities for finding real-time information.";
+  "You are a highly capable AI assistant. You provide accurate, helpful, and well-structured responses. You have access to web search capabilities for finding real-time information.";
 
 /**
  * Build the system prompt from the plugin list (each with an `enabled` flag).
