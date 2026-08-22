@@ -16,7 +16,6 @@ interface SidebarProps {
   onDeleteMany: (ids: string[]) => Promise<string[]>;
   onRename: (id: string, title: string) => void;
   onArchive: (id: string, archived: boolean) => void;
-  onOpenSearch: () => void;
   onImported: () => void;
   onOpenSettings: () => void;
   /** How long the delete button stays locked, in seconds. */
@@ -40,7 +39,6 @@ export function Sidebar({
   onDeleteMany,
   onRename,
   onArchive,
-  onOpenSearch,
   onImported,
   onOpenSettings,
   deleteDelay,
@@ -233,69 +231,15 @@ export function Sidebar({
       } flex-shrink-0 overflow-hidden`}
     >
       <div className="flex h-full min-w-[288px] flex-col">
-        {/* New chat */}
-        <div className="flex h-[56px] flex-none items-center gap-1.5 px-3">
+        {/* New chat — the only control in this row, so it can take the
+            full sidebar width instead of sharing it with utilities. */}
+        <div className="flex h-[56px] flex-none items-center px-3">
           <button onClick={onNew} className="new-chat-btn">
             <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 5v14M5 12h14" />
             </svg>
             New chat
           </button>
-
-          <input
-            ref={importRef}
-            type="file"
-            accept="application/json,.json"
-            className="hidden"
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (file) void handleImport(file);
-              e.target.value = "";
-            }}
-          />
-
-          <button
-            onClick={() => importRef.current?.click()}
-            title="Import a chat from a JSON export"
-            aria-label="Import chat"
-            className="sidebar-icon-btn"
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} aria-hidden="true">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 15V3m0 12l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" />
-            </svg>
-          </button>
-
-          <button
-            onClick={onOpenSearch}
-            title="Search chats  (Ctrl+K)"
-            aria-label="Search chats"
-            className="sidebar-icon-btn"
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} aria-hidden="true">
-              <circle cx="11" cy="11" r="8" />
-              <path strokeLinecap="round" d="M21 21l-4.35-4.35" />
-            </svg>
-          </button>
-
-          {/* Multi-select, entered deliberately.
-
-              Checkboxes permanently on screen would turn a list you click
-              through into a form you fill in. This is the rarer action, so it
-              asks for one click first. */}
-          <button
-            onClick={() => (selecting ? exitSelecting() : setSelecting(true))}
-            title={selecting ? "Done selecting" : "Select several chats"}
-            aria-label={selecting ? "Done selecting" : "Select several chats"}
-            aria-pressed={selecting}
-            data-open={selecting}
-            className="sidebar-icon-btn data-[open=true]:text-accent-light"
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} aria-hidden="true">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M9 11l3 3L22 4" />
-              <path strokeLinecap="round" strokeLinejoin="round" d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" />
-            </svg>
-          </button>
-
         </div>
 
         {importState && (
@@ -516,6 +460,21 @@ export function Sidebar({
                       }
                     />
 
+                    {/* Multi-select lives here rather than as a permanent
+                        header button. Entering from a row also ticks that
+                        row, so the first click is already useful. */}
+                    <MenuItem
+                      onClick={() => {
+                        setMenuFor(null);
+                        setSelecting(true);
+                        setSelected(new Set([conv.id]));
+                      }}
+                      label="Select several"
+                      icon={
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M9 11l3 3L22 4M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" />
+                      }
+                    />
+
                     {/* Export — expands to a format list in place */}
                     <button
                       onClick={() => setExportFor(exportFor === conv.id ? null : conv.id)}
@@ -595,8 +554,29 @@ export function Sidebar({
           )}
         </div>
 
-        {/* Settings */}
+        {/* Settings + import. Search chats is Ctrl/Cmd+K. */}
         <div className="border-t border-border px-3 py-3">
+          <input
+            ref={importRef}
+            type="file"
+            accept="application/json,.json"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) void handleImport(file);
+              e.target.value = "";
+            }}
+          />
+          <button
+            onClick={() => importRef.current?.click()}
+            title="Import a chat from a JSON export"
+            className="flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-sm text-text-secondary transition-colors duration-150 hover:bg-bg-tertiary hover:text-text-primary"
+          >
+            <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5} aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 15V3m0 12l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" />
+            </svg>
+            Import chats
+          </button>
           <button
             onClick={onOpenSettings}
             className="flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-sm text-text-secondary transition-colors duration-150 hover:bg-bg-tertiary hover:text-text-primary"
