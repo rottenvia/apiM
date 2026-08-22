@@ -507,6 +507,64 @@ export async function upsertMessage(
 }
 
 /**
+ * The inclusive-end slice of one user/assistant exchange.
+ *
+ * Deleting either side must take the other with it: an answer with no
+ * question (or the reverse) is how the model "remembers" something the
+ * user asked to forget.
+ */
+export function turnSlice(
+  messages: { role: string }[],
+  index: number
+): { start: number; end: number } | null {
+  if (index < 0 || index >= messages.length) return null;
+  let start = index;
+  let end = index + 1;
+  if (messages[index].role === "user" && messages[index + 1]?.role === "assistant") {
+    end = index + 2;
+  } else if (
+    messages[index].role === "assistant" &&
+    index > 0 &&
+    messages[index - 1]?.role === "user"
+  ) {
+    start = index - 1;
+  }
+  return { start, end };
+}
+
+/**
+ * Remove one exchange from a saved chat so the next request cannot see it.
+ *
+ * Client-only delete used to look gone and then come back: history is loaded
+ * from disk, not from the browser. `fallbackLastPair` covers the current
+ * session's temp- ids, which the client never syncs with the stored uuid.
+ */
+export async function deleteTurn(
+  conversationId: string,
+  messageId: string,
+  options: { fallbackLastPair?: boolean } = {}
+): Promise<{ removed: string[] } | null> {
+  const conv = await getConversation(conversationId);
+  if (!conv) return null;
+
+  let index = conv.messages.findIndex((m) => m.id === messageId);
+  if (index === -1 && options.fallbackLastPair && conv.messages.length) {
+    index = conv.messages.length - 1;
+  }
+  const slice = turnSlice(conv.messages, index);
+  if (!slice) return null;
+
+  const removed = conv.messages.slice(slice.start, slice.end).map((m) => m.id);
+  conv.messages = [
+    ...conv.messages.slice(0, slice.start),
+    ...conv.messages.slice(slice.end),
+  ];
+  conv.updatedAt = new Date().toISOString();
+  await writeConversation(conv);
+  return { removed };
+}
+
+/**
  * Drop trailing messages starting at the given id.
  * Used by regenerate, which discards the old reply before producing a new one.
  */

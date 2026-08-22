@@ -1782,7 +1782,7 @@ const MessageList = memo(function MessageList({
             onResume={onResume}
             onLoadReasoning={onLoadReasoning}
             onEdit={msg.role === "user" ? onEdit : undefined}
-            onDelete={msg.role === "user" ? onDeleteMessage : undefined}
+            onDelete={msg.isStreaming ? undefined : onDeleteMessage}
             searchQuery={searchQuery}
             searchWholeWord={searchWholeWord}
             activeMatchIndex={localActive}
