@@ -1,7 +1,7 @@
 /**
  * Retrying transient upstream failures.
  *
- * A long agent task can run forty rounds. Without a retry, one dropped
+ * A long agent task can run for many rounds. Without a retry, one dropped
  * connection on round thirty-two threw away the whole task — including the
  * tokens already paid for on the previous thirty-one rounds. The failure was
  * usually a blip that would have succeeded a second later.
