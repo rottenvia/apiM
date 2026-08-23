@@ -287,6 +287,196 @@ check(
     !/No vision key is configured, so images cannot be viewed/.test(toolsSrc)
 );
 
+console.log("\n9. Ox Alpha has open per-call tool limits; DeepSeek and Qwen stay capped");
+
+const limits = await load("src/lib/tool-limits.ts");
+
+check("only Ox Alpha opts into open tool limits", ox?.openToolLimits === true);
+check("DeepSeek Pro stays capped", pro?.openToolLimits === false);
+check("DeepSeek Flash stays capped", flash?.openToolLimits === false);
+check("Qwen 3.8 27B stays capped", qwen?.openToolLimits === false);
+check(
+  "every catalog model declares the flag",
+  models.MODELS.every((m) => typeof m.openToolLimits === "boolean")
+);
+check("modelHasOpenToolLimits is Ox-only", limits.modelHasOpenToolLimits("ox-alpha"));
+check(
+  "DeepSeek Pro is not open",
+  limits.modelHasOpenToolLimits("deepseek-v4-pro") === false
+);
+check(
+  "Qwen is not open",
+  limits.modelHasOpenToolLimits("qwen-3.8-27b") === false
+);
+check(
+  "an unknown id falls back to the capped default",
+  limits.modelHasOpenToolLimits("nope") === false
+);
+
+const defaultLimits = limits.toolLimitsFor("deepseek-v4-pro");
+const oxLimits = limits.toolLimitsFor("ox-alpha");
+const qwenLimits = limits.toolLimitsFor("qwen-3.8-27b");
+check(
+  "default ceilings are unchanged",
+  defaultLimits.readFiles === 60 &&
+    defaultLimits.writeFiles === 30 &&
+    defaultLimits.batchEdits === 40 &&
+    defaultLimits.readChars === 400_000 &&
+    defaultLimits.searchHits === 60 &&
+    defaultLimits.fetchChars === 200_000 &&
+    defaultLimits.docChars === 800_000 &&
+    defaultLimits.open === false
+);
+check(
+  "Ox ceilings are high enough that a real project is not cut",
+  oxLimits.open === true &&
+    oxLimits.readFiles >= 10_000 &&
+    oxLimits.writeFiles >= 10_000 &&
+    oxLimits.batchEdits >= 10_000 &&
+    oxLimits.readChars >= 8_000_000 &&
+    oxLimits.searchHits >= 10_000 &&
+    oxLimits.fetchChars >= 4_000_000 &&
+    oxLimits.docChars >= 8_000_000
+);
+check(
+  "Qwen still uses the default ceilings",
+  qwenLimits.readFiles === defaultLimits.readFiles &&
+    qwenLimits.readChars === defaultLimits.readChars &&
+    qwenLimits.open === false
+);
+check("Ox specs advertise open tools", /open tools/.test(ox?.specs ?? ""));
+
+// Isolate workspace/tools under a temp data root. Those modules snapshot
+// APIM_DATA_ROOT at import time, so this has to happen before they load.
+const { mkdtemp, rm } = await import("node:fs/promises");
+const os = await import("node:os");
+const tmpData = await mkdtemp(path.join(os.tmpdir(), "apim-ox-limits-"));
+process.env.APIM_DATA_ROOT = tmpData;
+
+const toolsMod = await load("src/lib/tools.ts");
+const isolatedWs = await load("src/lib/workspace.ts");
+const defaultTools = toolsMod.workspaceToolsFor("deepseek-v4-pro");
+const oxTools = toolsMod.workspaceToolsFor("ox-alpha");
+const qwenTools = toolsMod.workspaceToolsFor("qwen-3.8-27b");
+const readFilesDefault = defaultTools.find((t) => t.function.name === "read_files");
+const readFilesOx = oxTools.find((t) => t.function.name === "read_files");
+check(
+  "DeepSeek still sees the 60-file cap in the schema",
+  /up to 60/.test(JSON.stringify(readFilesDefault))
+);
+check(
+  "Ox is not told to stop at 60 files",
+  /No per-call cap/.test(JSON.stringify(readFilesOx)) &&
+    !/up to 60/.test(JSON.stringify(readFilesOx))
+);
+check(
+  "Qwen gets the same capped schema as DeepSeek",
+  JSON.stringify(qwenTools) === JSON.stringify(defaultTools)
+);
+check(
+  "the default export still lists the same tools",
+  toolsMod.WORKSPACE_TOOLS.map((t) => t.function.name).join(",") ===
+    defaultTools.map((t) => t.function.name).join(",")
+);
+
+check(
+  "the chat route builds the tool list per model",
+  /workspaceToolsFor\(model\)/.test(route) && !/WORKSPACE_TOOLS\.filter/.test(route)
+);
+check(
+  "every runTool call carries the model id",
+  (route.match(/modelId: model/g) ?? []).length >= 3
+);
+check(
+  "Ox can view_image without a vision key",
+  /Boolean\(visionApiKey\) \|\| modelHasOpenToolLimits\(model\)/.test(route)
+);
+check(
+  "the workspace prompt tells Ox the ceilings are off",
+  /This model has no per-call tool ceilings/.test(route)
+);
+check(
+  "plugin directives are still appended last every round",
+  /while \(true\) \{\s*round \+= 1;\s*appendPluginDirectives\(\)/.test(route)
+);
+check(
+  "the directive marker is unchanged",
+  /ACTIVE USER CONFIGURATION — RESPONSE BEHAVIOR/.test(plugins)
+);
+check(
+  "vision.ts still stays out of the browser OCR graph",
+  !/tesseract|from "@\/lib\/ocr"|from '@\/lib\/ocr'/.test(read("src/lib/vision.ts"))
+);
+
+const liveWs = "ox-open-limits";
+const oversized = `${"x".repeat(401_000)}TAIL-MARKER`;
+await isolatedWs.writeFile(liveWs, "big.txt", oversized);
+
+const defaultRead = await toolsMod.runTool(liveWs, "read_file", {
+  path: "big.txt",
+});
+const oxRead = await toolsMod.runTool(
+  liveWs,
+  "read_file",
+  { path: "big.txt" },
+  { modelId: "ox-alpha" }
+);
+const qwenRead = await toolsMod.runTool(
+  liveWs,
+  "read_file",
+  { path: "big.txt" },
+  { modelId: "qwen-3.8-27b" }
+);
+check(
+  "a 401k file is truncated for the default model",
+  defaultRead.ok &&
+    /truncated/.test(defaultRead.content) &&
+    !defaultRead.content.includes("TAIL-MARKER")
+);
+check(
+  "Ox Alpha reads the whole 401k file",
+  oxRead.ok &&
+    oxRead.content.includes("TAIL-MARKER") &&
+    !/truncated/.test(oxRead.content)
+);
+check(
+  "Qwen is still truncated at the default ceiling",
+  qwenRead.ok &&
+    /truncated/.test(qwenRead.content) &&
+    !qwenRead.content.includes("TAIL-MARKER")
+);
+
+const overflow = Array.from({ length: 63 }, (_, i) => `missing-${i}.txt`);
+const defaultBatch = await toolsMod.runTool(liveWs, "read_files", {
+  paths: overflow,
+});
+const oxBatch = await toolsMod.runTool(
+  liveWs,
+  "read_files",
+  { paths: overflow },
+  { modelId: "ox-alpha" }
+);
+const flashBatch = await toolsMod.runTool(
+  liveWs,
+  "read_files",
+  { paths: overflow },
+  { modelId: "deepseek-v4-flash" }
+);
+check(
+  "default read_files still drops paths past 60",
+  /NOT READ/.test(defaultBatch.content) && /missing-60\.txt/.test(defaultBatch.content)
+);
+check(
+  "Ox Alpha read_files keeps all 63 paths",
+  !/NOT READ/.test(oxBatch.content) && /missing-62\.txt/.test(oxBatch.content)
+);
+check(
+  "DeepSeek Flash still drops paths past 60",
+  /NOT READ/.test(flashBatch.content)
+);
+
+await rm(tmpData, { recursive: true, force: true });
+
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
 );

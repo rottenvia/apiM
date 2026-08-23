@@ -63,6 +63,11 @@ export interface ModelInfo {
   vision: VisionMode;
   /** Native video input (MP4). Independent of `vision`. */
   video: boolean;
+  /**
+   * Ox Alpha only: no per-call tool ceilings. The model can read a whole
+   * file, a whole page, and as many paths as it asks for in one call.
+   */
+  openToolLimits: boolean;
 }
 
 export const DEFAULT_MODEL_ID = "deepseek-v4-pro";
@@ -146,6 +151,7 @@ export const MODELS: ModelInfo[] = [
     peakHours: true,
     vision: "helper",
     video: false,
+    openToolLimits: false,
   },
   {
     id: "deepseek-v4-flash",
@@ -162,6 +168,7 @@ export const MODELS: ModelInfo[] = [
     peakHours: true,
     vision: "helper",
     video: false,
+    openToolLimits: false,
   },
   {
     id: "ox-alpha",
@@ -171,7 +178,7 @@ export const MODELS: ModelInfo[] = [
     shortLabel: "Ox Alpha",
     description:
       "Stealth reasoning model on OpenCode Zen. 1M context, native image and video, free during the preview.",
-    specs: "1M context · 128K max output · image + video · free preview",
+    specs: "1M context · 128K max output · image + video · open tools · free preview",
     resumeBlurb: "Free on OpenCode Zen",
     settingsSubtitle: "OpenCode · 1M context · free",
     mapsLowToHigh: false,
@@ -179,6 +186,7 @@ export const MODELS: ModelInfo[] = [
     peakHours: false,
     vision: "native",
     video: true,
+    openToolLimits: true,
   },
   {
     id: QWEN_38_27B_ID,
@@ -196,6 +204,7 @@ export const MODELS: ModelInfo[] = [
     peakHours: false,
     vision: "native",
     video: true,
+    openToolLimits: false,
   },
 ];
 
