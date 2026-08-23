@@ -348,7 +348,7 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
     function: {
       name: "make_plan",
       description:
-        "Write down the goal and the steps before starting anything that will take more than two or three actions. This is not paperwork: on a long task your own reasoning from twenty rounds ago is gone, and without a plan you will forget requirements from the first message and stop early because the work so far looks finished. Include verification steps — 'run the tests', 'open the page and check it renders' — not just the building. Replaces any existing plan.",
+        "Write down the goal and the steps before starting anything that will take more than two or three actions. This is not paperwork: on a long task your own reasoning from twenty rounds ago is gone, and without a plan you will forget requirements from the first message and stop early because the work so far looks finished. Include verification steps — 'run the tests', 'open the page and check it renders' — not just the building. steps MUST be an array of sentences (not one numbered string, not labels like 'Search'). Replaces any existing plan.",
       parameters: {
         type: "object",
         properties: {
@@ -360,7 +360,7 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
             type: "array",
             items: { type: "string" },
             description:
-              "The steps, in order. Include how you will check the work, not only how you will do it.",
+              "The steps, in order, each a full sentence. Include how you will check the work, not only how you will do it. Do not send one string.",
           },
         },
         required: ["goal", "steps"],

@@ -127,6 +127,50 @@ check(
   "otherwise being genuinely stuck would trap the run"
 );
 
+const draft = plan.createPlan("Build the scraper end to end", [
+  "Inspect the match page for selectors",
+  "Write the parser module",
+  "Run the test suite",
+  "Write a short usage note",
+  "Check the output against a fixture",
+]);
+check(
+  "a draft plan can be rewritten as two or more steps",
+  plan.replacePlan(
+    draft,
+    plan.createPlan("Build the scraper end to end", [
+      "Read the logging files that actually exist",
+      "Write the parser from those files",
+      "Run the test suite",
+    ])
+  ).steps.length === 3,
+  "the first guess is often wrong once the files have been read"
+);
+check(
+  "a draft still cannot collapse to one trivial step",
+  refuses(() =>
+    plan.replacePlan(
+      draft,
+      plan.createPlan("Build the scraper end to end", [
+        "Tell the user it is finished now",
+      ])
+    )
+  ),
+  "that is still the original escape"
+);
+check(
+  "a leftover plan on a new message can be replaced",
+  plan.replacePlan(
+    started(),
+    plan.createPlan("Look at how velocity logs to the console", [
+      "Search the logging utilities and list every hit",
+      "Read console.cpp and note how messages are emitted",
+    ]),
+    { allowShrink: true }
+  ).steps.length === 2,
+  "a new user question must not be trapped by the previous plan"
+);
+
 const carried = plan.replacePlan(
   started(),
   plan.createPlan("Build the scraper end to end", [
