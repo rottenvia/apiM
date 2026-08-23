@@ -285,6 +285,17 @@ check(
   args.includes("--host") && args[args.indexOf("--host") + 1] === "127.0.0.1"
 );
 check(
+  "the sidecar opens an 80K window, not 16K",
+  args.includes("-c") &&
+    args[args.indexOf("-c") + 1] === String(shared.SIDECAR_CTX) &&
+    shared.SIDECAR_CTX >= 65_536
+);
+check(
+  "KV cache is quantized so 80K does not add another 17 GB",
+  args.includes("--cache-type-k") &&
+    args[args.indexOf("--cache-type-k") + 1] === "q8_0"
+);
+check(
   "the sidecar is llama-server, not Ollama",
   args.includes("-m") && engineSrc.includes("llama-server") && !/ollama serve/.test(engineSrc)
 );
@@ -397,6 +408,81 @@ check(
   "DeepSeek still gets the tail system copies on the wire",
   /serializeForApi\(/.test(route) &&
     /compacted\.messages/.test(route)
+);
+
+console.log("\n8c. Local context has to fit the sidecar window");
+
+const localCtx = await load("src/lib/local-context.ts");
+const huge = [
+  { role: "system", content: "persona " + "x".repeat(20_000) },
+  { role: "user", content: "do the thing" },
+  {
+    role: "assistant",
+    content: "working",
+    reasoning_content: "R".repeat(40_000),
+    tool_calls: [
+      {
+        id: "c0",
+        type: "function",
+        function: { name: "read_file", arguments: "{\"path\":\"a.py\"}" },
+      },
+    ],
+  },
+  { role: "tool", tool_call_id: "c0", content: "file " + "y".repeat(30_000) },
+  { role: "user", content: "and then this" },
+];
+const fitted = localCtx.fitForLocalContext(huge, 8_000);
+check(
+  "a fat transcript is cut down to the local budget",
+  fitted.trimmed &&
+    fitted.tokens <= 8_000 &&
+    fitted.messages.some((m) => m.role === "user" && m.content === "and then this")
+);
+check(
+  "the last user question survives the cut",
+  fitted.messages[fitted.messages.length - 1].role === "user"
+);
+check(
+  "tool calls stay paired after the cut",
+  (() => {
+    const ids = new Set();
+    const replies = new Set();
+    for (const m of fitted.messages) {
+      if (m.role === "assistant") for (const c of m.tool_calls ?? []) ids.add(c.id);
+      if (m.role === "tool") replies.add(m.tool_call_id);
+    }
+    if (ids.size !== replies.size) return false;
+    for (const id of ids) if (!replies.has(id)) return false;
+    return true;
+  })()
+);
+check(
+  "the chat route fits Qwen before serialize",
+  /fitForLocalContext/.test(route) && /localMessageBudget/.test(route)
+);
+check(
+  "local output is capped below the sidecar window",
+  /SIDECAR_MAX_OUTPUT/.test(route) &&
+    shared.SIDECAR_MAX_OUTPUT + 256 < shared.SIDECAR_CTX
+);
+check(
+  "a context-exceeded 400 tells you to restart the sidecar",
+  /80K window/.test(
+    providers.providerHttpError(
+      400,
+      "On this PC",
+      "request (73667 tokens) exceeds the available context size (16384 tokens)"
+    )
+  )
+);
+check(
+  "the catalog no longer advertises a 262K window the sidecar does not open",
+  !/262K/.test(qwen?.specs ?? "") && /80K/.test(qwen?.specs ?? "")
+);
+check(
+  "a sidecar still on 16K is restarted before chat",
+  /readSidecarCtx/.test(engineSrc) &&
+    /ctx >= SIDECAR_CTX/.test(engineSrc)
 );
 
 console.log("\n9. A 503 from Ox / OpenCode is their outage, not the user's key");
