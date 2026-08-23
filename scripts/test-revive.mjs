@@ -65,6 +65,29 @@ check(
   }) === "limit_language"
 );
 check(
+  "the same excuse in the thinking box is treated the same",
+  R.detectPrematureStop({
+    ...base,
+    toolRounds: 0,
+    toolsUsed: [],
+    roundContent: "",
+    reasoning:
+      "I have a lot left to do here but I have to stop. Say continue and I will keep going from this exact point.",
+  }) === "limit_language",
+  "Ox writes the limit excuse in reasoning, not in the visible answer"
+);
+check(
+  "thinking then silence is a cut, not a finished chat answer",
+  R.detectPrematureStop({
+    ...base,
+    toolRounds: 0,
+    toolsUsed: [],
+    roundContent: "",
+    reasoning:
+      "First I need to look at the logging path, then read console.cpp, then decide whether the hook belongs in CreateMove. The file is large so I will start by searching for the logger factory and the sink that writes to the console.",
+  }) === "thinking_cut"
+);
+check(
   "tools then silence is unfinished",
   R.detectPrematureStop({ ...base, roundContent: "" }) === "empty_after_work"
 );
@@ -189,6 +212,17 @@ check(
   "the counter starts at zero on every request",
   /let autoRevives = 0;/.test(route),
   "an explicit Resume is the user asking us to try again"
+);
+check(
+  "a premature stop that cannot be auto-continued stays resumable",
+  /if \(premature\) stoppedPrematurely = premature;/.test(route) &&
+    /Boolean\(stoppedPrematurely\)/.test(route),
+  "after two auto-revives the reply used to be saved as complete"
+);
+check(
+  "reasoning is passed into the detector",
+  /reasoning: reasoningContent/.test(route),
+  "the excuse is usually in the thought box"
 );
 check(
   "the UI says it is continuing, not hung",
