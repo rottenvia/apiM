@@ -2,16 +2,19 @@
  * Image understanding for a text-only model.
  *
  * DeepSeek's V4 API accepts text only — there is no documented image input on
- * the hosted Chat Completions endpoint. So images are described by a vision
- * model first, and only that description reaches DeepSeek.
+ * the hosted Chat Completions endpoint. So images are described first, and
+ * only that description reaches DeepSeek.
  *
  * Ox Alpha and Qwen 3.8 27B are native VLMs: do not call this helper for
  * those. The composer gates `/api/vision` on `modelNeedsVisionHelper`.
  *
- * A vision model is used rather than plain OCR because a screenshot is rarely
- * just characters: layout, which control is highlighted, and what looks wrong
- * all matter, and OCR discards every one of them.
+ * Preferred path is an OpenAI vision model (layout, highlighted controls,
+ * what looks wrong). When the user has no key or the key is out of credit,
+ * `describeImageWithFallback` scrapes visible text with free local OCR so
+ * a screenshot still works.
  */
+
+export type DescriptionSource = "vision" | "ocr";
 
 export const VISION_BASE_URL =
   process.env.VISION_BASE_URL ?? "https://api.openai.com/v1";
@@ -52,6 +55,8 @@ Do not add commentary, opinions or a preamble. Output only the description.`;
 export interface VisionResult {
   description?: string;
   error?: string;
+  /** How the text was produced. Absent on a hard failure. */
+  source?: DescriptionSource;
 }
 
 /**
@@ -140,4 +145,31 @@ export async function describeImage(
 /** Wrap a description so the model knows it came from an image, not the user. */
 export function formatImageBlock(name: string, description: string): string {
   return `<image name="${name}">\n${description}\n</image>`;
+}
+
+/**
+ * OpenAI vision when a key is present and working; free local OCR otherwise.
+ *
+ * Any vision failure (no funds, rejected key, timeout) falls through to OCR
+ * rather than blocking the screenshot. OCR is also the only path when the
+ * user never added a key.
+ */
+export async function describeImageWithFallback(
+  dataUrl: string,
+  apiKey?: string,
+  model: string = DEFAULT_VISION_MODEL,
+  userHint?: string
+): Promise<VisionResult> {
+  // Loaded here so the client bundle that only needs isImageFile never
+  // pulls Node OCR (child_process / tesseract.js) into the browser.
+  const { describeWithOcr } = await import("@/lib/ocr");
+  const key = apiKey?.trim();
+  if (key) {
+    const vision = await describeImage(dataUrl, key, model, userHint);
+    if (vision.description) return { ...vision, source: "vision" };
+    const ocr = await describeWithOcr(dataUrl);
+    if (ocr.description) return ocr;
+    return vision;
+  }
+  return describeWithOcr(dataUrl);
 }

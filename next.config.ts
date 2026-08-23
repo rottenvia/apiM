@@ -31,7 +31,7 @@ const nextConfig: NextConfig = {
    * that server import at its physical package location; browser attachments
    * still use the ordinary client bundle.
    */
-  serverExternalPackages: ["pdfjs-dist"],
+  serverExternalPackages: ["pdfjs-dist", "tesseract.js"],
 
   // Hide the floating Next.js dev-tools badge (the small "N" circle in the
   // bottom-left corner during `next dev`). It never ships in production

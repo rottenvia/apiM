@@ -1,5 +1,5 @@
 import { diffLines, diffStats, diffHunks } from "@/lib/diff";
-import { describeImage } from "@/lib/vision";
+import { describeImageWithFallback } from "@/lib/vision";
 import {
   startProcess,
   stopProcess,
@@ -277,8 +277,9 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
       name: "view_image",
       description:
         "Look at an image file in the workspace — a screenshot, a mockup, a " +
-        "diagram. Returns a detailed description including any text in it. " +
-        "Use this when the user refers to an image they saved, or when you " +
+        "diagram. Uses the OpenAI vision key when one is set; otherwise " +
+        "scrapes visible text with free local OCR (no funds needed). Use " +
+        "this when the user refers to an image they saved, or when you " +
         "have generated or downloaded one and need to check it.",
       parameters: {
         type: "object",
@@ -1350,7 +1351,7 @@ function num(args: Record<string, unknown>, key: string): number | null {
  * would abandon the whole turn instead.
  */
 export interface ToolContext {
-  /** Vision provider key. Absent means view_image is unavailable. */
+  /** Vision provider key. Absent means view_image uses free local OCR. */
   visionKey?: string;
   visionModel?: string;
   /** Tavily key. Absent means web_search is withheld from the model. */
@@ -1792,29 +1793,17 @@ export async function runTool(
       }
 
       case "view_image": {
-        if (!context.visionKey) {
-          // Reported as a tool result rather than an error, so the model can
-          // tell the user what to do instead of retrying forever.
-          return {
-            ok: false,
-            content:
-              "No vision key is configured, so images cannot be viewed. " +
-              "Tell the user to add one in Settings.",
-            summary: "Vision not configured",
-          };
-        }
-
         const imagePath = str(args, "path");
         const image = await readImageAsDataUrl(workspaceId, imagePath);
 
-        const result = await describeImage(
+        const result = await describeImageWithFallback(
           image.dataUrl,
           context.visionKey,
           context.visionModel,
           typeof args.question === "string" ? args.question : undefined
         );
 
-        if (result.error) {
+        if (result.error && !result.description) {
           return {
             ok: false,
             content: `Could not read ${imagePath}: ${result.error}`,
@@ -1822,10 +1811,14 @@ export async function runTool(
           };
         }
 
+        const via = result.source === "ocr" ? " (OCR)" : "";
         return {
           ok: true,
-          content: `${imagePath}:\n\n${result.description ?? "(no description)"}`,
-          summary: `Viewed ${imagePath}`,
+          content: `${imagePath}${via}:\n\n${result.description ?? "(no description)"}`,
+          summary:
+            result.source === "ocr"
+              ? `OCR ${imagePath}`
+              : `Viewed ${imagePath}`,
         };
       }
 

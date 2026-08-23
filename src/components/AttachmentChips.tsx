@@ -47,6 +47,7 @@ export function AttachmentChips({
           src={preview.dataUrl}
           name={preview.name}
           description={preview.description}
+          source={preview.descriptionSource}
           kind={preview.kind === "video" ? "video" : "image"}
           onClose={() => setPreview(null)}
         />

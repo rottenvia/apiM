@@ -130,8 +130,8 @@ check("a non-matching edit is refused with guidance",
 
 console.log("\n6. Viewing images");
 let viewed = await runTool(WS, "view_image", { path: "shot.png" }, {});
-check("without a vision key it says so instead of failing silently",
-  !viewed.ok && /vision key/i.test(viewed.content));
+check("a missing image is reported even without a vision key",
+  !viewed.ok && /no such file|not an image/i.test(viewed.content));
 
 viewed = await runTool(WS, "view_image", { path: "notes.txt" }, { visionKey: "sk-x" });
 check("a non-image path is rejected",

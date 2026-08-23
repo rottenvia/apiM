@@ -239,6 +239,47 @@ check("sidecarArgs without a projector stays text-only", !noProj.includes("--mmp
 check("downloadEngine pulls the projector", /MMPROJ_URL/.test(engine) && /mmprojPath\(\)/.test(engine));
 check("startEngine passes the projector into sidecarArgs", /sidecarArgs\(gguf, mmproj\)/.test(engine));
 
+console.log("\n8. Free OCR fallback for blind models");
+
+const ocr = await load("src/lib/ocr.ts");
+const vision = await load("src/lib/vision.ts");
+const visionRoute = read("src/app/api/vision/route.ts");
+const toolsSrc = read("src/lib/tools.ts");
+
+const scraped = ocr.formatOcrDescription("ERROR: file not found\n  at main.ts:12");
+check(
+  "OCR wraps scraped text with an honest note",
+  scraped.startsWith("ERROR: file not found") && /\[OCR —/.test(scraped)
+);
+check("empty OCR says no readable text", /no readable text/i.test(ocr.formatOcrDescription("   \n")));
+check("OCR descriptions are recognisable", ocr.isOcrDescription(scraped));
+check("a vision description is not labelled OCR", ocr.isOcrDescription("a red button") === false);
+
+check(
+  "vision helper falls back to OCR",
+  /describeImageWithFallback/.test(read("src/lib/vision.ts")) &&
+    typeof vision.describeImageWithFallback === "function"
+);
+check(
+  "the vision route does not require an API key",
+  /describeImageWithFallback/.test(visionRoute) &&
+    !/if \(!apiKey\)/.test(visionRoute)
+);
+check(
+  "ChatArea still calls /api/vision without a key",
+  /apiKey: visionKey \|\| undefined/.test(chatSrc) &&
+    !/Add a vision API key in Settings to read screenshots/.test(chatSrc)
+);
+check(
+  "Settings says OCR is free when there is no OpenAI key",
+  /free OCR/.test(settings) && /no OpenAI key or/.test(settings)
+);
+check(
+  "view_image uses the OCR fallback instead of refusing",
+  /describeImageWithFallback/.test(toolsSrc) &&
+    !/No vision key is configured, so images cannot be viewed/.test(toolsSrc)
+);
+
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
 );
