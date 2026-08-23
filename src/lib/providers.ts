@@ -284,8 +284,15 @@ export function completionHeaders(target: ResolvedTarget): Record<string, string
 }
 
 /** How long one hung attempt may sit before we treat it as a miss. */
-export function attemptTimeoutMs(target: ResolvedTarget): number {
-  return isOxProvider(target.providerId) ? OX_ATTEMPT_TIMEOUT_MS : 280_000;
+export function attemptTimeoutMs(
+  target: ResolvedTarget,
+  inputChars = 0
+): number {
+  if (!isOxProvider(target.providerId)) return 280_000;
+  // Workspace prompts are large. Give the upload a second per 8k chars
+  // on top of the base hang cap, but never sit past 90s on a dead host.
+  const extra = Math.ceil(Math.max(0, inputChars) / 8_000) * 1_000;
+  return Math.min(90_000, OX_ATTEMPT_TIMEOUT_MS + extra);
 }
 
 const VALID_EFFORTS = new Set(["low", "high", "max"]);

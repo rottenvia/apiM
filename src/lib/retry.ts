@@ -132,8 +132,15 @@ export function shouldAutoResumeOnTimeout(input: {
   autoResume?: boolean;
   hadWork: boolean;
   used: number;
+  /**
+   * Only the in-app Qwen sidecar should silently continue a deadline.
+   * Ox 429/timeouts are a shared pool — retrying them in a loop is the
+   * "every model generates forever and Stop does nothing" bug.
+   */
+  local?: boolean;
 }): boolean {
   if (!input.hadWork) return false;
+  if (input.local === false) return false;
   if (input.used >= MAX_TIMEOUT_AUTO_RESUMES) return false;
   if (input.autoResume === true) return true;
   return isTimeoutFailure(input.error ?? "");
@@ -304,6 +311,40 @@ export function formatRetryNotice(info: RetryInfo): string {
  * the 300s route ceiling, which is the "Test works, chat never loads,
  * no error" case.
  */
+/**
+ * Read one SSE chunk, or abort the moment Stop fires.
+ *
+ * `reader.read()` ignores `runSignal`. After headers land the body can sit
+ * silent for minutes (Qwen thinking, Ox prefill) and the Stop button did
+ * nothing — that is the infinite-generate loop.
+ */
+export async function readChunk(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  signal?: AbortSignal
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  if (signal?.aborted) {
+    throw new DOMException("Aborted", "AbortError");
+  }
+  if (!signal) return reader.read();
+
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    reader.read().then(
+      (chunk) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(chunk);
+      },
+      (err) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(err);
+      }
+    );
+  });
+}
+
 export async function readWithTimeout(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   ms: number,

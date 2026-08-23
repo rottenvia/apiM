@@ -453,6 +453,8 @@ export default function Home() {
   const [visionKey, setVisionKey] = useState("");
   const [visionModel, setVisionModel] = useState("gpt-4o-mini");
   const [model, setModel] = useState("deepseek-v4-pro");
+  /** False until localStorage has been read, so we don't unload Qwen on the default model. */
+  const [settingsHydrated, setSettingsHydrated] = useState(false);
   const [thinkingEffort, setThinkingEffort] = useState("auto");
   const [webSearchMode, setWebSearchMode] = useState<"off" | "auto" | "always">("auto");
   const [enabledPlugins, setEnabledPlugins] = useState<string[]>([]);
@@ -665,6 +667,7 @@ export default function Home() {
           }
         }
         initialLoadDone.current = true;
+        setSettingsHydrated(true);
       }
     });
   }, []);
@@ -1165,6 +1168,9 @@ export default function Home() {
         return;
       }
 
+      // A fresh send (not the silent timeout continue) may auto-resume again.
+      if (!options?.force) cancelAutoResumeRef.current = false;
+
       const trimmed = content.trim();
       const regenerateFromId = options?.regenerateFromId;
       const resumeMessageId = options?.resumeMessageId;
@@ -1469,7 +1475,9 @@ export default function Home() {
                 // looks like the app has hung.
                 retryLiveRef.current = null;
                 setRetryNotice(
-                  evt.reason === "output_limit"
+                  evt.reason === "thinking_budget"
+                    ? "Used the thinking budget — answering now, without another think"
+                    : evt.reason === "output_limit"
                     ? `Answer was longer than one response allows — continuing (${evt.n}/${evt.of})`
                     : `The model stopped mid-task — continuing from where it left off (${evt.n}/${evt.of})`
                 );
@@ -1827,11 +1835,13 @@ export default function Home() {
                  */
                 const used = autoResumeCounts.current.get(streamingId) ?? 0;
                 if (
+                  !cancelAutoResumeRef.current &&
                   shouldAutoResumeOnTimeout({
                     error: evt.error,
                     autoResume: evt.autoResume,
                     hadWork,
                     used,
+                    local: getModel(activeModel).provider === "local",
                   })
                 ) {
                   // Keep the bubble streaming. Marking it incomplete here is
@@ -1839,7 +1849,6 @@ export default function Home() {
                   // about to continue on its own.
                   autoResumeCounts.current.set(streamingId, used + 1);
                   pendingAutoResumeRef.current = streamingId;
-                  cancelAutoResumeRef.current = false;
                   break;
                 }
                 finish(
@@ -2019,6 +2028,18 @@ export default function Home() {
     sendMessageRef.current = sendMessage;
   }, [sendMessage]);
 
+  // Switching away from Qwen must drop the sidecar. Leaving llama-server
+  // mapped is the "100% memory after I stopped using it" report.
+  useEffect(() => {
+    if (!settingsHydrated) return;
+    if (getModel(model).provider === "local") return;
+    void fetch("/api/local", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "stop" }),
+    }).catch(() => {});
+  }, [model, settingsHydrated]);
+
   /**
    * Stop, meaning stop.
    *
@@ -2052,19 +2073,32 @@ export default function Home() {
   const stopGeneration = useCallback(() => {
     cancelAutoResumeRef.current = true;
     pendingAutoResumeRef.current = null;
-    const id = runMessageIdRef.current;
-    if (id) {
-      void fetch("/api/chat/stop", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messageId: id }),
-        keepalive: true,
-      }).catch(() => {});
-    }
-    // Stop the stream for whichever conversation is currently visible. The
-    // server-side stop by message id above halts generation even if the user
-    // has switched to a different chat than the one running.
-    abortRefs.current.get(currentConvId ?? "")?.abort();
+    const messageId = runMessageIdRef.current;
+    const convId = workspaceIdRef.current ?? currentConvId;
+    void fetch("/api/chat/stop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        messageId: messageId || undefined,
+        conversationId: convId || undefined,
+      }),
+      keepalive: true,
+    }).catch(() => {});
+    // Abort every in-flight client stream. Keying only on currentConvId
+    // missed new chats (id still null) and auto-resume replacements.
+    for (const ac of abortRefs.current.values()) ac.abort();
+    abortRefs.current.clear();
+    runMessageIdRef.current = null;
+    setIsLoading(false);
+    setStatusStage(null);
+    setLiveRetry(null);
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.isStreaming
+          ? { ...m, isStreaming: false, incomplete: true, canResume: true }
+          : m
+      )
+    );
   }, [currentConvId]);
 
   /** Resend an edited user message, discarding everything after it. */
@@ -2629,6 +2663,41 @@ export default function Home() {
           onTogglePlugin={(id) => {
             setEnabledPlugins((prev) =>
               prev.includes(id)
+                ? prev.filter((p) => p !== id)
+                : [...prev, id]
+            );
+          }}
+          onClose={() => setShowPlugins(false)}
+        />
+      )}
+    </div>
+    </ArtifactProvider>
+  );
+}
+)
+                ? prev.filter((p) => p !== id)
+                : [...prev, id]
+            );
+          }}
+          onClose={() => setShowPlugins(false)}
+        />
+      )}
+    </div>
+    </ArtifactProvider>
+  );
+}
+        ? prev.filter((p) => p !== id)
+                : [...prev, id]
+            );
+          }}
+          onClose={() => setShowPlugins(false)}
+        />
+      )}
+    </div>
+    </ArtifactProvider>
+  );
+}
+)
                 ? prev.filter((p) => p !== id)
                 : [...prev, id]
             );

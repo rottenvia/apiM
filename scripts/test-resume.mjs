@@ -585,6 +585,38 @@ check(
   "a think-only timeout resume tells it to stop thinking",
   /You already thought/.test(page)
 );
+check(
+  "Ox timeouts do not silently auto-resume",
+  /local: getModel\(activeModel\)\.provider === "local"/.test(page) &&
+    /autoResume: timedOut && target\.providerId === "local"/.test(route)
+);
+check(
+  "Stop names the conversation so it works before meta",
+  /conversationId: convId/.test(page) &&
+    /stopConversation/.test(read("src/app/api/chat/stop/route.ts"))
+);
+check(
+  "Stop aborts every client stream, not just currentConvId",
+  /for \(const ac of abortRefs\.current\.values\(\)\) ac\.abort\(\)/.test(page)
+);
+check(
+  "the body reader honours Stop",
+  /readChunk\(reader, runSignal\)/.test(route)
+);
+check(
+  "the agent loop has a hard round cap",
+  /MAX_AGENT_ROUNDS = 64/.test(route)
+);
+check(
+  "meta is sent before search so Stop has an id",
+  /Named before search/.test(route) &&
+    route.indexOf("Named before search") < route.indexOf('stage: "searching"')
+);
+check(
+  "a think-only cut disables thinking on the next call",
+  /forceNoThinking = true/.test(route) &&
+    /thinkingEnabled && !forceNoThinking/.test(route)
+);
 
 // -------------------------------------------------------------- task 4
 console.log("\n4. The prompt cache is not thrown away on every write");

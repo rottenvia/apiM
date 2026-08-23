@@ -97,6 +97,7 @@ import {
   fetchWithRetry,
   isTimeoutFailure,
   OPENCODE_RETRY,
+  readChunk,
   readWithTimeout,
   sleep,
 } from "@/lib/retry";
@@ -605,15 +606,6 @@ export async function POST(req: NextRequest) {
       const convId: string = conversationId ?? uuidv4();
 
       /*
-       * A normal UI request uses the same id for co  }
-      };
-
-      // Ids are allocated up front so the same assistant message can be
-      // rewritten in place as it streams.
-      const startedAt = Date.now();
-      const convId: string = conversationId ?? uuidv4();
-
-      /*
        * A normal UI request uses the same id for conversation and workspace.
        * Refuse a disagreement instead of letting Chat B pointhat B point at Chat A's
        * LESSONS.md, plan, GitHub checkout or files. Direct API callers that
@@ -651,6 +643,27 @@ export async function POST(req: NextRequest) {
       const runSignal = beginRun(assistantMsgId, convId);
       const stopped = () => runSignal.aborted;
       let emergencySave: (() => Promise<void>) | null = null;
+
+      // Named before search / the first model call so Stop has something
+      // to abort. Waiting for the later search-filled meta is why Stop
+      // did nothing and every model looked stuck.
+      send({
+        type: "meta",
+        conversationId: convId,
+        messageId: assistantMsgId,
+        title,
+        resolvedEffort,
+        thinkingEnabled,
+        webSearchUsed: false,
+        searchReason: "",
+        searchRounds: 0,
+        searchStopReason: "",
+        searchResults: null,
+        searchQueries: null,
+        searchesPerformed: 0,
+        searchCacheHits: 0,
+        searchUsd: 0,
+      });
 
       try {
         // Built-ins plus the user's own saved plugins.
@@ -716,6 +729,7 @@ export async function POST(req: NextRequest) {
         let resumed: {
           toolRounds: number;
           continuations: number;
+          thinkNudges: number;
           messages: TranscriptMessage[];
         } | null = null;
         let resumedContent = "";
@@ -760,6 +774,7 @@ export async function POST(req: NextRequest) {
                   // were made, so the run's length is not silently reset.
                   toolRounds: (prior.toolEvents ?? []).length,
                   continuations: 0,
+                  thinkNudges: 0,
                   messages: rebuilt.messages,
                 };
               }
@@ -1109,6 +1124,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             continue;
           }
           const built = buildUserContent(
+            msg.content ? built = buildUserContent(
             msg.content ?? "",
             msg.attachments,
             vision
@@ -1538,11 +1554,23 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          * continuation adds another full output budget.
          */
         const MAX_CONTINUATIONS = 8;
+        /**
+         * Hard ceiling on the agent loop.
+         *
+         * There is no other round budget. Combined with a Stop that used
+         * to miss the body reader, a model that kept calling tools never
+         * ended. 64 is enough for a real task and finite if Stop fails.
+         */
+        const MAX_AGENT_ROUNDS = 64;
         // Carried across a resume, so continuing cannot reset the guard and
         // spend another eight budgets on a model that never stops.
         let continuations = resumed?.continuations ?? 0;
         /** A think-only output-limit cut. One nudge to act, then stop. */
-        let thinkNudges = 0;
+        let thinkNudges = resumed?.thinkNudges ?? 0;
+        /** After a think-only cut, the next call must not think again. */
+        let forceNoThinking =
+          thinkNudges > 0 ||
+          /do not think more/i.test(resumeNote ?? "");
         /**
          * Times we auto-continued a mid-task stop that was not an output
          * ceiling. Separate from MAX_CONTINUATIONS, and not carried across
@@ -1674,12 +1702,18 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             resumeState: {
               toolRounds,
               continuations,
+              thinkNudges,
               messages: transcript,
             },
           });
         };
 
         while (true) {
+          if (stopped()) break;
+          if (round >= MAX_AGENT_ROUNDS) {
+            stoppedPrematurely = "provider_abort";
+            break;
+          }
           round += 1;
           appendPluginDirectives();
           // Ox ignores the tail copy after a few rounds. Re-pin every
@@ -1791,8 +1825,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           applyThinking(
             dsRequestBody,
             target.thinkingStyle,
-            thinkingEnabled,
-            resolvedEffort
+            thinkingEnabled && !forceNoThinking,
+            forceNoThinking ? "none" : resolvedEffort
           );
 
           if (workspaceEnabled) {
@@ -1845,7 +1879,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                     body: JSON.stringify(dsRequestBody),
                     signal,
                   }),
-                attemptTimeoutMs(target),
+                attemptTimeoutMs(target, inputChars),
                 runSignal
               ),
             {
@@ -1905,7 +1939,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               error: timedOut
                 ? providerTimedOut(target.providerName, attempt.attempts)
                 : providerUnreachable(target.providerName, attempt.attempts),
-              autoResume: timedOut && hadWork,
+              autoResume: timedOut && hadWork && target.providerId === "local",
             });
             close();
             return;
@@ -1958,6 +1992,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   resumeState: {
                     toolRounds,
                     continuations,
+                    thinkNudges,
                     messages: transcript,
                   },
                 });
@@ -2052,7 +2087,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                  */
                 resumeState:
                   toolRounds > lastResumeRound
-                    ? { toolRounds, continuations, messages: transcript }
+                    ? { toolRounds, continuations, thinkNudges, messages: transcript }
                     : undefined,
               });
               // Recorded after a successful write, so a failed checkpoint
@@ -2088,7 +2123,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                     Math.max(1, remaining),
                     runSignal
                   )
-                : { timedOut: false as const, ...(await reader.read()) };
+                : { timedOut: false as const, ...(await readChunk(reader, runSignal)) };
             if (chunkRead.timedOut) {
               firstTokenTimedOut = true;
               await reader.cancel().catch(() => {});
@@ -2263,7 +2298,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             send({
               type: "error",
               error: "The operation was aborted due to timeout",
-              autoResume: true,
+              autoResume: target.providerId === "local",
             });
             close();
             return;
@@ -2364,6 +2399,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             });
             if (thinkNudges < 1) {
               thinkNudges += 1;
+              forceNoThinking = true;
               transcript.push({
                 role: "user",
                 content:
@@ -2553,6 +2589,15 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 : false,
               finishReason: roundFinishReason,
             });
+            // Qwen already has thinkOnlyCut. Reviving a think-only stop
+            // here just starts another think and looks like an infinite loop.
+            if (
+              premature === "thinking_cut" &&
+              (target.thinkingStyle === "qwen" || forceNoThinking)
+            ) {
+              stoppedPrematurely = premature;
+              break;
+            }
             if (premature && autoRevives < MAX_AUTO_REVIVES) {
               autoRevives += 1;
               transcript.push({
@@ -3439,7 +3484,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             // drops it: it is the largest field in the record and resuming a
             // complete answer means nothing.
             resumeState: unfinished
-              ? { toolRounds, continuations, messages: transcript }
+              ? { toolRounds, continuations, thinkNudges, messages: transcript }
               : null,
           });
           persisted = true;
@@ -3605,7 +3650,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             error instanceof Error
               ? `Internal server error: ${error.message}`
               : "Internal server error",
-          autoResume: timedOut,
+          autoResume: timedOut && target.providerId === "local",
         });
         close();
       }

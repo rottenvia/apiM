@@ -45,9 +45,9 @@ export function LocalModelRuntime({
 }: LocalModelRuntimeProps) {
   const [status, setStatus] = useState<EngineStatus>(emptyStatus);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState<"download" | "start" | "restart" | "opts" | null>(
-    null
-  );
+  const [busy, setBusy] = useState<
+    "download" | "start" | "restart" | "opts" | "stop" | null
+  >(null);
   const [error, setError] = useState<string | null>(null);
   const [customFlag, setCustomFlag] = useState("");
   const [pull, setPull] = useState<{
@@ -99,11 +99,11 @@ export function LocalModelRuntime({
     async (
       action: string,
       extra?: Record<string, unknown>,
-      kind: "start" | "restart" | "opts" = "start"
+      kind: "start" | "restart" | "opts" | "stop" = "start"
     ) => {
       setBusy(kind);
       setError(null);
-      applyReady();
+      if (kind !== "stop") applyReady();
       try {
         const res = await fetch("/api/local", {
           method: "POST",
@@ -133,6 +133,10 @@ export function LocalModelRuntime({
 
   const restart = useCallback(() => {
     void postAction("restart", undefined, "restart");
+  }, [postAction]);
+
+  const unload = useCallback(() => {
+    void postAction("stop", undefined, "stop");
   }, [postAction]);
 
   const spec: SidecarSpecState = status.spec ?? defaultSpecState();
@@ -180,7 +184,6 @@ export function LocalModelRuntime({
     setBusy("download");
     setError(null);
     setPull({ label: "Starting", percent: null, completed: 0, total: 0 });
-    applyReady();
 
     try {
       const res = await fetch("/api/local", {
@@ -368,6 +371,42 @@ export function LocalModelRuntime({
             >
               {busy === "restart" ? "Restarting…" : "Restart"}
             </button>
+            <button
+              type="button"
+              onClick={() => void unload()}
+              disabled={busy !== null}
+              className="rounded-lg border border-border bg-bg-secondary px-2.5 py-1.5 text-[12px] font-medium text-text-secondary transition-colors duration-150 hover:border-danger/40 hover:text-danger disabled:opacity-40"
+            >
+              {busy === "stop" ? "Unloading…" : "Unload"}
+            </button>
+          </>
+        ) : status.ggufReady ? (
+          <>
+            <button
+              type="button"
+              onClick={() => void start()}
+              disabled={busy !== null}
+              className="rounded-lg border border-accent/30 bg-accent/10 px-2.5 py-1.5 text-[12px] font-medium text-accent-light transition-colors duration-150 hover:bg-accent/15 disabled:opacity-40"
+            >
+              {busy === "start" ? "Starting…" : "Start Qwen"}
+            </button>
+            <button
+              type="button"
+              onClick={() => void download()}
+              disabled={busy === "start" || busy === "restart" || busy === "stop"}
+              className="rounded-lg border border-border bg-bg-secondary px-2.5 py-1.5 text-[12px] font-medium text-text-secondary transition-colors duration-150 hover:border-border-light hover:text-text-primary disabled:opacity-40"
+            >
+              {busy === "download" ? "Downloading…" : "Re-download"}
+            </button>
+            {busy === "download" && (
+              <button
+                type="button"
+                onClick={cancel}
+                className="rounded-lg px-2.5 py-1.5 text-[12px] font-medium text-text-muted transition-colors duration-150 hover:text-text-primary"
+              >
+                Cancel
+              </button>
+            )}
           </>
         ) : (
           <>
@@ -377,18 +416,12 @@ export function LocalModelRuntime({
               disabled={busy === "start" || busy === "restart"}
               className="rounded-lg border border-accent/30 bg-accent/10 px-2.5 py-1.5 text-[12px] font-medium text-accent-light transition-colors duration-150 hover:bg-accent/15 disabled:opacity-40"
             >
-              {busy === "download" ? "Downloading…" : "Download Qwen 3.8 27B"}
+              {busy === "download"
+                ? "Downloading…"
+                : status.ggufBytes > 0
+                  ? "Resume download"
+                  : "Download Qwen 3.8 27B"}
             </button>
-            {status.ggufReady && (
-              <button
-                type="button"
-                onClick={() => void start()}
-                disabled={busy !== null}
-                className="rounded-lg border border-border bg-bg-secondary px-2.5 py-1.5 text-[12px] font-medium text-text-secondary transition-colors duration-150 hover:border-border-light hover:text-text-primary disabled:opacity-40"
-              >
-                {busy === "start" ? "Starting…" : "Start"}
-              </button>
-            )}
             {busy === "download" && (
               <button
                 type="button"

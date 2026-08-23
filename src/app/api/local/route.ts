@@ -44,7 +44,10 @@ export async function POST(req: NextRequest) {
 
   if (action === "stop") {
     stopEngine();
-    return NextResponse.json(await engineStatus());
+    return NextResponse.json({
+      ok: true,
+      status: await engineStatus(),
+    });
   }
 
   if (action === "restart") {
@@ -119,17 +122,13 @@ export async function POST(req: NextRequest) {
         };
         try {
           await downloadEngine(send, req.signal);
-          const status = await engineStatus();
-          send({ type: "status", message: "Starting the sidecar…" });
-          const started = await startEngine();
-          if (!started.ok) {
-            send({
-              type: "error",
-              message: started.error ?? "Downloaded, but the sidecar did not start.",
-            });
-          }
+          // Do not auto-start. Loading 25–30 GB just because the file
+          // finished is what left RAM pegged after they switched to Ox.
+          send({
+            type: "status",
+            message: "Downloaded. Click Start when you want Qwen in RAM.",
+          });
           send({ type: "done", status: await engineStatus() });
-          void status;
         } catch (err) {
           send({
             type: "error",
