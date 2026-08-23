@@ -22,6 +22,10 @@ import {
   GGUF_BYTES,
   GGUF_FILE,
   GGUF_URL,
+  MMPROJ_BYTES,
+  MMPROJ_FILE,
+  MMPROJ_MIN_BYTES,
+  MMPROJ_URL,
   isAllowedDownloadUrl,
   LLAMA_CPP_RELEASE,
   LLAMA_CPP_RELEASE_API,
@@ -45,6 +49,10 @@ export function localEngineRoot(): string {
 
 export function ggufPath(): string {
   return path.join(localEngineRoot(), GGUF_FILE);
+}
+
+export function mmprojPath(): string {
+  return path.join(localEngineRoot(), MMPROJ_FILE);
 }
 
 export function engineBinDir(): string {
@@ -119,11 +127,14 @@ export function detectGpu(): EngineGpu {
 
 export async function engineStatus(): Promise<EngineStatus> {
   const bytes = await fileSize(ggufPath());
+  const projector = await fileSize(mmprojPath());
   const ggufReady = bytes >= GGUF_BYTES;
+  const mmprojReady = projector >= MMPROJ_MIN_BYTES;
   const server = await findServerBinary();
   const running = await isEngineListening();
   const flags = {
     ggufReady,
+    mmprojReady,
     serverReady: Boolean(server),
     running,
   };
@@ -131,6 +142,8 @@ export async function engineStatus(): Promise<EngineStatus> {
     ...flags,
     ggufBytes: bytes,
     ggufExpected: GGUF_BYTES,
+    mmprojBytes: projector,
+    mmprojExpected: MMPROJ_BYTES,
     baseUrl: DEFAULT_LOCAL_BASE_URL,
     apiModel: DEFAULT_LOCAL_API_MODEL,
     hint: engineHint(flags),
@@ -324,6 +337,27 @@ export async function downloadEngine(
     );
   }
 
+  if ((await fileSize(mmprojPath())) < MMPROJ_MIN_BYTES) {
+    emit({
+      type: "status",
+      message: "Downloading the vision projector so Qwen can see images and video…",
+    });
+    await downloadToFile(
+      MMPROJ_URL,
+      mmprojPath(),
+      (completed, total) => {
+        emit({
+          type: "progress",
+          label: "Vision",
+          completed,
+          total: total || MMPROJ_BYTES,
+          percent: downloadPercent(completed, total || MMPROJ_BYTES),
+        });
+      },
+      signal
+    );
+  }
+
   if (!(await findServerBinary())) {
     emit({ type: "status", message: "Downloading the local engine…" });
     const assets = await listLlamaAssets(signal);
@@ -427,8 +461,12 @@ export async function startEngine(): Promise<{ ok: boolean; error?: string }> {
 
   stopEngine();
 
+  const projector = mmprojPath();
+  const mmproj =
+    (await fileSize(projector)) >= MMPROJ_MIN_BYTES ? projector : undefined;
+
   try {
-    child = spawn(server, sidecarArgs(gguf), {
+    child = spawn(server, sidecarArgs(gguf, mmproj), {
       cwd: path.dirname(server),
       detached: process.platform !== "win32",
       stdio: ["ignore", "ignore", "pipe"],

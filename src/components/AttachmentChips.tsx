@@ -47,12 +47,13 @@ export function AttachmentChips({
           src={preview.dataUrl}
           name={preview.name}
           description={preview.description}
+          kind={preview.kind === "video" ? "video" : "image"}
           onClose={() => setPreview(null)}
         />
       )}
 
       {attachments
-        .filter((f) => f.kind === "image")
+        .filter((f) => f.kind === "image" || f.kind === "video")
         .map((file) => (
           <div
             key={file.id}
@@ -71,12 +72,22 @@ export function AttachmentChips({
               }
               className="block"
             >
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={file.dataUrl}
-                alt={file.name}
-                className="h-16 w-16 object-cover transition-transform duration-150 group-hover:scale-105"
-              />
+              {file.kind === "video" ? (
+                <video
+                  src={file.dataUrl}
+                  muted
+                  playsInline
+                  preload="metadata"
+                  className="h-16 w-16 object-cover transition-transform duration-150 group-hover:scale-105"
+                />
+              ) : (
+                /* eslint-disable-next-line @next/next/no-img-element */
+                <img
+                  src={file.dataUrl}
+                  alt={file.name}
+                  className="h-16 w-16 object-cover transition-transform duration-150 group-hover:scale-105"
+                />
+              )}
 
               {(file.analyzing || file.stage) && (
                 <span className="absolute inset-0 flex flex-col items-center justify-center gap-1 bg-black/65 text-[9px] font-medium text-white">
@@ -117,7 +128,7 @@ export function AttachmentChips({
         ))}
 
       {attachments
-        .filter((f) => f.kind !== "image")
+        .filter((f) => f.kind === "text")
         .map((file) => (
         <div
           key={file.id}
