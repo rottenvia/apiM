@@ -84,7 +84,12 @@ import {
   rebuiltResumeInstruction,
 } from "@/lib/rebuild-resume";
 import type { RebuiltResume } from "@/lib/rebuild-resume";
-import { fetchWithRetry, OPENCODE_RETRY, sleep } from "@/lib/retry";
+import {
+  fetchWithRetry,
+  OPENCODE_RETRY,
+  readWithTimeout,
+  sleep,
+} from "@/lib/retry";
 import {
   MAX_AUTO_REVIVES,
   detectPrematureStop,
@@ -124,6 +129,7 @@ import {
   resolveChatTarget,
   resolveHelperTarget,
 } from "@/lib/providers";
+import { OX_FIRST_TOKEN_MS, isOxProvider } from "@/lib/ox-host";
 import {
   ensureEngineRunning,
   isManagedEngineUrl,
@@ -305,10 +311,13 @@ type StreamEvent =
   | {
       /** A transient upstream failure is being retried rather than surfaced. */
       type: "retrying";
+      phase?: "attempt" | "backoff" | "clear";
       attempt: number;
       attempts: number;
       delayMs: number;
       reason: string;
+      host?: string;
+      inputChars?: number;
     }
   | {
       /** Old tool output was collapsed to keep a long run affordable. */
@@ -533,6 +542,12 @@ export async function POST(req: NextRequest) {
           controller.enqueue(
             encoder.encode(`data: ${JSON.stringify(event)}\n\n`)
           );
+          // Proxies buffer small SSE frames. A retry/clear line that sits
+          // in a 4KB buffer is exactly "the banner appeared 10s late" /
+          // "it kept saying retrying after it started typing".
+          if (event.type === "retrying") {
+            controller.enqueue(encoder.encode(`: ${" ".repeat(1024)}\n\n`));
+          }
         } catch {
           // The consumer went away between our check and this enqueue, so the
           // controller is already closed. Mark it so later frames are droppedenqueue, so the
@@ -1713,6 +1728,12 @@ Ask before you build the wrong thing. If a choice would change what you produce 
 
           send({ type: "status", stage: thinkingEnabled ? "thinking" : "writing" });
 
+          const inputChars = JSON.stringify(dsRequestBody).length;
+          const retryAttempts =
+            target.providerId === "opencode"
+              ? OPENCODE_RETRY.attempts
+              : undefined;
+
           // ---------------- Call DeepSeek ----------------
           // Retried rather than failed outright: a blip on round thirty of a
           // long task used to discard the whole run, including every token
@@ -1732,8 +1753,29 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             {
               ...(target.providerId === "opencode" ? OPENCODE_RETRY : {}),
               signal: runSignal,
+              onAttempt: ({ attempt: n, attempts }) => {
+                send({
+                  type: "retrying",
+                  phase: "attempt",
+                  attempt: n,
+                  attempts,
+                  delayMs: 0,
+                  reason: "",
+                  host: target.providerName,
+                  inputChars,
+                });
+              },
               onRetry: ({ attempt: n, attempts, delayMs, reason }) => {
-                send({ type: "retrying", attempt: n, attempts, delayMs, reason });
+                send({
+                  type: "retrying",
+                  phase: "backoff",
+                  attempt: n,
+                  attempts,
+                  delayMs,
+                  reason,
+                  host: target.providerName,
+                  inputChars,
+                });
               },
             }
           );
@@ -1827,6 +1869,23 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           const reader = dsResponse.body.getReader();
           const decoder = new TextDecoder();
           let buffer = "";
+          const watchFirstToken = isOxProvider(target.providerId);
+          const streamStarted = Date.now();
+          let gotUpstreamSignal = false;
+          let firstTokenTimedOut = false;
+          const markUpstream = () => {
+            if (gotUpstreamSignal) return;
+            gotUpstreamSignal = true;
+            send({
+              type: "retrying",
+              phase: "clear",
+              attempt: attempt.attempts,
+              attempts: retryAttempts ?? attempt.attempts,
+              delayMs: 0,
+              reason: "",
+              host: target.providerName,
+            });
+          };
 
           // Checkpoint the partial reply to disk at most once every few seconds.
           // Without this, closing the tab mid-answer lost everything generated
@@ -1904,7 +1963,23 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               return;
             }
 
-            const { done, value } = await reader.read();
+            const remaining = watchFirstToken && !gotUpstreamSignal
+              ? OX_FIRST_TOKEN_MS - (Date.now() - streamStarted)
+              : 0;
+            const chunkRead =
+              watchFirstToken && !gotUpstreamSignal
+                ? await readWithTimeout(
+                    reader,
+                    Math.max(1, remaining),
+                    runSignal
+                  )
+                : { timedOut: false as const, ...(await reader.read()) };
+            if (chunkRead.timedOut) {
+              firstTokenTimedOut = true;
+              await reader.cancel().catch(() => {});
+              break;
+            }
+            const { done, value } = chunkRead;
             if (done) break;
 
             buffer += decoder.decode(value, { stream: true });
@@ -1993,7 +2068,10 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               // delta — so it is read before the `!delta` guard below, which
               // would otherwise skip the one frame that carries it.
               const reason = chunk.choices?.[0]?.finish_reason;
-              if (reason) roundFinishReason = reason;
+              if (reason) {
+                roundFinishReason = reason;
+                markUpstream();
+              }
 
               const delta = chunk.choices?.[0]?.delta;
               if (!delta) continue;
@@ -2025,12 +2103,15 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 }
                 reasoningContent += reasoningDelta.text;
                 roundReasoning += reasoningDelta.text;
+                markUpstream();
                 send({ type: "reasoning", delta: reasoningDelta.text });
               }
               if (delta.tool_calls) {
+                markUpstream();
                 for (const tc of delta.tool_calls) toolAcc.add(tc);
               }
               if (delta.content) {
+                markUpstream();
                 if (!announcedWriting) {
                   announcedWriting = true;
                   send({ type: "status", stage: "writing" });
@@ -2057,15 +2138,18 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             !roundContent &&
             !roundReasoning &&
             toolAcc.result().length === 0 &&
-            !roundFinishReason
+            (!roundFinishReason || firstTokenTimedOut)
           ) {
             emptyStreamRetries += 1;
             send({
               type: "retrying",
+              phase: "backoff",
               attempt: emptyStreamRetries,
               attempts: 2,
               delayMs: 1_200,
-              reason: "empty reply",
+              reason: firstTokenTimedOut ? "no first token" : "empty reply",
+              host: target.providerName,
+              inputChars,
             });
             try {
               await sleep(1_200, runSignal);

@@ -1312,11 +1312,13 @@ export function ChatArea({
                 onAnswerQuestion={onAnswerQuestion}
               />
 
-              {/* Shown before the first token, and again if a later round
-                  has to retry — otherwise a 503 mid-task looks like a freeze. */}
-              {isLoading && (!streamingHasOutput || retryNotice) && (
-                <LoadingIndicator stage={statusStage} retryNotice={retryNotice} />
+              {/* Thinking dots only until the bubble has something to show.
+                  The retry line is its own row so it can snap on/off without
+                  remounting Thinking… ten seconds after tokens started. */}
+              {isLoading && !streamingHasOutput && (
+                <LoadingIndicator stage={statusStage} />
               )}
+              {retryNotice && <RetryBanner text={retryNotice} />}
 
               <div ref={messagesEndRef} />
             </div>
@@ -1914,30 +1916,30 @@ const STAGE_LABELS: Record<StatusStage, string> = {
  */
 function LoadingIndicator({
   stage,
-  retryNotice,
 }: {
   stage: StatusStage | null;
-  retryNotice?: string | null;
 }) {
   return (
-    <div className="flex animate-fade-in justify-start">
-      <div className="flex flex-col gap-1 px-1 py-2">
-        <div className="flex items-center gap-2.5">
-          <span className="text-[#c96442]">
-            <Dots size={5} />
-          </span>
-          <span className="animate-thinking text-xs text-[#a29d92]">
-            {STAGE_LABELS[stage ?? "thinking"]}…
-          </span>
-        </div>
-        {/* Shown rather than hidden: an unexplained pause reads as a freeze,
-            and the point is that the work so far is not lost. */}
-        {retryNotice && (
-          <span className="pl-[18px] text-[11px] text-[#cfa25a]">
-            {retryNotice}
-          </span>
-        )}
+    <div className="flex justify-start">
+      <div className="flex items-center gap-2.5 px-1 py-2">
+        <span className="text-[#c96442]">
+          <Dots size={5} />
+        </span>
+        <span className="animate-thinking text-xs text-[#a29d92]">
+          {STAGE_LABELS[stage ?? "thinking"]}…
+        </span>
       </div>
+    </div>
+  );
+}
+
+/** Instant appear / disappear — no fade. A 300ms slide is the "10s late" feel. */
+function RetryBanner({ text }: { text: string }) {
+  return (
+    <div className="flex justify-start px-1 pb-2">
+      <span className="pl-[18px] text-[11px] leading-4 tabular-nums text-[#cfa25a]">
+        {text}
+      </span>
     </div>
   );
 }

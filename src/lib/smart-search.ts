@@ -38,10 +38,15 @@ function plannerFrom(
 }
 
 function plannerHeaders(planner: SearchPlanner): Record<string, string> {
-  return {
+  const headers: Record<string, string> = {
     "Content-Type": "application/json",
     Authorization: `Bearer ${planner.apiKey}`,
   };
+  if (/openrouter\.ai/i.test(planner.baseUrl)) {
+    headers["HTTP-Referer"] = "https://github.com/eggyeg/apiM";
+    headers["X-Title"] = "apiM";
+  }
+  return headers;
 }
 
 function plannerThinking(planner: SearchPlanner): Record<string, unknown> {
