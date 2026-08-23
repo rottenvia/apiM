@@ -568,6 +568,23 @@ check(
   "Stop cancels a pending auto-resume",
   /cancelAutoResumeRef.current = true/.test(page)
 );
+check(
+  "a think-only output cut asks the model to act, not to think again",
+  /thinkOnlyCut/.test(route) && /thinking_budget/.test(route),
+  "Qwen was spending the whole 6k budget on thinking, then we asked it to continue eight more times"
+);
+check(
+  "auto never sends Qwen xhigh",
+  /thinkingStyle === \"qwen\"/.test(route) &&
+    /thinkingEffort === \"auto\"/.test(route) &&
+    /resolvedEffort === \"max\"/.test(route) &&
+    /resolvedEffort = \"high\"/.test(route),
+  "auto max → xhigh on a 27B CPU is infinite thinking"
+);
+check(
+  "a think-only timeout resume tells it to stop thinking",
+  /You already thought/.test(page)
+);
 
 // -------------------------------------------------------------- task 4
 console.log("\n4. The prompt cache is not thrown away on every write");
