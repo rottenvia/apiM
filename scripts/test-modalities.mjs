@@ -242,7 +242,6 @@ check("startEngine passes the projector into sidecarArgs", /sidecarArgs\(gguf, m
 console.log("\n8. Free OCR fallback for blind models");
 
 const ocr = await load("src/lib/ocr.ts");
-const vision = await load("src/lib/vision.ts");
 const visionRoute = read("src/app/api/vision/route.ts");
 const toolsSrc = read("src/lib/tools.ts");
 
@@ -257,8 +256,16 @@ check("a vision description is not labelled OCR", ocr.isOcrDescription("a red bu
 
 check(
   "vision helper falls back to OCR",
-  /describeImageWithFallback/.test(read("src/lib/vision.ts")) &&
-    typeof vision.describeImageWithFallback === "function"
+  /describeImageWithFallback/.test(read("src/lib/ocr.ts")) &&
+    typeof ocr.describeImageWithFallback === "function"
+);
+check(
+  "vision.ts stays out of the browser OCR graph",
+  !/tesseract|from \"@\/lib\/ocr\"|from '@\/lib\/ocr'/.test(read("src/lib/vision.ts"))
+);
+check(
+  "ChatArea never imports ocr or tesseract",
+  !/tesseract|@\/lib\/ocr/.test(chatSrc)
 );
 check(
   "the vision route does not require an API key",

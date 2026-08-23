@@ -1,8 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import {
-  describeImageWithFallback,
-  DEFAULT_VISION_MODEL,
-} from "@/lib/vision";
+import { DEFAULT_VISION_MODEL } from "@/lib/vision";
+import { describeImageWithFallback } from "@/lib/ocr";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;

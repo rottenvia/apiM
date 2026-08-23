@@ -1,5 +1,5 @@
 import { diffLines, diffStats, diffHunks } from "@/lib/diff";
-import { describeImageWithFallback } from "@/lib/vision";
+import { describeImageWithFallback } from "@/lib/ocr";
 import {
   startProcess,
   stopProcess,
