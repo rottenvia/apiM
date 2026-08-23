@@ -423,6 +423,79 @@ check(
   "a shortcut nobody knows about is not a shortcut"
 );
 
+console.log("\n3f. Typed resume still works when the button never appeared");
+
+const { replyCanContinue } = await load("src/lib/resume-target.ts");
+
+check(
+  "a finished Q&A is not swallowed by the word continue",
+  replyCanContinue({
+    role: "assistant",
+    content: "Paris is the capital of France.",
+    reasoningContent: "The user asked a geography question.",
+  }) === false,
+  "otherwise every next message starting with continue would replay the last answer"
+);
+check(
+  "an incomplete reply is still continuable",
+  replyCanContinue({
+    role: "assistant",
+    incomplete: true,
+    content: "halfway",
+  })
+);
+check(
+  "tools mean typed resume restores that reply, even if detection missed it",
+  replyCanContinue({
+    role: "assistant",
+    incomplete: false,
+    content: "I will pick this up later.",
+    toolEvents: [{ id: "t1", name: "search_files" }],
+  }),
+  "this is the missed-detection case: no banner, user types continue"
+);
+check(
+  "a long thought with almost no answer is continuable",
+  replyCanContinue({
+    role: "assistant",
+    incomplete: false,
+    content: "",
+    reasoningLength: 4000,
+  })
+);
+check(
+  "an unfinished plan is continuable",
+  replyCanContinue({
+    role: "assistant",
+    incomplete: false,
+    content: "Working.",
+    plan: { steps: [{ state: "todo" }, { state: "done" }] },
+  })
+);
+check(
+  "typed resume does not require the incomplete flag",
+  /replyCanContinue\(last\)/.test(page) &&
+    !/!last\.incomplete \|\| last\.isStreaming \|\| !last\.canResume/.test(page),
+  "requiring the flag is why continue opened a new thinking box"
+);
+check(
+  "Resume keeps the existing thought box instead of blanking it",
+  /reasoningContent: existing\?\.reasoningContent/.test(page) &&
+    /thinkingEffort: existing\?\.thinkingEffort/.test(page) &&
+    /loadReasoning\(existing\.id\)/.test(page),
+  "blanking reasoning is what made Resume look like a new thinking panel"
+);
+check(
+  "fetched reasoning is written onto the live list before Resume sends",
+  /messagesRef\.current = messagesRef\.current\.map/.test(page) &&
+    /needsReasoning/.test(page),
+  "setState alone left the ref stale, so Resume opened an empty thought box"
+);
+check(
+  "an unfinished plan survives a reload so typed resume can find it",
+  /plan: m\.plan \? \(m\.plan as PlanView\)/.test(page)
+);
+
 // -------------------------------------------------------------- task 4
 console.log("\n4. The prompt cache is not thrown away on every write");
 

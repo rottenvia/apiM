@@ -21,6 +21,7 @@ import type { TimelineEntry } from "@/components/MessageTimeline";
 import { clampDeleteDelay, DEFAULT_DELETE_DELAY } from "@/components/DeleteChatDialog";
 import { warmRoutes } from "@/lib/warmup";
 import { getModel, hasKeyForModel } from "@/lib/models";
+import { replyCanContinue } from "@/lib/resume-target";
 
 export interface Message {
   id: string;
@@ -861,6 +862,10 @@ export default function Home() {
           timeline: Array.isArray(m.timeline)
             ? (m.timeline as TimelineEntry[])
             : undefined,
+          // Needed so a typed "continue" after reload can see an unfinished
+          // plan. Dropping it made missed-detection resumes look like a
+          // finished Q&A and open a new thought box.
+          plan: m.plan ? (m.plan as PlanView) : undefined,
         };
       });
 
@@ -1109,7 +1114,12 @@ export default function Home() {
         // Carry the interrupted text forward so it does not blank out and
         // refill as the continuation streams in.
         content: existing?.content ?? "",
-        reasoningContent: existing?.reasoningContent ?? "",
+        // Keep the existing thought box. Blanking reasoning here is what
+        // made Resume look like a brand-new thinking panel.
+        reasoningContent: existing?.reasoningContent,
+        reasoningLength: existing?.reasoningLength,
+        thinkingEffort: existing?.thinkingEffort,
+        plan: existing?.plan,
         timeline: existing?.timeline,
         toolEvents: existing?.toolEvents,
         isStreaming: true,
@@ -2039,8 +2049,9 @@ export default function Home() {
    */
   const lastResumable = (() => {
     const last = messages[messages.length - 1];
-    if (!last || last.role !== "assistant") return null;
-    if (!last.incomplete || last.isStreaming || !last.canResume) return null;
+    if (!last || !replyCanContinue(last)) return null;
+    const prev = messages[messages.length - 2];
+    if (!prev || prev.role !== "user") return null;
     return last;
   })();
 
@@ -2093,6 +2104,9 @@ export default function Home() {
     // An unsaved chat has nothing on disk. Resolve to empty rather than
     // leaving the panel loading against a request that can never come.
     if (!convId) {
+      messagesRef.current = messagesRef.current.map((m) =>
+        m.id === messageId ? { ...m, reasoningContent: "" } : m
+      );
       setMessages((prev) =>
         prev.map((m) =>
           m.id === messageId ? { ...m, reasoningContent: "" } : m
@@ -2115,6 +2129,12 @@ export default function Home() {
       /* fall through — an empty panel beats one that loads forever */
     } finally {
       reasoningInFlight.current.delete(messageId);
+      // Resume reads messagesRef in the same tick after this await.
+      // Updating only via setMessages left the ref stale, so the stream
+      // started with an empty thought box.
+      messagesRef.current = messagesRef.current.map((m) =>
+        m.id === messageId ? { ...m, reasoningContent: text } : m
+      );
       setMessages((prev) => {
         const next = prev.map((m) =>
           m.id === messageId ? { ...m, reasoningContent: text } : m
@@ -2155,15 +2175,31 @@ export default function Home() {
       const prompt = list[index - 1];
       if (prompt.role !== "user") return;
 
-      void sendMessageRef.current?.(prompt.content, {
-        resumeMessageId: assistantId,
-        resumeNote: opts?.note?.trim() || undefined,
-        // Which model finishes the job. The saved transcript is just
-        // messages, so a run that stalled on Pro can be completed on Flash.
-        modelOverride,
-      });
+      const existing = list[index];
+      // Stored chats send only a length. Fetch the body first so Resume
+      // reopens the same thought box instead of an empty new one.
+      const needsReasoning =
+        existing &&
+        typeof existing.reasoningContent !== "string" &&
+        (existing.reasoningLength ?? 0) > 0;
+
+      const go = () => {
+        void sendMessageRef.current?.(prompt.content, {
+          resumeMessageId: assistantId,
+          resumeNote: opts?.note?.trim() || undefined,
+          // Which model finishes the job. The saved transcript is just
+          // messages, so a run that stalled on Pro can be completed on Flash.
+          modelOverride,
+        });
+      };
+
+      if (needsReasoning) {
+        void loadReasoning(existing.id).then(go);
+        return;
+      }
+      go();
     },
-    []
+    [loadReasoning]
   );
 
   return (
