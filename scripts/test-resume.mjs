@@ -83,7 +83,9 @@ check(
 );
 check(
   "a reply stopped at the ceiling is not saved as complete",
-  /incomplete: hitOutputCeiling/.test(route),
+  /incomplete: unfinished/.test(route) &&
+    /hitOutputCeiling/.test(route) &&
+    /stoppedPrematurely/.test(route),
   "marked complete it looked finished while ending mid-sentence"
 );
 
@@ -159,15 +161,29 @@ check(
   // string `resumeState: hitOutputCeiling`, so adding a second reason to
   // resume (the spending limit) broke the test while the behaviour was fine.
   // A check that fails when the code gets more correct is worse than no check.
-  /resumeState:[\s\S]{0,200}?hitOutputCeiling[\s\S]{0,80}?\?[\s\S]{0,120}?messages: transcript[\s\S]{0,40}?:\s*null/.test(
+  /resumeState: unfinished[\s\S]{0,80}?\?[\s\S]{0,120}?messages: transcript[\s\S]{0,40}?:\s*null/.test(
     route
   ),
   "it is the largest field in the record"
 );
 check(
   "an unfinished reply keeps it, whatever ended the run",
-  /hitOutputCeiling \|\| stoppedByBudget/.test(route),
-  "running out of room and running out of budget both leave work worth keeping"
+  /hitOutputCeiling \|\|[\s\S]{0,80}stoppedByBudget \|\|[\s\S]{0,80}stoppedPrematurely/.test(
+    route
+  ),
+  "running out of room, budget, or an inner limit all leave work worth keeping"
+);
+check(
+  "max_tokens is treated as an output-limit cut, same as length",
+  /length\|max_tokens/.test(route),
+  "Ox often names the same ceiling max_tokens; treating only length left thinking-only stops looking finished"
+);
+check(
+  "the done frame tells the live UI the reply is resumable",
+  /incomplete: unfinished/.test(route) &&
+    /canResume: unfinished/.test(route) &&
+    /evt\.incomplete === true/.test(page),
+  "without this every done looked complete and the next send opened a new thinking box"
 );
 check(
   "the saved transcript is never sent to the browser",
