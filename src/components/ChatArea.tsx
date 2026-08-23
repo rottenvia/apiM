@@ -1312,9 +1312,9 @@ export function ChatArea({
                 onAnswerQuestion={onAnswerQuestion}
               />
 
-              {/* Only shown before the first token lands; afterwards the
-                  streaming bubble itself is the feedback. */}
-              {isLoading && !streamingHasOutput && (
+              {/* Shown before the first token, and again if a later round
+                  has to retry — otherwise a 503 mid-task looks like a freeze. */}
+              {isLoading && (!streamingHasOutput || retryNotice) && (
                 <LoadingIndicator stage={statusStage} retryNotice={retryNotice} />
               )}
 

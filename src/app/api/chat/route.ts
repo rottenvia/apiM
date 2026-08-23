@@ -84,7 +84,7 @@ import {
   rebuiltResumeInstruction,
 } from "@/lib/rebuild-resume";
 import type { RebuiltResume } from "@/lib/rebuild-resume";
-import { fetchWithRetry } from "@/lib/retry";
+import { fetchWithRetry, OPENCODE_RETRY, sleep } from "@/lib/retry";
 import {
   MAX_AUTO_REVIVES,
   detectPrematureStop,
@@ -1485,6 +1485,13 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          * Resume: an explicit continue is the user asking us to try again.
          */
         let autoRevives = 0;
+        /**
+         * Times we re-issued an OpenCode call that came back HTTP 200 with
+         * an empty SSE body. Zen does this during the same outages as 503;
+         * built-in retries only fire on a bad status, so without this the
+         * user sees "retrying" then a blank reply.
+         */
+        let emptyStreamRetries = 0;
         /** Set when the reply stopped because it ran out of room. */
         let hitOutputCeiling = false;
         /** Set when the spending limit ended the run rather than the model. */
@@ -1716,6 +1723,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 ]),
               }),
             {
+              ...(target.providerId === "opencode" ? OPENCODE_RETRY : {}),
               signal: runSignal,
               onRetry: ({ attempt: n, attempts, delayMs, reason }) => {
                 send({ type: "retrying", attempt: n, attempts, delayMs, reason });
@@ -2027,6 +2035,41 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 void checkpoint();
               }
             }
+          }
+
+          /*
+           * OpenCode Zen sometimes returns HTTP 200 with an empty SSE body
+           * during the same outages as 503. fetchWithRetry treats 200 as
+           * success, so without this the user sees a blank reply after
+           * "retrying". Only retry a stream that never even named a
+           * finish_reason — a real empty `stop` is left alone.
+           */
+          if (
+            target.providerId === "opencode" &&
+            emptyStreamRetries < 2 &&
+            !roundContent &&
+            !roundReasoning &&
+            toolAcc.result().length === 0 &&
+            !roundFinishReason
+          ) {
+            emptyStreamRetries += 1;
+            send({
+              type: "retrying",
+              attempt: emptyStreamRetries,
+              attempts: 2,
+              delayMs: 1_200,
+              reason: "empty reply",
+            });
+            try {
+              await sleep(1_200, runSignal);
+            } catch (error) {
+              if (error instanceof Error && error.name === "AbortError") {
+                close();
+                return;
+              }
+              throw error;
+            }
+            continue;
           }
 
           if (thinkingEnabled && !roundReasoning) {
@@ -3291,6 +3334,10 @@ Ask before you build the wrong thing. If a choice would change what you produce 
       Connection: "keep-alive",
       // Stops nginx/proxies from buffering the stream into one lump.
       "X-Accel-Buffering": "no",
+    },
+  });
+}
+    "X-Accel-Buffering": "no",
     },
   });
 }

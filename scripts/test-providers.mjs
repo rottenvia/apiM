@@ -357,6 +357,45 @@ check(
   /Check the network connection/.test(providers.providerUnreachable("DeepSeek", 2))
 );
 
+console.log("\n9. A 503 from Ox / OpenCode is their outage, not the user's key");
+
+const busy = providers.providerHttpError(503, "OpenCode", "retrying");
+check(
+  "a 503 does not echo the upstream word retrying as a final error",
+  !/retrying/i.test(busy),
+  "that is what made the bubble look like we were still going to retry"
+);
+check(
+  "and it says the key is fine",
+  /not your API key/i.test(busy),
+  busy
+);
+check(
+  "a 503 with a useful detail is kept",
+  /capacity exceeded/.test(
+    providers.providerHttpError(503, "OpenCode", "capacity exceeded in us-west")
+  )
+);
+check(
+  "a rejected key is still a 401, never a 503",
+  /API key was rejected/.test(providers.providerHttpError(401, "OpenCode", ""))
+);
+check(
+  "the chat route gives OpenCode extra attempts",
+  /OPENCODE_RETRY/.test(route) && /emptyStreamRetries/.test(route),
+  "Zen 503s last longer than three tries, and 200+empty is the other failure mode"
+);
+check(
+  "the live retry label uses the real attempt total",
+  /formatRetryNotice/.test(page) && !/attempts - 1/.test(page)
+);
+check(
+  "a retry mid-task still shows the notice after the first token",
+  /!streamingHasOutput \|\| retryNotice/.test(
+    read("src/components/ChatArea.tsx")
+  )
+);
+
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
 );
