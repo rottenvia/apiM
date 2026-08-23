@@ -93,7 +93,9 @@ import {
 } from "@/lib/rebuild-resume";
 import type { RebuiltResume } from "@/lib/rebuild-resume";
 import {
+  fetchUntilHeaders,
   fetchWithRetry,
+  isTimeoutFailure,
   OPENCODE_RETRY,
   readWithTimeout,
   sleep,
@@ -144,7 +146,7 @@ import {
   readSidecarCtx,
 } from "@/lib/local-engine";
 
-export const maxDuration = 300;
+export const maxDuration = 1800;
 
 /**
  * Ceiling on generated tokens. The model supports up to 384K; 8192 was far too
@@ -432,7 +434,7 @@ type StreamEvent =
         fieldsSeen: string[];
       };
     }
-  | { type: "error"; error: string };
+  | { type: "error"; error: string; autoResume?: boolean };
 
 export async function POST(req: NextRequest) {
   // ---------------------------------------------------------------------
@@ -638,6 +640,7 @@ export async function POST(req: NextRequest) {
        */
       const runSignal = beginRun(assistantMsgId, convId);
       const stopped = () => runSignal.aborted;
+      let emergencySave: (() => Promise<void>) | null = null;
 
       try {
         // Built-ins plus the user's own saved plugins.
@@ -906,6 +909,9 @@ export async function POST(req: NextRequest) {
           resolvedEffort,
           thinkingEnabled,
           webSearchUsed: doSearch,
+          searchReason,
+          searchRounds: searchContext?.rounds ?? 0,
+          searchStopReason: se    webSearchUsed: doSearch,
           searchReason,
           searchRounds: searchContext?.rounds ?? 0,
           searchStopReason: searchContext?.stopReason ?? "",
@@ -1636,6 +1642,31 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         const toolSummaries: { name: string; ok: boolean; summary: string }[] =
           [];
 
+        emergencySave = async () => {
+          if (!(assistantContent || toolEvents.length || reasoningContent)) {
+            return;
+          }
+          await upsertMessage(convId, title, {
+            id: assistantMsgId,
+            role: "assistant",
+            content: assistantContent,
+            reasoningContent: reasoningContent || null,
+            thinkingEffort: resolvedEffort,
+            model,
+            tokenCount: totalUsage.total_tokens || null,
+            usage: totalUsage.total_tokens ? { ...totalUsage } : null,
+            toolEvents: toolEvents.length ? toolEvents : null,
+            timeline: timeline.length ? timeline : null,
+            createdAt: new Date().toISOString(),
+            incomplete: true,
+            resumeState: {
+              toolRounds,
+              continuations,
+              messages: transcript,
+            },
+          });
+        };
+
         while (true) {
           round += 1;
           appendPluginDirectives();
@@ -1794,15 +1825,17 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           // or an empty balance fails the same way every time.
           const attempt = await fetchWithRetry(
             () =>
-              fetch(`${target.baseUrl}/chat/completions`, {
-                method: "POST",
-                headers: completionHeaders(target),
-                body: JSON.stringify(dsRequestBody),
-                signal: AbortSignal.any([
-                  runSignal,
-                  AbortSignal.timeout(attemptTimeoutMs(target)),
-                ]),
-              }),
+              fetchUntilHeaders(
+                (signal) =>
+                  fetch(`${target.baseUrl}/chat/completions`, {
+                    method: "POST",
+                    headers: completionHeaders(target),
+                    body: JSON.stringify(dsRequestBody),
+                    signal,
+                  }),
+                attemptTimeoutMs(target),
+                runSignal
+              ),
             {
               ...(target.providerId === "opencode" ? OPENCODE_RETRY : {}),
               signal: runSignal,
@@ -1835,17 +1868,32 @@ Ask before you build the wrong thing. If a choice would change what you produce 
 
           if (!attempt.response) {
             const err = attempt.error;
-            if (err instanceof Error && err.name === "AbortError") {
+            if (
+              err instanceof Error &&
+              err.name === "AbortError" &&
+              !isTimeoutFailure(err)
+            ) {
               // The user pressed Stop; the abort handler already tidied up.
               close();
               return;
             }
-            const timedOut = err instanceof Error && err.name === "TimeoutError";
+            const timedOut = isTimeoutFailure(err);
+            const hadWork = Boolean(
+              assistantContent || toolEvents.length || reasoningContent
+            );
+            if (hadWork) {
+              try {
+                await emergencySave?.();
+              } catch (e) {
+                console.error("Could not save work before timeout:", e);
+              }
+            }
             send({
               type: "error",
               error: timedOut
                 ? providerTimedOut(target.providerName, attempt.attempts)
                 : providerUnreachable(target.providerName, attempt.attempts),
+              autoResume: timedOut && hadWork,
             });
             close();
             return;
@@ -2005,6 +2053,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             }
           };
 
+          let streamTimedOut = false;
+          try {
           while (true) {
             // The client vanished (tab closed, navigation, network drop). Stop
             // pulling tokens and keep the last checkpoint, which stays flagged
@@ -2176,6 +2226,72 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 void checkpoint();
               }
             }
+          }
+          } catch (streamErr) {
+            if (runSignal.aborted) {
+              await checkpoint(true);
+              close();
+              return;
+            }
+            if (isTimeoutFailure(streamErr)) {
+              streamTimedOut = true;
+              await checkpoint(true);
+            } else {
+              throw streamErr;
+            }
+          }
+
+          if (streamTimedOut) {
+            try {
+              await emergencySave?.();
+            } catch (e) {
+              console.error("Could not save work before timeout:", e);
+            }
+            send({
+              type: "error",
+              error: "The operation was aborted due to timeout",
+              autoResume: true,
+            });
+            close();
+            return;
+          }
+
+          /*
+           * OpenCode Zen sometimes returns HTTP 200 with an empty SSE body
+           * during the same outages as 503. fetchWithRetry treats 200 as
+           * success, so without this the user sees a blank reply after
+           * "retrying". Only retry a stream that never even named a
+           * finish_reason — a real empty `stop` is left alone.
+           */
+          if (
+            target.providerId === "opencode" &&
+            emptyStreamRetries < 2 &&
+            !roundContent &&
+            !roundReasoning &&
+            toolAcc.result().length === 0 &&
+            (!roundFinishReason || firstTokenTimedOut)
+          ) {
+            emptyStreamRetries += 1;
+            send({
+              type: "retrying",
+              phase: "backoff",
+              attempt: emptyStreamRetries,
+              attempts: 2,
+              delayMs: 1_200,
+              reason: firstTokenTimedOut ? "no first token" : "empty reply",
+              host: target.providerName,
+              inputChars,
+            });
+            try {
+              await sleep(1_200, runSignal);
+            } catch (error) {
+              if (error instanceof Error && error.name === "AbortError") {
+                close();
+                return;
+              }
+              throw error;
+            }
+            continue;
           }
 
           /*
@@ -3458,13 +3574,23 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           return;
         }
 
-        console.error("Chat API error:", error);
+        const timedOut = isTimeoutFailure(error);
+        if (timedOut) {
+          try {
+            await emergencySave?.();
+          } catch (e) {
+            console.error("Could not save work before timeout:", e);
+          }
+        } else {
+          console.error("Chat API error:", error);
+        }
         send({
           type: "error",
           error:
             error instanceof Error
               ? `Internal server error: ${error.message}`
               : "Internal server error",
+          autoResume: timedOut,
         });
         close();
       }
