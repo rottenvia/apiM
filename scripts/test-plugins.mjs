@@ -164,16 +164,71 @@ check(
   "history, file tree and plan can no longer bury it"
 );
 check(
-  "only one plugin directive message exists at a time",
-  /entry\.content\.startsWith\(PLUGIN_DIRECTIVES_MARKER\)[\s\S]{0,120}transcript\.splice/.test(
+  "only the dedicated tail copy is moved each round",
+  /entry\.content === pluginDirectives[\s\S]{0,80}transcript\.splice/.test(
     routeAssembly
-  )
+  ),
+  "a first system that STARTS with the marker is the Ox pin and must stay"
 );
 check(
   "Ox pins the same standing orders onto the first system message",
   /providerId === "opencode"/.test(routeAssembly) &&
-    /opening\.content \+=/.test(routeAssembly),
+    /pinPluginDirectivesOnFirstSystem/.test(routeAssembly),
   "OpenCode often ignores a later system message after a few rounds"
+);
+check(
+  "Ox re-pins every agent round, not only at request start",
+  /appendPluginDirectives\(\);[\s\S]{0,400}pinPluginDirectivesOnFirstSystem/.test(
+    routeAssembly
+  )
+);
+check(
+  "the wire copy is re-pinned after compact",
+  /compactTranscript\(pruned\.messages\)[\s\S]{0,500}pinPluginDirectivesOnFirstSystem\(/.test(
+    routeAssembly
+  )
+);
+
+console.log("\n3b. The Ox first-system pin");
+
+const pinBlock = P.buildPluginDirectives(withEnabled("god-mode"));
+const workspace = "You have a workspace. Ask before you build the wrong thing.";
+const pinned = [{ role: "system", content: workspace }];
+P.pinPluginDirectivesOnFirstSystem(pinned, pinBlock);
+check(
+  "the pin puts MAXIMUM PRIORITY at the start of the first system message",
+  pinned[0].content.startsWith(P.PLUGIN_DIRECTIVES_MARKER) &&
+    pinned[0].content.indexOf("MAXIMUM PRIORITY") <
+      pinned[0].content.indexOf(workspace),
+  "Ox reads the start of the first system message most reliably"
+);
+check(
+  "and repeats the block at the end so workspace prose cannot outrank it",
+  pinned[0].content.endsWith(pinBlock) &&
+    pinned[0].content.indexOf(workspace) <
+      pinned[0].content.lastIndexOf(P.PLUGIN_DIRECTIVES_MARKER)
+);
+check(
+  "re-pinning is idempotent",
+  (() => {
+    const once = pinned[0].content;
+    P.pinPluginDirectivesOnFirstSystem(pinned, pinBlock);
+    return pinned[0].content === once;
+  })()
+);
+check(
+  "an empty pin leaves the first system message alone",
+  (() => {
+    const msgs = [{ role: "system", content: workspace }];
+    P.pinPluginDirectivesOnFirstSystem(msgs, "");
+    return msgs[0].content === workspace;
+  })()
+);
+check(
+  "a first system that starts with the marker is not the same as the tail copy",
+  pinned[0].content.startsWith(P.PLUGIN_DIRECTIVES_MARKER) &&
+    pinned[0].content !== pinBlock,
+  "appendPluginDirectives must not delete this message"
 );
 
 // ------------------------------------------------- the old blended builder

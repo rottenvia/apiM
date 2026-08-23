@@ -293,6 +293,33 @@ export function buildSystemPrompt(
 export const PLUGIN_DIRECTIVES_MARKER =
   "ACTIVE USER CONFIGURATION — RESPONSE BEHAVIOR";
 
+/**
+ * Keep standing orders on the first system message.
+ *
+ * DeepSeek obeys a later system message. Ox / OpenCode often treats only
+ * the first one as binding and ignores the tail copy after a few rounds —
+ * which is how Direct Mode "suddenly" started refusing mid-conversation.
+ *
+ * The block is written at both ends of that first message: the start is
+ * what Ox actually reads, the end still outranks the workspace prose that
+ * sits in the middle. Re-pinning is idempotent so it can run every round.
+ */
+export function pinPluginDirectivesOnFirstSystem(
+  messages: { role: string; content?: unknown }[],
+  pluginDirectives: string
+): void {
+  if (!pluginDirectives) return;
+  const first = messages.find((m) => m.role === "system");
+  if (!first || typeof first.content !== "string") return;
+
+  let body = first.content.split(pluginDirectives).join("");
+  body = body.replace(/^\s+|\s+$/g, "").replace(/\n{3,}/g, "\n\n");
+
+  first.content = body
+    ? `${pluginDirectives}\n\n${body}\n\n${pluginDirectives}`
+    : pluginDirectives;
+}
+
 export function buildPluginDirectives(
   plugins: (Plugin & { enabled?: boolean })[]
 ): string {
