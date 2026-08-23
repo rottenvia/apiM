@@ -28,6 +28,7 @@ import {
 } from "@/lib/models";
 import { replyCanContinue } from "@/lib/resume-target";
 import {
+  shouldAutoResumeOnTimeout,
   visibleUpstreamNotice,
   type UpstreamNotice,
 } from "@/lib/retry";
@@ -261,7 +262,7 @@ type StreamEvent =
         fieldsSeen: string[];
       };
     }
-  | { type: "error"; error: string };
+  | { type: "error"; error: string; autoResume?: boolean };
 
 export interface Conversation {
   id: string;
@@ -485,6 +486,13 @@ export default function Home() {
     id ? abortRefs.current.get(id) : undefined;
   /** Server-side id of the reply in flight, for the stop endpoint. */
   const runMessageIdRef = useRef<string | null>(null);
+  /**
+   * A timeout that left work on disk. The current request is dying; the
+   * next one resumes the same bubble. Counted so a hung host cannot loop.
+   */
+  const pendingAutoResumeRef = useRef<string | null>(null);
+  const autoResumeCounts = useRef(new Map<string, number>());
+  const cancelAutoResumeRef = useRef(false);
 
   /*
    * The side channel.
@@ -593,6 +601,8 @@ export default function Home() {
           /** Answer with this model instead of the selected one. */
           modelOverride?: string;
           previousVersions?: Message["previousVersions"];
+          /** Skip the in-flight guard so a timeout can resume itself. */
+          force?: boolean;
         }
       ) => void)
     | null
@@ -953,6 +963,8 @@ export default function Home() {
   const startNewChat = useCallback(() => {
     // Starting a new chat does not cancel other chats' streams; they keep
     // running and saving to their own conversations.
+    cancelAutoResumeRef.current = true;
+    pendingAutoResumeRef.current = null;
     btwAbortRef.current?.abort();
     loadSeq.current += 1;
     const nextId = uuidv4();
@@ -1141,11 +1153,13 @@ export default function Home() {
         attachments?: MessageAttachment[];
         /** Earlier replies being superseded, retained for comparison. */
         previousVersions?: Message["previousVersions"];
+        /** Skip the in-flight guard so a timeout can resume itself. */
+        force?: boolean;
       }
     ) => {
       if (
         (!content.trim() && !(options?.attachments && options.attachments.length)) ||
-        isLoading ||
+        (isLoading && !options?.force) ||
         !hasKeys
       ) {
         return;
@@ -1301,6 +1315,7 @@ export default function Home() {
 
       /** Set when a tool changed the workspace, so the list can refresh. */
       let sawToolWrite = false;
+olWrite = false;
       const changedPaths = new Set<string>();
 
       const finish = (patch: Partial<Message>) => {
@@ -1811,6 +1826,23 @@ export default function Home() {
                  * mid-thought, produced a bare error with no way back to it.
                  * That is why Resume was never seen.
                  */
+                const used = autoResumeCounts.current.get(streamingId) ?? 0;
+                if (
+                  shouldAutoResumeOnTimeout({
+                    error: evt.error,
+                    autoResume: evt.autoResume,
+                    hadWork,
+                    used,
+                  })
+                ) {
+                  // Keep the bubble streaming. Marking it incomplete here is
+                  // what flashed the Resume button for a timeout the app is
+                  // about to continue on its own.
+                  autoResumeCounts.current.set(streamingId, used + 1);
+                  pendingAutoResumeRef.current = streamingId;
+                  cancelAutoResumeRef.current = false;
+                  break;
+                }
                 finish(
                   hadWork
                     ? { incomplete: true, canResume: true, errorNotice: evt.error }
@@ -1872,7 +1904,15 @@ export default function Home() {
         // Drop this run's controller now that it has finished.
         if (runConvId) abortRefs.current.delete(runConvId);
         const stillActive = workspaceIdRef.current === requestConversationId;
-        if (stillActive) {
+        const resumeId = stillActive ? pendingAutoResumeRef.current : null;
+        if (resumeId) {
+          pendingAutoResumeRef.current = null;
+          setStatusStage("working");
+          retryLiveRef.current = null;
+          setRetryNotice(
+            "Request timed out — continuing from where it left off"
+          );
+        } else if (stillActive) {
           setIsLoading(false);
           setStatusStage(null);
           setLiveRetry(null);
@@ -1886,6 +1926,28 @@ export default function Home() {
           if (sawToolWrite) {
             setRecentlyChanged([...changedPaths]);
             void refreshWorkspaceFiles();
+          }
+        }
+        if (resumeId) {
+          const list = messagesRef.current;
+          const index = list.findIndex((m) => m.id === resumeId);
+          const prompt = index > 0 ? list[index - 1] : null;
+          if (prompt?.role === "user") {
+            queueMicrotask(() => {
+              if (cancelAutoResumeRef.current) {
+                setIsLoading(false);
+                setStatusStage(null);
+                setLiveRetry(null);
+                return;
+              }
+              void sendMessageRef.current?.(prompt.content, {
+                resumeMessageId: resumeId,
+                force: true,
+              });
+            });
+          } else if (stillActive) {
+            setIsLoading(false);
+            setStatusStage(null);
           }
         }
       }
@@ -1981,6 +2043,8 @@ export default function Home() {
   }, []);
 
   const stopGeneration = useCallback(() => {
+    cancelAutoResumeRef.current = true;
+    pendingAutoResumeRef.current = null;
     const id = runMessageIdRef.current;
     if (id) {
       void fetch("/api/chat/stop", {
@@ -2559,6 +2623,62 @@ export default function Home() {
             setEnabledPlugins((prev) =>
               prev.includes(id)
                 ? prev.filter((p) => p !== id)
+                : [...prev, id]
+            );
+          }}
+          onClose={() => setShowPlugins(false)}
+        />
+      )}
+    </div>
+    </ArtifactProvider>
+  );
+}
+.filter((p) => p !== id)
+                : [...prev, id]
+            );
+          }}
+          onClose={() => setShowPlugins(false)}
+        />
+      )}
+    </div>
+    </ArtifactProvider>
+  );
+}
+tton>
+          </div>
+        </div>
+      )}
+
+      {showWorkspace && currentConvId && (
+        <WorkspacePanel
+          workspaceId={workspaceId}
+          highlightPath={workspaceHighlight}
+          onClose={() => {
+            setShowWorkspace(false);
+            setWorkspaceHighlight(null);
+            void refreshWorkspaceFiles();
+          }}
+        />
+      )}
+
+      {showPlugins && (
+        <PluginsModal
+          enabledPlugins={enabledPlugins}
+          onTogglePlugin={(id) => {
+            setEnabledPlugins((prev) =>
+              prev.includes(id)
+                ? prev.filter((p) => p !== id)
+                : [...prev, id]
+            );
+          }}
+          onClose={() => setShowPlugins(false)}
+        />
+      )}
+    </div>
+    </ArtifactProvider>
+  );
+}
+.filter((p) => p !== id)
                 : [...prev, id]
             );
           }}

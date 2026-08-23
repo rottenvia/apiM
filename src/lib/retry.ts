@@ -88,13 +88,110 @@ export interface RetryResult {
   attempts: number;
 }
 
+/**
+ * How many times the client will silently resume after a request timeout.
+ *
+ * The saved transcript already has the files, reads and reasoning. A new
+ * HTTP request is what resets the route clock. Three is enough to ride out
+ * a 5-minute Next ceiling on a long Qwen think; more than that is a hang.
+ */
+export const MAX_TIMEOUT_AUTO_RESUMES = 3;
+
+const TIMEOUT_TEXT =
+  /aborted due to timeout|timed out|took too long to respond|\bTimeoutError\b/i;
+
+/**
+ * True for a deadline abort — not the user pressing Stop.
+ *
+ * `AbortSignal.timeout()` is supposed to throw TimeoutError. Some runtimes
+ * wrap that as AbortError with this exact message, which is how
+ * "Internal server error: The operation was aborted due to timeout"
+ * reached the chat bubble instead of a retry.
+ */
+export function isTimeoutFailure(error: unknown): boolean {
+  if (error == null) return false;
+  if (typeof error === "string") return TIMEOUT_TEXT.test(error);
+  if (typeof error !== "object") return false;
+  const name = "name" in error ? String(error.name) : "";
+  const message = "message" in error ? String(error.message) : "";
+  if (name === "TimeoutError") return true;
+  if (TIMEOUT_TEXT.test(message)) return true;
+  const cause = "cause" in error ? (error as { cause?: unknown }).cause : undefined;
+  return Boolean(cause && cause !== error && isTimeoutFailure(cause));
+}
+
+/**
+ * A timeout that left real work on disk should continue itself.
+ *
+ * The Resume button is for the user choosing to pick up later. A deadline
+ * abort is our clock, not theirs — flashing the banner and waiting for a
+ * click is how "everything is saved" still felt like a stop.
+ */
+export function shouldAutoResumeOnTimeout(input: {
+  error?: string | null;
+  autoResume?: boolean;
+  hadWork: boolean;
+  used: number;
+}): boolean {
+  if (!input.hadWork) return false;
+  if (input.used >= MAX_TIMEOUT_AUTO_RESUMES) return false;
+  if (input.autoResume === true) return true;
+  return isTimeoutFailure(input.error ?? "");
+}
+
+/**
+ * Abort a hung fetch before headers arrive, then let the body stream.
+ *
+ * Putting `AbortSignal.timeout()` on the fetch itself keeps the deadline
+ * armed for the whole SSE body. A 27B thinking for five minutes then dies
+ * with "The operation was aborted due to timeout" — that is a long
+ * generation, not a hang. Clearing the timer once headers land is the
+ * difference.
+ */
+export async function fetchUntilHeaders(
+  makeRequest: (signal: AbortSignal) => Promise<Response>,
+  timeoutMs: number,
+  runSignal?: AbortSignal
+): Promise<Response> {
+  const ac = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    ac.abort();
+  }, timeoutMs);
+
+  const onAbort = () => ac.abort();
+  if (runSignal) {
+    if (runSignal.aborted) {
+      clearTimeout(timer);
+      throw new DOMException("Aborted", "AbortError");
+    }
+    runSignal.addEventListener("abort", onAbort);
+  }
+
+  try {
+    return await makeRequest(ac.signal);
+  } catch (error) {
+    if (timedOut) {
+      const err = new Error("The operation was aborted due to timeout");
+      err.name = "TimeoutError";
+      throw err;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    runSignal?.removeEventListener("abort", onAbort);
+  }
+}
+
 /** True for network-level failures, which are the most common transient case. */
 export function isTransientNetworkError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   // A user pressing Stop is not a failure to retry.
-  if (error.name === "AbortError") return false;
+  if (error.name === "AbortError" && !isTimeoutFailure(error)) return false;
   return (
     error.name === "TimeoutError" ||
+    isTimeoutFailure(error) ||
     error.name === "TypeError" || // fetch throws TypeError on connection loss
     /ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket hang up|network/i.test(
       error.message
@@ -330,7 +427,13 @@ export async function fetchWithRetry(
       response = await makeRequest();
     } catch (error) {
       // Stop means stop — never retry past a deliberate cancellation.
-      if (error instanceof Error && error.name === "AbortError") {
+      // A timeout abort is not Stop: some runtimes wrap TimeoutError as
+      // AbortError with "aborted due to timeout".
+      if (
+        error instanceof Error &&
+        error.name === "AbortError" &&
+        !isTimeoutFailure(error)
+      ) {
         return { response: null, error, attempts: attempt };
       }
       if (!isTransientNetworkError(error)) {

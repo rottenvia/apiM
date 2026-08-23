@@ -496,6 +496,79 @@ check(
   /plan: m\.plan \? \(m\.plan as PlanView\)/.test(page)
 );
 
+console.log("\n3g. A timeout continues itself — no Resume button");
+
+const { isTimeoutFailure, shouldAutoResumeOnTimeout, MAX_TIMEOUT_AUTO_RESUMES } =
+  await load("src/lib/retry.ts");
+
+check(
+  "the exact timeout bubble is recognised",
+  isTimeoutFailure(
+    "Internal server error: The operation was aborted due to timeout"
+  )
+);
+check(
+  "a TimeoutError is recognised",
+  isTimeoutFailure(Object.assign(new Error("t"), { name: "TimeoutError" }))
+);
+check(
+  "Stop is not a timeout",
+  !isTimeoutFailure(Object.assign(new Error("Aborted"), { name: "AbortError" }))
+);
+check(
+  "a timeout with saved work auto-resumes",
+  shouldAutoResumeOnTimeout({
+    error: "Internal server error: The operation was aborted due to timeout",
+    hadWork: true,
+    used: 0,
+  })
+);
+check(
+  "a timeout with nothing saved does not pretend to resume",
+  !shouldAutoResumeOnTimeout({
+    error: "The operation was aborted due to timeout",
+    hadWork: false,
+    used: 0,
+  })
+);
+check(
+  "the auto-resume is capped",
+  !shouldAutoResumeOnTimeout({
+    error: "The operation was aborted due to timeout",
+    hadWork: true,
+    used: MAX_TIMEOUT_AUTO_RESUMES,
+  }) && MAX_TIMEOUT_AUTO_RESUMES >= 2 && MAX_TIMEOUT_AUTO_RESUMES <= 5
+);
+check(
+  "the live error path calls the helper instead of always showing Resume",
+  /shouldAutoResumeOnTimeout/.test(page) &&
+    /pendingAutoResumeRef/.test(page) &&
+    /force: true/.test(page)
+);
+check(
+  "a timeout keeps the bubble streaming so the Resume banner never mounts",
+  /Keep the bubble streaming/.test(page) &&
+    page.indexOf("pendingAutoResumeRef.current = streamingId") <
+      page.indexOf("incomplete: true, canResume: true, errorNotice: evt.error")
+);
+check(
+  "the notice says it is continuing, not asking the user to click",
+  /Request timed out — continuing from where it left off/.test(page)
+);
+check(
+  "the route hands the client an autoResume flag on a deadline abort",
+  /autoResume: timedOut/.test(route) && /fetchUntilHeaders/.test(route)
+);
+check(
+  "the route clock is long enough for a local think, not five minutes",
+  /export const maxDuration = 1800/.test(route),
+  "300s was killing Qwen mid-thought with Internal server error"
+);
+check(
+  "Stop cancels a pending auto-resume",
+  /cancelAutoResumeRef.current = true/.test(page)
+);
+
 // -------------------------------------------------------------- task 4
 console.log("\n4. The prompt cache is not thrown away on every write");
 
@@ -579,3 +652,4 @@ console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
 );
 process.exit(fail ? 1 : 0);
+
