@@ -62,6 +62,20 @@ check(
   "pressing Stop is not a failure to retry",
   !R.isTransientNetworkError(Object.assign(new Error("x"), { name: "AbortError" }))
 );
+check(
+  "the reported timeout string is a timeout, not Stop",
+  R.isTimeoutFailure(
+    "Internal server error: The operation was aborted due to timeout"
+  )
+);
+check(
+  "an AbortError that is actually a timeout is transient",
+  R.isTransientNetworkError(
+    Object.assign(new Error("The operation was aborted due to timeout"), {
+      name: "AbortError",
+    })
+  )
+);
 
 // ------------------------------------------------------------ live server
 
@@ -308,6 +322,48 @@ check(
   `${Date.now() - started}ms, not the 5s backoff`
 );
 check("the abort is reported as an abort", out.error?.name === "AbortError");
+
+// Header deadline must not kill a body that is still streaming.
+hits = 0;
+const slow = createServer((req, res) => {
+  hits += 1;
+  res.writeHead(200, { "Content-Type": "text/plain" });
+  res.write("hi");
+  setTimeout(() => res.end("done"), 80);
+});
+await new Promise((resolve) => slow.listen(8842, "127.0.0.1", resolve));
+const headerOk = await R.fetchUntilHeaders(
+  (signal) => fetch("http://127.0.0.1:8842", { signal }),
+  25
+);
+const body = await headerOk.text();
+check(
+  "a slow body survives a header deadline that already fired in wall time",
+  body === "hidone" && hits === 1,
+  "AbortSignal.timeout on the fetch used to abort the SSE body mid-think"
+);
+slow.close();
+
+const silentHeaders = createServer((req, res) => {
+  /* never write */
+});
+await new Promise((resolve) => silentHeaders.listen(8843, "127.0.0.1", resolve));
+const startedHeaders = Date.now();
+let headerErr = null;
+try {
+  await R.fetchUntilHeaders(
+    (signal) => fetch("http://127.0.0.1:8843", { signal }),
+    40
+  );
+} catch (e) {
+  headerErr = e;
+}
+check(
+  "a hung header wait still times out",
+  headerErr?.name === "TimeoutError" && Date.now() - startedHeaders < 1_000,
+  headerErr?.name
+);
+silentHeaders.close();
 
 server.close();
 
