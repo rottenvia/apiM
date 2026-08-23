@@ -156,6 +156,107 @@ check(
   R.OPENCODE_RETRY.attempts === 5 && R.DEFAULT_RETRY.attempts === 3
 );
 
+const backoffAt = 1_000;
+check(
+  "the backoff countdown uses time left, not the original delay",
+  R.formatUpstreamNotice(
+    { phase: "backoff", attempt: 3, attempts: 5, delayMs: 4_900, reason: "inference unavailable" },
+    backoffAt + 2_000,
+    backoffAt
+  ) === "inference unavailable — retrying, try 4 of 5 in 2.9s"
+);
+check(
+  "a healthy first try stays hidden for two seconds",
+  R.visibleUpstreamNotice(
+    {
+      phase: "attempt",
+      attempt: 1,
+      attempts: 5,
+      receivedAt: 10_000,
+      host: "OpenCode Zen",
+    },
+    11_500
+  ) === null,
+  "otherwise a 200ms success flashes Calling…"
+);
+check(
+  "the same try becomes a waiting line after two seconds",
+  R.visibleUpstreamNotice(
+    {
+      phase: "attempt",
+      attempt: 1,
+      attempts: 5,
+      receivedAt: 10_000,
+      host: "OpenCode Zen",
+      inputChars: 48_000,
+    },
+    13_400
+  ) === "Waiting on OpenCode Zen — try 1 of 5, 3.4s · 48k chars in"
+);
+check(
+  "try 2 of a retry shows immediately so the backoff line does not vanish",
+  R.visibleUpstreamNotice(
+    {
+      phase: "attempt",
+      attempt: 2,
+      attempts: 5,
+      receivedAt: 10_000,
+      host: "OpenRouter",
+    },
+    10_100
+  ) === "Calling OpenRouter — try 2 of 5"
+);
+check(
+  "a backoff line shows immediately",
+  R.visibleUpstreamNotice(
+    {
+      phase: "backoff",
+      attempt: 1,
+      attempts: 5,
+      delayMs: 1_200,
+      reason: "inference unavailable",
+      receivedAt: 10_000,
+    },
+    10_050
+  ) === "inference unavailable — retrying, try 2 of 5 in 1.2s"
+);
+check(
+  "clear hides the banner",
+  R.visibleUpstreamNotice(
+    { phase: "clear", attempt: 1, attempts: 5, receivedAt: 10_000 },
+    10_100
+  ) === null
+);
+
+hits = 0;
+failuresToServe = 1;
+serveStatus = 503;
+const attemptsSeen = [];
+out = await R.fetchWithRetry(() => fetch(URL_), {
+  ...fast,
+  onAttempt: (i) => attemptsSeen.push(i.attempt),
+});
+check(
+  "onAttempt fires for every try including the first",
+  attemptsSeen.join(",") === "1,2" && out.response?.ok === true,
+  attemptsSeen.join(",")
+);
+
+const silent = {
+  read: () => new Promise(() => {}),
+};
+const timed = await R.readWithTimeout(silent, 20);
+check("a silent SSE body times out instead of hanging", timed.timedOut === true);
+
+const ready = {
+  read: async () => ({ done: false, value: new Uint8Array([1]) }),
+};
+const got = await R.readWithTimeout(ready, 200);
+check(
+  "a real chunk wins the first-token race",
+  got.timedOut === false && got.done === false && got.value?.length === 1
+);
+
 hits = 0;
 failuresToServe = 1;
 serveStatus = 503;

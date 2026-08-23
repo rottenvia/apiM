@@ -246,13 +246,13 @@ export function resolveHelperTarget(
 
   const ox = MODELS.find((m) => m.id === "ox-alpha");
   if (ox) {
-    const preferred = parseOxHost(creds.oxHost);
-    const order: OxHost[] = preferred === "openrouter" ? ["openrouter", "zen"] : ["zen", "openrouter"];
-    for (const host of order) {
-      const raw =
-        host === "openrouter" ? creds.openrouterApiKey : creds.opencodeApiKey;
-      const apiKey = typeof raw === "string" ? raw.trim() : "";
-      if (!apiKey) continue;
+    // Only the host the user picked. Do not silently hop Zen ↔ OpenRouter —
+    // they set that button on purpose when one of them is down for ten minutes.
+    const host = parseOxHost(creds.oxHost);
+    const raw =
+      host === "openrouter" ? creds.openrouterApiKey : creds.opencodeApiKey;
+    const apiKey = typeof raw === "string" ? raw.trim() : "";
+    if (apiKey) {
       const gate = oxHostInfo(host);
       return {
         model: ox,

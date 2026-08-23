@@ -390,13 +390,12 @@ check(
 );
 check(
   "the live retry label uses the real attempt total",
-  /formatRetryNotice/.test(page) && !/attempts - 1/.test(page)
+  /visibleUpstreamNotice/.test(page) && !/attempts - 1/.test(page)
 );
 check(
-  "a retry mid-task still shows the notice after the first token",
-  /!streamingHasOutput \|\| retryNotice/.test(
-    read("src/components/ChatArea.tsx")
-  )
+  "the retry banner is its own row so it can vanish without remounting Thinking",
+  /function RetryBanner/.test(read("src/components/ChatArea.tsx")) &&
+    /retryNotice && <RetryBanner/.test(read("src/components/ChatArea.tsx"))
 );
 
 console.log("\n10. OpenRouter is a second Ox Alpha host, not a second model");
@@ -441,8 +440,19 @@ check(
   !providers.resolveChatTarget("ox-alpha", { oxHost: "openrouter", opencodeApiKey: "sk-zen-1" }).ok
 );
 check(
-  "the helper can use the OpenRouter key",
-  providers.resolveHelperTarget({ openrouterApiKey: "sk-or-1" })?.oxHost === "openrouter"
+  "the helper can use the OpenRouter key when that host is selected",
+  providers.resolveHelperTarget({
+    oxHost: "openrouter",
+    openrouterApiKey: "sk-or-1",
+  })?.oxHost === "openrouter"
+);
+check(
+  "the helper does not silently hop to the other Ox host",
+  providers.resolveHelperTarget({
+    oxHost: "zen",
+    openrouterApiKey: "sk-or-1",
+  }) === null,
+  "the user picks Zen vs OpenRouter by hand"
 );
 check("Settings has an OpenRouter key field", /OpenRouter API Key/.test(settings));
 check(
@@ -461,8 +471,25 @@ check(
     read("src/app/api/ox/test/route.ts").includes("/models")
 );
 check(
-  "a hung first attempt shows a wait hint instead of silent Thinking",
-  /Still waiting on/.test(page) && /Do not clear retryNotice here/.test(page)
+  "the live banner is driven by visibleUpstreamNotice, not a late 8s hint",
+  /visibleUpstreamNotice/.test(page) &&
+    !/Still waiting on/.test(page) &&
+    /Do not clear retryNotice here/.test(page)
+);
+check(
+  "content and reasoning clear the banner immediately",
+  /setLiveRetry\(null\)/.test(page) && /case "content":/.test(page)
+);
+check(
+  "a 200 with no first token is retried instead of hanging the route",
+  /readWithTimeout/.test(route) &&
+    /OX_FIRST_TOKEN_MS/.test(route) &&
+    /no first token/.test(route)
+);
+check(
+  "the route never auto-fails over to the other Ox host",
+  !/order: OxHost\[\]/.test(read("src/lib/providers.ts")) &&
+    /Only the host the user picked/.test(read("src/lib/providers.ts"))
 );
 
 console.log(

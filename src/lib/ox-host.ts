@@ -24,8 +24,17 @@ export interface OxHostInfo {
 
 export const DEFAULT_OX_HOST: OxHost = "zen";
 
-/** Per-attempt hang cap. Zen often sits silent for minutes before a 503. */
+/** Per-attempt hang cap for HTTP headers. Zen often sits silent before a 503. */
 export const OX_ATTEMPT_TIMEOUT_MS = 20_000;
+
+/**
+ * After a 200, how long we wait for the first token / tool / finish.
+ *
+ * Test (GET /models) never exercises this. A 200 with an empty or stalled
+ * SSE body is how "both hosts Test green, chat never loads, no error"
+ * actually happens.
+ */
+export const OX_FIRST_TOKEN_MS = 15_000;
 
 export const OX_HOSTS: Record<OxHost, OxHostInfo> = {
   zen: {

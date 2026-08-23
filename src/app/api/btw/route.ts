@@ -24,7 +24,7 @@ import { buildWorkspaceContext } from "@/lib/workspace-context";
  * longer than the question is worth.
  */
 
-import { resolveHelperTarget } from "@/lib/providers";
+import { completionHeaders, resolveHelperTarget } from "@/lib/providers";
 
 /** Long enough for a real answer, short enough that it stays an aside. */
 const MAX_OUTPUT_TOKENS = 1200;

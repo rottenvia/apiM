@@ -37,9 +37,29 @@ export interface RetryOptions {
   maxDelayMs?: number;
   /** Aborts the wait as well as the request. */
   signal?: AbortSignal;
+  /** Called at the start of every try, including the first. */
+  onAttempt?: (info: { attempt: number; attempts: number }) => void;
   /** Called before each retry, for surfacing "retrying…" in the UI. */
   onRetry?: (info: RetryInfo) => void;
 }
+
+/** How the live Ox / upstream banner should behave. */
+export type UpstreamPhase = "attempt" | "backoff" | "clear";
+
+export interface UpstreamNotice {
+  phase: UpstreamPhase;
+  attempt: number;
+  attempts: number;
+  delayMs?: number;
+  reason?: string;
+  host?: string;
+  waitedMs?: number;
+  /** Approximate JSON body size of the completion request. */
+  inputChars?: number;
+}
+
+/** Hide a healthy first try until it has actually been sitting there. */
+export const HIDE_ATTEMPT_BEFORE_MS = 2_000;
 
 /** Default policy for DeepSeek and the local sidecar. */
 export const DEFAULT_RETRY = {
@@ -88,6 +108,77 @@ export function isRetryableStatus(status: number): boolean {
   return RETRYABLE_STATUS.has(status) || status >= 500;
 }
 
+function tenths(ms: number): string {
+  return `${Math.round(Math.max(0, ms) / 100) / 10}`;
+}
+
+function sizeNote(inputChars?: number): string {
+  if (typeof inputChars !== "number" || inputChars < 8_000) return "";
+  return ` · ${(inputChars / 1000).toFixed(0)}k chars in`;
+}
+
+/**
+ * Live label for the Ox / upstream banner.
+ *
+ * Split into phases so the line can spawn on a real wait and vanish the
+ * instant tokens arrive, instead of sitting on a stale "retrying in 4.9s"
+ * for ten seconds after the model has already started typing.
+ */
+export function formatUpstreamNotice(
+  info: UpstreamNotice,
+  nowMs = Date.now(),
+  receivedAt = nowMs
+): string | null {
+  if (info.phase === "clear") return null;
+
+  const host = info.host?.trim() || "the model";
+  if (info.phase === "backoff") {
+    const remaining = Math.max(0, (info.delayMs ?? 0) - (nowMs - receivedAt));
+    const next = Math.min(info.attempt + 1, info.attempts);
+    const reason = info.reason?.trim() || "unavailable";
+    return `${reason} — retrying, try ${next} of ${info.attempts} in ${tenths(remaining)}s`;
+  }
+
+  const waited = info.waitedMs ?? Math.max(0, nowMs - receivedAt);
+  const size = sizeNote(info.inputChars);
+  if (waited < HIDE_ATTEMPT_BEFORE_MS && !info.reason) {
+    return `Calling ${host} — try ${info.attempt} of ${info.attempts}${size}`;
+  }
+  const why = info.reason?.trim();
+  const prefix = why ? `${why} — waiting on ${host}` : `Waiting on ${host}`;
+  return `${prefix} — try ${info.attempt} of ${info.attempts}, ${tenths(waited)}s${size}`;
+}
+
+/**
+ * What the UI should actually render right now.
+ *
+ * A healthy first attempt must not flash "Calling…" for 200ms and vanish.
+ * A backoff or a named failure (503, empty stream) shows immediately.
+ * `clear` and a brand-new attempt that has not sat long enough stay hidden.
+ */
+export function visibleUpstreamNotice(
+  info: (UpstreamNotice & { receivedAt: number }) | null,
+  nowMs: number,
+  hideAttemptBeforeMs = HIDE_ATTEMPT_BEFORE_MS
+): string | null {
+  if (!info || info.phase === "clear") return null;
+  // Only the first try stays quiet. A later try must replace the backoff
+  // line immediately or the banner vanishes for two seconds mid-retry.
+  if (
+    info.phase === "attempt" &&
+    info.attempt <= 1 &&
+    !info.reason &&
+    nowMs - info.receivedAt < hideAttemptBeforeMs
+  ) {
+    return null;
+  }
+  return formatUpstreamNotice(
+    { ...info, waitedMs: nowMs - info.receivedAt },
+    nowMs,
+    info.receivedAt
+  );
+}
+
 /**
  * Label shown while a transient failure is being retried.
  *
@@ -97,9 +188,66 @@ export function isRetryableStatus(status: number): boolean {
  * said retrying and then didn't".
  */
 export function formatRetryNotice(info: RetryInfo): string {
-  const next = Math.min(info.attempt + 1, info.attempts);
-  const seconds = Math.round(info.delayMs / 100) / 10;
-  return `${info.reason} — retrying, try ${next} of ${info.attempts} in ${seconds}s`;
+  return (
+    formatUpstreamNotice({
+      phase: "backoff",
+      attempt: info.attempt,
+      attempts: info.attempts,
+      delayMs: info.delayMs,
+      reason: info.reason,
+    }) ?? ""
+  );
+}
+
+/**
+ * Read one SSE chunk, or give up if the body stays silent.
+ *
+ * fetchWithRetry only times out waiting for HTTP headers. Zen/OpenRouter
+ * often return 200 and then never send a token — that used to hang until
+ * the 300s route ceiling, which is the "Test works, chat never loads,
+ * no error" case.
+ */
+export async function readWithTimeout(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  ms: number,
+  signal?: AbortSignal
+): Promise<
+  | { timedOut: true }
+  | { timedOut: false; done: boolean; value?: Uint8Array }
+> {
+  if (ms <= 0) {
+    const chunk = await reader.read();
+    return { timedOut: false, done: chunk.done, value: chunk.value };
+  }
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<{ timedOut: true }>((resolve) => {
+    timer = setTimeout(() => resolve({ timedOut: true }), ms);
+  });
+
+  let onAbort: (() => void) | undefined;
+  const aborted =
+    signal &&
+    new Promise<never>((_, reject) => {
+      if (signal.aborted) {
+        reject(new DOMException("Aborted", "AbortError"));
+        return;
+      }
+      onAbort = () => reject(new DOMException("Aborted", "AbortError"));
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+
+  try {
+    const read = reader.read().then((chunk) => ({
+      timedOut: false as const,
+      done: chunk.done,
+      value: chunk.value,
+    }));
+    return await (aborted ? Promise.race([read, timeout, aborted]) : Promise.race([read, timeout]));
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (onAbort && signal) signal.removeEventListener("abort", onAbort);
+  }
 }
 
 /**
@@ -158,6 +306,7 @@ export async function fetchWithRetry(
     baseDelayMs = DEFAULT_RETRY.baseDelayMs,
     maxDelayMs = DEFAULT_RETRY.maxDelayMs,
     signal,
+    onAttempt,
     onRetry,
   } = options;
 
@@ -171,6 +320,8 @@ export async function fetchWithRetry(
         attempts: attempt - 1,
       };
     }
+
+    onAttempt?.({ attempt, attempts });
 
     let response: Response | null = null;
     let reason = "";
