@@ -5,6 +5,13 @@
  * Resolution of keys and base URLs lives in `providers.ts`.
  */
 
+import {
+  DEFAULT_LOCAL_API_MODEL,
+  DEFAULT_LOCAL_BASE_URL,
+} from "@/lib/local-engine-shared";
+
+export { DEFAULT_LOCAL_API_MODEL, DEFAULT_LOCAL_BASE_URL };
+
 export type ProviderId = "deepseek" | "opencode" | "local";
 
 export type ThinkingStyle = "deepseek" | "openai" | "qwen";
@@ -41,12 +48,6 @@ export interface ModelInfo {
 }
 
 export const DEFAULT_MODEL_ID = "deepseek-v4-pro";
-
-/** Ollama's OpenAI-compatible host. Overridable in Settings. */
-export const DEFAULT_LOCAL_BASE_URL = "http://127.0.0.1:11434/v1";
-
-/** Ollama tag for Qwen3.8 27B. vLLM uses `Qwen/Qwen3.8-27B` instead. */
-export const DEFAULT_LOCAL_API_MODEL = "qwen3.8:27b";
 
 export const QWEN_38_27B_ID = "qwen-3.8-27b";
 
@@ -93,12 +94,12 @@ export const PROVIDER_INFO: Record<ProviderId, ProviderInfo> = {
   },
   local: {
     id: "local",
-    name: "Local",
-    authUrl: "https://ollama.com/library/qwen3.8",
+    name: "On this PC",
+    authUrl: "https://huggingface.co/Qwen/Qwen3.8-27B",
     authLabel: "your machine",
     keyPlaceholder: "(optional)",
     keyBlurb:
-      "Any OpenAI-compatible host on this machine — Ollama, vLLM, or llama.cpp. No cloud key.",
+      "Download Qwen in Settings. A sidecar on this PC runs it; the app stays a thin client. No cloud key.",
     thinkingStyle: "qwen",
   },
 };
@@ -108,8 +109,8 @@ export const PROVIDER_INFO: Record<ProviderId, ProviderInfo> = {
  *
  * `id` is what Settings, localStorage and saved replies store.
  * `apiModel` is what goes on the wire — OpenCode serves Ox Alpha as
- * `x-preview-f-free` (see opencode.ai/docs/zen). Local Qwen's wire id
- * is overridable in Settings because Ollama and vLLM name it differently.
+ * `x-preview-f-free` (see opencode.ai/docs/zen). Local Qwen defaults to
+ * the in-app sidecar; a custom host can still override the wire id.
  */
 export const MODELS: ModelInfo[] = [
   {
@@ -162,10 +163,10 @@ export const MODELS: ModelInfo[] = [
     label: "Qwen 3.8 27B",
     shortLabel: "Qwen 3.8",
     description:
-      "Local 27B. Thinking on by default, with reasoning_effort (low / medium / xhigh).",
+      "Download in Settings. Your PC runs the 27B in a sidecar so this app stays light.",
     specs: "262K context · runs on your GPU · free",
-    resumeBlurb: "Local Qwen 3.8 27B",
-    settingsSubtitle: "Local · 27B · thinking",
+    resumeBlurb: "Qwen 3.8 27B on this PC",
+    settingsSubtitle: "On this PC · 27B · thinking",
     mapsLowToHigh: false,
     helper: false,
     peakHours: false,
