@@ -1315,7 +1315,6 @@ export default function Home() {
 
       /** Set when a tool changed the workspace, so the list can refresh. */
       let sawToolWrite = false;
-olWrite = false;
       const changedPaths = new Set<string>();
 
       const finish = (patch: Partial<Message>) => {
@@ -1933,6 +1932,11 @@ olWrite = false;
           const index = list.findIndex((m) => m.id === resumeId);
           const prompt = index > 0 ? list[index - 1] : null;
           if (prompt?.role === "user") {
+            const existing = list[index];
+            const thinkOnly =
+              Boolean(existing?.reasoningContent?.trim()) &&
+              !existing?.content?.trim() &&
+              !(existing?.toolEvents?.length);
             queueMicrotask(() => {
               if (cancelAutoResumeRef.current) {
                 setIsLoading(false);
@@ -1943,6 +1947,9 @@ olWrite = false;
               void sendMessageRef.current?.(prompt.content, {
                 resumeMessageId: resumeId,
                 force: true,
+                resumeNote: thinkOnly
+                  ? "You already thought. Do not think more. Call a tool or write the answer now."
+                  : undefined,
               });
             });
           } else if (stillActive) {

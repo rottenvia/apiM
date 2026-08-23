@@ -534,8 +534,18 @@ export async function POST(req: NextRequest) {
   };
 
   // Resolve "auto" to a concrete level based on the message.
-  const resolvedEffort =
+  // Local 27B on CPU cannot spend xhigh — it fills the output budget with
+  // thinking and never answers. Auto therefore tops out at High (Qwen medium).
+  // The Max slider still sends xhigh if the user picks it.
+  let resolvedEffort =
     thinkingEffort === "auto" ? autoThinkingEffort(userText) : thinkingEffort;
+  if (
+    target.thinkingStyle === "qwen" &&
+    thinkingEffort === "auto" &&
+    resolvedEffort === "max"
+  ) {
+    resolvedEffort = "high";
+  }
 
   // "none" is our UI concept for "don't reason at all".
   const thinkingEnabled = resolvedEffort !== "none";
@@ -1531,6 +1541,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         // Carried across a resume, so continuing cannot reset the guard and
         // spend another eight budgets on a model that never stops.
         let continuations = resumed?.continuations ?? 0;
+        /** A think-only output-limit cut. One nudge to act, then stop. */
+        let thinkNudges = 0;
         /**
          * Times we auto-continued a mid-task stop that was not an output
          * ceiling. Separate from MAX_CONTINUATIONS, and not carried across
@@ -2208,6 +2220,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 roundReasoning += reasoningDelta.text;
                 markUpstream();
                 send({ type: "reasoning", delta: reasoningDelta.text });
+                void checkpoint();
               }
               if (delta.tool_calls) {
                 markUpstream();
@@ -2294,44 +2307,6 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             continue;
           }
 
-          /*
-           * OpenCode Zen sometimes returns HTTP 200 with an empty SSE body
-           * during the same outages as 503. fetchWithRetry treats 200 as
-           * success, so without this the user sees a blank reply after
-           * "retrying". Only retry a stream that never even named a
-           * finish_reason — a real empty `stop` is left alone.
-           */
-          if (
-            target.providerId === "opencode" &&
-            emptyStreamRetries < 2 &&
-            !roundContent &&
-            !roundReasoning &&
-            toolAcc.result().length === 0 &&
-            (!roundFinishReason || firstTokenTimedOut)
-          ) {
-            emptyStreamRetries += 1;
-            send({
-              type: "retrying",
-              phase: "backoff",
-              attempt: emptyStreamRetries,
-              attempts: 2,
-              delayMs: 1_200,
-              reason: firstTokenTimedOut ? "no first token" : "empty reply",
-              host: target.providerName,
-              inputChars,
-            });
-            try {
-              await sleep(1_200, runSignal);
-            } catch (error) {
-              if (error instanceof Error && error.name === "AbortError") {
-                close();
-                return;
-              }
-              throw error;
-            }
-            continue;
-          }
-
           if (thinkingEnabled && !roundReasoning) {
             send({
               type: "reasoning_status",
@@ -2367,6 +2342,46 @@ Ask before you build the wrong thing. If a choice would change what you produce 
            * than abandoned.
            */
           const truncated = /^(length|max_tokens)$/i.test(roundFinishReason);
+
+          /*
+           * Qwen (and sometimes others) can spend the entire output budget
+           * on thinking and emit no answer and no tool. Treating that as a
+           * mid-sentence cut asked it to "continue" eight more times — each
+           * one another full think. The UI sat on Thinking forever.
+           *
+           * One shove to act. If it thinks through the budget again, stop.
+           */
+          const thinkOnlyCut =
+            truncated &&
+            calls.length === 0 &&
+            roundReasoning.length >= 80 &&
+            (roundContent?.trim().length ?? 0) < 40;
+          if (thinkOnlyCut) {
+            transcript.push({
+              role: "assistant",
+              content: roundContent || null,
+              reasoning_content: roundReasoning || null,
+            });
+            if (thinkNudges < 1) {
+              thinkNudges += 1;
+              transcript.push({
+                role: "user",
+                content:
+                  "You used the whole output budget on thinking and produced " +
+                  "no answer and no tool call. Stop reasoning. Call a tool " +
+                  "or write the reply now. Do not think more.",
+              });
+              send({
+                type: "continuing",
+                reason: "thinking_budget",
+                n: 1,
+                of: 1,
+              });
+              continue;
+            }
+            hitOutputCeiling = true;
+            break;
+          }
 
           if (truncated && calls.length === 0) {
             // Plain prose cut short. Ask for the rest instead of stopping —
