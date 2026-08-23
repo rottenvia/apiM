@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { describeImage, DEFAULT_VISION_MODEL } from "@/lib/vision";
+import {
+  describeImageWithFallback,
+  DEFAULT_VISION_MODEL,
+} from "@/lib/vision";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
@@ -7,8 +10,9 @@ export const maxDuration = 120;
 /**
  * Describe an image so a text-only model can reason about it.
  *
- * Runs server-side so the vision key is never exposed to a third-party origin
- * from the browser, and so the request isn't blocked by CORS.
+ * OpenAI vision when a key is sent and still has credit. Otherwise free
+ * local OCR — no key, no funds. The key is never forwarded to a third
+ * party from the browser.
  */
 export async function POST(req: NextRequest) {
   let body: {
@@ -32,23 +36,20 @@ export async function POST(req: NextRequest) {
       { status: 400 }
     );
   }
-  if (!apiKey) {
-    return NextResponse.json(
-      { error: "Add a vision API key in Settings to send screenshots" },
-      { status: 400 }
-    );
-  }
 
-  const result = await describeImage(
+  const result = await describeImageWithFallback(
     dataUrl,
     apiKey,
     model || DEFAULT_VISION_MODEL,
     hint
   );
 
-  if (result.error) {
+  if (result.error && !result.description) {
     return NextResponse.json({ error: result.error }, { status: 502 });
   }
 
-  return NextResponse.json({ description: result.description });
+  return NextResponse.json({
+    description: result.description,
+    source: result.source ?? "ocr",
+  });
 }

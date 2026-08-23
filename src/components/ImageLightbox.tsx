@@ -14,12 +14,14 @@ export function ImageLightbox({
   src,
   name,
   description,
+  source,
   kind = "image",
   onClose,
 }: {
   src: string;
   name: string;
   description?: string;
+  source?: "vision" | "ocr";
   kind?: "image" | "video";
   onClose: () => void;
 }) {
@@ -110,7 +112,7 @@ export function ImageLightbox({
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h10" />
                 </svg>
-                {showText ? "Hide text" : "Extracted text"}
+                {showText ? "Hide text" : source === "ocr" ? "OCR text" : "Extracted text"}
               </button>
             )}
             <button
@@ -157,7 +159,9 @@ export function ImageLightbox({
           {showText && description && (
             <div className="max-h-56 min-h-0 shrink-0 overflow-y-auto border-t border-[#2c2924] bg-[#141210] p-3.5 md:max-h-none md:w-80 md:border-l md:border-t-0 [overscroll-behavior:contain]">
               <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.1em] text-[#6d685d]">
-                What the assistant receives
+                {source === "ocr"
+                  ? "OCR — visible text only"
+                  : "What the assistant receives"}
               </p>
               <pre className="whitespace-pre-wrap break-words font-mono text-[12px] leading-relaxed text-[#a29d92]">
                 {description}

@@ -86,6 +86,7 @@
     "react-dom": "19.2.6",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
+    "tesseract.js": "^7.0.0",
     "uuid": "^14.0.1"
   },
   "devDependencies": {
