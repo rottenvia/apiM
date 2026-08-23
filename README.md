@@ -201,7 +201,7 @@ regressions with `npm run test:binaries`.
   - DeepSeek from [platform.deepseek.com](https://platform.deepseek.com), or
   - OpenCode Zen from [opencode.ai/auth](https://opencode.ai/auth) for Ox Alpha
     (`x-preview-f-free` on `https://opencode.ai/zen/v1`), or
-  - a local OpenAI-compatible server for Qwen 3.8 27B (Ollama, vLLM, or llama.cpp)
+  - Qwen 3.8 27B downloaded in Settings (runs on this PC, no cloud key)
 - (Optional) Tavily API key from [app.tavily.com](https://app.tavily.com) for web search
 
 ## Files
@@ -232,8 +232,16 @@ nohomo/
 
 ## Local models (Qwen 3.8 27B)
 
-This app does not load GGUF weights itself. It talks to whatever
-OpenAI-compatible server you start on this machine.
+Download and chat from **Settings**. The 27B lives in this app
+(`data/local-engine/`) and runs in a **sidecar on your PC**. Next.js
+only sends `/v1/chat/completions`, so the UI stays light. You do not
+need Ollama.
+
+**Settings → Local model → Download Qwen 3.8 27B.** That pulls the
+Q4_K_M GGUF (~16.5 GB) and a llama-server build, then starts
+`127.0.0.1:18765`. The chat process never loads the weights.
+
+A custom OpenAI-compatible host is still available under Advanced.
 
 **Does it have a reasoning parameter?** Yes. Qwen 3.8 27B thinks by
 default. Official controls:
@@ -247,17 +255,10 @@ default. Official controls:
 
 `preserve_thinking` stays on so prior-round thoughts are not dropped.
 
-### Ollama
+### Advanced: your own server
 
-```bash
-ollama pull qwen3.8:27b
-# then in Settings → Local model → Ollama
-# endpoint http://127.0.0.1:11434/v1
-# wire model qwen3.8:27b
-```
-
-Quantized tags such as `qwen3.8:27b-q4_K_M` or `qwen3.8:27b-mxfp8` work —
-put the tag in the wire-model field.
+Ollama / vLLM still work if you already run them. Settings → Local
+model → Advanced, then pick the preset.
 
 ### vLLM
 

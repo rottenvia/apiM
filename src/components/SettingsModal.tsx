@@ -10,6 +10,7 @@ import {
 import { SearchBudget } from "@/components/SearchBudget";
 import { BUDGET_PRESETS } from "@/lib/budget";
 import { DiagnosticsPanel } from "@/components/DiagnosticsPanel";
+import { LocalModelRuntime } from "@/components/LocalModelRuntime";
 import {
   DEFAULT_LOCAL_API_MODEL,
   DEFAULT_LOCAL_BASE_URL,
@@ -417,72 +418,80 @@ export function SettingsModal({
                 )}
               </div>
 
-              {/* Local OpenAI-compatible host — Qwen 3.8 27B */}
+              {/* Qwen 3.8 27B — downloaded and run by this app */}
               <div>
                 <label className="block text-sm font-semibold text-text-primary mb-1.5">
                   Local model
                   <span className="ml-1 text-xs font-normal text-text-muted">
-                    (Qwen 3.8 27B via Ollama / vLLM / llama.cpp)
+                    (Qwen 3.8 27B on this PC)
                   </span>
                 </label>
                 <p className="text-xs text-text-secondary mb-2">
-                  Serve the weights on this machine, then point the app at the
-                  OpenAI-compatible{" "}
-                  <code className="rounded bg-bg-tertiary px-1 py-0.5 text-[11px]">
-                    /v1/chat/completions
-                  </code>{" "}
-                  host. Thinking is on by default; the effort slider maps to
-                  Qwen&apos;s{" "}
+                  Download the 27B into this app. A sidecar on your machine
+                  runs it so the UI stays light. Thinking is on by default;
+                  the effort slider maps to Qwen&apos;s{" "}
                   <code className="rounded bg-bg-tertiary px-1 py-0.5 text-[11px]">
                     reasoning_effort
                   </code>{" "}
                   (low / medium / xhigh).
                 </p>
-                <div className="mb-2 flex flex-wrap gap-1.5">
-                  {LOCAL_HOST_PRESETS.map((preset) => (
-                    <button
-                      key={preset.id}
-                      type="button"
-                      onClick={() => {
-                        onLocalBaseUrlChange(preset.baseUrl);
-                        onLocalApiModelChange(preset.apiModel);
-                        onModelChange(QWEN_38_27B_ID);
-                      }}
-                      className="rounded-lg border border-border px-2.5 py-1 text-[11px] text-text-secondary transition-colors hover:bg-bg-hover"
-                    >
-                      {preset.label}
-                    </button>
-                  ))}
+                <div className="mb-3">
+                  <LocalModelRuntime
+                    onLocalBaseUrlChange={onLocalBaseUrlChange}
+                    onLocalApiModelChange={onLocalApiModelChange}
+                    onUseModel={onModelChange}
+                  />
                 </div>
+                <details className="mb-2">
+                  <summary className="cursor-pointer text-[11px] font-medium text-text-muted">
+                    Advanced — custom local server
+                  </summary>
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {LOCAL_HOST_PRESETS.map((preset) => (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        onClick={() => {
+                          onLocalBaseUrlChange(preset.baseUrl);
+                          onLocalApiModelChange(preset.apiModel);
+                          onModelChange(QWEN_38_27B_ID);
+                        }}
+                        className="rounded-lg border border-border px-2.5 py-1 text-[11px] text-text-secondary transition-colors hover:bg-bg-hover"
+                      >
+                        {preset.label}
+                      </button>
+                    ))}
+                  </div>
+                  <label className="mb-1 mt-2 block text-[11px] font-medium text-text-muted">
+                    Endpoint
+                  </label>
+                  <input
+                    type="text"
+                    value={localBaseUrl}
+                    onChange={(e) => onLocalBaseUrlChange(e.target.value)}
+                    placeholder={DEFAULT_LOCAL_BASE_URL}
+                    className="mb-2 w-full px-4 py-2.5 rounded-xl bg-bg-tertiary border border-border text-sm text-text-primary placeholder-text-muted outline-none focus:border-accent/50 focus:ring-1 focus:ring-accent/25 transition-all"
+                  />
+                  <label className="mb-1 block text-[11px] font-medium text-text-muted">
+                    Wire model id
+                  </label>
+                  <input
+                    type="text"
+                    value={localApiModel}
+                    onChange={(e) => onLocalApiModelChange(e.target.value)}
+                    placeholder={DEFAULT_LOCAL_API_MODEL}
+                    className="mb-2 w-full px-4 py-2.5 rounded-xl bg-bg-tertiary border border-border font-mono text-sm text-text-primary placeholder-text-muted outline-none focus:border-accent/50 focus:ring-1 focus:ring-accent/25 transition-all"
+                  />
+                </details>
                 <label className="mb-1 block text-[11px] font-medium text-text-muted">
-                  Endpoint
-                </label>
-                <input
-                  type="text"
-                  value={localBaseUrl}
-                  onChange={(e) => onLocalBaseUrlChange(e.target.value)}
-                  placeholder={DEFAULT_LOCAL_BASE_URL}
-                  className="mb-2 w-full px-4 py-2.5 rounded-xl bg-bg-tertiary border border-border text-sm text-text-primary placeholder-text-muted outline-none focus:border-accent/50 focus:ring-1 focus:ring-accent/25 transition-all"
-                />
-                <label className="mb-1 block text-[11px] font-medium text-text-muted">
-                  Wire model id
-                </label>
-                <input
-                  type="text"
-                  value={localApiModel}
-                  onChange={(e) => onLocalApiModelChange(e.target.value)}
-                  placeholder={DEFAULT_LOCAL_API_MODEL}
-                  className="mb-2 w-full px-4 py-2.5 rounded-xl bg-bg-tertiary border border-border font-mono text-sm text-text-primary placeholder-text-muted outline-none focus:border-accent/50 focus:ring-1 focus:ring-accent/25 transition-all"
-                />
-                <label className="mb-1 block text-[11px] font-medium text-text-muted">
-                  API key (optional — Ollama ignores it)
+                  API key (optional — the in-app sidecar ignores it)
                 </label>
                 <div className="relative">
                   <input
                     type={showLocalKey ? "text" : "password"}
                     value={localApiKey}
                     onChange={(e) => onLocalApiKeyChange(e.target.value)}
-                    placeholder="Leave empty for Ollama"
+                    placeholder="Leave empty for the in-app sidecar"
                     className="w-full px-4 py-2.5 rounded-xl bg-bg-tertiary border border-border text-sm text-text-primary placeholder-text-muted outline-none focus:border-accent/50 focus:ring-1 focus:ring-accent/25 transition-all"
                   />
                   <button
@@ -772,10 +781,19 @@ export function SettingsModal({
                   >
                     <span className="block font-semibold">Qwen 3.8 27B</span>
                     <span className="text-[11px] opacity-70">
-                      Local · 262K context · thinking
+                      On this PC · 262K context · thinking
                     </span>
                   </button>
                 </div>
+                {model === QWEN_38_27B_ID && (
+                  <div className="mt-2">
+                    <LocalModelRuntime
+                      onLocalBaseUrlChange={onLocalBaseUrlChange}
+                      onLocalApiModelChange={onLocalApiModelChange}
+                      onUseModel={onModelChange}
+                    />
+                  </div>
+                )}
               </div>
 
               {/* Default Thinking Effort */}
