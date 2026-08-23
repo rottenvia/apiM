@@ -20,7 +20,12 @@ import type { PlanView, PlanStepView } from "@/components/PlanPanel";
 import type { TimelineEntry } from "@/components/MessageTimeline";
 import { clampDeleteDelay, DEFAULT_DELETE_DELAY } from "@/components/DeleteChatDialog";
 import { warmRoutes } from "@/lib/warmup";
-import { getModel, hasKeyForModel } from "@/lib/models";
+import {
+  DEFAULT_LOCAL_API_MODEL,
+  DEFAULT_LOCAL_BASE_URL,
+  getModel,
+  hasKeyForModel,
+} from "@/lib/models";
 import { replyCanContinue } from "@/lib/resume-target";
 
 export interface Message {
@@ -338,6 +343,9 @@ export default function Home() {
   // Settings
   const [deepseekKey, setDeepseekKey] = useState("");
   const [opencodeKey, setOpencodeKey] = useState("");
+  const [localBaseUrl, setLocalBaseUrl] = useState(DEFAULT_LOCAL_BASE_URL);
+  const [localApiKey, setLocalApiKey] = useState("");
+  const [localApiModel, setLocalApiModel] = useState(DEFAULT_LOCAL_API_MODEL);
 
   /*
    * What is actually left in the DeepSeek account.
@@ -423,7 +431,7 @@ export default function Home() {
    */
   const [budgetUsd, setBudgetUsd] = useState<number | null>(null);
 
-  const hasKeys = hasKeyForModel(model, { deepseekKey, opencodeKey });
+  const hasKeys = hasKeyForModel(model, { deepseekKey, opencodeKey, localBaseUrl });
   const initialLoadDone = useRef(false);
   /** Current workspace id, readable from callbacks without re-creating them. */
   const workspaceIdRef = useRef<string | null>(workspaceId);
@@ -488,6 +496,9 @@ export default function Home() {
             question,
             deepseekApiKey: deepseekKey,
             opencodeApiKey: opencodeKey,
+            localBaseUrl,
+            localApiKey,
+            localApiModel,
             workspaceId,
             lastUserMessage: lastUser?.content?.slice(0, 500),
           }),
@@ -527,7 +538,7 @@ export default function Home() {
         );
       }
     },
-    [deepseekKey, opencodeKey, hasKeys, workspaceId]
+    [deepseekKey, opencodeKey, localBaseUrl, localApiKey, localApiModel, hasKeys, workspaceId]
   );
   /** Latest messages + sender, so stable callbacks can read them. */
   const messagesRef = useRef<Message[]>([]);
@@ -558,6 +569,13 @@ export default function Home() {
             const s = JSON.parse(saved);
             if (s.deepseekKey) setDeepseekKey(s.deepseekKey);
             if (s.opencodeKey) setOpencodeKey(s.opencodeKey);
+            if (typeof s.localBaseUrl === "string" && s.localBaseUrl.trim()) {
+              setLocalBaseUrl(s.localBaseUrl);
+            }
+            if (typeof s.localApiKey === "string") setLocalApiKey(s.localApiKey);
+            if (typeof s.localApiModel === "string" && s.localApiModel.trim()) {
+              setLocalApiModel(s.localApiModel);
+            }
             if (s.tavilyKey) setTavilyKey(s.tavilyKey);
             if (s.exaKey) setExaKey(s.exaKey);
             // Explicit false only: an older saved settings object has neither
@@ -605,6 +623,9 @@ export default function Home() {
         JSON.stringify({
           deepseekKey,
           opencodeKey,
+          localBaseUrl,
+          localApiKey,
+          localApiModel,
           tavilyKey,
           exaKey,
           tavilyEnabled,
@@ -627,6 +648,9 @@ export default function Home() {
   }, [
     deepseekKey,
     opencodeKey,
+    localBaseUrl,
+    localApiKey,
+    localApiModel,
     tavilyKey,
     exaKey,
     tavilyEnabled,
@@ -1246,6 +1270,9 @@ export default function Home() {
             conversationId: requestConversationId,
             deepseekApiKey: deepseekKey,
             opencodeApiKey: opencodeKey,
+            localBaseUrl,
+            localApiKey,
+            localApiModel,
             // A disabled provider is simply not sent, so the server
             // never sees a key it must not use.
             tavilyApiKey: tavilyEnabled ? tavilyKey : "",
@@ -1795,6 +1822,9 @@ export default function Home() {
       workspaceId,
       deepseekKey,
       opencodeKey,
+      localBaseUrl,
+      localApiKey,
+      localApiModel,
       tavilyKey,
       exaKey,
       tavilyEnabled,
@@ -2265,7 +2295,11 @@ export default function Home() {
         onStop={stopGeneration}
         hasKeys={hasKeys}
         missingKeyLabel={
-          getModel(model).provider === "opencode" ? "OpenCode" : "DeepSeek"
+          getModel(model).provider === "opencode"
+            ? "OpenCode"
+            : getModel(model).provider === "local"
+              ? "local server"
+              : "DeepSeek"
         }
         model={model}
         thinkingEffort={thinkingEffort}
@@ -2317,6 +2351,9 @@ export default function Home() {
         <SettingsModal
           deepseekKey={deepseekKey}
           opencodeKey={opencodeKey}
+          localBaseUrl={localBaseUrl}
+          localApiKey={localApiKey}
+          localApiModel={localApiModel}
           tavilyKey={tavilyKey}
           exaKey={exaKey}
           onExaKeyChange={setExaKey}
@@ -2331,6 +2368,9 @@ export default function Home() {
           model={model}
           defaultEffort={thinkingEffort}
           onDeepseekKeyChange={setDeepseekKey}
+          onLocalBaseUrlChange={setLocalBaseUrl}
+          onLocalApiKeyChange={setLocalApiKey}
+          onLocalApiModelChange={setLocalApiModel}
           onOpencodeKeyChange={(key) => {
             setOpencodeKey(key);
             // A user who only connected OpenCode should land on Ox Alpha

@@ -93,7 +93,7 @@ export async function runRefine(
    * Which model to ask. Defaults to DeepSeek Flash. Ox Alpha-only setups
    * pass `x-preview-f-free` and skip DeepSeek's `thinking` object.
    */
-  options?: { model?: string; thinkingStyle?: "deepseek" | "openai" }
+  options?: { model?: string; thinkingStyle?: "deepseek" | "openai" | "qwen" }
 ): Promise<RefineResult> {
   const empty: RefineResult = { lessons: [], confirms: [], usage: null };
 
