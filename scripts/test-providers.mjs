@@ -191,8 +191,8 @@ const qwen = models.MODELS.find((m) => m.id === "qwen-3.8-27b");
 check("Qwen 3.8 27B is listed", Boolean(qwen));
 check("it is a local model", qwen?.provider === "local", qwen?.provider);
 check(
-  "the default wire id is the Ollama tag",
-  qwen?.apiModel === "qwen3.8:27b",
+  "the default wire id is the in-app sidecar name",
+  qwen?.apiModel === "qwen-3.8-27b",
   qwen?.apiModel
 );
 check(
@@ -203,8 +203,8 @@ check(
 const localOk = providers.resolveChatTarget("qwen-3.8-27b", {});
 check("Qwen resolves without any API key", localOk.ok);
 check(
-  "and defaults to Ollama's OpenAI host",
-  localOk.ok && localOk.target.baseUrl === "http://127.0.0.1:11434/v1",
+  "and defaults to the in-app sidecar",
+  localOk.ok && localOk.target.baseUrl === "http://127.0.0.1:18765/v1",
   localOk.ok ? localOk.target.baseUrl : ""
 );
 
@@ -255,6 +255,99 @@ check("Settings offers the local host", /Local model/.test(settings));
 check("Settings offers Qwen 3.8 27B as a model", /Qwen 3.8 27B/.test(settings));
 check("the page persists the local host", /localBaseUrl/.test(page));
 check("the page sends the local host with the chat request", /localBaseUrl/.test(page) && /localApiModel/.test(page));
+
+console.log("\n8. In-app download, sidecar on this PC");
+
+const shared = await load("src/lib/local-engine-shared.ts");
+const localRoute = read("src/app/api/local/route.ts");
+const localUi = read("src/components/LocalModelRuntime.tsx");
+const engineSrc = read("src/lib/local-engine.ts");
+const sharedSrc = read("src/lib/local-engine-shared.ts");
+
+check(
+  "Settings has a Download Qwen control",
+  /LocalModelRuntime/.test(settings) && /Download Qwen 3.8 27B/.test(localUi)
+);
+check(
+  "Settings does not require Ollama",
+  !/via Ollama/.test(settings) && !/ollama serve/.test(settings)
+);
+check(
+  "the UI never imports Node spawn",
+  !/node:child_process/.test(localUi) && !/node:child_process/.test(sharedSrc)
+);
+const args = shared.sidecarArgs("/tmp/qwen.gguf");
+check(
+  "the sidecar binds loopback only",
+  args.includes("--host") && args[args.indexOf("--host") + 1] === "127.0.0.1"
+);
+check(
+  "the sidecar is llama-server, not Ollama",
+  args.includes("-m") && engineSrc.includes("llama-server") && !/ollama serve/.test(engineSrc)
+);
+check(
+  "the official GGUF URL is allow-listed",
+  shared.isAllowedDownloadUrl(shared.GGUF_URL)
+);
+check(
+  "a random HTTPS host is refused",
+  !shared.isAllowedDownloadUrl("https://example.com/evil.gguf")
+);
+check(
+  "cloud metadata is refused",
+  !shared.isAllowedDownloadUrl("http://169.254.169.254/latest")
+);
+check(
+  "a LAN address is refused",
+  !shared.isAllowedDownloadUrl("http://192.168.1.10/qwen.gguf")
+);
+const mac = shared.pickLlamaAsset(
+  [
+    "llama-b10566-bin-macos-arm64.tar.gz",
+    "llama-b10566-bin-ubuntu-x64.tar.gz",
+    "llama-b10566-bin-win-cpu-x64.zip",
+  ],
+  { platform: "darwin", arch: "arm64", gpu: "metal" }
+);
+check(
+  "macOS arm64 picks the Metal build",
+  mac === "llama-b10566-bin-macos-arm64.tar.gz"
+);
+const win = shared.pickLlamaAsset(
+  [
+    "llama-b10566-bin-win-cuda-12.4-x64.zip",
+    "llama-b10566-bin-win-cpu-x64.zip",
+    "llama-b10566-bin-ubuntu-x64.tar.gz",
+  ],
+  { platform: "win32", arch: "x64", gpu: "nvidia" }
+);
+check(
+  "Windows NVIDIA picks the CUDA build",
+  win === "llama-b10566-bin-win-cuda-12.4-x64.zip"
+);
+check("download percent is rounded", shared.downloadPercent(40, 100) === 40);
+check(
+  "the route downloads through the in-app engine",
+  /downloadEngine/.test(localRoute) && /ensureEngineRunning/.test(route)
+);
+check(
+  "the chat route forwards local host fields",
+  /localBaseUrl/.test(route) && /localApiModel/.test(route)
+);
+check(
+  "the runtime never loads weights into Node",
+  !/readFileSync\([^)]*gguf|node-llama-cpp|createCompletion|LlamaModel/i.test(
+    engineSrc
+  )
+);
+check(
+  "a dead local host tells you to Download in Settings",
+  /Download/.test(providers.providerUnreachable("On this PC", 2))
+);
+check(
+  "cloud hosts keep the generic unreachable copy",
+  /Check the network connection/.test(providers.providerUnreachable("DeepSeek", 2))
+);
 
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`

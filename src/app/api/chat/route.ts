@@ -117,6 +117,10 @@ import {
   resolveChatTarget,
   resolveHelperTarget,
 } from "@/lib/providers";
+import {
+  ensureEngineRunning,
+  isManagedEngineUrl,
+} from "@/lib/local-engine";
 
 export const maxDuration = 300;
 
@@ -184,7 +188,7 @@ interface ChatRequestBody {
   deepseekApiKey?: string;
   /** OpenCode Zen key — required when the selected model is Ox Alpha. */
   opencodeApiKey?: string;
-  /** Local OpenAI-compatible host (Ollama / vLLM / llama.cpp). */
+  /** Local OpenAI-compatible host (in-app sidecar or a custom one). */
   localBaseUrl?: string;
   localApiKey?: string;
   localApiModel?: string;
@@ -512,6 +516,15 @@ export async function POST(req: NextRequest) {
         } catch {
           // Already closed by an aborted client — nothing to do.
         }
+      };
+
+      // Ids are allocated up front so the same assistant message can be
+      // rewritten in place as it streams.
+      const startedAt = Date.now();
+      const convId: string = conversationId ?? uuidv4();
+
+      /*
+       * A normal UI request uses the same id for co  }
       };
 
       // Ids are allocated up front so the same assistant message can be

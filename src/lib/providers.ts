@@ -4,8 +4,8 @@
  * DeepSeek used to be the only provider. Ox Alpha is served by OpenCode Zen
  * at the same Chat Completions shape (`/chat/completions`), so the rest of
  * the agent loop stays identical — only the URL, key and on-the-wire model
- * id change. Local Qwen 3.8 27B is the same loop again, pointed at Ollama,
- * vLLM or llama.cpp on this machine.
+ * id change. Local Qwen 3.8 27B is the same loop again, pointed at the
+ * in-app sidecar on this machine (or a custom OpenAI-compatible host).
  */
 
 import {
@@ -35,11 +35,11 @@ export {
 export interface ChatCredentials {
   deepseekApiKey?: string | null;
   opencodeApiKey?: string | null;
-  /** OpenAI-compatible host, e.g. http://127.0.0.1:11434/v1 */
+  /** OpenAI-compatible host, e.g. http://127.0.0.1:18765/v1 */
   localBaseUrl?: string | null;
-  /** Optional. Ollama ignores it; some vLLM setups require one. */
+  /** Optional. The in-app sidecar ignores it; some custom hosts require one. */
   localApiKey?: string | null;
-  /** Overrides the catalog wire id (Ollama tag vs Hugging Face id). */
+  /** Overrides the catalog wire id. */
   localApiModel?: string | null;
 }
 
@@ -78,7 +78,7 @@ function cleanBase(url: string): string {
 /**
  * Accept the ways people paste a local host.
  *
- * `http://127.0.0.1:11434`, `.../v1`, and even `.../v1/chat/completions`
+ * `http://127.0.0.1:18765`, `.../v1`, and even `.../v1/chat/completions`
  * should all land on `.../v1` so the chat route can append
  * `/chat/completions`.
  */
@@ -110,7 +110,7 @@ export function keyForProvider(
 ): string {
   if (id === "local") {
     const raw = creds.localApiKey;
-    // Ollama accepts any bearer token. An empty one still has to be a
+    // The sidecar accepts any bearer token. An empty one still has to be a
     // string so the Authorization header is well-formed.
     return typeof raw === "string" && raw.trim() ? raw.trim() : "local";
   }
@@ -227,11 +227,11 @@ export function qwenReasoningEffort(effort: string): "low" | "medium" | "xhigh" 
  * document DeepSeek's `thinking` object — sending it can 400, so Ox Alpha
  * only gets `reasoning_effort` when thinking is on.
  *
- * Qwen 3.8 27B (local Ollama / vLLM / llama.cpp) thinks by default.
+ * Qwen 3.8 27B (in-app sidecar) thinks by default.
  * Official fields: `chat_template_kwargs.enable_thinking` and
  * `reasoning_effort` of `xhigh` | `medium` | `low`. `preserve_thinking`
- * keeps prior-round thoughts in the transcript. vLLM also needs
- * `--reasoning-parser qwen3` so the think block is not dumped into content.
+ * keeps prior-round thoughts in the transcript. The sidecar is started
+ * with `--reasoning-format deepseek` so think tokens stay out of content.
  */
 export function applyThinking(
   body: Record<string, unknown>,
@@ -256,7 +256,7 @@ export function applyThinking(
         reasoning_effort: qwen,
       };
       body.reasoning_effort = qwen;
-      // Ollama's OpenAI shim reads this; vLLM ignores unknown fields.
+      // Some OpenAI shims read this; unknown fields are ignored.
       body.think = true;
     } else {
       body.chat_template_kwargs = { enable_thinking: false };
@@ -287,6 +287,9 @@ export function providerHttpError(
 }
 
 export function providerUnreachable(providerName: string, attempts: number): string {
+  if (providerName === "On this PC" || providerName === "Local") {
+    return `Couldn't reach Qwen on this PC after ${attempts} attempt(s). Open Settings and Download or Start it. The 27B runs in a sidecar — this app never loads the weights.`;
+  }
   return `Couldn't reach the ${providerName} API after ${attempts} attempt(s). Check the network connection and try again.`;
 }
 
