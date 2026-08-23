@@ -365,6 +365,43 @@ check(
 );
 silentHeaders.close();
 
+const stopBody = new AbortController();
+const hangingReader = {
+  read: () => new Promise(() => {}),
+};
+const readStarted = Date.now();
+const readPending = R.readChunk(hangingReader, stopBody.signal);
+setTimeout(() => stopBody.abort(), 20);
+let readErr = null;
+try {
+  await readPending;
+} catch (e) {
+  readErr = e;
+}
+check(
+  "Stop aborts a hung body read instead of waiting forever",
+  readErr?.name === "AbortError" && Date.now() - readStarted < 1_000,
+  readErr?.name
+);
+check(
+  "Ox / cloud timeouts do not auto-resume",
+  R.shouldAutoResumeOnTimeout({
+    error: "The operation was aborted due to timeout",
+    hadWork: true,
+    used: 0,
+    local: false,
+  }) === false
+);
+check(
+  "a local Qwen timeout still auto-resumes",
+  R.shouldAutoResumeOnTimeout({
+    error: "The operation was aborted due to timeout",
+    hadWork: true,
+    used: 0,
+    local: true,
+  }) === true
+);
+
 server.close();
 
 // ---------------------------------------------------------------- pruning
