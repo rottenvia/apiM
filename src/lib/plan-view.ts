@@ -29,7 +29,19 @@ export function normalisePlanStepText(value: unknown): string {
   };
 
   const title = field("title", "name", "label", "step");
-  const description = field("description", "details", "detail", "text", "task");
+  const description = field(
+    "description",
+    "details",
+    "detail",
+    "text",
+    "task",
+    "content",
+    "action",
+    "what",
+    "work",
+    "instruction",
+    "body"
+  );
 
   if (title && description && normalise(title) !== normalise(description)) {
     return `${title} — ${description}`;

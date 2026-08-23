@@ -37,6 +37,24 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { normalisePlanStepText } from "@/lib/plan-view";
 
+const STEP_OBJECT_KEYS = [
+  "title",
+  "name",
+  "label",
+  "step",
+  "description",
+  "details",
+  "detail",
+  "text",
+  "task",
+  "content",
+  "action",
+  "what",
+  "work",
+  "instruction",
+  "body",
+] as const;
+
 export type StepState = "todo" | "doing" | "done" | "blocked";
 
 export interface PlanStep {
@@ -80,6 +98,16 @@ export class PlanError extends Error {}
 export const MIN_TEXT = 12;
 
 /**
+ * Shortest a step may be.
+ *
+ * Goals stay at MIN_TEXT — "do it" is not a goal. Steps of eight characters
+ * ("Read file", "Inspect") are real work labels the model actually sends,
+ * and rejecting the whole plan for one of them is how make_plan starts
+ * looping on "Could not set plan".
+ */
+export const MIN_STEP = 8;
+
+/**
  * Shortest acceptable evidence.
  *
  * Testing the plan adversarially, `verified: "."` was accepted. That defeats
@@ -89,8 +117,158 @@ export const MIN_TEXT = 12;
  */
 export const MIN_EVIDENCE = 15;
 
-export function createPlan(goal: string, steps: unknown[]): Plan {
-  const cleanGoal = goal.trim();
+function looksLikeStepObject(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const item = value as Record<string, unknown>;
+  return STEP_OBJECT_KEYS.some(
+    (key) => typeof item[key] === "string" && item[key].trim()
+  );
+}
+
+/** Split a numbered, bulleted or semicolon-separated list into steps. */
+export function splitPlanStepString(text: string): string[] {
+  const trimmed = text.trim();
+  if (!trimmed) return [];
+
+  const lines = trimmed
+    .split(/\r?\n+/)
+    .map((line) => line.replace(/^\s*(?:\d+[\.)]|[-*•])\s+/, "").trim())
+    .filter(Boolean);
+  if (lines.length >= 2) return lines;
+
+  const numbered = trimmed
+    .split(/\s*\d+[\.)]\s+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (numbered.length >= 2) return numbered;
+
+  const semis = trimmed
+    .split(/\s*;\s*/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (semis.length >= 2) return semis;
+
+  return [trimmed];
+}
+
+/**
+ * Accept the shapes models actually send for `steps`.
+ *
+ * The schema asks for string[], but Ox and similar will send a numbered
+ * paragraph, `{content}` / `{action}` objects, a `{1:"…", 2:"…"}` map, or
+ * a double-encoded JSON array. Treating anything that is not already an
+ * array as "no steps" is why make_plan sometimes cannot be set at all.
+ */
+export function coercePlanSteps(raw: unknown): unknown[] {
+  if (raw == null) return [];
+  if (Array.isArray(raw)) {
+    return raw.flatMap((item) => (Array.isArray(item) ? item : [item]));
+  }
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (!trimmed) return [];
+    if (trimmed.startsWith("[")) {
+      try {
+        const parsed = JSON.parse(trimmed) as unknown;
+        if (Array.isArray(parsed)) return coercePlanSteps(parsed);
+      } catch {
+        /* fall through and split as prose */
+      }
+    }
+    return splitPlanStepString(trimmed);
+  }
+  if (typeof raw === "object") {
+    const obj = raw as Record<string, unknown>;
+    for (const key of ["steps", "items", "tasks"]) {
+      if (obj[key] == null) continue;
+      const nested = coercePlanSteps(obj[key]);
+      if (nested.length) return nested;
+    }
+    if (looksLikeStepObject(obj)) return [obj];
+    const keys = Object.keys(obj);
+    if (
+      keys.length >= 2 &&
+      keys.every((key) => /^\d+$/.test(key) || /^step[-_ ]?\d+$/i.test(key))
+    ) {
+      return keys
+        .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+        .map((key) => obj[key]);
+    }
+    const values = Object.values(obj);
+    if (
+      values.length &&
+      values.every(
+        (value) => typeof value === "string" || looksLikeStepObject(value)
+      )
+    ) {
+      return values;
+    }
+    return [obj];
+  }
+  return [raw];
+}
+
+export function coercePlanGoal(raw: unknown): string {
+  if (typeof raw === "string") return raw.trim();
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    const item = raw as Record<string, unknown>;
+    for (const key of [
+      "goal",
+      "objective",
+      "title",
+      "text",
+      "description",
+      "purpose",
+    ]) {
+      if (typeof item[key] === "string" && item[key].trim()) {
+        return item[key].trim();
+      }
+    }
+  }
+  return "";
+}
+
+/**
+ * Pull a goal and a step list out of a raw make_plan argument object.
+ *
+ * Models wrap the same idea as `{objective, tasks}`, `{plan:{goal,steps}}`,
+ * or a missing goal with an otherwise valid list. The route used to pass
+ * `String(goal)` and `Array.isArray(steps) ? steps : []`, which turned every
+ * one of those into "Could not set plan".
+ */
+export function readPlanToolArgs(raw: Record<string, unknown>): {
+  goal: string;
+  steps: unknown[];
+} {
+  const nested =
+    raw.plan && typeof raw.plan === "object" && !Array.isArray(raw.plan)
+      ? (raw.plan as Record<string, unknown>)
+      : null;
+  const source = nested ?? raw;
+  let goal = coercePlanGoal(
+    source.goal ??
+      source.objective ??
+      source.title ??
+      source.purpose ??
+      raw.goal ??
+      raw.objective
+  );
+  const steps = coercePlanSteps(
+    source.steps ??
+      source.tasks ??
+      source.items ??
+      raw.steps ??
+      raw.tasks ??
+      raw.items
+  );
+  if (!goal && steps.length) {
+    goal = "Finish the current task as listed";
+  }
+  return { goal, steps };
+}
+
+export function createPlan(goal: string, steps: unknown): Plan {
+  const cleanGoal = coercePlanGoal(goal) || String(goal ?? "").trim();
   if (!cleanGoal) throw new PlanError("A plan needs a goal.");
   if (cleanGoal.length < MIN_TEXT) {
     throw new PlanError(
@@ -99,9 +277,12 @@ export function createPlan(goal: string, steps: unknown[]): Plan {
     );
   }
 
-  const cleaned = steps.map(normalisePlanStepText).filter(Boolean);
+  const cleaned = coercePlanSteps(steps).map(normalisePlanStepText).filter(Boolean);
   if (cleaned.length === 0) {
-    throw new PlanError("A plan needs at least one step.");
+    throw new PlanError(
+      "A plan needs at least one step. Pass steps as an array of sentences, " +
+        "not one string and not empty labels."
+    );
   }
   if (cleaned.length > MAX_STEPS) {
     throw new PlanError(
@@ -110,16 +291,16 @@ export function createPlan(goal: string, steps: unknown[]): Plan {
     );
   }
 
-  const tooShort = cleaned.find((step) => step.length < MIN_TEXT);
-  if (tooShort) {
+  const usable = cleaned.filter((step) => step.length >= MIN_STEP);
+  if (usable.length === 0) {
     throw new PlanError(
-      `"${tooShort}" is not a step — describe the actual work, not a label.`
+      `"${cleaned[0]}" is not a step — describe the actual work, not a label.`
     );
   }
 
   return {
     goal: cleanGoal,
-    steps: cleaned.map((text, i) => ({ id: i + 1, text, state: "todo" })),
+    steps: usable.map((text, i) => ({ id: i + 1, text, state: "todo" })),
     revision: 1,
     history: [],
   };
@@ -141,7 +322,29 @@ export function createPlan(goal: string, steps: unknown[]): Plan {
  * something already proved comes back already done — so a rewrite can
  * reorganise the remaining work but cannot un-know what happened.
  */
-export function replacePlan(previous: Plan | null, next: Plan): Plan {
+/** Has anything on this plan actually been proved? */
+export function planHasProvenWork(plan: Plan): boolean {
+  return (
+    plan.history.length > 0 || plan.steps.some((step) => step.state === "done")
+  );
+}
+
+export interface ReplacePlanOptions {
+  /**
+   * Allow a smaller plan even when work remains.
+   *
+   * Used for the first make_plan of a new user message that inherited an
+   * unfinished plan from a previous turn. Mid-run shrink-to-escape stays
+   * refused — see the default path below.
+   */
+  allowShrink?: boolean;
+}
+
+export function replacePlan(
+  previous: Plan | null,
+  next: Plan,
+  options: ReplacePlanOptions = {}
+): Plan {
   if (!previous) return next;
 
   /*
@@ -156,11 +359,22 @@ export function replacePlan(previous: Plan | null, next: Plan): Plan {
    * has fewer steps than the old one had REMAINING, the model is not
    * re-planning, it is discarding. That is refused, with the count, so the
    * correction is obvious.
+   *
+   * Two exceptions, both real "Could not set plan" loops:
+   *
+   *   - A draft (nothing proved) rewritten as two or more steps. The first
+   *     guess is often wrong once the files have been read; locking it in
+   *     makes every later make_plan fail. A one-step rewrite is still the
+   *     original escape and stays refused.
+   *   - allowShrink, for a leftover plan inherited by a new user message.
    */
   const remaining = previous.steps.filter(
     (s) => s.state !== "done" && s.state !== "blocked"
   );
-  if (remaining.length > 0 && next.steps.length < remaining.length) {
+  const shrinking =
+    remaining.length > 0 && next.steps.length < remaining.length;
+  const draftRewrite = !planHasProvenWork(previous) && next.steps.length >= 2;
+  if (shrinking && !options.allowShrink && !draftRewrite) {
     throw new PlanError(
       `The new plan has ${next.steps.length} step` +
         `${next.steps.length === 1 ? "" : "s"} but ${remaining.length} were ` +

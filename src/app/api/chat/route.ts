@@ -30,6 +30,7 @@ import {
   createPlan,
   replacePlan,
   updatePlan,
+  readPlanToolArgs,
   formatPlan,
   planSummary,
   planProgress,
@@ -129,6 +130,17 @@ const MAX_OUTPUT_TOKENS = 65536;
  * Strips markdown noise, collapses whitespace and cuts on a word boundary so
  * the sidebar shows "Make an html game" rather than a truncated blob.
  */
+/** Short chip for a failed make_plan — the full reason is in the tool body. */
+function planFailSummary(detail: string): string {
+  if (/outstanding/i.test(detail)) return "Could not set plan — leftover steps remain";
+  if (/not a step/i.test(detail)) return "Could not set plan — a step was only a label";
+  if (/not a goal/i.test(detail)) return "Could not set plan — goal was too vague";
+  if (/at least one step/i.test(detail)) return "Could not set plan — no usable steps";
+  if (/too many/i.test(detail)) return "Could not set plan — too many steps";
+  if (/needs a goal/i.test(detail)) return "Could not set plan — missing goal";
+  return "Could not set plan";
+}
+
 function deriveTitle(message: string): string {
   const cleaned = message
     .replace(/```[\s\S]*?```/g, " ")
@@ -1053,10 +1065,17 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          * be worse than having none.
          */
         let plan: Plan | null = null;
+        /*
+         * A leftover unfinished plan from a previous message must not lock
+         * make_plan. Mid-run shrink-to-escape stays refused; the first
+         * make_plan of a NEW user message (not Resume) may replace it.
+         */
+        let allowFirstPlanShrink = false;
         if (workspaceEnabled) {
           const saved = await readPlan(workspace);
           if (saved && !planIsComplete(saved)) {
             plan = saved;
+            allowFirstPlanShrink = !resumeMessageId;
             send({
               type: "plan",
               goal: plan.goal,
@@ -2340,10 +2359,6 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                * through it would make every tool call carry state it does not
                * use.
                */
-              const pArgs = parsed.value as {
-                goal?: unknown;
-                steps?: unknown;
-              };
               try {
                 /*
                  * Re-planning keeps what was already proved.
@@ -2353,18 +2368,18 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                  * it done. replacePlan carries verified work forward, so a
                  * rewrite can reorganise what is left but cannot erase what
                  * happened.
+                 *
+                 * Arguments are coerced first: a numbered string, {content}
+                 * objects, or a leftover unfinished plan used to surface as
+                 * the generic "Could not set plan" the user kept hitting.
                  */
+                const planned = readPlanToolArgs(parsed.value);
                 plan = replacePlan(
                   plan,
-                  createPlan(
-                    String(pArgs.goal ?? ""),
-                    // The schema asks for strings, but some models send
-                    // {title, description}. createPlan normalises that shape;
-                    // String(object) is the literal "[object Object]" shown in
-                    // every plan row in Screenshot_168.
-                    Array.isArray(pArgs.steps) ? pArgs.steps : []
-                  )
+                  createPlan(planned.goal, planned.steps),
+                  { allowShrink: allowFirstPlanShrink }
                 );
+                allowFirstPlanShrink = false;
                 replanCount += 1;
                 // Saved immediately, not at the end of the run: Stop, a
                 // crash, or a closed tab must not lose it.
@@ -2383,12 +2398,12 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   summary: `Planned ${plan.steps.length} steps`,
                 };
               } catch (error) {
+                const detail =
+                  error instanceof Error ? error.message : "bad plan";
                 result = {
                   ok: false,
-                  content: `Error: ${
-                    error instanceof Error ? error.message : "bad plan"
-                  }`,
-                  summary: "Could not set plan",
+                  content: `Error: ${detail}`,
+                  summary: planFailSummary(detail),
                 };
               }
             } else if (call.function.name === "update_plan") {
