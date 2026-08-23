@@ -447,6 +447,36 @@ check(
   "an old chat sends only the length and fetches the body on demand"
 );
 
+console.log("\n9. scrolling up while it types yanks me back");
+
+/*
+ * Reported: while the answer is printing, scrolling up to read earlier text
+ * holds you for about two seconds and then dumps you back at the caret.
+ *
+ * scrollIntoView walks every ancestor and fights the user's gesture.
+ * Pin-in-React-state is stale across a token flush. Follow must set this
+ * pane's scrollTop only, and a wheel upward must unpin before the next
+ * token can drag them down.
+ */
+check(
+  "follow never uses scrollIntoView on the live transcript",
+  !chatArea.includes("messagesEndRef.current?.scrollIntoView"),
+  "that walks ancestors and yanks the view back to the caret"
+);
+check(
+  "it writes this pane's scrollTop instead",
+  chatArea.includes("el.scrollTop = el.scrollHeight")
+);
+check(
+  "a wheel upward unpins immediately",
+  chatArea.includes("e.deltaY < 0") && chatArea.includes("setPinned(false)"),
+  "waiting for onScroll lets the next token re-pin and snap them back"
+);
+check(
+  "the browser is not allowed to re-anchor the caret after we let go",
+  chatArea.includes("overflow-anchor:none")
+);
+
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
 );

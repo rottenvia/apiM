@@ -395,10 +395,18 @@ function MessageBubbleImpl({
   );
 
   // Keep the reasoning panel pinned to the newest text while "Follow" is on.
+  // A user scroll upward turns Follow off — same rule as the chat pane, so
+  // the incoming tokens do not drag the box back down under their finger.
+  const ignoreThinkScroll = useRef(false);
   useEffect(() => {
     if (!followThinking || !showThinking) return;
     const el = thinkingRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (!el) return;
+    ignoreThinkScroll.current = true;
+    el.scrollTop = el.scrollHeight;
+    requestAnimationFrame(() => {
+      ignoreThinkScroll.current = false;
+    });
   }, [message.reasoningContent, followThinking, showThinking]);
 
   const copyMessage = async () => {
@@ -993,6 +1001,17 @@ function MessageBubbleImpl({
                     <div
                       ref={thinkingRef}
                       aria-hidden={!showThinking}
+                      onWheel={(e) => {
+                        if (e.deltaY < 0) setFollowThinking(false);
+                      }}
+                      onScroll={() => {
+                        if (ignoreThinkScroll.current || !followThinking) return;
+                        const el = thinkingRef.current;
+                        if (!el) return;
+                        if (el.scrollHeight - el.scrollTop - el.clientHeight > 24) {
+                          setFollowThinking(false);
+                        }
+                      }}
                       className="thinking-body-text max-h-80 overflow-y-auto whitespace-pre-wrap break-words px-3 pb-2.5 font-sans text-[13px] leading-5 [overscroll-behavior:contain]"
                     >
                       {/*
