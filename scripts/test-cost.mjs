@@ -267,7 +267,9 @@ check("every round is charged", /chargeRound\(/.test(route));
 check("the limit is checked in the agent loop", /checkBudget\(/.test(route));
 check(
   "a budget stop leaves the reply resumable",
-  /hitOutputCeiling \|\| stoppedByBudget/.test(route),
+  /hitOutputCeiling/.test(route) &&
+    /stoppedByBudget/.test(route) &&
+    /resumeState: unfinished/.test(route),
   "otherwise hitting the cap throws away everything it paid for"
 );
 check(

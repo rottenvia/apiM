@@ -234,6 +234,9 @@ type StreamEvent =
       usage: unknown;
       durationMs: number;
       model: string;
+      incomplete?: boolean;
+      canResume?: boolean;
+      stopReason?: string;
       reasoningDiagnostic: {
         expected: boolean;
         chars: number;
@@ -1641,6 +1644,12 @@ export default function Home() {
                   usage,
                   model: evt.model,
                   durationMs: evt.durationMs,
+                  // A limit-stop must land as Resume on the SAME bubble.
+                  // Ignoring these flags made every `done` look finished, so
+                  // the next send opened a new thinking box from scratch.
+                  incomplete: evt.incomplete === true,
+                  canResume: evt.canResume === true || evt.incomplete === true,
+                  errorNotice: evt.stopReason || undefined,
                 });
                 if (evt.conversationId) {
                   setCurrentConvId(evt.conversationId);
@@ -1705,18 +1714,24 @@ export default function Home() {
         // Stream ended without a terminal frame (dropped connection).
         if (!sawError) {
           setMessages((prev) =>
-            prev.map((m) =>
-              m.id === streamingId && m.isStreaming
-                ? {
-                    ...m,
-                    ...finalMeta,
-                    isStreaming: false,
-                    content:
-                      m.content ||
-                      "⚠️ The connection closed before a reply arrived.",
-                  }
-                : m
-            )
+            prev.map((m) => {
+              if (m.id !== streamingId || !m.isStreaming) return m;
+              const hadWork = Boolean(
+                m.content?.trim() ||
+                  m.reasoningContent?.trim() ||
+                  m.toolEvents?.length
+              );
+              return {
+                ...m,
+                ...finalMeta,
+                isStreaming: false,
+                incomplete: true,
+                canResume: hadWork,
+                content:
+                  m.content ||
+                  "⚠️ The connection closed before a reply arrived.",
+              };
+            })
           );
         }
       } catch (err) {
@@ -1724,7 +1739,15 @@ export default function Home() {
           // Keep whatever streamed in, but mark it stopped. Without this the
           // partial text was later sent back as a completed reply, so the
           // model answered the abandoned question instead of the new one.
-          finish({ incomplete: true });
+          // canResume must be set: incomplete-only used to show "Try again"
+          // and rebuild the thinking box from scratch.
+          const current = messagesRef.current.find((m) => m.id === streamingId);
+          const hadWork = Boolean(
+            current?.content?.trim() ||
+              current?.reasoningContent?.trim() ||
+              current?.toolEvents?.length
+          );
+          finish({ incomplete: true, canResume: hadWork });
         } else {
           finish({
             content: `⚠️ Couldn't reach the server: ${

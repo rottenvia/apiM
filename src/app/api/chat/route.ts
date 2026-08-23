@@ -87,8 +87,10 @@ import { fetchWithRetry } from "@/lib/retry";
 import {
   MAX_AUTO_REVIVES,
   detectPrematureStop,
+  prematureStopNotice,
   reviveInstruction,
 } from "@/lib/revive";
+import type { PrematureStopReason } from "@/lib/revive";
 import { extractReasoningDelta } from "@/lib/reasoning-stream";
 import { loadScopedConversationHistory } from "@/lib/chat-history";
 import {
@@ -381,6 +383,15 @@ type StreamEvent =
       /** Wall-clock milliseconds from request start to final token. */
       durationMs: number;
       model: string;
+      /**
+       * True when the reply stopped unfinished and Resume should keep the
+       * same transcript (output ceiling, budget, or an inner-limit abort).
+       * The live UI used to ignore this and treat every `done` as complete,
+       * so a limit-stop looked finished and the next send started over.
+       */
+      incomplete?: boolean;
+      canResume?: boolean;
+      stopReason?: string;
       reasoningDiagnostic: {
         expected: boolean;
         chars: number;
@@ -1427,6 +1438,12 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         let hitOutputCeiling = false;
         /** Set when the spending limit ended the run rather than the model. */
         let stoppedByBudget = false;
+        /**
+         * Inner-limit / mid-task stop that auto-revive could not finish.
+         * Must stay resumable: treating it as a complete `done` is why
+         * Resume vanished and the next send opened a new thinking box.
+         */
+        let stoppedPrematurely: PrematureStopReason | null = null;
         const budget = createBudget(budgetUsd);
         /**
          * What the previous round cost, used to predict the next one. A limit
@@ -1979,7 +1996,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
            * the one in flight is lost, and now it is asked for again rather
            * than abandoned.
            */
-          const truncated = roundFinishReason === "length";
+          const truncated = /^(length|max_tokens)$/i.test(roundFinishReason);
 
           if (truncated && calls.length === 0) {
             // Plain prose cut short. Ask for the rest instead of stopping —
@@ -2142,6 +2159,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             const premature = detectPrematureStop({
               content: assistantContent,
               roundContent,
+              reasoning: reasoningContent,
               toolRounds,
               toolsUsed: toolsUsedThisRun,
               planComplete: plan ? planProgress(plan).complete : null,
@@ -2171,6 +2189,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               send({ type: "status", stage: "working" });
               continue;
             }
+            if (premature) stoppedPrematurely = premature;
             break;
           }
 
@@ -2985,7 +3004,12 @@ Ask before you build the wrong thing. If a choice would change what you produce 
 
         // ---------------- Final save ----------------
         // The assistant message has been checkpointed throughout the stream;
-        // this last write clears the `incomplete` flag and records usage.
+        // this last write clears the `incomplete` flag and records usage —
+        // unless the run is still unfinished and Resume must keep the work.
+        const unfinished =
+          hitOutputCeiling ||
+          stoppedByBudget ||
+          Boolean(stoppedPrematurely);
         try {
           await upsertMessage(convId, title, {
             id: assistantMsgId,
@@ -3018,14 +3042,17 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             // incomplete so Resume is offered — otherwise hitting the cap
             // would throw away everything it just paid for, which is the
             // opposite of what a spending limit is for.
-            incomplete: hitOutputCeiling || stoppedByBudget,
+            //
+            // An inner-limit abort (Ox stopping mid-thought) used to fall
+            // through as a normal done. Resume vanished; the next send
+            // opened a new thinking box and rebuilt from scratch.
+            incomplete: unfinished,
             // Kept only while there is something to resume. A finished reply
             // drops it: it is the largest field in the record and resuming a
             // complete answer means nothing.
-            resumeState:
-              hitOutputCeiling || stoppedByBudget
-                ? { toolRounds, continuations, messages: transcript }
-                : null,
+            resumeState: unfinished
+              ? { toolRounds, continuations, messages: transcript }
+              : null,
           });
           persisted = true;
         } catch (storeError) {
@@ -3138,6 +3165,13 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           usage: totalUsage.total_tokens ? { ...totalUsage } : usage,
           durationMs: Date.now() - startedAt,
           model,
+          incomplete: unfinished,
+          canResume: unfinished,
+          stopReason: stoppedPrematurely
+            ? prematureStopNotice(stoppedPrematurely)
+            : hitOutputCeiling
+              ? "The answer hit the output limit before it finished"
+              : undefined,
           reasoningDiagnostic: {
             expected: thinkingEnabled,
             chars: reasoningContent.length,
