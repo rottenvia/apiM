@@ -43,6 +43,36 @@ export type TranscriptMessage =
   | { role: "tool"; tool_call_id: string; content: string };
 
 /**
+ * Qwen's chat template (llama-server --jinja) only accepts a system
+ * message at index 0. A later one raises:
+ *   "System message must be at the beginning."
+ *
+ * The agent loop appends the file tree, plan and plugin block as extra
+ * system messages so DeepSeek can cache the prefix. Those stay in the
+ * stored transcript. On the wire for Qwen they are folded into the first
+ * system message, in order, so nothing is dropped.
+ */
+export function foldSystemMessagesToFront(
+  messages: TranscriptMessage[]
+): TranscriptMessage[] {
+  const systems: string[] = [];
+  const rest: TranscriptMessage[] = [];
+  let laterSystem = false;
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    if (m.role === "system") {
+      if (i > 0) laterSystem = true;
+      if (m.content) systems.push(m.content);
+      continue;
+    }
+    rest.push(m);
+  }
+  if (!laterSystem) return messages;
+  if (systems.length === 0) return rest;
+  return [{ role: "system", content: systems.join("\n\n") }, ...rest];
+}
+
+/**
  * Strip fields DeepSeek rejects and drop empty ones.
  *
  * An assistant turn with `content: null` is valid when it only called tools,

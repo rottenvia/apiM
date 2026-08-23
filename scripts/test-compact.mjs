@@ -230,7 +230,7 @@ console.log("\n6. It is wired into both paths");
 check(
   "the live agent loop compacts before sending",
   /const compacted = compactTranscript\(pruned\.messages\)/.test(route) &&
-    /messages: serializeForApi\(compacted\.messages\)/.test(route)
+    /serializeForApi\(wireMessages\)/.test(route)
 );
 check(
   "resuming compacts the replayed attempt",
