@@ -22,7 +22,8 @@ import {
   buildPluginDirectives,
   PLUGIN_DIRECTIVES_MARKER,
 } from "@/lib/plugins";
-import { WORKSPACE_TOOLS, runTool } from "@/lib/tools";
+import { workspaceToolsFor, runTool } from "@/lib/tools";
+import { modelHasOpenToolLimits } from "@/lib/tool-limits";
 import type { ToolResult } from "@/lib/tools";
 import { buildWorkspaceContext } from "@/lib/workspace-context";
 import { TreeTracker } from "@/lib/tree-delta";
@@ -915,12 +916,16 @@ export async function POST(req: NextRequest) {
         const hasBrowser = workspaceEnabled ? await browserAvailable() : false;
 
         const workspaceInstruction = workspaceEnabled
-          ? `\n\nYou have a workspace on the user's machine and tools to work in it. Prefer creating real files over printing code in chat: the user wants working files, not snippets to copy. List or read before editing so your replacements match exactly.\n\nYou can also run code with run_command. After writing something runnable, run it and check the output rather than assuming it works. If it fails, read the error, fix the file, and run it again. Each command needs the user's approval, so keep them few and purposeful, and say briefly why in the reason field. There is no shell. run_command waits for the program to finish, so use it only for things that exit — scripts, tests, installs. You can install packages: pip install and npm install both work and go into this workspace, not the user's system, so install what you need rather than rewriting code to avoid a dependency. For anything that keeps running, such as a dev server or a watcher, use start_process instead: it returns straight away, and you can read its output with read_process and stop it with stop_process. Always stop what you started once you are done with it. Before anything that takes more than two or three actions, call make_plan: write down what finished looks like and the steps to get there, including how you will CHECK each one. On a long task your own reasoning from twenty rounds ago is gone, so without a written plan you will forget requirements from the first message and stop early because the work so far looks finished. When you work something out that a later turn would need - why an approach is dead, what a function actually does, which build or file is correct and why, an offset or value you verified, a command's exact error and what fixed it - call note_finding IMMEDIATELY, before continuing. Those findings are listed to you every turn and survive compaction, so you never have to re-read a file or re-run a command to remember it. Treat the findings list as your working memory: at the START of every turn, before doing anything, read the active findings and use them. When you find a finding is wrong or superseded, call note_finding with status='disproved' and the corrected claim so the list stays accurate and does not fill with stale notes. Do not record trivialities; one specific, evidence-backed line per finding. Keep it current with update_plan — a step is only done when you can say how you verified it.
+          ? `\n\nYou have a workspace on the user's machine and tools to work in it. Prefer creating real files over printing code in chat: the user wants working files, not snippets to copy. List or read before editing so your replacements match exactly.${
+              modelHasOpenToolLimits(model)
+                ? " This model has no per-call tool ceilings: read_file returns the whole file, read_files / write_files / edit_files accept as many items as you send, search_files returns every match, and fetch_url returns the full page."
+                : ""
+            }\n\nYou can also run code with run_command. After writing something runnable, run it and check the output rather than assuming it works. If it fails, read the error, fix the file, and run it again. Each command needs the user's approval, so keep them few and purposeful, and say briefly why in the reason field. There is no shell. run_command waits for the program to finish, so use it only for things that exit — scripts, tests, installs. You can install packages: pip install and npm install both work and go into this workspace, not the user's system, so install what you need rather than rewriting code to avoid a dependency. For anything that keeps running, such as a dev server or a watcher, use start_process instead: it returns straight away, and you can read its output with read_process and stop it with stop_process. Always stop what you started once you are done with it. Before anything that takes more than two or three actions, call make_plan: write down what finished looks like and the steps to get there, including how you will CHECK each one. On a long task your own reasoning from twenty rounds ago is gone, so without a written plan you will forget requirements from the first message and stop early because the work so far looks finished. When you work something out that a later turn would need - why an approach is dead, what a function actually does, which build or file is correct and why, an offset or value you verified, a command's exact error and what fixed it - call note_finding IMMEDIATELY, before continuing. Those findings are listed to you every turn and survive compaction, so you never have to re-read a file or re-run a command to remember it. Treat the findings list as your working memory: at the START of every turn, before doing anything, read the active findings and use them. When you find a finding is wrong or superseded, call note_finding with status='disproved' and the corrected claim so the list stays accurate and does not fill with stale notes. Do not record trivialities; one specific, evidence-backed line per finding. Keep it current with update_plan — a step is only done when you can say how you verified it.
 
 Work to the end. Do not hand back a half-finished task with a summary that reads as if it is complete: if something cannot be done, say so plainly and say why. Check your own work before claiming it works — run the tests, call the endpoint, open the page. To compile or build anything, call build_project instead of typing msbuild/cmake/dotnet/cargo yourself: it finds the installed Visual Studio/MSBuild/compiler automatically (including vswhere), restores packages, builds Release x64 by default, and hands you the compiler errors so you can fix them and rebuild.
 
 Ask before you build the wrong thing. If a choice would change what you produce and you cannot settle it by reading a file or looking it up, call ask_user — one question up front is far cheaper than twenty rounds of work in the wrong direction, and the user would rather be asked than handed something they have to throw away. Ask early, while the work is cheap to redo, not after you have committed to an approach. Offer concrete options with a sensible default so it is one click. Do not ask about things you can find out yourself, and do not ask the same thing twice. When you are done, briefly say what you changed and whether it ran.\n\nUse search_files to find where something lives rather than opening files one at a time, and read_files when you already know you need several — each separate call costs a whole round.\n\nYou can also look at the live web. When a task depends on what is actually on a page — its markup, its data, its exact wording — fetch it rather than reasoning from memory. Before writing anything that targets a site, such as a content script, a userscript or a scraper, call inspect_page on the real URL and use the ids and classes it returns. Never invent a selector you have not seen: a plausible-looking one that does not exist produces code that runs and does nothing, which is worse than admitting you need to look. Use fetch_url to read a page, fetch_url with raw for its HTML, and download_file to save something from a URL straight into the workspace. ${canSearch ? "When you hit something you do not know — an unfamiliar error, a library's current API — use web_search rather than guessing, because a wrong assumption compounds over every round after it. One web_search costs several model calls of its own, so make the query specific and read what comes back before searching again." : "There is no web_search in this workspace — no Tavily key is set in Settings. fetch_url still works if you already know the URL. When you genuinely do not know something and cannot look it up, say so instead of guessing, and name what you would have searched for."}\n\nIf an edit turns out to be wrong, undo_file puts that file back exactly as it was; reverting is safer than patching your own mistake. restore_snapshot rolls the whole workspace back to a restore point, which is a much larger step — list_snapshots first, and say what you are undoing before you do it. read_document opens PDF, Word, Excel, PowerPoint, EPUB and ODT files, which read_file cannot. inspect_binary statically reads Windows EXEs/DLLs without executing them. Select only the layers the request needs: analyses:["decompile"] to test Ghidra/ILSpy, ["strings"] for a strings dump, ["entropy"], ["carve"], ["dependencies"], or ["capa"] for those individual jobs, and ["all"] only when the user asks to check everything. Omitted analyses means a cheap summary, not everything. After download_file of a large DLL, start with summary/strings and then decompile only the functions you name in focus_terms for THAT file — enable a specific analyzer such as Decompiler Parameter ID via enable_analyzers if you need it. Do not dump the whole binary and do not rely on a default hook list. Ghidra leftover after a closed or refreshed tab has no inspect UI: call list_processes and stop_process id=leftover to kill it. Decompiling is expensive and its artifacts persist on disk; the system message lists every executable already analyzed in this workspace with its hash and artifact paths - if the binary you need is already there, read those artifacts with read_file instead of running inspect_binary again, and never re-decompile the same hash unless the user asks you to. The moment you reach a conclusion about a binary - which one works, what is flawed, where the good build is, what a hook actually does - call note_binary so that verdict survives Stop and compaction instead of being paid for twice. write_files creates several files in one call, which is worth using whenever you are scaffolding.\n\nBatch the changes that belong together. move_file renames in one step instead of read-write-delete. edit_files applies several replacements at once, across one file or many. replace_in_files changes the same text everywhere it appears, which is what you want for renaming a function or an import path — doing that file by file costs a round each. When a string might occur somewhere you did not intend, run it with preview first and read the list before committing.${
-              visionApiKey
+              visionApiKey || modelHasOpenToolLimits(model)
                 ? " You can also view_image to look at a screenshot or mockup saved in the workspace."
                 : ""
             }${
@@ -1469,7 +1474,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         // Write, run, read the error, fix, run again is four rounds for a
         // single bug. Real work is several of those plus the reading it takes
         // to find the right file, so a hard cap used to cut tasks off mid-fix.
-        // There is no round budget: the model keeps going until it stops,
+        // There is no round budit stops,
         // the user presses Stop, or a spending limit (if one is set) fires.
         let round = 0;
         // Carried across Resume so the ask-early nudge and plan checks still
@@ -1668,11 +1673,14 @@ Ask before you build the wrong thing. If a choice would change what you produce 
              *
              * A model given a tool it has no key for will call it, get an
              * error, apologise, and try something worse — a wasted round and
-             * a worse answer. view_image needs a vision key; web_search needs
-             * a Tavily one.
+             * a worse answer. view_image needs a vision key except on Ox
+             * Alpha, which can use free local OCR; web_search needs a
+             * Tavily or Exa key.
              */
-            dsRequestBody.tools = WORKSPACE_TOOLS.filter((t) => {
-              if (t.function.name === "view_image") return Boolean(visionApiKey);
+            dsRequestBody.tools = workspaceToolsFor(model).filter((t) => {
+              if (t.function.name === "view_image") {
+                return Boolean(visionApiKey) || modelHasOpenToolLimits(model);
+              }
               if (t.function.name === "web_search")
                 return Boolean(tavilyApiKey || exaApiKey);
               // The browser is an optional install. Offering it when Chromium
@@ -2345,6 +2353,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               prefetched.set(
                 call.id,
                 runTool(workspace, call.function.name, parsedArgs.value, {
+                  modelId: model,
                   visionKey: visionApiKey,
                   visionModel,
                   searchKey: tavilyApiKey,
@@ -2840,12 +2849,13 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                     "start_process",
                     parsed.value,
                     {
+                      modelId: model,
                       visionKey: visionApiKey,
                       visionModel,
                       searchKey: tavilyApiKey,
-                  exaKey: exaApiKey,
+                      exaKey: exaApiKey,
                       deepseekKey: helper.apiKey,
-                  planner,
+                      planner,
                       searchProfile,
                       signal: runSignal,
                     }
@@ -2881,6 +2891,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 call.function.name,
                 parsed.value,
                 {
+                  modelId: model,
                   visionKey: visionApiKey,
                   visionModel,
                   searchKey: tavilyApiKey,

@@ -208,7 +208,7 @@ const DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000;
  */
 export async function downloadResource(
   rawUrl: string,
-  options: { signal?: AbortSignal; allowLocal?: boolean } = {}
+  options: { signal?: AbortSignal; allowLocal?: boolean; maxBytes?: number } = {}
 ): Promise<DownloadedResource> {
   let url = assertPublicUrl(rawUrl, {
     allowLoopback: options.allowLocal === true,
@@ -244,20 +244,21 @@ export async function downloadResource(
     );
   }
 
+  const downloadCap = options.maxBytes ?? MAX_DOWNLOAD_BYTES;
   const declared = Number(response.headers.get("content-length") ?? 0);
-  if (Number.isFinite(declared) && declared > MAX_DOWNLOAD_BYTES) {
+  if (Number.isFinite(declared) && declared > downloadCap) {
     throw new WebError(
       `That file is ${(declared / 1024 / 1024).toFixed(1)}MB, over the ${
-        MAX_DOWNLOAD_BYTES / 1024 / 1024
+        downloadCap / 1024 / 1024
       }MB download limit.`
     );
   }
 
   const data = new Uint8Array(await response.arrayBuffer());
-  if (data.byteLength > MAX_DOWNLOAD_BYTES) {
+  if (data.byteLength > downloadCap) {
     throw new WebError(
       `That file is ${(data.byteLength / 1024 / 1024).toFixed(1)}MB, over the ${
-        MAX_DOWNLOAD_BYTES / 1024 / 1024
+        downloadCap / 1024 / 1024
       }MB download limit.`
     );
   }
@@ -333,7 +334,12 @@ export function looksLikeAppShell(html: string, text: string): boolean {
  */
 export async function fetchPage(
   rawUrl: string,
-  options: { raw?: boolean; signal?: AbortSignal } = {}
+  options: {
+    raw?: boolean;
+    signal?: AbortSignal;
+    maxBytes?: number;
+    maxChars?: number;
+  } = {}
 ): Promise<FetchedPage> {
   const url = assertPublicUrl(rawUrl);
 
@@ -378,10 +384,12 @@ export async function fetchPage(
 
   const buffer = await res.arrayBuffer();
   const bytes = buffer.byteLength;
-  if (bytes > MAX_FETCH_BYTES) {
+  const byteCap = options.maxBytes ?? MAX_FETCH_BYTES;
+  const charCap = options.maxChars ?? MAX_FETCH_CHARS;
+  if (bytes > byteCap) {
     throw new WebError(
       `That page is ${(bytes / 1024 / 1024).toFixed(1)}MB, over the ${
-        MAX_FETCH_BYTES / 1024 / 1024
+        byteCap / 1024 / 1024
       }MB limit.`
     );
   }
@@ -390,7 +398,7 @@ export async function fetchPage(
   const isHtml = /html|xml/i.test(contentType) || /^\s*<(!doctype|html)/i.test(body);
 
   const text = isHtml ? htmlToText(body) : body;
-  const truncated = text.length > MAX_FETCH_CHARS;
+  const truncated = text.length > charCap;
 
   return {
     url: res.url || url.toString(),
@@ -398,11 +406,11 @@ export async function fetchPage(
     contentType: contentType.split(";")[0] || "unknown",
     title: isHtml ? extractTitle(body) : "",
     needsBrowser: isHtml ? looksLikeAppShell(body, text) : false,
-    text: truncated ? text.slice(0, MAX_FETCH_CHARS) : text,
+    text: truncated ? text.slice(0, charCap) : text,
     html:
       options.raw && isHtml
-        ? body.length > MAX_FETCH_CHARS
-          ? body.slice(0, MAX_FETCH_CHARS)
+        ? body.length > charCap
+          ? body.slice(0, charCap)
           : body
         : undefined,
     truncated,

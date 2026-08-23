@@ -648,7 +648,7 @@ check(
 );
 check(
   "and it stops after a sane number of matches",
-  /MAX_MATCHES = 20/.test(toolsSrc3)
+  /MAX_MATCHES = limits\.fetchFindMatches/.test(toolsSrc3)
 );
 check(
   "an invalid regex falls back to a literal search",
