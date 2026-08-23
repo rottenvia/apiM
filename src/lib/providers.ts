@@ -19,6 +19,14 @@ import {
   type ProviderId,
   type ThinkingStyle,
 } from "@/lib/models";
+import {
+  OX_ATTEMPT_TIMEOUT_MS,
+  OX_HOSTS,
+  isOxProvider,
+  oxHostInfo,
+  parseOxHost,
+  type OxHost,
+} from "@/lib/ox-host";
 
 export {
   DEFAULT_LOCAL_API_MODEL,
@@ -35,6 +43,10 @@ export {
 export interface ChatCredentials {
   deepseekApiKey?: string | null;
   opencodeApiKey?: string | null;
+  /** OpenRouter key — used when Ox Alpha's host is set to OpenRouter. */
+  openrouterApiKey?: string | null;
+  /** Which Ox Alpha front door to hit. Defaults to OpenCode Zen. */
+  oxHost?: OxHost | string | null;
   /** OpenAI-compatible host, e.g. http://127.0.0.1:18765/v1 */
   localBaseUrl?: string | null;
   /** Optional. The in-app sidecar ignores it; some custom hosts require one. */
@@ -52,6 +64,8 @@ export interface ResolvedTarget {
   baseUrl: string;
   /** Value of the Chat Completions `model` field. */
   apiModel: string;
+  /** Set when this target is Ox Alpha, so the route can pick headers/timeout. */
+  oxHost?: OxHost;
 }
 
 export interface ResolveFailure {
@@ -92,7 +106,7 @@ export function normalizeOpenAiBase(url: string): string {
   return u;
 }
 
-export function providerBaseUrl(id: ProviderId): string {
+export function providerBaseUrl(id: ProviderId, host?: OxHost): string {
   if (id === "deepseek") {
     return cleanBase(process.env.DEEPSEEK_BASE_URL ?? DEFAULT_BASE.deepseek);
   }
@@ -101,7 +115,17 @@ export function providerBaseUrl(id: ProviderId): string {
       process.env.LOCAL_BASE_URL ?? DEFAULT_BASE.local
     );
   }
+  if (host === "openrouter") {
+    return cleanBase(process.env.OPENROUTER_BASE_URL ?? OX_HOSTS.openrouter.baseUrl);
+  }
   return cleanBase(process.env.OPENCODE_BASE_URL ?? DEFAULT_BASE.opencode);
+}
+
+export function keyForOx(creds: ChatCredentials): string {
+  const host = parseOxHost(creds.oxHost);
+  const raw =
+    host === "openrouter" ? creds.openrouterApiKey : creds.opencodeApiKey;
+  return typeof raw === "string" ? raw.trim() : "";
 }
 
 export function keyForProvider(
@@ -114,8 +138,8 @@ export function keyForProvider(
     // string so the Authorization header is well-formed.
     return typeof raw === "string" && raw.trim() ? raw.trim() : "local";
   }
-  const raw =
-    id === "opencode" ? creds.opencodeApiKey : creds.deepseekApiKey;
+  if (id === "opencode") return keyForOx(creds);
+  const raw = creds.deepseekApiKey;
   return typeof raw === "string" ? raw.trim() : "";
 }
 
@@ -133,16 +157,42 @@ export function resolveChatTarget(
   creds: ChatCredentials
 ): ResolveSuccess | ResolveFailure {
   const model = getModel(modelId);
+
+  if (model.provider === "opencode") {
+    const host = parseOxHost(creds.oxHost);
+    const gate = oxHostInfo(host);
+    const apiKey = keyForOx(creds);
+    if (!apiKey) {
+      return {
+        ok: false,
+        error:
+          host === "openrouter"
+            ? "An OpenRouter API key is required for Ox Alpha. Add one in Settings, or switch the Ox host back to OpenCode Zen."
+            : "An OpenCode Zen API key is required for Ox Alpha. Add one in Settings (opencode.ai/auth), or switch the Ox host to OpenRouter.",
+      };
+    }
+    return {
+      ok: true,
+      target: {
+        model,
+        providerId: "opencode",
+        providerName: gate.label,
+        thinkingStyle: "openai",
+        apiKey,
+        baseUrl: providerBaseUrl("opencode", host),
+        apiModel: gate.apiModel,
+        oxHost: host,
+      },
+    };
+  }
+
   const apiKey = keyForProvider(model.provider, creds);
   const info = getProviderInfo(model.provider);
 
   if (model.provider !== "local" && !apiKey) {
     return {
       ok: false,
-      error:
-        model.provider === "opencode"
-          ? "An OpenCode API key is required for Ox Alpha. Add one in Settings (opencode.ai/auth)."
-          : "A DeepSeek API key is required for this model. Add one in Settings.",
+      error: "A DeepSeek API key is required for this model. Add one in Settings.",
     };
   }
 
@@ -195,19 +245,47 @@ export function resolveHelperTarget(
   }
 
   const ox = MODELS.find((m) => m.id === "ox-alpha");
-  if (ox && keyForProvider("opencode", creds)) {
-    return {
-      model: ox,
-      providerId: "opencode",
-      providerName: getProviderInfo("opencode").name,
-      thinkingStyle: "openai",
-      apiKey: keyForProvider("opencode", creds),
-      baseUrl: providerBaseUrl("opencode"),
-      apiModel: ox.apiModel,
-    };
+  if (ox) {
+    const preferred = parseOxHost(creds.oxHost);
+    const order: OxHost[] = preferred === "openrouter" ? ["openrouter", "zen"] : ["zen", "openrouter"];
+    for (const host of order) {
+      const raw =
+        host === "openrouter" ? creds.openrouterApiKey : creds.opencodeApiKey;
+      const apiKey = typeof raw === "string" ? raw.trim() : "";
+      if (!apiKey) continue;
+      const gate = oxHostInfo(host);
+      return {
+        model: ox,
+        providerId: "opencode",
+        providerName: gate.label,
+        thinkingStyle: "openai",
+        apiKey,
+        baseUrl: providerBaseUrl("opencode", host),
+        apiModel: gate.apiModel,
+        oxHost: host,
+      };
+    }
   }
 
   return null;
+}
+
+/** Headers for a Chat Completions POST. OpenRouter asks for a referer. */
+export function completionHeaders(target: ResolvedTarget): Record<string, string> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${target.apiKey}`,
+  };
+  if (target.oxHost === "openrouter") {
+    headers["HTTP-Referer"] = "https://github.com/eggyeg/apiM";
+    headers["X-Title"] = "apiM";
+  }
+  return headers;
+}
+
+/** How long one hung attempt may sit before we treat it as a miss. */
+export function attemptTimeoutMs(target: ResolvedTarget): number {
+  return isOxProvider(target.providerId) ? OX_ATTEMPT_TIMEOUT_MS : 280_000;
 }
 
 const VALID_EFFORTS = new Set(["low", "high", "max"]);
@@ -297,7 +375,10 @@ export function providerHttpError(
       `${providerName} is temporarily unavailable (${status}). ` +
       `This is their servers, not your API key.` +
       (noisy ? "" : ` ${trimmed}`) +
-      ` Wait a minute and try again.`
+      ` Wait a minute and try again.` +
+      (providerName === "OpenCode Zen" || providerName === "OpenRouter"
+        ? ` Or switch the Ox host in Settings.`
+        : "")
     );
   }
   return `${providerName} API error (${status})${detail ? `: ${detail}` : ""}`;
