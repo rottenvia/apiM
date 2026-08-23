@@ -171,6 +171,21 @@ export function pickLlamaAsset(
   return null;
 }
 
+/**
+ * Context the in-app sidecar actually opens.
+ *
+ * The catalog model is 262K, but that KV cache is another ~16 GB on top of
+ * the 17 GB weights. 80K is enough for the agent prompt + tools + a long
+ * turn, and with q8_0 KV it costs a few GB, not another model.
+ */
+export const SIDECAR_CTX = 81_920;
+
+/** Output ceiling on the local wire. Input + this must stay under SIDECAR_CTX. */
+export const SIDECAR_MAX_OUTPUT = 6_144;
+
+/** Rough token cost of the workspace tool schemas on the wire. */
+export const LOCAL_TOOL_RESERVE = 10_000;
+
 /** Args for the sidecar. Host is loopback-only on purpose. */
 export function sidecarArgs(
   ggufPath: string,
@@ -189,9 +204,22 @@ export function sidecarArgs(
     "--reasoning-format",
     "deepseek",
     "-c",
-    "16384",
+    String(SIDECAR_CTX),
     "-ngl",
     "99",
+    // q8_0 KV is ~half of f16. 80K at f16 would add several GB on a machine
+    // that already committed ~17 GB of weights.
+    "--cache-type-k",
+    "q8_0",
+    "--cache-type-v",
+    "q8_0",
+    // Smaller batches cut the prefill spike on a 73k-token agent prompt.
+    "-b",
+    "512",
+    "-ub",
+    "256",
+    "--parallel",
+    "1",
   ];
   // Without this the 27B is text-only even though the catalog model is a VLM.
   if (mmprojPath) {
@@ -209,7 +237,7 @@ export function engineHint(s: {
   if (s.running && s.ggufReady) {
     return s.mmprojReady === false
       ? "Sidecar is up, but the vision projector is missing — click Download so Qwen can see images and video."
-      : "Ready on this PC. The 27B is in a sidecar — this window only sends chat.";
+      : "Ready on this PC. The 27B weights are ~17 GB; 25–30 GB committed on a 32 GB machine is expected. This window only sends chat.";
   }
   if (s.ggufReady && s.serverReady) {
     return s.mmprojReady === false

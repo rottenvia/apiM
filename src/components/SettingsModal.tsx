@@ -955,7 +955,7 @@ export function SettingsModal({
                   >
                     <span className="block font-semibold">Qwen 3.8 27B</span>
                     <span className="text-[11px] opacity-70">
-                      On this PC · 262K context · thinking
+                      On this PC · 80K window · thinking
                     </span>
                   </button>
                 </div>

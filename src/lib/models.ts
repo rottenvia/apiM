@@ -196,7 +196,7 @@ export const MODELS: ModelInfo[] = [
     shortLabel: "Qwen 3.8",
     description:
       "Download in Settings. Your PC runs the 27B in a sidecar so this app stays light. Native vision — images and video, no cloud helper.",
-    specs: "262K context · native VLM · runs on your GPU · free",
+    specs: "80K window on this PC · ~17 GB weights · native VLM · free",
     resumeBlurb: "Qwen 3.8 27B on this PC",
     settingsSubtitle: "On this PC · 27B · thinking",
     mapsLowToHigh: false,

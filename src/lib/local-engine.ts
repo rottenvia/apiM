@@ -31,6 +31,7 @@ import {
   LLAMA_CPP_RELEASE_API,
   pickLlamaAsset,
   sidecarArgs,
+  SIDECAR_CTX,
   type EngineDownloadEvent,
   type EngineGpu,
   type EngineStatus,
@@ -406,28 +407,96 @@ export async function downloadEngine(
 
 let child: ChildProcess | null = null;
 
-export function stopEngine(): boolean {
-  const proc = child;
-  child = null;
-  if (!proc || proc.killed) {
-    return false;
-  }
+function killPid(pid: number): void {
   try {
-    if (process.platform === "win32" && proc.pid) {
-      spawn("taskkill", ["/pid", String(proc.pid), "/T", "/F"], {
+    if (process.platform === "win32") {
+      spawn("taskkill", ["/pid", String(pid), "/T", "/F"], {
         windowsHide: true,
       });
-    } else if (proc.pid) {
-      try {
-        process.kill(-proc.pid, "SIGTERM");
-      } catch {
-        proc.kill("SIGTERM");
-      }
+      return;
+    }
+    try {
+      process.kill(-pid, "SIGTERM");
+    } catch {
+      process.kill(pid, "SIGTERM");
     }
   } catch {
     /* already gone */
   }
-  return true;
+}
+
+/** Pid listening on the sidecar port — needed after a Next.js restart. */
+function listenerPidOnPort(port: number): number | null {
+  if (process.platform === "win32") {
+    const r = spawnSync("netstat", ["-ano", "-p", "tcp"], {
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    const re = new RegExp(
+      `127\\.0\\.0\\.1:${port}\\s+\\S+\\s+LISTENING\\s+(\\d+)`,
+      "i"
+    );
+    const m = re.exec(r.stdout || "");
+    const pid = m ? Number(m[1]) : NaN;
+    return Number.isFinite(pid) && pid > 0 ? pid : null;
+  }
+  const lsof = spawnSync(
+    "lsof",
+    ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"],
+    { encoding: "utf8" }
+  );
+  const fromLsof = Number((lsof.stdout || "").trim().split(/\s+/)[0]);
+  if (Number.isFinite(fromLsof) && fromLsof > 0) return fromLsof;
+  const fuser = spawnSync("fuser", [`${port}/tcp`], { encoding: "utf8" });
+  const fromFuser = Number((fuser.stdout || "").trim().split(/\s+/)[0]);
+  return Number.isFinite(fromFuser) && fromFuser > 0 ? fromFuser : null;
+}
+
+export function stopEngine(): boolean {
+  const proc = child;
+  child = null;
+  let killed = false;
+  if (proc && !proc.killed && proc.pid) {
+    killPid(proc.pid);
+    killed = true;
+  }
+  const leftover = listenerPidOnPort(ENGINE_PORT);
+  if (leftover) {
+    killPid(leftover);
+    killed = true;
+  }
+  return killed;
+}
+
+function parseSidecarCtx(data: unknown): number | null {
+  if (!data || typeof data !== "object") return null;
+  const o = data as Record<string, unknown>;
+  const settings = o.default_generation_settings;
+  if (settings && typeof settings === "object") {
+    const s = settings as Record<string, unknown>;
+    if (typeof s.n_ctx === "number") return s.n_ctx;
+    const params = s.params;
+    if (params && typeof params === "object") {
+      const n = (params as Record<string, unknown>).n_ctx;
+      if (typeof n === "number") return n;
+    }
+  }
+  if (typeof o.n_ctx === "number") return o.n_ctx;
+  return null;
+}
+
+/** How big a window the running sidecar actually opened. */
+export async function readSidecarCtx(): Promise<number | null> {
+  try {
+    const res = await fetch(`http://${ENGINE_HOST}:${ENGINE_PORT}/props`, {
+      cache: "no-store",
+      signal: AbortSignal.timeout(1_200),
+    });
+    if (!res.ok) return null;
+    return parseSidecarCtx(await res.json());
+  } catch {
+    return null;
+  }
 }
 
 async function waitForHealth(ms: number, signal?: AbortSignal): Promise<boolean> {
@@ -440,8 +509,22 @@ async function waitForHealth(ms: number, signal?: AbortSignal): Promise<boolean>
   return false;
 }
 
+async function waitUntilStopped(ms: number): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (!(await isEngineListening())) return;
+    await new Promise((r) => setTimeout(r, 150));
+  }
+}
+
 export async function startEngine(): Promise<{ ok: boolean; error?: string }> {
-  if (await isEngineListening()) return { ok: true };
+  if (await isEngineListening()) {
+    const ctx = await readSidecarCtx();
+    // Unknown ctx: leave it. Only bounce a sidecar we know is too small.
+    if (ctx === null || ctx >= SIDECAR_CTX) return { ok: true };
+    stopEngine();
+    await waitUntilStopped(8_000);
+  }
 
   const gguf = ggufPath();
   if ((await fileSize(gguf)) < GGUF_BYTES) {
