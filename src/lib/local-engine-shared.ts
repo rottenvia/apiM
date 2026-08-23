@@ -186,6 +186,12 @@ export const SIDECAR_MAX_OUTPUT = 6_144;
 /** Rough token cost of the workspace tool schemas on the wire. */
 export const LOCAL_TOOL_RESERVE = 10_000;
 
+/**
+ * Bump this when sidecar flags change so a running llama-server is
+ * restarted instead of keeping yesterday's args.
+ */
+export const SIDECAR_LAUNCH = "c81920-q8-mtp2";
+
 /** Args for the sidecar. Host is loopback-only on purpose. */
 export function sidecarArgs(
   ggufPath: string,
@@ -220,6 +226,13 @@ export function sidecarArgs(
     "256",
     "--parallel",
     "1",
+    // Qwen 3.8 ships an MTP draft head in the same GGUF. Two draft tokens
+    // is the safe default: ~1.5x decode, ~0.8 GB extra, same answers.
+    // n-max 8 is slower; we do not open that.
+    "--spec-type",
+    "draft-mtp",
+    "--spec-draft-n-max",
+    "2",
   ];
   // Without this the 27B is text-only even though the catalog model is a VLM.
   if (mmprojPath) {
