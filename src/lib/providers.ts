@@ -4,10 +4,13 @@
  * DeepSeek used to be the only provider. Ox Alpha is served by OpenCode Zen
  * at the same Chat Completions shape (`/chat/completions`), so the rest of
  * the agent loop stays identical — only the URL, key and on-the-wire model
- * id change.
+ * id change. Local Qwen 3.8 27B is the same loop again, pointed at Ollama,
+ * vLLM or llama.cpp on this machine.
  */
 
 import {
+  DEFAULT_LOCAL_API_MODEL,
+  DEFAULT_LOCAL_BASE_URL,
   DEFAULT_MODEL_ID,
   MODELS,
   getModel,
@@ -18,6 +21,8 @@ import {
 } from "@/lib/models";
 
 export {
+  DEFAULT_LOCAL_API_MODEL,
+  DEFAULT_LOCAL_BASE_URL,
   DEFAULT_MODEL_ID,
   MODELS,
   getModel,
@@ -30,6 +35,12 @@ export {
 export interface ChatCredentials {
   deepseekApiKey?: string | null;
   opencodeApiKey?: string | null;
+  /** OpenAI-compatible host, e.g. http://127.0.0.1:11434/v1 */
+  localBaseUrl?: string | null;
+  /** Optional. Ollama ignores it; some vLLM setups require one. */
+  localApiKey?: string | null;
+  /** Overrides the catalog wire id (Ollama tag vs Hugging Face id). */
+  localApiModel?: string | null;
 }
 
 export interface ResolvedTarget {
@@ -56,6 +67,7 @@ export interface ResolveSuccess {
 const DEFAULT_BASE: Record<ProviderId, string> = {
   deepseek: "https://api.deepseek.com",
   opencode: "https://opencode.ai/zen/v1",
+  local: DEFAULT_LOCAL_BASE_URL,
 };
 
 /** Strip a trailing slash so `${base}/chat/completions` never doubles. */
@@ -63,9 +75,31 @@ function cleanBase(url: string): string {
   return url.replace(/\/+$/, "");
 }
 
+/**
+ * Accept the ways people paste a local host.
+ *
+ * `http://127.0.0.1:11434`, `.../v1`, and even `.../v1/chat/completions`
+ * should all land on `.../v1` so the chat route can append
+ * `/chat/completions`.
+ */
+export function normalizeOpenAiBase(url: string): string {
+  let u = url.trim();
+  if (!u) return DEFAULT_LOCAL_BASE_URL;
+  u = cleanBase(u);
+  u = u.replace(/\/chat\/completions$/i, "");
+  u = cleanBase(u);
+  if (!/\/v\d+$/i.test(u)) u += "/v1";
+  return u;
+}
+
 export function providerBaseUrl(id: ProviderId): string {
   if (id === "deepseek") {
     return cleanBase(process.env.DEEPSEEK_BASE_URL ?? DEFAULT_BASE.deepseek);
+  }
+  if (id === "local") {
+    return normalizeOpenAiBase(
+      process.env.LOCAL_BASE_URL ?? DEFAULT_BASE.local
+    );
   }
   return cleanBase(process.env.OPENCODE_BASE_URL ?? DEFAULT_BASE.opencode);
 }
@@ -74,6 +108,12 @@ export function keyForProvider(
   id: ProviderId,
   creds: ChatCredentials
 ): string {
+  if (id === "local") {
+    const raw = creds.localApiKey;
+    // Ollama accepts any bearer token. An empty one still has to be a
+    // string so the Authorization header is well-formed.
+    return typeof raw === "string" && raw.trim() ? raw.trim() : "local";
+  }
   const raw =
     id === "opencode" ? creds.opencodeApiKey : creds.deepseekApiKey;
   return typeof raw === "string" ? raw.trim() : "";
@@ -83,7 +123,9 @@ export function hasKeyForModel(
   modelId: string | null | undefined,
   creds: ChatCredentials
 ): boolean {
-  return Boolean(keyForProvider(getModel(modelId).provider, creds));
+  const provider = getModel(modelId).provider;
+  if (provider === "local") return true;
+  return Boolean(keyForProvider(provider, creds));
 }
 
 export function resolveChatTarget(
@@ -94,7 +136,7 @@ export function resolveChatTarget(
   const apiKey = keyForProvider(model.provider, creds);
   const info = getProviderInfo(model.provider);
 
-  if (!apiKey) {
+  if (model.provider !== "local" && !apiKey) {
     return {
       ok: false,
       error:
@@ -104,6 +146,16 @@ export function resolveChatTarget(
     };
   }
 
+  const baseUrl =
+    model.provider === "local"
+      ? normalizeOpenAiBase(creds.localBaseUrl || providerBaseUrl("local"))
+      : providerBaseUrl(model.provider);
+
+  const apiModel =
+    model.provider === "local" && creds.localApiModel?.trim()
+      ? creds.localApiModel.trim()
+      : model.apiModel;
+
   return {
     ok: true,
     target: {
@@ -112,8 +164,8 @@ export function resolveChatTarget(
       providerName: info.name,
       thinkingStyle: info.thinkingStyle,
       apiKey,
-      baseUrl: providerBaseUrl(model.provider),
-      apiModel: model.apiModel,
+      baseUrl,
+      apiModel,
     },
   };
 }
@@ -123,7 +175,8 @@ export function resolveChatTarget(
  *
  * Prefers DeepSeek Flash when that key is present so existing DeepSeek-only
  * setups keep the same cost profile. Falls back to Ox Alpha when the user
- * only connected OpenCode.
+ * only connected OpenCode. Local 27B is deliberately not a helper — it is
+ * the main model, not a planner.
  */
 export function resolveHelperTarget(
   creds: ChatCredentials
@@ -159,6 +212,13 @@ export function resolveHelperTarget(
 
 const VALID_EFFORTS = new Set(["low", "high", "max"]);
 
+/** Map our High/Max slider onto Qwen3.8's low / medium / xhigh. */
+export function qwenReasoningEffort(effort: string): "low" | "medium" | "xhigh" {
+  if (effort === "low") return "low";
+  if (effort === "max") return "xhigh";
+  return "medium";
+}
+
 /**
  * Provider-specific thinking fields.
  *
@@ -166,6 +226,12 @@ const VALID_EFFORTS = new Set(["low", "high", "max"]);
  * `reasoning_effort`. OpenCode Zen is OpenAI-compatible and does not
  * document DeepSeek's `thinking` object — sending it can 400, so Ox Alpha
  * only gets `reasoning_effort` when thinking is on.
+ *
+ * Qwen 3.8 27B (local Ollama / vLLM / llama.cpp) thinks by default.
+ * Official fields: `chat_template_kwargs.enable_thinking` and
+ * `reasoning_effort` of `xhigh` | `medium` | `low`. `preserve_thinking`
+ * keeps prior-round thoughts in the transcript. vLLM also needs
+ * `--reasoning-parser qwen3` so the think block is not dumped into content.
  */
 export function applyThinking(
   body: Record<string, unknown>,
@@ -178,6 +244,24 @@ export function applyThinking(
   if (style === "deepseek") {
     body.thinking = { type: thinkingEnabled ? "enabled" : "disabled" };
     if (thinkingEnabled) body.reasoning_effort = level;
+    return;
+  }
+
+  if (style === "qwen") {
+    if (thinkingEnabled) {
+      const qwen = qwenReasoningEffort(level);
+      body.chat_template_kwargs = {
+        enable_thinking: true,
+        preserve_thinking: true,
+        reasoning_effort: qwen,
+      };
+      body.reasoning_effort = qwen;
+      // Ollama's OpenAI shim reads this; vLLM ignores unknown fields.
+      body.think = true;
+    } else {
+      body.chat_template_kwargs = { enable_thinking: false };
+      body.think = false;
+    }
     return;
   }
 

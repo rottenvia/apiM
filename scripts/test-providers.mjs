@@ -185,6 +185,77 @@ check(
   "Ox Alpha must not inherit Pro's silent low→high mapping"
 );
 
+console.log("\n7. Local Qwen 3.8 27B");
+
+const qwen = models.MODELS.find((m) => m.id === "qwen-3.8-27b");
+check("Qwen 3.8 27B is listed", Boolean(qwen));
+check("it is a local model", qwen?.provider === "local", qwen?.provider);
+check(
+  "the default wire id is the Ollama tag",
+  qwen?.apiModel === "qwen3.8:27b",
+  qwen?.apiModel
+);
+check(
+  "local needs no cloud key",
+  models.hasKeyForModel("qwen-3.8-27b", {})
+);
+
+const localOk = providers.resolveChatTarget("qwen-3.8-27b", {});
+check("Qwen resolves without any API key", localOk.ok);
+check(
+  "and defaults to Ollama's OpenAI host",
+  localOk.ok && localOk.target.baseUrl === "http://127.0.0.1:11434/v1",
+  localOk.ok ? localOk.target.baseUrl : ""
+);
+
+const vllm = providers.resolveChatTarget("qwen-3.8-27b", {
+  localBaseUrl: "http://127.0.0.1:8000",
+  localApiModel: "Qwen/Qwen3.8-27B",
+});
+check(
+  "a pasted host without /v1 is normalised",
+  vllm.ok && vllm.target.baseUrl === "http://127.0.0.1:8000/v1"
+);
+check(
+  "the wire id can be the Hugging Face name",
+  vllm.ok && vllm.target.apiModel === "Qwen/Qwen3.8-27B"
+);
+
+const qOn = {};
+providers.applyThinking(qOn, "qwen", true, "max");
+check(
+  "Qwen thinking-on sends enable_thinking",
+  qOn.chat_template_kwargs?.enable_thinking === true &&
+    qOn.chat_template_kwargs?.preserve_thinking === true
+);
+check(
+  "Max maps to Qwen's xhigh",
+  qOn.reasoning_effort === "xhigh" &&
+    providers.qwenReasoningEffort("max") === "xhigh"
+);
+check(
+  "High maps to Qwen's medium",
+  providers.qwenReasoningEffort("high") === "medium"
+);
+
+const qOff = {};
+providers.applyThinking(qOff, "qwen", false, "none");
+check(
+  "Qwen thinking-off disables thinking and sends no effort",
+  qOff.chat_template_kwargs?.enable_thinking === false &&
+    qOff.reasoning_effort === undefined
+);
+check(
+  "Qwen never gets DeepSeek's thinking object",
+  qOn.thinking === undefined && qOff.thinking === undefined,
+  "that field is DeepSeek-only"
+);
+check("local Qwen is free in the rate table", pricing.MODEL_RATES["qwen-3.8-27b"]?.input === 0);
+check("Settings offers the local host", /Local model/.test(settings));
+check("Settings offers Qwen 3.8 27B as a model", /Qwen 3.8 27B/.test(settings));
+check("the page persists the local host", /localBaseUrl/.test(page));
+check("the page sends the local host with the chat request", /localBaseUrl/.test(page) && /localApiModel/.test(page));
+
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
 );

@@ -62,6 +62,7 @@ const EFFORTS = [
  */
 function effortsFor(model: string) {
   const isPro = model === "deepseek-v4-pro";
+  const isQwen = model === "qwen-3.8-27b";
   return EFFORTS.map((e) => {
     if (isPro && e.id === "low") {
       return {
@@ -69,6 +70,33 @@ function effortsFor(model: string) {
         description: "Same as High on V4 Pro — this model has no light mode.",
         warning: "Switch to V4 Flash for genuinely cheaper reasoning.",
       };
+    }
+    if (isQwen) {
+      if (e.id === "none") {
+        return {
+          ...e,
+          description: "enable_thinking: false — answers without a think block.",
+        };
+      }
+      if (e.id === "low") {
+        return {
+          ...e,
+          description: "Qwen reasoning_effort=low.",
+        };
+      }
+      if (e.id === "high") {
+        return {
+          ...e,
+          description: "Qwen reasoning_effort=medium (its middle setting).",
+        };
+      }
+      if (e.id === "max") {
+        return {
+          ...e,
+          description: "Qwen reasoning_effort=xhigh — the model default.",
+          warning: "Can think for a very long time. Use medium unless you need it.",
+        };
+      }
     }
     return e;
   });
