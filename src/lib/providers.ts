@@ -283,6 +283,23 @@ export function providerHttpError(
   if (status === 429) {
     return `Rate limited by ${providerName}. Please wait a moment and try again.`;
   }
+  if (status === 502 || status === 503 || status === 504) {
+    // OpenCode Zen often replies 503 with body {"error":{"message":"retrying"}}
+    // or "Inference is temporarily unavailable". Echoing that produced a
+    // bubble that said we were retrying after retries had already finished.
+    const trimmed = detail.replace(/\s+/g, " ").trim();
+    const noisy =
+      !trimmed ||
+      /^(retrying|inference is temporarily unavailable|bad gateway|gateway time-?out)[.!]?$/i.test(
+        trimmed
+      );
+    return (
+      `${providerName} is temporarily unavailable (${status}). ` +
+      `This is their servers, not your API key.` +
+      (noisy ? "" : ` ${trimmed}`) +
+      ` Wait a minute and try again.`
+    );
+  }
   return `${providerName} API error (${status})${detail ? `: ${detail}` : ""}`;
 }
 
