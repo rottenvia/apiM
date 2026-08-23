@@ -360,6 +360,45 @@ check(
   /Check the network connection/.test(providers.providerUnreachable("DeepSeek", 2))
 );
 
+console.log("\n8b. Qwen cannot take a system message after the first");
+
+const transcript = await load("src/lib/transcript.ts");
+const qwenMsgs = [
+  { role: "system", content: "persona" },
+  { role: "user", content: "hi" },
+  { role: "system", content: "Current workspace contents: a.py" },
+  { role: "assistant", content: "ok" },
+  { role: "system", content: "plan" },
+];
+const folded = transcript.foldSystemMessagesToFront(qwenMsgs);
+check(
+  "later system messages are folded into the first",
+  folded[0].role === "system" &&
+    folded.filter((m) => m.role === "system").length === 1 &&
+    folded[0].content.includes("persona") &&
+    folded[0].content.includes("Current workspace contents") &&
+    folded[0].content.includes("plan")
+);
+check(
+  "user and assistant order is unchanged",
+  folded[1].role === "user" && folded[2].role === "assistant"
+);
+const alreadyFront = qwenMsgs.slice(0, 2);
+check(
+  "a transcript that already has one leading system is left alone",
+  transcript.foldSystemMessagesToFront(alreadyFront) === alreadyFront
+);
+check(
+  "the chat route folds only for Qwen, not DeepSeek/Ox",
+  /thinkingStyle === "qwen"/.test(route) &&
+    /foldSystemMessagesToFront/.test(route)
+);
+check(
+  "DeepSeek still gets the tail system copies on the wire",
+  /serializeForApi\(/.test(route) &&
+    /compacted\.messages/.test(route)
+);
+
 console.log("\n9. A 503 from Ox / OpenCode is their outage, not the user's key");
 
 const busy = providers.providerHttpError(503, "OpenCode", "retrying");

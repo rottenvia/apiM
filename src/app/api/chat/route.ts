@@ -59,6 +59,7 @@ import {
 import { requestApproval, isRemembered, askQuestion } from "@/lib/approvals";
 import {
   ToolCallAccumulator,
+  foldSystemMessagesToFront,
   parseToolArguments,
   serializeForApi,
 } from "@/lib/transcript";
@@ -1672,12 +1673,20 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             );
           }
 
+          // Qwen's jinja template only accepts a system message at index 0.
+          // File-tree / plan / plugin tails stay in `transcript` (and so in
+          // resume state) so DeepSeek/Ox keep their cache-friendly layout.
+          const wireMessages =
+            target.thinkingStyle === "qwen"
+              ? foldSystemMessagesToFront(compacted.messages)
+              : compacted.messages;
+
           const dsRequestBody: Record<string, unknown> = {
             // On the wire this may differ from the app id (Ox Alpha is
             // `x-preview-f-free` on OpenCode Zen). Saved usage still uses
             // the app id so pricing looks it up correctly.
             model: target.apiModel,
-            messages: serializeForApi(compacted.messages),
+            messages: serializeForApi(wireMessages),
             stream: true,
             stream_options: { include_usage: true },
             /*
