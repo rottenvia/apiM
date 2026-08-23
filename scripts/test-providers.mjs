@@ -286,8 +286,16 @@ check(
   args.includes("-m") && engineSrc.includes("llama-server") && !/ollama serve/.test(engineSrc)
 );
 check(
+  "Qwen 3.8 27B is native vision with video",
+  qwen?.vision === "native" && qwen?.video === true
+);
+check(
   "the official GGUF URL is allow-listed",
   shared.isAllowedDownloadUrl(shared.GGUF_URL)
+);
+check(
+  "the official mmproj URL is allow-listed",
+  shared.isAllowedDownloadUrl(shared.MMPROJ_URL)
 );
 check(
   "a random HTTPS host is refused",

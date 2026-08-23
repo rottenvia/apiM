@@ -64,10 +64,10 @@ export interface Attachment {
   content: string;
   /** True when the file was longer than MAX_CHARS and had to be cut. */
   truncated: boolean;
-  kind: "text" | "image";
-  /** Images only: base64 data URL used for the thumbnail and the API call. */
+  kind: "text" | "image" | "video";
+  /** Images and video: base64 data URL used for the thumbnail and the API call. */
   dataUrl?: string;
-  /** Images only: description produced by the vision model. */
+  /** Images only, helper path: description produced by the vision model. */
   description?: string;
   /** Images only: extraction still running. */
   analyzing?: boolean;
@@ -104,6 +104,19 @@ export const MAX_ARCHIVE_BYTES = 50 * 1024 * 1024;
 export const MAX_FILES = 10;
 /** Images are capped separately — they are sent to the vision model whole. */
 export const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+/**
+ * Native video (MP4) on Ox Alpha / Qwen. 32 MB raw is ~43 MB as a data URL,
+ * well under the 256 MB request body the server accepts.
+ */
+export const MAX_VIDEO_BYTES = 32 * 1024 * 1024;
+
+const VIDEO_MIME_TYPES = new Set(["video/mp4", "video/mpeg"]);
+
+/** MP4 only — other containers stay on the binary refusal list. */
+export function isVideoFile(file: { type: string; name: string }): boolean {
+  if (VIDEO_MIME_TYPES.has(file.type)) return true;
+  return /\.mp4$/i.test(file.name);
+}
 
 
 /**
@@ -274,22 +287,32 @@ export interface ReadResult {
 /** Reports progress while a file is read, so the chip can say what is happening. */
 export type ProgressFn = (stage: AttachStage) => void;
 
+async function readAsDataUrl(file: File): Promise<string | null> {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => resolve(null);
+    reader.readAsDataURL(file);
+  });
+}
+
 /** Read an image as a data URL so it can be previewed and sent for analysis. */
-export async function readImageFile(file: File): Promise<ReadResult> {
+export async function readImageFile(
+  file: File,
+  options: { analyze?: boolean } = {}
+): Promise<ReadResult> {
   if (file.size > MAX_IMAGE_BYTES) {
     return {
       error: `${file.name} is ${formatBytes(file.size)} — the image limit is ${formatBytes(MAX_IMAGE_BYTES)}`,
     };
   }
 
-  const dataUrl = await new Promise<string | null>((resolve) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = () => resolve(null);
-    reader.readAsDataURL(file);
-  });
-
+  const dataUrl = await readAsDataUrl(file);
   if (!dataUrl) return { error: `Couldn't read ${file.name}` };
+
+  // Native VLMs see the pixels themselves — do not mark the chip as
+  // "Looking at image" or the composer will wait on a helper that never runs.
+  const analyze = options.analyze !== false;
 
   return {
     attachment: {
@@ -300,7 +323,31 @@ export async function readImageFile(file: File): Promise<ReadResult> {
       truncated: false,
       kind: "image",
       dataUrl,
-      analyzing: true,
+      analyzing: analyze,
+    },
+  };
+}
+
+/** Read an MP4 as a data URL for models that accept native video. */
+export async function readVideoFile(file: File): Promise<ReadResult> {
+  if (file.size > MAX_VIDEO_BYTES) {
+    return {
+      error: `${file.name} is ${formatBytes(file.size)} — the video limit is ${formatBytes(MAX_VIDEO_BYTES)}`,
+    };
+  }
+
+  const dataUrl = await readAsDataUrl(file);
+  if (!dataUrl) return { error: `Couldn't read ${file.name}` };
+
+  return {
+    attachment: {
+      id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      name: file.name,
+      size: file.size,
+      content: "",
+      truncated: false,
+      kind: "video",
+      dataUrl,
     },
   };
 }
@@ -533,18 +580,27 @@ export async function readTextFile(
  */
 export function buildMessageWithAttachments(
   text: string,
-  attachments: Attachment[]
+  attachments: Attachment[],
+  vision: "none" | "native" | "helper" = "helper"
 ): string {
   if (attachments.length === 0) return text;
 
-  const blocks = attachments.map((a) => {
-    // Images arrive as a description from the vision model, since DeepSeek's
-    // API is text-only and cannot accept pixels.
+  const blocks = attachments.flatMap((a) => {
+    // Native VLMs receive pixels on the wire — do not also dump a helper
+    // description into the typed text, or the chip overlay looks like OCR.
     if (a.kind === "image") {
+      if (vision === "native") return [];
       if (a.description) {
-        return `<image name="${a.name}">\n${a.description}\n</image>`;
+        return [`<image name="${a.name}">\n${a.description}\n</image>`];
       }
-      return `<image name="${a.name}">\n[the image could not be read]\n</image>`;
+      return [`<image name="${a.name}">\n[the image could not be read]\n</image>`];
+    }
+
+    if (a.kind === "video") {
+      if (vision === "native") return [];
+      return [
+        `<video name="${a.name}">\n[this model cannot watch video — switch to Ox Alpha or Qwen 3.8 27B]\n</video>`,
+      ];
     }
 
     const ext = extensionOf(a.name);

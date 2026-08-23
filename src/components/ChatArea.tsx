@@ -9,12 +9,20 @@ import { ChatSearchBar } from "@/components/ChatSearchBar";
 import { AttachmentChips } from "@/components/AttachmentChips";
 import {
   buildMessageWithAttachments,
+  isVideoFile,
   readImageFile,
   readTextFile,
   readFolder,
+  readVideoFile,
   MAX_FILES,
 } from "@/lib/attachments";
 import { isImageFile } from "@/lib/vision";
+import {
+  getModel,
+  modelNeedsVisionHelper,
+  modelSeesVideo,
+} from "@/lib/models";
+import type { StoredAttachment } from "@/lib/multimodal";
 import {
   binaryFolderUploadPath,
   binaryUploadPath,
@@ -78,7 +86,7 @@ interface ChatAreaProps {
     message: string,
     options?: {
       displayContent?: string;
-      attachments?: { name: string; kind: "text" | "image"; dataUrl?: string }[];
+      attachments?: StoredAttachment[];
     }
   ) => void;
   onRegenerate: (assistantId: string) => void;
@@ -178,6 +186,10 @@ export function ChatArea({
   const analyzeImage = useCallback(
     async (image: Attachment) => {
       if (!image.dataUrl) return;
+      // Native VLMs see the pixels. Hitting /api/vision here is what made
+      // "extracted text" appear on Ox Alpha, and what surfaced a dead
+      // helper balance while a seeing model was selected.
+      if (!modelNeedsVisionHelper(model)) return;
 
       if (!visionKey) {
         setAttachments((prev) =>
@@ -232,7 +244,7 @@ export function ChatArea({
         );
       }
     },
-    [visionKey, visionModel]
+    [model, visionKey, visionModel]
   );
 
   const addFiles = useCallback(async (files: FileList | File[]) => {
@@ -297,7 +309,11 @@ export function ChatArea({
       content: "",
       truncated: false,
       kind:
-        item.kind === "file" && isImageFile(item.file) ? "image" : "text",
+        item.kind === "file" && isImageFile(item.file)
+          ? "image"
+          : item.kind === "file" && isVideoFile(item.file)
+            ? "video"
+            : "text",
       stage:
         item.kind === "folder"
           ? "unpacking"
@@ -507,7 +523,17 @@ export function ChatArea({
             onProcessesChanged?.();
           }
         } else if (isImageFile(item.file)) {
-          ({ attachment, error } = await readImageFile(item.file));
+          ({ attachment, error } = await readImageFile(item.file, {
+            analyze: modelNeedsVisionHelper(model),
+          }));
+        } else if (isVideoFile(item.file)) {
+          if (!modelSeesVideo(model)) {
+            error =
+              `${item.file.name} is a video. ${getModel(model).label} cannot ` +
+              `watch MP4 — switch to Ox Alpha or Qwen 3.8 27B to attach it.`;
+          } else {
+            ({ attachment, error } = await readVideoFile(item.file));
+          }
         } else {
           ({ attachment, error } = await readTextFile(item.file, (stage) =>
             setStage(placeholder.id, stage)
@@ -652,12 +678,15 @@ export function ChatArea({
 
     // Images need a description before they are any use to a text-only model,
     // so kick that off as soon as they are attached rather than at send time.
-    for (const image of accepted.filter((a) => a.kind === "image")) {
-      void analyzeImage(image);
+    // Native models skip this — they receive the pixels themselves.
+    if (modelNeedsVisionHelper(model)) {
+      for (const image of accepted.filter((a) => a.kind === "image")) {
+        void analyzeImage(image);
+      }
     }
 
     if (errors.length > 0) setAttachError(errors.join(" · "));
-  }, [analyzeImage, workspaceId, onProcessesChanged]);
+  }, [analyzeImage, model, workspaceId, onProcessesChanged]);
 
   /** Re-run a failed description, so a transient API error isn't terminal. */
   const retryImage = useCallback(
@@ -679,6 +708,38 @@ export function ChatArea({
     setAttachments((prev) => prev.filter((a) => a.id !== id));
     setAttachError(null);
   }, []);
+
+  // Switching onto a blind model with screenshots already attached: describe
+  // them now. Switching onto a seeing model must not leave a helper spinner.
+  useEffect(() => {
+    if (!modelNeedsVisionHelper(model)) {
+      setAttachments((prev) =>
+        prev.some((a) => a.analyzing)
+          ? prev.map((a) => (a.analyzing ? { ...a, analyzing: false } : a))
+          : prev
+      );
+    } else {
+      for (const a of attachmentsRef.current) {
+        if (
+          a.kind === "image" &&
+          a.dataUrl &&
+          !a.description &&
+          !a.analyzing &&
+          !a.visionError
+        ) {
+          void analyzeImage(a);
+        }
+      }
+    }
+    if (
+      !modelSeesVideo(model) &&
+      attachmentsRef.current.some((a) => a.kind === "video")
+    ) {
+      setAttachError(
+        `${getModel(model).label} cannot watch MP4. Remove the video or switch to Ox Alpha / Qwen 3.8 27B.`
+      );
+    }
+  }, [model, analyzeImage]);
 
   // In-chat find. Whole-word is the default so "calc" doesn't match
   // "calculator"; the bar's toggle switches to substring matching.
@@ -940,14 +1001,15 @@ export function ChatArea({
     }
     // A message of only attachments is valid — the files are the content.
     if ((!input.trim() && attachments.length === 0) || isLoading) return;
-    // The model receives the file contents and image descriptions; the
-    // transcript shows only what the user typed, plus attachment chips.
-    onSend(buildMessageWithAttachments(input, attachments), {
+    // The model receives the file contents and (for blind models) image
+    // descriptions; the transcript shows only what the user typed, plus chips.
+    onSend(buildMessageWithAttachments(input, attachments, getModel(model).vision), {
       displayContent: input,
       attachments: attachments.map((a) => ({
         name: a.name,
         kind: a.kind,
         dataUrl: a.dataUrl,
+        description: a.description,
       })),
     });
     setInput("");
@@ -990,10 +1052,13 @@ export function ChatArea({
   );
 
   const analyzingImages = attachments.some((a) => a.analyzing);
+  const blockedVideo =
+    !modelSeesVideo(model) && attachments.some((a) => a.kind === "video");
   const canSend =
     (Boolean(input.trim()) || attachments.length > 0) &&
     !isLoading &&
     !analyzingImages &&
+    !blockedVideo &&
     hasKeys;
   // Show the standalone indicator until the assistant bubble actually has
   // something to display. Previously an empty streaming bubble was created

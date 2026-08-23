@@ -93,6 +93,10 @@ import {
 import type { PrematureStopReason } from "@/lib/revive";
 import { extractReasoningDelta } from "@/lib/reasoning-stream";
 import { loadScopedConversationHistory } from "@/lib/chat-history";
+import type { ScopedChatMessage } from "@/lib/chat-history";
+import { buildUserContent, userHasContent } from "@/lib/multimodal";
+import type { StoredAttachment } from "@/lib/multimodal";
+import { getModel } from "@/lib/models";
 import {
   GITHUB_TOKEN_COOKIE,
   githubConfig,
@@ -179,11 +183,7 @@ interface ChatRequestBody {
    */
   displayContent?: string;
   /** Attachment metadata for re-rendering chips after a reload. */
-  attachments?: {
-    name: string;
-    kind: "text" | "image";
-    dataUrl?: string;
-  }[];
+  attachments?: StoredAttachment[];
   conversationId?: string | null;
   deepseekApiKey?: string;
   /** OpenCode Zen key — required when the selected model is Ox Alpha. */
@@ -456,16 +456,32 @@ export async function POST(req: NextRequest) {
     budgetUsd,
   } = body;
 
-  if (!message) {
+  const userText = typeof message === "string" ? message : "";
+  if (!userText.trim() && !attachments?.length) {
     return NextResponse.json({ error: "A message is required" }, { status: 400 });
   }
 
-  const creds = { deepseekApiKey, opencodeApiKey };
+  const creds = {
+    deepseekApiKey,
+    opencodeApiKey,
+    localBaseUrl,
+    localApiKey,
+    localApiModel,
+  };
   const resolved = resolveChatTarget(model, creds);
   if (!resolved.ok) {
     return NextResponse.json({ error: resolved.error }, { status: 400 });
   }
   const target = resolved.target;
+  if (target.providerId === "local" && isManagedEngineUrl(target.baseUrl)) {
+    const ready = await ensureEngineRunning();
+    if (!ready.ok) {
+      return NextResponse.json(
+        { error: ready.error ?? "Qwen is not running on this PC." },
+        { status: 503 }
+      );
+    }
+  }
   const helper = resolveHelperTarget(creds) ?? target;
   const planner = {
     apiKey: helper.apiKey,
@@ -476,7 +492,7 @@ export async function POST(req: NextRequest) {
 
   // Resolve "auto" to a concrete level based on the message.
   const resolvedEffort =
-    thinkingEffort === "auto" ? autoThinkingEffort(message) : thinkingEffort;
+    thinkingEffort === "auto" ? autoThinkingEffort(userText) : thinkingEffort;
 
   // "none" is our UI concept for "don't reason at all".
   const thinkingEnabled = resolvedEffort !== "none";
@@ -488,7 +504,12 @@ export async function POST(req: NextRequest) {
     (tavilyApiKey || exaApiKey) && webSearchMode !== "off"
   );
 
-  const derivedTitle = deriveTitle(displayContent?.trim() || message);
+  const derivedTitle = deriveTitle(
+    displayContent?.trim() ||
+      userText ||
+      attachments?.map((a) => a.name).filter(Boolean).join(", ") ||
+      ""
+  );
 
   const encoder = new TextEncoder();
 
@@ -503,6 +524,7 @@ export async function POST(req: NextRequest) {
           );
         } catch {
           // The consumer went away between our check and this enqueue, so the
+          // controller is already closed. Mark it so later frames are droppedenqueue, so the
           // controller is already closed. Mark it so later frames are dropped
           // quietly instead of throwing into the catch-all as a fake error.
           closed = true;
@@ -612,7 +634,7 @@ export async function POST(req: NextRequest) {
          * direct cross-chat memory leak. Client history is now ignored; a new
          * id has no stored history, and an existing id can only read itself.
          */
-        let scopedHistory: ChatMessage[] = [];
+        let scopedHistory: ScopedChatMessage[] = [];
         try {
           scopedHistory = await loadScopedConversationHistory(convId, {
             dropLastUser: Boolean(regenerateFromId || resumeMessageId),
@@ -716,7 +738,7 @@ export async function POST(req: NextRequest) {
               role: "user",
               // Store what the user typed. Saving the full payload meant the
               // <image> block reappeared in the transcript after a reload.
-              content: (displayContent ?? message).trim(),
+              content: (displayContent ?? userText).trim(),
               attachments: attachments?.length ? attachments : null,
               thinkingEffort: resolvedEffort,
               createdAt: new Date().toISOString(),
@@ -732,7 +754,7 @@ export async function POST(req: NextRequest) {
 
         const recentContext = scopedHistory
           .slice(-4)
-          .map((m) => `${m.role}: ${m.content}`)
+          .map((m) => `${m.role}: ${m.content || "(attachment)"}`)
           .join("\n");
 
         // Decide whether this turn needs the web. In "auto" the model itself
@@ -747,7 +769,7 @@ export async function POST(req: NextRequest) {
           } else {
             send({ type: "status", stage: "deciding" });
             const decision = await decideSearch(
-              message,
+              userText,
               recentContext,
               helper.apiKey,
               runSignal,
@@ -770,7 +792,7 @@ export async function POST(req: NextRequest) {
 
           try {
             searchContext = await smartSearch(
-              message,
+              userText,
               recentContext,
               helper.apiKey,
               tavilyApiKey as string,
@@ -881,7 +903,7 @@ export async function POST(req: NextRequest) {
           try {
             await createSnapshot(
               workspace,
-              (displayContent?.trim() || message).slice(0, 80)
+              (displayContent?.trim() || userText).slice(0, 80)
             );
           } catch (e) {
             console.error("Snapshot failed:", e);
@@ -1017,15 +1039,25 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           opening.content += `\n\n${pluginDirectives}`;
         }
 
+        const vision = getModel(model).vision;
         for (const msg of scopedHistory) {
-          if (!msg.content?.trim()) continue;
-          transcript.push(
-            msg.role === "assistant"
-              ? { role: "assistant", content: msg.content }
-              : { role: "user", content: msg.content }
+          if (msg.role === "assistant") {
+            if (!msg.content?.trim()) continue;
+            transcript.push({ role: "assistant", content: msg.content });
+            continue;
+          }
+          const built = buildUserContent(
+            msg.content ?? "",
+            msg.attachments,
+            vision
           );
+          if (!userHasContent(built)) continue;
+          transcript.push({ role: "user", content: built });
         }
-        transcript.push({ role: "user", content: message });
+        transcript.push({
+          role: "user",
+          content: buildUserContent(userText, attachments, vision),
+        });
 
         /**
          * Re-append active plugins as the newest system instruction.
@@ -1079,6 +1111,13 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          * The agent's plan for this reply, if it made one.
          *
          * Lives for the duration of the run. It is appended to the request as
+         * a trailing message so it can change every round without disturbing
+         * the cached prefix, the same reason the file tree sits at the end.
+         */
+        /*
+         * Loaded from disk, not started empty.
+         *
+         * This was `let plan = null` with a comment saying it to the request as
          * a trailing message so it can change every round without disturbing
          * the cached prefix, the same reason the file tree sits at the end.
          */

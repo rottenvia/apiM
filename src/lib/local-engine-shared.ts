@@ -17,6 +17,18 @@ export const GGUF_BYTES = 17_772_537_440;
 export const GGUF_URL =
   "https://huggingface.co/bartowski/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-Q4_K_M.gguf";
 
+/**
+ * Vision projector. The main GGUF is text-only until llama-server is started
+ * with `--mmproj`. bartowski ships this next to the weights (~928 MB).
+ */
+export const MMPROJ_FILE = "mmproj-Qwen3.8-27B-f16.gguf";
+export const MMPROJ_URL =
+  "https://huggingface.co/bartowski/Qwen3.8-27B-GGUF/resolve/main/mmproj-Qwen3.8-27B-f16.gguf";
+/** Hugging Face lists the f16 projector as 928 MB. */
+export const MMPROJ_BYTES = 928 * 1024 * 1024;
+/** A partial download is not usable — anything under this is treated as missing. */
+export const MMPROJ_MIN_BYTES = 100 * 1024 * 1024;
+
 export const LLAMA_CPP_RELEASE = "b10566";
 export const LLAMA_CPP_RELEASE_API = `https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/${LLAMA_CPP_RELEASE}`;
 
@@ -38,6 +50,9 @@ export interface EngineStatus {
   ggufReady: boolean;
   ggufBytes: number;
   ggufExpected: number;
+  mmprojReady: boolean;
+  mmprojBytes: number;
+  mmprojExpected: number;
   serverReady: boolean;
   running: boolean;
   baseUrl: string;
@@ -157,8 +172,11 @@ export function pickLlamaAsset(
 }
 
 /** Args for the sidecar. Host is loopback-only on purpose. */
-export function sidecarArgs(ggufPath: string): string[] {
-  return [
+export function sidecarArgs(
+  ggufPath: string,
+  mmprojPath?: string | null
+): string[] {
+  const args = [
     "-m",
     ggufPath,
     "-a",
@@ -175,21 +193,31 @@ export function sidecarArgs(ggufPath: string): string[] {
     "-ngl",
     "99",
   ];
+  // Without this the 27B is text-only even though the catalog model is a VLM.
+  if (mmprojPath) {
+    args.push("--mmproj", mmprojPath);
+  }
+  return args;
 }
 
 export function engineHint(s: {
   ggufReady: boolean;
+  mmprojReady?: boolean;
   serverReady: boolean;
   running: boolean;
 }): string {
   if (s.running && s.ggufReady) {
-    return "Ready on this PC. The 27B is in a sidecar — this window only sends chat.";
+    return s.mmprojReady === false
+      ? "Sidecar is up, but the vision projector is missing — click Download so Qwen can see images and video."
+      : "Ready on this PC. The 27B is in a sidecar — this window only sends chat.";
   }
   if (s.ggufReady && s.serverReady) {
-    return "Weights are on disk. Start the sidecar to chat — the UI process will not load them.";
+    return s.mmprojReady === false
+      ? "Weights are on disk. Download the vision projector (~0.9 GB) so Qwen can see images and video, then Start."
+      : "Weights are on disk. Start the sidecar to chat — the UI process will not load them.";
   }
   if (s.ggufReady) {
     return "Weights are on disk. The engine binary is still missing — click Download.";
   }
-  return "Download Qwen 3.8 27B into this app (~16.5 GB). Your PC runs it; nothing is sent to a cloud provider.";
+  return "Download Qwen 3.8 27B into this app (~16.5 GB plus a 0.9 GB vision projector). Your PC runs it; nothing is sent to a cloud provider.";
 }

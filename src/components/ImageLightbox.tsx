@@ -14,11 +14,13 @@ export function ImageLightbox({
   src,
   name,
   description,
+  kind = "image",
   onClose,
 }: {
   src: string;
   name: string;
   description?: string;
+  kind?: "image" | "video";
   onClose: () => void;
 }) {
   const [visible, setVisible] = useState(false);
@@ -127,16 +129,29 @@ export function ImageLightbox({
 
         <div className="flex min-h-0 flex-1 flex-col md:flex-row">
           <div className="flex min-h-0 min-w-0 flex-1 items-center justify-center overflow-auto bg-[#0e0d0c] p-2">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              src={src}
-              alt={name}
-              className={`max-h-[calc(100vh-8rem)] rounded-lg object-contain ${
-                showText && description
-                  ? "max-w-[calc(100vw-26rem)]"
-                  : "max-w-[calc(100vw-4rem)]"
-              }`}
-            />
+            {kind === "video" ? (
+              <video
+                src={src}
+                controls
+                playsInline
+                className={`max-h-[calc(100vh-8rem)] rounded-lg object-contain ${
+                  showText && description
+                    ? "max-w-[calc(100vw-26rem)]"
+                    : "max-w-[calc(100vw-4rem)]"
+                }`}
+              />
+            ) : (
+              /* eslint-disable-next-line @next/next/no-img-element */
+              <img
+                src={src}
+                alt={name}
+                className={`max-h-[calc(100vh-8rem)] rounded-lg object-contain ${
+                  showText && description
+                    ? "max-w-[calc(100vw-26rem)]"
+                    : "max-w-[calc(100vw-4rem)]"
+                }`}
+              />
+            )}
           </div>
 
           {showText && description && (

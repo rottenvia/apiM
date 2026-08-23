@@ -29,8 +29,10 @@ export interface StoredMessage {
   /** Files sent with this message, so chips survive a reload. */
   attachments?: {
     name: string;
-    kind: "text" | "image";
+    kind: "text" | "image" | "video";
     dataUrl?: string;
+    /** Helper path only: what the vision model extracted. */
+    description?: string;
   }[] | null;
   reasoningContent?: string | null;
   thinkingEffort?: string | null;

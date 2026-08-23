@@ -15,6 +15,8 @@
  * entirely.
  */
 
+import type { UserContent } from "@/lib/multimodal";
+
 export interface ToolCall {
   id: string;
   type: "function";
@@ -27,7 +29,7 @@ export interface ToolCall {
 
 export type TranscriptMessage =
   | { role: "system"; content: string }
-  | { role: "user"; content: string }
+  | { role: "user"; content: UserContent }
   | {
       role: "assistant";
       content: string | null;

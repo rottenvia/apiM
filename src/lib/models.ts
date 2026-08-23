@@ -16,6 +16,15 @@ export type ProviderId = "deepseek" | "opencode" | "local";
 
 export type ThinkingStyle = "deepseek" | "openai" | "qwen";
 
+/**
+ * How this catalog model takes pictures (and whether it can take video).
+ *
+ *   none   — text only, no helper either
+ *   helper — pixels must be described by a separate vision provider first
+ *   native — the Chat Completions request can carry image_url / video_url
+ */
+export type VisionMode = "none" | "native" | "helper";
+
 export interface ProviderInfo {
   id: ProviderId;
   name: string;
@@ -45,6 +54,15 @@ export interface ModelInfo {
   helper: boolean;
   /** Show DeepSeek's Beijing-time peak/off-peak chip. */
   peakHours: boolean;
+  /**
+   * How screenshots reach this model.
+   *
+   * DeepSeek's hosted Chat Completions API is text-only, so images go
+   * through a vision helper. Ox Alpha and Qwen 3.8 27B are native VLMs.
+   */
+  vision: VisionMode;
+  /** Native video input (MP4). Independent of `vision`. */
+  video: boolean;
 }
 
 export const DEFAULT_MODEL_ID = "deepseek-v4-pro";
@@ -126,6 +144,8 @@ export const MODELS: ModelInfo[] = [
     mapsLowToHigh: true,
     helper: false,
     peakHours: true,
+    vision: "helper",
+    video: false,
   },
   {
     id: "deepseek-v4-flash",
@@ -140,6 +160,8 @@ export const MODELS: ModelInfo[] = [
     mapsLowToHigh: false,
     helper: true,
     peakHours: true,
+    vision: "helper",
+    video: false,
   },
   {
     id: "ox-alpha",
@@ -148,13 +170,15 @@ export const MODELS: ModelInfo[] = [
     label: "Ox Alpha",
     shortLabel: "Ox Alpha",
     description:
-      "Stealth reasoning model on OpenCode Zen. 1M context, multimodal, free during the preview.",
-    specs: "1M context · 128K max output · free preview",
+      "Stealth reasoning model on OpenCode Zen. 1M context, native image and video, free during the preview.",
+    specs: "1M context · 128K max output · image + video · free preview",
     resumeBlurb: "Free on OpenCode Zen",
     settingsSubtitle: "OpenCode · 1M context · free",
     mapsLowToHigh: false,
     helper: true,
     peakHours: false,
+    vision: "native",
+    video: true,
   },
   {
     id: QWEN_38_27B_ID,
@@ -163,15 +187,37 @@ export const MODELS: ModelInfo[] = [
     label: "Qwen 3.8 27B",
     shortLabel: "Qwen 3.8",
     description:
-      "Download in Settings. Your PC runs the 27B in a sidecar so this app stays light.",
-    specs: "262K context · runs on your GPU · free",
+      "Download in Settings. Your PC runs the 27B in a sidecar so this app stays light. Native vision — images and video, no cloud helper.",
+    specs: "262K context · native VLM · runs on your GPU · free",
     resumeBlurb: "Qwen 3.8 27B on this PC",
     settingsSubtitle: "On this PC · 27B · thinking",
     mapsLowToHigh: false,
     helper: false,
     peakHours: false,
+    vision: "native",
+    video: true,
   },
 ];
+
+/** Screenshots can reach this model — either natively or via the helper. */
+export function modelSeesImages(id: string | null | undefined): boolean {
+  const mode = getModel(id).vision;
+  return mode === "native" || mode === "helper";
+}
+
+/** Blind model: pixels must be described by a separate vision provider. */
+export function modelNeedsVisionHelper(id: string | null | undefined): boolean {
+  return getModel(id).vision === "helper";
+}
+
+/** Native video input (MP4). DeepSeek cannot; Ox and Qwen can. */
+export function modelSeesVideo(id: string | null | undefined): boolean {
+  return getModel(id).video;
+}
+
+export function modelVision(id: string | null | undefined): VisionMode {
+  return getModel(id).vision;
+}
 
 export function getModel(id: string | null | undefined): ModelInfo {
   return MODELS.find((m) => m.id === id) ?? MODELS[0];

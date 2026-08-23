@@ -116,9 +116,11 @@ export interface Message {
 /** Lightweight record of an attachment, for display only. */
 export interface MessageAttachment {
   name: string;
-  kind: "text" | "image";
-  /** Images only: data URL for the inline thumbnail. */
+  kind: "text" | "image" | "video";
+  /** Images and video: data URL for the inline thumbnail. */
   dataUrl?: string;
+  /** Helper path only: what the vision model extracted. */
+  description?: string;
 }
 
 /** What the assistant is currently doing, for the live status indicator. */
