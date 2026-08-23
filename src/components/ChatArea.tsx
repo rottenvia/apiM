@@ -787,34 +787,72 @@ export function ChatArea({
     }
   }, []);
 
-  // Auto-scroll, but only while the user is already near the bottom. During a
-  // long stream this lets them scroll up to read earlier output without the
-  // view yanking back down on every token.
+  // Auto-scroll, but only while the user is already at the bottom.
+  //
+  // Reported: scrolling up while a reply is printing yanked the view back
+  // to the caret for about two seconds, then let go. Two things did that.
+  // `scrollIntoView` walks every ancestor, so it fought the user's scroll
+  // instead of moving this pane. And pin lived only in React state, so a
+  // token flush scheduled before the scroll handler could re-pin and snap
+  // them back. The pin is a ref now (read synchronously), follow sets
+  // `scrollTop` on this container only, and a wheel/touch upward unpins
+  // immediately — before the next token has a chance to drag them down.
   const scrollRef = useRef<HTMLDivElement>(null);
   const [pinnedToBottom, setPinnedToBottom] = useState(true);
+  const pinnedRef = useRef(true);
+  const ignoreScroll = useRef(false);
+
+  const setPinned = useCallback((next: boolean) => {
+    pinnedRef.current = next;
+    setPinnedToBottom((prev) => (prev === next ? prev : next));
+  }, []);
+
+  const stickToBottom = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el || !pinnedRef.current) return;
+    ignoreScroll.current = true;
+    el.scrollTop = el.scrollHeight;
+    requestAnimationFrame(() => {
+      ignoreScroll.current = false;
+    });
+  }, []);
 
   const handleScroll = useCallback(() => {
+    if (ignoreScroll.current) return;
     const el = scrollRef.current;
     if (!el) return;
-    const distanceFromBottom =
-      el.scrollHeight - el.scrollTop - el.clientHeight;
-    setPinnedToBottom(distanceFromBottom < 120);
-  }, []);
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    // Hysteresis: leave easily, come back only when truly at the end.
+    if (pinnedRef.current) {
+      if (distance > 40) setPinned(false);
+    } else if (distance < 12) {
+      setPinned(true);
+    }
+  }, [setPinned]);
+
+  const releaseFollow = useCallback(
+    (e: { deltaY?: number }) => {
+      if (typeof e.deltaY === "number" && e.deltaY < 0) setPinned(false);
+    },
+    [setPinned]
+  );
+
+  const touchStartY = useRef<number | null>(null);
 
   useEffect(() => {
-    if (!pinnedToBottom) return;
-    messagesEndRef.current?.scrollIntoView({
-      // Smooth scrolling can't keep up with a fast token stream, so only the
-      // final settle is animated.
-      behavior: isLoading ? "auto" : "smooth",
-      block: "end",
-    });
-  }, [messages, pinnedToBottom, isLoading]);
+    stickToBottom();
+  }, [messages, isLoading, stickToBottom]);
 
   const scrollToBottom = useCallback(() => {
-    setPinnedToBottom(true);
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, []);
+    setPinned(true);
+    const el = scrollRef.current;
+    if (!el) return;
+    ignoreScroll.current = true;
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    requestAnimationFrame(() => {
+      ignoreScroll.current = false;
+    });
+  }, [setPinned]);
 
   useEffect(() => {
     if (textareaRef.current) {
@@ -1128,6 +1166,16 @@ export function ChatArea({
       <div
         ref={scrollRef}
         onScroll={handleScroll}
+        onWheel={releaseFollow}
+        onTouchStart={(e) => {
+          touchStartY.current = e.touches[0]?.clientY ?? null;
+        }}
+        onTouchMove={(e) => {
+          const y = e.touches[0]?.clientY;
+          if (touchStartY.current != null && y != null && y - touchStartY.current > 6) {
+            setPinned(false);
+          }
+        }}
         /*
          * Vertical scrolling only.
          *
@@ -1142,8 +1190,11 @@ export function ChatArea({
          * Clipping here rather than hunting every possible offender means a
          * future wide element degrades to being clipped, which is recoverable,
          * instead of breaking the page layout.
+         *
+         * overflow-anchor is off so the browser does not "helpfully" keep the
+         * caret in view after we have already released follow.
          */
-        className="relative flex-1 overflow-y-auto overflow-x-hidden"
+        className="relative flex-1 overflow-y-auto overflow-x-hidden [overflow-anchor:none]"
       >
         {messages.length === 0 ? (
           <EmptyState
