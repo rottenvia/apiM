@@ -27,7 +27,10 @@ import {
   hasKeyForModel,
 } from "@/lib/models";
 import { replyCanContinue } from "@/lib/resume-target";
-import { formatRetryNotice } from "@/lib/retry";
+import {
+  visibleUpstreamNotice,
+  type UpstreamNotice,
+} from "@/lib/retry";
 import { oxHostInfo, type OxHost } from "@/lib/ox-host";
 
 export interface Message {
@@ -188,10 +191,13 @@ type StreamEvent =
     }
   | {
       type: "retrying";
+      phase?: "attempt" | "backoff" | "clear";
       attempt: number;
       attempts: number;
       delayMs: number;
       reason: string;
+      host?: string;
+      inputChars?: number;
     }
   | { type: "continuing"; reason: string; n: number; of: number }
   | { type: "context_pruned"; collapsed: number; tokensSaved: number }
@@ -305,7 +311,26 @@ export default function Home() {
   // silent 8-second pause reads as a freeze, and the user needs to know the
   // work is not lost.
   const [retryNotice, setRetryNotice] = useState<string | null>(null);
+  const retryLiveRef = useRef<(UpstreamNotice & { receivedAt: number }) | null>(
+    null
+  );
 
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      const info = retryLiveRef.current;
+      if (!info) return;
+      const next = visibleUpstreamNotice(info, Date.now());
+      setRetryNotice((prev) => (prev === next ? prev : next));
+    }, 200);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const setLiveRetry = (
+    info: (UpstreamNotice & { receivedAt: number }) | null
+  ) => {
+    retryLiveRef.current = info;
+    setRetryNotice(info ? visibleUpstreamNotice(info, Date.now()) : null);
+  };
 
   const [showSettings, setShowSettings] = useState(false);
   const [showPlugins, setShowPlugins] = useState(false);
@@ -857,7 +882,7 @@ export default function Home() {
     setCurrentConvId(id);
     setIsLoading(false);
     setStatusStage(null);
-    setRetryNotice(null);
+    setLiveRetry(null);
     runMessageIdRef.current = null;
 
     // Show the cached copy immediately, then refresh from disk.
@@ -940,7 +965,7 @@ export default function Home() {
     setIsLoading(false);
     runMessageIdRef.current = null;
     setStatusStage(null);
-    setRetryNotice(null);
+    setLiveRetry(null);
     setRecentlyChanged([]);
     setWorkspaceFiles([]);
   }, []);
@@ -1199,14 +1224,7 @@ export default function Home() {
       });
       setIsLoading(true);
       setStatusStage(webSearchMode === "off" ? "thinking" : "deciding");
-      const oxWaitHint =
-        getModel(activeModel).provider === "opencode"
-          ? setTimeout(() => {
-              setRetryNotice(
-                `Still waiting on ${oxHostInfo(oxHost).label}. Their API often hangs a minute before it fails — Test the host in Settings, or switch to the other one.`
-              );
-            }, 8_000)
-          : null;
+      setLiveRetry(null);
 
       /*
        * Conversation history is intentionally NOT sent by the browser.
@@ -1414,7 +1432,20 @@ export default function Home() {
                 break;
 
               case "retrying":
-                setRetryNotice(formatRetryNotice(evt));
+                if (evt.phase === "clear") {
+                  setLiveRetry(null);
+                  break;
+                }
+                setLiveRetry({
+                  phase: evt.phase === "attempt" ? "attempt" : "backoff",
+                  attempt: evt.attempt,
+                  attempts: evt.attempts,
+                  delayMs: evt.delayMs,
+                  reason: evt.reason,
+                  host: evt.host,
+                  inputChars: evt.inputChars,
+                  receivedAt: Date.now(),
+                });
                 break;
 
               case "continuing":
@@ -1422,6 +1453,7 @@ export default function Home() {
                 // model stopped mid-task (Ox does this on its own limits).
                 // Said plainly, because otherwise a long pause mid-file
                 // looks like the app has hung.
+                retryLiveRef.current = null;
                 setRetryNotice(
                   evt.reason === "output_limit"
                     ? `Answer was longer than one response allows — continuing (${evt.n}/${evt.of})`
@@ -1461,6 +1493,7 @@ export default function Home() {
               case "budget_warning":
                 // Warned rather than stopped. Being cut off with no notice is
                 // worse than knowing it is going to be close.
+                retryLiveRef.current = null;
                 setRetryNotice(
                   `Spending limit approaching — $${evt.spentUsd.toFixed(4)} of ` +
                     `$${evt.limitUsd.toFixed(2)} used on this reply`
@@ -1470,6 +1503,7 @@ export default function Home() {
               case "budget_stopped":
                 // The reply itself explains this too, so the notice is short.
                 // It clears on the next message like every other notice.
+                retryLiveRef.current = null;
                 setRetryNotice(
                   `Stopped at your $${evt.limitUsd.toFixed(2)} spending limit — ` +
                     `the work so far is saved, use Resume to continue`
@@ -1525,6 +1559,7 @@ export default function Home() {
                 break;
 
               case "reasoning":
+                setLiveRetry(null);
                 pendingReasoning += evt.delta;
                 scheduleFlush();
                 break;
@@ -1553,6 +1588,7 @@ export default function Home() {
               // the "Writing app.py" line appear after the file already
               // existed.
               case "tool_start": {
+                setLiveRetry(null);
                 const started: ToolEvent = {
                   id: evt.id,
                   name: evt.name,
@@ -1696,6 +1732,7 @@ export default function Home() {
               }
 
               case "content":
+                setLiveRetry(null);
                 pendingContent += evt.delta;
                 scheduleFlush();
                 break;
@@ -1831,7 +1868,6 @@ export default function Home() {
           });
         }
       } finally {
-        if (oxWaitHint) clearTimeout(oxWaitHint);
         if (frame !== null) cancelAnimationFrame(frame);
         // Drop this run's controller now that it has finished.
         if (runConvId) abortRefs.current.delete(runConvId);
@@ -1839,7 +1875,7 @@ export default function Home() {
         if (stillActive) {
           setIsLoading(false);
           setStatusStage(null);
-          setRetryNotice(null);
+          setLiveRetry(null);
         }
         // Re-sync the global chat list; this does not enter any transcript.
         void refreshConversations();

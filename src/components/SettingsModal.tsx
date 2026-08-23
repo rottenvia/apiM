@@ -438,7 +438,9 @@ export function SettingsModal({
                 </label>
                 <p className="text-xs text-text-secondary mb-2">
                   Same Ox Alpha model. Direct Mode stays MAXIMUM PRIORITY on
-                  both. Zen is often 503 — switch to OpenRouter if Test fails.
+                  both. Test only hits GET /models — a green Test and a hung
+                  chat means their inference is backed up, not a bad key.
+                  Switch hosts yourself; this app will not fail over for you.
                 </p>
                 <div className="mb-3 grid grid-cols-2 gap-1.5">
                   {(["zen", "openrouter"] as const).map((id) => (
