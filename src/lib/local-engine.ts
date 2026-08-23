@@ -7,7 +7,7 @@
  */
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { createWriteStream, promises as fs } from "node:fs";
+import { createWriteStream, readFileSync, rmSync, promises as fs } from "node:fs";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
@@ -31,11 +31,13 @@ import {
   LLAMA_CPP_RELEASE_API,
   pickLlamaAsset,
   sidecarArgs,
+  sidecarLaunchId,
   SIDECAR_CTX,
-  SIDECAR_LAUNCH,
+  defaultSpecState,
   type EngineDownloadEvent,
   type EngineGpu,
   type EngineStatus,
+  type SidecarSpecState,
 } from "@/lib/local-engine-shared";
 
 export * from "@/lib/local-engine-shared";
@@ -134,11 +136,14 @@ export async function engineStatus(): Promise<EngineStatus> {
   const mmprojReady = projector >= MMPROJ_MIN_BYTES;
   const server = await findServerBinary();
   const running = await isEngineListening();
+  const nCtx = running ? await readSidecarCtx() : null;
+  const spec = await readSpecState();
   const flags = {
     ggufReady,
     mmprojReady,
     serverReady: Boolean(server),
     running,
+    nCtx,
   };
   return {
     ...flags,
@@ -149,6 +154,7 @@ export async function engineStatus(): Promise<EngineStatus> {
     baseUrl: DEFAULT_LOCAL_BASE_URL,
     apiModel: DEFAULT_LOCAL_API_MODEL,
     hint: engineHint(flags),
+    spec,
   };
 }
 
@@ -408,96 +414,158 @@ export async function downloadEngine(
 
 let child: ChildProcess | null = null;
 
+function pidFilePath(): string {
+  return path.join(localEngineRoot(), "sidecar.pid");
+}
+
+function specFilePath(): string {
+  return path.join(localEngineRoot(), "spec-opts.json");
+}
+
+function launchStampPath(): string {
+  return path.join(localEngineRoot(), "sidecar.launch");
+}
+
 function killPid(pid: number): void {
   try {
     if (process.platform === "win32") {
-      spawn("taskkill", ["/pid", String(pid), "/T", "/F"], {
+      spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], {
         windowsHide: true,
       });
       return;
     }
     try {
-      process.kill(-pid, "SIGTERM");
+      process.kill(pid, "SIGKILL");
     } catch {
-      process.kill(pid, "SIGTERM");
+      /* already gone */
     }
   } catch {
     /* already gone */
   }
 }
 
-/** Pid listening on the sidecar port — needed after a Next.js restart. */
-function listenerPidOnPort(port: number): number | null {
+/** Every pid listening on our sidecar port — any address. */
+export function pidsOnEnginePort(): number[] {
+  const port = ENGINE_PORT;
+  const found = new Set<number>();
   if (process.platform === "win32") {
     const r = spawnSync("netstat", ["-ano", "-p", "tcp"], {
       encoding: "utf8",
       windowsHide: true,
     });
-    const re = new RegExp(
-      `127\\.0\\.0\\.1:${port}\\s+\\S+\\s+LISTENING\\s+(\\d+)`,
-      "i"
+    const pin = new RegExp(`:${port}(?!\\d)`);
+    for (const line of (r.stdout || "").split(/\r?\n/)) {
+      if (!/LISTENING/i.test(line) || !pin.test(line)) continue;
+      const m = line.trim().match(/(\d+)\s*$/);
+      if (m) found.add(Number(m[1]));
+    }
+  } else {
+    const lsof = spawnSync(
+      "lsof",
+      ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"],
+      { encoding: "utf8" }
     );
-    const m = re.exec(r.stdout || "");
-    const pid = m ? Number(m[1]) : NaN;
-    return Number.isFinite(pid) && pid > 0 ? pid : null;
+    for (const piece of (lsof.stdout || "").trim().split(/\s+/)) {
+      const n = Number(piece);
+      if (Number.isFinite(n) && n > 0) found.add(n);
+    }
+    const fuser = spawnSync("fuser", ["-n", "tcp", String(port)], {
+      encoding: "utf8",
+    });
+    for (const piece of `${fuser.stdout || ""} ${fuser.stderr || ""}`.split(
+      /\s+/
+    )) {
+      const n = Number(piece);
+      if (Number.isFinite(n) && n > 0) found.add(n);
+    }
   }
-  const lsof = spawnSync(
-    "lsof",
-    ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"],
-    { encoding: "utf8" }
-  );
-  const fromLsof = Number((lsof.stdout || "").trim().split(/\s+/)[0]);
-  if (Number.isFinite(fromLsof) && fromLsof > 0) return fromLsof;
-  const fuser = spawnSync("fuser", [`${port}/tcp`], { encoding: "utf8" });
-  const fromFuser = Number((fuser.stdout || "").trim().split(/\s+/)[0]);
-  return Number.isFinite(fromFuser) && fromFuser > 0 ? fromFuser : null;
+  return [...found];
+}
+
+function killLlamaServerByName(): void {
+  if (process.platform === "win32") {
+    spawnSync("taskkill", ["/F", "/IM", "llama-server.exe", "/T"], {
+      windowsHide: true,
+    });
+    return;
+  }
+  spawnSync("pkill", ["-9", "-f", "llama-server"], { encoding: "utf8" });
 }
 
 export function stopEngine(): boolean {
   const proc = child;
   child = null;
   let killed = false;
-  if (proc && !proc.killed && proc.pid) {
+  if (proc && proc.pid) {
     killPid(proc.pid);
     killed = true;
   }
-  const leftover = listenerPidOnPort(ENGINE_PORT);
-  if (leftover) {
-    killPid(leftover);
+  try {
+    const raw = readFileSync(pidFilePath(), "utf8");
+    const saved = Number(raw.trim());
+    if (Number.isFinite(saved) && saved > 0) {
+      killPid(saved);
+      killed = true;
+    }
+  } catch {
+    /* no pid file */
+  }
+  for (const pid of pidsOnEnginePort()) {
+    killPid(pid);
     killed = true;
+  }
+  killLlamaServerByName();
+  try {
+    rmSync(pidFilePath(), { force: true });
+  } catch {
+    /* ignore */
   }
   return killed;
 }
 
-function parseSidecarCtx(data: unknown): number | null {
-  if (!data || typeof data !== "object") return null;
-  const o = data as Record<string, unknown>;
-  const settings = o.default_generation_settings;
-  if (settings && typeof settings === "object") {
-    const s = settings as Record<string, unknown>;
-    if (typeof s.n_ctx === "number") return s.n_ctx;
-    const params = s.params;
-    if (params && typeof params === "object") {
-      const n = (params as Record<string, unknown>).n_ctx;
-      if (typeof n === "number") return n;
+function walkNctx(value: unknown, depth = 0): number | null {
+  if (depth > 8 || value == null) return null;
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const hit = walkNctx(item, depth + 1);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  if (typeof value === "object") {
+    const rec = value as Record<string, unknown>;
+    if (typeof rec.n_ctx === "number") return rec.n_ctx;
+    for (const item of Object.values(rec)) {
+      const hit = walkNctx(item, depth + 1);
+      if (hit) return hit;
     }
   }
-  if (typeof o.n_ctx === "number") return o.n_ctx;
   return null;
+}
+
+function parseSidecarCtx(data: unknown): number | null {
+  return walkNctx(data);
 }
 
 /** How big a window the running sidecar actually opened. */
 export async function readSidecarCtx(): Promise<number | null> {
-  try {
-    const res = await fetch(`http://${ENGINE_HOST}:${ENGINE_PORT}/props`, {
-      cache: "no-store",
-      signal: AbortSignal.timeout(1_200),
-    });
-    if (!res.ok) return null;
-    return parseSidecarCtx(await res.json());
-  } catch {
-    return null;
+  for (const path of ["/props", "/slots"]) {
+    try {
+      const res = await fetch(`http://${ENGINE_HOST}:${ENGINE_PORT}${path}`, {
+        cache: "no-store",
+        signal: AbortSignal.timeout(1_200),
+      });
+      if (!res.ok) continue;
+      const hit = parseSidecarCtx(await res.json());
+      if (hit) return hit;
+    } catch {
+      /* try the other endpoint */
+    }
   }
+  return null;
 }
 
 async function waitForHealth(ms: number, signal?: AbortSignal): Promise<boolean> {
@@ -514,62 +582,64 @@ async function waitUntilStopped(ms: number): Promise<void> {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
     if (!(await isEngineListening())) return;
-    await new Promise((r) => setTimeout(r, 150));
+    await new Promise((r) => setTimeout(r, 200));
   }
 }
 
-function launchStampPath(): string {
-  return path.join(localEngineRoot(), "sidecar.launch");
-}
-
-async function writeLaunchStamp(): Promise<void> {
-  await fs.mkdir(localEngineRoot(), { recursive: true });
-  await fs.writeFile(launchStampPath(), SIDECAR_LAUNCH, "utf8");
-}
-
-async function launchMatches(): Promise<boolean> {
+export async function readSpecState(): Promise<SidecarSpecState> {
   try {
-    return (await fs.readFile(launchStampPath(), "utf8")).trim() === SIDECAR_LAUNCH;
+    const raw = await fs.readFile(specFilePath(), "utf8");
+    const parsed = JSON.parse(raw) as Partial<SidecarSpecState>;
+    const fallback = defaultSpecState();
+    return {
+      enabled: Array.isArray(parsed.enabled)
+        ? parsed.enabled.filter((id): id is string => typeof id === "string")
+        : fallback.enabled,
+      extra: Array.isArray(parsed.extra)
+        ? parsed.extra.filter((id): id is string => typeof id === "string")
+        : [],
+    };
+  } catch {
+    return defaultSpecState();
+  }
+}
+
+export async function writeSpecState(spec: SidecarSpecState): Promise<void> {
+  await fs.mkdir(localEngineRoot(), { recursive: true });
+  await fs.writeFile(specFilePath(), JSON.stringify(spec, null, 2), "utf8");
+}
+
+async function writeLaunchStamp(id: string): Promise<void> {
+  await fs.mkdir(localEngineRoot(), { recursive: true });
+  await fs.writeFile(launchStampPath(), id, "utf8");
+}
+
+async function launchMatches(id: string): Promise<boolean> {
+  try {
+    return (await fs.readFile(launchStampPath(), "utf8")).trim() === id;
   } catch {
     return false;
   }
 }
 
-export async function startEngine(): Promise<{ ok: boolean; error?: string }> {
+async function spawnSidecar(
+  server: string,
+  gguf: string,
+  mmproj: string | undefined,
+  spec: SidecarSpecState
+): Promise<{ ok: boolean; error?: string }> {
+  stopEngine();
+  await waitUntilStopped(10_000);
   if (await isEngineListening()) {
-    const ctx = await readSidecarCtx();
-    const sameLaunch = await launchMatches();
-    // Unknown ctx is fine if we started this process with the current flags.
-    // A missing/old stamp means MTP or context changed — bounce it.
-    if (sameLaunch && (ctx === null || ctx >= SIDECAR_CTX)) return { ok: true };
-    stopEngine();
-    await waitUntilStopped(8_000);
-  }
-
-  const gguf = ggufPath();
-  if ((await fileSize(gguf)) < GGUF_BYTES) {
     return {
       ok: false,
       error:
-        "Qwen 3.8 27B is not downloaded yet. Open Settings and click Download.",
+        "An old llama-server is still holding the port. End llama-server in Task Manager and click Restart.",
     };
   }
-  const server = await findServerBinary();
-  if (!server) {
-    return {
-      ok: false,
-      error: "The local engine is not installed yet. Click Download in Settings.",
-    };
-  }
-
-  stopEngine();
-
-  const projector = mmprojPath();
-  const mmproj =
-    (await fileSize(projector)) >= MMPROJ_MIN_BYTES ? projector : undefined;
 
   try {
-    child = spawn(server, sidecarArgs(gguf, mmproj), {
+    child = spawn(server, sidecarArgs(gguf, mmproj, spec), {
       cwd: path.dirname(server),
       detached: process.platform !== "win32",
       stdio: ["ignore", "ignore", "pipe"],
@@ -582,6 +652,11 @@ export async function startEngine(): Promise<{ ok: boolean; error?: string }> {
       error:
         err instanceof Error ? err.message : "Could not start the local engine.",
     };
+  }
+
+  if (child.pid) {
+    await fs.mkdir(localEngineRoot(), { recursive: true });
+    await fs.writeFile(pidFilePath(), String(child.pid), "utf8");
   }
 
   let spawnError = "";
@@ -603,8 +678,65 @@ export async function startEngine(): Promise<{ ok: boolean; error?: string }> {
         "The local engine started but is not answering yet. Give it a moment and try Start again.",
     };
   }
-  await writeLaunchStamp();
+
+  const ctx = await readSidecarCtx();
+  if (ctx !== null && ctx < SIDECAR_CTX) {
+    stopEngine();
+    await waitUntilStopped(8_000);
+    return {
+      ok: false,
+      error:
+        `Qwen came up on a ${ctx.toLocaleString()}-token window, not ${SIDECAR_CTX.toLocaleString()}. ` +
+        `An old llama-server is still answering. End llama-server in Task Manager and click Restart.`,
+    };
+  }
+  await writeLaunchStamp(sidecarLaunchId(spec));
   return { ok: true };
+}
+
+export async function startEngine(): Promise<{ ok: boolean; error?: string }> {
+  const spec = await readSpecState();
+  const wanted = sidecarLaunchId(spec);
+
+  if (await isEngineListening()) {
+    const ctx = await readSidecarCtx();
+    const same = await launchMatches(wanted);
+    if (same && ctx !== null && ctx >= SIDECAR_CTX) return { ok: true };
+    // Too small, unknown, or stale flags: kill the old process for real.
+    stopEngine();
+    await waitUntilStopped(10_000);
+  }
+
+  const gguf = ggufPath();
+  if ((await fileSize(gguf)) < GGUF_BYTES) {
+    return {
+      ok: false,
+      error:
+        "Qwen 3.8 27B is not downloaded yet. Open Settings and click Download.",
+    };
+  }
+  const server = await findServerBinary();
+  if (!server) {
+    return {
+      ok: false,
+      error: "The local engine is not installed yet. Click Download in Settings.",
+    };
+  }
+
+  const projector = mmprojPath();
+  const mmproj =
+    (await fileSize(projector)) >= MMPROJ_MIN_BYTES ? projector : undefined;
+  return spawnSidecar(server, gguf, mmproj, spec);
+}
+
+/** Persist spec flags and bounce the sidecar so they take effect. */
+export async function applySpecState(
+  spec: SidecarSpecState
+): Promise<{ ok: boolean; error?: string }> {
+  await writeSpecState(spec);
+  stopEngine();
+  await waitUntilStopped(10_000);
+  return startEngine();
 }
 
 /** Start the sidecar if this request is aimed at the in-app engine. */
