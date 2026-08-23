@@ -20,7 +20,7 @@ import {
   BASE_PROMPT,
   buildLegacyPrompt,
   buildPluginDirectives,
-  PLUGIN_DIRECTIVES_MARKER,
+  pinPluginDirectivesOnFirstSystem,
 } from "@/lib/plugins";
 import { workspaceToolsFor, runTool } from "@/lib/tools";
 import { modelHasOpenToolLimits } from "@/lib/tool-limits";
@@ -1031,17 +1031,12 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         /*
          * Ox / OpenCode often treats only the first system message as binding
          * and ignores a later "priority" one after a few rounds. Pin the
-         * same standing orders onto that first message so Direct Mode cannot
-         * fade. DeepSeek still gets the tail-only copy (cache prefix).
+         * same standing orders onto that first message — start and end —
+         * so Direct Mode cannot fade. DeepSeek still gets the tail-only
+         * copy (cache prefix).
          */
-        const opening = transcript[0];
-        if (
-          target.providerId === "opencode" &&
-          pluginDirectives &&
-          opening?.role === "system" &&
-          !opening.content.includes(PLUGIN_DIRECTIVES_MARKER)
-        ) {
-          opening.content += `\n\n${pluginDirectives}`;
+        if (target.providerId === "opencode") {
+          pinPluginDirectivesOnFirstSystem(transcript, pluginDirectives);
         }
 
         const vision = getModel(model).vision;
@@ -1075,12 +1070,14 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          * prefix hits while keeping it more recent than every dynamic input.
          */
         const appendPluginDirectives = () => {
+          // Only the dedicated tail copy moves. The first system message may
+          // START with the same marker (Ox pin) and must not be deleted.
           for (let i = transcript.length - 1; i >= 0; i--) {
             const entry = transcript[i];
             if (
               entry.role === "system" &&
               typeof entry.content === "string" &&
-              entry.content.startsWith(PLUGIN_DIRECTIVES_MARKER)
+              entry.content === pluginDirectives
             ) {
               transcript.splice(i, 1);
             }
@@ -1453,18 +1450,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           await refreshFileTree();
         }
 
-        if (
-          target.providerId === "opencode" &&
-          pluginDirectives
-        ) {
-          const first = transcript.find((m) => m.role === "system");
-          if (
-            first &&
-            typeof first.content === "string" &&
-            !first.content.includes(PLUGIN_DIRECTIVES_MARKER)
-          ) {
-            first.content += `\n\n${pluginDirectives}`;
-          }
+        if (target.providerId === "opencode") {
+          pinPluginDirectivesOnFirstSystem(transcript, pluginDirectives);
         }
 
         // ---------------- Agent loop ----------------
@@ -1599,6 +1586,11 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         while (true) {
           round += 1;
           appendPluginDirectives();
+          // Ox ignores the tail copy after a few rounds. Re-pin every
+          // round so a long agent loop cannot fade Direct Mode.
+          if (target.providerId === "opencode") {
+            pinPluginDirectivesOnFirstSystem(transcript, pluginDirectives);
+          }
           const toolAcc = new ToolCallAccumulator();
           let roundContent = "";
           let roundReasoning = "";
@@ -1638,6 +1630,14 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               rounds: compacted.stats.rounds,
               tokensSaved: compacted.stats.tokensSaved,
             });
+          }
+          // Compact returns a new array. Re-pin the copy that actually
+          // goes on the wire so Ox cannot lose MAXIMUM PRIORITY.
+          if (target.providerId === "opencode") {
+            pinPluginDirectivesOnFirstSystem(
+              compacted.messages,
+              pluginDirectives
+            );
           }
 
           const dsRequestBody: Record<string, unknown> = {
