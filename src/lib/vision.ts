@@ -5,6 +5,9 @@
  * the hosted Chat Completions endpoint. So images are described by a vision
  * model first, and only that description reaches DeepSeek.
  *
+ * Ox Alpha and Qwen 3.8 27B are native VLMs: do not call this helper for
+ * those. The composer gates `/api/vision` on `modelNeedsVisionHelper`.
+ *
  * A vision model is used rather than plain OCR because a screenshot is rarely
  * just characters: layout, which control is highlighted, and what looks wrong
  * all matter, and OCR discards every one of them.

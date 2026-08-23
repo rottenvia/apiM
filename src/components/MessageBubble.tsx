@@ -536,19 +536,29 @@ function MessageBubbleImpl({
             {message.attachments && message.attachments.length > 0 && (
               <div className="flex flex-wrap gap-1.5">
                 {message.attachments.map((file, i) =>
-                  file.kind === "image" && file.dataUrl ? (
+                  (file.kind === "image" || file.kind === "video") && file.dataUrl ? (
                     <button
                       key={i}
                       onClick={() => setPreviewImage(file)}
                       title={`${file.name} — click to enlarge`}
                       className="overflow-hidden rounded-lg border border-border transition-transform hover:scale-[1.03]"
                     >
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        src={file.dataUrl}
-                        alt={file.name}
-                        className="h-24 w-auto max-w-[12rem] object-cover"
-                      />
+                      {file.kind === "video" ? (
+                        <video
+                          src={file.dataUrl}
+                          muted
+                          playsInline
+                          preload="metadata"
+                          className="h-24 w-auto max-w-[12rem] object-cover"
+                        />
+                      ) : (
+                        /* eslint-disable-next-line @next/next/no-img-element */
+                        <img
+                          src={file.dataUrl}
+                          alt={file.name}
+                          className="h-24 w-auto max-w-[12rem] object-cover"
+                        />
+                      )}
                     </button>
                   ) : (
                     <span
@@ -687,6 +697,8 @@ function MessageBubbleImpl({
           <ImageLightbox
             src={previewImage.dataUrl}
             name={previewImage.name}
+            description={previewImage.description}
+            kind={previewImage.kind === "video" ? "video" : "image"}
             onClose={() => setPreviewImage(null)}
           />
         )}

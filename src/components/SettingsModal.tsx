@@ -16,6 +16,9 @@ import {
   DEFAULT_LOCAL_BASE_URL,
   LOCAL_HOST_PRESETS,
   QWEN_38_27B_ID,
+  getModel,
+  modelNeedsVisionHelper,
+  modelSeesVideo,
 } from "@/lib/models";
 
 /**
@@ -653,20 +656,35 @@ export function SettingsModal({
                 <label className="block text-sm font-semibold text-text-primary mb-1.5">
                   Vision API Key
                   <span className="ml-1 text-xs font-normal text-text-muted">
-                    (for screenshots)
+                    {modelNeedsVisionHelper(model)
+                      ? "(for DeepSeek screenshots)"
+                      : "(DeepSeek only)"}
                   </span>
                 </label>
                 <p className="text-xs text-text-secondary mb-2">
-                  DeepSeek can&apos;t read images, so attached screenshots are
-                  described by an OpenAI vision model first. Get a key from{" "}
-                  <a
-                    href="https://platform.openai.com/api-keys"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-accent-light underline underline-offset-2"
-                  >
-                    platform.openai.com
-                  </a>
+                  {modelNeedsVisionHelper(model) ? (
+                    <>
+                      {getModel(model).label} can&apos;t read images, so
+                      attached screenshots are described by an OpenAI vision
+                      model first. MP4 is not supported on this model. Get a
+                      key from{" "}
+                      <a
+                        href="https://platform.openai.com/api-keys"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-accent-light underline underline-offset-2"
+                      >
+                        platform.openai.com
+                      </a>
+                    </>
+                  ) : (
+                    <>
+                      {getModel(model).label} sees images
+                      {modelSeesVideo(model) ? " and video" : ""} itself — no
+                      vision provider is used while it is selected. A key here
+                      is only needed if you switch to DeepSeek.
+                    </>
+                  )}
                 </p>
                 <div className="relative">
                   <input

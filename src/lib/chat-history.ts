@@ -1,8 +1,10 @@
 import { getConversation } from "@/lib/store";
+import type { StoredAttachment } from "@/lib/multimodal";
 
 export interface ScopedChatMessage {
   role: "user" | "assistant";
   content: string;
+  attachments?: StoredAttachment[] | null;
 }
 
 /**
@@ -21,13 +23,17 @@ export async function loadScopedConversationHistory(
     .filter(
       (entry) =>
         (entry.role === "user" || entry.role === "assistant") &&
-        Boolean(entry.content?.trim()) &&
+        // A screenshot-only turn stores empty typed text — keep it so the
+        // pixels (or helper description) can be replayed.
+        (Boolean(entry.content?.trim()) ||
+          Boolean(entry.attachments?.length)) &&
         !entry.incomplete
     )
     .slice(-20)
     .map((entry) => ({
       role: entry.role as "user" | "assistant",
       content: entry.content,
+      attachments: entry.attachments ?? null,
     }));
   if (options.dropLastUser && history.at(-1)?.role === "user") history.pop();
   return history;
