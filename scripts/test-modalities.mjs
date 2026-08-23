@@ -237,7 +237,7 @@ check(
 const noProj = shared.sidecarArgs("/tmp/qwen.gguf");
 check("sidecarArgs without a projector stays text-only", !noProj.includes("--mmproj"));
 check("downloadEngine pulls the projector", /MMPROJ_URL/.test(engine) && /mmprojPath\(\)/.test(engine));
-check("startEngine passes the projector into sidecarArgs", /sidecarArgs\(gguf, mmproj\)/.test(engine));
+check("startEngine passes the projector into sidecarArgs", /sidecarArgs\(gguf, mmproj/.test(engine));
 
 console.log("\n8. Free OCR fallback for blind models");
 

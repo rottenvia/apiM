@@ -10,9 +10,15 @@ import {
   downloadEngine,
   engineStatus,
   ensureEngineRunning,
+  applySpecState,
   startEngine,
   stopEngine,
 } from "@/lib/local-engine";
+import {
+  defaultSpecState,
+  parseUserFlags,
+  type SidecarSpecState,
+} from "@/lib/local-engine-shared";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -39,6 +45,47 @@ export async function POST(req: NextRequest) {
   if (action === "stop") {
     stopEngine();
     return NextResponse.json(await engineStatus());
+  }
+
+  if (action === "restart") {
+    stopEngine();
+    const started = await startEngine();
+    return NextResponse.json({
+      ok: started.ok,
+      error: started.error,
+      status: await engineStatus(),
+    });
+  }
+
+  if (action === "set-opts") {
+    const raw = body as {
+      enabled?: unknown;
+      extra?: unknown;
+      addFlag?: unknown;
+    };
+    const current = (await engineStatus()).spec ?? defaultSpecState();
+    let extra = Array.isArray(raw.extra)
+      ? raw.extra.filter((t): t is string => typeof t === "string")
+      : current.extra;
+    if (typeof raw.addFlag === "string" && raw.addFlag.trim()) {
+      const parsed = parseUserFlags(raw.addFlag);
+      if (!parsed.ok) {
+        return NextResponse.json({ ok: false, error: parsed.error }, { status: 400 });
+      }
+      extra = [...extra, ...parsed.tokens];
+    }
+    const next: SidecarSpecState = {
+      enabled: Array.isArray(raw.enabled)
+        ? raw.enabled.filter((t): t is string => typeof t === "string")
+        : current.enabled,
+      extra,
+    };
+    const applied = await applySpecState(next);
+    return NextResponse.json({
+      ok: applied.ok,
+      error: applied.error,
+      status: await engineStatus(),
+    });
   }
 
   if (action === "start") {

@@ -473,7 +473,7 @@ check(
 );
 check(
   "a context-exceeded 400 tells you to restart the sidecar",
-  /80K window/.test(
+  /Restart/.test(
     providers.providerHttpError(
       400,
       "On this PC",
@@ -491,8 +491,16 @@ check(
     /ctx >= SIDECAR_CTX/.test(engineSrc)
 );
 check(
-  "a sidecar without the current launch stamp is restarted",
-  /SIDECAR_LAUNCH/.test(engineSrc) && /launchMatches/.test(engineSrc)
+  "a stale llama-server is killed by name, not just by the in-memory child",
+  /killLlamaServerByName/.test(engineSrc) && /pkill/.test(engineSrc)
+);
+check(
+  "chat refuses to send if the running window is still 16K",
+  /ctx < SIDECAR_CTX/.test(route) && /Restart/.test(route)
+);
+check(
+  "Settings exposes spec optimizations the user can add to",
+  /Spec optimizations/.test(localUi) && /parseUserFlags/.test(sharedSrc)
 );
 
 console.log("\n9. A 503 from Ox / OpenCode is their outage, not the user's key");
