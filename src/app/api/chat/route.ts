@@ -66,6 +66,13 @@ import {
 import type { TranscriptMessage } from "@/lib/transcript";
 import { pruneTranscript } from "@/lib/prune";
 import { compactTranscript, compactForResume } from "@/lib/compact";
+import {
+  QWEN_COMPACT,
+  QWEN_PRUNE,
+  fitForLocalContext,
+  localMessageBudget,
+} from "@/lib/local-context";
+import { SIDECAR_MAX_OUTPUT } from "@/lib/local-engine-shared";
 import { readLessons, applyLessons, formatLessonsForPrompt } from "@/lib/lessons";
 import {
   readBinaryLedger,
@@ -1635,7 +1642,10 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           // keeps everything; only the copy going upstream is reduced, so a
           // long agent run does not re-pay for the full text of a file it
           // read thirty rounds ago.
-          const pruned = pruneTranscript(transcript);
+          const pruned = pruneTranscript(
+            transcript,
+            target.thinkingStyle === "qwen" ? QWEN_PRUNE : undefined
+          );
           if (pruned.stats.collapsed > 0) {
             send({
               type: "context_pruned",
@@ -1676,10 +1686,19 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           // Qwen's jinja template only accepts a system message at index 0.
           // File-tree / plan / plugin tails stay in `transcript` (and so in
           // resume state) so DeepSeek/Ox keep their cache-friendly layout.
-          const wireMessages =
+          // The sidecar window is 80K, not 1M — fit the wire copy so a
+          // workspace turn cannot 400 with "exceeds the available context".
+          const foldedForQwen =
             target.thinkingStyle === "qwen"
               ? foldSystemMessagesToFront(compacted.messages)
               : compacted.messages;
+          const wireMessages =
+            target.thinkingStyle === "qwen"
+              ? fitForLocalContext(
+                  foldedForQwen,
+                  localMessageBudget(workspaceEnabled)
+                ).messages
+              : foldedForQwen;
 
           const dsRequestBody: Record<string, unknown> = {
             // On the wire this may differ from the app id (Ox Alpha is
@@ -1697,8 +1716,17 @@ Ask before you build the wrong thing. If a choice would change what you produce 
              * let a single round overshoot badly, measured at 4.8x a $0.10
              * cap. Capping max_tokens means the round physically cannot cost
              * more than is left.
+             *
+             * Local Qwen also cannot emit 65k into an 80k window that already
+             * holds the prompt, so the sidecar output ceiling wins there.
              */
-            max_tokens: maxTokensFor(budget, model, MAX_OUTPUT_TOKENS),
+            max_tokens: maxTokensFor(
+              budget,
+              model,
+              target.thinkingStyle === "qwen"
+                ? SIDECAR_MAX_OUTPUT
+                : MAX_OUTPUT_TOKENS
+            ),
           };
 
           applyThinking(
