@@ -20,6 +20,7 @@ import {
   modelNeedsVisionHelper,
   modelSeesVideo,
 } from "@/lib/models";
+import { OX_HOSTS, type OxHost } from "@/lib/ox-host";
 
 /**
  * Settings, grouped.
@@ -96,6 +97,9 @@ const GROUPS: {
 interface SettingsModalProps {
   deepseekKey: string;
   opencodeKey: string;
+  openrouterKey: string;
+  oxHost: OxHost;
+  onOxHostChange: (host: OxHost) => void;
   localBaseUrl: string;
   localApiKey: string;
   localApiModel: string;
@@ -112,6 +116,7 @@ interface SettingsModalProps {
   defaultEffort: string;
   onDeepseekKeyChange: (key: string) => void;
   onOpencodeKeyChange: (key: string) => void;
+  onOpenrouterKeyChange: (key: string) => void;
   onLocalBaseUrlChange: (url: string) => void;
   onLocalApiKeyChange: (key: string) => void;
   onLocalApiModelChange: (model: string) => void;
@@ -188,9 +193,69 @@ function ProviderToggle({
   );
 }
 
+function OxProbeButton({ host, apiKey }: { host: OxHost; apiKey: string }) {
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
+  const info = OX_HOSTS[host];
+
+  const run = async () => {
+    setBusy(true);
+    setResult(null);
+    try {
+      const res = await fetch("/api/ox/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ host, apiKey }),
+      });
+      const data = (await res.json()) as {
+        ok?: boolean;
+        error?: string;
+        detail?: string;
+        ms?: number;
+      };
+      const text = data.ok
+        ? data.detail ?? `${info.label} is up.`
+        : data.error ?? `Couldn't test ${info.label}.`;
+      setResult({
+        ok: Boolean(data.ok),
+        text: data.ms ? `${text} (${data.ms}ms)` : text,
+      });
+    } catch {
+      setResult({ ok: false, text: "Couldn't reach this app's test route." });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mt-2">
+      <button
+        type="button"
+        onClick={() => void run()}
+        disabled={busy || !apiKey.trim()}
+        className="rounded-lg border border-border px-2.5 py-1 text-[11px] font-medium text-text-secondary transition-colors hover:bg-bg-hover disabled:opacity-40"
+      >
+        {busy ? "Testing…" : `Test ${info.shortLabel}`}
+      </button>
+      {result && (
+        <p
+          className={`mt-1.5 text-[11px] leading-4 ${
+            result.ok ? "text-success" : "text-danger"
+          }`}
+        >
+          {result.text}
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function SettingsModal({
   deepseekKey,
   opencodeKey,
+  openrouterKey,
+  oxHost,
+  onOxHostChange,
   localBaseUrl,
   localApiKey,
   localApiModel,
@@ -207,6 +272,7 @@ export function SettingsModal({
   defaultEffort,
   onDeepseekKeyChange,
   onOpencodeKeyChange,
+  onOpenrouterKeyChange,
   onLocalBaseUrlChange,
   onLocalApiKeyChange,
   onLocalApiModelChange,
@@ -232,6 +298,7 @@ export function SettingsModal({
 
   const [showDsKey, setShowDsKey] = useState(false);
   const [showOcKey, setShowOcKey] = useState(false);
+  const [showOrKey, setShowOrKey] = useState(false);
   const [showLocalKey, setShowLocalKey] = useState(false);
   const [showTvKey, setShowTvKey] = useState(false);
   const [showExaKey, setShowExaKey] = useState(false);
@@ -364,8 +431,34 @@ export function SettingsModal({
                 )}
               </div>
 
-              {/* OpenCode Zen — Ox Alpha */}
+              {/* Ox Alpha — one model, two hosts */}
               <div>
+                <label className="block text-sm font-semibold text-text-primary mb-1.5">
+                  Ox Alpha host
+                </label>
+                <p className="text-xs text-text-secondary mb-2">
+                  Same Ox Alpha model. Direct Mode stays MAXIMUM PRIORITY on
+                  both. Zen is often 503 — switch to OpenRouter if Test fails.
+                </p>
+                <div className="mb-3 grid grid-cols-2 gap-1.5">
+                  {(["zen", "openrouter"] as const).map((id) => (
+                    <button
+                      key={id}
+                      type="button"
+                      onClick={() => onOxHostChange(id)}
+                      className={`rounded-xl border px-3 py-2 text-left text-[12px] font-medium transition-all ${
+                        oxHost === id
+                          ? "border-accent/30 bg-accent/15 text-accent-light"
+                          : "border-border bg-bg-tertiary text-text-secondary hover:border-border-light"
+                      }`}
+                    >
+                      <span className="block">{OX_HOSTS[id].shortLabel}</span>
+                      <span className="mt-0.5 block font-mono text-[10px] opacity-70">
+                        {OX_HOSTS[id].apiModel}
+                      </span>
+                    </button>
+                  ))}
+                </div>
                 <label className="block text-sm font-semibold text-text-primary mb-1.5">
                   OpenCode API Key
                   <span className="ml-1 text-xs font-normal text-text-muted">
@@ -418,6 +511,64 @@ export function SettingsModal({
                     <div className="w-1.5 h-1.5 rounded-full bg-success" />
                     <span className="text-xs text-success">Key saved</span>
                   </div>
+                )}
+                {oxHost === "zen" && <OxProbeButton host="zen" apiKey={opencodeKey} />}
+
+                <label className="mt-4 block text-sm font-semibold text-text-primary mb-1.5">
+                  OpenRouter API Key
+                  <span className="ml-1 text-xs font-normal text-text-muted">
+                    (Ox Alpha)
+                  </span>
+                </label>
+                <p className="text-xs text-text-secondary mb-2">
+                  Get a key from{" "}
+                  <a
+                    href="https://openrouter.ai/settings/keys"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-accent-light underline underline-offset-2"
+                  >
+                    openrouter.ai/settings/keys
+                  </a>
+                  . Wire id{" "}
+                  <code className="rounded bg-bg-tertiary px-1 py-0.5 text-[11px]">
+                    stealth/ox-alpha
+                  </code>
+                  .
+                </p>
+                <div className="relative">
+                  <input
+                    type={showOrKey ? "text" : "password"}
+                    value={openrouterKey}
+                    onChange={(e) => onOpenrouterKeyChange(e.target.value)}
+                    placeholder="sk-or-v1-..."
+                    className="w-full px-4 py-2.5 rounded-xl bg-bg-tertiary border border-border text-sm text-text-primary placeholder-text-muted outline-none focus:border-accent/50 focus:ring-1 focus:ring-accent/25 transition-all"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowOrKey(!showOrKey)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-text-muted hover:text-text-secondary transition-colors"
+                  >
+                    {showOrKey ? (
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
+                      </svg>
+                    ) : (
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                      </svg>
+                    )}
+                  </button>
+                </div>
+                {openrouterKey && (
+                  <div className="flex items-center gap-1.5 mt-1.5">
+                    <div className="w-1.5 h-1.5 rounded-full bg-success" />
+                    <span className="text-xs text-success">Key saved</span>
+                  </div>
+                )}
+                {oxHost === "openrouter" && (
+                  <OxProbeButton host="openrouter" apiKey={openrouterKey} />
                 )}
               </div>
 
@@ -789,7 +940,7 @@ export function SettingsModal({
                   >
                     <span className="block font-semibold">Ox Alpha</span>
                     <span className="text-[11px] opacity-70">
-                      OpenCode Zen • 1M context • free preview
+                      Zen or OpenRouter • 1M context • free preview
                     </span>
                   </button>
                   <button

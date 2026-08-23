@@ -296,9 +296,9 @@ export const PLUGIN_DIRECTIVES_MARKER =
 /**
  * Keep standing orders on the first system message.
  *
- * DeepSeek obeys a later system message. Ox / OpenCode often treats only
- * the first one as binding and ignores the tail copy after a few rounds —
- * which is how Direct Mode "suddenly" started refusing mid-conversation.
+ * DeepSeek obeys a later system message. Ox (Zen or OpenRouter) often
+ * treats only the first one as binding and ignores the tail copy after a
+ * few rounds — which is how Direct Mode "suddenly" started refusing.
  *
  * The block is written at both ends of that first message: the start is
  * what Ox actually reads, the end still outranks the workspace prose that

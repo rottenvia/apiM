@@ -177,10 +177,10 @@ export const MODELS: ModelInfo[] = [
     label: "Ox Alpha",
     shortLabel: "Ox Alpha",
     description:
-      "Stealth reasoning model on OpenCode Zen. 1M context, native image and video, free during the preview.",
+      "Stealth reasoning model. 1M context, native image and video. Served by OpenCode Zen or OpenRouter — pick the host in Settings.",
     specs: "1M context · 128K max output · image + video · open tools · free preview",
-    resumeBlurb: "Free on OpenCode Zen",
-    settingsSubtitle: "OpenCode · 1M context · free",
+    resumeBlurb: "Free on Zen or OpenRouter",
+    settingsSubtitle: "Zen or OpenRouter · 1M context · free",
     mapsLowToHigh: false,
     helper: true,
     peakHours: false,
@@ -246,6 +246,9 @@ export function hasKeyForModel(
   keys: {
     deepseekKey?: string;
     opencodeKey?: string;
+    openrouterKey?: string;
+    /** Which Ox Alpha front door is selected. */
+    oxHost?: string;
     /** Local models need a host, not a cloud key. */
     localBaseUrl?: string;
   }
@@ -256,6 +259,10 @@ export function hasKeyForModel(
     // listening — that is a reachability error, not a missing-key one.
     return true;
   }
-  const raw = provider === "opencode" ? keys.opencodeKey : keys.deepseekKey;
-  return Boolean(raw && raw.trim());
+  if (provider === "opencode") {
+    const raw =
+      keys.oxHost === "openrouter" ? keys.openrouterKey : keys.opencodeKey;
+    return Boolean(raw && raw.trim());
+  }
+  return Boolean(keys.deepseekKey && keys.deepseekKey.trim());
 }

@@ -28,6 +28,7 @@ import {
 } from "@/lib/models";
 import { replyCanContinue } from "@/lib/resume-target";
 import { formatRetryNotice } from "@/lib/retry";
+import { oxHostInfo, type OxHost } from "@/lib/ox-host";
 
 export interface Message {
   id: string;
@@ -347,6 +348,8 @@ export default function Home() {
   // Settings
   const [deepseekKey, setDeepseekKey] = useState("");
   const [opencodeKey, setOpencodeKey] = useState("");
+  const [openrouterKey, setOpenrouterKey] = useState("");
+  const [oxHost, setOxHost] = useState<OxHost>("zen");
   const [localBaseUrl, setLocalBaseUrl] = useState(DEFAULT_LOCAL_BASE_URL);
   const [localApiKey, setLocalApiKey] = useState("");
   const [localApiModel, setLocalApiModel] = useState(DEFAULT_LOCAL_API_MODEL);
@@ -435,7 +438,13 @@ export default function Home() {
    */
   const [budgetUsd, setBudgetUsd] = useState<number | null>(null);
 
-  const hasKeys = hasKeyForModel(model, { deepseekKey, opencodeKey, localBaseUrl });
+  const hasKeys = hasKeyForModel(model, {
+    deepseekKey,
+    opencodeKey,
+    openrouterKey,
+    oxHost,
+    localBaseUrl,
+  });
   const initialLoadDone = useRef(false);
   /** Current workspace id, readable from callbacks without re-creating them. */
   const workspaceIdRef = useRef<string | null>(workspaceId);
@@ -500,6 +509,8 @@ export default function Home() {
             question,
             deepseekApiKey: deepseekKey,
             opencodeApiKey: opencodeKey,
+            openrouterApiKey: openrouterKey,
+            oxHost,
             localBaseUrl,
             localApiKey,
             localApiModel,
@@ -542,7 +553,7 @@ export default function Home() {
         );
       }
     },
-    [deepseekKey, opencodeKey, localBaseUrl, localApiKey, localApiModel, hasKeys, workspaceId]
+    [deepseekKey, opencodeKey, openrouterKey, oxHost, localBaseUrl, localApiKey, localApiModel, hasKeys, workspaceId]
   );
   /** Latest messages + sender, so stable callbacks can read them. */
   const messagesRef = useRef<Message[]>([]);
@@ -573,6 +584,10 @@ export default function Home() {
             const s = JSON.parse(saved);
             if (s.deepseekKey) setDeepseekKey(s.deepseekKey);
             if (s.opencodeKey) setOpencodeKey(s.opencodeKey);
+            if (s.openrouterKey) setOpenrouterKey(s.openrouterKey);
+            if (s.oxHost === "zen" || s.oxHost === "openrouter") {
+              setOxHost(s.oxHost);
+            }
             if (typeof s.localBaseUrl === "string" && s.localBaseUrl.trim()) {
               setLocalBaseUrl(s.localBaseUrl);
             }
@@ -627,6 +642,8 @@ export default function Home() {
         JSON.stringify({
           deepseekKey,
           opencodeKey,
+          openrouterKey,
+          oxHost,
           localBaseUrl,
           localApiKey,
           localApiModel,
@@ -652,6 +669,8 @@ export default function Home() {
   }, [
     deepseekKey,
     opencodeKey,
+    openrouterKey,
+    oxHost,
     localBaseUrl,
     localApiKey,
     localApiModel,
@@ -1180,6 +1199,14 @@ export default function Home() {
       });
       setIsLoading(true);
       setStatusStage(webSearchMode === "off" ? "thinking" : "deciding");
+      const oxWaitHint =
+        getModel(activeModel).provider === "opencode"
+          ? setTimeout(() => {
+              setRetryNotice(
+                `Still waiting on ${oxHostInfo(oxHost).label}. Their API often hangs a minute before it fails — Test the host in Settings, or switch to the other one.`
+              );
+            }, 8_000)
+          : null;
 
       /*
        * Conversation history is intentionally NOT sent by the browser.
@@ -1280,6 +1307,8 @@ export default function Home() {
             conversationId: requestConversationId,
             deepseekApiKey: deepseekKey,
             opencodeApiKey: opencodeKey,
+            openrouterApiKey: openrouterKey,
+            oxHost,
             localBaseUrl,
             localApiKey,
             localApiModel,
@@ -1380,8 +1409,8 @@ export default function Home() {
             switch (evt.type) {
               case "status":
                 setStatusStage(evt.stage);
-                // Any progress means the retry resolved.
-                setRetryNotice(null);
+                // Do not clear retryNotice here. The route sends "thinking"
+                // before it even calls Ox, so wiping the notice hid the hang.
                 break;
 
               case "retrying":
@@ -1802,6 +1831,7 @@ export default function Home() {
           });
         }
       } finally {
+        if (oxWaitHint) clearTimeout(oxWaitHint);
         if (frame !== null) cancelAnimationFrame(frame);
         // Drop this run's controller now that it has finished.
         if (runConvId) abortRefs.current.delete(runConvId);
@@ -1830,6 +1860,8 @@ export default function Home() {
       workspaceId,
       deepseekKey,
       opencodeKey,
+      openrouterKey,
+      oxHost,
       localBaseUrl,
       localApiKey,
       localApiModel,
@@ -2304,7 +2336,7 @@ export default function Home() {
         hasKeys={hasKeys}
         missingKeyLabel={
           getModel(model).provider === "opencode"
-            ? "OpenCode"
+            ? oxHostInfo(oxHost).label
             : getModel(model).provider === "local"
               ? "local server"
               : "DeepSeek"
@@ -2359,6 +2391,9 @@ export default function Home() {
         <SettingsModal
           deepseekKey={deepseekKey}
           opencodeKey={opencodeKey}
+          openrouterKey={openrouterKey}
+          oxHost={oxHost}
+          onOxHostChange={setOxHost}
           localBaseUrl={localBaseUrl}
           localApiKey={localApiKey}
           localApiModel={localApiModel}
@@ -2385,6 +2420,13 @@ export default function Home() {
             // rather than a DeepSeek model they cannot call.
             if (key.trim() && !deepseekKey && getModel(model).provider === "deepseek") {
               setModel("ox-alpha");
+            }
+          }}
+          onOpenrouterKeyChange={(key) => {
+            setOpenrouterKey(key);
+            if (key.trim() && !deepseekKey && getModel(model).provider === "deepseek") {
+              setModel("ox-alpha");
+              setOxHost("openrouter");
             }
           }}
           onTavilyKeyChange={setTavilyKey}

@@ -41,6 +41,8 @@ interface Incoming {
   question?: unknown;
   deepseekApiKey?: unknown;
   opencodeApiKey?: unknown;
+  openrouterApiKey?: unknown;
+  oxHost?: unknown;
   workspaceId?: unknown;
   /** The user's last real message, purely as context for pronouns. */
   lastUserMessage?: unknown;
@@ -61,6 +63,9 @@ export async function POST(req: NextRequest) {
       typeof body.deepseekApiKey === "string" ? body.deepseekApiKey : "",
     opencodeApiKey:
       typeof body.opencodeApiKey === "string" ? body.opencodeApiKey : "",
+    openrouterApiKey:
+      typeof body.openrouterApiKey === "string" ? body.openrouterApiKey : "",
+    oxHost: typeof body.oxHost === "string" ? body.oxHost : undefined,
   });
 
   if (!question) {

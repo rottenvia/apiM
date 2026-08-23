@@ -116,6 +116,8 @@ import { estimateCost, getDeepSeekPeriod } from "@/lib/pricing";
 import { listCustomPlugins } from "@/lib/plugin-store";
 import {
   applyThinking,
+  attemptTimeoutMs,
+  completionHeaders,
   providerHttpError,
   providerTimedOut,
   providerUnreachable,
@@ -187,8 +189,12 @@ interface ChatRequestBody {
   attachments?: StoredAttachment[];
   conversationId?: string | null;
   deepseekApiKey?: string;
-  /** OpenCode Zen key — required when the selected model is Ox Alpha. */
+  /** OpenCode Zen key — required when Ox Alpha is on the Zen host. */
   opencodeApiKey?: string;
+  /** OpenRouter key — required when Ox Alpha is on the OpenRouter host. */
+  openrouterApiKey?: string;
+  /** `zen` or `openrouter`. Defaults to Zen. */
+  oxHost?: string;
   /** Local OpenAI-compatible host (in-app sidecar or a custom one). */
   localBaseUrl?: string;
   localApiKey?: string;
@@ -430,6 +436,8 @@ export async function POST(req: NextRequest) {
     conversationId,
     deepseekApiKey,
     opencodeApiKey,
+    openrouterApiKey,
+    oxHost,
     localBaseUrl,
     localApiKey,
     localApiModel,
@@ -465,6 +473,8 @@ export async function POST(req: NextRequest) {
   const creds = {
     deepseekApiKey,
     opencodeApiKey,
+    openrouterApiKey,
+    oxHost,
     localBaseUrl,
     localApiKey,
     localApiModel,
@@ -1712,14 +1722,11 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             () =>
               fetch(`${target.baseUrl}/chat/completions`, {
                 method: "POST",
-                headers: {
-                  "Content-Type": "application/json",
-                  Authorization: `Bearer ${target.apiKey}`,
-                },
+                headers: completionHeaders(target),
                 body: JSON.stringify(dsRequestBody),
                 signal: AbortSignal.any([
                   runSignal,
-                  AbortSignal.timeout(280_000),
+                  AbortSignal.timeout(attemptTimeoutMs(target)),
                 ]),
               }),
             {
