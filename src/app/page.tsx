@@ -27,6 +27,7 @@ import {
   hasKeyForModel,
 } from "@/lib/models";
 import { replyCanContinue } from "@/lib/resume-target";
+import { formatRetryNotice } from "@/lib/retry";
 
 export interface Message {
   id: string;
@@ -1384,9 +1385,7 @@ export default function Home() {
                 break;
 
               case "retrying":
-                setRetryNotice(
-                  `${evt.reason} — retrying (${evt.attempt}/${evt.attempts - 1}) in ${Math.round(evt.delayMs / 100) / 10}s`
-                );
+                setRetryNotice(formatRetryNotice(evt));
                 break;
 
               case "continuing":
