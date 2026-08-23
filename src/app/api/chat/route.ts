@@ -72,7 +72,7 @@ import {
   fitForLocalContext,
   localMessageBudget,
 } from "@/lib/local-context";
-import { SIDECAR_MAX_OUTPUT } from "@/lib/local-engine-shared";
+import { SIDECAR_CTX, SIDECAR_MAX_OUTPUT } from "@/lib/local-engine-shared";
 import { readLessons, applyLessons, formatLessonsForPrompt } from "@/lib/lessons";
 import {
   readBinaryLedger,
@@ -141,6 +141,7 @@ import { OX_FIRST_TOKEN_MS, isOxProvider } from "@/lib/ox-host";
 import {
   ensureEngineRunning,
   isManagedEngineUrl,
+  readSidecarCtx,
 } from "@/lib/local-engine";
 
 export const maxDuration = 300;
@@ -506,6 +507,18 @@ export async function POST(req: NextRequest) {
     if (!ready.ok) {
       return NextResponse.json(
         { error: ready.error ?? "Qwen is not running on this PC." },
+        { status: 503 }
+      );
+    }
+    const ctx = await readSidecarCtx();
+    if (ctx !== null && ctx < SIDECAR_CTX) {
+      return NextResponse.json(
+        {
+          error:
+            `Qwen is still on a ${ctx.toLocaleString()}-token window ` +
+            `(need ${SIDECAR_CTX.toLocaleString()}). Open Settings → On this PC → Restart. ` +
+            `An old llama-server is still holding the port.`,
+        },
         { status: 503 }
       );
     }
@@ -1666,7 +1679,10 @@ Ask before you build the wrong thing. If a choice would change what you produce 
            * — the API requires the two together — so whole rounds are
            * replaced by a plain assistant message describing what they did.
            */
-          const compacted = compactTranscript(pruned.messages);
+          const compacted = compactTranscript(
+            pruned.messages,
+            target.thinkingStyle === "qwen" ? QWEN_COMPACT : undefined
+          );
           if (compacted.stats.rounds > 0) {
             send({
               type: "context_compacted",

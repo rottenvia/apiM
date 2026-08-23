@@ -58,6 +58,9 @@ export interface EngineStatus {
   baseUrl: string;
   apiModel: string;
   hint: string;
+  /** What the running llama-server actually opened. Null if unknown. */
+  nCtx?: number | null;
+  spec?: SidecarSpecState;
 }
 
 const ALLOWED_HOSTS = new Set([
@@ -187,16 +190,97 @@ export const SIDECAR_MAX_OUTPUT = 6_144;
 export const LOCAL_TOOL_RESERVE = 10_000;
 
 /**
- * Bump this when sidecar flags change so a running llama-server is
- * restarted instead of keeping yesterday's args.
+ * Optional llama-server flags the user can toggle or add.
+ *
+ * Base args (host, ctx, KV) stay fixed. These are the spec/speed knobs
+ * people paste from TikTok — MTP is on by default; the rest are opt-in
+ * because they can fail on CPU.
  */
-export const SIDECAR_LAUNCH = "c81920-q8-mtp2";
+export interface SpecPreset {
+  id: string;
+  label: string;
+  blurb: string;
+  args: string[];
+  /** On unless the user turns it off. */
+  on: boolean;
+}
+
+export const SPEC_PRESETS: SpecPreset[] = [
+  {
+    id: "mtp",
+    label: "MTP draft · 2 tokens",
+    blurb: "Uses the draft head already in the GGUF. Same answers, faster decode. ~0.8 GB extra.",
+    args: ["--spec-type", "draft-mtp", "--spec-draft-n-max", "2"],
+    on: true,
+  },
+  {
+    id: "flash",
+    label: "Flash attention",
+    blurb: "Faster attention on NVIDIA / Metal. Leave off on CPU — it can refuse to start.",
+    args: ["-fa", "on"],
+    on: false,
+  },
+  {
+    id: "shift",
+    label: "Context shift",
+    blurb: "When the window fills, shift old tokens instead of 400ing.",
+    args: ["--context-shift"],
+    on: false,
+  },
+];
+
+export interface SidecarSpecState {
+  enabled: string[];
+  extra: string[];
+}
+
+export function defaultSpecState(): SidecarSpecState {
+  return {
+    enabled: SPEC_PRESETS.filter((p) => p.on).map((p) => p.id),
+    extra: [],
+  };
+}
+
+/** Split a typed flag line into argv tokens. Rejects shell metacharacters. */
+export function parseUserFlags(
+  raw: string
+): { ok: true; tokens: string[] } | { ok: false; error: string } {
+  const parts = raw.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return { ok: false, error: "Empty flag." };
+  if (!parts[0].startsWith("-")) {
+    return { ok: false, error: "Start with a flag, e.g. --spec-draft-p-min 0.85" };
+  }
+  for (const part of parts) {
+    if (/[;|&$`\n\r<>\\]/.test(part)) {
+      return { ok: false, error: "That flag has a shell character." };
+    }
+    if (part.startsWith("-")) {
+      if (!/^--?[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(part)) {
+        return { ok: false, error: `Not a flag: ${part}` };
+      }
+    } else if (!/^[A-Za-z0-9_.:%=,+/-]+$/.test(part)) {
+      return { ok: false, error: `Not a safe value: ${part}` };
+    }
+  }
+  return { ok: true, tokens: parts };
+}
+
+export function sidecarLaunchId(spec: SidecarSpecState = defaultSpecState()): string {
+  const enabled = [...spec.enabled].sort().join("+");
+  const extra = spec.extra.join(" ");
+  return `c${SIDECAR_CTX}-q8-${enabled}-${extra}`;
+}
+
+/** Kept so older callers still compile. Prefer sidecarLaunchId. */
+export const SIDECAR_LAUNCH = sidecarLaunchId();
 
 /** Args for the sidecar. Host is loopback-only on purpose. */
 export function sidecarArgs(
   ggufPath: string,
-  mmprojPath?: string | null
+  mmprojPath?: string | null,
+  spec: SidecarSpecState = defaultSpecState()
 ): string[] {
+  const enabled = new Set(spec.enabled);
   const args = [
     "-m",
     ggufPath,
@@ -226,14 +310,11 @@ export function sidecarArgs(
     "256",
     "--parallel",
     "1",
-    // Qwen 3.8 ships an MTP draft head in the same GGUF. Two draft tokens
-    // is the safe default: ~1.5x decode, ~0.8 GB extra, same answers.
-    // n-max 8 is slower; we do not open that.
-    "--spec-type",
-    "draft-mtp",
-    "--spec-draft-n-max",
-    "2",
   ];
+  for (const preset of SPEC_PRESETS) {
+    if (enabled.has(preset.id)) args.push(...preset.args);
+  }
+  args.push(...spec.extra);
   // Without this the 27B is text-only even though the catalog model is a VLM.
   if (mmprojPath) {
     args.push("--mmproj", mmprojPath);
@@ -246,6 +327,7 @@ export function engineHint(s: {
   mmprojReady?: boolean;
   serverReady: boolean;
   running: boolean;
+  nCtx?: number | null;
 }): string {
   if (s.running && s.ggufReady) {
     return s.mmprojReady === false

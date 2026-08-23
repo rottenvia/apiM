@@ -229,7 +229,7 @@ console.log("\n6. It is wired into both paths");
 
 check(
   "the live agent loop compacts before sending",
-  /const compacted = compactTranscript\(pruned\.messages\)/.test(route) &&
+  /compactTranscript\(\s*pruned\.messages/.test(route) &&
     /serializeForApi\(wireMessages\)/.test(route)
 );
 check(

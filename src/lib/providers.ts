@@ -384,8 +384,8 @@ export function providerHttpError(
   if (/exceeds the available context size/i.test(detail)) {
     return (
       `${providerName} ran out of context (${detail}). ` +
-      `The in-app sidecar now opens an 80K window — Stop and Start Qwen in Settings ` +
-      `if it is still on 16K, or start a new chat if this one is huge.`
+      `The sidecar must be on an 80K window. Open Settings → On this PC → Restart ` +
+      `so the old 16K llama-server is killed.`
     );
   }
   return `${providerName} API error (${status})${detail ? `: ${detail}` : ""}`;
