@@ -133,6 +133,68 @@ check(
   "old corrupted plans fall back to Untitled step; new structured plans keep their title"
 );
 
+const fromContent = plan.createPlan("Map how velocity logs to the console", [
+  { id: 1, content: "Search the logging utilities and list every hit" },
+  { action: "Read console.cpp and note how messages are emitted" },
+]);
+check(
+  "content/action objects become real steps",
+  fromContent.steps.length === 2 &&
+    fromContent.steps[0].text.includes("Search the logging") &&
+    fromContent.steps[1].text.includes("console.cpp")
+);
+
+const fromString = plan.createPlan(
+  "Map how velocity logs to the console",
+  "1. Search the logging utilities and list every hit\n2. Read console.cpp and note how messages are emitted\n3. Summarise the log path in a finding"
+);
+check(
+  "a numbered string is split into steps instead of refused",
+  fromString.steps.length === 3,
+  `${fromString.steps.length} steps`
+);
+
+const fromEncoded = plan.createPlan("Map how velocity logs to the console", {
+  steps: JSON.stringify([
+    "Search the logging utilities and list every hit",
+    "Read console.cpp and note how messages are emitted",
+  ]),
+});
+check(
+  "a double-encoded JSON array of steps is accepted",
+  fromEncoded.steps.length === 2
+);
+
+const mixed = plan.createPlan("Map how velocity logs to the console", [
+  "Search",
+  "Read console.cpp and note how messages are emitted",
+  "ok",
+]);
+check(
+  "a short label is dropped instead of killing the whole plan",
+  mixed.steps.length === 1 && mixed.steps[0].text.includes("console.cpp"),
+  "one leftover 'Search' used to make every later make_plan fail"
+);
+
+const wrapped = plan.readPlanToolArgs({
+  plan: {
+    goal: "Map how velocity logs to the console",
+    tasks: ["Search the logging utilities and list every hit"],
+  },
+});
+check(
+  "nested {plan:{goal,tasks}} is unpacked",
+  wrapped.goal.includes("velocity") && wrapped.steps.length === 1
+);
+
+const noGoal = plan.readPlanToolArgs({
+  steps: ["Search the logging utilities and list every hit"],
+});
+check(
+  "a missing goal still produces a usable one when steps exist",
+  noGoal.goal.length >= plan.MIN_TEXT && noGoal.steps.length === 1
+);
+
 // ---------------------------------------------------------------------------
 console.log("\n2. 'Done' has to be earned");
 
@@ -244,6 +306,11 @@ check(
   "the system prompt tells the model to plan",
   /call make_plan/.test(route),
   "a tool the model never reaches for is not a feature"
+);
+check(
+  "make_plan coerces messy arguments instead of refusing them",
+  /readPlanToolArgs/.test(route) && /allowFirstPlanShrink/.test(route),
+  "Ox sends numbered strings and leftover plans — both used to be Could not set plan"
 );
 check(
   "and to verify its own work",
