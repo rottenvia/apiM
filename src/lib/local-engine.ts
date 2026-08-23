@@ -32,6 +32,7 @@ import {
   pickLlamaAsset,
   sidecarArgs,
   SIDECAR_CTX,
+  SIDECAR_LAUNCH,
   type EngineDownloadEvent,
   type EngineGpu,
   type EngineStatus,
@@ -517,11 +518,30 @@ async function waitUntilStopped(ms: number): Promise<void> {
   }
 }
 
+function launchStampPath(): string {
+  return path.join(localEngineRoot(), "sidecar.launch");
+}
+
+async function writeLaunchStamp(): Promise<void> {
+  await fs.mkdir(localEngineRoot(), { recursive: true });
+  await fs.writeFile(launchStampPath(), SIDECAR_LAUNCH, "utf8");
+}
+
+async function launchMatches(): Promise<boolean> {
+  try {
+    return (await fs.readFile(launchStampPath(), "utf8")).trim() === SIDECAR_LAUNCH;
+  } catch {
+    return false;
+  }
+}
+
 export async function startEngine(): Promise<{ ok: boolean; error?: string }> {
   if (await isEngineListening()) {
     const ctx = await readSidecarCtx();
-    // Unknown ctx: leave it. Only bounce a sidecar we know is too small.
-    if (ctx === null || ctx >= SIDECAR_CTX) return { ok: true };
+    const sameLaunch = await launchMatches();
+    // Unknown ctx is fine if we started this process with the current flags.
+    // A missing/old stamp means MTP or context changed — bounce it.
+    if (sameLaunch && (ctx === null || ctx >= SIDECAR_CTX)) return { ok: true };
     stopEngine();
     await waitUntilStopped(8_000);
   }
@@ -583,6 +603,7 @@ export async function startEngine(): Promise<{ ok: boolean; error?: string }> {
         "The local engine started but is not answering yet. Give it a moment and try Start again.",
     };
   }
+  await writeLaunchStamp();
   return { ok: true };
 }
 

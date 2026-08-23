@@ -296,6 +296,12 @@ check(
     args[args.indexOf("--cache-type-k") + 1] === "q8_0"
 );
 check(
+  "the sidecar turns on Qwen's built-in MTP draft head",
+  args.includes("--spec-type") &&
+    args[args.indexOf("--spec-type") + 1] === "draft-mtp" &&
+    args[args.indexOf("--spec-draft-n-max") + 1] === "2"
+);
+check(
   "the sidecar is llama-server, not Ollama",
   args.includes("-m") && engineSrc.includes("llama-server") && !/ollama serve/.test(engineSrc)
 );
@@ -483,6 +489,10 @@ check(
   "a sidecar still on 16K is restarted before chat",
   /readSidecarCtx/.test(engineSrc) &&
     /ctx >= SIDECAR_CTX/.test(engineSrc)
+);
+check(
+  "a sidecar without the current launch stamp is restarted",
+  /SIDECAR_LAUNCH/.test(engineSrc) && /launchMatches/.test(engineSrc)
 );
 
 console.log("\n9. A 503 from Ox / OpenCode is their outage, not the user's key");
