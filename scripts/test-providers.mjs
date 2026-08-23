@@ -159,7 +159,10 @@ console.log("\n5. The chat route actually uses the resolver");
 check("the route accepts an OpenCode key", /opencodeApiKey/.test(route));
 check("it no longer requires a DeepSeek key for every request", !/Message and DeepSeek API key are required/.test(route));
 check("it resolves the target before opening the stream", /resolveChatTarget\(model, creds\)/.test(route));
-check("the fetch uses the resolved host", /target\.baseUrl/.test(route) && /target\.apiKey/.test(route));
+check(
+  "the fetch uses the resolved host",
+  /target\.baseUrl/.test(route) && /completionHeaders\(target\)/.test(route)
+);
 check("the wire model is the resolved one", /model: target\.apiModel/.test(route));
 check("thinking is applied per provider", /applyThinking\(/.test(route));
 check(
@@ -394,6 +397,72 @@ check(
   /!streamingHasOutput \|\| retryNotice/.test(
     read("src/components/ChatArea.tsx")
   )
+);
+
+console.log("\n10. OpenRouter is a second Ox Alpha host, not a second model");
+
+const oxHost = await load("src/lib/ox-host.ts");
+check("there is still only one Ox Alpha catalog entry", models.MODELS.filter((m) => m.id === "ox-alpha").length === 1);
+check("Zen wire id is x-preview-f-free", oxHost.OX_HOSTS.zen.apiModel === "x-preview-f-free");
+check("OpenRouter wire id is stealth/ox-alpha", oxHost.OX_HOSTS.openrouter.apiModel === "stealth/ox-alpha");
+
+const viaOr = providers.resolveChatTarget("ox-alpha", {
+  oxHost: "openrouter",
+  openrouterApiKey: "sk-or-v1-test",
+});
+check("Ox Alpha on OpenRouter resolves", viaOr.ok);
+check(
+  "and hits openrouter.ai",
+  viaOr.ok && viaOr.target.baseUrl.includes("openrouter.ai/api/v1"),
+  viaOr.ok ? viaOr.target.baseUrl : ""
+);
+check(
+  "and sends stealth/ox-alpha on the wire",
+  viaOr.ok && viaOr.target.apiModel === "stealth/ox-alpha"
+);
+check(
+  "and stays provider opencode so pinning/retry/tools are reused",
+  viaOr.ok && viaOr.target.providerId === "opencode"
+);
+check(
+  "OpenRouter asks for a referer header",
+  viaOr.ok && providers.completionHeaders(viaOr.target)["HTTP-Referer"]
+);
+check(
+  "an Ox attempt times out in 20s, not 280s",
+  viaOr.ok && providers.attemptTimeoutMs(viaOr.target) === 20_000
+);
+check(
+  "Zen still works when the host is left default",
+  providers.resolveChatTarget("ox-alpha", { opencodeApiKey: "sk-zen-1" }).ok
+);
+check(
+  "OpenRouter without its key is refused",
+  !providers.resolveChatTarget("ox-alpha", { oxHost: "openrouter", opencodeApiKey: "sk-zen-1" }).ok
+);
+check(
+  "the helper can use the OpenRouter key",
+  providers.resolveHelperTarget({ openrouterApiKey: "sk-or-1" })?.oxHost === "openrouter"
+);
+check("Settings has an OpenRouter key field", /OpenRouter API Key/.test(settings));
+check(
+  "Settings has Zen / OpenRouter host buttons",
+  settings.includes("onOxHostChange(id)")
+);
+check("the page persists the OpenRouter key and host", /openrouterKey/.test(page) && /oxHost/.test(page));
+check("the page sends both Ox fields with the chat request", /openrouterApiKey: openrouterKey/.test(page) && /oxHost/.test(page));
+check(
+  "plugin pinning still runs for the shared Ox provider",
+  route.includes('target.providerId === "opencode"') && /MAXIMUM PRIORITY/.test(plugins)
+);
+check(
+  "there is a Settings test that hits GET /models",
+  settings.includes("/api/ox/test") &&
+    read("src/app/api/ox/test/route.ts").includes("/models")
+);
+check(
+  "a hung first attempt shows a wait hint instead of silent Thinking",
+  /Still waiting on/.test(page) && /Do not clear retryNotice here/.test(page)
 );
 
 console.log(
