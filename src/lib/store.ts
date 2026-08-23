@@ -31,8 +31,9 @@ export interface StoredMessage {
     name: string;
     kind: "text" | "image" | "video";
     dataUrl?: string;
-    /** Helper path only: what the vision model extracted. */
+    /** Helper path only: what vision or OCR extracted. */
     description?: string;
+    descriptionSource?: "vision" | "ocr";
   }[] | null;
   reasoningContent?: string | null;
   thinkingEffort?: string | null;

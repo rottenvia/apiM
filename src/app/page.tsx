@@ -119,8 +119,9 @@ export interface MessageAttachment {
   kind: "text" | "image" | "video";
   /** Images and video: data URL for the inline thumbnail. */
   dataUrl?: string;
-  /** Helper path only: what the vision model extracted. */
+  /** Helper path only: what vision or OCR extracted. */
   description?: string;
+  descriptionSource?: "vision" | "ocr";
 }
 
 /** What the assistant is currently doing, for the live status indicator. */
@@ -1097,7 +1098,13 @@ export default function Home() {
         previousVersions?: Message["previousVersions"];
       }
     ) => {
-      if (!content.trim() || isLoading || !hasKeys) return;
+      if (
+        (!content.trim() && !(options?.attachments && options.attachments.length)) ||
+        isLoading ||
+        !hasKeys
+      ) {
+        return;
+      }
 
       const trimmed = content.trim();
       const regenerateFromId = options?.regenerateFromId;

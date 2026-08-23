@@ -67,8 +67,10 @@ export interface Attachment {
   kind: "text" | "image" | "video";
   /** Images and video: base64 data URL used for the thumbnail and the API call. */
   dataUrl?: string;
-  /** Images only, helper path: description produced by the vision model. */
+  /** Images only, helper path: description produced by vision or OCR. */
   description?: string;
+  /** How `description` was produced. */
+  descriptionSource?: "vision" | "ocr";
   /** Images only: extraction still running. */
   analyzing?: boolean;
   /** Images only: extraction failed, with the reason. */

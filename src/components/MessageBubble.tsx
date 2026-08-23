@@ -698,6 +698,7 @@ function MessageBubbleImpl({
             src={previewImage.dataUrl}
             name={previewImage.name}
             description={previewImage.description}
+            source={previewImage.descriptionSource}
             kind={previewImage.kind === "video" ? "video" : "image"}
             onClose={() => setPreviewImage(null)}
           />

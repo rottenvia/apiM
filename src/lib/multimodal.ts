@@ -19,8 +19,9 @@ export interface StoredAttachment {
   kind: AttachmentKind;
   /** Images and video: data URL so native models can replay the pixels. */
   dataUrl?: string;
-  /** Images only, helper path: what the vision model extracted. */
+  /** Images only, helper path: what vision or OCR extracted. */
   description?: string;
+  descriptionSource?: "vision" | "ocr";
 }
 
 export type ContentPart =

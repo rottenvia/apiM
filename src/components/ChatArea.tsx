@@ -191,35 +191,21 @@ export function ChatArea({
       // helper balance while a seeing model was selected.
       if (!modelNeedsVisionHelper(model)) return;
 
-      if (!visionKey) {
-        setAttachments((prev) =>
-          prev.map((a) =>
-            a.id === image.id
-              ? {
-                  ...a,
-                  analyzing: false,
-                  visionError:
-                    "Add a vision API key in Settings to read screenshots",
-                }
-              : a
-          )
-        );
-        return;
-      }
-
+      // No OpenAI key is fine: the server scrapes the text with free OCR.
       try {
         const res = await fetch("/api/vision", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             dataUrl: image.dataUrl,
-            apiKey: visionKey,
+            apiKey: visionKey || undefined,
             model: visionModel,
           }),
         });
         const body = (await res.json()) as {
           description?: string;
           error?: string;
+          source?: "vision" | "ocr";
         };
 
         setAttachments((prev) =>
@@ -229,7 +215,8 @@ export function ChatArea({
                   ...a,
                   analyzing: false,
                   description: body.description,
-                  visionError: body.error,
+                  descriptionSource: body.source,
+                  visionError: body.error && !body.description ? body.error : undefined,
                 }
               : a
           )
@@ -1010,6 +997,7 @@ export function ChatArea({
         kind: a.kind,
         dataUrl: a.dataUrl,
         description: a.description,
+        descriptionSource: a.descriptionSource,
       })),
     });
     setInput("");

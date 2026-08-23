@@ -657,17 +657,20 @@ export function SettingsModal({
                   Vision API Key
                   <span className="ml-1 text-xs font-normal text-text-muted">
                     {modelNeedsVisionHelper(model)
-                      ? "(for DeepSeek screenshots)"
+                      ? "(optional — OCR is free)"
                       : "(DeepSeek only)"}
                   </span>
                 </label>
                 <p className="text-xs text-text-secondary mb-2">
                   {modelNeedsVisionHelper(model) ? (
                     <>
-                      {getModel(model).label} can&apos;t read images, so
-                      attached screenshots are described by an OpenAI vision
-                      model first. MP4 is not supported on this model. Get a
-                      key from{" "}
+                      {getModel(model).label} can&apos;t see images. Screenshots
+                      are scraped locally with free OCR — no OpenAI key or
+                      funds needed. Add a key below only if you want a full
+                      visual description (layout, highlighted controls) instead
+                      of just the text. If the key is empty or out of credit,
+                      we fall back to OCR. MP4 is not supported on this model.
+                      Optional key from{" "}
                       <a
                         href="https://platform.openai.com/api-keys"
                         target="_blank"
