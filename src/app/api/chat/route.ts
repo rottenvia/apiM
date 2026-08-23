@@ -3337,7 +3337,3 @@ Ask before you build the wrong thing. If a choice would change what you produce 
     },
   });
 }
-    "X-Accel-Buffering": "no",
-    },
-  });
-}
