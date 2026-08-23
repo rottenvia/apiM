@@ -71,13 +71,16 @@ function xmlToText(xml: string, breakOn: RegExp): string {
   );
 }
 
-function clamp(text: string): { text: string; truncated: boolean } {
-  if (text.length <= MAX_DOC_CHARS) return { text, truncated: false };
-  return { text: text.slice(0, MAX_DOC_CHARS), truncated: true };
+function clamp(
+  text: string,
+  maxChars = MAX_DOC_CHARS
+): { text: string; truncated: boolean } {
+  if (text.length <= maxChars) return { text, truncated: false };
+  return { text: text.slice(0, maxChars), truncated: true };
 }
 
 /** Word: one main part, plus headers and footnotes worth keeping. */
-async function readDocx(buf: Uint8Array): Promise<DocumentResult> {
+async function readDocx(buf: Uint8Array, maxChars = MAX_DOC_CHARS): Promise<DocumentResult> {
   const parts = await zipMembers(
     buf,
     (p) =>
@@ -104,7 +107,7 @@ async function readDocx(buf: Uint8Array): Promise<DocumentResult> {
     if (text.length > 20) chunks.push(`\n\n--- ${label} ---\n${text}`);
   }
 
-  const { text, truncated } = clamp(chunks.join(""));
+  const { text, truncated } = clamp(chunks.join(""), maxChars);
   return { text, sections: 1, truncated };
 }
 
@@ -115,7 +118,7 @@ async function readDocx(buf: Uint8Array): Promise<DocumentResult> {
  * text, so that has to be read first or every text cell comes out as a
  * number.
  */
-async function readXlsx(buf: Uint8Array): Promise<DocumentResult> {
+async function readXlsx(buf: Uint8Array, maxChars = MAX_DOC_CHARS): Promise<DocumentResult> {
   const parts = await zipMembers(
     buf,
     (p) =>
@@ -180,12 +183,12 @@ async function readXlsx(buf: Uint8Array): Promise<DocumentResult> {
   });
 
   if (out.length === 0) throw new Error("no readable sheets");
-  const { text, truncated } = clamp(out.join("\n\n"));
+  const { text, truncated } = clamp(out.join("\n\n"), maxChars);
   return { text, sections: out.length, truncated };
 }
 
 /** PowerPoint: one section per slide, in slide order. */
-async function readPptx(buf: Uint8Array): Promise<DocumentResult> {
+async function readPptx(buf: Uint8Array, maxChars = MAX_DOC_CHARS): Promise<DocumentResult> {
   const parts = await zipMembers(buf, (p) =>
     /^ppt\/slides\/slide\d+\.xml$/.test(p)
   );
@@ -202,12 +205,12 @@ async function readPptx(buf: Uint8Array): Promise<DocumentResult> {
   });
 
   if (out.length === 0) throw new Error("no readable slides");
-  const { text, truncated } = clamp(out.join("\n\n"));
+  const { text, truncated } = clamp(out.join("\n\n"), maxChars);
   return { text, sections: out.length, truncated };
 }
 
 /** EPUB: the XHTML chapters, in the order the archive lists them. */
-async function readEpub(buf: Uint8Array): Promise<DocumentResult> {
+async function readEpub(buf: Uint8Array, maxChars = MAX_DOC_CHARS): Promise<DocumentResult> {
   const parts = await zipMembers(buf, (p) => /\.x?html?$/i.test(p));
 
   const paths = [...parts.keys()].sort();
@@ -224,12 +227,12 @@ async function readEpub(buf: Uint8Array): Promise<DocumentResult> {
   }
 
   if (out.length === 0) throw new Error("no readable chapters");
-  const { text, truncated } = clamp(out.join("\n\n"));
+  const { text, truncated } = clamp(out.join("\n\n"), maxChars);
   return { text, sections: out.length, truncated };
 }
 
 /** OpenDocument text: a single content part, like DOCX but different tags. */
-async function readOdt(buf: Uint8Array): Promise<DocumentResult> {
+async function readOdt(buf: Uint8Array, maxChars = MAX_DOC_CHARS): Promise<DocumentResult> {
   const parts = await zipMembers(buf, (p) => p === "content.xml");
   const main = parts.get("content.xml");
   if (!main) throw new Error("no content part — is this really an .odt?");
@@ -240,28 +243,30 @@ async function readOdt(buf: Uint8Array): Promise<DocumentResult> {
   );
   if (!text) throw new Error("no readable text");
 
-  const clamped = clamp(text);
+  const clamped = clamp(text, maxChars);
   return { text: clamped.text, sections: 1, truncated: clamped.truncated };
 }
 
 /** Read a document, or throw with a reason worth showing the user. */
 export async function readDocument(
   kind: DocumentKind,
-  buf: Uint8Array
+  buf: Uint8Array,
+  options: { maxChars?: number } = {}
 ): Promise<DocumentResult> {
+  const maxChars = options.maxChars ?? MAX_DOC_CHARS;
   switch (kind) {
     case "docx":
-      return readDocx(buf);
+      return readDocx(buf, maxChars);
     case "xlsx":
-      return readXlsx(buf);
+      return readXlsx(buf, maxChars);
     case "pptx":
-      return readPptx(buf);
+      return readPptx(buf, maxChars);
     case "epub":
-      return readEpub(buf);
+      return readEpub(buf, maxChars);
     case "odt":
-      return readOdt(buf);
+      return readOdt(buf, maxChars);
     case "pdf":
-      return readPdf(buf);
+      return readPdf(buf, maxChars);
   }
 }
 
@@ -285,7 +290,7 @@ export async function readDocument(
  * case is detected and explained, with a usable suggestion, rather than
  * reported as success.
  */
-async function readPdf(buf: Uint8Array): Promise<DocumentResult> {
+async function readPdf(buf: Uint8Array, maxChars = MAX_DOC_CHARS): Promise<DocumentResult> {
   /*
    * The legacy build is the one that runs under Node without a DOM. It is
    * listed in Next's serverExternalPackages so the server loads this physical
@@ -312,7 +317,7 @@ async function readPdf(buf: Uint8Array): Promise<DocumentResult> {
   let truncated = false;
 
   for (let i = 1; i <= doc.numPages; i++) {
-    if (chars >= MAX_DOC_CHARS) {
+    if (chars >= maxChars) {
       truncated = true;
       break;
     }

@@ -604,6 +604,10 @@ export async function searchFiles(
     glob?: string;
     /** Lines of surrounding code to include with each hit. */
     context?: number;
+    /** Override the default hit cap (Ox Alpha lifts this). */
+    maxHits?: number;
+    /** Override the per-file size skip (Ox Alpha lifts this). */
+    maxFileBytes?: number;
   } = {}
 ): Promise<{ hits: SearchHit[]; truncated: boolean; filesSearched: number }> {
   const needle = String(query ?? "");
@@ -654,16 +658,18 @@ export async function searchFiles(
   const hits: SearchHit[] = [];
   let filesSearched = 0;
   let truncated = false;
+  const hitCap = options.maxHits ?? MAX_SEARCH_HITS;
+  const fileCap = options.maxFileBytes ?? MAX_SEARCHABLE_BYTES;
 
   for (const file of files) {
-    if (hits.length >= MAX_SEARCH_HITS) {
+    if (hits.length >= hitCap) {
       truncated = true;
       break;
     }
     if (globRe && !globRe.test(file.path)) continue;
     // Skip anything large enough to be data rather than source; reading it
     // would cost more than the match is worth.
-    if (file.size > MAX_SEARCHABLE_BYTES) continue;
+    if (file.size > fileCap) continue;
 
     let content: string;
     try {
@@ -707,7 +713,7 @@ export async function searchFiles(
           .map((l) => l.slice(0, 200));
       }
       hits.push(hit);
-      if (hits.length >= MAX_SEARCH_HITS) {
+      if (hits.length >= hitCap) {
         truncated = true;
         break;
       }
@@ -726,7 +732,8 @@ export interface ReadResult {
 
 export async function readFile(
   workspaceId: string,
-  relative: string
+  relative: string,
+  options: { maxChars?: number } = {}
 ): Promise<ReadResult> {
   const target = resolveInside(workspaceId, relative);
 
@@ -746,10 +753,16 @@ export async function readFile(
   // A document in the workspace should be as readable as one attached to a
   // message — otherwise the agent can be handed a .docx it cannot open, and
   // has to tell the user to convert a file that is right there.
+  const maxChars = options.maxChars ?? MAX_READ_CHARS;
+
   const kind = documentKind(relative);
   if (kind) {
     try {
-      const doc = await readDocument(kind, new Uint8Array(await fs.readFile(target)));
+      const doc = await readDocument(
+        kind,
+        new Uint8Array(await fs.readFile(target)),
+        { maxChars }
+      );
       return {
         path: relative,
         content: doc.text,
@@ -766,10 +779,10 @@ export async function readFile(
   }
 
   const raw = await fs.readFile(target, "utf8");
-  const truncated = raw.length > MAX_READ_CHARS;
+  const truncated = raw.length > maxChars;
   return {
     path: relative,
-    content: truncated ? raw.slice(0, MAX_READ_CHARS) : raw,
+    content: truncated ? raw.slice(0, maxChars) : raw,
     truncated,
     size: stat.size,
   };

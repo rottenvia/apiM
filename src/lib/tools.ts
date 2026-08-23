@@ -31,7 +31,6 @@ import {
   fetchPage,
   downloadResource,
   extractSelectors,
-  MAX_FETCH_CHARS,
   WebError,
 } from "@/lib/web";
 import {
@@ -49,6 +48,7 @@ import {
   writeFileBytes,
   workspaceDirectory,
   WorkspaceError,
+  MAX_FILE_BYTES,
 } from "@/lib/workspace";
 import { applyPatch } from "@/lib/patch";
 import { httpRequest, formatHttpResult } from "@/lib/http";
@@ -66,6 +66,14 @@ import {
 } from "@/lib/testing";
 import { runCommand } from "@/lib/runner";
 import { detectBuild, BuildError } from "@/lib/build";
+import {
+  DEFAULT_BATCH_EDITS,
+  DEFAULT_READ_FILES,
+  DEFAULT_WRITE_FILES,
+  modelHasOpenToolLimits,
+  toolLimitsFor,
+  type ToolLimits,
+} from "@/lib/tool-limits";
 
 /**
  * Tool definitions exposed to the model, and the dispatcher that runs them.
@@ -92,7 +100,7 @@ export interface ToolDefinition {
  * thousand characters is a small fraction of a 1M-token window, and it is
  * roughly the size of the projects people actually drop in as a zip.
  */
-export const MAX_READ_FILES = 60;
+export const MAX_READ_FILES = DEFAULT_READ_FILES;
 
 /**
  * How many files one write_files call may create.
@@ -101,7 +109,7 @@ export const MAX_READ_FILES = 60;
  * call that rewrites thirty files is already at the edge of what a user can
  * reasonably review in the activity list.
  */
-export const MAX_WRITE_FILES = 30;
+export const MAX_WRITE_FILES = DEFAULT_WRITE_FILES;
 
 /**
  * How many replacements one edit_files call may make.
@@ -110,7 +118,7 @@ export const MAX_WRITE_FILES = 30;
  * named snippet rather than replacing a whole file — so forty of them is
  * still a reviewable change.
  */
-export const MAX_BATCH_EDITS = 40;
+export const MAX_BATCH_EDITS = DEFAULT_BATCH_EDITS;
 
 export const WORKSPACE_TOOLS: ToolDefinition[] = [
   {
@@ -1306,6 +1314,144 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
   },
 ];
 
+/**
+ * Tool list for this model. Ox Alpha gets the same tools with the
+ * per-call ceilings removed from the descriptions, so it does not
+ * self-limit to 60 files.
+ */
+export function workspaceToolsFor(
+  modelId?: string | null
+): ToolDefinition[] {
+  if (!modelHasOpenToolLimits(modelId)) return WORKSPACE_TOOLS;
+  return WORKSPACE_TOOLS.map((tool) => {
+    const name = tool.function.name;
+    if (name === "read_file") {
+      return {
+        ...tool,
+        function: {
+          ...tool.function,
+          description:
+            "Read one file in the workspace. Always read a file before editing it, so the text you replace matches exactly. The whole file is returned — it is not truncated. For a huge file, use start_line and end_line if you only need one part.",
+        },
+      };
+    }
+    if (name === "read_files") {
+      return {
+        ...tool,
+        function: {
+          ...tool.function,
+          description:
+            "Read several files in one step. Prefer this over calling read_file repeatedly. No per-call cap — read as many paths as you need.",
+          parameters: {
+            ...tool.function.parameters,
+            properties: {
+              paths: {
+                type: "array",
+                items: { type: "string" },
+                description: "File paths to read. No per-call cap.",
+              },
+            },
+          },
+        },
+      };
+    }
+    if (name === "write_files") {
+      return {
+        ...tool,
+        function: {
+          ...tool.function,
+          description:
+            "Create several files in one step. Prefer this when scaffolding. No per-call cap.",
+          parameters: {
+            ...tool.function.parameters,
+            properties: {
+              files: {
+                type: "array",
+                description: "Files to write. No per-call cap.",
+                items: {
+                  type: "object",
+                  properties: {
+                    path: { type: "string" },
+                    content: { type: "string" },
+                  },
+                  required: ["path", "content"],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (name === "edit_files") {
+      return {
+        ...tool,
+        function: {
+          ...tool.function,
+          description:
+            "Make several exact replacements in one step, across one file or many. Prefer this over repeated edit_file. No per-call cap. Every snippet must appear exactly once in its file.",
+          parameters: {
+            ...tool.function.parameters,
+            properties: {
+              edits: {
+                type: "array",
+                description: "Replacements to apply. No per-call cap.",
+                items: {
+                  type: "object",
+                  properties: {
+                    path: { type: "string" },
+                    old_text: {
+                      type: "string",
+                      description: "Exact text to replace, copied verbatim.",
+                    },
+                    new_text: { type: "string" },
+                  },
+                  required: ["path", "old_text", "new_text"],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (name === "search_files") {
+      return {
+        ...tool,
+        function: {
+          ...tool.function,
+          description:
+            "Find text across every file in the workspace at once, with the file " +
+            "and line number of each match. Returns every match — not a short sample. " +
+            "Query is PLAIN TEXT by default. Only set regex:true when you intentionally want a pattern.",
+        },
+      };
+    }
+    if (name === "fetch_url") {
+      return {
+        ...tool,
+        function: {
+          ...tool.function,
+          description:
+            "Open a web page and read it. The full page text is returned rather than a short extract. " +
+            "Set raw to true to get the HTML. Never guess a selector you have not seen.",
+        },
+      };
+    }
+    if (name === "download_file") {
+      return {
+        ...tool,
+        function: {
+          ...tool.function,
+          description:
+            "Save the exact bytes from a URL straight into the workspace. " +
+            "Sized against the workspace file ceiling, not a small download cap. " +
+            "A downloaded PDF can be passed to read_document and an image to view_image.",
+        },
+      };
+    }
+    return tool;
+  });
+}
+
 export interface ToolResult {
   /** Text handed back to the model as the tool message. */
   content: string;
@@ -1351,6 +1497,11 @@ function num(args: Record<string, unknown>, key: string): number | null {
  * would abandon the whole turn instead.
  */
 export interface ToolContext {
+  /**
+   * Catalog model id. Ox Alpha lifts per-call tool ceilings; everyone
+   * else keeps the defaults. Absent means the default (capped) set.
+   */
+  modelId?: string | null;
   /** Vision provider key. Absent means view_image uses free local OCR. */
   visionKey?: string;
   visionModel?: string;
@@ -1373,6 +1524,7 @@ export async function runTool(
   args: Record<string, unknown>,
   context: ToolContext = {}
 ): Promise<ToolResult> {
+  const limits: ToolLimits = toolLimitsFor(context.modelId);
   try {
     switch (name) {
       case "list_files": {
@@ -1396,7 +1548,9 @@ export async function runTool(
       }
 
       case "read_file": {
-        const result = await readFile(workspaceId, str(args, "path"));
+        const result = await readFile(workspaceId, str(args, "path"), {
+          maxChars: limits.readChars,
+        });
         const note = result.truncated
           ? "\n\n[truncated — file is larger than the read limit]"
           : "";
@@ -1475,7 +1629,7 @@ export async function runTool(
         // on, and the answer covered a third of the project. The cap exists
         // to stop a runaway call, not to ration ordinary reading, so it is
         // set where a real request will not hit it.
-        const paths = raw.slice(0, MAX_READ_FILES).map((p) => String(p));
+        const paths = raw.slice(0, limits.readFiles).map((p) => String(p));
         const parts: string[] = [];
         let read = 0;
 
@@ -1484,7 +1638,7 @@ export async function runTool(
         // matters: the model refers to them by position in its own request.
         const results = await Promise.all(
           paths.map((filePath) =>
-            readFile(workspaceId, filePath)
+            readFile(workspaceId, filePath, { maxChars: limits.readChars })
               .then((result) => ({ filePath, result, error: null as unknown }))
               .catch((error: unknown) => ({ filePath, result: null, error }))
           )
@@ -1519,7 +1673,7 @@ export async function runTool(
           // looked like the agent giving up early.
           const dropped = raw.slice(paths.length).map((p) => String(p));
           parts.push(
-            `[NOT READ — ${dropped.length} path(s) exceeded the ${MAX_READ_FILES}-per-call limit: ` +
+            `[NOT READ — ${dropped.length} path(s) exceeded the ${limits.readFiles}-per-call limit: ` +
               `${dropped.join(", ")}. ` +
               `Call read_files again with these before you answer. Do not ` +
               `describe them as if you had read them.]`
@@ -1542,6 +1696,8 @@ export async function runTool(
           caseSensitive: args.case_sensitive === true,
           glob: typeof args.glob === "string" ? args.glob : undefined,
           context: num(args, "context") ?? 0,
+          maxHits: limits.searchHits,
+          maxFileBytes: limits.searchableBytes,
         });
 
         if (result.hits.length === 0) {
@@ -1844,7 +2000,9 @@ export async function runTool(
         // cannot tell a correct edit from one that landed in the wrong place.
         let before: string | null = null;
         try {
-          before = (await readFile(workspaceId, filePath)).content;
+          before = (await readFile(workspaceId, filePath, {
+            maxChars: limits.readChars,
+          })).content;
         } catch {
           before = null;
         }
@@ -1859,7 +2017,11 @@ export async function runTool(
         let confirmation = `Edited ${result.path}.`;
         if (before !== null) {
           try {
-            const after = (await readFile(workspaceId, filePath)).content;
+            const after = (
+              await readFile(workspaceId, filePath, {
+                maxChars: limits.readChars,
+              })
+            ).content;
             const changed = diffLines(before, after);
             const stats = diffStats(changed);
             const hunks = diffHunks(changed, 2);
@@ -1903,14 +2065,18 @@ export async function runTool(
 
       case "fetch_url": {
         const wantsRaw = args.raw === true;
-        const page = await fetchPage(str(args, "url"), { raw: wantsRaw });
+        const page = await fetchPage(str(args, "url"), {
+          raw: wantsRaw,
+          maxBytes: limits.fetchBytes,
+          maxChars: limits.fetchChars,
+        });
 
         const header = [
           `${page.url}`,
           page.title ? `Title: ${page.title}` : null,
           `HTTP ${page.status} · ${page.contentType} · ${(page.bytes / 1024).toFixed(0)}KB`,
           page.truncated
-            ? `[truncated at ${MAX_FETCH_CHARS.toLocaleString()} characters]`
+            ? `[truncated at ${limits.fetchChars.toLocaleString()} characters]`
             : null,
         ]
           .filter(Boolean)
@@ -1950,7 +2116,7 @@ export async function runTool(
            * blob gets a slice around the needle rather than the ocean.
            */
           const WINDOW = 300;
-          const MAX_MATCHES = 20;
+          const MAX_MATCHES = limits.fetchFindMatches;
 
           let re: RegExp;
           try {
@@ -1999,7 +2165,7 @@ export async function runTool(
               `for "${find}" with ${WINDOW} characters of context each, out of ` +
               `${body.length.toLocaleString()} characters.` +
               `${spans.length >= MAX_MATCHES ? ` Stopped at ${MAX_MATCHES} matches.` : ""}]`;
-            body = shown.slice(0, MAX_FETCH_CHARS);
+            body = shown.slice(0, limits.fetchChars);
           }
         }
 
@@ -2031,7 +2197,11 @@ export async function runTool(
       }
 
       case "inspect_page": {
-        const page = await fetchPage(str(args, "url"), { raw: true });
+        const page = await fetchPage(str(args, "url"), {
+          raw: true,
+          maxBytes: limits.fetchBytes,
+          maxChars: limits.fetchChars,
+        });
         if (!page.html) {
           return {
             ok: false,
@@ -2111,6 +2281,7 @@ export async function runTool(
         const target = str(args, "path");
         const resource = await downloadResource(str(args, "url"), {
           allowLocal: args.allow_local === true,
+          maxBytes: limits.open ? MAX_FILE_BYTES : undefined,
         });
         // Bytes, never decoded text. This is what lets a downloaded PDF flow
         // directly into read_document and an image into view_image without
@@ -2168,7 +2339,7 @@ export async function runTool(
           };
         }
 
-        const batch = raw.slice(0, MAX_BATCH_EDITS);
+        const batch = raw.slice(0, limits.batchEdits);
         const done: string[] = [];
         const failed: string[] = [];
 
@@ -2243,7 +2414,7 @@ export async function runTool(
         if (raw.length > batch.length) {
           notes.push(
             `[${raw.length - batch.length} more ignored — limit is ` +
-              `${MAX_BATCH_EDITS} per call.]`
+              `${limits.batchEdits} per call.]`
           );
         }
 
@@ -2308,6 +2479,8 @@ export async function runTool(
         const hits = await searchFiles(workspaceId, find, {
           glob,
           regex: useRegex,
+          maxHits: limits.searchHits,
+          maxFileBytes: limits.searchableBytes,
         });
         const paths = [...new Set(hits.hits.map((h) => h.path))];
 
@@ -2327,7 +2500,9 @@ export async function runTool(
 
         for (const filePath of paths) {
           try {
-            const file = await readFile(workspaceId, filePath);
+            const file = await readFile(workspaceId, filePath, {
+              maxChars: limits.readChars,
+            });
 
             let count: number;
             let updated: string;
@@ -2476,10 +2651,10 @@ export async function runTool(
         }
 
         const body = found.results
-          .slice(0, 8)
+          .slice(0, limits.searchResults)
           .map(
             (hit, i) =>
-              `[${i + 1}] ${hit.title}\n${hit.url}\n${(hit.content ?? "").slice(0, 700)}`
+              `[${i + 1}] ${hit.title}\n${hit.url}\n${(hit.content ?? "").slice(0, limits.searchSnippet)}`
           )
           .join("\n\n");
 
@@ -2814,7 +2989,9 @@ export async function runTool(
         const relative = str(args, "path");
         const patch = str(args, "patch");
 
-        const existing = await readFile(workspaceId, relative);
+        const existing = await readFile(workspaceId, relative, {
+          maxChars: limits.readChars,
+        });
         let applied;
         try {
           applied = applyPatch(existing.content, patch);
@@ -2893,7 +3070,7 @@ export async function runTool(
         }
 
         const bytes = await readFileBytes(workspaceId, target);
-        const doc = await readDocument(kind, bytes);
+        const doc = await readDocument(kind, bytes, { maxChars: limits.docChars });
         if (!doc.text.trim()) {
           return {
             ok: false,
@@ -3141,7 +3318,7 @@ export async function runTool(
 
         // Capped for the same reason as read_files: one call should not be
         // able to rewrite an entire project unreviewed.
-        const batch = raw.slice(0, MAX_WRITE_FILES);
+        const batch = raw.slice(0, limits.writeFiles);
         const written: string[] = [];
         const failed: string[] = [];
 
@@ -3170,7 +3347,7 @@ export async function runTool(
         if (raw.length > batch.length) {
           notes.push(
             `[${raw.length - batch.length} more ignored — limit is ` +
-              `${MAX_WRITE_FILES} per call. Call again with the rest.]`
+              `${limits.writeFiles} per call. Call again with the rest.]`
           );
         }
 
