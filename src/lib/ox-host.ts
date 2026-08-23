@@ -24,17 +24,23 @@ export interface OxHostInfo {
 
 export const DEFAULT_OX_HOST: OxHost = "zen";
 
-/** Per-attempt hang cap for HTTP headers. Zen often sits silent before a 503. */
-export const OX_ATTEMPT_TIMEOUT_MS = 20_000;
+/**
+ * Per-attempt hang cap for HTTP headers.
+ *
+ * 20s was killing real Ox replies: workspace is always on, so the POST
+ * body is huge and the upload alone can eat the budget. 45s still fails
+ * a silent 503 quickly; Stop aborts the wait either way.
+ */
+export const OX_ATTEMPT_TIMEOUT_MS = 45_000;
 
 /**
  * After a 200, how long we wait for the first token / tool / finish.
  *
  * Test (GET /models) never exercises this. A 200 with an empty or stalled
  * SSE body is how "both hosts Test green, chat never loads, no error"
- * actually happens.
+ * actually happens. Prefill on a workspace prompt needs more than 15s.
  */
-export const OX_FIRST_TOKEN_MS = 15_000;
+export const OX_FIRST_TOKEN_MS = 45_000;
 
 export const OX_HOSTS: Record<OxHost, OxHostInfo> = {
   zen: {

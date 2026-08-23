@@ -87,6 +87,8 @@ export interface StoredMessage {
     toolRounds: number;
     /** Continuations already used against the output ceiling. */
     continuations: number;
+    /** Think-only nudges already used, so resume cannot think forever. */
+    thinkNudges?: number;
     /** Verbatim API messages, including reasoning and tool results. */
     messages: unknown[];
   } | null;

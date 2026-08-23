@@ -272,6 +272,28 @@ check(
   /LocalModelRuntime/.test(settings) && /Download Qwen 3.8 27B/.test(localUi)
 );
 check(
+  "a finished download shows Start, not another Download",
+  /status\.ggufReady \?/.test(localUi) && /Start Qwen/.test(localUi)
+);
+check(
+  "a running sidecar can be Unloaded",
+  /Unload/.test(localUi) && /action === \"stop\"/.test(localRoute)
+);
+check(
+  "download does not auto-start the sidecar",
+  /Click Start when you want Qwen/.test(localRoute) &&
+    !/Starting the sidecar/.test(localRoute)
+);
+check(
+  "a 98% GGUF counts as downloaded",
+  shared.ggufLooksComplete(Math.floor(shared.GGUF_BYTES * 0.99)) &&
+    !shared.ggufLooksComplete(1024)
+);
+check(
+  "switching away from Qwen unloads the sidecar",
+  /action: \"stop\"/.test(page) && /settingsHydrated/.test(page)
+);
+check(
   "Settings does not require Ollama",
   !/via Ollama/.test(settings) && !/ollama serve/.test(settings)
 );
@@ -577,8 +599,13 @@ check(
   viaOr.ok && providers.completionHeaders(viaOr.target)["HTTP-Referer"]
 );
 check(
-  "an Ox attempt times out in 20s, not 280s",
-  viaOr.ok && providers.attemptTimeoutMs(viaOr.target) === 20_000
+  "an Ox attempt times out in 45s, not 280s",
+  viaOr.ok && providers.attemptTimeoutMs(viaOr.target) === 45_000
+);
+check(
+  "a huge Ox body gets more header time, capped at 90s",
+  viaOr.ok &&
+    providers.attemptTimeoutMs(viaOr.target, 400_000) === 90_000
 );
 check(
   "Zen still works when the host is left default",

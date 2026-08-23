@@ -22,6 +22,8 @@ import {
   GGUF_BYTES,
   GGUF_FILE,
   GGUF_URL,
+  ggufLooksComplete,
+  SIDECAR_IDLE_MS,
   MMPROJ_BYTES,
   MMPROJ_FILE,
   MMPROJ_MIN_BYTES,
@@ -130,9 +132,10 @@ export function detectGpu(): EngineGpu {
 }
 
 export async function engineStatus(): Promise<EngineStatus> {
+  await maybeUnloadIdle();
   const bytes = await fileSize(ggufPath());
   const projector = await fileSize(mmprojPath());
-  const ggufReady = bytes >= GGUF_BYTES;
+  const ggufReady = ggufLooksComplete(bytes);
   const mmprojReady = projector >= MMPROJ_MIN_BYTES;
   const server = await findServerBinary();
   const running = await isEngineListening();
@@ -144,6 +147,7 @@ export async function engineStatus(): Promise<EngineStatus> {
     serverReady: Boolean(server),
     running,
     nCtx,
+    ggufBytes: bytes,
   };
   return {
     ...flags,
@@ -426,6 +430,45 @@ function launchStampPath(): string {
   return path.join(localEngineRoot(), "sidecar.launch");
 }
 
+function lastUsedPath(): string {
+  return path.join(localEngineRoot(), "last-used");
+}
+
+export async function touchSidecarUsed(): Promise<void> {
+  try {
+    await fs.mkdir(localEngineRoot(), { recursive: true });
+    await fs.writeFile(lastUsedPath(), String(Date.now()), "utf8");
+  } catch {
+    /* status must still work if the data dir is read-only */
+  }
+}
+
+async function readLastUsed(): Promise<number> {
+  try {
+    const n = Number((await fs.readFile(lastUsedPath(), "utf8")).trim());
+    return Number.isFinite(n) ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Drop the 25–30 GB sidecar when nobody has asked Qwen for a while.
+ *
+ * Switching models used to leave llama-server mapped forever. Settings
+ * polls this every few seconds, so an idle machine unloads itself.
+ */
+export async function maybeUnloadIdle(): Promise<boolean> {
+  if (!(await isEngineListening())) return false;
+  const last = await readLastUsed();
+  // No stamp: do not kill a sidecar that is still booting. Model-switch
+  // and the Unload button handle leftovers without a chat timestamp.
+  if (last <= 0) return false;
+  if (Date.now() - last < SIDECAR_IDLE_MS) return false;
+  stopEngine();
+  return true;
+}
+
 function killPid(pid: number): void {
   try {
     if (process.platform === "win32") {
@@ -691,6 +734,7 @@ async function spawnSidecar(
     };
   }
   await writeLaunchStamp(sidecarLaunchId(spec));
+  await touchSidecarUsed();
   return { ok: true };
 }
 
@@ -701,14 +745,17 @@ export async function startEngine(): Promise<{ ok: boolean; error?: string }> {
   if (await isEngineListening()) {
     const ctx = await readSidecarCtx();
     const same = await launchMatches(wanted);
-    if (same && ctx !== null && ctx >= SIDECAR_CTX) return { ok: true };
+    if (same && ctx !== null && ctx >= SIDECAR_CTX) {
+      await touchSidecarUsed();
+      return { ok: true };
+    }
     // Too small, unknown, or stale flags: kill the old process for real.
     stopEngine();
     await waitUntilStopped(10_000);
   }
 
   const gguf = ggufPath();
-  if ((await fileSize(gguf)) < GGUF_BYTES) {
+  if (!ggufLooksComplete(await fileSize(gguf))) {
     return {
       ok: false,
       error:

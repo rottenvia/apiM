@@ -93,6 +93,19 @@ export function stopRun(messageId: string): boolean {
   return true;
 }
 
+/** Stop every run in a conversation — Stop must work before `meta` arrives. */
+export function stopConversation(conversationId: string): number {
+  if (!conversationId) return 0;
+  let n = 0;
+  for (const [id, run] of [...runs]) {
+    if (run.conversationId !== conversationId) continue;
+    runs.delete(id);
+    run.controller.abort();
+    n += 1;
+  }
+  return n;
+}
+
 /** Runs still going in a conversation, so a reopened tab can find them. */
 export function activeRuns(conversationId: string): string[] {
   sweep();

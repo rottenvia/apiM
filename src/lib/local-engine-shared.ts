@@ -14,6 +14,22 @@ export const DEFAULT_LOCAL_API_MODEL = "qwen-3.8-27b";
 export const GGUF_FILE = "Qwen3.8-27B-Q4_K_M.gguf";
 /** bartowski Q4_K_M of official Qwen/Qwen3.8-27B. */
 export const GGUF_BYTES = 17_772_537_440;
+/**
+ * Treat the weights as downloaded once they are this large.
+ *
+ * Requiring the exact catalog byte count made a finished download look
+ * missing (HF can report a slightly different size, and a 99% file is
+ * already usable). Below this is a partial .part, not Qwen.
+ */
+export const GGUF_MIN_BYTES = Math.floor(GGUF_BYTES * 0.98);
+
+/** True when the on-disk GGUF is complete enough to start. */
+export function ggufLooksComplete(bytes: number): boolean {
+  return Number.isFinite(bytes) && bytes >= GGUF_MIN_BYTES;
+}
+
+/** Unload the sidecar after this long with no local chat request. */
+export const SIDECAR_IDLE_MS = 10 * 60 * 1000;
 export const GGUF_URL =
   "https://huggingface.co/bartowski/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-Q4_K_M.gguf";
 
@@ -328,19 +344,23 @@ export function engineHint(s: {
   serverReady: boolean;
   running: boolean;
   nCtx?: number | null;
+  ggufBytes?: number;
 }): string {
   if (s.running && s.ggufReady) {
     return s.mmprojReady === false
       ? "Sidecar is up, but the vision projector is missing — click Download so Qwen can see images and video."
-      : "Ready on this PC. The 27B weights are ~17 GB; 25–30 GB committed on a 32 GB machine is expected. This window only sends chat.";
+      : "Qwen is loaded on this PC (~25–30 GB committed). Unload it when you switch to Ox or DeepSeek so the RAM comes back.";
   }
   if (s.ggufReady && s.serverReady) {
     return s.mmprojReady === false
-      ? "Weights are on disk. Download the vision projector (~0.9 GB) so Qwen can see images and video, then Start."
-      : "Weights are on disk. Start the sidecar to chat — the UI process will not load them.";
+      ? "Downloaded. Get the vision projector (~0.9 GB) so Qwen can see images, then Start. It is not using RAM until you Start."
+      : "Downloaded. Start only when you want to chat with Qwen — Unload frees the 25–30 GB.";
   }
   if (s.ggufReady) {
     return "Weights are on disk. The engine binary is still missing — click Download.";
+  }
+  if ((s.ggufBytes ?? 0) > 0) {
+    return "Partial download on disk — click Download to resume. Qwen is not loaded in RAM yet.";
   }
   return "Download Qwen 3.8 27B into this app (~16.5 GB plus a 0.9 GB vision projector). Your PC runs it; nothing is sent to a cloud provider.";
 }
