@@ -184,6 +184,10 @@ interface ChatRequestBody {
   deepseekApiKey?: string;
   /** OpenCode Zen key — required when the selected model is Ox Alpha. */
   opencodeApiKey?: string;
+  /** Local OpenAI-compatible host (Ollama / vLLM / llama.cpp). */
+  localBaseUrl?: string;
+  localApiKey?: string;
+  localApiModel?: string;
   tavilyApiKey?: string;
   /** Optional fallback search provider, used when Tavily refuses. */
   exaApiKey?: string;
@@ -421,6 +425,9 @@ export async function POST(req: NextRequest) {
     conversationId,
     deepseekApiKey,
     opencodeApiKey,
+    localBaseUrl,
+    localApiKey,
+    localApiModel,
     tavilyApiKey,
     exaApiKey,
     model = "deepseek-v4-pro",
@@ -514,7 +521,7 @@ export async function POST(req: NextRequest) {
 
       /*
        * A normal UI request uses the same id for conversation and workspace.
-       * Refuse a disagreement instead of letting Chat B point at Chat A's
+       * Refuse a disagreement instead of letting Chat B pointhat B point at Chat A's
        * LESSONS.md, plan, GitHub checkout or files. Direct API callers that
        * omit conversationId may still name a standalone workspace.
        */

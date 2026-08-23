@@ -5,9 +5,9 @@
  * Resolution of keys and base URLs lives in `providers.ts`.
  */
 
-export type ProviderId = "deepseek" | "opencode";
+export type ProviderId = "deepseek" | "opencode" | "local";
 
-export type ThinkingStyle = "deepseek" | "openai";
+export type ThinkingStyle = "deepseek" | "openai" | "qwen";
 
 export interface ProviderInfo {
   id: ProviderId;
@@ -42,6 +42,35 @@ export interface ModelInfo {
 
 export const DEFAULT_MODEL_ID = "deepseek-v4-pro";
 
+/** Ollama's OpenAI-compatible host. Overridable in Settings. */
+export const DEFAULT_LOCAL_BASE_URL = "http://127.0.0.1:11434/v1";
+
+/** Ollama tag for Qwen3.8 27B. vLLM uses `Qwen/Qwen3.8-27B` instead. */
+export const DEFAULT_LOCAL_API_MODEL = "qwen3.8:27b";
+
+export const QWEN_38_27B_ID = "qwen-3.8-27b";
+
+export const LOCAL_HOST_PRESETS = [
+  {
+    id: "ollama",
+    label: "Ollama",
+    baseUrl: "http://127.0.0.1:11434/v1",
+    apiModel: "qwen3.8:27b",
+  },
+  {
+    id: "vllm",
+    label: "vLLM",
+    baseUrl: "http://127.0.0.1:8000/v1",
+    apiModel: "Qwen/Qwen3.8-27B",
+  },
+  {
+    id: "llamacpp",
+    label: "llama.cpp",
+    baseUrl: "http://127.0.0.1:8080/v1",
+    apiModel: "Qwen3.8-27B",
+  },
+] as const;
+
 export const PROVIDER_INFO: Record<ProviderId, ProviderInfo> = {
   deepseek: {
     id: "deepseek",
@@ -62,6 +91,16 @@ export const PROVIDER_INFO: Record<ProviderId, ProviderInfo> = {
       "A Zen API key from OpenCode. Required for Ox Alpha — the same OpenAI-compatible Chat Completions API DeepSeek uses.",
     thinkingStyle: "openai",
   },
+  local: {
+    id: "local",
+    name: "Local",
+    authUrl: "https://ollama.com/library/qwen3.8",
+    authLabel: "your machine",
+    keyPlaceholder: "(optional)",
+    keyBlurb:
+      "Any OpenAI-compatible host on this machine — Ollama, vLLM, or llama.cpp. No cloud key.",
+    thinkingStyle: "qwen",
+  },
 };
 
 /**
@@ -69,7 +108,8 @@ export const PROVIDER_INFO: Record<ProviderId, ProviderInfo> = {
  *
  * `id` is what Settings, localStorage and saved replies store.
  * `apiModel` is what goes on the wire — OpenCode serves Ox Alpha as
- * `x-preview-f-free` (see opencode.ai/docs/zen).
+ * `x-preview-f-free` (see opencode.ai/docs/zen). Local Qwen's wire id
+ * is overridable in Settings because Ollama and vLLM name it differently.
  */
 export const MODELS: ModelInfo[] = [
   {
@@ -115,6 +155,21 @@ export const MODELS: ModelInfo[] = [
     helper: true,
     peakHours: false,
   },
+  {
+    id: QWEN_38_27B_ID,
+    apiModel: DEFAULT_LOCAL_API_MODEL,
+    provider: "local",
+    label: "Qwen 3.8 27B",
+    shortLabel: "Qwen 3.8",
+    description:
+      "Local 27B. Thinking on by default, with reasoning_effort (low / medium / xhigh).",
+    specs: "262K context · runs on your GPU · free",
+    resumeBlurb: "Local Qwen 3.8 27B",
+    settingsSubtitle: "Local · 27B · thinking",
+    mapsLowToHigh: false,
+    helper: false,
+    peakHours: false,
+  },
 ];
 
 export function getModel(id: string | null | undefined): ModelInfo {
@@ -129,12 +184,22 @@ export function isKnownModel(id: string | null | undefined): boolean {
   return Boolean(id && MODELS.some((m) => m.id === id));
 }
 
-/** True when the selected model has a saved key. */
+/** True when the selected model has whatever it needs to send. */
 export function hasKeyForModel(
   modelId: string | null | undefined,
-  keys: { deepseekKey?: string; opencodeKey?: string }
+  keys: {
+    deepseekKey?: string;
+    opencodeKey?: string;
+    /** Local models need a host, not a cloud key. */
+    localBaseUrl?: string;
+  }
 ): boolean {
   const provider = getModel(modelId).provider;
+  if (provider === "local") {
+    // A default host is always assumed. The send fails later if nothing is
+    // listening — that is a reachability error, not a missing-key one.
+    return true;
+  }
   const raw = provider === "opencode" ? keys.opencodeKey : keys.deepseekKey;
   return Boolean(raw && raw.trim());
 }

@@ -22,6 +22,8 @@ export const MODEL_RATES: Record<string, ModelRates> = {
   "deepseek-v4-flash": { input: 0.14, cachedInput: 0.0028, output: 0.28 },
   // OpenCode Zen lists Ox Alpha Free at $0 / $0 during the stealth preview.
   "ox-alpha": { input: 0, cachedInput: 0, output: 0 },
+  // Electricity only — the weights run on the user's GPU.
+  "qwen-3.8-27b": { input: 0, cachedInput: 0, output: 0 },
 };
 
 /** Off-peak multiplier for input/output (Beijing 16:30-00:30). Cache-hit unchanged. */

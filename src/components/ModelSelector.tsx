@@ -112,7 +112,7 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
                   Model
                 </p>
                 <p className="mt-0.5 text-[11px] leading-4 text-text-muted">
-                  DeepSeek or OpenCode Ox Alpha
+                  DeepSeek, OpenCode, or a local Qwen
                 </p>
               </div>
               <button

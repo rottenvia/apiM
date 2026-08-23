@@ -197,10 +197,11 @@ regressions with `npm run test:binaries`.
 ## Requirements
 
 - Python 3.10+
-- A model provider key:
+- A model provider:
   - DeepSeek from [platform.deepseek.com](https://platform.deepseek.com), or
   - OpenCode Zen from [opencode.ai/auth](https://opencode.ai/auth) for Ox Alpha
-    (`x-preview-f-free` on `https://opencode.ai/zen/v1`)
+    (`x-preview-f-free` on `https://opencode.ai/zen/v1`), or
+  - a local OpenAI-compatible server for Qwen 3.8 27B (Ollama, vLLM, or llama.cpp)
 - (Optional) Tavily API key from [app.tavily.com](https://app.tavily.com) for web search
 
 ## Files
@@ -228,6 +229,50 @@ nohomo/
 | Self-Critic | 🔍 | Reviews own work |
 | Security First | 🛡️ | Security-focused |
 | Diff Only | 📝 | Shows only changes |
+
+## Local models (Qwen 3.8 27B)
+
+This app does not load GGUF weights itself. It talks to whatever
+OpenAI-compatible server you start on this machine.
+
+**Does it have a reasoning parameter?** Yes. Qwen 3.8 27B thinks by
+default. Official controls:
+
+| Our slider | Sent to the local API |
+|---|---|
+| None | `chat_template_kwargs.enable_thinking: false` |
+| Low | `reasoning_effort: "low"` |
+| High | `reasoning_effort: "medium"` |
+| Max | `reasoning_effort: "xhigh"` (Qwen's default) |
+
+`preserve_thinking` stays on so prior-round thoughts are not dropped.
+
+### Ollama
+
+```bash
+ollama pull qwen3.8:27b
+# then in Settings → Local model → Ollama
+# endpoint http://127.0.0.1:11434/v1
+# wire model qwen3.8:27b
+```
+
+Quantized tags such as `qwen3.8:27b-q4_K_M` or `qwen3.8:27b-mxfp8` work —
+put the tag in the wire-model field.
+
+### vLLM
+
+`--reasoning-parser qwen3` is required. Without it the `<think>` block
+lands in `content` and the thinking panel stays empty.
+
+```bash
+vllm serve Qwen/Qwen3.8-27B \
+  --reasoning-parser qwen3 \
+  --enable-auto-tool-choice \
+  --tool-call-parser qwen3_coder
+```
+
+Then Settings → Local model → vLLM (`http://127.0.0.1:8000/v1`,
+`Qwen/Qwen3.8-27B`).
 
 ## Thinking Effort
 

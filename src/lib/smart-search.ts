@@ -21,7 +21,7 @@ export interface SearchPlanner {
   apiKey: string;
   baseUrl: string;
   apiModel: string;
-  thinkingStyle?: "deepseek" | "openai";
+  thinkingStyle?: "deepseek" | "openai" | "qwen";
 }
 
 function plannerFrom(
@@ -45,9 +45,11 @@ function plannerHeaders(planner: SearchPlanner): Record<string, string> {
 }
 
 function plannerThinking(planner: SearchPlanner): Record<string, unknown> {
-  return planner.thinkingStyle === "openai"
-    ? {}
-    : { thinking: { type: "disabled" } };
+  // DeepSeek needs an explicit disable. OpenAI-compat and Qwen 3.8 treat
+  // an omitted thinking object as "don't think" for these tiny helper calls.
+  return planner.thinkingStyle === "deepseek"
+    ? { thinking: { type: "disabled" } }
+    : {};
 }
 
 /** Overridable so the search path can be exercised against a stub in tests. */
