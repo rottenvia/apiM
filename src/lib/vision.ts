@@ -10,8 +10,9 @@
  *
  * Preferred path is an OpenAI vision model (layout, highlighted controls,
  * what looks wrong). When the user has no key or the key is out of credit,
- * `describeImageWithFallback` scrapes visible text with free local OCR so
- * a screenshot still works.
+ * the server-only helper in `ocr.ts` scrapes visible text with free local
+ * OCR. This file must stay free of Node-only imports — ChatArea uses
+ * `isImageFile` in the browser.
  */
 
 export type DescriptionSource = "vision" | "ocr";
@@ -145,31 +146,4 @@ export async function describeImage(
 /** Wrap a description so the model knows it came from an image, not the user. */
 export function formatImageBlock(name: string, description: string): string {
   return `<image name="${name}">\n${description}\n</image>`;
-}
-
-/**
- * OpenAI vision when a key is present and working; free local OCR otherwise.
- *
- * Any vision failure (no funds, rejected key, timeout) falls through to OCR
- * rather than blocking the screenshot. OCR is also the only path when the
- * user never added a key.
- */
-export async function describeImageWithFallback(
-  dataUrl: string,
-  apiKey?: string,
-  model: string = DEFAULT_VISION_MODEL,
-  userHint?: string
-): Promise<VisionResult> {
-  // Loaded here so the client bundle that only needs isImageFile never
-  // pulls Node OCR (child_process / tesseract.js) into the browser.
-  const { describeWithOcr } = await import("@/lib/ocr");
-  const key = apiKey?.trim();
-  if (key) {
-    const vision = await describeImage(dataUrl, key, model, userHint);
-    if (vision.description) return { ...vision, source: "vision" };
-    const ocr = await describeWithOcr(dataUrl);
-    if (ocr.description) return ocr;
-    return vision;
-  }
-  return describeWithOcr(dataUrl);
 }

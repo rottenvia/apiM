@@ -12,6 +12,11 @@ import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import {
+  DEFAULT_VISION_MODEL,
+  describeImage,
+  type VisionResult,
+} from "@/lib/vision";
 
 export const OCR_NOTE =
   "[OCR — free local scrape of visible text only. Layout and non-text details are not described. Add an OpenAI vision key in Settings for a full description.]";
@@ -187,4 +192,27 @@ export async function describeWithOcr(
     description: formatOcrDescription(result.text ?? ""),
     source: "ocr",
   };
+}
+
+/**
+ * OpenAI vision when a key is present and working; free local OCR otherwise.
+ *
+ * Lives here — not in `vision.ts` — so the composer can import `isImageFile`
+ * without dragging tesseract.js into the browser bundle.
+ */
+export async function describeImageWithFallback(
+  dataUrl: string,
+  apiKey?: string,
+  model: string = DEFAULT_VISION_MODEL,
+  userHint?: string
+): Promise<VisionResult> {
+  const key = apiKey?.trim();
+  if (key) {
+    const vision = await describeImage(dataUrl, key, model, userHint);
+    if (vision.description) return { ...vision, source: "vision" };
+    const ocr = await describeWithOcr(dataUrl);
+    if (ocr.description) return ocr;
+    return vision;
+  }
+  return describeWithOcr(dataUrl);
 }
