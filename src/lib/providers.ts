@@ -359,6 +359,13 @@ export function providerHttpError(
     return `Your ${providerName} account has insufficient balance. Everything done so far is saved — add credit and press Continue on the reply above.`;
   }
   if (status === 429) {
+    if (providerName === "OpenCode Zen" || providerName === "OpenRouter") {
+      return (
+        `${providerName} is out of free capacity right now (429). ` +
+        `This is their shared pool, not your key — mornings are quieter, ` +
+        `evenings and US work hours get slammed. Wait a bit, or switch the Ox host in Settings.`
+      );
+    }
     return `Rate limited by ${providerName}. Please wait a moment and try again.`;
   }
   if (status === 502 || status === 503 || status === 504) {

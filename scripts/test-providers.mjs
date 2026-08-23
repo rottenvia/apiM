@@ -527,6 +527,12 @@ check(
   /API key was rejected/.test(providers.providerHttpError(401, "OpenCode", ""))
 );
 check(
+  "a Zen 429 names the shared free pool, not the user's key",
+  /shared pool/.test(providers.providerHttpError(429, "OpenCode Zen", "")) &&
+    /not your key/.test(providers.providerHttpError(429, "OpenCode Zen", "")),
+  "mornings are quiet; evenings look like the key is broken"
+);
+check(
   "the chat route gives OpenCode extra attempts",
   /OPENCODE_RETRY/.test(route) && /emptyStreamRetries/.test(route),
   "Zen 503s last longer than three tries, and 200+empty is the other failure mode"
