@@ -70,12 +70,14 @@ console.log("\n2. Retrying against a real server");
 let hits = 0;
 let failuresToServe = 0;
 let serveStatus = 500;
+let retryAfterHeader = null;
 
 const server = createServer((req, res) => {
   hits += 1;
   if (failuresToServe > 0) {
     failuresToServe -= 1;
     if (serveStatus === 429) res.setHeader("retry-after", "0");
+    if (retryAfterHeader != null) res.setHeader("retry-after", retryAfterHeader);
     res.writeHead(serveStatus, { "Content-Type": "text/plain" });
     res.end("nope");
     return;
@@ -137,6 +139,53 @@ check(
   "the reason is human-readable",
   notices[0]?.reason === "rate limited",
   notices[0]?.reason
+);
+
+check(
+  "the retry label counts the next try against the real total",
+  R.formatRetryNotice({
+    attempt: 1,
+    attempts: 3,
+    delayMs: 1400,
+    reason: "inference unavailable",
+  }) === "inference unavailable — retrying, try 2 of 3 in 1.4s",
+  "the old (1/2) counter looked like the last retry when two were left"
+);
+check(
+  "OpenCode is given more than the default three tries",
+  R.OPENCODE_RETRY.attempts === 5 && R.DEFAULT_RETRY.attempts === 3
+);
+
+hits = 0;
+failuresToServe = 1;
+serveStatus = 503;
+retryAfterHeader = "30";
+const cappedStarted = Date.now();
+out = await R.fetchWithRetry(() => fetch(URL_), {
+  attempts: 2,
+  baseDelayMs: 5,
+  maxDelayMs: 40,
+});
+const cappedMs = Date.now() - cappedStarted;
+check(
+  "a huge Retry-After is capped so a 503 cannot freeze the UI",
+  cappedMs < 1_000 && out.response?.ok === true,
+  `${cappedMs}ms (would have been 30s if the header were honoured uncapped)`
+);
+retryAfterHeader = null;
+
+hits = 0;
+failuresToServe = 99;
+serveStatus = 503;
+const reasons = [];
+out = await R.fetchWithRetry(() => fetch(URL_), {
+  ...fast,
+  onRetry: (i) => reasons.push(i.reason),
+});
+check(
+  "a 503 is described as inference unavailable, not a generic server error",
+  reasons[0] === "inference unavailable" && out.response?.status === 503,
+  reasons[0]
 );
 
 // Stop must win immediately, not after the backoff.

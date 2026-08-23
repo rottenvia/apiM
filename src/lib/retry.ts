@@ -21,6 +21,13 @@ const RETRYABLE_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
  */
 const FATAL_STATUS = new Set([400, 401, 402, 403, 404, 422]);
 
+export interface RetryInfo {
+  attempt: number;
+  attempts: number;
+  delayMs: number;
+  reason: string;
+}
+
 export interface RetryOptions {
   /** Total attempts, including the first. */
   attempts?: number;
@@ -31,13 +38,27 @@ export interface RetryOptions {
   /** Aborts the wait as well as the request. */
   signal?: AbortSignal;
   /** Called before each retry, for surfacing "retrying…" in the UI. */
-  onRetry?: (info: {
-    attempt: number;
-    attempts: number;
-    delayMs: number;
-    reason: string;
-  }) => void;
+  onRetry?: (info: RetryInfo) => void;
 }
+
+/** Default policy for DeepSeek and the local sidecar. */
+export const DEFAULT_RETRY = {
+  attempts: 3,
+  baseDelayMs: 700,
+  maxDelayMs: 8_000,
+} as const;
+
+/**
+ * OpenCode Zen (Ox Alpha) 503s several times a day.
+ *
+ * Three tries is not enough for an outage that lasts a minute, and their
+ * body often just says "retrying" — which we must not show as a final error.
+ */
+export const OPENCODE_RETRY = {
+  attempts: 5,
+  baseDelayMs: 1_200,
+  maxDelayMs: 10_000,
+} as const;
 
 export interface RetryResult {
   response: Response | null;
@@ -68,10 +89,26 @@ export function isRetryableStatus(status: number): boolean {
 }
 
 /**
+ * Label shown while a transient failure is being retried.
+ *
+ * `attempt` is the try that just failed, so the user sees the *next* try
+ * against the real total — `(1/2)` with `attempts: 3` looked like the
+ * last retry when two were still left, which is why 503s read as "it
+ * said retrying and then didn't".
+ */
+export function formatRetryNotice(info: RetryInfo): string {
+  const next = Math.min(info.attempt + 1, info.attempts);
+  const seconds = Math.round(info.delayMs / 100) / 10;
+  return `${info.reason} — retrying, try ${next} of ${info.attempts} in ${seconds}s`;
+}
+
+/**
  * Honour a Retry-After header when the server sends one.
  *
  * Rate limiters know better than a fixed backoff how long to wait, and
- * ignoring the header tends to earn a longer ban.
+ * ignoring the header tends to earn a longer ban. The wait is still
+ * capped: OpenCode 503s sometimes send a multi-minute value, which
+ * froze the UI on "retrying" until the user assumed nothing was happening.
  */
 function retryAfterMs(response: Response): number | null {
   const header = response.headers.get("retry-after");
@@ -87,7 +124,7 @@ function retryAfterMs(response: Response): number | null {
 }
 
 /** Sleep that gives up immediately if the request is aborted. */
-function delay(ms: number, signal?: AbortSignal): Promise<void> {
+export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   if (ms <= 0) return Promise.resolve();
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
@@ -117,9 +154,9 @@ export async function fetchWithRetry(
   options: RetryOptions = {}
 ): Promise<RetryResult> {
   const {
-    attempts = 3,
-    baseDelayMs = 700,
-    maxDelayMs = 8_000,
+    attempts = DEFAULT_RETRY.attempts,
+    baseDelayMs = DEFAULT_RETRY.baseDelayMs,
+    maxDelayMs = DEFAULT_RETRY.maxDelayMs,
     signal,
     onRetry,
   } = options;
@@ -164,7 +201,9 @@ export async function fetchWithRetry(
       reason =
         response.status === 429
           ? "rate limited"
-          : `server error ${response.status}`;
+          : response.status === 503
+            ? "inference unavailable"
+            : `server error ${response.status}`;
     }
 
     // Out of attempts — hand back whatever the last try produced.
@@ -180,7 +219,9 @@ export async function fetchWithRetry(
     const backoff = Math.min(maxDelayMs, baseDelayMs * 2 ** (attempt - 1));
     // Jitter stops repeated failures from re-colliding in lockstep.
     const jitter = Math.random() * 250;
-    const waitMs = suggested ?? backoff + jitter;
+    // Honour Retry-After, but never wait past the cap. A 120s header on a
+    // Zen 503 looks exactly like "it said retrying and then hung".
+    const waitMs = Math.min(maxDelayMs, suggested ?? backoff + jitter);
 
     onRetry?.({ attempt, attempts, delayMs: Math.round(waitMs), reason });
 
@@ -188,7 +229,7 @@ export async function fetchWithRetry(
     if (response) await response.body?.cancel().catch(() => {});
 
     try {
-      await delay(waitMs, signal);
+      await sleep(waitMs, signal);
     } catch (error) {
       return {
         response: null,
