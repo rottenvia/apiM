@@ -1054,7 +1054,17 @@ export async function runDeepDecompilation(
     allowFullFallback?: boolean;
   } = {}
 ): Promise<DeepDecompilationResult> {
-  if (!inspection.format.startsWith("PE")) {
+  /*
+   * Format gate.
+   *
+   * PE goes to ILSpy (managed) or Ghidra (native). ELF and Mach-O are not
+   * "supported" by ILSpy, but headless Ghidra imports and decompiles them
+   * natively — it auto-detects the format from the file bytes, so nothing
+   * PE-specific is needed here. The only formats left out are the legacy
+   * DOS images (NE/LE/LX/MZ), which neither modern decompiler reconstructs.
+   */
+  const ghidraFormats = new Set(["ELF", "Mach-O", "Mach-O universal", "unknown binary"]);
+  if (!inspection.format.startsWith("PE") && !ghidraFormats.has(inspection.format)) {
     return {
       attempted: false,
       status: "unavailable",

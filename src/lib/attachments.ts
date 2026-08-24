@@ -375,7 +375,7 @@ export async function readFolder(
   try {
     const result = await readFolderTree(files);
     if (result.entries.length === 0 && !(result.binaries?.length)) {
-      return { error: `${name} had no readable text or supported Windows executables in it` };
+      return { error: `${name} had no readable text or binary files in it` };
     }
     return {
       attachment: {
@@ -433,7 +433,7 @@ export async function readTextFile(
       const result = await readArchive(file.name, data);
       if (result.entries.length === 0 && !(result.binaries?.length)) {
         return {
-          error: `${file.name} had no readable text or supported Windows executables in it`,
+          error: `${file.name} had no readable text or binary files in it`,
         };
       }
       return {
