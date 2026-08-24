@@ -748,6 +748,7 @@ export async function POST(req: NextRequest) {
               resumed = {
                 toolRounds: state.toolRounds ?? 0,
                 continuations: state.continuations ?? 0,
+                thinkNudges: state.thinkNudges ?? 0,
                 messages: state.messages as TranscriptMessage[],
               };
             } else if (prior) {
@@ -936,9 +937,6 @@ export async function POST(req: NextRequest) {
           webSearchUsed: doSearch,
           searchReason,
           searchRounds: searchContext?.rounds ?? 0,
-          searchStopReason: se    webSearchUsed: doSearch,
-          searchReason,
-          searchRounds: searchContext?.rounds ?? 0,
           searchStopReason: searchContext?.stopReason ?? "",
           searchResults:
             searchContext?.results.map((r) => ({
@@ -1124,7 +1122,6 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             continue;
           }
           const built = buildUserContent(
-            msg.content ? built = buildUserContent(
             msg.content ?? "",
             msg.attachments,
             vision
