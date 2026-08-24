@@ -61,11 +61,22 @@ export function userContentText(content: UserContent | null | undefined): string
  * Native VLMs get text plus image_url / video_url parts. Helper / text-only
  * models get a string: either the already-inlined `<image>` blocks from the
  * composer, or a reconstruction from stored helper descriptions on replay.
+ *
+ * `options.mediaWindow` replays only the media kinds it allows and replaces
+ * the rest with a one-line text reference. Used for history turns: re-sending
+ * the full base64 of every past attachment on every request is what bloats
+ * the body past the size the gateway's zstd pipeline can take (a 32MB clip
+ * is a ~43MB body on every round), and it re-bills image tokens on a shared
+ * free pool. The model's earlier turns already reflect what it saw, so old
+ * pixels cost more than they are worth.
  */
 export function buildUserContent(
   text: string,
   attachments: StoredAttachment[] | null | undefined,
-  vision: VisionMode
+  vision: VisionMode,
+  options?: {
+    mediaWindow?: { images?: boolean; videos?: boolean };
+  }
 ): UserContent {
   const body = typeof text === "string" ? text : "";
   const media = (attachments ?? []).filter(
@@ -73,15 +84,32 @@ export function buildUserContent(
   );
 
   if (vision === "native" && media.length > 0) {
+    const window = options?.mediaWindow;
     const parts: ContentPart[] = [];
+    const dropped: string[] = [];
     const trimmed = body.trim();
     if (trimmed) parts.push({ type: "text", text: trimmed });
     for (const a of media) {
+      const keep =
+        !window ||
+        (a.kind === "video"
+          ? window.videos !== false
+          : window.images !== false);
+      if (!keep) {
+        dropped.push(`${a.name} (${a.kind})`);
+        continue;
+      }
       if (a.kind === "video") {
         parts.push({ type: "video_url", video_url: { url: a.dataUrl as string } });
       } else {
         parts.push({ type: "image_url", image_url: { url: a.dataUrl as string } });
       }
+    }
+    if (dropped.length > 0) {
+      parts.push({
+        type: "text",
+        text: `[Earlier attachment${dropped.length > 1 ? "s" : ""}: ${dropped.join(", ")} — kept in the conversation, not re-sent in later turns]`,
+      });
     }
     return parts.length > 0 ? parts : body;
   }
