@@ -1006,19 +1006,24 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
     function: {
       name: "inspect_binary",
       description:
-        "Statically inspect and decompile a Windows executable or library " +
-        "without running it. Use for .exe, .dll, .sys, .ocx, .scr, .cpl, " +
-        ".drv and .efi files. Always returns built-in PE architecture, " +
-        "headers, sections/entropy, hashes, Authenticode envelope, imports " +
-        "with function names, exports, PDB paths, selected strings, .NET " +
-        "metadata and a recursive graph of DLLs supplied in the workspace. " +
+        "Statically inspect and decompile executables and libraries without " +
+        "running them. Works on Windows PE files (.exe, .dll, .sys, .ocx, " +
+        ".scr, .cpl, .drv, .efi) and other native binaries: Linux ELF " +
+        "(.so, stripped executables, kernel modules) and macOS Mach-O. PE " +
+        "files return architecture, headers, sections/entropy, hashes, " +
+        "Authenticode envelope, imports with function names, exports, PDB " +
+        "paths, selected strings, .NET metadata and a recursive graph of " +
+        "DLLs supplied in the workspace. ELF/Mach-O return the detected " +
+        "format, hashes, selected strings, the entropy map and carved " +
+        "embedded blobs (no imports, exports or DLL graph). " +
         "It writes a full offset-labelled ASCII/UTF-16 strings dump, a " +
         "4KB-window entropy map, explicit packing assessment, carved embedded " +
         "PE/Lua/ZIP/PNG/PDF blobs plus opaque high-entropy sections/overlays " +
         "with their own strings, highlighted Lua/" +
         "process-memory/library-loading/process-creation imports, and an " +
-        "optional FLARE capa report. Managed code uses ILSpy when " +
-        "installed; native code uses headless Ghidra. Decompile ONLY the " +
+        "optional FLARE capa report (PE files only). Managed code uses ILSpy " +
+        "when installed; native code and all non-PE formats use headless " +
+        "Ghidra, which auto-detects the file format. Decompile ONLY the " +
         "functions/strings you name in focus_terms — there is no default " +
         "hook list and no automatic full-binary decompile. Enable specific " +
         "Ghidra analyzers (e.g. Decompiler Parameter ID) with " +

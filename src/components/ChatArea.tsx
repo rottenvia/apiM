@@ -9,6 +9,7 @@ import { ChatSearchBar } from "@/components/ChatSearchBar";
 import { AttachmentChips } from "@/components/AttachmentChips";
 import {
   buildMessageWithAttachments,
+  bytesLookBinary,
   isVideoFile,
   readImageFile,
   readTextFile,
@@ -33,7 +34,9 @@ import {
   archiveFolderName,
   formatArchiveManifest,
   folderPathOf,
+  isArchive,
 } from "@/lib/archive";
+import { documentKind } from "@/lib/documents";
 import type { Attachment } from "@/lib/attachments";
 import { Dots, MessageBubble } from "@/components/MessageBubble";
 import { ThinkingEffortSelector } from "@/components/ThinkingEffortSelector";
@@ -344,7 +347,7 @@ export function ChatArea({
         return {
           error:
             `${file.name} is ${(file.size / 1024 / 1024).toFixed(1)}MB; ` +
-            `the per-executable limit is ${MAX_PE_UPLOAD_BYTES / 1024 / 1024}MB`,
+            `the per-binary limit is ${MAX_PE_UPLOAD_BYTES / 1024 / 1024}MB`,
         };
       }
       // Large files go to /binary-raw first (custom server streams past
@@ -520,6 +523,44 @@ export function ChatArea({
               `watch MP4 — switch to Ox Alpha or Qwen 3.8 27B to attach it.`;
           } else {
             ({ attachment, error } = await readVideoFile(item.file));
+          }
+        } else if (
+          !isArchive(item.file.name) &&
+          !documentKind(item.file.name) &&
+          (await fileLooksBinary(item.file))
+        ) {
+          /*
+           * A binary that is not a named Windows executable: an ELF, a
+           * Mach-O, a .so, raw data. Save it as exact bytes the same way an
+           * executable is, instead of refusing it as "no text to read" —
+           * inspect_binary now handles non-PE formats (hashes, strings,
+           * entropy, carves, and Ghidra decompiles ELF/Mach-O when the
+           * decompiler is installed).
+           */
+          setStage(placeholder.id, "saving");
+          const saved = await saveProgram(
+            item.file,
+            binaryUploadPath(item.file.name)
+          );
+          if (!saved.path) {
+            error = `Couldn't save ${item.file.name}: ${saved.error ?? "upload failed"}`;
+          } else {
+            attachment = {
+              id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+              name: item.file.name,
+              size: saved.bytes ?? item.file.size,
+              content:
+                `${item.file.name} was saved as exact binary bytes at ` +
+                `${saved.path}. It was not executed. Use inspect_binary on ` +
+                `that path: start with analyses:["summary"] or ["strings"], ` +
+                `then decompile only the functions you name in focus_terms. ` +
+                `Do not dump the whole binary.`,
+              truncated: false,
+              kind: "text",
+              unpackedTo: saved.path,
+              binaryPaths: [saved.path],
+            };
+            onProcessesChanged?.();
           }
         } else {
           ({ attachment, error } = await readTextFile(item.file, (stage) =>
@@ -1676,6 +1717,23 @@ export function ChatArea({
       </div>
     </div>
   );
+}
+
+/**
+ * Sniff a loose file's head to decide whether it is binary.
+ *
+ * Only the first 8KB is read: every relevant signature (MZ, \x7fELF,
+ * Mach-O) sits at the head, and bytesLookBinary is conservative (a NUL
+ * byte or ~10% non-printable), so ordinary text files never false-positive
+ * even from a short head.
+ */
+async function fileLooksBinary(file: File): Promise<boolean> {
+  try {
+    const head = new Uint8Array(await file.slice(0, 8192).arrayBuffer());
+    return bytesLookBinary(head);
+  } catch {
+    return false;
+  }
 }
 
 function EmptyState({

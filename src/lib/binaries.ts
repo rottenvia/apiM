@@ -102,7 +102,17 @@ export interface HighlightedImport {
 }
 
 export interface PeInspection {
-  format: "PE32" | "PE32+" | "DOS/NE" | "DOS/LE" | "DOS/LX" | "DOS/MZ";
+  format:
+    | "PE32"
+    | "PE32+"
+    | "DOS/NE"
+    | "DOS/LE"
+    | "DOS/LX"
+    | "DOS/MZ"
+    | "ELF"
+    | "Mach-O"
+    | "Mach-O universal"
+    | "unknown binary";
   architecture: string;
   machine: number;
   bytes: number;
@@ -809,6 +819,23 @@ function stringScore(value: string): number {
   if (/\.(dll|exe|sys|pdb|json|config|xml|ini|db|sqlite)\b/i.test(value)) score += 80;
   if (/error|failed|exception|warning|password|token|secret|debug/i.test(value)) score += 70;
   if (/^[A-Za-z_?$@][\w?$@.:<>~-]{5,}$/.test(value)) score += 25;
+  /*
+   * Garbage demotion.
+   *
+   * The UTF-16 scan accepts any code point 0x20..0xFFFD, so a binary blob
+   * read on the wrong alignment decodes as a long run of CJK look-alikes.
+   * The bare length cap above used to let one outrank every real string
+   * (160 base vs 9 for "libc.so.6"), which made the "selected strings"
+   * section useless on non-PE files — exactly where this list is the only
+   * string source. Two cheap signals that a candidate is a misread:
+   * no alphanumerics at all, and extreme repetition (a repeating 4-byte
+   * overlay pattern has one or two unique code points across hundreds).
+   */
+  if (!/[A-Za-z0-9]/.test(value)) score = Math.floor(score * 0.2);
+  if (value.length >= 8) {
+    const unique = new Set(value).size;
+    if (unique / value.length < 0.3) score = Math.floor(score * 0.25);
+  }
   return score;
 }
 
@@ -1362,13 +1389,174 @@ async function dependencyChildren(
 }
 
 /** Inspect a workspace executable plus DLLs that were supplied beside it. */
+/**
+ * Magic-byte detection for the non-PE formats Ghidra can still take apart.
+ *
+ * ELF (Linux/Android), Mach-O and universal binaries (macOS) are the formats
+ * a person who drops a binary into a workspace is most likely to hold besides
+ * PE. Everything else is kept as "unknown binary" rather than refused: the
+ * strings, entropy, hashes and carve layers all work on raw bytes, and
+ * headless Ghidra auto-detects its own format list on import.
+ */
+function detectBinaryFormat(bytes: Uint8Array): {
+  format: "ELF" | "Mach-O" | "Mach-O universal" | "unknown binary";
+  architecture: string;
+} {
+  if (
+    bytes.length >= 5 &&
+    bytes[0] === 0x7f &&
+    bytes[1] === 0x45 &&
+    bytes[2] === 0x4c &&
+    bytes[3] === 0x46
+  ) {
+    const bits = bytes[4] === 2 ? "64-bit" : "32-bit";
+    const endian = bytes[5] === 1 ? "little-endian" : "big-endian";
+    return { format: "ELF", architecture: `ELF ${bits}, ${endian}` };
+  }
+  /*
+   * >>> 0 is load-bearing: the magic constants have the high bit set, so the
+   * signed 32-bit OR result (e.g. -16726769 for 0xFEEDFACF) would never
+   * equal the positive literal without the unsigned coercion.
+   */
+  const u32le = bytes.length >= 4
+    ? (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0
+    : 0;
+  const u32be = bytes.length >= 4
+    ? ((bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3]) >>> 0
+    : 0;
+  // MH_MAGIC / MH_MAGIC_64 in either byte order.
+  if (
+    u32le === 0xfeedface ||
+    u32le === 0xfeedfacf ||
+    u32be === 0xfeedface ||
+    u32be === 0xfeedfacf
+  ) {
+    const cputype = u32le === 0xfeedface || u32le === 0xfeedfacf
+      ? bytes.length >= 8
+        ? (bytes[4] | (bytes[5] << 8) | (bytes[6] << 16) | (bytes[7] << 24)) >>> 0
+        : 0
+      : bytes.length >= 8
+        ? ((bytes[4] << 24) | (bytes[5] << 16) | (bytes[6] << 8) | bytes[7]) >>> 0
+        : 0;
+    // CPU_TYPE_ARM 12, CPU_TYPE_ARM64 0x0100000C, CPU_TYPE_X86 7,
+    // CPU_TYPE_X86_64 0x01000007 (the high word marks the 64-bit variants).
+    const arch =
+      cputype === 0x0100000c
+        ? "arm64"
+        : cputype === 12
+          ? "arm"
+          : cputype === 0x01000007
+            ? "x86_64"
+            : cputype === 7
+              ? "x86"
+              : `cputype 0x${(cputype >>> 0).toString(16)}`;
+    return { format: "Mach-O", architecture: `Mach-O ${arch}` };
+  }
+  // FAT_MAGIC — a slice of several Mach-O images in one file.
+  if (u32be === 0xcafebabe || u32le === 0xcafebabe) {
+    return { format: "Mach-O universal", architecture: "Mach-O universal (multi-arch)" };
+  }
+  return { format: "unknown binary", architecture: "unknown" };
+}
+
+/**
+ * The inspection shape for a file that is a real binary but not a Windows
+ * executable: correct format, size and hashes, the full string extraction,
+ * and empty PE-only layers. Throwing "Not a Windows executable" here used to
+ * make inspect_binary refuse every ELF/Mach-O file even though headless
+ * Ghidra (when installed) decompiles those natively.
+ */
+function inspectGenericBinary(
+  bytes: Uint8Array,
+  options: InspectBinaryOptions = {}
+): PeInspection {
+  const { format, architecture } = detectBinaryFormat(bytes);
+  const hashes = hashBytes(bytes);
+  const r = new Reader(bytes);
+  const stringResult = extractStrings(r, options);
+  return {
+    format,
+    architecture,
+    machine: 0,
+    bytes: bytes.length,
+    hashes,
+    timestamp: 0,
+    timestampIso: null,
+    characteristics: 0,
+    isDll: false,
+    subsystem: "n/a",
+    imageBase: "0x0",
+    entryPointRva: 0,
+    sizeOfImage: 0,
+    sections: [],
+    imports: [],
+    exports: [],
+    managed: null,
+    authenticode: { present: false, size: 0, verified: false },
+    pdbPaths: [],
+    versionInfo: {},
+    strings: stringResult.strings,
+    possibleDynamicLibraries: [],
+    highlightedImports: [],
+    overlayBytes: 0,
+    packing: {
+      status: "unknown",
+      score: 0,
+      reasons: [
+        "PE-only packing heuristics do not apply; the entropy layer below still shows high-entropy regions.",
+      ],
+    },
+    mitigations: {
+      aslr: false,
+      highEntropyVa: false,
+      dep: false,
+      controlFlowGuard: false,
+      forceIntegrity: false,
+    },
+    indicators: [],
+    truncated: { imports: false, exports: false, strings: stringResult.truncated },
+  };
+}
+
+/**
+ * A file the upload may keep as opaque bytes.
+ *
+ * PE names keep the strict MZ check: a ".dll" that has no MZ header is
+ * corrupt or spoofed, not a renamed ELF to be lenient about. Any other name
+ * is accepted as-is — the bytes are stored and analysed statically, and
+ * nothing in this app ever executes an attached file.
+ */
+export function assertBinaryUpload(bytes: Uint8Array, name: string): void {
+  if (isPeFilename(name)) {
+    if (bytes.length < 64 || bytes[0] !== 0x4d || bytes[1] !== 0x5a) {
+      throw new WorkspaceError(`${name} does not have a Windows MZ executable header.`);
+    }
+  }
+}
+
 export async function inspectWorkspaceBinary(
   workspaceId: string,
   target: string,
   options: InspectBinaryOptions = {}
 ): Promise<WorkspaceBinaryInspection> {
   const bytes = await readFileBytes(workspaceId, target);
-  const inspection = inspectPortableExecutable(bytes, options);
+  let inspection: PeInspection;
+  try {
+    inspection = inspectPortableExecutable(bytes, options);
+  } catch (error) {
+    // A missing MZ header is no longer a hard refusal: fall back to the
+    // generic binary inspection so ELF/Mach-O/unknown files still get
+    // hashes, strings, entropy, carves and (when Ghidra is installed) a
+    // real decompile. Size errors and the like re-throw.
+    if (
+      error instanceof BinaryInspectionError &&
+      /MZ header/i.test(error.message)
+    ) {
+      inspection = inspectGenericBinary(bytes, options);
+    } else {
+      throw error;
+    }
+  }
   const dependenciesEnabled = options.dependencies !== false;
   let dependencies: DependencyNode[] = [];
   const unresolved = new Set<string>();
@@ -1551,7 +1739,7 @@ export function formatBinaryInspection(result: WorkspaceBinaryInspection): strin
   const p = result.inspection;
   const lines: string[] = [
     `Binary: ${result.path}`,
-    `Format: ${p.format} · ${p.architecture} · ${p.isDll ? "DLL/library" : p.subsystem}`,
+    `Format: ${p.format} · ${p.architecture} · ${p.isDll ? "DLL/library" : p.format.startsWith("PE") ? p.subsystem : "native binary"}`,
     `Size: ${p.bytes.toLocaleString()} bytes · SHA-256: ${p.hashes.sha256}`,
     `MD5: ${p.hashes.md5} · SHA-1: ${p.hashes.sha1}${p.hashes.imphash ? ` · imphash: ${p.hashes.imphash}` : ""}`,
   ];

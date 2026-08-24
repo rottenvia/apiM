@@ -3,7 +3,7 @@ import { createWriteStream } from "node:fs";
 import { mkdir, rename, unlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { assertPeUpload, MAX_BINARY_ANALYSIS_BYTES } from "@/lib/binaries";
+import { assertBinaryUpload, MAX_BINARY_ANALYSIS_BYTES } from "@/lib/binaries";
 import {
   workspaceDirectory,
   resolveInside,
@@ -70,7 +70,7 @@ export async function POST(
         );
       }
       const buf = Buffer.from(await file.arrayBuffer());
-      assertPeUpload(buf, filename);
+      assertBinaryUpload(buf, filename);
       await ensureRoot(id);
       const dest = resolveInside(id, target);
       await mkdir(path.dirname(dest), { recursive: true });
@@ -160,7 +160,7 @@ export async function POST(
       const { readFile } = await import("node:fs/promises");
       const tmpBuf = await readFile(tmpPath);
       try {
-        assertPeUpload(tmpBuf, filename);
+        assertBinaryUpload(tmpBuf, filename);
       } catch (peErr) {
         await unlink(tmpPath).catch(() => {});
         if (peErr instanceof WorkspaceError) {

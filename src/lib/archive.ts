@@ -36,12 +36,18 @@ const SKIP_DIRS = [
 ];
 
 /** Binary payloads that would only arrive as mojibake. */
+// Name-based pre-filter only. Everything not listed still goes through
+// decodeText, and non-text files are KEPT as exact binary bytes under the
+// same caps as executables — so only media, fonts and nested archives stay
+// excluded here (a zip of 200 PNGs must not consume the binary-entry caps).
+// Code and data binaries (.so, .dylib, .o, .a, .bin, .dat, .pyc, .class)
+// deliberately fall through: they are exactly what inspect_binary is for.
 const SKIP_EXTENSIONS = new Set([
   "png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "svg",
-  "pdf", "zip", "gz", "tar", "rar", "7z", "exe", "dll", "so", "dylib",
+  "pdf", "zip", "gz", "tar", "rar", "7z", "exe", "dll",
   "woff", "woff2", "ttf", "otf", "eot",
   "mp3", "mp4", "wav", "avi", "mov", "webm",
-  "pyc", "class", "o", "a", "bin", "dat", "db", "sqlite",
+  "db", "sqlite",
 ]);
 
 export interface ArchiveEntry {
@@ -60,7 +66,7 @@ export interface ArchiveBinaryEntry {
 
 export interface ArchiveResult {
   entries: ArchiveEntry[];
-  /** PE files preserved as exact bytes for inspect_binary, never decoded. */
+  /** Binary files (PE, ELF, Mach-O, raw data) preserved as exact bytes for inspect_binary, never decoded. */
   binaries?: ArchiveBinaryEntry[];
   /** Files deliberately left out, with a one-line reason each. */
   skipped: { path: string; reason: string }[];
@@ -138,8 +144,9 @@ function shouldSkip(path: string): string | null {
   if (base.startsWith("._")) return "macOS resource fork";
 
   // A cheap pre-filter only. Anything not listed still goes through
-  // decodeText, which drops it if it turns out to be binary — so an
-  // unfamiliar text format is read rather than refused for being unknown.
+  // decodeText: text is kept as text, and binary is kept as exact bytes —
+  // so an unfamiliar format is included rather than refused for being
+  // unknown.
   const dot = base.lastIndexOf(".");
   const ext = dot === -1 ? "" : base.slice(dot + 1).toLowerCase();
   if (SKIP_EXTENSIONS.has(ext)) return "binary file";
@@ -221,10 +228,11 @@ export async function readFolderTree(
       continue;
     }
 
-    if (entries.length >= MAX_ENTRIES || totalChars >= MAX_TOTAL_CHARS) {
-      hitLimit = true;
-      continue;
-    }
+    // The text cap applies to text only — it is evaluated after the sniff
+    // below, so a binary found in a capped folder is still preserved (PE
+    // files above get the same treatment by being handled first).
+    const atTextCap =
+      entries.length >= MAX_ENTRIES || totalChars >= MAX_TOTAL_CHARS;
 
     let bytes: Uint8Array;
     try {
@@ -239,7 +247,37 @@ export async function readFolderTree(
 
     const text = decodeText(bytes);
     if (text === null) {
-      skipped.push({ path, reason: "binary file" });
+      /*
+       * Binary file: keep it as exact bytes under the same caps as
+       * executables. `bytes` here is only the sniff head, so a file larger
+       * than the head must be read in full first — but never past the cap,
+       * which is what bounds the read itself.
+       */
+      if (
+        file.size > MAX_PE_UPLOAD_BYTES ||
+        binaries.length >= MAX_BINARY_ENTRIES ||
+        totalBinaryBytes + file.size > MAX_TOTAL_BINARY_BYTES
+      ) {
+        hitLimit = true;
+        skipped.push({ path, reason: "binary limit exceeded" });
+        continue;
+      }
+      let full = bytes;
+      if (file.size > bytes.length) {
+        try {
+          full = new Uint8Array(await file.arrayBuffer());
+        } catch {
+          skipped.push({ path, reason: "could not read binary bytes" });
+          continue;
+        }
+      }
+      binaries.push({ path, data: full, bytes: full.length });
+      totalBinaryBytes += full.length;
+      continue;
+    }
+
+    if (atTextCap) {
+      hitLimit = true;
       continue;
     }
 
@@ -278,6 +316,23 @@ function decodeText(bytes: Uint8Array): string | null {
   // A NUL byte in the first chunk is the cheapest reliable binary signal.
   const probe = bytes.subarray(0, Math.min(bytes.length, 8000));
   if (probe.includes(0)) return null;
+
+  /*
+   * Control-byte ratio — kept in lockstep with bytesLookBinary in
+   * attachments.ts so a file is "binary" the same way whether it is dropped
+   * loose or arrives inside an archive. Without it, a 2MB file of 0x07
+   * bytes sailed through as "text" and inlined two megabytes of garbage,
+   * while the identical loose file was refused. Tab, LF, CR and form feed
+   * are exempt (real text uses them); ESC counts only when it does not
+   * start a colour-code sequence, so dense ANSI logs stay text.
+   */
+  let control = 0;
+  for (let i = 0; i < probe.length; i++) {
+    const b = probe[i];
+    if (b === 0x1b && probe[i + 1] === 0x5b) continue;
+    if (b < 9 || (b > 13 && b < 32)) control += 1;
+  }
+  if (probe.length > 0 && control / probe.length > 0.1) return null;
 
   try {
     return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
@@ -437,10 +492,11 @@ async function readZip(buf: Uint8Array): Promise<ArchiveResult> {
         skipped.push({ path: name, reason: "executable binary limit exceeded" });
         continue;
       }
-    } else if (entries.length >= MAX_ENTRIES || totalChars >= MAX_TOTAL_CHARS) {
-      hitLimit = true;
-      continue;
     }
+    // The text cap applies to text only (evaluated after the sniff below), so
+    // a non-PE binary in a text-capped archive is still preserved.
+    const atTextCap =
+      entries.length >= MAX_ENTRIES || totalChars >= MAX_TOTAL_CHARS;
 
     // The local header repeats the name and extra fields, and its extra
     // length can differ from the central one — so it has to be read again.
@@ -477,7 +533,33 @@ async function readZip(buf: Uint8Array): Promise<ArchiveResult> {
 
     const text = decodeText(bytes);
     if (text === null) {
-      skipped.push({ path: name, reason: "binary file" });
+      /*
+       * Non-text file: keep it as exact bytes, exactly like an executable.
+       *
+       * Skipping here was the "the zip worked but my .so / .bin / core file
+       * vanished" case — a zip of a Linux project lost every ELF and the
+       * model was left with the source that referenced files it could not
+       * see. The same caps that bound executables bound everything else.
+       */
+      if (
+        bytes.length > MAX_PE_UPLOAD_BYTES ||
+        binaries.length >= MAX_BINARY_ENTRIES ||
+        totalBinaryBytes + bytes.length > MAX_TOTAL_BINARY_BYTES
+      ) {
+        hitLimit = true;
+        skipped.push({ path: name, reason: "binary limit exceeded" });
+      } else {
+        // Copy out of the archive buffer. Stored entries may otherwise retain
+        // the entire ZIP through a small subarray view.
+        const data = new Uint8Array(bytes);
+        binaries.push({ path: name, data, bytes: data.length });
+        totalBinaryBytes += data.length;
+      }
+      continue;
+    }
+
+    if (atTextCap) {
+      hitLimit = true;
       continue;
     }
 
@@ -556,15 +638,32 @@ function readTar(buf: Uint8Array): ArchiveResult {
       }
       continue;
     }
-    if (entries.length >= MAX_ENTRIES || totalChars >= MAX_TOTAL_CHARS) {
-      hitLimit = true;
-      continue;
-    }
+    // The text cap applies to text only (evaluated after the sniff below), so
+    // a non-PE binary in a text-capped archive is still preserved.
+    const atTextCap =
+      entries.length >= MAX_ENTRIES || totalChars >= MAX_TOTAL_CHARS;
 
     const bytes = buf.subarray(dataStart, dataStart + size);
     const text = decodeText(bytes);
     if (text === null) {
-      skipped.push({ path: full, reason: "binary file" });
+      // Keep non-text files as exact bytes, same caps as executables.
+      if (
+        size > MAX_PE_UPLOAD_BYTES ||
+        binaries.length >= MAX_BINARY_ENTRIES ||
+        totalBinaryBytes + size > MAX_TOTAL_BINARY_BYTES
+      ) {
+        hitLimit = true;
+        skipped.push({ path: full, reason: "binary limit exceeded" });
+      } else {
+        const data = new Uint8Array(bytes);
+        binaries.push({ path: full, data, bytes: data.length });
+        totalBinaryBytes += data.length;
+      }
+      continue;
+    }
+
+    if (atTextCap) {
+      hitLimit = true;
       continue;
     }
 
@@ -620,7 +719,7 @@ export function formatArchiveManifest(
     ...entries.map(
       (e) => `  ${dir}/${e.path}${e.truncated ? "  (truncated)" : ""}`
     ),
-    ...binaries.map((e) => `  ${dir}/${e.path}  (executable bytes)`),
+    ...binaries.map((e) => `  ${dir}/${e.path}  (binary bytes)`),
   ].join("\n");
 
   const notes: string[] = [];
@@ -646,12 +745,12 @@ export function formatArchive(name: string, result: ArchiveResult): string {
   const binaries = result.binaries ?? [];
 
   if (entries.length === 0 && binaries.length === 0) {
-    return `[${name} contained no readable text or supported Windows executable files]`;
+    return `[${name} contained no readable text or binary files]`;
   }
 
   const tree = [
     ...entries.map((e) => `  ${e.path}${e.truncated ? "  (truncated)" : ""}`),
-    ...binaries.map((e) => `  ${e.path}  (executable bytes; saving to workspace)`),
+    ...binaries.map((e) => `  ${e.path}  (binary bytes; saving to workspace)`),
   ].join("\n");
 
   const notes: string[] = [];
