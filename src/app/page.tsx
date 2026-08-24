@@ -2674,38 +2674,3 @@ export default function Home() {
     </ArtifactProvider>
   );
 }
-)
-                ? prev.filter((p) => p !== id)
-                : [...prev, id]
-            );
-          }}
-          onClose={() => setShowPlugins(false)}
-        />
-      )}
-    </div>
-    </ArtifactProvider>
-  );
-}
-        ? prev.filter((p) => p !== id)
-                : [...prev, id]
-            );
-          }}
-          onClose={() => setShowPlugins(false)}
-        />
-      )}
-    </div>
-    </ArtifactProvider>
-  );
-}
-)
-                ? prev.filter((p) => p !== id)
-                : [...prev, id]
-            );
-          }}
-          onClose={() => setShowPlugins(false)}
-        />
-      )}
-    </div>
-    </ArtifactProvider>
-  );
-}
