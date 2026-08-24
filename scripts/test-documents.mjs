@@ -270,7 +270,7 @@ const documentsSource = await fs.readFile(
 const nextConfig = await fs.readFile(path.join(ROOT, "next.config.ts"), "utf8");
 check(
   "pdfjs stays external to Next's server chunks",
-  /serverExternalPackages:\s*\["pdfjs-dist"\]/.test(nextConfig),
+  /serverExternalPackages:\s*\["pdfjs-dist",\s*"tesseract\.js"\]/.test(nextConfig),
   "bundling pdf.mjs without its sibling created the missing .next/dev/server/chunks/pdf.worker.mjs path"
 );
 check(

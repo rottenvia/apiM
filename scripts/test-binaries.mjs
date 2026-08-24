@@ -891,8 +891,8 @@ check(
     (/application\/octet-stream/.test(chatSource) || /FormData/.test(chatSource))
 );
 check(
-  "upload endpoint validates MZ and writes bytes",
-  /assertPeUpload/.test(routeSource) &&
+  "upload endpoint keeps the strict MZ gate and writes bytes",
+  /assertBinaryUpload/.test(routeSource) &&
     // Streamed raw path writes directly to disk; multipart path still uses writeFile.
     (/createWriteStream/.test(routeSource) || /writeFile/.test(routeSource))
 );
@@ -950,6 +950,47 @@ check(
   rawRes.status === 200 &&
     Buffer.from(savedBig).equals(Buffer.from(big)),
   `status ${rawRes.status}, sent ${big.length}, got ${savedBig?.length}`
+);
+
+// Non-PE binaries (ELF, Mach-O, raw data) are stored as opaque bytes:
+// inspect_static and headless Ghidra handle them. Only a name that claims to
+// be a Windows executable keeps the strict MZ requirement, so a renamed ELF
+// arriving as .dll is still refused rather than silently mislabelled.
+const elfBytes = new Uint8Array(72);
+elfBytes.set([0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01, 0x00], 0);
+const elfTarget = "uploads/binaries/libtest.so";
+const elfRes = await Upload.POST(
+  new NextRequest("http://localhost/api/workspace/test/binary", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/octet-stream",
+      "X-Binary-Path": elfTarget,
+      "Content-Length": String(elfBytes.length),
+    },
+    body: Buffer.from(elfBytes),
+  }),
+  { params: Promise.resolve({ id: WS }) }
+);
+check(
+  "non-PE binaries are stored as opaque bytes",
+  elfRes.status === 200,
+  JSON.stringify(await elfRes.json().catch(() => ({})))
+);
+const fakeRes = await Upload.POST(
+  new NextRequest("http://localhost/api/workspace/test/binary", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/octet-stream",
+      "X-Binary-Path": "uploads/binaries/fake.dll",
+      "Content-Length": String(elfBytes.length),
+    },
+    body: Buffer.from(elfBytes),
+  }),
+  { params: Promise.resolve({ id: WS }) }
+);
+check(
+  "a .dll without an MZ header is still refused",
+  fakeRes.status === 400
 );
 check("the target is never executed by the analysis path", !/spawn\([^\n]*targetPath/.test(await fs.readFile(path.join(ROOT, "src/lib/binary-decompiler.ts"), "utf8")));
 const ghidraScript = await fs.readFile(

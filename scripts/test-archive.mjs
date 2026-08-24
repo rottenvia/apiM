@@ -270,7 +270,7 @@ const emptyText = A.formatArchive("empty.zip", {
 });
 check(
   "an archive with nothing readable says so",
-  emptyText.includes("no readable text or supported Windows executable files")
+  emptyText.includes("no readable text or binary files")
 );
 
 // ------------------------------------------------------------ robustness
