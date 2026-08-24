@@ -77,10 +77,21 @@ export function foldSystemMessagesToFront(
  *
  * An assistant turn with `content: null` is valid when it only called tools,
  * but sending `tool_calls: []` or a stray `undefined` is not.
+ *
+ * `includeReasoning` exists for hosts that are NOT DeepSeek. `reasoning_content`
+ * is a DeepSeek wire field: DeepSeek 400s when a tool-calling turn omits it,
+ * but OpenCode Zen validates its Chat Completions schema strictly and the
+ * Ox Alpha catalog says the field is not required there
+ * (`requiresReasoningContentOnAssistantMessages: No`) — replaying it is what
+ * turns a 20-round agent run into a 400 "[1210] Invalid API parameter" on
+ * every subsequent round and every resume. Stripping it for those hosts also
+ * stops resending ~9k tokens of chain-of-thought per round on a free pool.
  */
 export function serializeForApi(
-  messages: TranscriptMessage[]
+  messages: TranscriptMessage[],
+  options: { includeReasoning?: boolean } = {}
 ): Record<string, unknown>[] {
+  const { includeReasoning = true } = options;
   return messages.map((m) => {
     if (m.role === "assistant") {
       const out: Record<string, unknown> = {
@@ -91,7 +102,8 @@ export function serializeForApi(
       // ignores it otherwise, and sending it everywhere wastes tokens.
       if (m.tool_calls?.length) {
         out.tool_calls = m.tool_calls;
-        if (m.reasoning_content) out.reasoning_content = m.reasoning_content;
+        if (includeReasoning && m.reasoning_content)
+          out.reasoning_content = m.reasoning_content;
         // A tool-calling turn legitimately has no prose.
         out.content = m.content ?? null;
       }

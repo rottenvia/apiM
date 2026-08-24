@@ -437,6 +437,64 @@ type StreamEvent =
     }
   | { type: "error"; error: string; autoResume?: boolean };
 
+/**
+ * The least-shaped version of a Chat Completions body: no tools, no tool
+ * choice, and no image/video parts (replaced by a text note).
+ *
+ * The Ox Alpha free model's tool path has been flapping on the OpenCode
+ * gateway (anomalyco/opencode #44300, #44382 — "Endpoint is unavailable" /
+ * network_error on ANY request that offers tools, while the identical
+ * request without them streams fine). It is their adapter, not our key, but
+ * while it is down a workspace turn — which always offers tools — fails
+ * 100% and looks "50/50" as their side recovers and breaks again.
+ *
+ * This is the fallback body for ONE retry after such a rejection: the round
+ * degrades to prose (the model can still emit tool calls learned from the
+ * transcript and we execute those), instead of the whole run stopping.
+ * Everything else — thinking fields, stream options, message text — stays
+ * exactly as it was.
+ */
+function sanitizeOxRequestBody(body: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...body };
+  delete out.tools;
+  delete out.tool_choice;
+
+  const messages = out.messages;
+  if (Array.isArray(messages)) {
+    out.messages = messages.map((m) => {
+      if (
+        typeof m !== "object" ||
+        m === null ||
+        (m as Record<string, unknown>).role !== "user" ||
+        !Array.isArray((m as Record<string, unknown>).content)
+      ) {
+        return m;
+      }
+      let droppedMedia = false;
+      const content = ((m as Record<string, unknown>).content as Record<string, unknown>[]).map(
+        (part) => {
+          if (
+            part &&
+            typeof part === "object" &&
+            (part.type === "image_url" || part.type === "video_url")
+          ) {
+            droppedMedia = true;
+            return {
+              type: "text",
+              text: `[attached ${part.type === "video_url" ? "video" : "image"} omitted from this retry — the provider rejected the media payload; answer from the conversation text]`,
+            };
+          }
+          return part;
+        }
+      );
+      if (!droppedMedia) return m;
+      return { ...(m as Record<string, unknown>), content };
+    });
+  }
+
+  return out;
+}
+
 export async function POST(req: NextRequest) {
   // ---------------------------------------------------------------------
   // Validation happens before the stream opens, so these can still be real
@@ -1115,16 +1173,70 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         }
 
         const vision = getModel(model).vision;
+
+        /*
+         * Which history turns still replay their pixels in full.
+         *
+         * Every past user turn used to re-send its full base64 image/video on
+         * EVERY request: up to twenty messages, 8MB images and 32MB clips —
+         * one clip alone made a ~43MB body on every round, which is the
+         * "invalid zstd request body" 1210 the Zen gateway returns, and on
+         * the free pool the image tokens were re-billed every turn. What the
+         * model saw is already reflected in its own earlier turns, so pixels
+         * stay full only for the newest media-bearing turns (videos keep
+         * strictly less of a window than images — they are the huge ones)
+         * and become a one-line reference before that.
+         */
+        const mediaWindowFor: (
+          msg: ScopedChatMessage
+        ) => { images: boolean; videos: boolean } | null =
+          vision === "native"
+            ? (() => {
+                const imgWindow = new Map<number, boolean>();
+                const vidWindow = new Map<number, boolean>();
+                let imgSeen = 0;
+                let vidSeen = 0;
+                for (let i = scopedHistory.length - 1; i >= 0; i--) {
+                  const m = scopedHistory[i];
+                  if (m.role !== "user") continue;
+                  let hasImg = false;
+                  let hasVid = false;
+                  for (const a of m.attachments ?? []) {
+                    if (a.kind === "image" && a.dataUrl) hasImg = true;
+                    if (a.kind === "video" && a.dataUrl) hasVid = true;
+                  }
+                  if (hasImg) {
+                    imgWindow.set(i, imgSeen < 2);
+                    imgSeen += 1;
+                  }
+                  if (hasVid) {
+                    vidWindow.set(i, vidSeen < 1);
+                    vidSeen += 1;
+                  }
+                }
+                return (m: ScopedChatMessage) => {
+                  const i = scopedHistory.indexOf(m);
+                  if (!imgWindow.has(i) && !vidWindow.has(i)) return null;
+                  return {
+                    images: imgWindow.get(i) ?? false,
+                    videos: vidWindow.get(i) ?? false,
+                  };
+                };
+              })()
+            : () => null;
+
         for (const msg of scopedHistory) {
           if (msg.role === "assistant") {
             if (!msg.content?.trim()) continue;
             transcript.push({ role: "assistant", content: msg.content });
             continue;
           }
+          const window = mediaWindowFor(msg);
           const built = buildUserContent(
             msg.content ?? "",
             msg.attachments,
-            vision
+            vision,
+            window ? { mediaWindow: window } : undefined
           );
           if (!userHasContent(built)) continue;
           transcript.push({ role: "user", content: built });
@@ -1795,7 +1907,14 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             // `x-preview-f-free` on OpenCode Zen). Saved usage still uses
             // the app id so pricing looks it up correctly.
             model: target.apiModel,
-            messages: serializeForApi(wireMessages),
+            // DeepSeek REQUIRES the verbatim reasoning on tool-calling
+            // turns; the OpenCode Zen gateway validates its schema strictly
+            // and the Ox catalog marks the field as not required — sending
+            // it is a 400 "[1210] Invalid API parameter" once any tool round
+            // is in the transcript (and every resume replays those rounds).
+            messages: serializeForApi(wireMessages, {
+              includeReasoning: !isOxProvider(target.providerId),
+            }),
             stream: true,
             stream_options: { include_usage: true },
             /*
@@ -1942,10 +2061,90 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             return;
           }
 
-          const dsResponse = attempt.response;
+          let dsResponse = attempt.response;
+          let earlyErrText = "";
+
+          /*
+           * Ox: one more chance with a body the gateway will actually take.
+           *
+           * A 400 "Invalid API parameter" is a REJECTION OF THE REQUEST
+           * SHAPE, not of the content — retrying it identically fails
+           * identically, which is why the retry policy treats 400 as fatal.
+           * The shapes only Ox has rejected in the wild are the tool path
+           * (their adapter for the free model flaps: anomalyco/opencode
+           * #44300, #44382 — while it is down, every request that offers
+           * tools fails while plain chat works) and oversized or foreign
+           * media payloads (the "invalid zstd request body" variant of the
+           * same 1210). So: if the rejection looks like a shape problem,
+           * retry ONCE with the sanitized body — no tools, no media pixels.
+           * The round degrades to prose at worst; the model can still emit
+           * tool calls learned from the history and we execute those. Either
+           * way the task survives instead of a hard stop mid-run.
+           */
+          if (!dsResponse.ok && target.providerId === "opencode") {
+            earlyErrText = await dsResponse.text().catch(() => "");
+            const rejectedDetail = (() => {
+              try {
+                const parsed = JSON.parse(earlyErrText);
+                return String(parsed?.error?.message ?? parsed?.message ?? "");
+              } catch {
+                return earlyErrText.slice(0, 300);
+              }
+            })();
+            if (
+              dsResponse.status === 400 ||
+              (dsResponse.status >= 500 && /endpoint is unavailable/i.test(rejectedDetail))
+            ) {
+              const sanitized = sanitizeOxRequestBody(dsRequestBody);
+              if (JSON.stringify(sanitized) !== JSON.stringify(dsRequestBody)) {
+                const sanitizedChars = JSON.stringify(sanitized).length;
+                send({
+                  type: "retrying",
+                  phase: "attempt",
+                  attempt: attempt.attempts + 1,
+                  attempts: (retryAttempts ?? attempt.attempts) + 1,
+                  delayMs: 0,
+                  reason: "host rejected the payload — retrying without tools and media",
+                  host: target.providerName,
+                  inputChars: sanitizedChars,
+                });
+                try {
+                  const second = await fetchUntilHeaders(
+                    (signal) =>
+                      fetch(`${target.baseUrl}/chat/completions`, {
+                        method: "POST",
+                        headers: completionHeaders(target),
+                        body: JSON.stringify(sanitized),
+                        signal,
+                      }),
+                    attemptTimeoutMs(target, sanitizedChars),
+                    runSignal
+                  );
+                  if (second.ok && second.body) {
+                    recordAsync({
+                      kind: "api_error",
+                      subject: "ox_shape_rejection",
+                      detail: `Recovered on sanitized retry after HTTP ${dsResponse.status}: ${rejectedDetail.slice(0, 160)}`,
+                      context: { status: dsResponse.status },
+                    });
+                    dsResponse = second;
+                  } else {
+                    const t2 = await second.text().catch(() => "");
+                    console.error(
+                      "Ox sanitized retry failed:",
+                      second.status,
+                      t2.slice(0, 300)
+                    );
+                  }
+                } catch (e) {
+                  console.error("Ox sanitized retry threw:", e);
+                }
+              }
+            }
+          }
 
           if (!dsResponse.ok || !dsResponse.body) {
-            const errText = await dsResponse.text().catch(() => "");
+            const errText = earlyErrText || (await dsResponse.text().catch(() => ""));
             console.error("DeepSeek error:", dsResponse.status, errText);
 
             let detail = "";
