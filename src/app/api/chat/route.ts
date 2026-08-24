@@ -150,11 +150,24 @@ import {
 export const maxDuration = 1800;
 
 /**
- * Ceiling on generated tokens. The model supports up to 384K; 8192 was far too
- * low and silently truncated long answers (a full HTML game hits it mid-line).
- * This is only a cap — it costs nothing when responses are short.
+ * Ceiling on generated tokens, PER REPLY — not a total for the run.
+ *
+ * A run is bounded by MAX_AGENT_ROUNDS and the (optional) spending limit,
+ * never by this number: a forty-round task generates forty replies, each up
+ * to this many tokens. It costs nothing when a reply is shorter.
+ *
+ * 8192 was far too low and silently truncated long answers (a full HTML game
+ * hits it mid-line). 65536 bounds the worst-case single round on the PAID
+ * models, where a 384K round is real money.
  */
 const MAX_OUTPUT_TOKENS = 65536;
+
+/**
+ * Ox Alpha's documented output window is 128k, and the model is free during
+ * preview — so it gets the full window instead of the paid-model cap. There
+ * is no bill to bound; the only reason to cap output would be cost.
+ */
+const OX_MAX_OUTPUT_TOKENS = 131_072;
 
 /**
  * Derive a readable conversation title from the first user message.
@@ -1934,7 +1947,9 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               model,
               target.thinkingStyle === "qwen"
                 ? SIDECAR_MAX_OUTPUT
-                : MAX_OUTPUT_TOKENS
+                : isOxProvider(target.providerId)
+                  ? OX_MAX_OUTPUT_TOKENS
+                  : MAX_OUTPUT_TOKENS
             ),
           };
 
@@ -2538,6 +2553,41 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             continue;
           }
 
+          /*
+           * Every stalled attempt failed: three 200s with nothing coming
+           * through on the other side is an outage, not a short answer.
+           *
+           * Saving that as a completed blank reply was the "it was not
+           * answering at all, and there is nothing to continue" case —
+           * what the user needs is a real error. Any work from earlier
+           * rounds of this reply is already checkpointed as incomplete, so
+           * it stays resumable.
+           */
+          if (
+            target.providerId === "opencode" &&
+            emptyStreamRetries >= 2 &&
+            !roundContent &&
+            !roundReasoning &&
+            toolAcc.result().length === 0 &&
+            (!roundFinishReason || firstTokenTimedOut)
+          ) {
+            try {
+              await checkpoint(true);
+            } catch (e) {
+              console.error("Checkpoint failed:", e);
+            }
+            send({
+              type: "error",
+              error:
+                `${target.providerName} returned an empty response after ` +
+                `${emptyStreamRetries + 1} attempt(s). The host is overloaded ` +
+                `or down right now — this is their pool, not your key. Wait a ` +
+                `minute and try again, or switch the Ox host in Settings.`,
+            });
+            close();
+            return;
+          }
+
           if (thinkingEnabled && !roundReasoning) {
             send({
               type: "reasoning_status",
@@ -2572,7 +2622,31 @@ Ask before you build the wrong thing. If a choice would change what you produce 
            * the one in flight is lost, and now it is asked for again rather
            * than abandoned.
            */
-          const truncated = /^(length|max_tokens)$/i.test(roundFinishReason);
+          const hardTruncated = /^(length|max_tokens)$/i.test(
+            roundFinishReason
+          );
+          /*
+           * A stream that ended without the model finishing it.
+           *
+           * The other half of "cut off": the shared free pool drops
+           * connections mid-generation under load — OpenCode Zen sends
+           * `finish_reason: "network_error"`, and during outages the body can
+           * simply end with NO finish_reason. Neither is a completion, but
+           * only `length` was matched before, so a dropped stream fell into
+           * "the model stopped, is it actually finished?" and the partial
+           * reply was saved as the final answer — the "it cut off at ~500
+           * chars and did nothing" case. Treat a non-`stop` ending with
+           * partial content as a cut and let the continuation path below
+           * carry it on. Tool-call rounds are excluded: `tool_calls` is a
+           * legitimate stop reason and those take the tool path.
+           */
+          const streamCut =
+            !hardTruncated &&
+            calls.length === 0 &&
+            Boolean(roundContent || roundReasoning) &&
+            (!roundFinishReason ||
+              !/^(stop|tool_calls|content_filter)$/i.test(roundFinishReason));
+          const truncated = hardTruncated || streamCut;
 
           /*
            * Qwen (and sometimes others) can spend the entire output budget
@@ -2629,12 +2703,14 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               transcript.push({
                 role: "user",
                 content:
-                  "You reached the output limit mid-answer. Continue from " +
-                  "exactly where you stopped — do not repeat anything you " +
-                  "already wrote, do not restate the plan, and do not " +
-                  "apologise. Carry straight on from the last character.",
+                  (hardTruncated
+                    ? "You reached the output limit mid-answer. "
+                    : "Your previous reply was cut off mid-answer before it finished. ") +
+                  "Continue from exactly where you stopped — do not repeat " +
+                  "anything you already wrote, do not restate the plan, and " +
+                  "do not apologise. Carry straight on from the last character.",
               });
-              send({ type: "continuing", reason: "output_limit", of: MAX_CONTINUATIONS, n: continuations });
+              send({ type: "continuing", reason: hardTruncated ? "output_limit" : "connection_cut", of: MAX_CONTINUATIONS, n: continuations });
               continue;
             }
             // Out of continuations: keep what arrived and stop cleanly.
