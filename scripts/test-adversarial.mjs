@@ -250,6 +250,11 @@ check(
   budget.maxTokensFor(b, "deepseek-v4-pro", CEILING) === CEILING
 );
 
+// Bill at the PEAK window on purpose: DeepSeek's off-peak (Beijing business
+// hours) halves the input/output rate, so a charge that landed in that window
+// would leave more budget, and the cap below it (priced at peak) would not
+// shrink — the check would fail on the clock, not the arithmetic. Peak is
+// also the conservative (expensive) direction a budget cap must be tested in.
 budget.chargeRound(
   b,
   {
@@ -258,7 +263,8 @@ budget.chargeRound(
     prompt_cache_hit_tokens: 0,
     prompt_cache_miss_tokens: 20_000,
   },
-  "deepseek-v4-pro"
+  "deepseek-v4-pro",
+  "peak"
 );
 const allowed = budget.maxTokensFor(b, "deepseek-v4-pro", CEILING);
 check(

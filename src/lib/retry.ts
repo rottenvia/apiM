@@ -15,6 +15,19 @@
 const RETRYABLE_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
 
 /**
+ * Statuses that, once every retry is spent, mean "their server is having a
+ * moment" rather than "your key or balance is wrong" — so a reply that left
+ * work on disk should continue itself (auto-resume) instead of parking on a
+ * Resume button.
+ *
+ * 429 is deliberately NOT in this set: a rate limit is the shared pool
+ * saying "slow down", and a separate resume agent owns limit stops. Looping
+ * on it here is the "every model generates forever" bug again. 401/402
+ * (dead key, empty balance) are fatal for the same reason.
+ */
+export const SERVER_SIDE_STATUS = new Set([408, 409, 425, 500, 502, 503, 504]);
+
+/**
  * Statuses that will never succeed on retry, listed explicitly so a new
  * status code defaults to "do not retry" rather than looping on something
  * permanent.
@@ -121,11 +134,26 @@ export function isTimeoutFailure(error: unknown): boolean {
 }
 
 /**
- * A timeout that left real work on disk should continue itself.
+ * A failure that left real work on disk should continue itself.
  *
- * The Resume button is for the user choosing to pick up later. A deadline
- * abort is our clock, not theirs — flashing the banner and waiting for a
- * click is how "everything is saved" still felt like a stop.
+ * The Resume button is for the user choosing to pick up later. A server
+ * dying mid-task is not the user's call — flashing the banner and waiting
+ * for a click is how "everything is saved" still felt like a stop.
+ *
+ * Two doors in:
+ *   - The route says `autoResume: true`. That is the server having checked
+ *     the failure class itself (server-side: their 5xx, a dropped stream, a
+ *     deadline — never a Stop, never a rate limit or a dead balance), so it
+ *     is trusted for ANY provider, Ox included.
+ *   - The client's own heuristic: a deadline-style error on the in-app Qwen
+ *     sidecar. Kept local-only on purpose — Ox 429s and shared-pool
+ *     timeouts are owned by the separate limit-resume agent, and looping
+ *     them from here is the "every model generates forever and Stop does
+ *     nothing" bug.
+ *
+ * Stop never reaches either door: a deliberate abort sends no error frame at
+ * all, and `cancelAutoResumeRef` kills anything queued between the frame and
+ * the re-post.
  */
 export function shouldAutoResumeOnTimeout(input: {
   error?: string | null;
@@ -133,16 +161,16 @@ export function shouldAutoResumeOnTimeout(input: {
   hadWork: boolean;
   used: number;
   /**
-   * Only the in-app Qwen sidecar should silently continue a deadline.
-   * Ox 429/timeouts are a shared pool — retrying them in a loop is the
-   * "every model generates forever and Stop does nothing" bug.
+   * Whether the main model is the in-app Qwen sidecar. Bounds the
+   * CLIENT-SIDE heuristic only; an explicit `autoResume` from the route is
+   * honoured regardless.
    */
   local?: boolean;
 }): boolean {
   if (!input.hadWork) return false;
-  if (input.local === false) return false;
   if (input.used >= MAX_TIMEOUT_AUTO_RESUMES) return false;
   if (input.autoResume === true) return true;
+  if (input.local === false) return false;
   return isTimeoutFailure(input.error ?? "");
 }
 
