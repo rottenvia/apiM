@@ -89,6 +89,15 @@ export interface Message {
   searchReason?: string;
   /** Files sent with this message, rendered as chips on the bubble. */
   attachments?: MessageAttachment[];
+  /**
+   * A steering note added while a reply was running ("btw …").
+   *
+   * It is a real user message in the conversation — the model acted on it —
+   * but it rendered as a full bubble it would read like a new task started.
+   * The compact note chip shows what it was: information handed to a task
+   * that was already running.
+   */
+  isNote?: boolean;
   /** Full token usage, for cost estimation. */
   usage?: Record<string, number> | null;
   /** Model that produced the reply, needed to price it. */
@@ -203,6 +212,14 @@ type StreamEvent =
   | { type: "continuing"; reason: string; n: number; of: number }
   | { type: "context_pruned"; collapsed: number; tokensSaved: number }
   | { type: "context_compacted"; rounds: number; tokensSaved: number }
+  | {
+      /** The running task read a mid-run note at a round boundary: it is a
+       *  user message in the transcript now (chip), not a dock item. */
+      type: "btw_note_accepted";
+      id: string;
+      note: string;
+      round: number;
+    }
   | {
       type: "plan";
       goal: string;
@@ -497,15 +514,20 @@ export default function Home() {
   const cancelAutoResumeRef = useRef(false);
 
   /*
-   * The side channel.
+   * The mid-run note channel.
    *
-   * Held in its own state and never merged into `messages`, which is the
-   * whole safety argument: the agent's next round reads `conversationHistory`
-   * built from `messages`, so an aside that never lands there can never
-   * redirect the running task.
+   * "btw …" while a task runs is steering for the RUNNING task: the note is
+   * queued on the conversation and the agent loop folds it into the
+   * transcript at the next round boundary — so the model reads it as a fresh
+   * user message mid-think, and nothing that was running is interrupted.
+   *
+   * The dock state is transient (passing → passed → read at step N); the
+   * permanent record is the note chip the `btw_note_accepted` stream event
+   * adds to `messages`, which is why the chip — not the dock — is what
+   * survives a reload.
    *
    * Its own AbortController too, deliberately not `abortRef` — Stop belongs
-   * to the main task and dismissing an aside must not touch it.
+   * to the main task and dismissing the note must not touch it.
    */
   const [btwEntry, setBtwEntry] = useState<BtwEntry | null>(null);
   const btwAbortRef = useRef<AbortController | null>(null);
@@ -516,60 +538,37 @@ export default function Home() {
     setBtwEntry(null);
   }, []);
 
-  const askBtw = useCallback(
-    async (question: string) => {
-      if (!question.trim() || !hasKeys) return;
+  const sendBtwNote = useCallback(
+    async (note: string) => {
+      const text = note.trim();
+      if (!text || !currentConvId) return;
 
-      // One at a time. A second aside replaces the first rather than stacking,
-      // because a dock with a queue in it stops being an aside.
+      // One at a time in the dock. A second note replaces the first's
+      // display rather than stacking — both notes still reach the task,
+      // they are queued server-side.
       btwAbortRef.current?.abort();
       const controller = new AbortController();
       btwAbortRef.current = controller;
 
       const id = `btw-${Date.now()}`;
-      setBtwEntry({ id, question, answer: "", pending: true });
-
-      // The last thing the user actually typed, for pronouns like "it".
-      // Never the in-flight reply.
-      const lastUser = [...messagesRef.current]
-        .reverse()
-        .find((m) => m.role === "user" && !m.isError);
+      setBtwEntry({ id, note: text, status: "sending" });
 
       try {
         const res = await fetch("/api/btw", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           signal: controller.signal,
-          body: JSON.stringify({
-            question,
-            deepseekApiKey: deepseekKey,
-            opencodeApiKey: opencodeKey,
-            openrouterApiKey: openrouterKey,
-            oxHost,
-            localBaseUrl,
-            localApiKey,
-            localApiModel,
-            workspaceId,
-            lastUserMessage: lastUser?.content?.slice(0, 500),
-          }),
+          body: JSON.stringify({ conversationId: currentConvId, note: text }),
         });
 
-        const data = (await res.json()) as {
-          answer?: string;
-          error?: string;
-          cancelled?: boolean;
-        };
-
-        if (controller.signal.aborted || data.cancelled) return;
+        const data = (await res.json()) as { queued?: boolean; error?: string };
+        if (controller.signal.aborted) return;
 
         setBtwEntry((prev) =>
           prev && prev.id === id
-            ? {
-                ...prev,
-                pending: false,
-                answer: data.answer ?? "",
-                error: data.error,
-              }
+            ? res.ok
+              ? { ...prev, status: "queued" }
+              : { ...prev, status: "queued", error: data.error ?? `HTTP ${res.status}` }
             : prev
         );
       } catch (err) {
@@ -578,17 +577,16 @@ export default function Home() {
           prev && prev.id === id
             ? {
                 ...prev,
-                pending: false,
                 error:
                   err instanceof Error
-                    ? `Couldn't ask on the side: ${err.message}`
-                    : "Couldn't ask on the side.",
+                    ? `Couldn't pass the note to the running task: ${err.message}`
+                    : "Couldn't pass the note to the running task.",
               }
             : prev
         );
       }
     },
-    [deepseekKey, opencodeKey, openrouterKey, oxHost, localBaseUrl, localApiKey, localApiModel, hasKeys, workspaceId]
+    [currentConvId]
   );
   /** Latest messages + sender, so stable callbacks can read them. */
   const messagesRef = useRef<Message[]>([]);
@@ -885,8 +883,10 @@ export default function Home() {
     // it keeps generating server-side and its frames route back to its own
     // conversation by message id, so you can watch one chat while another
     // generates. Only an explicit Stop (or navigating away from the app)
-    // cancels a run.
+    // cancels a run. A note's POST is in-flight, though, and it belongs to
+    // the conversation being left — close the dock with it.
     btwAbortRef.current?.abort();
+    setBtwEntry(null);
     // Each load gets a sequence number; a slower earlier response is ignored
     // once a newer one starts, so rapidly switching chats can't leave the
     // wrong transcript on screen.
@@ -936,6 +936,8 @@ export default function Home() {
           // The server sends a flag, never the saved transcript itself: it
           // can run to megabytes and the browser has no use for it.
           canResume: m.canResume === true,
+          // Mid-run steering note → compact chip, not a task bubble.
+          isNote: m.note === true,
           attachments: Array.isArray(m.attachments)
             ? (m.attachments as Message["attachments"])
             : undefined,
@@ -1491,6 +1493,29 @@ export default function Home() {
                 // Also informational. Not surfaced as a notice: it happens
                 // mid-task and reads as an error when it is the opposite.
                 break;
+
+              case "btw_note_accepted": {
+                // The running task just read a mid-run note: it is now a real
+                // user message in the transcript. Add the chip here so it
+                // appears at the moment it was actually read, not later on a
+                // reload — and mark the dock so the hand-off is confirmed.
+                setMessages((prev) => [
+                  ...prev,
+                  {
+                    id: evt.id,
+                    role: "user",
+                    content: evt.note,
+                    isNote: true,
+                    createdAt: new Date().toISOString(),
+                  },
+                ]);
+                setBtwEntry((prev) =>
+                  prev && prev.note === evt.note && prev.status !== "accepted"
+                    ? { ...prev, status: "accepted", round: evt.round }
+                    : prev
+                );
+                break;
+              }
 
               case "plan":
                 // Applied immediately rather than batched with text: the plan
@@ -2470,7 +2495,7 @@ export default function Home() {
           ) : null
         }
         btwEntry={btwEntry}
-        onAskBtw={askBtw}
+        onAskBtw={sendBtwNote}
         onDismissBtw={dismissBtw}
         retryNotice={retryNotice}
         onStop={stopGeneration}

@@ -27,9 +27,25 @@ export interface ToolCall {
   };
 }
 
+/**
+ * How a mid-run steering note is labeled on the wire.
+ *
+ * The model needs to know, from the message alone, that the user said this
+ * *while the task was running* — not that it started a new task. The label
+ * is what makes "hmm, the user just told me not to touch that DLL" happen at
+ * the next thinking step instead of the note being read as fresh instructions
+ * that restart the plan.
+ */
+export const MID_RUN_NOTE_LABEL = "While I was working, the user added:";
+
 export type TranscriptMessage =
   | { role: "system"; content: string }
-  | { role: "user"; content: UserContent }
+  /**
+   * `note` marks a steering note the user added while a reply was already
+   * running ("btw …"). It serializes with the mid-run label so the model
+   * reads it as live steering, not a new task.
+   */
+  | { role: "user"; content: UserContent; note?: boolean }
   | {
       role: "assistant";
       content: string | null;
@@ -115,6 +131,22 @@ export function serializeForApi(
         role: "tool",
         tool_call_id: m.tool_call_id,
         content: m.content,
+      };
+    }
+
+    /*
+     * Mid-run steering note: label it on the wire, every time.
+     *
+     * The label is added here (not stored on the message) so every provider
+     * — and every resume, which re-serializes the saved transcript — sees
+     * the identical framing. Notes only ever carry plain text; a note whose
+     * content is a media part (cannot happen today) goes out unlabeled
+     * rather than losing the pixels.
+     */
+    if (m.role === "user" && m.note && typeof m.content === "string") {
+      return {
+        role: "user",
+        content: `[${MID_RUN_NOTE_LABEL} ${m.content}]`,
       };
     }
 

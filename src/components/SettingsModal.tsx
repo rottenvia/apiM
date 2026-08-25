@@ -455,7 +455,7 @@ export function SettingsModal({
                       }`}
                     >
                       <span className="block">{OX_HOSTS[id].shortLabel}</span>
-                      <span className="mt-0.5 block font-mono text-[10px] opacity-70">
+                      <span className="mt-0.5 block font-mono text-[11px] opacity-70">
                         {OX_HOSTS[id].apiModel}
                       </span>
                     </button>

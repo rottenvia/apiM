@@ -5,6 +5,8 @@ export interface ScopedChatMessage {
   role: "user" | "assistant";
   content: string;
   attachments?: StoredAttachment[] | null;
+  /** Mid-run steering note (see StoredMessage.note); replayed with its label. */
+  note?: boolean;
 }
 
 /**
@@ -34,6 +36,10 @@ export async function loadScopedConversationHistory(
       role: entry.role as "user" | "assistant",
       content: entry.content,
       attachments: entry.attachments ?? null,
+      // Without this a steering note would replay on the next run as plain
+      // history — the model would lose the "the user said this mid-task"
+      // framing that is the whole point of the label.
+      ...(entry.note === true ? { note: true } : {}),
     }));
   if (options.dropLastUser && history.at(-1)?.role === "user") history.pop();
   return history;

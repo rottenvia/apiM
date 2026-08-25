@@ -349,6 +349,14 @@ function MessageBubbleImpl({
   /** Scroll target for the plan pill in the meta row. */
   const planRef = useRef<HTMLDivElement>(null);
   const isUser = message.role === "user";
+  /**
+   * A mid-run steering note ("btw …" sent while a reply was running).
+   *
+   * It is a real user message in the conversation — the model acted on it —
+   * but it was handed into a task that was already running, so a full bubble
+   * would misread it as a fresh task. It renders as a compact teal chip.
+   */
+  const isNote = isUser && message.isNote === true;
 
   /*
    * The step the plan is on, for the pill in the meta row.
@@ -525,13 +533,34 @@ function MessageBubbleImpl({
     >
       <div
         className={`max-w-[85%] md:max-w-[75%] ${
-          isUser
-            ? "rounded-2xl bg-bg-elevated px-4 py-2.5"
-            : "bg-transparent px-4"
+          isNote
+            ? "rounded-xl border border-[#6ba3a0]/30 bg-[#6ba3a0]/[0.08] px-3.5 py-2.5"
+            : isUser
+              ? "rounded-2xl bg-bg-elevated px-4 py-2.5"
+              : "bg-transparent px-4"
         }`}
       >
+        {/* Mid-run steering note: a compact chip, not a task bubble. It is
+            information the user passed to a task that was already running, so
+            it reads as an aside to the task, not a new instruction to you. */}
+        {isNote && (
+          <div className="space-y-1">
+            <div className="flex items-center gap-1.5">
+              <span className="rounded-lg bg-[#6ba3a0]/20 px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-[#6ba3a0]">
+                note
+              </span>
+              <span className="text-[11px] text-text-muted">
+                passed while the task was running
+              </span>
+            </div>
+            <div className="whitespace-pre-wrap break-words text-[13px] leading-6 text-text-secondary">
+              {message.content}
+            </div>
+          </div>
+        )}
+
         {/* User message */}
-        {isUser && (
+        {isUser && !isNote && (
           <div className="space-y-2">
             {message.attachments && message.attachments.length > 0 && (
               <div className="flex flex-wrap gap-1.5">
@@ -1503,6 +1532,7 @@ export const MessageBubble = memo(MessageBubbleImpl, (prev, next) => {
     a.reasoningNotice === b.reasoningNotice &&
     a.isStreaming === b.isStreaming &&
     a.isError === b.isError &&
+    a.isNote === b.isNote &&
     a.incomplete === b.incomplete &&
     a.canResume === b.canResume &&
     a.errorNotice === b.errorNotice &&

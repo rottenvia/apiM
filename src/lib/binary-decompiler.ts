@@ -602,6 +602,26 @@ function resolveAnalyzerConfig(
   return { disable: [...disable], enable: [...enable] };
 }
 
+/**
+ * One line the model can read back from a result: which preset ran and which
+ * analyzers ended up on/off.
+ *
+ * Without this the model sees `param_1`-style placeholders after a fast run
+ * and has no signal that it was the preset — not the binary — that stripped
+ * the names, or that a rerun with enable_analyzers would recover them.
+ * Reporting the effective config (not just the preset label) is what lets it
+ * choose its next analyzer set on purpose instead of guessing.
+ */
+function describeAnalyzerConfig(
+  analyzers: AnalyzerOverrides | undefined
+): string {
+  const cfg = resolveAnalyzerConfig(analyzers);
+  const parts = [`preset ${analyzers?.preset ?? "fast"}`];
+  if (cfg.disable.length) parts.push(`off: ${cfg.disable.join(", ")}`);
+  if (cfg.enable.length) parts.push(`on: ${cfg.enable.join(", ")}`);
+  return parts.join(" · ");
+}
+
 async function runGhidra(
   workspaceId: string,
   target: string,
@@ -805,7 +825,16 @@ async function runGhidra(
           ? `No surviving ${focusTerms.join("/")} references were found, so only callers of high-interest loader/process-memory APIs were decompiled.`
           : fullFallbackUsed
             ? `No surviving ${focusTerms.join("/")} or behavioral API references were found, so bounded full decompilation ran automatically.`
-            : `Focus terms: ${focusTerms.join(", ") || "(none)"}.`),
+            : `Focus terms: ${focusTerms.join(", ") || "(none)"}.`) +
+        // The model must see what this run paid for: without the effective
+        // analyzer set it cannot tell a placeholder parameter name between
+        // "the binary has no names" and "Parameter ID was off", and it
+        // cannot choose a cheaper or richer rerun on purpose.
+        ` Analyzer config: ${describeAnalyzerConfig(analyzers)}. ` +
+        (cfg.enable.includes("Decompiler Parameter ID") ||
+        analyzers?.preset === "full"
+          ? ""
+          : `Placeholder names (param_1, var_1...) are expected: rerun with enable_analyzers: ["Decompiler Parameter ID"] to recover them. `),
       logTail: tail(result.output),
     };
   }
