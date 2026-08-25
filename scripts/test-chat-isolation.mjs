@@ -36,7 +36,8 @@ check(
   "the server loads history strictly by convId",
   /loadScopedConversationHistory\(convId/.test(route) &&
     /getConversation\(conversationId\)/.test(historySource) &&
-    /let scopedHistory: ChatMessage\[\]/.test(route)
+    // The history is typed by the scoping loader's own message type.
+    /let scopedHistory: (Scoped)?ChatMessage\[\]/.test(route)
 );
 check(
   "the transcript iterates only scoped server history",

@@ -67,10 +67,10 @@ interface ChatAreaProps {
   connectionNotice?: React.ReactNode;
   /** Shown above the composer when the DeepSeek balance is getting low. */
   balanceWarning?: React.ReactNode;
-  /** The current side question, if one has been asked. */
+  /** The current mid-run note, if one has been sent. */
   btwEntry?: BtwEntry | null;
-  /** Ask something without disturbing the running task. */
-  onAskBtw?: (question: string) => void;
+  /** Pass a note to the running task without disturbing it. */
+  onAskBtw?: (note: string) => void;
   onDismissBtw?: () => void;
   /** Set while a transient upstream failure is being retried. */
   retryNotice?: string | null;
@@ -952,10 +952,12 @@ export function ChatArea({
   }, [input]);
 
   /*
-   * A side question, recognised by how you already say it.
+   * A mid-run note, recognised by how you already say it.
    *
-   * Only while a task is actually running: with the agent idle there is
-   * nothing to be parallel to, so "btw ..." is just a normal message and
+   * "btw …" while a task is running is steering for the running task, not a
+   * question: it is queued and the agent folds it into its thinking at the
+   * next step. Only while a task is actually running: with the agent idle
+   * there is nothing to steer, so "btw ..." is just a normal message and
    * sends as one. That also means the prefix cannot surprise anyone who
    * happens to start a sentence with it.
    */
@@ -975,13 +977,15 @@ export function ChatArea({
   ]);
 
   const btwMatch = /^btw[\s,:]+([\s\S]+)/i.exec(input.trim());
-  const btwQuestion = isLoading && btwMatch ? btwMatch[1].trim() : "";
-  const isBtw = Boolean(btwQuestion) && Boolean(onAskBtw);
+  const btwNote = isLoading && btwMatch ? btwMatch[1].trim() : "";
+  const isBtw = Boolean(btwNote) && Boolean(onAskBtw);
 
   const handleSubmit = () => {
-    // An aside is sendable while the main task runs; a normal message is not.
+    // A note is sendable while the main task runs; a normal message is not.
+    // Sending it never stops anything — it is queued and the task reads it
+    // at its next thinking step.
     if (isBtw) {
-      onAskBtw?.(btwQuestion);
+      onAskBtw?.(btwNote);
       setInput("");
       return;
     }
@@ -1400,20 +1404,16 @@ export function ChatArea({
           matters more than anything else on screen. */}
       {balanceWarning}
 
-      {/* The side channel, above the composer and below the transcript.
-          
+      {/* The mid-run note channel, above the composer and below the
+          transcript.
+
           Outside the composer box so it cannot be mistaken for something you
           are editing, and outside the message list so it never disturbs the
           reading order of the conversation. */}
       {btwEntry && (
         <div className="flex-shrink-0 px-4 sm:px-6">
           <div className={`mx-auto w-full ${columnWidth}`}>
-            <BtwDock
-              entry={btwEntry}
-              onDismiss={onDismissBtw ?? (() => {})}
-              onAskProperly={(q) => onSend(q)}
-              mainTaskRunning={isLoading}
-            />
+            <BtwDock entry={btwEntry} onDismiss={onDismissBtw ?? (() => {})} />
           </div>
         </div>
       )}
@@ -1526,7 +1526,7 @@ export function ChatArea({
               placeholder={
                 hasKeys
                   ? isLoading && onAskBtw
-                    ? "Working… start with \"btw\" to ask something on the side"
+                    ? "Working… start with \"btw\" to tell it something"
                     : canResumeLast
                       ? "Type \"resume\" to carry on, or ask something new…"
                     : attachments.length > 0
@@ -1555,7 +1555,7 @@ export function ChatArea({
             {isBtw && (
               <div className="flex items-center gap-1.5 px-4 pb-1 text-[11px] text-[#6ba3a0]">
                 <span className="btw-pulse" aria-hidden="true" />
-                Asked on the side — the running task keeps going
+                Passes it to the running task — nothing stops
               </div>
             )}
 
@@ -1653,18 +1653,18 @@ export function ChatArea({
               {/* While generating, this becomes a Stop control — you can
                   interrupt a long answer and keep whatever arrived. */}
               {isLoading && isBtw ? (
-                /* An aside is being composed while the task runs.
-                   
-                   The button becomes Send for the aside rather than Stop,
+                /* A note is being composed while the task runs.
+
+                   The button becomes Send for the note rather than Stop,
                    because pressing Stop here would be the opposite of the
-                   intent — you typed a question precisely so you would not
+                   intent — you typed "btw" precisely so you would not
                    have to interrupt anything. Stop is still reachable: clear
                    the input and it returns. */
                 <button
                   onClick={handleSubmit}
                   className="send-btn btw-send"
-                  title="Ask on the side — won't interrupt the task"
-                  aria-label="Ask on the side"
+                  title="Pass it to the running task — won't interrupt it"
+                  aria-label="Pass it to the running task"
                 >
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
                     <path strokeLinecap="round" strokeLinejoin="round" d="M8 10h8M8 14h5" />

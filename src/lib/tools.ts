@@ -1025,10 +1025,17 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
         "when installed; native code and all non-PE formats use headless " +
         "Ghidra, which auto-detects the file format. Decompile ONLY the " +
         "functions/strings you name in focus_terms — there is no default " +
-        "hook list and no automatic full-binary decompile. Enable specific " +
-        "Ghidra analyzers (e.g. Decompiler Parameter ID) with " +
-        "enable_analyzers when you need them. Leftover Ghidra after a " +
-        "closed tab is listed by list_processes and killed with " +
+        "hook list and no automatic full-binary decompile. Pick the " +
+        "analyzer set yourself: the default 'fast' preset already turns " +
+        "OFF the expensive analyzers the decompiled output does not " +
+        "surface (Decompiler Parameter ID, Decompiler Switch Analysis, " +
+        "Stack), so keep it for quick checks and pay for an analyzer only " +
+        "when you need its output — e.g. enable_analyzers: [\"Decompiler " +
+        "Parameter ID\"] when you need real parameter names instead of " +
+        "param_1 placeholders, or analyzer_preset: \"full\" when switch-" +
+        "case analysis matters. The exact available analyzer names are " +
+        "listed in analyzers.txt in the output folder. Leftover Ghidra " +
+        "after a closed tab is listed by list_processes and killed with " +
         "stop_process id=leftover. " +
         "Availability is resolved by the apiM server; do not use " +
         "run_command/where/environment probes to second-guess it because agent " +
@@ -1108,23 +1115,31 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
             type: "string",
             enum: ["fast", "full"],
             description:
-              "Ghidra auto-analyzers to run: 'fast' (default) skips the " +
-              "expensive analyzers the post-script does not use — much " +
-              "faster, no loss of reported information; 'full' keeps every " +
-              "analyzer on (slower, maximum fidelity).",
+              "Ghidra auto-analyzers to run: 'fast' (default) turns OFF " +
+              "the expensive analyzers the decompiled output does not " +
+              "surface (Decompiler Parameter ID, Decompiler Switch " +
+              "Analysis, Stack) — much faster, no loss of reported " +
+              "information; 'full' keeps every analyzer on (much slower — " +
+              "only when parameter names or switch-case analysis are " +
+              "actually needed).",
           },
           disable_analyzers: {
             type: "array",
             items: { type: "string" },
             description:
               "Exact Ghidra analyzer names to turn OFF in addition to the " +
-              "preset; analyzers.txt in the output folder lists them.",
+              "preset; analyzers.txt in the output folder lists the " +
+              "available names.",
           },
           enable_analyzers: {
             type: "array",
             items: { type: "string" },
             description:
-              "Exact Ghidra analyzer names to turn ON, overriding the preset.",
+              "Exact Ghidra analyzer names to turn ON, overriding the " +
+              "preset. 'Decompiler Parameter ID' recovers real parameter " +
+              "names (otherwise param_1… placeholders); 'Decompiler " +
+              "Switch Analysis' resolves switch tables. analyzers.txt in " +
+              "the output folder lists the available names.",
           },
           dependencies: {
             type: "boolean",

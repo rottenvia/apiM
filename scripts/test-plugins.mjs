@@ -158,7 +158,9 @@ check(
 );
 check(
   "the plugin message is moved to the tail every agent round",
-  /while \(true\) \{\s*round \+= 1;\s*appendPluginDirectives\(\)/.test(
+  // The loop head may carry stop/budget guards between the { and the round
+  // increment; the pin is what matters: increment + re-append, every round.
+  /while \(true\) \{[\s\S]{0,300}?round \+= 1;\s*appendPluginDirectives\(\)/.test(
     routeAssembly
   ),
   "history, file tree and plan can no longer bury it"
@@ -184,7 +186,9 @@ check(
 );
 check(
   "the wire copy is re-pinned after compact",
-  /compactTranscript\(pruned\.messages\)[\s\S]{0,500}pinPluginDirectivesOnFirstSystem\(/.test(
+  // The compact call is multi-line (it carries a style argument), and the
+  // re-pin sits past the compacted-stats send and the provider check.
+  /compactTranscript\(\s*pruned\.messages[\s\S]{0,700}pinPluginDirectivesOnFirstSystem\(/.test(
     routeAssembly
   )
 );

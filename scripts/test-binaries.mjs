@@ -1134,6 +1134,19 @@ check(
     /enable\.add\(trimmed\)/.test(decompilerSource)
 );
 check(
+  "the tool description tells the model to keep fast for quick checks",
+  /keep it for quick checks and pay for an analyzer only/.test(toolsSource),
+  "the model should disable expensive analyzers itself when their output is unneeded"
+);
+check(
+  "…and to reserve full for parameter names / switch analysis",
+  // Split across concatenated literals in the source, so match the pieces.
+  /switch-case analysis are/.test(toolsSource) &&
+    /actually needed/.test(toolsSource) &&
+    /listed in analyzers\.txt/.test(toolsSource),
+  "preset full costs minutes; it is only justified when the names matter"
+);
+check(
   "a fabricated decompilation claim is caught",
   P.checkAnswerClaims(
     "I used inspect_binary and it found three imported DLLs.",
@@ -1181,6 +1194,20 @@ const ledgerInspect = await B.inspectWorkspaceBinary(
 check(
   "a deep inspection records one ledger entry with its outputs",
   ledgerInspect.deep.status === "complete"
+);
+check(
+  "the result reports the analyzer config it actually ran",
+  /Analyzer config: preset fast/.test(ledgerInspect.deep.summary) &&
+    /off: Decompiler Parameter ID, Decompiler Switch Analysis, Stack/.test(
+      ledgerInspect.deep.summary
+    ),
+  "without it the model cannot see that fast trimmed Parameter ID"
+);
+check(
+  "…and tells it how to recover real parameter names",
+  /enable_analyzers: \["Decompiler Parameter ID"\]/.test(
+    ledgerInspect.deep.summary
+  )
 );
 let ledger = await BL.readBinaryLedger(ledgerWs);
 let entry = Object.values(ledger.entries).find(
