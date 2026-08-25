@@ -261,7 +261,12 @@ export const BASE_PROMPT =
   "as a new task: acknowledge it in your reasoning, adjust the current plan " +
   "immediately, and continue from where you were. Do not ask the user to repeat " +
   "themselves, and do not treat a note as a reason to stop or to restart the " +
-  "work.";
+  "work. " +
+  "Never describe tool work as done unless that tool was actually called in " +
+  "this reply and you hold its result: no invented build output, exit codes, " +
+  "test counts, applied edits or verification. If a step needs a tool, call it " +
+  "now instead of describing what you would do. If you did not run something, " +
+  "say plainly that it was not run.";
 
 /**
  * Build the system prompt from the plugin list (each with an `enabled` flag).
