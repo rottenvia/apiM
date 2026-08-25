@@ -49,12 +49,19 @@ export interface StoredMessage {
   /** Wall-clock time the reply took. */
   durationMs?: number | null;
   createdAt: string;
-  /**
-   * True while the reply is still streaming. If the process dies or the tab
-   * closes mid-answer the flag stays set, which is how the UI knows to offer
-   * a retry instead of silently showing a truncated message as final.
+  /** True while the reply is still streaming. If the process dies or the tab
+   *  closes mid-answer the flag stays set, which is how the UI knows to offer
+   *  a retry instead of silently showing a truncated message as final.
    */
   incomplete?: boolean;
+  /**
+   * A steering note the user added while a reply was already running ("btw …").
+   *
+   * It is persisted like any other user message — the model must keep
+   * acting on it in every later turn, not just the one that was in flight —
+   * but the UI renders it as a compact chip instead of a full bubble.
+   */
+  note?: boolean;
   /** Text and actions in the order they happened, for the split view. */
   timeline?: (
     | { kind: "text"; text: string }
@@ -101,6 +108,16 @@ export interface StoredConversation {
   createdAt: string;
   updatedAt: string;
   messages: StoredMessage[];
+  /**
+   * Steering notes posted with the task still running.
+   *
+   * Queued here, not appended to `messages` directly: the agent loop drains
+   * them at a round boundary and then persists each one as a real user
+   * message (at the point it was actually read). Appending on receipt would
+   * put the note in the history *before* the reply it steered, which is the
+   * wrong order on a resume.
+   */
+  btwNotes?: string[];
 }
 
 /** Summary shape returned to the sidebar (messages omitted). */
@@ -378,7 +395,7 @@ export async function getConversation(
  * with ENOENT — losing that write. Chaining on a per-id promise keeps writes
  * ordered without blocking other conversations.
  */
-const writeQueues = new Map<string, Promise<void>>();
+const writeQueues = new Map<string, Promise<unknown>>();
 
 /**
  * Parsed sidebar summaries, keyed by file path.
@@ -403,14 +420,53 @@ const summaryCache = new Map<
  */
 const deletedIds = new Set<string>();
 
-/** Runs `task` after any pending write for this conversation. */
-function enqueue(id: string, task: () => Promise<void>): Promise<void> {
+/**
+ * Runs `task` after any pending write for this conversation, returning its
+ * value.
+ *
+ * The task runs while holding the conversation's write slot, so a task that
+ * reads, mutates and writes is atomic with respect to every other queued
+ * mutation for the same conversation. `drainBtwNotes` relies on exactly that:
+ * read the queue, clear it, and write back must be one unit, or a note posted
+ * between the read and the write would be silently discarded.
+ */
+function transact<T>(id: string, task: () => Promise<T>): Promise<T> {
   const previous = writeQueues.get(id) ?? Promise.resolve();
-  const next = previous.catch(() => {}).then(task);
+  const next = previous.catch(() => {}).then(task) as Promise<T>;
   writeQueues.set(id, next);
   return next.finally(() => {
     if (writeQueues.get(id) === next) writeQueues.delete(id);
   });
+}
+
+/** Runs `task` after any pending write for this conversation. */
+function enqueue(id: string, task: () => Promise<void>): Promise<void> {
+  return transact<void>(id, task);
+}
+
+/**
+ * The raw file write, without queueing.
+ *
+ * Callers that hold the per-conversation queue slot (read-modify-write
+ * transactions like `drainBtwNotes`) must use this directly: going through
+ * `writeConversation` from inside a queued task would enqueue behind itself
+ * and deadlock.
+ */
+async function writeConversationNow(conv: StoredConversation): Promise<void> {
+  await ensureDir();
+  // Resolves the folder from the current title, renaming it if the title
+  // changed.
+  const folder = await resolveFolder(conv.id, conv.title);
+  const target = fileIn(folder);
+  // Unique suffix so two writers can never collide on the same temp path.
+  const tmp = `${target}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+  try {
+    await fs.writeFile(tmp, JSON.stringify(conv, null, 2), "utf8");
+    await fs.rename(tmp, target);
+  } catch (err) {
+    await fs.unlink(tmp).catch(() => {});
+    throw err;
+  }
 }
 
 async function writeConversation(conv: StoredConversation): Promise<void> {
@@ -420,21 +476,7 @@ async function writeConversation(conv: StoredConversation): Promise<void> {
 
   return enqueue(conv.id, async () => {
     if (deletedIds.has(conv.id)) return;
-
-    await ensureDir();
-    // Resolves the folder from the current title, renaming it if the title
-    // changed. Inside the write queue so a rename can't race a save.
-    const folder = await resolveFolder(conv.id, conv.title);
-    const target = fileIn(folder);
-    // Unique suffix so two writers can never collide on the same temp path.
-    const tmp = `${target}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
-    try {
-      await fs.writeFile(tmp, JSON.stringify(conv, null, 2), "utf8");
-      await fs.rename(tmp, target);
-    } catch (err) {
-      await fs.unlink(tmp).catch(() => {});
-      throw err;
-    }
+    await writeConversationNow(conv);
   });
 }
 
@@ -509,6 +551,74 @@ export async function upsertMessage(
 
   conv.updatedAt = now;
   await writeConversation(conv);
+}
+
+/**
+ * Queue a steering note for a conversation whose reply is still running.
+ *
+ * The note is NOT appended to `messages` here. It sits in `btwNotes` until
+ * the agent loop drains it at a round boundary, at which point it becomes a
+ * real user message (see `drainBtwNotes`). Queuing it separately is what lets
+ * the running task read it at the next step without the note appearing in the
+ * history *before* the reply it is steering.
+ *
+ * Runs through the same per-conversation write queue as every other mutation,
+ * so a drain in the chat route and a note posted from /api/btw can never
+ * interleave and drop one.
+ */
+export async function appendBtwNote(
+  conversationId: string,
+  note: string
+): Promise<void> {
+  const text = note.trim();
+  if (!text) throw new Error("Empty note");
+
+  // Transactional like the drain: a drain running in the chat route at the
+  // same instant must not clear a note this call is about to append (or vice
+  // versa).
+  await transact(conversationId, async () => {
+    const existing = await getConversation(conversationId);
+    if (!existing) {
+      // A note for a conversation that does not exist is a stale client (or a
+      // deleted chat). Creating the conversation on the side would leave a
+      // ghost chat whose only content is a steering note — 404 instead, and
+      // the UI shows the error in the dock.
+      throw new Error(`No such conversation: ${conversationId}`);
+    }
+
+    existing.btwNotes = [...(existing.btwNotes ?? []), text];
+    existing.updatedAt = new Date().toISOString();
+    if (!deletedIds.has(existing.id)) {
+      await writeConversationNow(existing);
+    }
+  });
+}
+
+/**
+ * Take and clear every queued note for a conversation.
+ *
+ * Called by the agent loop at a round boundary. The caller is responsible for
+ * turning each returned note into a `TranscriptMessage` (pushed onto the
+ * in-flight transcript) and a persisted user message, so the note is both
+ * seen by the running task and kept for every later turn.
+ */
+export async function drainBtwNotes(
+  conversationId: string
+): Promise<string[]> {
+  return transact(conversationId, async () => {
+    const existing = await getConversation(conversationId);
+    if (!existing || !existing.btwNotes?.length) return [];
+
+    const notes = existing.btwNotes;
+    existing.btwNotes = [];
+    existing.updatedAt = new Date().toISOString();
+    // Raw write: we already hold the queue slot, so enqueueing would wait
+    // behind ourselves.
+    if (!deletedIds.has(existing.id)) {
+      await writeConversationNow(existing);
+    }
+    return notes;
+  });
 }
 
 /**

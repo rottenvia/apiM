@@ -6,6 +6,7 @@ import {
   upsertMessage,
   availableTitle,
   getConversation,
+  drainBtwNotes,
 } from "@/lib/store";
 import type { StoredMessage } from "@/lib/store";
 import {
@@ -448,7 +449,16 @@ type StreamEvent =
         fieldsSeen: string[];
       };
     }
-  | { type: "error"; error: string; autoResume?: boolean };
+  | { type: "error"; error: string; autoResume?: boolean }
+  | {
+      type: "btw_note_accepted";
+      /** The persisted message id of the note, so the UI chip and the saved
+       *  transcript are the same message on a reload. */
+      id: string;
+      note: string;
+      /** Which round read it — "folded in at step 4" beats "sometime soon". */
+      round: number;
+    };
 
 /**
  * The least-shaped version of a Chat Completions body: no tools, no tool
@@ -1252,7 +1262,13 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             window ? { mediaWindow: window } : undefined
           );
           if (!userHasContent(built)) continue;
-          transcript.push({ role: "user", content: built });
+          transcript.push({
+            role: "user",
+            content: built,
+            // Re-label a saved steering note on replay, so a later run reads
+            // it as "the user said this mid-task" rather than plain history.
+            ...(msg.note === true ? { note: true } : {}),
+          });
         }
         transcript.push({
           role: "user",
@@ -1843,6 +1859,47 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           if (target.providerId === "opencode") {
             pinPluginDirectivesOnFirstSystem(transcript, pluginDirectives);
           }
+
+          /*
+           * Drain steering notes the user posted while the previous round ran.
+           *
+           * A note becomes a real user message at this boundary — the last
+           * thing the model reads before its next step — so it reads "hmm,
+           * the user just told me this" in its thinking instead of the note
+           * sitting in a side channel the task never sees. Nothing running is
+           * interrupted: the previous round finished, and tools it started
+           * keep running; the note simply joins the transcript here.
+           *
+           * Each note is also persisted as an ordinary user message, so it
+           * keeps steering every later turn (and a resume, whose transcript
+           * already contains it) instead of vanishing when this reply ends.
+           */
+          try {
+            const midRunNotes = await drainBtwNotes(convId);
+            for (const note of midRunNotes) {
+              const noteId = uuidv4();
+              transcript.push({ role: "user", content: note, note: true });
+              try {
+                await appendMessages(convId, title, [
+                  {
+                    id: noteId,
+                    role: "user",
+                    content: note,
+                    note: true,
+                    createdAt: new Date().toISOString(),
+                  },
+                ]);
+              } catch (e) {
+                // The in-flight transcript already has the note, so the model
+                // still gets it this run; a disk error must not kill the task.
+                console.error("Failed to persist btw note:", e);
+              }
+              send({ type: "btw_note_accepted", id: noteId, note, round });
+            }
+          } catch (e) {
+            console.error("Failed to drain btw notes:", e);
+          }
+
           const toolAcc = new ToolCallAccumulator();
           let roundContent = "";
           let roundReasoning = "";

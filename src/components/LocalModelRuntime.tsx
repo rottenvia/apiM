@@ -459,12 +459,12 @@ export function LocalModelRuntime({
                     <span className="block text-[12px] font-medium text-text-primary">
                       {preset.label}
                     </span>
-                    <span className="block text-[10px] leading-3 text-text-muted">
+                    <span className="block text-[11px] leading-3 text-text-muted">
                       {preset.blurb}
                     </span>
                   </span>
                   <span
-                    className={`mt-0.5 flex-none text-[10px] font-medium ${
+                    className={`mt-0.5 flex-none text-[11px] font-medium ${
                       on ? "text-accent-light" : "text-text-muted"
                     }`}
                   >
@@ -485,7 +485,7 @@ export function LocalModelRuntime({
                   <button
                     type="button"
                     onClick={() => removeExtraAt(i)}
-                    className="text-[10px] text-text-muted hover:text-danger"
+                    className="text-[11px] text-text-muted hover:text-danger"
                   >
                     Remove
                   </button>

@@ -254,7 +254,14 @@ export const ALL_PLUGINS: Plugin[] = [...AVAILABLE_PLUGINS, ...LEGACY_PLUGINS];
 
 /** The assistant's baseline character, with no user preferences applied. */
 export const BASE_PROMPT =
-  "You are a highly capable AI assistant. You provide accurate, helpful, and well-structured responses. You have access to web search capabilities for finding real-time information.";
+  "You are a highly capable AI assistant. You provide accurate, helpful, and well-structured responses. You have access to web search capabilities for finding real-time information. " +
+  "Mid-run user notes: while you are working, the user can add short steering " +
+  "notes; they arrive as user messages labeled \"While I was working, the user " +
+  "added:\". Treat each one as an instruction about the task in progress, not " +
+  "as a new task: acknowledge it in your reasoning, adjust the current plan " +
+  "immediately, and continue from where you were. Do not ask the user to repeat " +
+  "themselves, and do not treat a note as a reason to stop or to restart the " +
+  "work.";
 
 /**
  * Build the system prompt from the plugin list (each with an `enabled` flag).

@@ -166,7 +166,7 @@ export function ProcessDock({
                       {proc.display}
                     </span>
                     {proc.leftover && (
-                      <span className="flex-none rounded bg-bg-primary px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text-muted">
+                      <span className="flex-none rounded bg-bg-primary px-1.5 py-0.5 text-[11px] uppercase tracking-wide text-text-muted">
                         leftover
                       </span>
                     )}
