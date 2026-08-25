@@ -172,6 +172,71 @@ check(
   "blocking would throw away work that may be good apart from the last line"
 );
 
+/*
+ * The 15-minute case: a whole reply narrating builds, edits and a
+ * "24/24 verified" check — none of it ran. The run_command family catches
+ * it on "exit 0", and a real run_command clears it.
+ */
+const FAKE_BUILD =
+  "Done, all three fronts delivered. The build came back green — exit 0, " +
+  "the verifier says 24/24, and the edits landed in the source.";
+check(
+  "a narrated build with exit code and 'verified' is caught",
+  P.checkAnswerClaims(FAKE_BUILD, []) !== null,
+  "the exact reported shape: 15 minutes of invented output"
+);
+check(
+  "…and is left alone once run_command really ran",
+  P.checkAnswerClaims(FAKE_BUILD, ["run_command"]) === null,
+  "a false accusation makes the warning dead weight"
+);
+
+/*
+ * The post-hoc note was not enough: by the time it is appended, the user has
+ * already waited through the narration and read the lie as the reply. The
+ * same detector now runs INSIDE the loop, before the no-tool-call round is
+ * allowed to end, and sends the reply back once to be redone or confessed.
+ */
+const pageSrc = await readSrc("src/app/page.tsx");
+const plugins = await load("src/lib/plugins.ts");
+
+check(
+  "the same detector runs in the loop, before the turn is allowed to end",
+  (routeSrc.match(/checkAnswerClaims\(/g) ?? []).length === 2,
+  "once where the round ends without a tool call, once at final save"
+);
+check(
+  "the in-loop catch is gated on having not retried yet",
+  /!claimRetried\s*&&[\s\S]{0,120}checkAnswerClaims\(/.test(routeSrc) &&
+    /let claimRetried = false;/.test(routeSrc),
+  "one retry per run, then the final-save note is the last word"
+);
+check(
+  "the retry is spent exactly once",
+  (routeSrc.match(/claimRetried = true/g) ?? []).length === 1,
+  "a model that lies after being caught must not get a second free pass"
+);
+check(
+  "the corrective nudge offers both exits: do it, or say it was not done",
+  /actually call the tools now[\s\S]{0,220}state plainly what was and was not done/.test(
+    routeSrc
+  ) && /reason: "unverified_claim"/.test(routeSrc),
+  "the model may not have been able to run the tool at all — honesty is a valid ending"
+);
+check(
+  "the base prompt forbids the narration outright",
+  /Never describe tool work as done unless that tool was actually called/.test(
+    plugins.BASE_PROMPT
+  ) && /say plainly that it was not run/.test(plugins.BASE_PROMPT),
+  "applies to every provider — the lie was worst on Ox Alpha but not unique to it"
+);
+check(
+  "the client names the reason while the redo is happening",
+  /evt\.reason === "unverified_claim"/.test(pageSrc) &&
+    /claimed work that did not run/.test(pageSrc),
+  "otherwise the second pause looks like the app hung"
+);
+
 // ------------------------------------------------------------- 2. the plan
 
 console.log('\n2. "when i was stopping generating he could ... erase his planning"');

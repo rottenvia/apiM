@@ -1394,6 +1394,12 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         let nudgedIncomplete = false;
         /** Only ever pushed to clarify once, however long the run gets. */
         let askedEarly = false;
+        /**
+         * The reply claimed tool work that never ran, and it was sent back to
+         * actually do it (or confess). Once: a model that fabricates after
+         * being caught gets the post-hoc note instead of another round.
+         */
+        let claimRetried = false;
         /** How many times the plan has been rewritten, to catch thrashing. */
         let replanCount = 0;
         /**
@@ -2866,6 +2872,45 @@ Ask before you build the wrong thing. If a choice would change what you produce 
 
           if (calls.length === 0) {
             /*
+             * The reply is a summary that claims tool work this run never
+             * did — the reported 15-minute case: the model narrates a build,
+             * edits and a "24/24 verified" check, and none of it ran.
+             *
+             * The same detector runs at final save and appends a warning
+             * there, but by then the user has already waited through the
+             * whole narration, and a warning bolted onto a lie still leaves
+             * the lie as the reply. Catching it HERE, before the turn is
+             * allowed to end, costs one round and gives the model a real
+             * choice: actually call the tools and report what comes back, or
+             * rewrite the reply to say what was and was not done.
+             *
+             * Once per run (claimRetried). If it fabricates again, the turn
+             * ends and the final-save check stamps the warning — twice the
+             * same detector, so both views stay honest.
+             */
+            if (
+              workspaceEnabled &&
+              !claimRetried &&
+              checkAnswerClaims(assistantContent, toolsUsedThisRun) !== null
+            ) {
+              claimRetried = true;
+              transcript.push({
+                role: "user",
+                content:
+                  "Your reply above describes tools running and reporting " +
+                  "results — edits applied, a build coming back green, checks " +
+                  "passing — but those tools were not called in this reply. " +
+                  "The user reads that as work that happened. Finish this " +
+                  "reply one of two ways: either actually call the tools now " +
+                  "and report exactly what comes back, or rewrite the reply " +
+                  "to state plainly what was and was not done. Do not " +
+                  "describe output you do not have.",
+              });
+              send({ type: "continuing", reason: "unverified_claim", of: 1, n: 1 });
+              continue;
+            }
+
+            /*
              * The model stopped talking. Is it actually finished?
              *
              * This is the single most common way a long task ends badly: at
@@ -3801,10 +3846,13 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          * update_plan — the closing answer, which is the part actually read,
          * was never checked against anything.
          *
-         * A note is appended rather than the reply being blocked. Blocking
-         * would throw away work that may be perfectly good apart from an
-         * over-claiming last paragraph, and would cost another round to
-         * regenerate. The point is that the claim stops being invisible.
+         * This is the second layer: inside the loop, the same check already
+         * sent a lying summary back to be redone or confessed (claimRetried,
+         * once per run). Reaching this point means either the run had no
+         * workspace, the retry was spent, or the model lied twice in a row —
+         * in which case a note appended to the reply is all a program can
+         * honestly do. Blocking would throw away work that may be perfectly
+         * good apart from an over-claiming last paragraph.
          */
         if (workspaceEnabled) {
           const claimIssue = checkAnswerClaims(
