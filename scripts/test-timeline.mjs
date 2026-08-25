@@ -11,8 +11,13 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
-const { buildTimelineRows } = await import(
+const { buildTimelineRows, textHasTable } = await import(
   pathToFileURL(path.join(ROOT, "src/lib/timeline.ts")).href
+);
+const { readFileSync } = await import("node:fs");
+const messageTimeline = readFileSync(
+  path.join(ROOT, "src/components/MessageTimeline.tsx"),
+  "utf8"
 );
 
 const COLOR = process.stdout.isTTY && !process.env.NO_COLOR;
@@ -103,6 +108,19 @@ rows = buildTimelineRows(
 );
 check("an action before any text keeps its place",
   rows[0].tools[0].summary === "first" && rows[1].tools[0].summary === "second");
+
+console.log("\n6. A table is isolated, not squeezed beside the divider");
+check("a GFM table is detected",
+  textHasTable("header\n| a | b |\n|---|---|\n| 1 | 2 |") === true &&
+    textHasTable("| a | b |\n|---|---|") === true);
+check("plain prose is not mistaken for a table",
+  textHasTable("Here is the plan.\n- first\n- second") === false &&
+    textHasTable("") === false);
+check("a row with a table is never split beside the tool column",
+  /const split = hasText && hasTools && !textHasTable\(row\.text\);/.test(
+    messageTimeline
+  ),
+  "squeezed into the left column the vertical divider reads as cutting through the table");
 
 console.log("\n" + (fail === 0 ? g(`All ${pass} checks passed.`) : r(`${fail} of ${pass + fail} failed.`)) + "\n");
 process.exit(fail === 0 ? 0 : 1);

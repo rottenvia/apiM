@@ -83,7 +83,10 @@ await appendBtwNote(CONV, "it's a dead DLL, don't touch it");
 const drained = await drainBtwNotes(CONV);
 check(
   "a queued note comes back on the next drain",
-  drained.length === 1 && drained[0] === "it's a dead DLL, don't touch it"
+  drained.length === 1 &&
+    drained[0].text === "it's a dead DLL, don't touch it" &&
+    drained[0].wireText === "it's a dead DLL, don't touch it",
+  "a text-only note carries wireText === text"
 );
 check(
   "a drained note is drained exactly once",
@@ -97,7 +100,32 @@ await appendBtwNote(CONV, "also skip the strings");
 const second = await drainBtwNotes(CONV);
 check(
   "notes posted after a drain wait for the next one",
-  second.length === 1 && second[0] === "also skip the strings"
+  second.length === 1 && second[0].text === "also skip the strings"
+);
+
+// A note with a dropped attachment keeps its three parts intact: the typed
+// text, the model-facing wire text (file blocks inlined), and the stored
+// attachments (pixels / "saved at" metadata).
+const attached = {
+  text: "look at the crash",
+  wireText:
+    "Attached file: screenshot-1.png\n```png\n<data-url-stripped-in-tests>\n```\n\nlook at the crash",
+  attachments: [
+    {
+      name: "screenshot-1.png",
+      kind: "image",
+      dataUrl: "data:image/png;base64,AAAA",
+    },
+  ],
+};
+await appendBtwNote(CONV, attached);
+const third = await drainBtwNotes(CONV);
+check(
+  "a note with attachments round-trips all three parts",
+  third.length === 1 &&
+    third[0].text === "look at the crash" &&
+    third[0].wireText?.includes("Attached file: screenshot-1.png") === true &&
+    third[0].attachments?.[0]?.dataUrl === "data:image/png;base64,AAAA"
 );
 
 // The note serializes on the wire with its label, and only when it is a note.
@@ -113,6 +141,27 @@ check(
 check(
   "an ordinary user message is left untouched",
   wire[0].content === "decompile this binary"
+);
+
+// A note WITH a screenshot serializes as parts (text + image_url): the label
+// must land on the text part and the pixels must survive untouched.
+const wireParts = serializeForApi([
+  {
+    role: "user",
+    note: true,
+    content: [
+      { type: "text", text: "look at the crash" },
+      { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } },
+    ],
+  },
+]);
+check(
+  "a note with a screenshot keeps the label on its text part",
+  wireParts[0].content[0].text === `[${MID_RUN_NOTE_LABEL} look at the crash]`
+);
+check(
+  "…and the pixels go out intact",
+  wireParts[0].content[1].image_url.url === "data:image/png;base64,AAAA"
 );
 
 // The drain block in the round loop: it must run at a round boundary
@@ -135,17 +184,29 @@ const drainBlock = routeSrc.slice(
   routeSrc.indexOf("const toolAcc = new ToolCallAccumulator();")
 );
 check(
-  "a drained note joins the live transcript",
-  /transcript\.push\(\{\s*role: "user",\s*content: note,\s*note: true\s*\}\)/.test(drainBlock)
+  "a drained note joins the live transcript through the attachment builder",
+  /buildUserContent\(\s*note\.wireText \|\| note\.text,\s*note\.attachments,\s*vision\s*\)/.test(
+    drainBlock
+  ),
+  "native vision gets the pixels; blind models the description blocks"
 );
 check(
-  "…and is persisted as a real user message",
-  /appendMessages\(convId, title, \[\s*\{[^}]*note: true/.test(drainBlock),
+  "…and is persisted as a real user message with its attachments",
+  /appendMessages\(convId, title, \[\s*\{[^]*?attachments: note\.attachments[^]*?note: true[^]*?\},?\s*\]\)/.test(
+    drainBlock
+  ),
   "without persistence the note vanishes when the reply completes"
 );
 check(
-  "the UI is told the note was read, with the persisted id and round",
-  /send\(\{\s*type: "btw_note_accepted",\s*id: noteId,\s*note,\s*round\s*\}\)/.test(drainBlock)
+  "…storing the typed text, not the file blocks",
+  /content: note\.text/.test(drainBlock),
+  "the blocks are rebuilt from the attachments on replay"
+);
+check(
+  "the UI is told the note was read, with the persisted id, round and files",
+  /send\(\{\s*type: "btw_note_accepted",\s*id: noteId,\s*note: note\.text,\s*round/.test(
+    drainBlock
+  ) && /attachments: note\.attachments/.test(drainBlock)
 );
 
 // Replay: a persisted note must come back through scoped history flagged,
@@ -200,7 +261,9 @@ check(
 );
 check(
   "it queues through the store, not a side file",
-  /appendBtwNote\(conversationId, note\)/.test(api)
+  /appendBtwNote\(conversationId, \{[\s\S]{0,120}text: note,[\s\S]{0,120}wireText[\s\S]{0,120}attachments/.test(
+    api
+  )
 );
 check(
   "a note is a course correction, not a document",
@@ -227,8 +290,40 @@ check(
 );
 check(
   "…and it lands in the queue",
-  (await getConversation(CONV)).btwNotes?.includes("keep the symbols") === true
+  (await getConversation(CONV)).btwNotes?.some(
+    (n) => n.text === "keep the symbols"
+  ) === true
 );
+
+const withFileRes = await post({
+  conversationId: CONV,
+  note: "decompile this one",
+  wireText: "Attached file: evil.dll\nsaved at uploads/binaries/evil.dll\n\ndecompile this one",
+  attachments: [
+    { name: "evil.dll", kind: "text" },
+    { name: "shot.png", kind: "image", dataUrl: "data:image/png;base64,BBBB" },
+  ],
+});
+check(
+  "POST with wireText + attachments → {queued:true}",
+  withFileRes.status === 200 && (await withFileRes.json()).queued === true
+);
+const queuedWithFile = (await getConversation(CONV))
+  .btwNotes?.find((n) => n.text === "decompile this one");
+check(
+  "…and the attachment note keeps wire text and stored attachments",
+  queuedWithFile?.wireText?.includes("evil.dll") === true &&
+    queuedWithFile?.attachments?.length === 2 &&
+    queuedWithFile.attachments.find((a) => a.name === "shot.png")
+      ?.dataUrl === "data:image/png;base64,BBBB"
+);
+
+const badAttachRes = await post({
+  conversationId: CONV,
+  note: "hello",
+  attachments: "not-an-array",
+});
+check("malformed attachments are a 400, never a queued poison", badAttachRes.status === 400);
 
 const emptyRes = await post({ conversationId: CONV, note: "   " });
 check("an empty note is a 400", emptyRes.status === 400);
@@ -268,10 +363,11 @@ const sendBtwNote = page.slice(
   page.indexOf("/** Latest messages + sender")
 );
 check(
-  "the client posts only the conversation and the note — no keys",
-  /conversationId: currentConvId, note: text/.test(sendBtwNote) &&
-    !/ApiKey|opencodeKey|openrouterKey|localApi/.test(sendBtwNote),
-  "there is no model call to authorize"
+  "the client posts the note trio — no keys",
+  /conversationId: currentConvId,[\s\S]{0,80}note: text,[\s\S]{0,80}wireText,[\s\S]{0,80}attachments/.test(
+    sendBtwNote
+  ) && !/ApiKey|opencodeKey|openrouterKey|localApi/.test(sendBtwNote),
+  "wireText + attachments are the same pair a normal send posts"
 );
 check(
   "the dock tracks sending → queued",
@@ -288,6 +384,23 @@ check(
   /status: "accepted", round: evt\.round/.test(page)
 );
 check(
+  "…and the chip shows the files that rode along",
+  /attachments: evt\.attachments/.test(
+    page.slice(
+      page.indexOf("case \"btw_note_accepted\""),
+      page.indexOf("case \"btw_note_accepted\"") + 1500
+    )
+  )
+);
+check(
+  "a btw send consumes its attachments like a normal send does",
+  /onAskBtw\?\.\(\s*btwNote,[\s\S]{0,300}buildMessageWithAttachments\(btwNote, attachments/.test(
+    chat
+  ) &&
+    /onAskBtw\?\.\([\s\S]{0,600}setAttachments\(\[\]\)/.test(chat),
+  "a dropped file left behind after the note is a silent loss"
+);
+check(
   "a reloaded conversation maps the flag back to the chip",
   /isNote: m\.note === true/.test(page)
 );
@@ -302,6 +415,24 @@ check(
     /read by the task at step/.test(dock) &&
     !/answer/.test(dock.replace(/<!--[\s\S]*?-->/g, "")),
   "a note has no answer — its answer is the task changing course"
+);
+check(
+  "…and names any attachment, so a file is never mistaken for text",
+  /attachmentNames\?\.length/.test(dock) &&
+    /attachmentNames: attachments\.map\(\(a\) => a\.name\)/.test(page)
+);
+check(
+  "a queued note fades on its own — the dock is a confirmation, not a record",
+  /scheduleBtwDismiss\(id\)/.test(page) &&
+    /if \(acceptedId\) scheduleBtwDismiss\(acceptedId\)/.test(page) &&
+    /setTimeout\([\s\S]{0,120}prev\.id === id \? null : prev/.test(page),
+  "the transcript chip that appears when the task reads the note is the record"
+);
+check(
+  "a failed note is not auto-dismissed — that one needs to be seen",
+  /const queued = res\.ok && !data\.error;/.test(page) &&
+    /if \(queued\) scheduleBtwDismiss\(id\)/.test(page),
+  "only a clean hand-off fades; an error stays until dismissed"
 );
 check(
   "the dock no longer asks properly or watches the main task",
@@ -333,7 +464,7 @@ check(
 );
 check(
   "…and dismiss aborts only the note's request",
-  /const dismissBtw = useCallback\(\(\) => \{\s*btwAbortRef\.current\?\.abort\(\);\s*btwAbortRef\.current = null;\s*setBtwEntry\(null\);\s*\}, \[\]\)/.test(
+  /const dismissBtw = useCallback\(\(\) => \{[\s\S]{0,80}clearBtwDismiss\(\);[\s\S]{0,80}btwAbortRef\.current\?\.abort\(\);[\s\S]{0,80}btwAbortRef\.current = null;[\s\S]{0,80}setBtwEntry\(null\);[\s\S]{0,40}\}, \[\]\)/.test(
     page
   ),
   "if this ever touches the run's abort, Stop gained a second meaning"

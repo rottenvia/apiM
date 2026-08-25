@@ -219,6 +219,7 @@ type StreamEvent =
       id: string;
       note: string;
       round: number;
+      attachments?: { name: string; kind: "text" | "image" | "video" }[];
     }
   | {
       type: "plan";
@@ -531,39 +532,81 @@ export default function Home() {
    */
   const [btwEntry, setBtwEntry] = useState<BtwEntry | null>(null);
   const btwAbortRef = useRef<AbortController | null>(null);
+  // The dock is a confirmation, not a record. A queued note gets its record
+  // in the transcript the moment the task reads it, so the popup gets out of
+  // the way on its own. A failed note stays until dismissed — that one needs
+  // to be seen.
+  const btwDismissTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearBtwDismiss = () => {
+    if (btwDismissTimer.current) {
+      clearTimeout(btwDismissTimer.current);
+      btwDismissTimer.current = null;
+    }
+  };
+
+  const scheduleBtwDismiss = (id: string) => {
+    clearBtwDismiss();
+    btwDismissTimer.current = setTimeout(() => {
+      btwDismissTimer.current = null;
+      setBtwEntry((prev) => (prev && prev.id === id ? null : prev));
+    }, 1800);
+  };
+
+  useEffect(() => clearBtwDismiss, []);
 
   const dismissBtw = useCallback(() => {
+    clearBtwDismiss();
     btwAbortRef.current?.abort();
     btwAbortRef.current = null;
     setBtwEntry(null);
   }, []);
 
   const sendBtwNote = useCallback(
-    async (note: string) => {
+    async (
+      note: string,
+      wireText: string,
+      attachments: MessageAttachment[]
+    ) => {
       const text = note.trim();
       if (!text || !currentConvId) return;
 
       // One at a time in the dock. A second note replaces the first's
       // display rather than stacking — both notes still reach the task,
       // they are queued server-side.
+      clearBtwDismiss();
       btwAbortRef.current?.abort();
       const controller = new AbortController();
       btwAbortRef.current = controller;
 
       const id = `btw-${Date.now()}`;
-      setBtwEntry({ id, note: text, status: "sending" });
+      setBtwEntry({
+        id,
+        note: text,
+        status: "sending",
+        attachmentNames: attachments.map((a) => a.name),
+      });
 
       try {
         const res = await fetch("/api/btw", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           signal: controller.signal,
-          body: JSON.stringify({ conversationId: currentConvId, note: text }),
+          // wireText + attachments are the same pair a normal send posts:
+          // the model-facing text (file blocks inlined) and the stored
+          // attachment metadata (pixels, image descriptions).
+          body: JSON.stringify({
+            conversationId: currentConvId,
+            note: text,
+            wireText,
+            attachments,
+          }),
         });
 
         const data = (await res.json()) as { queued?: boolean; error?: string };
         if (controller.signal.aborted) return;
 
+        const queued = res.ok && !data.error;
         setBtwEntry((prev) =>
           prev && prev.id === id
             ? res.ok
@@ -571,6 +614,9 @@ export default function Home() {
               : { ...prev, status: "queued", error: data.error ?? `HTTP ${res.status}` }
             : prev
         );
+        // A clean hand-off confirms and fades on its own; the transcript chip
+        // that appears when the task reads the note is the record.
+        if (queued) scheduleBtwDismiss(id);
       } catch (err) {
         if (controller.signal.aborted) return;
         setBtwEntry((prev) =>
@@ -1499,6 +1545,10 @@ export default function Home() {
                 // user message in the transcript. Add the chip here so it
                 // appears at the moment it was actually read, not later on a
                 // reload — and mark the dock so the hand-off is confirmed.
+                //
+                // Attachments arrive as names only (the pixels are
+                // megabytes the client already has); a reload brings the
+                // full stored attachments, so thumbnails appear then.
                 setMessages((prev) => [
                   ...prev,
                   {
@@ -1506,14 +1556,26 @@ export default function Home() {
                     role: "user",
                     content: evt.note,
                     isNote: true,
+                    attachments: evt.attachments,
                     createdAt: new Date().toISOString(),
                   },
                 ]);
-                setBtwEntry((prev) =>
-                  prev && prev.note === evt.note && prev.status !== "accepted"
-                    ? { ...prev, status: "accepted", round: evt.round }
-                    : prev
-                );
+                let acceptedId: string | null = null;
+                setBtwEntry((prev) => {
+                  if (
+                    prev &&
+                    prev.note === evt.note &&
+                    prev.status !== "accepted"
+                  ) {
+                    acceptedId = prev.id;
+                    return { ...prev, status: "accepted", round: evt.round };
+                  }
+                  return prev;
+                });
+                // The task read the note: the chip in the transcript is the
+                // record now, and the dock fades after one glance at "read by
+                // the task at step N".
+                if (acceptedId) scheduleBtwDismiss(acceptedId);
                 break;
               }
 
@@ -1943,7 +2005,7 @@ export default function Home() {
           setStatusStage("working");
           retryLiveRef.current = null;
           setRetryNotice(
-            "Request timed out — continuing from where it left off"
+            "The connection dropped — continuing from where it left off"
           );
         } else if (stillActive) {
           setIsLoading(false);

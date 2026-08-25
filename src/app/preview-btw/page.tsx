@@ -36,6 +36,16 @@ const STATES: { label: string; note: string; entry: BtwEntry }[] = [
     entry: { id: "3", note: NOTE, status: "accepted", round: 4 },
   },
   {
+    label: "With an attachment",
+    note: "A dropped screenshot or binary rides along with the note text — the dock names it so the hand-off is visible.",
+    entry: {
+      id: "5",
+      note: "look at the crash in this screenshot",
+      status: "queued",
+      attachmentNames: ["screenshot-2026-08-25.png"],
+    },
+  },
+  {
     label: "Failed",
     note: "Only the note failed. The task keeps running either way.",
     entry: {
@@ -139,6 +149,10 @@ export default function PreviewBtw() {
                 role: "user",
                 content: NOTE,
                 isNote: true,
+                // A binary dropped with the note: it reaches the task as a
+                // "saved at <path>" instruction, shown here as a name chip
+                // (a screenshot would be a clickable thumbnail instead).
+                attachments: [{ name: "evil.dll", kind: "text" }],
               }}
             />
             <MessageBubble

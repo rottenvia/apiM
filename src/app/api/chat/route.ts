@@ -100,6 +100,7 @@ import {
   OPENCODE_RETRY,
   readChunk,
   readWithTimeout,
+  SERVER_SIDE_STATUS,
   sleep,
 } from "@/lib/retry";
 import {
@@ -458,6 +459,8 @@ type StreamEvent =
       note: string;
       /** Which round read it — "folded in at step 4" beats "sometime soon". */
       round: number;
+      /** Names/kinds of any attachments the note carried. */
+      attachments?: { name: string; kind: string }[];
     };
 
 /**
@@ -607,7 +610,11 @@ export async function POST(req: NextRequest) {
       );
     }
   }
-  const helper = resolveHelperTarget(creds) ?? target;
+  // The helper follows the main model's provider: an Ox conversation judges
+  // on Ox (free in preview, never balance-starved), a DeepSeek conversation
+  // on Flash. Passing `model` is what keeps a dead DeepSeek key from
+  // hijacking the web judge of a free Ox run.
+  const helper = resolveHelperTarget(creds, model) ?? target;
   const planner = {
     apiKey: helper.apiKey,
     baseUrl: helper.baseUrl,
@@ -745,6 +752,14 @@ export async function POST(req: NextRequest) {
         searchCacheHits: 0,
         searchUsd: 0,
       });
+
+      /*
+       * Set as soon as this reply produces anything — prose, reasoning or a
+       * tool result. The catch at the bottom of this try is out of scope of
+       * the round variables, so it reads this flag to decide whether a
+       * mid-task drop should continue itself.
+       */
+      let sawWork = false;
 
       try {
         // Built-ins plus the user's own saved plugins.
@@ -1878,13 +1893,32 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             const midRunNotes = await drainBtwNotes(convId);
             for (const note of midRunNotes) {
               const noteId = uuidv4();
-              transcript.push({ role: "user", content: note, note: true });
+              // Same builder a normal message's attachments go through:
+              // native-vision models get the pixels, blind models the
+              // description blocks, and a dropped binary's "saved at <path>"
+              // note rides in the wire text — so the task sees the attached
+              // screenshot or DLL exactly as if it had been sent as a message.
+              transcript.push({
+                role: "user",
+                content: buildUserContent(
+                  note.wireText || note.text,
+                  note.attachments,
+                  vision
+                ),
+                note: true,
+              });
               try {
                 await appendMessages(convId, title, [
                   {
                     id: noteId,
                     role: "user",
-                    content: note,
+                    // Store what the user typed, not the file blocks: the
+                    // blocks are rebuilt from the attachments on replay, the
+                    // same way an ordinary message stores its content.
+                    content: note.text,
+                    attachments: note.attachments?.length
+                      ? note.attachments
+                      : null,
                     note: true,
                     createdAt: new Date().toISOString(),
                   },
@@ -1894,7 +1928,18 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 // still gets it this run; a disk error must not kill the task.
                 console.error("Failed to persist btw note:", e);
               }
-              send({ type: "btw_note_accepted", id: noteId, note, round });
+              send({
+                type: "btw_note_accepted",
+                id: noteId,
+                note: note.text,
+                round,
+                // Names only — the pixels are megabytes and the client
+                // already has them from the composer; the chip just needs to
+                // show what went in.
+                attachments: note.attachments?.length
+                  ? note.attachments.map((a) => ({ name: a.name, kind: a.kind }))
+                  : undefined,
+              });
             }
           } catch (e) {
             console.error("Failed to drain btw notes:", e);
@@ -2122,12 +2167,18 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 console.error("Could not save work before timeout:", e);
               }
             }
+            /*
+             * No response at all — every attempt died on the network or on a
+             * deadline. That is their server (or our clock), not the user's
+             * key: with work saved, the reply continues itself. A Stop never
+             * reaches here — the run-signal check above returns first.
+             */
             send({
               type: "error",
               error: timedOut
                 ? providerTimedOut(target.providerName, attempt.attempts)
                 : providerUnreachable(target.providerName, attempt.attempts),
-              autoResume: timedOut && hadWork && target.providerId === "local",
+              autoResume: hadWork,
             });
             close();
             return;
@@ -2242,7 +2293,10 @@ Ask before you build the wrong thing. If a choice would change what you produce 
              * state first, so topping up and pressing Continue picks up
              * where it stopped instead of starting over.
              */
-            if (assistantContent || toolEvents.length || reasoningContent) {
+            const hadWork = Boolean(
+              assistantContent || toolEvents.length || reasoningContent
+            );
+            if (hadWork) {
               try {
                 await upsertMessage(convId, title, {
                   id: assistantMsgId,
@@ -2269,6 +2323,14 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               }
             }
 
+            /*
+             * Server-side statuses (their 5xx / 408 / 409 / 425) mean the
+             * host is down or overloaded — the same failure a dropped
+             * stream is, so saved work continues itself. A 429 is the pool
+             * saying "slow down" (the limit-resume agent owns it), and a
+             * 401/402 is the key or balance — retrying those just delays
+             * the error the user needs to see.
+             */
             send({
               type: "error",
               error: providerHttpError(
@@ -2276,6 +2338,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 target.providerName,
                 detail
               ),
+              autoResume:
+                hadWork && SERVER_SIDE_STATUS.has(dsResponse.status),
             });
             close();
             return;
@@ -2521,6 +2585,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 }
                 reasoningContent += reasoningDelta.text;
                 roundReasoning += reasoningDelta.text;
+                sawWork = true;
                 markUpstream();
                 send({ type: "reasoning", delta: reasoningDelta.text });
                 void checkpoint();
@@ -2537,6 +2602,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 }
                 assistantContent += delta.content;
                 roundContent += delta.content;
+                sawWork = true;
                 appendTimelineText(delta.content);
                 send({ type: "content", delta: delta.content });
                 void checkpoint();
@@ -2563,10 +2629,14 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             } catch (e) {
               console.error("Could not save work before timeout:", e);
             }
+            // A stalled stream is the host's clock problem, not ours: with
+            // work checkpointed, the reply continues itself.
             send({
               type: "error",
               error: "The operation was aborted due to timeout",
-              autoResume: target.providerId === "local",
+              autoResume: Boolean(
+                assistantContent || toolEvents.length || reasoningContent
+              ),
             });
             close();
             return;
@@ -2640,6 +2710,13 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 `${emptyStreamRetries + 1} attempt(s). The host is overloaded ` +
                 `or down right now — this is their pool, not your key. Wait a ` +
                 `minute and try again, or switch the Ox host in Settings.`,
+              // Their pool is down — a server-side failure. Work from
+              // earlier rounds is checkpointed, so the client continues it;
+              // the re-post rides the retry backoff, and the cap stops a
+              // sustained outage from looping forever.
+              autoResume: Boolean(
+                assistantContent || toolEvents.length || reasoningContent
+              ),
             });
             close();
             return;
@@ -3086,6 +3163,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               args: call.function.arguments,
             });
             timeline.push({ kind: "tool", id: call.id });
+            sawWork = true;
 
             const parsed = parseToolArguments(call.function.arguments);
 
@@ -3705,6 +3783,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 `. Stop them from the workspace panel when you are done with ` +
                 `them — they hold their ports until then.`;
               assistantContent += note;
+              sawWork = true;
               send({ type: "content", delta: note });
               appendTimelineText(note);
             }
@@ -3736,6 +3815,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             const note =
               (assistantContent.trim() ? "\n\n" : "") + `_${claimIssue}_`;
             assistantContent += note;
+            sawWork = true;
             send({ type: "content", delta: note });
             appendTimelineText(note);
             recordAsync({
@@ -3760,6 +3840,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             (assistantContent.trim() ? "\n\n" : "") +
             budgetStopMessage(budget.spentUsd, budget.limitUsd, true);
           assistantContent += note;
+          sawWork = true;
           send({ type: "content", delta: note });
           appendTimelineText(note);
         }
@@ -3973,13 +4054,20 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         } else {
           console.error("Chat API error:", error);
         }
+        /*
+         * A stream that died mid-task (connection reset, the host closing
+         * the socket) lands here. The model falling over is not the user's
+         * doing — with work saved, the reply continues itself. Bounded by
+         * the client's auto-resume cap, so a persistent failure parks on
+         * the Resume button after three tries instead of looping.
+         */
         send({
           type: "error",
           error:
             error instanceof Error
               ? `Internal server error: ${error.message}`
               : "Internal server error",
-          autoResume: timedOut && target.providerId === "local",
+          autoResume: sawWork,
         });
         close();
       }

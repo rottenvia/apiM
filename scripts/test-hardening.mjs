@@ -523,7 +523,10 @@ check(
   "the cache split is the missing explanation"
 );
 
-// The arithmetic behind the reported figures.
+// The arithmetic behind the reported figures. Priced at the PEAK window:
+// the $0.0009 figure is the peak figure, and the off-peak window (Beijing
+// business hours) halves the input/output rate, so billing at the live clock
+// made this fail whenever the suite ran during it.
 check(
   "a heavily cached 161k really does cost about a tenth of a cent",
   Math.abs(
@@ -534,7 +537,8 @@ check(
         prompt_cache_hit_tokens: 159_000,
         prompt_cache_miss_tokens: 1_000,
       },
-      "deepseek-v4-flash"
+      "deepseek-v4-flash",
+      "peak"
     ) - 0.0009
   ) < 0.0002,
   "so the number was right; only its presentation was wrong"

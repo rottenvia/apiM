@@ -290,33 +290,52 @@ function MessageBubbleImpl({
    * box and say so; absence of data must not masquerade as absence of UI.
    */
   const hasThinking = reasoningChars > 0 || thinkingRequested;
-  const reasoningGrewRef = useRef({ len: 0, done: false });
-  if (reasoningLen > reasoningGrewRef.current.len) {
-    // Still growing. Only clears `done` before any prose has arrived — after
-    // that the latch above holds, so a late burst of reasoning cannot make
-    // the panel spring open again.
-    reasoningGrewRef.current = {
-      len: reasoningLen,
-      done: reasoningGrewRef.current.done,
+
+  /*
+   * Which stream is arriving right now — reasoning or prose.
+   *
+   * The old rule latched "done" the first frame prose appeared and never
+   * un-latched. That was right for DeepSeek, which streams reasoning then
+   * prose and never goes back — but the high-effort models INTERLEAVE:
+   * reasoning, prose, more reasoning. On those, the first prose token grayed
+   * the box and dropped the Follow/Free control while reasoning was still
+   * streaming. Reported as "the buttons disappear and the box goes gray".
+   *
+   * The honest signal is which of the two streams grew LAST. During a
+   * reasoning burst the box is live (amber, Follow/Free usable, because new
+   * reasoning text is arriving); during a prose burst it rests. Bursts are
+   * runs of many tokens, not per-token alternation, so the state changes at
+   * burst boundaries — no flicker.
+   *
+   * A ref compared during render, as before: it must not schedule its own
+   * re-render, and the value is read in the same render that set it.
+   */
+  const contentLen = message.content?.length ?? 0;
+  const arriveRef = useRef<{
+    r: number;
+    c: number;
+    last: "reasoning" | "content" | null;
+  } | null>(null);
+  if (arriveRef.current === null) {
+    // First render: seed with what is already here. A resumed reply that
+    // already carries prose is mid-answer (the reasoning had its moment), so
+    // assume the prose stream; a fresh one is still in the reasoning seat.
+    arriveRef.current = {
+      r: reasoningLen,
+      c: contentLen,
+      last: contentLen > 0 ? "content" : "reasoning",
     };
-  } else if (
-    reasoningLen > 0 &&
-    message.content &&
-    reasoningLen === reasoningGrewRef.current.len
-  ) {
-    /*
-     * Reasoning has stopped growing and prose has started.
-     *
-     * Latched, never un-latched, because the alternative flickers. On a long
-     * Pro reply the model interleaves — reasoning, prose, more reasoning — and
-     * an un-latched flag reopens the panel mid-answer, which is a box jumping
-     * open and shut under the text you are reading. Once the answer is
-     * genuinely underway, the reasoning belongs behind the toggle.
-     *
-     * A ref rather than state on purpose: this must not schedule a re-render
-     * of its own, and the value is read during the same render that set it.
-     */
-    reasoningGrewRef.current.done = true;
+  } else {
+    // Content is checked first and reasoning second, so a frame that carries
+    // both deltas keeps the box live rather than resting.
+    if (contentLen > arriveRef.current.c) {
+      arriveRef.current.c = contentLen;
+      arriveRef.current.last = "content";
+    }
+    if (reasoningLen > arriveRef.current.r) {
+      arriveRef.current.r = reasoningLen;
+      arriveRef.current.last = "reasoning";
+    }
   }
 
   /*
@@ -390,17 +409,16 @@ function MessageBubbleImpl({
   // stays closed unless the user opens it, so nothing expands and collapses
   // underneath them mid-answer.
   /*
-   * Same correction as the open state above.
-   *
-   * This drove the amber tint and the sweeping progress line, and it used the
-   * same `!message.content` test — so both switched off on the first token of
-   * the answer, while reasoning was often still streaming. The line you saw
-   * appear and vanish was this.
+   * Same correction as the open state above, plus the interleaving fix:
+   * "live" means reasoning is the stream arriving right now (or has not
+   * arrived yet), not merely "prose has not started". That is what keeps the
+   * amber tint and the Follow/Free control present through a reasoning burst
+   * that lands after the answer has begun.
    */
   const isThinkingPhase = Boolean(
     message.isStreaming &&
       hasThinking &&
-      !reasoningGrewRef.current.done
+      (reasoningLen === 0 || arriveRef.current?.last === "reasoning")
   );
 
   // Keep the reasoning panel pinned to the newest text while "Follow" is on.
@@ -553,6 +571,55 @@ function MessageBubbleImpl({
                 passed while the task was running
               </span>
             </div>
+
+            {/* Attachments that rode along with the note: a dropped
+                screenshot, a binary. Same shapes as a user bubble —
+                thumbnails where the pixels are on hand (a reload brings
+                them; a live chip may carry names only), name chips
+                otherwise. */}
+            {message.attachments && message.attachments.length > 0 && (
+              <div className="flex flex-wrap gap-1.5">
+                {message.attachments.map((file, i) =>
+                  (file.kind === "image" || file.kind === "video") && file.dataUrl ? (
+                    <button
+                      key={i}
+                      onClick={() => setPreviewImage(file)}
+                      title={`${file.name} — click to enlarge`}
+                      className="overflow-hidden rounded-lg border border-border transition-transform hover:scale-[1.03]"
+                    >
+                      {file.kind === "video" ? (
+                        <video
+                          src={file.dataUrl}
+                          muted
+                          playsInline
+                          preload="metadata"
+                          className="h-24 w-auto max-w-[12rem] object-cover"
+                        />
+                      ) : (
+                        /* eslint-disable-next-line @next/next/no-img-element */
+                        <img
+                          src={file.dataUrl}
+                          alt={file.name}
+                          className="h-24 w-auto max-w-[12rem] object-cover"
+                        />
+                      )}
+                    </button>
+                  ) : (
+                    <span
+                      key={i}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-bg-secondary/60 px-2 py-1 text-xs text-text-secondary"
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} aria-hidden="true">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M14 2v6h6" />
+                      </svg>
+                      {file.name}
+                    </span>
+                  )
+                )}
+              </div>
+            )}
+
             <div className="whitespace-pre-wrap break-words text-[13px] leading-6 text-text-secondary">
               {message.content}
             </div>

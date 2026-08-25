@@ -42,6 +42,7 @@ const check = (label, ok, detail = "") => {
 };
 
 const route = read("src/app/api/chat/route.ts");
+const retry = read("src/lib/retry.ts");
 const providers = read("src/lib/providers.ts");
 const store = read("src/lib/store.ts");
 const bubble = read("src/components/MessageBubble.tsx");
@@ -312,7 +313,9 @@ check(
 check(
   "the checkpoint includes resume state",
   /Could not save work before failing[\s\S]{0,80}/.test(route) &&
-    /if \(assistantContent \|\| toolEvents\.length \|\| reasoningContent\)/.test(route)
+    /const hadWork = Boolean\(\s*assistantContent \|\| toolEvents\.length \|\| reasoningContent\s*\);[\s\S]{0,60}if \(hadWork\) \{/.test(
+      route
+    )
 );
 check(
   "the balance message says the work is safe",
@@ -553,11 +556,44 @@ check(
 );
 check(
   "the notice says it is continuing, not asking the user to click",
-  /Request timed out — continuing from where it left off/.test(page)
+  /The connection dropped — continuing from where it left off/.test(page)
 );
 check(
-  "the route hands the client an autoResume flag on a deadline abort",
-  /autoResume: timedOut/.test(route) && /fetchUntilHeaders/.test(route)
+  "the route hands the client an autoResume flag when work survived",
+  /autoResume: hadWork/.test(route) && /fetchUntilHeaders/.test(route),
+  "a no-response failure is the server's, and saved work continues itself"
+);
+check(
+  "a server-side HTTP status auto-resumes, a rate limit does not",
+  /autoResume:\s*hadWork && SERVER_SIDE_STATUS\.has\(dsResponse\.status\)/.test(
+    route
+  ) &&
+    /SERVER_SIDE_STATUS = new Set\(\[408, 409, 425, 500, 502, 503, 504\]\)/.test(
+      retry
+    ),
+  "429 belongs to the limit-resume agent; 401/402 to the user's wallet"
+);
+check(
+  "an explicit server autoResume is trusted for any provider",
+  shouldAutoResumeOnTimeout({
+    autoResume: true,
+    hadWork: true,
+    used: 0,
+    local: false,
+  }) === true &&
+    shouldAutoResumeOnTimeout({
+      autoResume: true,
+      hadWork: true,
+      used: MAX_TIMEOUT_AUTO_RESUMES,
+      local: false,
+    }) === false &&
+    shouldAutoResumeOnTimeout({
+      autoResume: true,
+      hadWork: false,
+      used: 0,
+      local: false,
+    }) === false,
+  "the route checked the failure class; the cap and the work check still apply"
 );
 check(
   "the route clock is long enough for a local think, not five minutes",
@@ -586,9 +622,11 @@ check(
   /You already thought/.test(page)
 );
 check(
-  "Ox timeouts do not silently auto-resume",
+  "a mid-task drop on Ox auto-resumes; Stop and rate limits still do not",
   /local: getModel\(activeModel\)\.provider === "local"/.test(page) &&
-    /autoResume: timedOut && target\.providerId === "local"/.test(route)
+    !/autoResume: timedOut && target\.providerId === "local"/.test(route) &&
+    /autoResume: Boolean\([\s\S]{0,40}assistantContent/.test(route),
+  "the client heuristic stays local-only; Ox gets its resume from the route's failure-class flag"
 );
 check(
   "Stop names the conversation so it works before meta",

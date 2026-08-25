@@ -459,9 +459,15 @@ check(
 
 const total = WORKSPACE_TOOLS.length;
 const schemaChars = JSON.stringify(WORKSPACE_TOOLS).length;
+// Raised from 9k when the binary tools became first-class: inspect_binary
+// gained its analyzer presets / enable-disable parameters and the
+// non-PE-format guidance, and that is description the model actually uses to
+// spend less time on easier targets. The schema is sent once per conversation
+// and then prompt-cached (~1/120th rate), so the real guard is "not ballooning",
+// which 12k still enforces with headroom for the next tool.
 check(
   "the schemas are still a rounding error on the bill",
-  schemaChars / 3.6 < 9_000,
+  schemaChars / 3.6 < 12_000,
   `${total} tools, ~${Math.round(schemaChars / 3.6)} tokens, sent once and cached`
 );
 

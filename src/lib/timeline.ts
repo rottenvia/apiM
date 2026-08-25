@@ -10,6 +10,20 @@ export interface TimelineRow {
 }
 
 /**
+ * True when the text contains a markdown table.
+ *
+ * GFM table rows start with `|` in column one; a separator line alone
+ * (`|---|---|`) does it too, which is the whole of a table with no body yet.
+ * Used to decide whether a row may share its line with a tool column — a
+ * table squeezed into the left column beside the vertical divider reads as
+ * the line running through the table, so table rows take the full width and
+ * their tools stack below instead.
+ */
+export function textHasTable(text: string): boolean {
+  return /^\s*\|/m.test(text);
+}
+
+/**
  * Groups a reply into rows of "what was said" and "what was done".
  *
  * Kept out of the component so it can be tested directly — the ordering is

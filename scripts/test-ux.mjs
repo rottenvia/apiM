@@ -368,23 +368,31 @@ check(
   "the first content token flipped that false while reasoning was still coming"
 );
 check(
-  "it tracks whether reasoning is still GROWING",
-  /reasoningGrewRef/.test(bubble) && /reasoningLen > reasoningGrewRef\.current\.len/.test(bubble),
+  "it tracks which stream is arriving — reasoning or prose",
+  /arriveRef/.test(bubble) &&
+    /contentLen > arriveRef\.current\.c/.test(bubble) &&
+    /reasoningLen > arriveRef\.current\.r/.test(bubble),
   "the honest signal for the active amber/progress treatment"
 );
 check(
   "the amber tint and header progress use the active signal",
-  /isThinkingPhase = Boolean\([\s\S]{0,120}message\.isStreaming &&[\s\S]{0,80}hasThinking &&[\s\S]{0,80}!reasoningGrewRef/.test(
+  /isThinkingPhase = Boolean\([\s\S]{0,160}message\.isStreaming &&[\s\S]{0,80}hasThinking &&[\s\S]{0,120}arriveRef/.test(
     bubble
   ) && /data-thinking=\{isThinkingPhase\}/.test(bubble),
   "the box can stay open after the active animation correctly finishes"
 );
 check(
-  "once prose is underway only the active animation latches off",
-  /reasoningGrewRef\.current\.done = true;/.test(bubble) &&
-    /done: reasoningGrewRef\.current\.done,/.test(bubble) &&
-    !/autoOpen = Boolean\([^;]*reasoningGrewRef/s.test(bubble),
-  "the old latch collapsed the entire panel into the reported line"
+  "prose no longer latches the box gray — interleaved reasoning keeps it live",
+  !/reasoningGrewRef\.current\.done = true;/.test(bubble) &&
+    !/last: "content" \? true/.test(bubble) &&
+    /arriveRef\.current\?\.last === "reasoning"/.test(bubble),
+  "the old one-way latch grayed the box and dropped Follow/Free while Pro models were still reasoning"
+);
+check(
+  "a frame carrying both deltas keeps the box live, not resting",
+  bubble.indexOf("contentLen > arriveRef.current.c") <
+    bubble.indexOf("reasoningLen > arriveRef.current.r"),
+  "reasoning is checked last, so a tie stays in the reasoning seat"
 );
 check(
   "finishing the stream does not collapse a live panel",
@@ -423,7 +431,7 @@ check(
 );
 check(
   "a ref, so active-phase tracking schedules no extra render",
-  /useRef\(\{ len: 0, done: false \}\)/.test(bubble)
+  /const arriveRef = useRef<\{[\s\S]{0,120}\} \| null>\(null\);/.test(bubble)
 );
 check(
   "thinking disabled still shows nothing",

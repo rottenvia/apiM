@@ -139,15 +139,29 @@ export function serializeForApi(
      *
      * The label is added here (not stored on the message) so every provider
      * — and every resume, which re-serializes the saved transcript — sees
-     * the identical framing. Notes only ever carry plain text; a note whose
-     * content is a media part (cannot happen today) goes out unlabeled
-     * rather than losing the pixels.
+     * the identical framing. With attachments the content is a part array
+     * (text + image_url): the FIRST text part takes the label, so the
+     * framing reads before the pixels without any part being lost.
      */
-    if (m.role === "user" && m.note && typeof m.content === "string") {
-      return {
-        role: "user",
-        content: `[${MID_RUN_NOTE_LABEL} ${m.content}]`,
-      };
+    if (m.role === "user" && m.note) {
+      if (typeof m.content === "string") {
+        return {
+          role: "user",
+          content: `[${MID_RUN_NOTE_LABEL} ${m.content}]`,
+        };
+      }
+      const parts = m.content.map((p) => ({ ...p }));
+      const firstTextIdx = parts.findIndex((p) => p.type === "text");
+      const firstText = firstTextIdx === -1 ? null : parts[firstTextIdx];
+      if (!firstText || firstText.type !== "text") {
+        parts.unshift({ type: "text", text: MID_RUN_NOTE_LABEL });
+      } else {
+        parts[firstTextIdx] = {
+          type: "text",
+          text: `[${MID_RUN_NOTE_LABEL} ${firstText.text}]`,
+        };
+      }
+      return { role: "user", content: parts };
     }
 
     return { role: m.role, content: m.content };

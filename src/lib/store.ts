@@ -8,6 +8,7 @@ import {
 import { stopAll } from "@/lib/processes";
 import { forgetWorkspace } from "@/lib/approvals";
 import { deleteAllSnapshots } from "@/lib/snapshots";
+import type { StoredAttachment } from "@/lib/multimodal";
 
 /**
  * File-backed conversation store.
@@ -101,6 +102,24 @@ export interface StoredMessage {
   } | null;
 }
 
+/**
+ * A steering note queued for the running task, with its composer attachments.
+ *
+ * `text` is what the user typed (persisted as the message content, and what
+ * the transcript chip shows). `wireText` is the model-facing form: the typed
+ * text plus the inlined file blocks that the composer would put in a normal
+ * message (saved text files, "saved at <path>" notes for binaries, image
+ * descriptions for blind models). `attachments` carry the image/video data
+ * URLs and image descriptions, exactly as a normal user message stores them,
+ * so native-vision models see the pixels and history replay rebuilds the
+ * blocks identically.
+ */
+export interface BtwNote {
+  text: string;
+  wireText: string;
+  attachments?: StoredAttachment[];
+}
+
 export interface StoredConversation {
   id: string;
   title: string;
@@ -117,7 +136,7 @@ export interface StoredConversation {
    * put the note in the history *before* the reply it steered, which is the
    * wrong order on a resume.
    */
-  btwNotes?: string[];
+  btwNotes?: BtwNote[];
 }
 
 /** Summary shape returned to the sidebar (messages omitted). */
@@ -565,13 +584,26 @@ export async function upsertMessage(
  * Runs through the same per-conversation write queue as every other mutation,
  * so a drain in the chat route and a note posted from /api/btw can never
  * interleave and drop one.
+ *
+ * Accepts a plain string (no attachments) or a full BtwNote carrying the
+ * composer's attachments, so a dropped screenshot or binary rides along with
+ * the note text exactly the way it would in a normal message.
  */
 export async function appendBtwNote(
   conversationId: string,
-  note: string
+  note: string | BtwNote
 ): Promise<void> {
-  const text = note.trim();
-  if (!text) throw new Error("Empty note");
+  const normalized: BtwNote =
+    typeof note === "string"
+      ? { text: note.trim(), wireText: note.trim() }
+      : {
+          text: note.text.trim(),
+          wireText: (note.wireText ?? note.text).trim(),
+          attachments: note.attachments?.length ? note.attachments : undefined,
+        };
+  if (!normalized.text && !normalized.attachments?.length) {
+    throw new Error("Empty note");
+  }
 
   // Transactional like the drain: a drain running in the chat route at the
   // same instant must not clear a note this call is about to append (or vice
@@ -586,7 +618,7 @@ export async function appendBtwNote(
       throw new Error(`No such conversation: ${conversationId}`);
     }
 
-    existing.btwNotes = [...(existing.btwNotes ?? []), text];
+    existing.btwNotes = [...(existing.btwNotes ?? []), normalized];
     existing.updatedAt = new Date().toISOString();
     if (!deletedIds.has(existing.id)) {
       await writeConversationNow(existing);
@@ -604,7 +636,7 @@ export async function appendBtwNote(
  */
 export async function drainBtwNotes(
   conversationId: string
-): Promise<string[]> {
+): Promise<BtwNote[]> {
   return transact(conversationId, async () => {
     const existing = await getConversation(conversationId);
     if (!existing || !existing.btwNotes?.length) return [];

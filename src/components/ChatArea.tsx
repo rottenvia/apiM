@@ -48,7 +48,7 @@ import { WorkspaceBar } from "@/components/WorkspaceBar";
 import { WorkspaceDock } from "@/components/WorkspaceDock";
 import { ProcessDock } from "@/components/ProcessDock";
 import type { WorkspaceFileInfo } from "@/components/WorkspaceBar";
-import type { Message, StatusStage } from "@/app/page";
+import type { Message, MessageAttachment, StatusStage } from "@/app/page";
 
 interface ChatAreaProps {
   messages: Message[];
@@ -69,8 +69,20 @@ interface ChatAreaProps {
   balanceWarning?: React.ReactNode;
   /** The current mid-run note, if one has been sent. */
   btwEntry?: BtwEntry | null;
-  /** Pass a note to the running task without disturbing it. */
-  onAskBtw?: (note: string) => void;
+  /**
+   * Pass a note to the running task without disturbing it.
+   *
+   * `note` is what was typed; `wireText` is the model-facing form with the
+   * composer's file blocks inlined; `attachments` are the stored
+   * attachment metadata (pixels, image descriptions) — the same trio a
+   * normal send posts, so a dropped screenshot or binary reaches the task
+   * the same way it would as a message.
+   */
+  onAskBtw?: (
+    note: string,
+    wireText: string,
+    attachments: MessageAttachment[]
+  ) => void;
   onDismissBtw?: () => void;
   /** Set while a transient upstream failure is being retried. */
   retryNotice?: string | null;
@@ -984,9 +996,28 @@ export function ChatArea({
     // A note is sendable while the main task runs; a normal message is not.
     // Sending it never stops anything — it is queued and the task reads it
     // at its next thinking step.
+    //
+    // Anything attached rides along, consumed exactly like a normal send:
+    // the same buildMessageWithAttachments inlines the file blocks (saved
+    // binaries as "saved at <path>", text as fenced blocks, image
+    // descriptions for blind models), and the attachment metadata carries
+    // the pixels to native-vision models. Dropping the file without sending
+    // it with the note is how a "btw look at this" loses the "this".
     if (isBtw) {
-      onAskBtw?.(btwNote);
+      onAskBtw?.(
+        btwNote,
+        buildMessageWithAttachments(btwNote, attachments, getModel(model).vision),
+        attachments.map((a) => ({
+          name: a.name,
+          kind: a.kind,
+          dataUrl: a.dataUrl,
+          description: a.description,
+          descriptionSource: a.descriptionSource,
+        }))
+      );
       setInput("");
+      setAttachments([]);
+      setAttachError(null);
       return;
     }
     /*

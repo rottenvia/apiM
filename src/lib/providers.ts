@@ -223,14 +223,44 @@ export function resolveChatTarget(
 /**
  * A cheap (or free) model for search planning, refine and asides.
  *
- * Prefers DeepSeek Flash when that key is present so existing DeepSeek-only
- * setups keep the same cost profile. Falls back to Ox Alpha when the user
- * only connected OpenCode. Local 27B is deliberately not a helper — it is
- * the main model, not a planner.
+ * The helper follows the main model's provider. When the main model is Ox
+ * Alpha the judge runs on Ox Alpha: it is free during the preview, so there
+ * is no cost reason to hop to Flash, and a DeepSeek key with an empty
+ * balance would just make every judge call fail ("it kept judging with no
+ * tokens on DeepSeek"). For a DeepSeek main model the helper stays DeepSeek
+ * Flash — the key is already the one paying for the reply, and Flash keeps
+ * the side calls cheap. Falls back to Ox when only OpenCode is connected.
+ * Local 27B is deliberately not a helper — it is the main model, not a
+ * planner.
  */
 export function resolveHelperTarget(
-  creds: ChatCredentials
+  creds: ChatCredentials,
+  mainModelId?: string
 ): ResolvedTarget | null {
+  const ox = MODELS.find((m) => m.id === "ox-alpha");
+  if (ox && mainModelId === "ox-alpha") {
+    const host = parseOxHost(creds.oxHost);
+    const raw =
+      host === "openrouter" ? creds.openrouterApiKey : creds.opencodeApiKey;
+    const apiKey = typeof raw === "string" ? raw.trim() : "";
+    if (apiKey) {
+      const gate = oxHostInfo(host);
+      return {
+        model: ox,
+        providerId: "opencode",
+        providerName: gate.label,
+        thinkingStyle: "openai",
+        apiKey,
+        baseUrl: providerBaseUrl("opencode", host),
+        apiModel: gate.apiModel,
+        oxHost: host,
+      };
+    }
+    // The main model is Ox but its key is gone — nothing else can judge for
+    // a conversation Ox is driving, so no helper rather than a wrong one.
+    return null;
+  }
+
   const flash = MODELS.find((m) => m.id === "deepseek-v4-flash");
   if (flash && keyForProvider("deepseek", creds)) {
     return {
@@ -244,7 +274,6 @@ export function resolveHelperTarget(
     };
   }
 
-  const ox = MODELS.find((m) => m.id === "ox-alpha");
   if (ox) {
     // Only the host the user picked. Do not silently hop Zen ↔ OpenRouter —
     // they set that button on purpose when one of them is down for ten minutes.

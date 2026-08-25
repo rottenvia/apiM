@@ -29,6 +29,9 @@ export interface BtwEntry {
   status: "sending" | "queued" | "accepted";
   /** Which round read it, once accepted. */
   round?: number;
+  /** Files the note carried (screenshot, binary, …) — names only, shown
+   *  so a note with an attachment is never mistaken for a text-only one. */
+  attachmentNames?: string[];
   /** Set instead of a status when it failed. */
   error?: string;
 }
@@ -64,6 +67,12 @@ export function BtwDock({
 
             <span className="min-w-0 flex-1 truncate text-[13px] text-text-secondary">
               {entry.note}
+              {entry.attachmentNames?.length ? (
+                <span className="text-text-muted">
+                  {" "}
+                  · {entry.attachmentNames.join(", ")}
+                </span>
+              ) : null}
             </span>
 
             <span
