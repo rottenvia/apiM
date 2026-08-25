@@ -31,6 +31,7 @@
 
 import { estimateCost, MODEL_RATES } from "@/lib/pricing";
 import type { UsageLike } from "@/lib/pricing";
+import type { DeepSeekPeriod } from "@/lib/deepseek-hours";
 
 /** Warn once the run passes this share of its cap. */
 export const WARN_AT_FRACTION = 0.8;
@@ -63,13 +64,22 @@ export function createBudget(limitUsd: number | null | undefined): BudgetState {
   return { limitUsd: limit, spentUsd: 0, warned: false };
 }
 
-/** Add one round's usage to the running total. */
+/**
+ * Add one round's usage to the running total.
+ *
+ * `period` is the DeepSeek peak/off-peak window to bill at. Defaults to the
+ * live clock — which is what the UI wants, since it shows what this round
+ * actually cost right now. Pass it explicitly to bill at a known window
+ * (tests do: the window is Beijing business hours, and a suite must not
+ * start failing because the sandbox ran during it).
+ */
 export function chargeRound(
   budget: BudgetState,
   usage: UsageLike | null | undefined,
-  model: string
+  model: string,
+  period?: DeepSeekPeriod
 ): number {
-  const cost = estimateCost(usage, model) ?? 0;
+  const cost = estimateCost(usage, model, period) ?? 0;
   budget.spentUsd += cost;
   return cost;
 }

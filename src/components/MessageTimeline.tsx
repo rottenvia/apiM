@@ -4,7 +4,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ToolActivity } from "@/components/ToolActivity";
 import type { ToolEvent } from "@/components/ToolActivity";
-import { buildTimelineRows } from "@/lib/timeline";
+import { buildTimelineRows, textHasTable } from "@/lib/timeline";
 import type { TimelineEntry } from "@/lib/timeline";
 
 export type { TimelineEntry } from "@/lib/timeline";
@@ -47,7 +47,12 @@ export function MessageTimeline({
         const hasTools = row.tools.length > 0;
         if (!hasText && !hasTools) return null;
 
-        const split = hasText && hasTools;
+        // A table is isolated, not split beside the tool column. Squeezed
+        // into the left column it ends up a fraction of its natural width
+        // with the vertical divider running alongside its cells, which reads
+        // as the rule cutting straight through the table. Full width gives
+        // the table the whole line; the row's tools stack below it.
+        const split = hasText && hasTools && !textHasTable(row.text);
 
         return (
           <div

@@ -108,6 +108,39 @@ check(
   helperOx?.model.id === "ox-alpha"
 );
 
+// The helper follows the main model's provider. An Ox conversation judges on
+// Ox (free in preview) — a DeepSeek key with an empty balance must not
+// hijack the web judge and make every judge call fail.
+const helperOxMain = providers.resolveHelperTarget(
+  { deepseekApiKey: "sk-ds", opencodeApiKey: "sk-zen" },
+  "ox-alpha"
+);
+check(
+  "an Ox main model gets the Ox helper even when a DeepSeek key exists",
+  helperOxMain?.model.id === "ox-alpha" &&
+    helperOxMain?.providerId === "opencode",
+  "the free judge never depends on a paid balance"
+);
+
+const helperOxNoKey = providers.resolveHelperTarget(
+  { deepseekApiKey: "sk-ds" },
+  "ox-alpha"
+);
+check(
+  "an Ox main with no Ox key gets no helper rather than a wrong one",
+  helperOxNoKey === null,
+  "judging an Ox conversation with a different provider is a worse failure"
+);
+
+check(
+  "a DeepSeek main model still judges on Flash",
+  providers.resolveHelperTarget(
+    { deepseekApiKey: "sk-ds", opencodeApiKey: "sk-zen" },
+    "deepseek-v4-pro"
+  )?.model.id === "deepseek-v4-flash",
+  "the key paying for the reply stays the cheap side-call planner"
+);
+
 check("no keys means no helper", providers.resolveHelperTarget({}) === null);
 
 console.log("\n3. Thinking fields");
