@@ -65,6 +65,7 @@ export async function POST(req: NextRequest) {
       enabled?: unknown;
       extra?: unknown;
       addFlag?: unknown;
+      build?: unknown;
     };
     const current = (await engineStatus()).spec ?? defaultSpecState();
     let extra = Array.isArray(raw.extra)
@@ -83,6 +84,9 @@ export async function POST(req: NextRequest) {
         : current.enabled,
       extra,
     };
+    if (typeof raw.build === "string" && ["auto", "cuda", "vulkan", "cpu"].includes(raw.build)) {
+      next.build = raw.build as SidecarSpecState["build"];
+    }
     const applied = await applySpecState(next);
     return NextResponse.json({
       ok: applied.ok,

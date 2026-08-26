@@ -519,7 +519,7 @@ export function SettingsModal({
                 <label className="mt-4 block text-sm font-semibold text-text-primary mb-1.5">
                   OpenRouter API Key
                   <span className="ml-1 text-xs font-normal text-text-muted">
-                    (Ox Alpha)
+                    (GLM 5.3 Flash · Ox Alpha)
                   </span>
                 </label>
                 <p className="text-xs text-text-secondary mb-2">
@@ -532,7 +532,11 @@ export function SettingsModal({
                   >
                     openrouter.ai/settings/keys
                   </a>
-                  . Wire id{" "}
+                  . One key covers both: GLM 5.3 Flash sends wire id{" "}
+                  <code className="rounded bg-bg-tertiary px-1 py-0.5 text-[11px]">
+                    z-ai/glm-5.3-flash
+                  </code>
+                  , Ox Alpha uses{" "}
                   <code className="rounded bg-bg-tertiary px-1 py-0.5 text-[11px]">
                     stealth/ox-alpha
                   </code>

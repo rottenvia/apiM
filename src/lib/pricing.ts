@@ -22,6 +22,13 @@ export const MODEL_RATES: Record<string, ModelRates> = {
   "deepseek-v4-flash": { input: 0.14, cachedInput: 0.0028, output: 0.28 },
   // OpenCode Zen lists Ox Alpha Free at $0 / $0 during the stealth preview.
   "ox-alpha": { input: 0, cachedInput: 0, output: 0 },
+  // Z.ai list price for GLM 5.3 Flash on OpenRouter (verified 2026-08-26):
+  // $0.15 in / $0.50 out / $0.03 cache-read per 1M. A 50% launch discount
+  // (0.075 / 0.015 / 0.25) runs through 2026-09-09 — budget against the
+  // list price so the spending cap never undercounts.
+  "glm-5.3-flash": { input: 0.15, cachedInput: 0.03, output: 0.5 },
+  // OpenCode Zen's free preview lane for DeepSeek V4 Flash.
+  "deepseek-v4-flash-free": { input: 0, cachedInput: 0, output: 0 },
   // Electricity only — the weights run on the user's GPU.
   "qwen-3.8-27b": { input: 0, cachedInput: 0, output: 0 },
 };

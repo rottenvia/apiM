@@ -81,6 +81,7 @@ export interface ResolveSuccess {
 const DEFAULT_BASE: Record<ProviderId, string> = {
   deepseek: "https://api.deepseek.com",
   opencode: "https://opencode.ai/zen/v1",
+  openrouter: "https://openrouter.ai/api/v1",
   local: DEFAULT_LOCAL_BASE_URL,
 };
 
@@ -115,16 +116,24 @@ export function providerBaseUrl(id: ProviderId, host?: OxHost): string {
       process.env.LOCAL_BASE_URL ?? DEFAULT_BASE.local
     );
   }
+  if (id === "openrouter") {
+    return cleanBase(process.env.OPENROUTER_BASE_URL ?? DEFAULT_BASE.openrouter);
+  }
   if (host === "openrouter") {
-    return cleanBase(process.env.OPENROUTER_BASE_URL ?? OX_HOSTS.openrouter.baseUrl);
+    return cleanBase(process.env.OPENROUTER_BASE_URL ?? DEFAULT_BASE.openrouter);
   }
   return cleanBase(process.env.OPENCODE_BASE_URL ?? DEFAULT_BASE.opencode);
 }
 
-export function keyForOx(creds: ChatCredentials): string {
-  const host = parseOxHost(creds.oxHost);
+/**
+ * The key for a given Ox front door. Without a host it follows the user's
+ * button; with one, the model's own door wins — the free DeepSeek lane is
+ * Zen-only even when the button points at OpenRouter.
+ */
+export function keyForOx(creds: ChatCredentials, host?: OxHost): string {
+  const h = host ?? parseOxHost(creds.oxHost);
   const raw =
-    host === "openrouter" ? creds.openrouterApiKey : creds.opencodeApiKey;
+    h === "openrouter" ? creds.openrouterApiKey : creds.opencodeApiKey;
   return typeof raw === "string" ? raw.trim() : "";
 }
 
@@ -139,6 +148,10 @@ export function keyForProvider(
     return typeof raw === "string" && raw.trim() ? raw.trim() : "local";
   }
   if (id === "opencode") return keyForOx(creds);
+  if (id === "openrouter") {
+    const raw = creds.openrouterApiKey;
+    return typeof raw === "string" ? raw.trim() : "";
+  }
   const raw = creds.deepseekApiKey;
   return typeof raw === "string" ? raw.trim() : "";
 }
@@ -159,18 +172,24 @@ export function resolveChatTarget(
   const model = getModel(modelId);
 
   if (model.provider === "opencode") {
-    const host = parseOxHost(creds.oxHost);
+    // A fixedHost model lives on one door regardless of the Ox button —
+    // the free DeepSeek lane does not exist on OpenRouter at all.
+    const host = model.fixedHost ?? parseOxHost(creds.oxHost);
     const gate = oxHostInfo(host);
-    const apiKey = keyForOx(creds);
+    const apiKey = keyForOx(creds, host);
     if (!apiKey) {
       return {
         ok: false,
         error:
-          host === "openrouter"
-            ? "An OpenRouter API key is required for Ox Alpha. Add one in Settings, or switch the Ox host back to OpenCode Zen."
-            : "An OpenCode Zen API key is required for Ox Alpha. Add one in Settings (opencode.ai/auth), or switch the Ox host to OpenRouter.",
+          model.fixedHost === "zen"
+            ? "An OpenCode Zen API key is required for this model. Add one in Settings (opencode.ai/auth)."
+            : host === "openrouter"
+              ? "An OpenRouter API key is required for Ox Alpha. Add one in Settings, or switch the Ox host back to OpenCode Zen."
+              : "An OpenCode Zen API key is required for Ox Alpha. Add one in Settings (opencode.ai/auth), or switch the Ox host to OpenRouter.",
       };
     }
+    // Ox Alpha's wire id differs per host (that is what the button picks).
+    // Every other model carries its own wire id on the catalog entry.
     return {
       ok: true,
       target: {
@@ -180,8 +199,31 @@ export function resolveChatTarget(
         thinkingStyle: "openai",
         apiKey,
         baseUrl: providerBaseUrl("opencode", host),
-        apiModel: gate.apiModel,
+        apiModel: model.fixedHost ? model.apiModel : gate.apiModel,
         oxHost: host,
+      },
+    };
+  }
+
+  if (model.provider === "openrouter") {
+    const apiKey = keyForProvider("openrouter", creds);
+    if (!apiKey) {
+      return {
+        ok: false,
+        error:
+          "An OpenRouter API key is required for GLM 5.3 Flash. Add one in Settings (openrouter.ai/settings/keys).",
+      };
+    }
+    return {
+      ok: true,
+      target: {
+        model,
+        providerId: "openrouter",
+        providerName: getProviderInfo("openrouter").name,
+        thinkingStyle: "openai",
+        apiKey,
+        baseUrl: providerBaseUrl("openrouter"),
+        apiModel: model.apiModel,
       },
     };
   }
@@ -305,7 +347,7 @@ export function completionHeaders(target: ResolvedTarget): Record<string, string
     "Content-Type": "application/json",
     Authorization: `Bearer ${target.apiKey}`,
   };
-  if (target.oxHost === "openrouter") {
+  if (target.oxHost === "openrouter" || target.providerId === "openrouter") {
     headers["HTTP-Referer"] = "https://github.com/eggyeg/apiM";
     headers["X-Title"] = "apiM";
   }

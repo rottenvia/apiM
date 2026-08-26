@@ -9,10 +9,11 @@ import {
   DEFAULT_LOCAL_API_MODEL,
   DEFAULT_LOCAL_BASE_URL,
 } from "@/lib/local-engine-shared";
+import type { OxHost } from "@/lib/ox-host";
 
 export { DEFAULT_LOCAL_API_MODEL, DEFAULT_LOCAL_BASE_URL };
 
-export type ProviderId = "deepseek" | "opencode" | "local";
+export type ProviderId = "deepseek" | "opencode" | "openrouter" | "local";
 
 export type ThinkingStyle = "deepseek" | "openai" | "qwen";
 
@@ -66,8 +67,16 @@ export interface ModelInfo {
   /**
    * Ox Alpha only: no per-call tool ceilings. The model can read a whole
    * file, a whole page, and as many paths as it asks for in one call.
+   * (GLM 5.3 Flash is the same model Ox Alpha previewed, so it keeps the
+   * open limits.)
    */
   openToolLimits: boolean;
+  /**
+   * OpenCode-provider models only: pin the model to one host, ignoring the
+   * Ox Alpha host button. `x-preview-f-free` follows the button; the free
+   * DeepSeek lane exists only on Zen.
+   */
+  fixedHost?: OxHost;
 }
 
 export const DEFAULT_MODEL_ID = "deepseek-v4-pro";
@@ -113,6 +122,16 @@ export const PROVIDER_INFO: Record<ProviderId, ProviderInfo> = {
     keyPlaceholder: "sk-zen-...",
     keyBlurb:
       "A Zen API key from OpenCode. Required for Ox Alpha — the same OpenAI-compatible Chat Completions API DeepSeek uses.",
+    thinkingStyle: "openai",
+  },
+  openrouter: {
+    id: "openrouter",
+    name: "OpenRouter",
+    authUrl: "https://openrouter.ai/settings/keys",
+    authLabel: "openrouter.ai/settings/keys",
+    keyPlaceholder: "sk-or-v1-...",
+    keyBlurb:
+      "An OpenRouter API key. Required for GLM 5.3 Flash — and for Ox Alpha when its host is set to OpenRouter.",
     thinkingStyle: "openai",
   },
   local: {
@@ -171,6 +190,25 @@ export const MODELS: ModelInfo[] = [
     openToolLimits: false,
   },
   {
+    id: "deepseek-v4-flash-free",
+    apiModel: "deepseek-v4-flash-free",
+    provider: "opencode",
+    fixedHost: "zen",
+    label: "DeepSeek V4 Flash Free",
+    shortLabel: "V4 Flash Free",
+    description:
+      "Free preview of DeepSeek V4 Flash on OpenCode Zen. No balance needed — but the quota is low, it is a limited-time offer, and it can end without notice.",
+    specs: "1M context · 384K max output · free preview",
+    resumeBlurb: "Free on Zen",
+    settingsSubtitle: "OpenCode Zen · free preview",
+    mapsLowToHigh: false,
+    helper: true,
+    peakHours: false,
+    vision: "helper",
+    video: false,
+    openToolLimits: false,
+  },
+  {
     id: "ox-alpha",
     apiModel: "x-preview-f-free",
     provider: "opencode",
@@ -186,6 +224,24 @@ export const MODELS: ModelInfo[] = [
     peakHours: false,
     vision: "native",
     video: true,
+    openToolLimits: true,
+  },
+  {
+    id: "glm-5.3-flash",
+    apiModel: "z-ai/glm-5.3-flash",
+    provider: "openrouter",
+    label: "GLM 5.3 Flash",
+    shortLabel: "GLM 5.3 Flash",
+    description:
+      "Z.ai's agent model — the model that ran as the Ox Alpha stealth preview, now official on OpenRouter. 1M context, native images, built for long agent tasks. 50% launch discount through Sep 9.",
+    specs: "1M context · 128K max output · image · open tools",
+    resumeBlurb: "Ox Alpha, now official",
+    settingsSubtitle: "OpenRouter · 1M context · fast",
+    mapsLowToHigh: false,
+    helper: false,
+    peakHours: false,
+    vision: "native",
+    video: false,
     openToolLimits: true,
   },
   {
@@ -253,15 +309,22 @@ export function hasKeyForModel(
     localBaseUrl?: string;
   }
 ): boolean {
-  const provider = getModel(modelId).provider;
+  const model = getModel(modelId);
+  const provider = model.provider;
   if (provider === "local") {
     // A default host is always assumed. The send fails later if nothing is
     // listening — that is a reachability error, not a missing-key one.
     return true;
   }
+  if (provider === "openrouter") {
+    return Boolean(keys.openrouterKey && keys.openrouterKey.trim());
+  }
   if (provider === "opencode") {
-    const raw =
-      keys.oxHost === "openrouter" ? keys.openrouterKey : keys.opencodeKey;
+    // A fixedHost model lives on one front door no matter what the Ox
+    // button says; everything else follows the button.
+    const host =
+      model.fixedHost ?? (keys.oxHost === "openrouter" ? "openrouter" : "zen");
+    const raw = host === "openrouter" ? keys.openrouterKey : keys.opencodeKey;
     return Boolean(raw && raw.trim());
   }
   return Boolean(keys.deepseekKey && keys.deepseekKey.trim());
