@@ -408,6 +408,134 @@ check(
   "Windows NVIDIA picks the CUDA build",
   win === "llama-b10566-bin-win-cuda-12.4-x64.zip"
 );
+// ------------------------------------------------- the GPU-sitting-idle case
+//
+// Reported: Qwen could not answer even "hi" — CPU 100%, GPU 0%. The sidecar
+// offloads 99 layers, so a 0% GPU means the GPU backend never came up and
+// the 27B was crawling on CPU — and the log line that says why was thrown
+// away. Now it is persisted, parsed, shown, and the backend is selectable.
+
+const WIN_ASSETS = [
+  "llama-b10566-bin-win-cuda-12.4-x64.zip",
+  "llama-b10566-bin-win-vulkan-x64.zip",
+  "llama-b10566-bin-win-cpu-x64.zip",
+  "llama-b10566-bin-ubuntu-x64.tar.gz",
+  "llama-b10566-bin-ubuntu-vulkan-x64.tar.gz",
+  "llama-b10566-bin-macos-arm64.tar.gz",
+];
+check(
+  "a Vulkan choice wins over a detected NVIDIA GPU",
+  shared.pickLlamaAsset(WIN_ASSETS, {
+    platform: "win32",
+    arch: "x64",
+    gpu: "nvidia",
+    build: "vulkan",
+  }) === "llama-b10566-bin-win-vulkan-x64.zip",
+  "the escape hatch when the CUDA build refuses the driver"
+);
+check(
+  "a CPU choice wins over everything",
+  shared.pickLlamaAsset(WIN_ASSETS, {
+    platform: "win32",
+    arch: "x64",
+    gpu: "nvidia",
+    build: "cpu",
+  }) === "llama-b10566-bin-win-cpu-x64.zip"
+);
+check(
+  "auto is unchanged when no override is set",
+  shared.pickLlamaAsset(WIN_ASSETS, {
+    platform: "win32",
+    arch: "x64",
+    gpu: "nvidia",
+  }) === "llama-b10566-bin-win-cuda-12.4-x64.zip"
+);
+check(
+  "there is no CUDA ubuntu asset, so cuda on Linux lands on Vulkan",
+  shared.pickLlamaAsset(WIN_ASSETS, {
+    platform: "linux",
+    arch: "x64",
+    gpu: "nvidia",
+    build: "cuda",
+  }) === "llama-b10566-bin-ubuntu-vulkan-x64.tar.gz",
+  "Vulkan drives NVIDIA too"
+);
+check(
+  "macOS has one build no matter what is chosen",
+  shared.pickLlamaAsset(WIN_ASSETS, {
+    platform: "darwin",
+    arch: "arm64",
+    gpu: "metal",
+    build: "vulkan",
+  }) === "llama-b10566-bin-macos-arm64.tar.gz"
+);
+
+const engineLib = await load("src/lib/local-engine.ts");
+check(
+  "the offload line settles it: GPU in use",
+  (() => {
+    const r = engineLib.parseGpuLog(
+      "llama-server: loading model\nllama_model_loader: offloaded 36/36 layers to GPU (CUDA)\n"
+    );
+    return r.inUse === true && r.backend === "CUDA" && r.offloaded === "36/36";
+  })()
+);
+check(
+  "offloaded 0 layers is a confirmed CPU run",
+  engineLib.parseGpuLog("offloaded 0/36 layers to GPU").inUse === false
+);
+check(
+  "a backend failure with no offload line is a confirmed CPU fallback",
+  (() => {
+    const r = engineLib.parseGpuLog(
+      "CUDA error: driver on the system is too old (version 12.0)\nCUDA: not available\n"
+    );
+    return r.inUse === false && /driver on the system is too old/.test(r.failedLine ?? "");
+  })(),
+  "the exact line is what the user needs to fix the driver"
+);
+check(
+  "a young log is unknown, not CPU",
+  engineLib.parseGpuLog("llama-server: serving on http://127.0.0.1:18765").inUse === null
+);
+check(
+  "the engine tees its stderr to a log file",
+  /createWriteStream\(engineLogPath\(\)/.test(engineSrc),
+  "before this the 'CUDA failed, using CPU' line was discarded after 400 chars"
+);
+check(
+  "status reports where the compute went",
+  /gpu: await buildGpuState\(running\)/.test(engineSrc) &&
+    /Running on the CPU/.test(engineSrc)
+);
+check(
+  "the panel says GPU not in use when the log proves the fallback",
+  /GPU not in use/.test(localUi) && /Engine backend/.test(localUi)
+);
+check(
+  "the panel can switch the backend",
+  /ENGINE_BUILDS/.test(localUi) && /setBackend\(b\.id\)/.test(localUi) &&
+    /extra: spec\.extra, build \}/.test(localUi)
+);
+check(
+  "the panel shows the engine log",
+  /Engine log \(last/.test(localUi) && /logTail\.join/.test(localUi)
+);
+check(
+  "a chosen build that is not installed asks for a Download",
+  /does not match|Click Download in Settings to fetch/.test(engineSrc)
+);
+check(
+  "first launch on a GPU machine starts flash attention on",
+  /detectGpu\(\) !== "none"/.test(engineSrc) &&
+    /\[\.\.\.base\.enabled, "flash"\]/.test(engineSrc),
+  "the preset blurb says leave it off only on CPU — the default disagreed"
+);
+check(
+  "a flash-attention startup failure retries once without it",
+  /spec\.enabled\.includes\("flash"\)/.test(engineSrc) &&
+    /id !== "flash"/.test(engineSrc)
+);
 check("download percent is rounded", shared.downloadPercent(40, 100) === 40);
 check(
   "the route downloads through the in-app engine",
@@ -699,6 +827,116 @@ check(
   "the route never auto-fails over to the other Ox host",
   !/order: OxHost\[\]/.test(read("src/lib/providers.ts")) &&
     /Only the host the user picked/.test(read("src/lib/providers.ts"))
+);
+
+console.log("\n11. The Ox Alpha trial ended: GLM 5.3 Flash (OpenRouter) and the free Zen Flash");
+
+const glm = models.MODELS.find((m) => m.id === "glm-5.3-flash");
+const free = models.MODELS.find((m) => m.id === "deepseek-v4-flash-free");
+check("GLM 5.3 Flash is in the catalog", Boolean(glm));
+check(
+  "its wire id is the official OpenRouter slug",
+  glm?.apiModel === "z-ai/glm-5.3-flash",
+  "openrouter.ai/z-ai/glm-5.3-flash"
+);
+check("it is its own provider (openrouter), not a second Ox entry", glm?.provider === "openrouter");
+check(
+  "it keeps the open tool limits — it IS the model Ox Alpha previewed",
+  glm?.openToolLimits === true
+);
+check("it is a native VLM like Ox", glm?.vision === "native");
+check("DeepSeek V4 Flash Free is in the catalog", Boolean(free));
+check("the free lane rides the opencode (Zen) provider", free?.provider === "opencode");
+check(
+  "the free lane is pinned to Zen — it does not exist on OpenRouter",
+  free?.fixedHost === "zen" && free?.apiModel === "deepseek-v4-flash-free"
+);
+check("Ox Alpha is untouched by the new entries", models.MODELS.filter((m) => m.id === "ox-alpha").length === 1);
+
+const glmResolved = providers.resolveChatTarget("glm-5.3-flash", {
+  openrouterApiKey: "sk-or-v1-test",
+});
+check("GLM resolves with an OpenRouter key", glmResolved.ok);
+check(
+  "and hits openrouter.ai",
+  glmResolved.ok && glmResolved.target.baseUrl.includes("openrouter.ai/api/v1"),
+  glmResolved.ok ? glmResolved.target.baseUrl : ""
+);
+check(
+  "and sends z-ai/glm-5.3-flash on the wire",
+  glmResolved.ok && glmResolved.target.apiModel === "z-ai/glm-5.3-flash"
+);
+check(
+  "OpenRouter asks for a referer header on GLM too",
+  glmResolved.ok && providers.completionHeaders(glmResolved.target)["HTTP-Referer"]
+);
+check(
+  "GLM is refused without the OpenRouter key",
+  !providers.resolveChatTarget("glm-5.3-flash", { opencodeApiKey: "sk-zen-1" }).ok
+);
+
+const freeResolved = providers.resolveChatTarget("deepseek-v4-flash-free", {
+  opencodeApiKey: "sk-zen-1",
+});
+check("the free Flash resolves with a Zen key", freeResolved.ok);
+check(
+  "and hits opencode.ai/zen",
+  freeResolved.ok && freeResolved.target.baseUrl.includes("opencode.ai/zen/v1"),
+  freeResolved.ok ? freeResolved.target.baseUrl : ""
+);
+check(
+  "and sends deepseek-v4-flash-free on the wire, not the Ox id",
+  freeResolved.ok && freeResolved.target.apiModel === "deepseek-v4-flash-free"
+);
+check(
+  "the Zen pin wins even when the Ox button points at OpenRouter",
+  providers.resolveChatTarget("deepseek-v4-flash-free", {
+    oxHost: "openrouter",
+    opencodeApiKey: "sk-zen-1",
+    openrouterApiKey: "sk-or-v1-test",
+  }).target.apiModel === "deepseek-v4-flash-free"
+);
+check(
+  "the free Flash is refused with only an OpenRouter key",
+  !providers.resolveChatTarget("deepseek-v4-flash-free", {
+    oxHost: "openrouter",
+    openrouterApiKey: "sk-or-v1-test",
+  }).ok
+);
+check(
+  "the client key check agrees: GLM wants the OpenRouter key",
+  models.hasKeyForModel("glm-5.3-flash", { openrouterKey: "sk-or-v1" }) &&
+    !models.hasKeyForModel("glm-5.3-flash", { opencodeKey: "sk-zen-1" })
+);
+check(
+  "and the free Flash wants the Zen key regardless of the Ox button",
+  models.hasKeyForModel("deepseek-v4-flash-free", { opencodeKey: "sk-zen-1", oxHost: "openrouter" }) &&
+    !models.hasKeyForModel("deepseek-v4-flash-free", { openrouterKey: "sk-or-v1", oxHost: "openrouter" })
+);
+
+check(
+  "GLM is budgeted at Z.ai list price, not the launch discount",
+  pricing.MODEL_RATES["glm-5.3-flash"]?.input === 0.15 &&
+    pricing.MODEL_RATES["glm-5.3-flash"]?.output === 0.5,
+  "the 50% discount ends 2026-09-09; the cap must never undercount"
+);
+check("the free Flash costs nothing in the rate table", pricing.MODEL_RATES["deepseek-v4-flash-free"]?.input === 0 && pricing.MODEL_RATES["deepseek-v4-flash-free"]?.output === 0);
+check(
+  "GLM replies are billed, so the cost chip can show real money",
+  pricing.estimateCost(
+    { prompt_tokens: 1_000_000, completion_tokens: 1_000_000 },
+    "glm-5.3-flash",
+    "peak"
+  ) === 0.65
+);
+check(
+  "the route's resilience gates cover the new provider, not just Ox",
+  (route.match(/target\.providerId === "openrouter"/g) ?? []).length >= 9,
+  "pin/retry/empty-stream paths apply to OpenRouter too"
+);
+check(
+  "Settings says one key covers both OpenRouter models",
+  /z-ai\/glm-5\.3-flash/.test(settings)
 );
 
 console.log(

@@ -50,6 +50,43 @@ export const LLAMA_CPP_RELEASE_API = `https://api.github.com/repos/ggml-org/llam
 
 export type EngineGpu = "nvidia" | "metal" | "vulkan" | "none";
 
+/**
+ * Which llama.cpp build to run, independently of what was detected.
+ *
+ * "auto" is the default and behaves exactly as before. The others exist
+ * because a GPU can be present and still not work — an old NVIDIA driver
+ * that the CUDA build refuses, a broken Vulkan ICD — and the honest fix is
+ * a different build, not another download of the same one.
+ */
+export type EngineBuild = "auto" | "cuda" | "vulkan" | "cpu";
+
+export const ENGINE_BUILDS: { id: EngineBuild; label: string }[] = [
+  { id: "auto", label: "Auto (detect)" },
+  { id: "cuda", label: "CUDA (NVIDIA)" },
+  { id: "vulkan", label: "Vulkan" },
+  { id: "cpu", label: "CPU only" },
+];
+
+/**
+ * What the running sidecar is actually doing with the GPU, parsed from the
+ * engine's own log. `inUse: null` means "no answer yet" — the log does not
+ * prove either way — and is shown differently from a confirmed CPU run.
+ */
+export interface EngineGpuState {
+  /** What this machine reports (nvidia-smi / DRI / macOS). */
+  detected: EngineGpu;
+  /** True: layers offloaded. False: confirmed CPU. Null: unknown. */
+  inUse: boolean | null;
+  /** Backend the engine says it offloaded to, e.g. "CUDA". */
+  backend: string | null;
+  /** e.g. "36/36" layers. */
+  offloaded: string | null;
+  /** One human line for the panel. */
+  note: string;
+  /** Last lines of the engine log, oldest first. */
+  logTail: string[];
+}
+
 export type EngineDownloadEvent =
   | {
       type: "progress";
@@ -77,6 +114,12 @@ export interface EngineStatus {
   /** What the running llama-server actually opened. Null if unknown. */
   nCtx?: number | null;
   spec?: SidecarSpecState;
+  /**
+   * Where the compute actually went, from the engine's own log. The
+   * "GPU 0%, CPU 100%" case used to be invisible: a CPU fallback logged a
+   * line the app threw away.
+   */
+  gpu?: EngineGpuState;
 }
 
 const ALLOWED_HOSTS = new Set([
@@ -147,44 +190,53 @@ export function downloadPercent(completed: number, total: number): number | null
  */
 export function pickLlamaAsset(
   assets: string[],
-  opts: { platform: string; arch: string; gpu: EngineGpu }
+  opts: {
+    platform: string;
+    arch: string;
+    gpu: EngineGpu;
+    /** User override from Settings. "auto" (or absent) detects. */
+    build?: EngineBuild;
+  }
 ): string | null {
   const names = assets.filter((n) => typeof n === "string" && n.length > 0);
   const has = (re: RegExp) => names.find((n) => re.test(n)) ?? null;
   const { platform, arch, gpu } = opts;
+  const build = opts.build ?? "auto";
   const x64 = arch === "x64" || arch === "x86_64";
   const arm = arch === "arm64" || arch === "aarch64";
 
+  const cudaWin = () =>
+    has(/llama-b\d+-bin-win-cuda-12\.4-x64\.zip$/) ??
+    has(/llama-b\d+-bin-win-cuda-\d+\.\d+-x64\.zip$/);
+  const vulkanWin = () => has(/llama-b\d+-bin-win-vulkan-x64\.zip$/);
+  const cpuWin = () => has(/llama-b\d+-bin-win-cpu-x64\.zip$/);
+  const vulkanLinux = () =>
+    has(/llama-b\d+-bin-ubuntu-vulkan-x64\.tar\.gz$/) ??
+    has(/llama-b\d+-bin-ubuntu-x64\.tar\.gz$/);
+  const cpuLinux = () => has(/llama-b\d+-bin-ubuntu-x64\.tar\.gz$/);
+
   if (platform === "darwin") {
+    // Metal is compiled in; there is no separate build to choose.
     if (arm) return has(/llama-b\d+-bin-macos-arm64\.tar\.gz$/);
     return has(/llama-b\d+-bin-macos-x64\.tar\.gz$/);
   }
 
   if (platform === "win32") {
-    if (gpu === "nvidia" && x64) {
-      return (
-        has(/llama-b\d+-bin-win-cuda-12\.4-x64\.zip$/) ??
-        has(/llama-b\d+-bin-win-cuda-\d+\.\d+-x64\.zip$/)
-      );
-    }
-    if (x64) {
-      return (
-        has(/llama-b\d+-bin-win-vulkan-x64\.zip$/) ??
-        has(/llama-b\d+-bin-win-cpu-x64\.zip$/)
-      );
-    }
+    if (build === "cuda" && x64) return cudaWin() ?? vulkanWin() ?? cpuWin();
+    if (build === "vulkan" && x64) return vulkanWin() ?? cpuWin();
+    if (build === "cpu" && x64) return cpuWin();
+    if (gpu === "nvidia" && x64) return cudaWin();
+    if (x64) return vulkanWin() ?? cpuWin();
     if (arm) return has(/llama-b\d+-bin-win-cpu-arm64\.zip$/);
   }
 
   if (platform === "linux") {
     if (arm) return has(/llama-b\d+-bin-ubuntu-arm64\.tar\.gz$/);
-    if (gpu === "vulkan" || gpu === "nvidia") {
-      return (
-        has(/llama-b\d+-bin-ubuntu-vulkan-x64\.tar\.gz$/) ??
-        has(/llama-b\d+-bin-ubuntu-x64\.tar\.gz$/)
-      );
-    }
-    return has(/llama-b\d+-bin-ubuntu-x64\.tar\.gz$/);
+    // There is no separate CUDA ubuntu asset; Vulkan also drives NVIDIA.
+    if ((build === "cuda" || build === "vulkan") && x64) return vulkanLinux();
+    if (build === "cpu" && x64) return cpuLinux();
+    if (gpu === "vulkan" || gpu === "nvidia") return vulkanLinux();
+    return cpuLinux();
   }
 
   return null;
@@ -248,6 +300,8 @@ export const SPEC_PRESETS: SpecPreset[] = [
 export interface SidecarSpecState {
   enabled: string[];
   extra: string[];
+  /** Which llama.cpp build to run. Absent means "auto (detect)". */
+  build?: EngineBuild;
 }
 
 export function defaultSpecState(): SidecarSpecState {

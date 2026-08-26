@@ -1206,7 +1206,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          * so Direct Mode cannot fade. DeepSeek still gets the tail-only
          * copy (cache prefix).
          */
-        if (target.providerId === "opencode") {
+        if (target.providerId === "opencode" || target.providerId === "openrouter") {
           pinPluginDirectivesOnFirstSystem(transcript, pluginDirectives);
         }
 
@@ -1687,7 +1687,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           await refreshFileTree();
         }
 
-        if (target.providerId === "opencode") {
+        if (target.providerId === "opencode" || target.providerId === "openrouter") {
           pinPluginDirectivesOnFirstSystem(transcript, pluginDirectives);
         }
 
@@ -1877,7 +1877,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           appendPluginDirectives();
           // Ox ignores the tail copy after a few rounds. Re-pin every
           // round so a long agent loop cannot fade Direct Mode.
-          if (target.providerId === "opencode") {
+          if (target.providerId === "opencode" || target.providerId === "openrouter") {
             pinPluginDirectivesOnFirstSystem(transcript, pluginDirectives);
           }
 
@@ -1999,7 +1999,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           }
           // Compact returns a new array. Re-pin the copy that actually
           // goes on the wire so Ox cannot lose MAXIMUM PRIORITY.
-          if (target.providerId === "opencode") {
+          if (target.providerId === "opencode" || target.providerId === "openrouter") {
             pinPluginDirectivesOnFirstSystem(
               compacted.messages,
               pluginDirectives
@@ -2099,7 +2099,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
 
           const inputChars = JSON.stringify(dsRequestBody).length;
           const retryAttempts =
-            target.providerId === "opencode"
+            target.providerId === "opencode" || target.providerId === "openrouter"
               ? OPENCODE_RETRY.attempts
               : undefined;
 
@@ -2122,7 +2122,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 runSignal
               ),
             {
-              ...(target.providerId === "opencode" ? OPENCODE_RETRY : {}),
+              ...((target.providerId === "opencode" || target.providerId === "openrouter") ? OPENCODE_RETRY : {}),
               signal: runSignal,
               onAttempt: ({ attempt: n, attempts }) => {
                 send({
@@ -2210,7 +2210,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
            * tool calls learned from the history and we execute those. Either
            * way the task survives instead of a hard stop mid-run.
            */
-          if (!dsResponse.ok && target.providerId === "opencode") {
+          if (!dsResponse.ok && (target.providerId === "opencode" || target.providerId === "openrouter")) {
             earlyErrText = await dsResponse.text().catch(() => "");
             const rejectedDetail = (() => {
               try {
@@ -2656,7 +2656,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
            * finish_reason — a real empty `stop` is left alone.
            */
           if (
-            target.providerId === "opencode" &&
+            (target.providerId === "opencode" || target.providerId === "openrouter") &&
             emptyStreamRetries < 2 &&
             !roundContent &&
             !roundReasoning &&
@@ -2697,7 +2697,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
            * it stays resumable.
            */
           if (
-            target.providerId === "opencode" &&
+            (target.providerId === "opencode" || target.providerId === "openrouter") &&
             emptyStreamRetries >= 2 &&
             !roundContent &&
             !roundReasoning &&

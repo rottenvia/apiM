@@ -5,10 +5,12 @@ import { QWEN_38_27B_ID } from "@/lib/models";
 import {
   DEFAULT_LOCAL_API_MODEL,
   DEFAULT_LOCAL_BASE_URL,
+  ENGINE_BUILDS,
   SIDECAR_CTX,
   SPEC_PRESETS,
   defaultSpecState,
   formatBytes,
+  type EngineBuild,
   type EngineDownloadEvent,
   type EngineStatus,
   type SidecarSpecState,
@@ -35,6 +37,14 @@ function emptyStatus(): EngineStatus {
     hint: "Checking this PC…",
     nCtx: null,
     spec: defaultSpecState(),
+    gpu: {
+      detected: "none",
+      inUse: null,
+      backend: null,
+      offloaded: null,
+      note: "Checking this PC…",
+      logTail: [],
+    },
   };
 }
 
@@ -140,6 +150,18 @@ export function LocalModelRuntime({
   }, [postAction]);
 
   const spec: SidecarSpecState = status.spec ?? defaultSpecState();
+
+  const setBackend = useCallback(
+    (build: EngineBuild) => {
+      if ((spec.build ?? "auto") === build) return;
+      void postAction(
+        "set-opts",
+        { enabled: spec.enabled, extra: spec.extra, build },
+        "opts"
+      );
+    },
+    [postAction, spec.build, spec.enabled, spec.extra]
+  );
 
   const togglePreset = useCallback(
     (id: string) => {
@@ -321,6 +343,28 @@ export function LocalModelRuntime({
         </p>
       )}
 
+      {status.gpu && (
+        <p
+          className={`mt-1 text-[11px] leading-4 ${
+            status.gpu.inUse === true
+              ? "text-success"
+              : status.gpu.inUse === false
+                ? "text-danger"
+                : "text-text-muted"
+          }`}
+        >
+          <span className="font-medium">
+            {status.gpu.inUse === true
+              ? "GPU active"
+              : status.gpu.inUse === false
+                ? "GPU not in use"
+                : "GPU"}
+            :{" "}
+          </span>
+          {status.gpu.note}
+        </p>
+      )}
+
       {status.ggufBytes > 0 && !status.ggufReady && !pull && (
         <p className="mt-1 text-[11px] text-text-muted">
           {formatBytes(status.ggufBytes)} of {formatBytes(status.ggufExpected)}{" "}
@@ -436,7 +480,48 @@ export function LocalModelRuntime({
       </div>
 
       {status.ggufReady && (
-        <div className="mt-3 border-t border-border pt-2.5">
+        <>
+          <div className="mt-3 border-t border-border pt-2.5">
+            <p className="text-[12px] font-medium text-text-primary">
+              Engine backend
+            </p>
+            <p className="mt-0.5 text-[11px] leading-4 text-text-muted">
+              Which llama.cpp build runs the 27B. Auto picks from the detected
+              GPU. If the GPU sits idle (GPU 0% in Task Manager), the log
+              below says why — switch the build, Download, then Restart.
+            </p>
+            <div className="mt-2 grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+              {ENGINE_BUILDS.map((b) => {
+                const active = (spec.build ?? "auto") === b.id;
+                return (
+                  <button
+                    key={b.id}
+                    type="button"
+                    onClick={() => setBackend(b.id)}
+                    disabled={busy !== null}
+                    className={`rounded-lg border px-2.5 py-1.5 text-left text-[12px] font-medium transition-all duration-150 disabled:opacity-40 ${
+                      active
+                        ? "border-accent/30 bg-accent/15 text-accent-light"
+                        : "border-border bg-bg-secondary text-text-secondary hover:border-border-light hover:text-text-primary"
+                    }`}
+                  >
+                    {b.label}
+                  </button>
+                );
+              })}
+            </div>
+            {status.gpu && status.gpu.logTail.length > 0 && (
+              <details className="mt-2">
+                <summary className="cursor-pointer text-[11px] font-medium text-text-muted">
+                  Engine log (last {status.gpu.logTail.length} lines)
+                </summary>
+                <pre className="mt-1 max-h-40 overflow-auto rounded-lg bg-bg-secondary p-2 font-mono text-[11px] leading-4 text-text-secondary">
+                  {status.gpu.logTail.join("\n")}
+                </pre>
+              </details>
+            )}
+          </div>
+          <div className="mt-3 border-t border-border pt-2.5">
           <p className="text-[12px] font-medium text-text-primary">
             Spec optimizations
           </p>
@@ -517,6 +602,7 @@ export function LocalModelRuntime({
             </button>
           </div>
         </div>
+        </>
       )}
     </div>
   );
