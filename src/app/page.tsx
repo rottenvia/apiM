@@ -2566,10 +2566,12 @@ export default function Home() {
         hasKeys={hasKeys}
         missingKeyLabel={
           getModel(model).provider === "opencode"
-            ? oxHostInfo(oxHost).label
-            : getModel(model).provider === "local"
-              ? "local server"
-              : "DeepSeek"
+            ? oxHostInfo(getModel(model).fixedHost ?? oxHost).label
+            : getModel(model).provider === "openrouter"
+              ? "OpenRouter"
+              : getModel(model).provider === "local"
+                ? "local server"
+                : "DeepSeek"
         }
         model={model}
         thinkingEffort={thinkingEffort}
