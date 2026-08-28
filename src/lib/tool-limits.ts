@@ -22,6 +22,12 @@ export const DEFAULT_DOC_CHARS = 800_000;
 export const DEFAULT_SEARCH_RESULTS = 8;
 export const DEFAULT_SEARCH_SNIPPET = 700;
 export const DEFAULT_FETCH_FIND_MATCHES = 20;
+/**
+ * How many agent rounds one reply may take.
+ *
+ * A guard against a model that never stops calling tools, not a work budget.
+ */
+export const DEFAULT_AGENT_ROUNDS = 64;
 
 /**
  * Open ceilings for Ox Alpha.
@@ -42,6 +48,19 @@ export const OPEN_DOC_CHARS = 8_000_000;
 export const OPEN_SEARCH_RESULTS = 20;
 export const OPEN_SEARCH_SNIPPET = 4_000;
 export const OPEN_FETCH_FIND_MATCHES = 200;
+/**
+ * Rounds for a model with open ceilings and a 1M window.
+ *
+ * 64 was fine while every round did a batch of work. GLM 5.3 Flash does not
+ * behave that way: it reads one file per call, so a middling codebase burns
+ * forty rounds on reading alone and the reply dies at the guard with the
+ * task half-done — reported as "it makes like 50 calls for reads so it
+ * can't read the whole thing". The batching fixes cut the calls; this makes
+ * sure a model that still prefers small steps runs out of task before it
+ * runs out of rounds. Stop, the spending limit and the context window all
+ * still apply.
+ */
+export const OPEN_AGENT_ROUNDS = 256;
 
 export interface ToolLimits {
   readFiles: number;
@@ -56,6 +75,7 @@ export interface ToolLimits {
   searchResults: number;
   searchSnippet: number;
   fetchFindMatches: number;
+  agentRounds: number;
   open: boolean;
 }
 
@@ -72,6 +92,7 @@ export const DEFAULT_TOOL_LIMITS: ToolLimits = {
   searchResults: DEFAULT_SEARCH_RESULTS,
   searchSnippet: DEFAULT_SEARCH_SNIPPET,
   fetchFindMatches: DEFAULT_FETCH_FIND_MATCHES,
+  agentRounds: DEFAULT_AGENT_ROUNDS,
   open: false,
 };
 
@@ -88,6 +109,7 @@ export const OPEN_TOOL_LIMITS: ToolLimits = {
   searchResults: OPEN_SEARCH_RESULTS,
   searchSnippet: OPEN_SEARCH_SNIPPET,
   fetchFindMatches: OPEN_FETCH_FIND_MATCHES,
+  agentRounds: OPEN_AGENT_ROUNDS,
   open: true,
 };
 
@@ -96,6 +118,11 @@ export function modelHasOpenToolLimits(
   id: string | null | undefined
 ): boolean {
   return getModel(id).openToolLimits === true;
+}
+
+/** Round guard for this model. */
+export function agentRoundsFor(id: string | null | undefined): number {
+  return toolLimitsFor(id).agentRounds;
 }
 
 export function toolLimitsFor(id: string | null | undefined): ToolLimits {

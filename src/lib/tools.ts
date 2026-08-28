@@ -36,7 +36,9 @@ import {
 import {
   deleteFile,
   editFile,
+  globPattern,
   listFiles,
+  looksLikeGlob,
   readFile,
   readImageAsDataUrl,
   readFileBytes,
@@ -265,14 +267,18 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
       description:
         "Read several files in one step. Prefer this over calling read_file " +
         "repeatedly — each separate call costs a full round trip, and you " +
-        "usually know up front which files you need.",
+        "usually know up front which files you need. Paths may be glob " +
+        "patterns: \"src/lib/*.ts\" or \"src/app/api/*\" reads the whole " +
+        "directory in one call, so you never have to list and then read.",
       parameters: {
         type: "object",
         properties: {
           paths: {
             type: "array",
             items: { type: "string" },
-            description: `File paths to read, up to ${MAX_READ_FILES}.`,
+            description:
+              `File paths to read, up to ${MAX_READ_FILES}. A path may be a ` +
+              `glob such as "src/**" or "*.ts".`,
           },
         },
         required: ["paths"],
@@ -1351,7 +1357,7 @@ export function workspaceToolsFor(
         function: {
           ...tool.function,
           description:
-            "Read one file in the workspace. Always read a file before editing it, so the text you replace matches exactly. The whole file is returned — it is not truncated. For a huge file, use start_line and end_line if you only need one part.",
+            "Read one file in the workspace. Always read a file before editing it, so the text you replace matches exactly. The whole file is returned in ONE call — it is not truncated, so never walk a file in slices; start_line and end_line exist only for when you genuinely want a single region of a huge file. Reading several files? Use read_files (it takes globs) rather than one call each.",
         },
       };
     }
@@ -1361,14 +1367,15 @@ export function workspaceToolsFor(
         function: {
           ...tool.function,
           description:
-            "Read several files in one step. Prefer this over calling read_file repeatedly. No per-call cap — read as many paths as you need.",
+            "Read several files in one step, and prefer it strongly over calling read_file repeatedly — one call per file is how a task runs out of rounds before it runs out of work. No per-call cap. Paths may be glob patterns, so \"src/lib/*.ts\" or \"src/app/api/*\" reads a whole directory in a single call.",
           parameters: {
             ...tool.function.parameters,
             properties: {
               paths: {
                 type: "array",
                 items: { type: "string" },
-                description: "File paths to read. No per-call cap.",
+                description:
+                  "File paths to read, or glob patterns such as \"src/**\" or \"*.ts\". No per-call cap.",
               },
             },
           },
@@ -1641,6 +1648,41 @@ export async function runTool(
           };
         }
 
+        /*
+         * Patterns are expanded before anything is read.
+         *
+         * "read every route file" was three rounds of work: list_files,
+         * decide, then read_files with the paths copied out by hand — and a
+         * model that does not batch does it one file per call, which is how
+         * a reply burns forty rounds on reading. `src/app/api/*` is now one
+         * call, and the paths it expands to are listed in the result so the
+         * model can see exactly what it got.
+         */
+        const expanded: string[] = [];
+        const emptyGlobs: string[] = [];
+        let listing: { path: string }[] | null = null;
+        for (const entry of raw) {
+          const requested = String(entry);
+          if (!looksLikeGlob(requested)) {
+            expanded.push(requested);
+            continue;
+          }
+          const pattern = globPattern(requested);
+          if (!pattern) {
+            expanded.push(requested);
+            continue;
+          }
+          listing ??= await listFiles(workspaceId);
+          const matched = listing
+            .map((f) => f.path)
+            .filter((path) => pattern.test(path));
+          if (matched.length === 0) emptyGlobs.push(requested);
+          expanded.push(...matched);
+        }
+        // Same file asked for twice — directly and via a pattern — is read
+        // once. Order is the order it was first asked for.
+        const requestedPaths = [...new Set(expanded)];
+
         // Capped so one call can't pull the whole workspace into context.
         //
         // Was 10, which is fewer files than a small project has. Asked to
@@ -1649,7 +1691,16 @@ export async function runTool(
         // on, and the answer covered a third of the project. The cap exists
         // to stop a runaway call, not to ration ordinary reading, so it is
         // set where a real request will not hit it.
-        const paths = raw.slice(0, limits.readFiles).map((p) => String(p));
+        const paths = requestedPaths.slice(0, limits.readFiles);
+        if (paths.length === 0) {
+          return {
+            ok: false,
+            content:
+              `Error: nothing matched ${emptyGlobs.join(", ")}. Run ` +
+              `list_files (or search_files) and read the paths it reports.`,
+            summary: "No file matched the pattern",
+          };
+        }
         const parts: string[] = [];
         let read = 0;
 
@@ -1686,12 +1737,19 @@ export async function runTool(
           }
         }
 
-        if (raw.length > paths.length) {
+        if (emptyGlobs.length) {
+          parts.push(
+            `[No file matched: ${emptyGlobs.join(", ")}. Check the pattern ` +
+              `with list_files or search_files.]`
+          );
+        }
+
+        if (requestedPaths.length > paths.length) {
           // Named explicitly, with an instruction. A bare "ignored" note was
           // treated as commentary: the model carried on and answered as if it
           // had read everything, so files silently missing from the answer
           // looked like the agent giving up early.
-          const dropped = raw.slice(paths.length).map((p) => String(p));
+          const dropped = requestedPaths.slice(paths.length);
           parts.push(
             `[NOT READ — ${dropped.length} path(s) exceeded the ${limits.readFiles}-per-call limit: ` +
               `${dropped.join(", ")}. ` +
