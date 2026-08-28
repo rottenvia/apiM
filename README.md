@@ -61,7 +61,7 @@ The executable will be in the `dist` folder. Just double-click to run!
 npm test
 ```
 
-Runs every suite — currently 2,386 checks across 54 suites — without calling
+Runs every suite — currently 2,447 checks across 55 suites — without calling
 the paid API; `npm run test:real` does that and is opt-in.
 
 ```bash

@@ -105,61 +105,187 @@ export function parsePatch(patch: string): PatchHunk[] {
   return hunks;
 }
 
-/** Where a hunk's expected lines actually sit in the file, or -1. */
-function locate(fileLines: string[], expected: string[], hint: number): number {
-  if (expected.length === 0) return -1;
+/**
+ * Where a hunk's expected lines sit, or -1.
+ *
+ * Two passes. Exact content first, because that is unambiguous. Then the
+ * same comparison ignoring leading indentation, because a hunk hand-built
+ * from a numbered read is routinely off by the gutter or by a tab/space
+ * conversion — and rejecting the whole surgery over that costs a round to
+ * learn nothing. A loose match is reported as loose; it is never silent.
+ */
+function locate(
+  fileLines: string[],
+  expected: string[],
+  hint: number
+): { at: number; exact: boolean } {
+  if (expected.length === 0) return { at: -1, exact: true };
 
-  const matchesAt = (index: number): boolean => {
+  const matchesAt = (index: number, loose: boolean): boolean => {
     if (index < 0 || index + expected.length > fileLines.length) return false;
     for (let i = 0; i < expected.length; i++) {
-      if (fileLines[index + i] !== expected[i]) return false;
+      const a = fileLines[index + i];
+      const b = expected[i];
+      if (loose ? a.trim() !== b.trim() : a !== b) return false;
     }
     return true;
   };
 
-  // The stated position first — correct in the common case and unambiguous.
-  const hinted = hint - 1;
-  if (matchesAt(hinted)) return hinted;
+  for (const loose of [false, true]) {
+    // The stated position first — correct in the common case and unambiguous.
+    const hinted = hint - 1;
+    if (matchesAt(hinted, loose)) return { at: hinted, exact: !loose };
 
-  // Then outward from it, so the nearest candidate wins when a file contains
-  // the same few lines more than once.
-  for (let distance = 1; distance <= fileLines.length; distance++) {
-    if (matchesAt(hinted - distance)) return hinted - distance;
-    if (matchesAt(hinted + distance)) return hinted + distance;
+    // Then outward from it, so the nearest candidate wins when a file
+    // contains the same few lines more than once.
+    for (let distance = 1; distance <= fileLines.length; distance++) {
+      if (matchesAt(hinted - distance, loose)) {
+        return { at: hinted - distance, exact: !loose };
+      }
+      if (matchesAt(hinted + distance, loose)) {
+        return { at: hinted + distance, exact: !loose };
+      }
+    }
   }
 
-  return -1;
+  return { at: -1, exact: true };
+}
+
+/** Closest thing to this hunk in the file, for the failure report. */
+function nearestCandidate(
+  fileLines: string[],
+  expected: string[]
+): { line: number; matched: number; found: string } | null {
+  const norm = (v: string) => v.trim().replace(/\s+/g, " ");
+  const target = expected.map(norm);
+  let bestScore = 0;
+  let bestAt = -1;
+  for (let i = 0; i + target.length <= fileLines.length; i++) {
+    let score = 0;
+    for (let j = 0; j < target.length; j++) {
+      if (norm(fileLines[i + j]) === target[j]) score++;
+    }
+    if (score > bestScore) {
+      bestScore = score;
+      bestAt = i;
+    }
+  }
+  if (bestAt === -1 || bestScore === 0) return null;
+
+  let firstDiff = 0;
+  while (
+    firstDiff < target.length &&
+    norm(fileLines[bestAt + firstDiff] ?? "") === target[firstDiff]
+  ) {
+    firstDiff++;
+  }
+  return {
+    line: bestAt + 1,
+    matched: bestScore,
+    found: (fileLines[bestAt + firstDiff] ?? "<end of file>").trim(),
+  };
+}
+
+/** What happened to one hunk. Reported for every hunk, always. */
+export interface HunkResult {
+  /** 1-based, in the order the hunks appear in the patch. */
+  index: number;
+  applied: boolean;
+  /** 1-based line it matched at, or null when it did not match. */
+  at: number | null;
+  /** False when it only matched with indentation ignored. */
+  exact: boolean;
+  /** First expected line, so a report names the hunk in the model's terms. */
+  head: string;
+  /** Why it failed — the nearest candidate and the first line that differs. */
+  reason?: string;
 }
 
 export interface PatchResult {
   content: string;
   hunksApplied: number;
+  hunksTotal: number;
+  /** One entry per hunk, applied or not. */
+  results: HunkResult[];
+}
+
+/** Human-readable per-hunk table. This is what the model actually reads. */
+export function formatHunkReport(results: HunkResult[]): string {
+  return results
+    .map((h) => {
+      const head = h.head ? ` ${JSON.stringify(h.head.slice(0, 60))}` : "";
+      if (h.applied) {
+        return (
+          `  hunk ${h.index}/${results.length}: applied at line ${h.at}` +
+          `${h.exact ? "" : " (matched ignoring indentation)"}${head}`
+        );
+      }
+      return (
+        `  hunk ${h.index}/${results.length}: NOT applied — expected to ` +
+        `find${head || " its context"}; ${h.reason ?? "no match"}`
+      );
+    })
+    .join("\n");
+}
+
+export class PatchReportError extends PatchError {
+  constructor(
+    message: string,
+    readonly results: HunkResult[]
+  ) {
+    super(message);
+  }
 }
 
 /**
- * Apply every hunk, or throw.
+ * Apply a unified diff.
  *
- * Hunks are applied from the bottom of the file upward, so an earlier hunk's
- * change cannot move the lines a later one was located against.
+ * Atomic by default: every hunk must find its place, or nothing is written,
+ * because a half-applied patch leaves a file in a state neither side
+ * predicted. What changed is the FAILURE: it used to name the first bad hunk
+ * and stop, so a nineteen-hunk surgery with one drifted context told you
+ * almost nothing. Now every hunk is located and reported — which applied,
+ * where, and for the ones that did not, the closest candidate and the exact
+ * line that differs.
+ *
+ * `partial: true` writes the hunks that did match and reports the rest, for
+ * when getting eighteen of nineteen in is worth more than atomicity.
  */
-export function applyPatch(original: string, patch: string): PatchResult {
+export function applyPatch(
+  original: string,
+  patch: string,
+  options: { partial?: boolean } = {}
+): PatchResult {
   const hunks = parsePatch(patch);
   const fileLines = original.split("\n");
 
-  // Locate everything before changing anything: a hunk that cannot be placed
-  // must abort the whole patch, not leave the file half-modified.
+  // Locate everything before changing anything, so the report describes the
+  // file as the model last saw it rather than one already half-edited.
   const placed: { at: number; hunk: PatchHunk }[] = [];
+  const results: HunkResult[] = [];
+
   for (const [i, hunk] of hunks.entries()) {
-    const at = locate(fileLines, hunk.expected, hunk.startsAt);
+    const head = hunk.expected.find((l) => l.trim() !== "") ?? "";
+    const { at, exact } = locate(fileLines, hunk.expected, hunk.startsAt);
     if (at === -1) {
-      const preview = hunk.expected.slice(0, 3).join("\n");
-      throw new PatchError(
-        `Hunk ${i + 1} does not match the file. It expected to find:\n` +
-          `${preview}\n\nRead the file again and build the patch from its ` +
-          `current contents — something has changed since you last saw it.`
-      );
+      const near = nearestCandidate(fileLines, hunk.expected);
+      results.push({
+        index: i + 1,
+        applied: false,
+        at: null,
+        exact: false,
+        head,
+        reason: near
+          ? `closest match is line ${near.line} where ${near.matched} of ` +
+            `${hunk.expected.length} lines agree; first difference there is ` +
+            `${JSON.stringify(near.found.slice(0, 60))}`
+          : `nothing in the file resembles this hunk — check the path and ` +
+            `re-read the region`,
+      });
+      continue;
     }
     placed.push({ at, hunk });
+    results.push({ index: i + 1, applied: true, at: at + 1, exact, head });
   }
 
   // Overlapping hunks would corrupt each other.
@@ -167,10 +293,23 @@ export function applyPatch(original: string, patch: string): PatchResult {
   for (let i = 1; i < sorted.length; i++) {
     const prev = sorted[i - 1];
     if (prev.at + prev.hunk.expected.length > sorted[i].at) {
-      throw new PatchError(
-        "Two hunks overlap the same lines. Combine them into one hunk."
+      throw new PatchReportError(
+        `Two hunks overlap the same lines (around line ${sorted[i].at + 1}). ` +
+          `Combine them into one hunk.\n\n${formatHunkReport(results)}`,
+        results
       );
     }
+  }
+
+  const failed = results.filter((r) => !r.applied);
+  if (failed.length && !options.partial) {
+    throw new PatchReportError(
+      `${failed.length} of ${hunks.length} hunk(s) did not match, so nothing ` +
+        `was written. Full report:\n${formatHunkReport(results)}\n\n` +
+        `Fix only the hunk(s) marked NOT applied and send the patch again, ` +
+        `or set partial to true to land the ones that do match.`,
+      results
+    );
   }
 
   let out = [...fileLines];
@@ -182,5 +321,10 @@ export function applyPatch(original: string, patch: string): PatchResult {
     ];
   }
 
-  return { content: out.join("\n"), hunksApplied: hunks.length };
+  return {
+    content: out.join("\n"),
+    hunksApplied: placed.length,
+    hunksTotal: hunks.length,
+    results,
+  };
 }
