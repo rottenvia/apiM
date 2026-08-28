@@ -718,6 +718,63 @@ check(
   "the tool is for HTTP; anything else is a mistake worth naming"
 );
 
+// ------------------------------------------------------ the two new tools
+
+console.log("\n10b. analyze_log, which reads a log so the model does not have to");
+
+const LOG = [
+  "[00:01] phase=scan gain=1.20 latency=14 ok",
+  "[00:02] phase=scan gain=1.35 latency=16 ok",
+  "[00:03] phase=lock gain=2.90 latency=41 ok",
+  "[00:04] WARN backstop engaged",
+  "[00:05] phase=lock gain=3.10 latency=44 ok",
+  "[00:06] ERROR access violation at 0x00401000",
+  "[00:07] phase=lock gain=3.05 latency=48 ok",
+].join("\n");
+
+res = await call("analyze_log", { text: LOG, count: ["scan", "lock"] });
+check("analyze_log runs on pasted text", res.ok, res.summary);
+check(
+  "it reports the ratio of the tokens that were asked for",
+  /scan/.test(res.content) && /lock/.test(res.content) && /%/.test(res.content),
+  "the retro asked for phase ratios, not a wall of lines back"
+);
+check(
+  "numeric fields get a distribution, not just a mention",
+  /gain/.test(res.content) && /median|p95/.test(res.content),
+  "gain distribution was named explicitly in the retro"
+);
+check(
+  "the fault sequence is ordered and surfaced",
+  /ERROR|fault/i.test(res.content) && /access violation/.test(res.content),
+  res.summary
+);
+
+await writeFile(path.join(WS_DIR, "run.log"), LOG, "utf8");
+res = await call("analyze_log", { path: "run.log", count: ["phase"] });
+check("it can read the log out of the workspace instead", res.ok, res.summary);
+
+res = await call("analyze_log", {});
+check(
+  "with neither text nor path it says which argument is missing",
+  !res.ok && /text/.test(res.content) && /path/.test(res.content),
+  res.summary
+);
+
+console.log("\n10c. screenshot_window, whose failure path is the testable part");
+
+res = await call("screenshot_window", { title: "does-not-exist-" + Date.now() });
+check(
+  "a window that cannot be captured is an error, never a blank PNG",
+  !res.ok,
+  res.summary
+);
+check(
+  "and it tells the model not to pretend it saw anything",
+  /do not describe/i.test(res.content),
+  "a hallucinated screenshot description is worse than no screenshot"
+);
+
 // --------------------------------------------------------------- the audit
 
 console.log("\n11. The audit this suite exists to satisfy");

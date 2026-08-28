@@ -23,6 +23,13 @@ export const DEFAULT_SEARCH_RESULTS = 8;
 export const DEFAULT_SEARCH_SNIPPET = 700;
 export const DEFAULT_FETCH_FIND_MATCHES = 20;
 /**
+ * Lines of context one search hit may carry.
+ *
+ * Deep enough that a whole function body comes back with the match, which
+ * removes the follow-up read that used to cost a round per hit.
+ */
+export const DEFAULT_SEARCH_CONTEXT = 40;
+/**
  * How many agent rounds one reply may take.
  *
  * A guard against a model that never stops calling tools, not a work budget.
@@ -48,6 +55,8 @@ export const OPEN_DOC_CHARS = 8_000_000;
 export const OPEN_SEARCH_RESULTS = 20;
 export const OPEN_SEARCH_SNIPPET = 4_000;
 export const OPEN_FETCH_FIND_MATCHES = 200;
+/** Open-ceiling models can pull a whole region around each hit. */
+export const OPEN_SEARCH_CONTEXT = 200;
 /**
  * Rounds for a model with open ceilings and a 1M window.
  *
@@ -75,6 +84,7 @@ export interface ToolLimits {
   searchResults: number;
   searchSnippet: number;
   fetchFindMatches: number;
+  searchContext: number;
   agentRounds: number;
   open: boolean;
 }
@@ -92,6 +102,7 @@ export const DEFAULT_TOOL_LIMITS: ToolLimits = {
   searchResults: DEFAULT_SEARCH_RESULTS,
   searchSnippet: DEFAULT_SEARCH_SNIPPET,
   fetchFindMatches: DEFAULT_FETCH_FIND_MATCHES,
+  searchContext: DEFAULT_SEARCH_CONTEXT,
   agentRounds: DEFAULT_AGENT_ROUNDS,
   open: false,
 };
@@ -109,6 +120,7 @@ export const OPEN_TOOL_LIMITS: ToolLimits = {
   searchResults: OPEN_SEARCH_RESULTS,
   searchSnippet: OPEN_SEARCH_SNIPPET,
   fetchFindMatches: OPEN_FETCH_FIND_MATCHES,
+  searchContext: OPEN_SEARCH_CONTEXT,
   agentRounds: OPEN_AGENT_ROUNDS,
   open: true,
 };
