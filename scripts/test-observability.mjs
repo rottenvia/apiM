@@ -830,6 +830,84 @@ check(
   )
 );
 
+// ------------------------------------------- 12. the two remaining walls
+console.log("\n12. The em dash that read as a quote, and the path that was thrown away");
+
+for (const [name, script] of [
+  ["hidden launcher", hidden.hiddenLaunchScript()],
+  ["window capture", shots.windowsCaptureScript()],
+]) {
+  const offenders = [...script].filter((c) => c.charCodeAt(0) > 126);
+  check(
+    `the ${name} script is pure ASCII`,
+    offenders.length === 0,
+    offenders.length
+      ? `still contains ${JSON.stringify(offenders.join(""))}`
+      : "an em dash decoded as cp1252 becomes U+201D, which PowerShell accepts as a string delimiter"
+  );
+}
+
+check(
+  "asciiOnly folds the characters that caused it",
+  hidden.asciiOnly('a \u2014 b \u201cc\u201d \u2026') === 'a - b "c" ...',
+  "the string ended mid-sentence and the parser blamed a brace 20 lines later"
+);
+check(
+  "…and anything else non-ASCII is replaced rather than shipped",
+  hidden.asciiOnly("caf\u00e9 \u4f60").endsWith("? ?"),
+  "a silent decoding hazard is exactly what this bug was"
+);
+
+const psPath = path.join(tmp, "probe.ps1");
+await hidden.writePowerShellScript(psPath, "Write-Output 1\n");
+const psBytes = await readFile(psPath);
+check(
+  "generated PowerShell is written WITH a BOM",
+  psBytes[0] === 0xef && psBytes[1] === 0xbb && psBytes[2] === 0xbf,
+  "without it, Windows PowerShell 5.1 decodes the file as the ANSI code page"
+);
+check(
+  "the script says it is generated, so a hand-edit is not silently lost",
+  /Edits here are overwritten/.test(hidden.hiddenLaunchScript()),
+  "two rewrites produced the same error because both were overwritten before running"
+);
+
+check(
+  "a toolchain path apiM discovered survives validation",
+  (() => {
+    const abs = path.resolve("/opt/vs/MSBuild.exe");
+    runner.registerToolchainPath(abs);
+    const v = runner.validateCommand(abs, ["app.sln"], "/nonexistent-workspace");
+    return v.ok && v.command === abs;
+  })(),
+  "it printed the full path to MSBuild.exe and then spawned bare msbuild"
+);
+check(
+  "an UNregistered absolute path is still reduced to its bare name",
+  (() => {
+    const v = runner.validateCommand(
+      "/tmp/evil/msbuild.exe",
+      [],
+      "/nonexistent-workspace"
+    );
+    return v.ok && v.command === "msbuild";
+  })(),
+  "the allow-list decides WHAT runs; only apiM's own discovery decides which copy"
+);
+check(
+  "…and registration is not something a model can reach",
+  !/registerToolchainPath/.test(
+    readFileSync(path.join(ROOT, "src/lib/tools.ts"), "utf8")
+  ),
+  "no tool exposes it; build discovery is the only caller"
+);
+check(
+  "build discovery registers what vswhere found",
+  /registerToolchainPath\(msbuild\)/.test(
+    readFileSync(path.join(ROOT, "src/lib/build.ts"), "utf8")
+  )
+);
+
 await rm(tmp, { recursive: true, force: true });
 
 console.log(
