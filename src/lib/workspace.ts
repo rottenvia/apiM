@@ -632,6 +632,8 @@ export async function searchFiles(
     glob?: string;
     /** Lines of surrounding code to include with each hit. */
     context?: number;
+    /** Ceiling on that context. Raised for open-limit models. */
+    maxContext?: number;
     /** Override the default hit cap (Ox Alpha lifts this). */
     maxHits?: number;
     /** Override the per-file size skip (Ox Alpha lifts this). */
@@ -708,7 +710,18 @@ export async function searchFiles(
      * question in the search result itself, and one extra round costs far
      * more than a few lines of text.
      */
-    const context = Math.max(0, Math.min(10, options.context ?? 0));
+    /*
+     * A ten-line ceiling was too small to be useful.
+     *
+     * "For a 40-line function body I need 25-30 lines around a match, then I
+     * can edit straight from the search result without a separate read."
+     * Exactly right: context is the cheapest possible substitute for a read,
+     * so the cap now sits where a whole function fits.
+     */
+    const context = Math.max(
+      0,
+      Math.min(options.maxContext ?? 40, options.context ?? 0)
+    );
 
     for (let i = 0; i < lines.length; i++) {
       if (!matcher(lines[i])) continue;
@@ -740,14 +753,41 @@ export async function searchFiles(
 export interface ReadResult {
   path: string;
   content: string;
+  /** True when `content` is NOT the whole requested span. */
   truncated: boolean;
   size: number;
+  /** Lines in the whole file, so a partial read can be measured against it. */
+  totalLines: number;
+  /** Characters in the whole file. */
+  totalChars: number;
+  /** First line included in `content`, 1-based. */
+  firstLine: number;
+  /** Last line included in `content`, 1-based and inclusive. */
+  lastLine: number;
+  /**
+   * Where to resume, or null when there is nothing after this span.
+   *
+   * The most expensive tool behaviour reported: a big read came back short,
+   * said nothing useful about it, and the model then planned surgery against
+   * a map with holes in it. Every partial read now carries the exact line to
+   * continue from, so "read the rest" is a mechanical next call rather than
+   * a guess.
+   */
+  nextLine: number | null;
+  /** True when the caller asked for a line range rather than the file. */
+  rangeRequested: boolean;
 }
 
 export async function readFile(
   workspaceId: string,
   relative: string,
-  options: { maxChars?: number } = {}
+  options: {
+    maxChars?: number;
+    /** First line to return, 1-based. */
+    startLine?: number | null;
+    /** Last line to return, inclusive. */
+    endLine?: number | null;
+  } = {}
 ): Promise<ReadResult> {
   const target = resolveInside(workspaceId, relative);
 
@@ -777,11 +817,18 @@ export async function readFile(
         new Uint8Array(await fs.readFile(target)),
         { maxChars }
       );
+      const lines = doc.text.length ? doc.text.split("\n").length : 0;
       return {
         path: relative,
         content: doc.text,
         truncated: doc.truncated,
         size: stat.size,
+        totalLines: lines,
+        totalChars: doc.text.length,
+        firstLine: 1,
+        lastLine: lines,
+        nextLine: null,
+        rangeRequested: false,
       };
     } catch (error) {
       throw new WorkspaceError(
@@ -793,14 +840,111 @@ export async function readFile(
   }
 
   const raw = await fs.readFile(target, "utf8");
-  const truncated = raw.length > maxChars;
+  const fileLines = raw.split("\n");
+  const totalLines = fileLines.length;
+
+  /*
+   * A line range is resolved HERE, against the whole file — not by the
+   * caller against an already-capped read.
+   *
+   * That ordering is what produced "I asked for a big span and got something
+   * collapsed": the file was cut to the character budget first and the
+   * requested lines were sliced out of whatever survived, so on a 178KB
+   * source the lines past the cap did not exist to be asked for, and the
+   * answer came back short with nothing saying why.
+   */
+  const rangeRequested = options.startLine != null || options.endLine != null;
+  const from = Math.max(1, Math.trunc(options.startLine ?? 1));
+  const to = Math.min(totalLines, Math.trunc(options.endLine ?? totalLines));
+
+  if (from > totalLines) {
+    throw new WorkspaceError(
+      `${relative} has ${totalLines} lines, so line ${from} does not exist`
+    );
+  }
+  if (rangeRequested && to < from) {
+    throw new WorkspaceError(
+      `end_line (${to}) is before start_line (${from}) in ${relative}`
+    );
+  }
+
+  const wanted = fileLines.slice(from - 1, to);
+
+  /*
+   * Cut on a line boundary, never mid-line.
+   *
+   * Half a line is worse than no line: it still looks like code, so it gets
+   * copied into an edit anchor and then fails to match for a reason nobody
+   * can see. Whole lines only, and the caller is told which line it stopped
+   * at.
+   */
+  let kept = wanted;
+  let truncated = false;
+  let used = 0;
+  for (let i = 0; i < wanted.length; i++) {
+    const cost = wanted[i].length + (i === 0 ? 0 : 1);
+    if (used + cost > maxChars && i > 0) {
+      kept = wanted.slice(0, i);
+      truncated = true;
+      break;
+    }
+    used += cost;
+  }
+  // One line longer than the entire budget: return it rather than returning
+  // nothing, and still report the read as cut.
+  if (kept.length === 1 && kept[0].length > maxChars) {
+    kept = [kept[0].slice(0, maxChars)];
+    truncated = true;
+  }
+
+  const lastLine = from + kept.length - 1;
+
   return {
     path: relative,
-    content: truncated ? raw.slice(0, maxChars) : raw,
+    content: kept.join("\n"),
     truncated,
     size: stat.size,
+    totalLines,
+    totalChars: raw.length,
+    firstLine: from,
+    lastLine,
+    nextLine: lastLine < totalLines ? lastLine + 1 : null,
+    rangeRequested,
   };
 }
+
+/**
+ * The whole file, uncapped, for read-modify-write callers.
+ *
+ * `readFile` exists to put text in front of a model, so it has a character
+ * budget. Anything that reads a file, changes it and writes it BACK must not
+ * use that budget: `apply_patch` and `replace_in_files` both did, and on a
+ * file larger than the cap they wrote the truncated copy back — silently
+ * deleting everything past the limit. A read that lies costs a round; a
+ * write that lies costs the file.
+ */
+export async function readFileWhole(
+  workspaceId: string,
+  relative: string
+): Promise<{ content: string; size: number }> {
+  const target = resolveInside(workspaceId, relative);
+
+  let stat;
+  try {
+    stat = await fs.stat(target);
+  } catch {
+    throw new WorkspaceError(`No such file: ${relative}`);
+  }
+  if (!stat.isFile()) throw new WorkspaceError(`Not a file: ${relative}`);
+  if (stat.size > MAX_FILE_BYTES) {
+    throw new WorkspaceError(
+      `${relative} is too large to edit (${Math.round(stat.size / 1024)}KB)`
+    );
+  }
+
+  return { content: await fs.readFile(target, "utf8"), size: stat.size };
+}
+
 
 /**
  * Where the previous version of each file is kept.
@@ -1088,12 +1232,369 @@ export async function writeFile(
  * model is how files get silently corrupted. Ambiguity is reported back so
  * the model can supply more context instead.
  */
-export async function editFile(
+/**
+ * How the region to replace is identified.
+ *
+ * Three ways, because copying byte-exact text out of a 109KB file was
+ * costing a read per hunk — "hundreds of reads that existed only to copy
+ * whitespace". A snippet is still the default; landmarks and line numbers
+ * exist so a model that knows WHERE the block is does not have to prove it
+ * can reproduce the indentation.
+ */
+export interface EditSpec {
+  /** Classic: the exact text to replace (whitespace-tolerant, see below). */
+  oldText?: string | null;
+  /** Landmark mode: first line of the block. */
+  startAnchor?: string | null;
+  /** Landmark mode: last line of the block. Searched after the start. */
+  endAnchor?: string | null;
+  /** Landmark mode: replace the anchors too. Default true. */
+  includeAnchors?: boolean;
+  /** Line mode: first line to replace, 1-based inclusive. */
+  startLine?: number | null;
+  /** Line mode: last line to replace, 1-based inclusive. */
+  endLine?: number | null;
+  newText: string;
+  /** Show what would be replaced and write nothing. */
+  preview?: boolean;
+}
+
+export interface EditOutcome {
+  path: string;
+  /** False when this was a preview, or when nothing needed changing. */
+  replaced: boolean;
+  mode: "snippet" | "anchors" | "lines";
+  /** 1-based inclusive line span that was (or would be) replaced. */
+  startLine: number;
+  endLine: number;
+  /** Exactly what was matched, so a preview can be checked before writing. */
+  matchedText: string;
+  /** True when the match was byte-for-byte rather than whitespace-tolerant. */
+  exact: boolean;
+  preview: boolean;
+  /** Lines removed / added, for the receipt. */
+  removedLines: number;
+  addedLines: number;
+}
+
+/**
+ * Strip a line-number gutter a model copied out of a numbered read.
+ *
+ * `read_file` can return "  42 | const x = 1", and an anchor pasted from
+ * that view can never match the file. Rather than failing with "old_text not
+ * found" — the least useful sentence in this whole harness — the gutter is
+ * recognised and removed. Only when EVERY non-empty line has one, so real
+ * code containing a pipe is untouched.
+ */
+export function stripLineGutter(text: string): string {
+  const lines = text.split("\n");
+  const meaningful = lines.filter((l) => l.trim() !== "");
+  if (meaningful.length === 0) return text;
+  const gutter = /^\s*\d+\s*(?:\||:)\s?/;
+  if (!meaningful.every((l) => gutter.test(l))) return text;
+  return lines.map((l) => (l.trim() === "" ? l : l.replace(gutter, ""))).join("\n");
+}
+
+/** Line number (1-based) for a character offset. */
+function lineAt(raw: string, offset: number): number {
+  let line = 1;
+  for (let i = 0; i < offset && i < raw.length; i++) {
+    if (raw[i] === "\n") line++;
+  }
+  return line;
+}
+
+/** Character offsets of the start of every line. */
+function lineOffsets(fileLines: string[]): number[] {
+  const starts: number[] = [];
+  let at = 0;
+  for (const line of fileLines) {
+    starts.push(at);
+    at += line.length + 1;
+  }
+  return starts;
+}
+
+/**
+ * Why an anchor did not match — in enough detail to fix it in one move.
+ *
+ * "old_text not found, read the file first" is true and useless: it costs a
+ * read to learn what the tool already knows. This reports the nearest
+ * candidate, its line number, and the FIRST line that actually differs, so
+ * the next call is a correction rather than an investigation.
+ */
+export function diagnoseEditFailure(raw: string, oldText: string): string {
+  const fileLines = raw.split("\n");
+  const wanted = oldText.split("\n").filter((l, i, a) => !(i === a.length - 1 && l.trim() === ""));
+  if (wanted.length === 0) return "old_text was empty";
+
+  const notes: string[] = [];
+
+  if (raw.includes("\r\n") && !oldText.includes("\r\n")) {
+    notes.push(
+      "the file uses CRLF line endings and old_text uses LF — that alone " +
+        "cannot cause a miss here (line endings are normalised), but it " +
+        "means the text was copied from somewhere else"
+    );
+  }
+
+  const first = wanted.find((l) => l.trim() !== "") ?? wanted[0];
+  const key = first.trim();
+  const candidates: number[] = [];
+  for (let i = 0; i < fileLines.length; i++) {
+    if (fileLines[i].trim() === key) candidates.push(i);
+  }
+
+  if (candidates.length === 0) {
+    // Nothing even starts the same. Score windows by how many lines match,
+    // so "close but drifted" reads differently from "not in this file".
+    let bestScore = 0;
+    let bestAt = -1;
+    const norm = (v: string) => v.trim().replace(/\s+/g, " ");
+    const target = wanted.map(norm);
+    for (let i = 0; i + target.length <= fileLines.length; i++) {
+      let score = 0;
+      for (let j = 0; j < target.length; j++) {
+        if (norm(fileLines[i + j]) === target[j]) score++;
+      }
+      if (score > bestScore) {
+        bestScore = score;
+        bestAt = i;
+      }
+    }
+    if (bestAt === -1 || bestScore === 0) {
+      return (
+        `no line in the file matches even the first line of old_text ` +
+        `(${JSON.stringify(key.slice(0, 80))}). This text is not in this ` +
+        `file — read the file first, or search_files for a distinctive ` +
+        `token, and copy the exact text` +
+        (notes.length ? `. Note: ${notes.join("; ")}` : "")
+      );
+    }
+    return (
+      `closest region is line ${bestAt + 1} where ${bestScore} of ` +
+      `${target.length} lines match. First mismatch there: expected ` +
+      `${JSON.stringify(target[0].slice(0, 60))}, file has ` +
+      `${JSON.stringify(norm(fileLines[bestAt]).slice(0, 60))}. Re-read ` +
+      `lines ${Math.max(1, bestAt)}-${bestAt + target.length + 1} and copy ` +
+      `the block, or use start_anchor/end_anchor instead of a full snippet`
+    );
+  }
+
+  // The first line exists. Report where the block stops agreeing.
+  const reports: string[] = [];
+  for (const at of candidates.slice(0, 3)) {
+    let mismatch = -1;
+    for (let j = 0; j < wanted.length; j++) {
+      const fileLine = fileLines[at + j];
+      if (fileLine === undefined) {
+        mismatch = j;
+        break;
+      }
+      if (fileLine.trim() !== wanted[j].trim()) {
+        mismatch = j;
+        break;
+      }
+    }
+    if (mismatch === -1) {
+      reports.push(
+        `line ${at + 1}: every line matches when indentation is ignored, so ` +
+          `this is an indentation-only difference the matcher should have ` +
+          `accepted — if you see this, the block appears more than once`
+      );
+      continue;
+    }
+    const fileLine = fileLines[at + mismatch];
+    reports.push(
+      `line ${at + 1}: matches until old_text line ${mismatch + 1}, which ` +
+        `expects ${JSON.stringify((wanted[mismatch] ?? "").trim().slice(0, 60))} ` +
+        `but the file has ${JSON.stringify((fileLine ?? "<end of file>").trim().slice(0, 60))}`
+    );
+  }
+
+  return (
+    `old_text starts at ${candidates.length} place(s) ` +
+    `(line${candidates.length === 1 ? "" : "s"} ${candidates.slice(0, 5).map((c) => c + 1).join(", ")}) ` +
+    `but no block matches in full — ${reports.join("; ")}. Re-read that ` +
+    `span, or replace it with start_anchor/end_anchor` +
+    (notes.length ? `. Note: ${notes.join("; ")}` : "")
+  );
+}
+
+/** All the places a single anchor line matches, ignoring indentation. */
+function anchorMatches(fileLines: string[], anchor: string): number[] {
+  const wanted = anchor.trim();
+  const exact: number[] = [];
+  const loose: number[] = [];
+  for (let i = 0; i < fileLines.length; i++) {
+    const line = fileLines[i];
+    if (line.trim() === wanted) exact.push(i);
+    else if (line.includes(anchor.trim())) loose.push(i);
+  }
+  return exact.length ? exact : loose;
+}
+
+/**
+ * Work out which characters an edit replaces, without touching the file.
+ *
+ * Shared by the real edit and by preview, so what a preview shows is by
+ * construction what a write would do.
+ */
+export function resolveEditRegion(
+  raw: string,
+  spec: EditSpec
+): {
+  start: number;
+  end: number;
+  indent: string;
+  mode: EditOutcome["mode"];
+  exact: boolean;
+} {
+  const fileLines = raw.split("\n");
+  const starts = lineOffsets(fileLines);
+
+  const hasAnchors = Boolean(spec.startAnchor?.trim());
+  const hasLines = spec.startLine != null;
+
+  if (hasAnchors) {
+    const startAnchor = stripLineGutter(String(spec.startAnchor)).trim();
+    const endAnchorRaw = spec.endAnchor?.trim()
+      ? stripLineGutter(String(spec.endAnchor)).trim()
+      : null;
+
+    const startHits = anchorMatches(fileLines, startAnchor);
+    if (startHits.length === 0) {
+      throw new WorkspaceError(
+        `start_anchor not found: ${JSON.stringify(startAnchor.slice(0, 80))}. ` +
+          `An anchor is matched ignoring indentation, so only the text has ` +
+          `to be right — search_files for it to find the real wording`
+      );
+    }
+    if (startHits.length > 1) {
+      throw new WorkspaceError(
+        `start_anchor matches ${startHits.length} lines ` +
+          `(${startHits.slice(0, 6).map((i) => i + 1).join(", ")}). Give a ` +
+          `longer or more distinctive line`
+      );
+    }
+
+    const startIdx = startHits[0];
+    let endIdx = startIdx;
+    if (endAnchorRaw) {
+      const after = fileLines
+        .map((line, i) => ({ line, i }))
+        .filter(({ i }) => i >= startIdx)
+        .filter(
+          ({ line }) =>
+            line.trim() === endAnchorRaw || line.includes(endAnchorRaw)
+        );
+      if (after.length === 0) {
+        throw new WorkspaceError(
+          `end_anchor not found after line ${startIdx + 1}: ` +
+            `${JSON.stringify(endAnchorRaw.slice(0, 80))}`
+        );
+      }
+      endIdx = after[0].i;
+    }
+
+    const include = spec.includeAnchors !== false;
+    const firstLine = include ? startIdx : startIdx + 1;
+    const lastLine = include ? endIdx : endIdx - 1;
+    if (lastLine < firstLine) {
+      throw new WorkspaceError(
+        `the two anchors are adjacent, so there is nothing between them to ` +
+          `replace — set include_anchors to true to replace the anchor ` +
+          `lines themselves`
+      );
+    }
+
+    return {
+      start: starts[firstLine],
+      end: starts[lastLine] + fileLines[lastLine].length,
+      indent: /^[ \t]*/.exec(fileLines[firstLine])?.[0] ?? "",
+      mode: "anchors",
+      exact: true,
+    };
+  }
+
+  if (hasLines) {
+    const from = Math.max(1, Math.trunc(spec.startLine ?? 1));
+    const to = Math.min(
+      fileLines.length,
+      Math.trunc(spec.endLine ?? spec.startLine ?? 1)
+    );
+    if (from > fileLines.length) {
+      throw new WorkspaceError(
+        `start_line ${from} is past the end of the file (${fileLines.length} lines)`
+      );
+    }
+    if (to < from) {
+      throw new WorkspaceError(
+        `end_line (${to}) is before start_line (${from})`
+      );
+    }
+    return {
+      start: starts[from - 1],
+      end: starts[to - 1] + fileLines[to - 1].length,
+      indent: /^[ \t]*/.exec(fileLines[from - 1])?.[0] ?? "",
+      mode: "lines",
+      exact: true,
+    };
+  }
+
+  const oldText = stripLineGutter(String(spec.oldText ?? ""));
+  if (!oldText) {
+    throw new WorkspaceError(
+      "give old_text, or start_anchor (+ optional end_anchor), or " +
+        "start_line and end_line"
+    );
+  }
+
+  const match = findEditTarget(raw, oldText);
+  if (match.kind === "none") {
+    throw new WorkspaceError(
+      `old_text not found — ${diagnoseEditFailure(raw, oldText)}`
+    );
+  }
+  if (match.kind === "ambiguous") {
+    const occurrences: number[] = [];
+    let at = raw.indexOf(oldText);
+    while (at !== -1 && occurrences.length < 6) {
+      occurrences.push(lineAt(raw, at));
+      at = raw.indexOf(oldText, at + Math.max(1, oldText.length));
+    }
+    throw new WorkspaceError(
+      `old_text appears more than once` +
+        (occurrences.length
+          ? ` (lines ${occurrences.join(", ")})`
+          : "") +
+        ` — include surrounding lines to make it unique, or use ` +
+        `start_line/end_line to name the one you mean`
+    );
+  }
+
+  return {
+    start: match.start,
+    end: match.end,
+    indent: match.indent,
+    mode: "snippet",
+    exact: match.kind === "exact",
+  };
+}
+
+/**
+ * Replace a region of a file — by snippet, by landmarks, or by line range.
+ *
+ * `preview: true` resolves the region, reports exactly what it matched, and
+ * writes nothing. That is the "show me what you matched before committing"
+ * the campaign kept asking for: on a file where an anchor is expensive to
+ * verify, one preview beats one wrong edit plus one undo.
+ */
+export async function applyEdit(
   workspaceId: string,
   relative: string,
-  oldText: string,
-  newText: string
-): Promise<{ path: string; replaced: boolean }> {
+  spec: EditSpec
+): Promise<EditOutcome> {
   const target = resolveInside(workspaceId, relative);
 
   let raw: string;
@@ -1103,55 +1604,52 @@ export async function editFile(
     throw new WorkspaceError(`No such file: ${relative}`);
   }
 
-  if (!oldText) throw new WorkspaceError("old_text is required");
+  const region = resolveEditRegion(raw, spec);
+  const matchedText = raw.slice(region.start, region.end);
+  const newText = spec.newText ?? "";
+  const startLine = lineAt(raw, region.start);
+  const endLine = startLine + Math.max(0, matchedText.split("\n").length - 1);
 
-  const match = findEditTarget(raw, oldText);
+  const outcome: EditOutcome = {
+    path: relative,
+    replaced: false,
+    mode: region.mode,
+    startLine,
+    endLine,
+    matchedText,
+    exact: region.exact,
+    preview: spec.preview === true,
+    removedLines: matchedText === "" ? 0 : matchedText.split("\n").length,
+    addedLines: newText === "" ? 0 : newText.split("\n").length,
+  };
 
-  if (match.kind === "none") {
-    throw new WorkspaceError(
-      `old_text not found in ${relative} — read the file first and copy the exact text`
-    );
-  }
-  if (match.kind === "ambiguous") {
-    throw new WorkspaceError(
-      `old_text appears more than once in ${relative} — include surrounding lines to make it unique`
-    );
-  }
+  if (spec.preview) return outcome;
 
   const updated =
-    raw.slice(0, match.start) +
+    raw.slice(0, region.start) +
     // Re-indent the replacement by however much the match was shifted, so a
     // whitespace-tolerant match does not flatten the file it lands in.
-    (match.indent ? reindent(newText, match.indent) : newText) +
-    raw.slice(match.end);
+    (region.indent && region.mode === "snippet"
+      ? reindent(newText, region.indent)
+      : newText) +
+    raw.slice(region.end);
+
   await writeFile(workspaceId, relative, updated);
-  return { path: relative, replaced: true };
+  return { ...outcome, replaced: true };
 }
 
-/**
- * Find where an edit should land, tolerating whitespace differences.
- *
- * Measured, not assumed: `edit_file` was the least reliable of the file tools
- * at roughly 90%, and every failure looked the same — "old_text not found",
- * on a file the model had just read. The cause is that a model reproducing a
- * snippet from context reliably gets the *characters* right and unreliably
- * gets the *indentation* right, especially after the snippet has been through
- * a diff view or its own summary. A four-space body copied back as two spaces
- * is not a wrong edit; it is the right edit written slightly differently, and
- * refusing it costs a full round to re-read and try again.
- *
- * Three passes, strictest first, so exact matches behave exactly as before:
- *
- *   1. Exact substring. Unchanged semantics, including the duplicate check.
- *   2. Line-by-line with each line's leading whitespace ignored. Catches the
- *      re-indented copy, which is the overwhelmingly common failure.
- *   3. Line-by-line with all internal whitespace collapsed. Catches
- *      `foo( a, b )` against `foo(a, b)`.
- *
- * Every pass still refuses an ambiguous match. Tolerance here means accepting
- * a differently-formatted description of ONE place in the file; it never
- * means guessing between two candidates.
- */
+/** Snippet replacement — the original signature, kept for existing callers. */
+export async function editFile(
+  workspaceId: string,
+  relative: string,
+  oldText: string,
+  newText: string
+): Promise<{ path: string; replaced: boolean }> {
+  if (!oldText) throw new WorkspaceError("old_text is required");
+  const outcome = await applyEdit(workspaceId, relative, { oldText, newText });
+  return { path: outcome.path, replaced: outcome.replaced };
+}
+
 type EditMatch =
   | { kind: "exact"; start: number; end: number; indent: string }
   | { kind: "fuzzy"; start: number; end: number; indent: string }

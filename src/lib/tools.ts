@@ -1,3 +1,4 @@
+import path from "node:path";
 import { diffLines, diffStats, diffHunks } from "@/lib/diff";
 import { describeImageWithFallback } from "@/lib/ocr";
 import {
@@ -33,9 +34,11 @@ import {
   extractSelectors,
   WebError,
 } from "@/lib/web";
+import type { EditOutcome, EditSpec, ReadResult } from "@/lib/workspace";
 import {
+  applyEdit,
   deleteFile,
-  editFile,
+  diagnoseEditFailure,
   globPattern,
   listFiles,
   looksLikeGlob,
@@ -45,6 +48,7 @@ import {
   moveFile,
   previousVersion,
   historyDepth,
+  readFileWhole,
   searchFiles,
   writeFile,
   writeFileBytes,
@@ -52,7 +56,9 @@ import {
   WorkspaceError,
   MAX_FILE_BYTES,
 } from "@/lib/workspace";
-import { applyPatch } from "@/lib/patch";
+import { applyPatch, formatHunkReport, PatchReportError } from "@/lib/patch";
+import { analyzeLog, formatLogAnalysis } from "@/lib/logs";
+import { captureWindow } from "@/lib/screenshot";
 import { httpRequest, formatHttpResult } from "@/lib/http";
 import {
   validateActions,
@@ -68,6 +74,10 @@ import {
 } from "@/lib/testing";
 import { runCommand } from "@/lib/runner";
 import { detectBuild, BuildError } from "@/lib/build";
+import {
+  diagnoseBuildFailure,
+  formatLockReport,
+} from "@/lib/build-diagnostics";
 import {
   DEFAULT_BATCH_EDITS,
   DEFAULT_READ_FILES,
@@ -147,7 +157,12 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
     function: {
       name: "read_file",
       description:
-        "Read one file in the workspace. Always read a file before editing it, so the text you replace matches exactly. For a large file, use start_line and end_line to read just the part you need instead of pulling the whole thing into context.",
+        "Read one file in the workspace. Every read states which lines you " +
+        "got out of how many the file has, and a read that is cut short says " +
+        "so loudly and gives the exact call that continues it — so you never " +
+        "have to guess whether you saw the whole thing. Line ranges are " +
+        "resolved against the WHOLE file, so start_line 4000 works on a file " +
+        "whose first 4000 lines exceed the read budget.",
       parameters: {
         type: "object",
         properties: {
@@ -165,6 +180,15 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
             type: "number",
             description:
               "Last line to read, inclusive. Omit to read to the end.",
+          },
+          line_numbers: {
+            type: "boolean",
+            description:
+              "Prefix every line with its real number (a 'NNN | ' gutter). " +
+              "Use it when you need to talk about positions or plan a " +
+              "start_line/end_line edit. The gutter is display only — if you " +
+              "paste numbered text back as old_text it is stripped " +
+              "automatically, so a copy-paste can no longer silently fail.",
           },
         },
         required: ["path"],
@@ -199,7 +223,15 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
     function: {
       name: "edit_file",
       description:
-        "Replace one exact snippet inside an existing file, leaving the rest untouched. Cheaper than rewriting a large file. The snippet must appear exactly once — include surrounding lines if needed to make it unique.",
+        "Replace part of an existing file, leaving the rest untouched. Name " +
+        "the region in whichever way is cheapest for you: old_text (a " +
+        "snippet; indentation differences are tolerated), start_anchor plus " +
+        "end_anchor (replace the whole block between two landmark lines — " +
+        "you do not have to reproduce anything in between), or start_line " +
+        "plus end_line. Set preview to true to see exactly what would be " +
+        "replaced without writing anything. A failed match tells you the " +
+        "nearest candidate line and the first line that differs, so you can " +
+        "correct it without another read.",
       parameters: {
         type: "object",
         properties: {
@@ -207,14 +239,53 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
           old_text: {
             type: "string",
             description:
-              "Exact text to replace, copied verbatim from the file including indentation.",
+              "Exact text to replace. Indentation and inner spacing " +
+              "differences are tolerated, and a copied 'NNN | ' line-number " +
+              "gutter is stripped. Must match one place only.",
+          },
+          start_anchor: {
+            type: "string",
+            description:
+              "Landmark mode: the first line of the block to replace, " +
+              "matched ignoring indentation. Use this instead of old_text " +
+              "when you know where the block is but not its exact " +
+              "whitespace. Must identify one line.",
+          },
+          end_anchor: {
+            type: "string",
+            description:
+              "Landmark mode: the last line of the block, searched after " +
+              "start_anchor. Omit to replace just the start_anchor line.",
+          },
+          include_anchors: {
+            type: "boolean",
+            description:
+              "Replace the anchor lines themselves. Defaults to true; set " +
+              "false to replace only what sits strictly between them.",
+          },
+          start_line: {
+            type: "number",
+            description:
+              "Line mode: first line to replace, 1-based inclusive. Pair " +
+              "with end_line. Read with line_numbers first so the numbers " +
+              "are real.",
+          },
+          end_line: {
+            type: "number",
+            description: "Line mode: last line to replace, inclusive.",
           },
           new_text: {
             type: "string",
             description: "Replacement text. Use an empty string to delete.",
           },
+          preview: {
+            type: "boolean",
+            description:
+              "Show exactly which lines would be replaced and write " +
+              "nothing. Cheaper than a wrong edit plus an undo.",
+          },
         },
-        required: ["path", "old_text", "new_text"],
+        required: ["path", "new_text"],
       },
     },
   },
@@ -253,7 +324,12 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
           context: {
             type: "number",
             description:
-              "Lines of surrounding code to show around each match, up to 10. Use 2 or 3 when you need to see what a match is part of — it usually saves a whole round of reading the file.",
+              "Lines of surrounding code to show around each match, up to " +
+              "40 (more for open-ceiling models). This is the cheapest " +
+              "substitute for a read there is: ask for 25-30 and a whole " +
+              "function body comes back with the match, so you can edit " +
+              "straight from the search result instead of spending a round " +
+              "opening the file.",
           },
         },
         required: ["query"],
@@ -674,10 +750,15 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
     function: {
       name: "edit_files",
       description:
-        "Make several exact replacements in one step, across one file or " +
-        "many. Prefer this over repeated edit_file whenever a change touches " +
-        "more than one place — each separate call costs a whole round. Every " +
-        "snippet must appear exactly once in its file.",
+        "Make several replacements in one step, across one file or many. " +
+        "Prefer this over repeated edit_file whenever a change touches more " +
+        "than one place — each separate call costs a whole round. Each edit " +
+        "may use old_text, start_anchor/end_anchor landmarks, or " +
+        "start_line/end_line, exactly like edit_file. Edits are independent: " +
+        "the ones that match are applied even if others miss, and the result " +
+        "names every edit by number — where it landed, or which line it " +
+        "expected and what the file has there instead. Set preview to true " +
+        "to check the whole volley before any of it is written.",
       parameters: {
         type: "object",
         properties: {
@@ -690,12 +771,42 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
                 path: { type: "string" },
                 old_text: {
                   type: "string",
-                  description: "Exact text to replace, copied verbatim.",
+                  description:
+                    "Exact text to replace. Indentation differences are " +
+                    "tolerated and a copied line-number gutter is stripped.",
+                },
+                start_anchor: {
+                  type: "string",
+                  description:
+                    "Landmark mode: first line of the block, matched " +
+                    "ignoring indentation.",
+                },
+                end_anchor: {
+                  type: "string",
+                  description: "Landmark mode: last line of the block.",
+                },
+                include_anchors: {
+                  type: "boolean",
+                  description: "Replace the anchor lines too. Default true.",
+                },
+                start_line: {
+                  type: "number",
+                  description: "Line mode: first line to replace, 1-based.",
+                },
+                end_line: {
+                  type: "number",
+                  description: "Line mode: last line to replace, inclusive.",
                 },
                 new_text: { type: "string" },
               },
-              required: ["path", "old_text", "new_text"],
+              required: ["path", "new_text"],
             },
+          },
+          preview: {
+            type: "boolean",
+            description:
+              "Resolve every edit and report what each one would replace, " +
+              "without writing anything.",
           },
         },
         required: ["edits"],
@@ -900,7 +1011,7 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
     function: {
       name: "build_project",
       description:
-        "Build the workspace with the installed toolchain: Visual Studio solutions/projects (.sln/.vcxproj/.csproj), CMake, dotnet, npm, cargo, go, make, Python, or a single .cpp/.cs file. Finds the compiler itself (no vcvars, no flag guessing), restores packages, builds Release x64 by default, and returns compiler errors so you can fix them without the user running anything. Prefer this over run_command for building.",
+        "Build the workspace with the installed toolchain: Visual Studio solutions/projects (.sln/.vcxproj/.csproj), CMake, dotnet, npm, cargo, go, make, Python, or a single .cpp/.cs file. Finds the compiler itself (no vcvars, no flag guessing), restores packages, builds Release x64 by default, and returns compiler errors so you can fix them without the user running anything. A failure is classified before you read it: a known toolchain race is rebuilt once automatically and reported as such, a locked output file names whoever holds the handle (and how to release it), and a real compiler error is never retried. Prefer this over run_command for building.",
       parameters: {
         type: "object",
         properties: {
@@ -930,6 +1041,15 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
             description:
               "If true, only report which command would run without executing it.",
           },
+          no_retry: {
+            type: "boolean",
+            description:
+              "Turn off the automatic single retry. A failure whose signature " +
+              "is a known toolchain race (MSBuild node death, PDB " +
+              "contention, a copy step losing a handle race) is rebuilt once " +
+              "and the report says so; real compiler errors are never " +
+              "retried. Set this only when you want the raw first result.",
+          },
         },
         required: [],
       },
@@ -940,7 +1060,17 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
     function: {
       name: "apply_patch",
       description:
-        "Apply a unified diff to one file — the same format as `git diff`. Use this instead of edit_file when you are changing several separate places in one file: a patch carries its own line context, so it applies cleanly where a series of edits can drift as each one shifts the lines below it.",
+        "Apply a unified diff to one file — the same format as `git diff`. " +
+        "Use this instead of edit_file when you are changing several " +
+        "separate places in one file: a patch carries its own line context, " +
+        "so it applies cleanly where a series of edits can drift as each one " +
+        "shifts the lines below it. Every hunk is reported by number: where " +
+        "it landed, or the closest candidate line and the first line that " +
+        "differs. Line numbers in @@ headers are a hint, and a hunk that " +
+        "differs only in indentation still applies (and is reported as " +
+        "such). By default nothing is written unless every hunk matches; set " +
+        "partial to true to land the ones that do and be told which to " +
+        "rebuild.",
       parameters: {
         type: "object",
         properties: {
@@ -952,6 +1082,13 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
             type: "string",
             description:
               "A unified diff body: lines starting with ' ' for context, '-' to remove and '+' to add, in @@ hunks. File headers are optional.",
+          },
+          partial: {
+            type: "boolean",
+            description:
+              "Apply the hunks that match instead of refusing the whole " +
+              "patch. Use it for a big surgery where landing 18 of 19 and " +
+              "fixing one is better than starting over.",
           },
         },
         required: ["path", "patch"],
@@ -1312,6 +1449,87 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "analyze_log",
+      description:
+        "Turn a wall of console output into receipts. Give it pasted text " +
+        "(or a log file in the workspace) and it returns level counts, the " +
+        "ratio of whatever tokens you name in count, the repeated lines " +
+        "clustered with their frequencies, a distribution for every numeric " +
+        "key=value field, and the fault sequence in order with the lines " +
+        "around the first one. Use it instead of eyeballing sixty lines: it " +
+        "is one call, it is repeatable, and the numbers can be quoted back " +
+        "to the user as evidence.",
+      parameters: {
+        type: "object",
+        properties: {
+          text: {
+            type: "string",
+            description: "The log text itself, e.g. output the user pasted.",
+          },
+          path: {
+            type: "string",
+            description:
+              "A log file in the workspace to read instead of text.",
+          },
+          count: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              'Tokens whose counts and ratio matter for this project, e.g. ["phase", "backstop"]. Counted per line, case-insensitively.',
+          },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "screenshot_window",
+      description:
+        "Look at a native window that is ALREADY running — normally " +
+        "something you launched with start_process. Saves a PNG in the " +
+        "workspace and reports its size; follow it with view_image to " +
+        "actually see the pixels. Use it after building a GUI instead of " +
+        "reasoning about coordinates in your head: a colour that leaks, a " +
+        "control that lands 20px off, a window that opens minimised are all " +
+        "invisible to a compiler and obvious in one image. Requires a real " +
+        "desktop session — on a headless machine it says so plainly rather " +
+        "than returning a blank image.",
+      parameters: {
+        type: "object",
+        properties: {
+          title: {
+            type: "string",
+            description:
+              "Window title, or a distinctive part of it. Matched loosely.",
+          },
+          pid: {
+            type: "number",
+            description:
+              "Process id instead of a title — use the pid from " +
+              "list_processes for a window with no title bar.",
+          },
+          path: {
+            type: "string",
+            description:
+              "Where to save the PNG, relative to the workspace root. " +
+              "Defaults to screenshots/window-<timestamp>.png.",
+          },
+          full_screen: {
+            type: "boolean",
+            description:
+              "Capture the whole desktop instead of one window. Use when the " +
+              "app draws outside its own window (menus, tooltips, overlays).",
+          },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "download_file",
       description:
         "Save the exact bytes from a URL straight into the workspace - up " +
@@ -1517,6 +1735,105 @@ function num(args: Record<string, unknown>, key: string): number | null {
 }
 
 /**
+ * Read an edit spec out of tool arguments.
+ *
+ * Three ways to name a region, so a model that KNOWS where a block is does
+ * not have to prove it by reproducing the indentation byte for byte:
+ * old_text, landmarks (start_anchor/end_anchor), or a line range.
+ */
+export function readEditSpec(args: Record<string, unknown>): EditSpec {
+  return {
+    oldText: typeof args.old_text === "string" ? args.old_text : null,
+    startAnchor:
+      typeof args.start_anchor === "string" ? args.start_anchor : null,
+    endAnchor: typeof args.end_anchor === "string" ? args.end_anchor : null,
+    includeAnchors: args.include_anchors !== false,
+    startLine: readNumber(args.start_line),
+    endLine: readNumber(args.end_line),
+    newText: typeof args.new_text === "string" ? args.new_text : "",
+    preview: args.preview === true,
+  };
+}
+
+function readNumber(value: unknown): number | null {
+  if (value === undefined || value === null || value === "") return null;
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? Math.trunc(parsed) : null;
+}
+
+/** What a preview shows: the exact span, numbered, and the replacement. */
+export function formatEditPreview(outcome: EditOutcome): string {
+  const matched = numberLines(outcome.matchedText, outcome.startLine);
+  return (
+    `PREVIEW — nothing was written to ${outcome.path}.\n\n` +
+    `This ${outcome.mode} match covers lines ${outcome.startLine}-` +
+    `${outcome.endLine} (${outcome.removedLines} line(s)):\n\n` +
+    `${matched}\n\n` +
+    `It would be replaced by ${outcome.addedLines} line(s). Re-send the same ` +
+    `call without preview to apply it.`
+  );
+}
+
+/**
+ * Say out loud what a read did NOT return.
+ *
+ * The single most expensive tool behaviour reported across a long campaign:
+ * a big read came back short with a five-word note, the model built its map
+ * of the region from it, and only a later verification pass revealed the map
+ * had holes. Silence is the bug. Every partial read now states the coverage
+ * as a fraction and a percentage, and gives the exact call that continues
+ * it — so the choice to read on is deliberate instead of accidental.
+ */
+export function truncationNotice(result: ReadResult): string {
+  if (!result.truncated) {
+    // A complete range read still says so, so "did I get everything?" is
+    // never something the model has to infer from length.
+    return result.rangeRequested && result.nextLine
+      ? `\n\n[COMPLETE for the range asked for. The file continues at line ` +
+          `${result.nextLine} of ${result.totalLines}.]`
+      : "";
+  }
+
+  const returned = result.lastLine - result.firstLine + 1;
+  const remaining = result.totalLines - result.lastLine;
+  const percent = Math.max(
+    1,
+    Math.round((returned / Math.max(1, result.totalLines)) * 100)
+  );
+
+  return (
+    `\n\n[INCOMPLETE READ — truncated at line ${result.lastLine}. You have ` +
+    `lines ${result.firstLine}-${result.lastLine} ` +
+    `of ${result.totalLines} (${percent}% of ${result.path}). ${remaining} ` +
+    `line(s) were NOT returned; the cut is at a line boundary, so nothing ` +
+    `above is half a line. Do NOT plan an edit against text you have not ` +
+    `seen. Continue with read_file path="${result.path}" start_line=` +
+    `${result.nextLine ?? result.lastLine + 1}, or narrow with search_files.]`
+  );
+}
+
+/** Coverage as a short phrase for the read header. */
+export function describeCoverage(result: ReadResult): string {
+  const returned = result.lastLine - result.firstLine + 1;
+  const percent = Math.max(
+    1,
+    Math.round((returned / Math.max(1, result.totalLines)) * 100)
+  );
+  return result.truncated
+    ? `${percent}% of the file — CUT SHORT`
+    : `${percent}% of the file`;
+}
+
+/** Prefix each line with its real number, right-aligned. */
+export function numberLines(text: string, firstLine: number): string {
+  const lines = text.split("\n");
+  const width = String(firstLine + lines.length - 1).length;
+  return lines
+    .map((line, i) => `${String(firstLine + i).padStart(width)} | ${line}`)
+    .join("\n");
+}
+
+/**
  * Execute one tool call.
  *
  * Errors are returned as tool results rather than thrown: the model needs to
@@ -1575,66 +1892,48 @@ export async function runTool(
       }
 
       case "read_file": {
-        const result = await readFile(workspaceId, str(args, "path"), {
+        const filePath = str(args, "path");
+        const result = await readFile(workspaceId, filePath, {
           maxChars: limits.readChars,
+          startLine: num(args, "start_line"),
+          endLine: num(args, "end_line"),
         });
-        const note = result.truncated
-          ? "\n\n[truncated — file is larger than the read limit]"
-          : "";
 
         /*
-         * Optional line range.
+         * Numbered when the offset matters, plain when it does not.
          *
-         * The parameters were accepted by callers and silently ignored: asking
-         * for lines 1-2 of an eight-line file returned all eight. Harmless on
-         * a small file, expensive on a large one — reading a 3000-line module
-         * to change one function is most of a round's budget spent on context
-         * that is never used.
+         * A slice handed over as bare text gets reasoned about as if it were
+         * the file — "the bug is on line 12" when it means line 411 — so a
+         * range read is numbered by default, and so is a read that was cut
+         * short, because that is precisely when knowing where you are
+         * matters most. A whole-file read stays clean for copy-paste.
+         * `line_numbers` forces either way, and any gutter pasted back into
+         * an edit anchor is stripped rather than failing to match.
          */
-        const total = result.content.split("\n").length;
-        const start = num(args, "start_line");
-        const end = num(args, "end_line");
+        const wantNumbers =
+          args.line_numbers === true ||
+          (args.line_numbers !== false &&
+            (result.rangeRequested || result.truncated));
 
-        if (start === null && end === null) {
-          return {
-            ok: true,
-            content: `${result.path}:\n\n${result.content}${note}`,
-            summary: `Read ${result.path}`,
-          };
-        }
+        const body = wantNumbers
+          ? numberLines(result.content, result.firstLine)
+          : result.content;
 
-        const from = Math.max(1, start ?? 1);
-        const to = Math.min(total, end ?? total);
-        if (from > total) {
-          return {
-            ok: false,
-            content:
-              `Error: ${result.path} has ${total} lines, so line ${from} ` +
-              `does not exist.`,
-            summary: `Line ${from} is past the end of ${result.path}`,
-          };
-        }
-
-        const slice = result.content.split("\n").slice(from - 1, to);
-        /*
-         * Numbered, because a slice without them is a trap.
-         *
-         * Handed lines 400-460 as bare text, a model reasons about them as if
-         * they were the file — reporting "the bug is on line 12" when it means
-         * line 411. The numbers cost a few tokens and make the offset
-         * impossible to lose.
-         */
-        const width = String(to).length;
-        const numbered = slice
-          .map((line, i) => `${String(from + i).padStart(width)} | ${line}`)
-          .join("\n");
+        const header =
+          `${result.path} — lines ${result.firstLine}-${result.lastLine} of ` +
+          `${result.totalLines}` +
+          (result.rangeRequested || result.truncated
+            ? ` (${describeCoverage(result)})`
+            : " (whole file)");
 
         return {
           ok: true,
-          content:
-            `${result.path} (lines ${from}-${to} of ${total}):\n\n` +
-            `${numbered}${note}`,
-          summary: `Read ${result.path} lines ${from}-${to}`,
+          content: `${header}:\n\n${body}${truncationNotice(result)}`,
+          summary: result.truncated
+            ? `Read ${result.path} lines ${result.firstLine}-${result.lastLine} — INCOMPLETE`
+            : result.rangeRequested
+              ? `Read ${result.path} lines ${result.firstLine}-${result.lastLine}`
+              : `Read ${result.path}`,
         };
       }
 
@@ -1702,6 +2001,7 @@ export async function runTool(
           };
         }
         const parts: string[] = [];
+        const incomplete: string[] = [];
         let read = 0;
 
         // Read together, reported in the order asked for. Sixty local files
@@ -1718,11 +2018,12 @@ export async function runTool(
         for (const entry of results) {
           if (entry.result) {
             read++;
-            const note = entry.result.truncated
-              ? "\n\n[truncated — file is larger than the read limit]"
-              : "";
+            if (entry.result.truncated) incomplete.push(entry.result.path);
             parts.push(
-              `--- ${entry.result.path} ---\n${entry.result.content}${note}`
+              `--- ${entry.result.path} ---  [lines ${entry.result.firstLine}-` +
+                `${entry.result.lastLine} of ${entry.result.totalLines}` +
+                `${entry.result.truncated ? ", TRUNCATED" : ""}]\n` +
+                `${entry.result.content}${truncationNotice(entry.result)}`
             );
           } else {
             // One missing file must not lose the others: report it inline and
@@ -1758,13 +2059,24 @@ export async function runTool(
           );
         }
 
+        if (incomplete.length) {
+          parts.push(
+            `[INCOMPLETE — ${incomplete.length} file(s) were cut short: ` +
+              `${incomplete.join(", ")}. Each one says above where it stopped ` +
+              `and how to continue. Do not plan edits against the parts you ` +
+              `have not seen.]`
+          );
+        }
+
         return {
           ok: read > 0,
           content: parts.join("\n\n"),
           summary:
-            read === paths.length
-              ? `Read ${read} file${read === 1 ? "" : "s"}`
-              : `Read ${read} of ${paths.length} files`,
+            incomplete.length
+              ? `Read ${read} file(s) — ${incomplete.length} INCOMPLETE`
+              : read === paths.length
+                ? `Read ${read} file${read === 1 ? "" : "s"}`
+                : `Read ${read} of ${paths.length} files`,
         };
       }
 
@@ -1774,6 +2086,7 @@ export async function runTool(
           caseSensitive: args.case_sensitive === true,
           glob: typeof args.glob === "string" ? args.glob : undefined,
           context: num(args, "context") ?? 0,
+          maxContext: limits.searchContext,
           maxHits: limits.searchHits,
           maxFileBytes: limits.searchableBytes,
         });
@@ -2072,34 +2385,47 @@ export async function runTool(
 
       case "edit_file": {
         const filePath = str(args, "path");
+        const spec = readEditSpec(args);
+
+        /*
+         * Preview resolves the region and writes nothing.
+         *
+         * This is the answer to "I want to say replace the block between
+         * these two landmarks and see what it matched before committing".
+         * One preview is cheaper than one wrong edit plus one undo, and far
+         * cheaper than the read-just-to-copy-whitespace that anchoring a
+         * 109KB file used to require.
+         */
+        if (spec.preview) {
+          const shown = await applyEdit(workspaceId, filePath, {
+            ...spec,
+            preview: true,
+          });
+          return {
+            ok: true,
+            content: formatEditPreview(shown),
+            summary: `Preview: ${shown.mode} match at ${filePath}:${shown.startLine}-${shown.endLine}`,
+          };
+        }
 
         // Captured before the edit so the result can show what actually
         // changed. Without it the model is told only "Edited main.py" and
         // cannot tell a correct edit from one that landed in the wrong place.
         let before: string | null = null;
         try {
-          before = (await readFile(workspaceId, filePath, {
-            maxChars: limits.readChars,
-          })).content;
+          before = (await readFileWhole(workspaceId, filePath)).content;
         } catch {
           before = null;
         }
 
-        const result = await editFile(
-          workspaceId,
-          filePath,
-          str(args, "old_text"),
-          str(args, "new_text")
-        );
+        const result = await applyEdit(workspaceId, filePath, spec);
 
-        let confirmation = `Edited ${result.path}.`;
+        let confirmation =
+          `Edited ${result.path} at lines ${result.startLine}-${result.endLine} ` +
+          `(${result.mode} match${result.exact ? "" : ", whitespace-tolerant"}).`;
         if (before !== null) {
           try {
-            const after = (
-              await readFile(workspaceId, filePath, {
-                maxChars: limits.readChars,
-              })
-            ).content;
+            const after = (await readFileWhole(workspaceId, filePath)).content;
             const changed = diffLines(before, after);
             const stats = diffStats(changed);
             const hunks = diffHunks(changed, 2);
@@ -2115,7 +2441,9 @@ export async function runTool(
               .join("\n");
 
             confirmation =
-              `Edited ${result.path} (+${stats.added} -${stats.removed}).\n\n` +
+              `Edited ${result.path} at lines ${result.startLine}-${result.endLine} ` +
+              `(+${stats.added} -${stats.removed}, ${result.mode} match` +
+              `${result.exact ? "" : ", whitespace-tolerant"}).\n\n` +
               `${preview}\n\n` +
               `Check this is the change you intended before moving on.`;
           } catch {
@@ -2126,7 +2454,7 @@ export async function runTool(
         return {
           ok: true,
           content: confirmation,
-          summary: `Edited ${result.path}`,
+          summary: `Edited ${result.path}:${result.startLine}`,
           changedPath: result.path,
         };
       }
@@ -2355,6 +2683,93 @@ export async function runTool(
         };
       }
 
+      case "analyze_log": {
+        let text = typeof args.text === "string" ? args.text : "";
+        const logPath = typeof args.path === "string" ? args.path.trim() : "";
+        if (!text && logPath) {
+          const file = await readFile(workspaceId, logPath, {
+            maxChars: limits.readChars,
+          });
+          text = file.content;
+          if (file.truncated) {
+            // Analysing 40% of a log and reporting ratios from it would be a
+            // confident lie, which is the exact failure this whole pass is
+            // about. Say which part was analysed.
+            text += `\n[analysis covers lines ${file.firstLine}-${file.lastLine} of ${file.totalLines}]`;
+          }
+        }
+        if (!text.trim()) {
+          return {
+            ok: false,
+            content:
+              "Error: give text (the pasted log) or path (a log file in the " +
+              "workspace).",
+            summary: "No log given",
+          };
+        }
+
+        const analysis = analyzeLog(text, {
+          count: Array.isArray(args.count)
+            ? args.count.map((c) => String(c))
+            : [],
+        });
+        return {
+          ok: true,
+          content: formatLogAnalysis(analysis),
+          summary:
+            `Analysed ${analysis.counted} log line(s)` +
+            (analysis.faults.length
+              ? ` — ${analysis.faults.length} fault(s)`
+              : " — no faults"),
+        };
+      }
+
+      case "screenshot_window": {
+        const relative =
+          typeof args.path === "string" && args.path.trim()
+            ? args.path.trim()
+            : `screenshots/window-${Date.now()}.png`;
+
+        // Written through the workspace root so the same containment rules
+        // apply to a screenshot as to any other file the agent creates.
+        const outPath = path.join(workspaceDirectory(workspaceId), relative);
+        if (!outPath.startsWith(workspaceDirectory(workspaceId))) {
+          return {
+            ok: false,
+            content: "Error: the screenshot path must stay inside the workspace.",
+            summary: "Path outside the workspace",
+          };
+        }
+
+        const shot = await captureWindow({
+          title: typeof args.title === "string" ? args.title : null,
+          pid: num(args, "pid"),
+          outPath,
+          fullScreen: args.full_screen === true,
+        });
+
+        if (!shot.ok) {
+          return {
+            ok: false,
+            content:
+              `Error: ${shot.error}\n\nNothing was saved. Do not describe ` +
+              `the window as if you had seen it.`,
+            summary: "Could not capture the window",
+          };
+        }
+
+        return {
+          ok: true,
+          content:
+            `Saved ${relative} (${shot.width ?? "?"}x${shot.height ?? "?"}, ` +
+            `${Math.round((shot.bytes ?? 0) / 1024)}KB, via ${shot.method}).\n\n` +
+            `Call view_image on it now — the file existing is not the same ` +
+            `as you having looked at it.`,
+          summary: `Captured ${relative}`,
+          changedPath: relative,
+        };
+      }
+
       case "download_file": {
         const target = str(args, "path");
         const resource = await downloadResource(str(args, "url"), {
@@ -2418,75 +2833,100 @@ export async function runTool(
         }
 
         const batch = raw.slice(0, limits.batchEdits);
-        const done: string[] = [];
-        const failed: string[] = [];
+        const previewOnly = args.preview === true;
 
-        for (const entry of batch) {
-          const edit = entry as {
-            path?: unknown;
-            old_text?: unknown;
-            new_text?: unknown;
-          };
-          if (
-            typeof edit.path !== "string" ||
-            typeof edit.old_text !== "string" ||
-            typeof edit.new_text !== "string"
-          ) {
-            failed.push(`${String(edit.path ?? "?")} — malformed edit`);
+        /*
+         * Every edit gets a numbered verdict. Every time.
+         *
+         * The reported failure mode was silence: a bulk call came back "0
+         * edited" with nothing saying WHICH hunk missed, so eighteen good
+         * edits were thrown away with the one bad one and the whole surgery
+         * was re-fired as thirty individual calls. A batch tool that cannot
+         * say "hunk 7 of 19" is a batch tool nobody can trust, so the report
+         * below names each edit by its index, where it landed, and — when it
+         * missed — the nearest candidate line and the first line that
+         * differs.
+         */
+        const applied: string[] = [];
+        const failures: string[] = [];
+        const previews: string[] = [];
+        const distinct = new Set<string>();
+
+        for (const [index, entry] of batch.entries()) {
+          const label = `edit ${index + 1}/${batch.length}`;
+          const edit = entry as Record<string, unknown>;
+          const editPath =
+            typeof edit.path === "string" ? edit.path : String(edit.path ?? "?");
+
+          if (typeof edit.path !== "string" || typeof edit.new_text !== "string") {
+            failures.push(
+              `${label} (${editPath}): malformed — every edit needs a path ` +
+                `and new_text, plus one of old_text / start_anchor / start_line`
+            );
             continue;
           }
+
+          const spec = readEditSpec(edit);
+          const wantsPreview = previewOnly || spec.preview === true;
+
           try {
-            const result = await editFile(
-              workspaceId,
-              edit.path,
-              edit.old_text,
-              edit.new_text
+            const outcome = await applyEdit(workspaceId, editPath, {
+              ...spec,
+              preview: wantsPreview,
+            });
+            if (wantsPreview) {
+              previews.push(
+                `${label} (${editPath}): would replace lines ` +
+                  `${outcome.startLine}-${outcome.endLine} ` +
+                  `(${outcome.removedLines} → ${outcome.addedLines} lines, ` +
+                  `${outcome.mode} match)`
+              );
+              continue;
+            }
+            distinct.add(outcome.path);
+            applied.push(
+              `${label} (${outcome.path}): applied at lines ` +
+                `${outcome.startLine}-${outcome.endLine}` +
+                `${outcome.exact ? "" : " (whitespace-tolerant match)"}`
             );
-            done.push(result.path);
           } catch (error) {
             /*
-             * One failure does not abandon the rest.
-             *
-             * Half-applying a refactor sounds worse than applying none of it,
-             * but the alternative is silently reverting edits that were
-             * correct — and the model cannot tell which those were. Naming
-             * exactly what failed lets it fix that one and move on.
+             * One failure does not abandon the rest, and it does not hide
+             * behind a generic message either: the reason carries the line
+             * numbers needed to fix exactly this hunk.
              */
-            failed.push(
-              `${edit.path} — ${
-                error instanceof WorkspaceError ? error.message : "could not be edited"
+            failures.push(
+              `${label} (${editPath}): ${
+                error instanceof WorkspaceError
+                  ? error.message
+                  : error instanceof Error
+                    ? error.message
+                    : "could not be edited"
               }`
             );
           }
         }
 
-        /*
-         * Count files, not edits.
-         *
-         * `done` holds one entry per successful EDIT, and several edits to the
-         * same file is the normal case — two bugs in one file is two entries.
-         * Reporting that as "Edited 2 file(s)" is wrong in the one direction
-         * that matters: it tells the model it touched more of the workspace
-         * than it did.
-         *
-         * Seen in a real run: the model fixed both bugs in counter.py with one
-         * edit_files call and was told it had edited two files. The work was
-         * correct; the receipt was not.
-         */
-        const distinct = [...new Set(done)];
         const fileWord = (n: number) => `${n} file${n === 1 ? "" : "s"}`;
-
         const notes: string[] = [];
-        if (done.length) {
+
+        if (previews.length) {
           notes.push(
-            `Applied ${done.length} edit${done.length === 1 ? "" : "s"} to ` +
-              `${fileWord(distinct.length)}:\n${distinct.join("\n")}`
+            `PREVIEW — nothing was written.\n${previews.join("\n")}\n\n` +
+              `Re-send without preview to apply.`
           );
         }
-        if (failed.length) {
+        if (applied.length) {
           notes.push(
-            `Failed ${failed.length} — these were NOT applied, fix and retry ` +
-              `just these:\n${failed.join("\n")}`
+            `Applied ${applied.length} edits of ${batch.length} requested to ` +
+              `${fileWord(distinct.size)}:\n${applied.join("\n")}`
+          );
+        }
+        if (failures.length) {
+          notes.push(
+            `NOT applied — ${failures.length} of ${batch.length}. Everything ` +
+              `else already landed, so fix and retry just these:\n` +
+              `${failures.join("\n")}`
           );
         }
         if (raw.length > batch.length) {
@@ -2496,14 +2936,16 @@ export async function runTool(
           );
         }
 
+        const okAll = failures.length === 0;
         return {
-          ok: done.length > 0,
+          ok: previews.length ? true : applied.length > 0,
           content: notes.join("\n\n"),
-          summary:
-            failed.length === 0
-              ? `Edited ${fileWord(distinct.length)}`
-              : `Edited ${fileWord(distinct.length)}, ${failed.length} failed`,
-          changedPath: done[0],
+          summary: previews.length
+            ? `Previewed ${previews.length} edit(s)`
+            : okAll
+              ? `Edited ${fileWord(distinct.size)} (${applied.length} edits)`
+              : `Edited ${fileWord(distinct.size)}, ${failures.length} failed`,
+          changedPath: [...distinct][0],
         };
       }
 
@@ -2578,9 +3020,9 @@ export async function runTool(
 
         for (const filePath of paths) {
           try {
-            const file = await readFile(workspaceId, filePath, {
-              maxChars: limits.readChars,
-            });
+            // Whole file: this is a read-modify-WRITE, so a capped read would
+            // write the truncated copy back and delete the tail.
+            const file = await readFileWhole(workspaceId, filePath);
 
             let count: number;
             let updated: string;
@@ -3026,15 +3468,56 @@ export async function runTool(
           }
         }
 
-        const run = await runCommand(
-          workspaceId,
-          runner.command,
-          runner.args,
-          context.signal,
-          // Compiles can run long; no artificial cap here — the signal
-          // (Stop) is the only abort.
-          null
-        );
+        const build = async () =>
+          runCommand(
+            workspaceId,
+            runner.command,
+            runner.args,
+            context.signal,
+            // Compiles can run long; no artificial cap here — the signal
+            // (Stop) is the only abort.
+            null
+          );
+
+        let run = await build();
+        let diagnosis =
+          run.exitCode === 0
+            ? null
+            : diagnoseBuildFailure(`${run.stdout}\n${run.stderr}`);
+        let retryNote = "";
+
+        /*
+         * The retry that used to be superstition, with its reasons written
+         * down.
+         *
+         * "First build fails, retry succeeds" was true for dozens of
+         * versions, so a human kept a manual retry armed. That is an
+         * undocumented rule, and undocumented rules cost rounds and trust.
+         * Now the flaky classes are named (MSBuild node races, PDB
+         * contention, a copy step losing a handle race), only those are
+         * retried, and the report says which rule fired and what the second
+         * attempt did. A real compile error is never retried.
+         */
+        if (
+          diagnosis?.retryable &&
+          args.no_retry !== true &&
+          !context.signal?.aborted
+        ) {
+          const first = run;
+          run = await build();
+          diagnosis =
+            run.exitCode === 0
+              ? null
+              : diagnoseBuildFailure(`${run.stdout}\n${run.stderr}`);
+          retryNote =
+            `\n\nAUTOMATIC RETRY — the first attempt failed on a known-flaky ` +
+            `class: ${first.exitCode ?? "?"} / ${diagnoseBuildFailure(`${first.stdout}\n${first.stderr}`).rule}. ` +
+            (run.exitCode === 0
+              ? `The second attempt succeeded, so the first failure was the ` +
+                `race and not your code. Nothing to fix.`
+              : `The second attempt failed too, so this is REAL — read the ` +
+                `log below and fix it rather than building again.`);
+        }
 
         const combined =
           (restore ? logs.join("\n\n") + "\n\n" : "") +
@@ -3042,23 +3525,44 @@ export async function runTool(
             run.timedOut ? ", timed out" : ""
           }]\n${run.stdout}\n${run.stderr}`;
 
+        /*
+         * A lock failure answers "who holds it" in the same round.
+         *
+         * The alternative is what actually happened on a real campaign: a
+         * kill script that found nothing, a denied delete, and a rename that
+         * worked — three rounds of archaeology for a question the machine can
+         * answer directly.
+         */
+        let lockReport = "";
+        if (diagnosis?.kind === "locked_file" && diagnosis.lockedFile) {
+          try {
+            lockReport = `\n\n${formatLockReport(workspaceId, diagnosis.lockedFile)}`;
+          } catch {
+            /* a probe that fails must not lose the build log */
+          }
+        }
+
+        const verdict =
+          run.exitCode === 0
+            ? `Build succeeded: ${runner.name}.`
+            : `Build FAILED (exit ${run.exitCode ?? "?"}) — ${diagnosis?.rule}.\n` +
+              `${diagnosis?.advice}`;
+
         return {
           // A failed compile is a successful tool CALL (we asked to build
           // and got the true result), same as run_tests: marking ok:false
           // would route it through the error path and invite a blind retry.
           ok: true,
           content:
-            (run.exitCode === 0
-              ? `Build succeeded: ${runner.name}.\n\n`
-              : `Build FAILED (exit ${run.exitCode ?? "?"}). ` +
-                `Read the compiler errors below, fix them in the source, ` +
-                `and call build_project again.\n\n`) +
+            `${verdict}${retryNote}${lockReport}\n\n` +
             `Target: ${target.path || "(workspace)"}\n` +
             `Command: ${argv}\n\n${combined}`.slice(0, 60_000),
           summary:
             run.exitCode === 0
-              ? `Built ${target.path || "workspace"} (${runner.name})`
-              : `Build failed: ${runner.name}`,
+              ? retryNote
+                ? `Built ${target.path || "workspace"} (${runner.name}, after 1 retry)`
+                : `Built ${target.path || "workspace"} (${runner.name})`
+              : `Build failed: ${diagnosis?.kind.replace("_", " ")} (${runner.name})`,
           changedPath: "build",
         };
       }
@@ -3066,30 +3570,62 @@ export async function runTool(
       case "apply_patch": {
         const relative = str(args, "path");
         const patch = str(args, "patch");
+        const partial = args.partial === true;
 
-        const existing = await readFile(workspaceId, relative, {
-          maxChars: limits.readChars,
-        });
+        /*
+         * The WHOLE file, not a capped read.
+         *
+         * This used to read with the same character budget the model's reads
+         * use and then write the result back — so patching a file larger
+         * than the budget silently deleted everything past it. A read that
+         * lies costs a round; a write that lies costs the file.
+         */
+        const existing = await readFileWhole(workspaceId, relative);
+
         let applied;
         try {
-          applied = applyPatch(existing.content, patch);
+          applied = applyPatch(existing.content, patch, { partial });
         } catch (error) {
           return {
             ok: false,
             content: `Error: ${
               error instanceof Error ? error.message : "could not apply patch"
             }`,
-            summary: `Patch did not apply to ${relative}`,
+            summary:
+              error instanceof PatchReportError
+                ? `${error.results.filter((h) => !h.applied).length} hunk(s) did not match`
+                : `Patch did not apply to ${relative}`,
+          };
+        }
+
+        if (applied.hunksApplied === 0) {
+          return {
+            ok: false,
+            content:
+              `No hunk matched ${relative}, so nothing was written.\n\n` +
+              `${formatHunkReport(applied.results)}`,
+            summary: `No hunk matched ${relative}`,
           };
         }
 
         await writeFile(workspaceId, relative, applied.content);
+
+        const failed = applied.results.filter((h) => !h.applied);
         return {
-          ok: true,
+          ok: failed.length === 0,
           content:
-            `Applied ${applied.hunksApplied} hunk` +
-            `${applied.hunksApplied === 1 ? "" : "s"} to ${relative}.`,
-          summary: `Patched ${relative}`,
+            `Applied ${applied.hunksApplied} of ${applied.hunksTotal} hunk` +
+            `${applied.hunksTotal === 1 ? "" : "s"} to ${relative}.\n\n` +
+            `${formatHunkReport(applied.results)}` +
+            (failed.length
+              ? `\n\nThe file now holds the ${applied.hunksApplied} hunk(s) ` +
+                `that matched. Re-send ONLY the ${failed.length} marked NOT ` +
+                `applied, rebuilt against the file as it is now.`
+              : ""),
+          summary:
+            failed.length === 0
+              ? `Patched ${relative} (${applied.hunksApplied} hunks)`
+              : `Patched ${relative} — ${applied.hunksApplied}/${applied.hunksTotal} hunks`,
           changedPath: relative,
         };
       }

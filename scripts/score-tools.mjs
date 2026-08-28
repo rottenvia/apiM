@@ -98,6 +98,10 @@ const TOOLS = [
   ["download_file", 94, 94, 88, 94, 95, "exact PDF/image/archive bytes, redirect-safe and workspace-contained"],
   ["http_request", 96, 96, 94, 92, 97, "public by default; loopback opt-in; every redirect revalidated"],
   ["github_push", 92, 98, 94, 90, 94, "dedicated branch only, no force, OAuth token hidden, user approval required"],
+  // --- seeing what happened ------------------------------------------------
+  ["analyze_log", 92, 98, 96, 96, 95, "counts, clusters, distributions and the fault sequence from pasted output; arithmetic is unit-checked"],
+  ["screenshot_window", 82, 92, 94, 90, 78, "PrintWindow on Windows, screencapture/xdotool elsewhere; headless failure is loud and leaves no fake PNG"],
+  ["build_project", 90, 92, 96, 90, 92, "finds MSBuild; classifies the failure, retries only the named flaky rules, and names the handle on a lock"],
   // --- documents and vision ------------------------------------------------
   ["read_document", 94, 94, 92, 88, 97, "real PDF plus Next dev bundle, Office and EPUB tested"],
   ["inspect_binary", 99, 99, 98, 95, 99, "model-selected incremental layers, behavior-focused cached capa/ILSpy/Ghidra, exhaustive artifacts only on request"],
