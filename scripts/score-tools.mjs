@@ -99,8 +99,10 @@ const TOOLS = [
   ["http_request", 96, 96, 94, 92, 97, "public by default; loopback opt-in; every redirect revalidated"],
   ["github_push", 92, 98, 94, 90, 94, "dedicated branch only, no force, OAuth token hidden, user approval required"],
   // --- seeing what happened ------------------------------------------------
+  ["verify_file", 96, 98, 96, 97, 95, "required/absent literals in UTF-8 AND UTF-16LE, size and sha256 — retires a family of hand-written verify scripts"],
+  ["read_symbol", 94, 96, 95, 98, 92, "one function by name with its exact line range; brace scanner respects strings and comments"],
   ["analyze_log", 92, 98, 96, 96, 95, "counts, clusters, distributions and the fault sequence from pasted output; arithmetic is unit-checked"],
-  ["screenshot_window", 82, 92, 94, 90, 78, "PrintWindow on Windows, screencapture/xdotool elsewhere; headless failure is loud and leaves no fake PNG"],
+  ["screenshot_window", 90, 92, 96, 92, 82, "captures a hidden desktop or Xvfb surface by process id; native VLMs get the pixels in the same round; headless failure is loud and leaves no fake PNG"],
   ["build_project", 90, 92, 96, 90, 92, "finds MSBuild; classifies the failure, retries only the named flaky rules, and names the handle on a lock"],
   // --- documents and vision ------------------------------------------------
   ["read_document", 94, 94, 92, 88, 97, "real PDF plus Next dev bundle, Office and EPUB tested"],

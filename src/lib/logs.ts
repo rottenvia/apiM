@@ -46,6 +46,23 @@ export interface FaultEvent {
   text: string;
 }
 
+/**
+ * A monotone counter that identifies WHICH slice of a run this text is.
+ *
+ * Asked for by name: "put the first and last tick= in the coverage line —
+ * your logs are tick-numbered, so that instantly tells me which session slice
+ * I'm holding without reading a word of it." Generalised past `tick` to any
+ * field that only ever goes up, because the next project will call it frame,
+ * seq, or iter.
+ */
+export interface LogSpan {
+  key: string;
+  first: number;
+  last: number;
+  /** Lines carrying the counter — how much of the log the span speaks for. */
+  n: number;
+}
+
 export interface LogAnalysis {
   lines: number;
   /** Non-empty lines, which is what every ratio below is measured against. */
@@ -58,6 +75,8 @@ export interface LogAnalysis {
   /** Lines around the first fault, so the sequence reads in order. */
   faultContext: string[];
   truncated: boolean;
+  /** First/last value of the run counter, when the log has one. */
+  span: LogSpan | null;
 }
 
 const LEVELS: { label: string; pattern: RegExp }[] = [
@@ -212,6 +231,38 @@ export function analyzeLog(
     .sort((a, b) => b.n - a.n)
     .slice(0, options.maxNumerics ?? 10);
 
+  /*
+   * The run counter, if there is one.
+   *
+   * Preference order matters: an explicitly named counter beats a lucky
+   * monotone field, so `tick` wins over a frame index that happens to rise.
+   * A field only qualifies when it never decreases across the log — that is
+   * what makes first/last a SPAN rather than two arbitrary samples.
+   */
+  const COUNTER_NAMES = ["tick", "frame", "seq", "iter", "step", "sample"];
+  let span: LogSpan | null = null;
+  const monotone = (values: number[]) =>
+    values.length >= 2 && values.every((v, i) => i === 0 || v >= values[i - 1]);
+
+  for (const name of COUNTER_NAMES) {
+    const key = [...numbers.keys()].find(
+      (k) => k.toLowerCase() === name
+    );
+    const values = key ? numbers.get(key)! : null;
+    if (key && values && monotone(values)) {
+      span = { key, first: values[0], last: values[values.length - 1], n: values.length };
+      break;
+    }
+  }
+  if (!span) {
+    for (const [key, values] of numbers) {
+      if (values.length >= 5 && monotone(values) && values[0] !== values[values.length - 1]) {
+        span = { key, first: values[0], last: values[values.length - 1], n: values.length };
+        break;
+      }
+    }
+  }
+
   // Faults, in the order they happened — the sequence is the story.
   const faults: FaultEvent[] = [];
   allLines.forEach((line, index) => {
@@ -250,13 +301,18 @@ export function analyzeLog(
     faults: faults.slice(0, 40),
     faultContext,
     truncated: faults.length > 40,
+    span,
   };
 }
 
 /** The receipt a human would have written by hand. */
 export function formatLogAnalysis(a: LogAnalysis): string {
   const out: string[] = [
-    `${a.lines} line(s), ${a.counted} non-empty.`,
+    `${a.lines} line(s), ${a.counted} non-empty.` +
+      (a.span
+        ? ` Covers ${a.span.key} ${a.span.first} → ${a.span.last} ` +
+          `(${a.span.n} line(s) carry it).`
+        : ""),
   ];
 
   if (a.levels.length) {

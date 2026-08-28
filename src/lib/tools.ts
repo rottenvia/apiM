@@ -1,4 +1,6 @@
 import path from "node:path";
+import { createHash } from "node:crypto";
+import { modelVision } from "@/lib/models";
 import { diffLines, diffStats, diffHunks } from "@/lib/diff";
 import { describeImageWithFallback } from "@/lib/ocr";
 import {
@@ -58,6 +60,8 @@ import {
 } from "@/lib/workspace";
 import { applyPatch, formatHunkReport, PatchReportError } from "@/lib/patch";
 import { analyzeLog, formatLogAnalysis } from "@/lib/logs";
+import { formatMarkerReport, verifyMarkers } from "@/lib/markers";
+import { findSymbols, formatSymbol } from "@/lib/symbols";
 import { captureWindow } from "@/lib/screenshot";
 import { httpRequest, formatHttpResult } from "@/lib/http";
 import {
@@ -75,6 +79,8 @@ import {
 import { runCommand } from "@/lib/runner";
 import { detectBuild, BuildError } from "@/lib/build";
 import {
+  digestBuild,
+  formatBuildDigest,
   diagnoseBuildFailure,
   formatLockReport,
 } from "@/lib/build-diagnostics";
@@ -538,7 +544,8 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
     function: {
       name: "start_process",
       description:
-        "Start something that keeps running — a dev server, a watcher, a bot. " +
+        "Start something that keeps running — a dev server, a watcher, a " +
+        "GUI you just built, a bot. " +
         "Use this instead of run_command for anything that does not exit on " +
         "its own, because run_command waits for the process to finish and " +
         "will kill it. Returns immediately with an id and the first few " +
@@ -550,12 +557,26 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
         properties: {
           command: {
             type: "string",
-            description: 'Program to run, e.g. "npm", "python3", "node".',
+            description:
+              'Program to run, e.g. "npm", "python3", "node" — or the path ' +
+              'to a program you built yourself, e.g. ' +
+              '"build/x64/Release/app.exe". A binary inside the workspace is ' +
+              "allowed by its path even though its name is on no list.",
           },
           args: {
             type: "array",
             items: { type: "string" },
             description: 'Arguments as separate items, e.g. ["run", "dev"].',
+          },
+          hidden: {
+            type: "boolean",
+            description:
+              "Run a GUI where the user cannot see it but you can still " +
+              "screenshot it: a separate Windows desktop, or an off-screen X " +
+              "display. No window appears on their screen and focus is never " +
+              "taken. Use this for every UI check so you are not throwing " +
+              "windows onto someone's desktop. Then call screenshot_window " +
+              "with process_id — it finds the hidden surface on its own.",
           },
           reason: {
             type: "string",
@@ -1449,6 +1470,91 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "read_symbol",
+      description:
+        "Read ONE function, class or struct by name, with its exact line " +
+        "range. This is the right way into a big file: main.cpp at 109KB " +
+        "cannot be read whole, and reading it in slices is how you end up " +
+        "with an anchor that spans a boundary and matches nothing. The span " +
+        "comes back byte for byte with its start_line and end_line, which " +
+        "you can hand straight to edit_file — no whitespace to copy, no " +
+        "landmark to guess. If the name is defined more than once, every " +
+        "definition is listed so you can pick the right one.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Source file to look in." },
+          name: {
+            type: "string",
+            description:
+              'Symbol name, e.g. "OnPaint" or "InjectorWindow". Qualified ' +
+              'C++ names match on the last segment, so "OnPaint" finds ' +
+              '"void InjectorWindow::OnPaint(...)".',
+          },
+          index: {
+            type: "number",
+            description:
+              "Which definition to return when there are several (1-based). " +
+              "Omit to get a list of all of them plus the first body.",
+          },
+        },
+        required: ["path", "name"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "verify_file",
+      description:
+        "Prove a built artifact is the one you think it is, without writing " +
+        "a verify script. Give it required literals (strings that must be " +
+        "in the new build) and absent literals (strings you deleted), and it " +
+        "searches BOTH UTF-8 and UTF-16LE — a wide string literal is the " +
+        "usual reason a marker looks missing from a binary that contains it. " +
+        "Reports size and sha256 every time, and can assert them. Use it " +
+        "after every build instead of trusting the compiler's exit code: a " +
+        "successful link of a stale source tree exits 0 and lies to you.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description: "File to verify, e.g. \"build/Release/app.exe\".",
+          },
+          required: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              'Literals that must be present, e.g. ["v17", "the compact law"].',
+          },
+          absent: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Literals that must NOT be present — the text this build was " +
+              "supposed to remove.",
+          },
+          sha256: {
+            type: "string",
+            description:
+              "Expected sha256 (a prefix is fine). The real one is always " +
+              "reported either way.",
+          },
+          bytes: {
+            type: "number",
+            description: "Exact expected size in bytes.",
+          },
+          min_bytes: { type: "number", description: "Lower size bound." },
+          max_bytes: { type: "number", description: "Upper size bound." },
+        },
+        required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "analyze_log",
       description:
         "Turn a wall of console output into receipts. Give it pasted text " +
@@ -1488,7 +1594,11 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
       name: "screenshot_window",
       description:
         "Look at a native window that is ALREADY running — normally " +
-        "something you launched with start_process. Saves a PNG in the " +
+        "something you launched with start_process (use hidden=true there " +
+        "and it never touches the user's screen). Can also capture a window " +
+        "the USER started, by pid: that is the route for a program that " +
+        "demands administrator rights, which this app cannot launch. " +
+        "Saves a PNG in the " +
         "workspace and reports its size; follow it with view_image to " +
         "actually see the pixels. Use it after building a GUI instead of " +
         "reasoning about coordinates in your head: a colour that leaks, a " +
@@ -1504,11 +1614,19 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
             description:
               "Window title, or a distinctive part of it. Matched loosely.",
           },
+          process_id: {
+            type: "string",
+            description:
+              'The id from start_process, e.g. "proc-3-lx9". Best option: it ' +
+              "knows the pid AND the off-screen surface the window is on, so " +
+              "a hidden launch captures with no extra arguments.",
+          },
           pid: {
             type: "number",
             description:
-              "Process id instead of a title — use the pid from " +
-              "list_processes for a window with no title bar.",
+              "Raw process id — use this for a program the USER launched " +
+              "(one that needs administrator rights, say). Ask them for the " +
+              "pid, or find it with list_processes.",
           },
           path: {
             type: "string",
@@ -1705,6 +1823,16 @@ export interface ToolResult {
   ok: boolean;
   /** Files touched, so the UI can refresh its tree. */
   changedPath?: string;
+  /**
+   * Pixels for a model that can actually see them.
+   *
+   * A tool message is text-only on every OpenAI-compatible wire, so an image
+   * a tool produced cannot ride inside it. The agent loop turns this into a
+   * follow-up user turn carrying an image part — which is the difference
+   * between a native VLM LOOKING at the screenshot and reading someone
+   * else's OCR of it.
+   */
+  image?: { path: string; dataUrl: string };
 }
 
 function str(args: Record<string, unknown>, key: string): string {
@@ -1919,12 +2047,35 @@ export async function runTool(
           ? numberLines(result.content, result.firstLine)
           : result.content;
 
+        /*
+         * A receipt the model can actually rely on.
+         *
+         * "Big reads sometimes came back short or subtly wrong" produced a
+         * house rule — small verbatim chunks, never anchor from a collapsed
+         * read — that cost whole rounds. A rule like that exists because the
+         * read gave no way to tell a complete span from a clipped one, so
+         * every span had to be treated as suspect.
+         *
+         * So say it, in the same words every time. A complete read is stamped
+         * EXACT with its character count and a sha256 of the very bytes
+         * handed over, which is checkable: verify_file on the same path will
+         * report the same hash when nothing has changed underneath.
+         */
+        const exactness = result.truncated
+          ? ""
+          : ` · EXACT: ${result.content.length.toLocaleString()} chars, ` +
+            `sha256 ${createHash("sha256")
+              .update(result.content)
+              .digest("hex")
+              .slice(0, 16)}`;
+
         const header =
           `${result.path} — lines ${result.firstLine}-${result.lastLine} of ` +
           `${result.totalLines}` +
           (result.rangeRequested || result.truncated
             ? ` (${describeCoverage(result)})`
-            : " (whole file)");
+            : " (whole file)") +
+          exactness;
 
         return {
           ok: true,
@@ -2135,7 +2286,8 @@ export async function runTool(
         const result = await startProcess(
           workspaceId,
           str(args, "command"),
-          Array.isArray(args.args) ? args.args.map((a) => String(a)) : []
+          Array.isArray(args.args) ? args.args.map((a) => String(a)) : [],
+          { hidden: args.hidden === true }
         );
 
         if (!result.ok) {
@@ -2163,13 +2315,25 @@ export async function runTool(
           };
         }
 
+        const hiddenNote = proc.hidden
+          ? `\n\nThis is running OFF-SCREEN (${
+              proc.hidden.kind === "windows-desktop"
+                ? `hidden Windows desktop "${proc.hidden.name}"`
+                : `X display ${proc.hidden.name}`
+            }) — the user cannot see it. That also means you cannot assume ` +
+            `anything about how it looks: call ` +
+            `screenshot_window with process_id="${proc.id}" and then ` +
+            `view_image.`
+          : "";
+
         return {
           ok: true,
           content:
-            `Started ${proc.display} — id ${proc.id}, still running.\n\n` +
+            `Started ${proc.display} — id ${proc.id}, still running.` +
+            `${hiddenNote}\n\n` +
             `${log || "(no output yet)"}\n\n` +
             `Read more with read_process, and stop it with stop_process when done.`,
-          summary: `Started ${proc.display}`,
+          summary: `Started ${proc.display}${proc.hidden ? " (hidden)" : ""}`,
         };
       }
 
@@ -2342,6 +2506,33 @@ export async function runTool(
       case "view_image": {
         const imagePath = str(args, "path");
         const image = await readImageAsDataUrl(workspaceId, imagePath);
+
+        /*
+         * A model with eyes should use them.
+         *
+         * This tool always ran the image through the vision helper or local
+         * OCR, whatever model was driving. On GLM 5.3 Flash — a native VLM —
+         * that meant the pixels never reached the model at all: it got back
+         * OCR text, which on a GUI screenshot is a handful of button labels
+         * with the layout, colours, spacing and every rendering bug thrown
+         * away. Reported as "it is multimodal but it seems like it never
+         * reads the screenshot", and that was exactly right.
+         *
+         * For a native VLM the image itself is returned and the agent loop
+         * attaches it to the next turn. OCR stays for the models that need
+         * it.
+         */
+        if (modelVision(context.modelId) === "native") {
+          return {
+            ok: true,
+            content:
+              `${imagePath} is attached to this turn as an image — look at ` +
+              `it directly. Describe what you actually see (layout, colour, ` +
+              `spacing, anything misdrawn), not what you expected to build.`,
+            summary: `Looking at ${imagePath}`,
+            image: { path: imagePath, dataUrl: image.dataUrl },
+          };
+        }
 
         const result = await describeImageWithFallback(
           image.dataUrl,
@@ -2683,6 +2874,115 @@ export async function runTool(
         };
       }
 
+      case "read_symbol": {
+        const filePath = str(args, "path");
+        const symbolName = str(args, "name");
+        if (!filePath || !symbolName) {
+          return {
+            ok: false,
+            content: "Error: both path and name are required.",
+            summary: "Missing path or name",
+          };
+        }
+
+        // The WHOLE file, uncapped. A symbol read that searched a truncated
+        // copy would miss definitions in the tail and report "not found" for
+        // a function that is right there — the exact class of quiet wrongness
+        // this tool exists to remove.
+        const whole = await readFileWhole(workspaceId, filePath);
+        const matches = findSymbols(whole.content, symbolName, filePath);
+
+        if (matches.length === 0) {
+          return {
+            ok: false,
+            content:
+              `No definition of "${symbolName}" in ${filePath} ` +
+              `(${whole.content.split("\n").length} lines searched, whole ` +
+              `file, nothing truncated).\n\n` +
+              `This looks for DEFINITIONS — a declaration or a call site is ` +
+              `not one. Use search_files to find every mention.`,
+            summary: `No ${symbolName} in ${filePath}`,
+          };
+        }
+
+        const pick = num(args, "index");
+        const chosen =
+          pick && pick >= 1 && pick <= matches.length
+            ? matches[pick - 1]
+            : matches[0];
+
+        const list =
+          matches.length > 1
+            ? `${matches.length} definitions of "${symbolName}":\n` +
+              matches
+                .map(
+                  (m, i) =>
+                    `  ${i + 1}. lines ${m.startLine}-${m.endLine} — ${m.signature}`
+                )
+                .join("\n") +
+              `\n\nShowing ${
+                pick && pick >= 1 && pick <= matches.length ? `#${pick}` : "#1"
+              }; pass index to see another.\n\n`
+            : "";
+
+        return {
+          ok: true,
+          content:
+            list +
+            formatSymbol(
+              chosen,
+              filePath,
+              numberLines(chosen.text, chosen.startLine)
+            ),
+          summary:
+            `Read ${symbolName} from ${filePath}:${chosen.startLine}-${chosen.endLine}`,
+        };
+      }
+
+      case "verify_file": {
+        const target = str(args, "path");
+        if (!target) {
+          return {
+            ok: false,
+            content: "Error: path is required.",
+            summary: "No path given",
+          };
+        }
+
+        const bytes = await readFileBytes(workspaceId, target);
+        const report = verifyMarkers(bytes, {
+          required: Array.isArray(args.required)
+            ? args.required.map((m) => String(m))
+            : [],
+          absent: Array.isArray(args.absent)
+            ? args.absent.map((m) => String(m))
+            : [],
+          sha256: typeof args.sha256 === "string" ? args.sha256 : null,
+          bytes: num(args, "bytes"),
+          minBytes: num(args, "min_bytes"),
+          maxBytes: num(args, "max_bytes"),
+        });
+
+        return {
+          // A failed verification is a successful CALL — it answered the
+          // question truthfully. ok:false would invite a blind retry of a
+          // check whose answer will not change until the file does.
+          ok: true,
+          content:
+            `${formatMarkerReport(report, target)}` +
+            (report.ok
+              ? ""
+              : `\n\nThis binary is not the one you were about to describe ` +
+                `to the user. Find out why before you report anything about ` +
+                `it — a stale artifact links cleanly and exits 0.`),
+          summary: report.total
+            ? report.ok
+              ? `Verified ${target} (${report.passed}/${report.total})`
+              : `${target} FAILED verification (${report.passed}/${report.total})`
+            : `${target}: ${report.bytes.toLocaleString()} bytes`,
+        };
+      }
+
       case "analyze_log": {
         let text = typeof args.text === "string" ? args.text : "";
         const logPath = typeof args.path === "string" ? args.path.trim() : "";
@@ -2741,11 +3041,55 @@ export async function runTool(
           };
         }
 
+        /*
+         * A tracked process knows more than the model does.
+         *
+         * When the window was launched hidden, its pid is the app's real pid
+         * (not the launcher's) and its desktop or display is where the window
+         * actually exists. Looking those up here is what makes
+         * `screenshot_window process_id="proc-3"` a complete instruction —
+         * the alternative is the model guessing a pid off a log line.
+         */
+        const processId = str(args, "process_id").trim();
+        let pid = num(args, "pid");
+        let desktop: string | null = null;
+        let display: string | null = null;
+
+        if (processId) {
+          const tracked = getProcess(processId);
+          if (!tracked) {
+            return {
+              ok: false,
+              content:
+                `Error: no process with id "${processId}". Use ` +
+                `list_processes to see what is running.`,
+              summary: "No such process",
+            };
+          }
+          if (!isRunning(tracked)) {
+            return {
+              ok: false,
+              content:
+                `Error: ${tracked.display} has already exited (code ` +
+                `${tracked.exitCode ?? "unknown"}), so it has no window. ` +
+                `Start it again before capturing.`,
+              summary: "Process already exited",
+            };
+          }
+          pid = tracked.innerPid ?? tracked.pid ?? pid;
+          if (tracked.hidden?.kind === "windows-desktop") {
+            desktop = tracked.hidden.name;
+          }
+          if (tracked.hidden?.kind === "xvfb") display = tracked.hidden.name;
+        }
+
         const shot = await captureWindow({
           title: typeof args.title === "string" ? args.title : null,
-          pid: num(args, "pid"),
+          pid,
           outPath,
           fullScreen: args.full_screen === true,
+          desktop,
+          display,
         });
 
         if (!shot.ok) {
@@ -2758,11 +3102,40 @@ export async function runTool(
           };
         }
 
+        const where = desktop
+          ? ` from the hidden desktop "${desktop}"`
+          : display
+            ? ` from the off-screen display ${display}`
+            : "";
+
+        // A model that can see gets the pixels in the same round. Making it
+        // call view_image afterwards costs a round and, on a long UI night,
+        // that round is the difference between two iterations and one.
+        if (modelVision(context.modelId) === "native") {
+          try {
+            const shown = await readImageAsDataUrl(workspaceId, relative);
+            return {
+              ok: true,
+              content:
+                `Saved ${relative} (${shot.width ?? "?"}x${shot.height ?? "?"}` +
+                `, ${Math.round((shot.bytes ?? 0) / 1024)}KB, via ` +
+                `${shot.method}${where}). It is attached to this turn — look ` +
+                `at it and say what is actually on screen.`,
+              summary: `Captured ${relative}`,
+              changedPath: relative,
+              image: { path: relative, dataUrl: shown.dataUrl },
+            };
+          } catch {
+            /* fall through to the text-only receipt */
+          }
+        }
+
         return {
           ok: true,
           content:
             `Saved ${relative} (${shot.width ?? "?"}x${shot.height ?? "?"}, ` +
-            `${Math.round((shot.bytes ?? 0) / 1024)}KB, via ${shot.method}).\n\n` +
+            `${Math.round((shot.bytes ?? 0) / 1024)}KB, via ${shot.method}` +
+            `${where}).\n\n` +
             `Call view_image on it now — the file existing is not the same ` +
             `as you having looked at it.`,
           summary: `Captured ${relative}`,
@@ -2851,8 +3224,14 @@ export async function runTool(
         const failures: string[] = [];
         const previews: string[] = [];
         const distinct = new Set<string>();
+        /** Edits that missed on the first pass, kept for one retry. */
+        const deferred: { index: number; entry: unknown }[] = [];
 
-        for (const [index, entry] of batch.entries()) {
+        const attempt = async (
+          index: number,
+          entry: unknown,
+          secondPass: boolean
+        ): Promise<{ ok: boolean; reason?: string }> => {
           const label = `edit ${index + 1}/${batch.length}`;
           const edit = entry as Record<string, unknown>;
           const editPath =
@@ -2863,7 +3242,7 @@ export async function runTool(
               `${label} (${editPath}): malformed — every edit needs a path ` +
                 `and new_text, plus one of old_text / start_anchor / start_line`
             );
-            continue;
+            return { ok: false };
           }
 
           const spec = readEditSpec(edit);
@@ -2881,30 +3260,58 @@ export async function runTool(
                   `(${outcome.removedLines} → ${outcome.addedLines} lines, ` +
                   `${outcome.mode} match)`
               );
-              continue;
+              return { ok: true };
             }
             distinct.add(outcome.path);
             applied.push(
               `${label} (${outcome.path}): applied at lines ` +
                 `${outcome.startLine}-${outcome.endLine}` +
-                `${outcome.exact ? "" : " (whitespace-tolerant match)"}`
+                `${outcome.exact ? "" : " (whitespace-tolerant match)"}` +
+                `${secondPass ? " — on the second pass, after its siblings landed" : ""}`
             );
+            return { ok: true };
           } catch (error) {
             /*
              * One failure does not abandon the rest, and it does not hide
              * behind a generic message either: the reason carries the line
              * numbers needed to fix exactly this hunk.
              */
-            failures.push(
-              `${label} (${editPath}): ${
-                error instanceof WorkspaceError
+            const reason =
+              error instanceof WorkspaceError
+                ? error.message
+                : error instanceof Error
                   ? error.message
-                  : error instanceof Error
-                    ? error.message
-                    : "could not be edited"
-              }`
-            );
+                  : "could not be edited";
+            if (!secondPass) return { ok: false, reason };
+            failures.push(`${label} (${editPath}): ${reason}`);
+            return { ok: false, reason };
           }
+        };
+
+        /*
+         * Two passes, because a batch must behave like the same edits sent
+         * one at a time.
+         *
+         * Reported: "edit_files failed twice on this exact file while the
+         * same changes individually succeeded". That is an ORDER effect, and
+         * it is real — edit 7 can anchor on text that edit 3 introduces, and
+         * a whole-file ambiguity check can see two candidates before edit 3
+         * removes one of them. Sent by hand, the model just retries the
+         * loser after the others have landed; the batch tool gave up
+         * instead, so a 19-hunk surgery cost four calls.
+         *
+         * So the batch does what the human does: everything that matches now
+         * is applied now, and anything that missed is retried once against
+         * the file as its siblings left it. Nothing is retried twice, so a
+         * genuinely wrong hunk still fails fast and says why.
+         */
+        for (const [index, entry] of batch.entries()) {
+          const first = await attempt(index, entry, false);
+          if (!first.ok && first.reason) deferred.push({ index, entry });
+        }
+
+        for (const { index, entry } of deferred) {
+          await attempt(index, entry, true);
         }
 
         const fileWord = (n: number) => `${n} file${n === 1 ? "" : "s"}`;
@@ -3548,13 +3955,22 @@ export async function runTool(
             : `Build FAILED (exit ${run.exitCode ?? "?"}) — ${diagnosis?.rule}.\n` +
               `${diagnosis?.advice}`;
 
+        // The digest goes ABOVE the log, never instead of it: a summary that
+        // hid the one line that mattered would be the truncated-read problem
+        // wearing a different hat.
+        const digest = formatBuildDigest(
+          digestBuild(combined),
+          run.exitCode,
+          run.durationMs
+        );
+
         return {
           // A failed compile is a successful tool CALL (we asked to build
           // and got the true result), same as run_tests: marking ok:false
           // would route it through the error path and invite a blind retry.
           ok: true,
           content:
-            `${verdict}${retryNote}${lockReport}\n\n` +
+            `${verdict}${retryNote}${lockReport}\n\n${digest}\n\n` +
             `Target: ${target.path || "(workspace)"}\n` +
             `Command: ${argv}\n\n${combined}`.slice(0, 60_000),
           summary:

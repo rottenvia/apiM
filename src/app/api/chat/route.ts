@@ -117,7 +117,15 @@ import { loadScopedConversationHistory } from "@/lib/chat-history";
 import type { ScopedChatMessage } from "@/lib/chat-history";
 import { buildUserContent, userHasContent } from "@/lib/multimodal";
 import type { StoredAttachment } from "@/lib/multimodal";
-import { getModel, maxOutputTokensFor } from "@/lib/models";
+import { getModel, maxOutputTokensFor, modelVision } from "@/lib/models";
+
+/**
+ * Marks a user turn that exists only to carry a tool's image.
+ *
+ * Needed so the loop can find its own earlier injections and collapse their
+ * pixels without touching anything the user actually attached.
+ */
+const TOOL_IMAGE_TAG = "[tool image]";
 import {
   GITHUB_TOKEN_COOKIE,
   githubConfig,
@@ -3236,6 +3244,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               content: string;
               summary: string;
               changedPath?: string;
+              image?: { path: string; dataUrl: string };
             };
 
             if (!parsed.ok) {
@@ -3798,6 +3807,56 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               tool_call_id: call.id,
               content: result.content,
             });
+
+            /*
+             * Pixels a tool produced, handed to a model that can see them.
+             *
+             * A tool message is text on every OpenAI-compatible wire, so an
+             * image cannot ride inside one — which is why view_image used to
+             * OCR everything even for a native VLM, and why GLM 5.3 Flash
+             * "never read the screenshot". The image goes in as a following
+             * user turn instead, which every provider accepts.
+             *
+             * Only the most recent few are kept as pixels. A UI session takes
+             * a screenshot every round, and re-sending all of them re-bills
+             * image tokens for pictures the model has already described; the
+             * older ones collapse to one line naming the file, which is
+             * enough to refer back to.
+             */
+            if (result.image && modelVision(model) === "native") {
+              for (const message of transcript) {
+                if (
+                  message.role === "user" &&
+                  Array.isArray(message.content) &&
+                  message.content.some((part) => part.type === "image_url") &&
+                  message.content.some(
+                    (part) =>
+                      part.type === "text" && part.text.startsWith(TOOL_IMAGE_TAG)
+                  )
+                ) {
+                  const name =
+                    message.content.find(
+                      (part): part is { type: "text"; text: string } =>
+                        part.type === "text"
+                    )?.text ?? TOOL_IMAGE_TAG;
+                  message.content = `${name} [pixels dropped from history — capture it again if you need another look]`;
+                }
+              }
+
+              transcript.push({
+                role: "user",
+                content: [
+                  {
+                    type: "text",
+                    text: `${TOOL_IMAGE_TAG} ${result.image.path}`,
+                  },
+                  {
+                    type: "image_url",
+                    image_url: { url: result.image.dataUrl },
+                  },
+                ],
+              });
+            }
 
             send({
               type: "tool_result",

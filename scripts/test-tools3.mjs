@@ -459,7 +459,12 @@ check(
 
 const total = WORKSPACE_TOOLS.length;
 const schemaChars = JSON.stringify(WORKSPACE_TOOLS).length;
-// Raised from 9k when the binary tools became first-class: inspect_binary
+// Raised again to 14k for the observability set — analyze_log,
+// screenshot_window, verify_file and read_symbol — each of which replaces a
+// hand-written script or a round of guessing. The schema is sent once per
+// conversation and prompt-cached at roughly 1/120th rate, so this guard is
+// about "not ballooning", not about pennies.
+// Previously raised from 9k when the binary tools became first-class: inspect_binary
 // gained its analyzer presets / enable-disable parameters and the
 // non-PE-format guidance, and that is description the model actually uses to
 // spend less time on easier targets. The schema is sent once per conversation
@@ -467,7 +472,7 @@ const schemaChars = JSON.stringify(WORKSPACE_TOOLS).length;
 // which 12k still enforces with headroom for the next tool.
 check(
   "the schemas are still a rounding error on the bill",
-  schemaChars / 3.6 < 12_000,
+  schemaChars / 3.6 < 14_000,
   `${total} tools, ~${Math.round(schemaChars / 3.6)} tokens, sent once and cached`
 );
 

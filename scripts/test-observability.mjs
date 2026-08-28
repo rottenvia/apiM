@@ -20,7 +20,8 @@
  */
 import path from "node:path";
 import os from "node:os";
-import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
@@ -141,20 +142,20 @@ check(
 // ---------------------------------------------------------- 2. lock reports
 console.log("\n2. A lock report says who holds the file, or admits it cannot tell");
 
-const report = build.formatLockReport("ws-observability-test", "cleanroom_bhop.exe");
-check("the report names the file", /cleanroom_bhop\.exe/.test(report));
+const lockText = build.formatLockReport("ws-observability-test", "cleanroom_bhop.exe");
+check("the report names the file", /cleanroom_bhop\.exe/.test(lockText));
 check(
   "with no holder found it says 'no holder identified', never 'nothing holds it'",
-  /No holder identified/i.test(report) || /Holders:/.test(report),
+  /No holder identified/i.test(lockText) || /Holders:/.test(lockText),
   "the difference between 'I could not tell' and 'it is free' is the whole point"
 );
 check(
   "it lists what it probed, so the answer can be judged",
-  /probed:/i.test(report) || /Holders:/.test(report)
+  /probed:/i.test(lockText) || /Holders:/.test(lockText)
 );
 check(
   "and it still gives the fix when nothing was identified",
-  /rename/i.test(report),
+  /rename/i.test(lockText),
   "an answer of 'unknown' with no next step is a wasted round"
 );
 
@@ -357,6 +358,294 @@ check(
 );
 
 await rm(tmp, { recursive: true, force: true });
+
+// ------------------------------------------------ 5. running your own build
+console.log("\n5. The allow-list lets the agent run what it built");
+
+const runner = await load("src/lib/runner.ts");
+const wsRoot = await mkdtemp(path.join(os.tmpdir(), "apim-ws-"));
+await writeFile(path.join(wsRoot, "app.exe"), "MZ fake", "utf8");
+await chmod(path.join(wsRoot, "app.exe"), 0o755);
+await writeFile(path.join(wsRoot, "notes.txt"), "not a program", "utf8");
+await chmod(path.join(wsRoot, "notes.txt"), 0o644);
+
+let v = runner.validateCommand("app.exe", [], wsRoot);
+check(
+  "a binary the agent built in the workspace is allowed by path",
+  v.ok,
+  v.ok ? v.command : v.reason
+);
+check(
+  "…and it runs by its resolved absolute path, not the model's spelling",
+  v.ok && path.isAbsolute(v.command) && v.command.startsWith(wsRoot),
+  v.ok ? v.command : ""
+);
+
+check(
+  "a path that climbs out of the workspace buys nothing",
+  runner.workspaceExecutable("../../../bin/sh", wsRoot) === null,
+  "location is the rule; `..` cannot buy execution"
+);
+check(
+  "an absolute system path is not a workspace binary",
+  runner.workspaceExecutable("/bin/sh", wsRoot) === null,
+  "only the allow-list can admit a system program, and it never admits a shell"
+);
+v = runner.validateCommand("../../../bin/sh", [], wsRoot);
+check(
+  "…and a shell reached by a relative path is still refused outright",
+  !v.ok && /Shells are not available/.test(v.reason),
+  v.ok ? "" : "the shell check runs on the basename, before anything else"
+);
+
+v = runner.validateCommand("notes.txt", [], wsRoot);
+check(
+  "a non-executable file in the workspace is not a program",
+  !v.ok,
+  "the executable bit still decides"
+);
+
+v = runner.validateCommand("nightfall.exe", [], wsRoot);
+check(
+  "a name that matches no file falls back to the allow-list error",
+  !v.ok && /not an allowed command/.test(v.reason),
+  "…and the message now says a built binary can be run by path"
+);
+check(
+  "the refusal explains the workspace-path route",
+  !v.ok && /built yourself/.test(v.reason),
+  v.ok ? "" : v.reason.slice(-90)
+);
+check(
+  "isReadOnlyCommand never green-lights a workspace binary",
+  runner.isReadOnlyCommand(path.join(wsRoot, "app.exe"), []) === false,
+  "native code always goes to the approval prompt"
+);
+
+await rm(wsRoot, { recursive: true, force: true });
+
+// --------------------------------------------------- 6. the hidden surface
+console.log("\n6. Launching where the user cannot see it");
+
+const hidden = await load("src/lib/hidden-display.ts");
+const availability = hidden.hiddenSurfaceAvailability();
+check(
+  "availability is answered honestly for this platform",
+  typeof availability.possible === "boolean" && availability.reason.length > 10,
+  `${availability.possible ? availability.kind : "not possible"} — ${availability.reason}`
+);
+
+const launcher = hidden.hiddenLaunchScript();
+check(
+  "the Windows launcher creates a real desktop object",
+  /CreateDesktop/.test(launcher) && /lpDesktop/.test(launcher),
+  "hiding the window instead would make PrintWindow return a blank rectangle"
+);
+check(
+  "it waits on the app, so stopping the tracked process stops the app",
+  /WaitForExit/.test(launcher)
+);
+check(
+  "elevation is explained rather than silently failing",
+  /740/.test(launcher) && /administrator/i.test(launcher),
+  "nightfall demands admin; the agent cannot elevate and must say so"
+);
+check(
+  "the capture script can join a hidden desktop before it looks for windows",
+  /SetThreadDesktop/.test(shots.windowsCaptureScript()) &&
+    /EnumDesktopWindows/.test(shots.windowsCaptureScript()),
+  "without this a hidden window is reported as 'no such window'"
+);
+check(
+  "a hidden launch is never silently downgraded to a visible one",
+  /return { ok: false, reason: opened.error }/.test(
+    readFileSync(path.join(ROOT, "src/lib/processes.ts"), "utf8")
+  ),
+  "'I thought it was hidden' is a promise you only get to break once"
+);
+
+// ------------------------------------------------------- 7. the build digest
+console.log("\n7. The build digest: one screen instead of forty lines");
+
+const BUILD_LOG = [
+  "Microsoft (R) Build Engine version 17.9",
+  "  main.cpp",
+  "d:\\proj\\main.cpp(412): warning C4244: 'argument': conversion from 'double' to 'int'",
+  "d:\\proj\\ui.cpp(88): warning C4244: 'argument': conversion from 'double' to 'int'",
+  "d:\\proj\\ui.cpp(91): warning C4101: 'unused': unreferenced local variable",
+  "d:\\proj\\main.cpp(500): error C2065: 'g_hWnd': undeclared identifier",
+  "  furniture line that means nothing",
+  "  nightfall -> d:\\proj\\x64\\Release\\nightfall.exe",
+  "    1 Error(s)",
+].join("\n");
+
+const dg = build.digestBuild(BUILD_LOG);
+check(
+  "errors are extracted with code, file and line",
+  dg.errors.length === 1 &&
+    dg.errors[0].code === "C2065" &&
+    dg.errors[0].file === "main.cpp" &&
+    dg.errors[0].line === 500,
+  JSON.stringify(dg.errors[0])
+);
+check(
+  "the same warning from two translation units is ONE row with a count",
+  dg.warnings.length === 2 &&
+    dg.warnings.find((w) => w.code === "C4244")?.count === 2,
+  dg.warnings.map((w) => `${w.code} x${w.count}`).join(" · ")
+);
+check(
+  "the first sighting is the one reported",
+  dg.warnings.find((w) => w.code === "C4244")?.line === 412,
+  "wall-scanning for C4244 was the exact complaint"
+);
+check(
+  "the linked artifact is picked out of the log",
+  dg.artifacts.length === 1 && /nightfall\.exe$/.test(dg.artifacts[0].path),
+  dg.artifacts[0]?.path
+);
+const digestText = build.formatBuildDigest(dg, 1, 4200);
+check(
+  "the digest leads with exit code and counts",
+  /DIGEST — exit 1/.test(digestText) && /1 distinct error/.test(digestText),
+  digestText.split("\n")[0]
+);
+check(
+  "a clean build digests to nothing alarming",
+  !/Errors:/.test(build.formatBuildDigest(build.digestBuild("Build succeeded."), 0))
+);
+
+// ------------------------------------- 8. one verifier instead of fifteen
+console.log("\n8. The marker verifier that retires the verify-script family");
+
+const markers = await load("src/lib/markers.ts");
+const artifact = Buffer.concat([
+  Buffer.from("header"),
+  Buffer.from("v17", "utf8"),
+  Buffer.from("the compact law", "utf16le"),
+  Buffer.from("tail"),
+]);
+
+let report = markers.verifyMarkers(new Uint8Array(artifact), {
+  required: ["v17", "the compact law"],
+  absent: ["v16 boot suffix"],
+});
+check("all markers pass on a good build", report.ok && report.passed === 3, `${report.passed}/${report.total}`);
+check(
+  "a UTF-16LE-only literal is found",
+  report.hits.find((h) => h.marker === "the compact law")?.found[0].encoding ===
+    "utf16le",
+  "searching UTF-8 only is why a present marker looks missing"
+);
+
+report = markers.verifyMarkers(new Uint8Array(artifact), { absent: ["v17"] });
+check(
+  "text that was supposed to be deleted is caught",
+  !report.ok && report.hits[0].found.length > 0,
+  "'physically extinct' has to be checked, not assumed"
+);
+
+report = markers.verifyMarkers(new Uint8Array(artifact), {
+  sha256: "deadbeef",
+  bytes: 999_999,
+});
+check(
+  "a wrong hash and a wrong size both fail, with the real values shown",
+  !report.ok &&
+    report.checks.every((c) => !c.ok) &&
+    /expected 999999 bytes, got/.test(report.checks[1].detail),
+  report.checks.map((c) => c.label).join(", ")
+);
+
+report = markers.verifyMarkers(new Uint8Array(artifact), {});
+check(
+  "with no markers it says so instead of claiming a pass",
+  /nothing was verified/.test(markers.formatMarkerReport(report, "x.exe")),
+  "a verifier that passes vacuously is worse than none"
+);
+
+// --------------------------------------------------------- 9. symbol reads
+console.log("\n9. Reading one function instead of one hundred kilobytes");
+
+const symbols = await load("src/lib/symbols.ts");
+const CPP = [
+  "int helper() { return 1; }",
+  "",
+  "void",
+  "InjectorWindow::OnPaint(HDC dc)",
+  "{",
+  '  const char* s = "a } brace in a string";',
+  "  // and a } in a comment",
+  "  if (dc) { Draw(dc); }",
+  "}",
+  "",
+  "void OnPaint(int overload) { }",
+].join("\n");
+
+const found = symbols.findSymbols(CPP, "OnPaint", "main.cpp");
+check("both definitions of an overloaded name come back", found.length === 2, `${found.length}`);
+check(
+  "the span starts at the return type, even on its own line",
+  found[0].startLine === 3 && found[0].endLine === 9,
+  `${found[0].startLine}-${found[0].endLine}`
+);
+check(
+  "braces inside strings and comments do not end the body early",
+  found[0].text.includes("if (dc)") && found[0].text.trim().endsWith("}"),
+  "a regex-based extractor gets this wrong, which is why it is a scanner"
+);
+check(
+  "a declaration without a body is not mistaken for a definition",
+  symbols.findSymbols("void OnPaint(HDC dc);", "OnPaint", "a.cpp").length === 0,
+  "a prototype is not the function"
+);
+
+const PY_SRC = [
+  "def outer():",
+  "    return 1",
+  "",
+  "class Widget:",
+  "    def paint(self):",
+  "        if True:",
+  "            pass",
+  "",
+  "    def other(self):",
+  "        pass",
+].join("\n");
+const py = symbols.findSymbols(PY_SRC, "paint", "ui.py");
+check(
+  "Python bodies end by indentation, not by brace",
+  py.length === 1 && py[0].startLine === 5 && py[0].endLine === 7,
+  py[0] ? `${py[0].startLine}-${py[0].endLine}` : "not found"
+);
+
+// ------------------------------------------- 10. pixels reach a native VLM
+console.log("\n10. A model with eyes is given the pixels");
+
+const toolsSrc = readFileSync(path.join(ROOT, "src/lib/tools.ts"), "utf8");
+const routeSrc = readFileSync(path.join(ROOT, "src/app/api/chat/route.ts"), "utf8");
+
+check(
+  "view_image returns the image itself on a native VLM instead of OCR",
+  /modelVision\(context\.modelId\) === "native"/.test(toolsSrc) &&
+    /image: \{ path: imagePath, dataUrl: image\.dataUrl \}/.test(toolsSrc),
+  "GLM 5.3 Flash was being handed OCR of its own screenshot"
+);
+check(
+  "screenshot_window attaches the capture in the same round",
+  /image: \{ path: relative, dataUrl: shown\.dataUrl \}/.test(toolsSrc),
+  "one round saved on every UI iteration"
+);
+check(
+  "the agent loop turns a tool image into a real image part",
+  /type: "image_url"/.test(routeSrc) && /TOOL_IMAGE_TAG/.test(routeSrc),
+  "a tool message is text-only on the wire, so it has to be a user turn"
+);
+check(
+  "older tool images collapse to a line instead of being re-billed forever",
+  /pixels dropped from history/.test(routeSrc),
+  "a UI session captures every round; re-sending them all is the bloat"
+);
 
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
