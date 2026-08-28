@@ -61,7 +61,7 @@ The executable will be in the `dist` folder. Just double-click to run!
 npm test
 ```
 
-Runs every suite — currently 2,493 checks across 55 suites — without calling
+Runs every suite — currently 2,516 checks across 55 suites — without calling
 the paid API; `npm run test:real` does that and is opt-in.
 
 ```bash
@@ -300,6 +300,13 @@ raw `pid` for something *you* launched — which is the route for a program that
 demands administrator rights, since the app cannot elevate. On a model with
 native vision the PNG is attached to the same round, so the model actually
 looks at the pixels instead of reading OCR of them.
+
+**Finding the project.** `build_project` searches the workspace up to four
+directories deep (shallowest `.sln` wins, `.sln` over `.vcxproj`) instead of
+only looking in the root, resolves MSBuild through `vswhere` including
+Preview and Build Tools installs — and by walking the install roots when
+`vswhere` itself is missing — and resolves `cl.exe` to a full path rather than
+hoping it is on PATH. `project: "sub/dir/app.sln"` skips discovery entirely.
 
 **Checking it is the right binary.** `verify_file` takes required and absent
 literals and searches both UTF-8 and UTF-16LE, plus size and sha256 — a build

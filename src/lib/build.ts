@@ -44,6 +44,8 @@ export interface BuildTarget {
     | "single-cs"
     | "none";
   path: string;
+  /** Where discovery looked, so "nothing found" can be argued with. */
+  searched?: string;
 }
 
 export interface BuildOptions {
@@ -57,6 +59,11 @@ export interface BuildOptions {
   extraArgs?: string[];
   /** Just detect what would run, do not build. */
   dryRun?: boolean;
+  /**
+   * Explicit project/solution to build, workspace-relative. Skips discovery
+   * entirely — the escape hatch for a workspace with several projects in it.
+   */
+  project?: string;
 }
 
 export interface BuildResult {
@@ -124,28 +131,135 @@ export function findMSBuild(): string | null {
   if (WIN) {
     const vswhere = vswherePath();
     if (vswhere) {
+      /*
+       * -prerelease, and no -requires.
+       *
+       * Both were failure modes on a real machine: a Preview/next-major
+       * install (VS 18) is invisible without -prerelease, and
+       * `-requires Microsoft.Component.MSBuild` excludes installs whose
+       * component set is spelled differently — including Build Tools. The
+       * find pattern already guarantees we only accept a real MSBuild.exe,
+       * so the requires clause was buying nothing and costing installs.
+       */
+      for (const extra of [
+        ["-latest", "-prerelease"],
+        ["-latest"],
+        ["-prerelease"],
+      ]) {
+        try {
+          const { spawnSync } = require("node:child_process") as typeof import("node:child_process");
+          const r = spawnSync(
+            vswhere,
+            [...extra, "-find", "MSBuild\\**\\Bin\\MSBuild.exe"],
+            { encoding: "utf8", windowsHide: true }
+          );
+          const found = (r.stdout || "")
+            .split(/\r?\n/)
+            .map((line) => line.trim())
+            .filter(Boolean)
+            // Prefer the 64-bit host when the install ships both.
+            .sort((a, b) => Number(b.includes("amd64")) - Number(a.includes("amd64")))
+            .find((line) => fsSync.existsSync(line));
+          if (found) return found;
+        } catch {
+          /* try the next vswhere shape */
+        }
+      }
+    }
+
+    /*
+     * vswhere itself can be missing (Build Tools installed by a zip, an
+     * offline layout, a machine where the Installer directory was cleaned).
+     * Walking the standard install roots costs a few stats and finds the
+     * MSBuild that is plainly there — including next-major versions this
+     * code has never heard of, because the year folder is enumerated rather
+     * than hard-coded.
+     */
+    const roots = [
+      process.env["ProgramFiles"],
+      process.env["ProgramFiles(x86)"],
+    ].filter(Boolean) as string[];
+    for (const root of roots) {
+      const vsRoot = path.join(root, "Microsoft Visual Studio");
+      let years: string[] = [];
       try {
-        const { spawnSync } = require("node:child_process") as typeof import("node:child_process");
-        const r = spawnSync(
-          vswhere,
-          [
-            "-latest",
-            "-requires",
-            "Microsoft.Component.MSBuild",
-            "-find",
-            "MSBuild\\**\\Bin\\MSBuild.exe",
-          ],
-          { encoding: "utf8", windowsHide: true }
-        );
-        const found = (r.stdout || "").split(/\r?\n/).map((s) => s.trim()).find(Boolean);
-        if (found && fsSync.existsSync(found)) return found;
+        years = fsSync.readdirSync(vsRoot).sort().reverse();
       } catch {
-        /* fall through to PATH */
+        continue;
+      }
+      for (const year of years) {
+        let editions: string[] = [];
+        try {
+          editions = fsSync.readdirSync(path.join(vsRoot, year));
+        } catch {
+          continue;
+        }
+        for (const edition of editions) {
+          for (const bin of [
+            path.join(vsRoot, year, edition, "MSBuild", "Current", "Bin", "amd64", "MSBuild.exe"),
+            path.join(vsRoot, year, edition, "MSBuild", "Current", "Bin", "MSBuild.exe"),
+          ]) {
+            if (fsSync.existsSync(bin)) return bin;
+          }
+        }
       }
     }
   }
   // Cross-spawn resolves bare names on PATH; on Windows include .exe.
   return "msbuild";
+}
+
+/**
+ * The absolute path to cl.exe, when Visual Studio has one.
+ *
+ * Bare `cl` only works inside a Developer Command Prompt, and the model is
+ * never in one — reported exactly that way: "it fell back to raw cl and never
+ * walked vswhere". Resolving the real path means the compiler at least
+ * STARTS; if the developer environment is missing it then fails with its own
+ * clear message about headers rather than "cl is not recognised", which is
+ * the difference between a fixable error and a dead end.
+ */
+export function findClPath(): string | null {
+  if (!WIN) return null;
+  const vswhere = vswherePath();
+  if (!vswhere) return null;
+  try {
+    const { spawnSync } = require("node:child_process") as typeof import("node:child_process");
+    const r = spawnSync(
+      vswhere,
+      [
+        "-latest",
+        "-prerelease",
+        "-find",
+        "VC\\Tools\\MSVC\\**\\bin\\Hostx64\\x64\\cl.exe",
+      ],
+      { encoding: "utf8", windowsHide: true }
+    );
+    const found = (r.stdout || "")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .sort()
+      .reverse()
+      .find((line) => fsSync.existsSync(line));
+    return found ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Is this program resolvable on PATH right now? */
+function onPath(command: string): boolean {
+  try {
+    const { spawnSync } = require("node:child_process") as typeof import("node:child_process");
+    const probe = spawnSync(WIN ? "where" : "which", [command], {
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    return probe.status === 0;
+  } catch {
+    return false;
+  }
 }
 
 /** Locate the C# compiler. Prefers csc from the VS/.NET Framework install. */
@@ -169,14 +283,120 @@ export function findCSharpCompiler(): string | null {
 export function findCppCompiler(): string | null {
   const explicit = process.env.APIM_CPP_COMPILER?.trim();
   if (explicit) return explicit;
-  // cl.exe needs the VS developer environment. findMSBuild proves a VS install
-  // exists; vcvars is invoked by the compile wrapper below.
-  if (WIN && findMSBuild() !== "msbuild" && vswherePath()) return "cl";
-  for (const cc of ["clang++", "clang", "g++", "cc", "c++"]) {
-    // We don't probe the network; assume it resolves on PATH on non-Windows.
-    if (!WIN) return cc;
+
+  if (WIN) {
+    // The full path first: `cl` alone is only on PATH inside a Developer
+    // Command Prompt, which nothing here is running in.
+    const cl = findClPath();
+    if (cl) return cl;
+    if (onPath("cl")) return "cl";
+    if (onPath("clang-cl")) return "clang-cl";
+    if (onPath("clang++")) return "clang++";
+    if (onPath("g++")) return "g++";
+    // Nothing found: say so, rather than handing back a command that cannot
+    // start and reporting its ENOENT as a build failure.
+    return null;
   }
-  return "cl";
+
+  for (const cc of ["clang++", "clang", "g++", "cc", "c++"]) {
+    if (onPath(cc)) return cc;
+  }
+  // On a POSIX box the toolchain is nearly always there; keep the old
+  // optimistic default rather than refusing to try.
+  return "c++";
+}
+
+/** Directories that never contain the project you meant. */
+const SKIP_DIRS = new Set([
+  "node_modules",
+  ".git",
+  ".packages",
+  "obj",
+  "bin",
+  "build",
+  "out",
+  "dist",
+  "x64",
+  "x86",
+  "win32",
+  "debug",
+  "release",
+  ".vs",
+  ".vscode",
+  "packages",
+  "target",
+  "venv",
+  "__pycache__",
+]);
+
+/**
+ * Find the project file, wherever the human actually put it.
+ *
+ * Discovery used to look in the workspace ROOT only. A real tree does not
+ * look like that: the reported case was `uploads/injector/x64/Release/...`
+ * with the solution one or two directories down, so the root held nothing but
+ * loose sources — and the detector fell through to "compile a single .cpp
+ * with cl", which on a six-translation-unit project is not the build anyone
+ * asked for and never touches MSBuild at all.
+ *
+ * Breadth-first so the SHALLOWEST project wins, which is the one a human
+ * would name, and a .sln outranks a .vcxproj at the same depth because it is
+ * the thing that knows about the other projects.
+ */
+async function findProjectFile(
+  root: string,
+  maxDepth = 4
+): Promise<{ relative: string; kind: BuildTarget["kind"]; visited: number } | null> {
+  const RANK: [RegExp, BuildTarget["kind"], number][ ] = [
+    [/\.sln$/i, "msbuild", 0],
+    [/\.slnx$/i, "msbuild", 0],
+    [/\.vcxproj$/i, "msbuild", 1],
+    [/\.csproj$/i, "csproj", 2],
+    [/\.fsproj$/i, "dotnet", 2],
+    [/^CMakeLists\.txt$/i, "cmake", 3],
+  ];
+
+  let best: { relative: string; kind: BuildTarget["kind"]; score: number } | null =
+    null;
+  let visited = 0;
+
+  const queue: { dir: string; depth: number }[] = [{ dir: root, depth: 0 }];
+  while (queue.length) {
+    const { dir, depth } = queue.shift()!;
+    visited++;
+    const entries = await listDir(dir);
+
+    for (const entry of entries) {
+      for (const [pattern, kind, rank] of RANK) {
+        if (!pattern.test(entry)) continue;
+        // Depth dominates rank: a solution three levels down loses to a
+        // vcxproj beside it, because proximity is what the human meant.
+        const score = depth * 10 + rank;
+        if (!best || score < best.score) {
+          best = {
+            relative: path.relative(root, path.join(dir, entry)) || entry,
+            kind,
+            score,
+          };
+        }
+      }
+    }
+
+    if (depth >= maxDepth) continue;
+    for (const entry of entries) {
+      if (SKIP_DIRS.has(entry.toLowerCase())) continue;
+      const child = path.join(dir, entry);
+      try {
+        if (fsSync.statSync(child).isDirectory()) {
+          queue.push({ dir: child, depth: depth + 1 });
+        }
+      } catch {
+        /* unreadable directory is not a project */
+      }
+    }
+  }
+
+  return best ? { relative: best.relative, kind: best.kind, visited } : null;
 }
 
 async function detectTarget(root: string): Promise<BuildTarget> {
@@ -200,6 +420,22 @@ async function detectTarget(root: string): Promise<BuildTarget> {
     return { kind: "make", path: "Makefile" };
   if (findCi(["pyproject.toml", "setup.py"], entries))
     return { kind: "python", path: "pyproject.toml" };
+
+  /*
+   * Nothing at the root — look deeper before giving up on a real project.
+   *
+   * This runs BEFORE the loose-source fallback on purpose: a tree with both a
+   * solution in a subdirectory and a stray .cpp at the root should build the
+   * solution, not the stray.
+   */
+  const deep = await findProjectFile(root);
+  if (deep) {
+    return {
+      kind: deep.kind,
+      path: deep.relative,
+      searched: `${deep.visited} directories`,
+    };
+  }
 
   // Loose source files: compile a single C/C++ file or all C# files.
   const cpp = entries.filter((e) => SOURCE_EXTS.has(path.extname(e).toLowerCase()));
@@ -239,13 +475,63 @@ export async function detectBuild(
   workspaceId: string,
   options: BuildOptions = {}
 ): Promise<BuildResult> {
-  const root = workspaceDirectory(workspaceId);
+  return detectBuildIn(workspaceDirectory(workspaceId), options);
+}
+
+/**
+ * The same detection against a plain directory.
+ *
+ * Split out so discovery can be tested against a real tree without inventing
+ * a workspace — the recursive search is the part that was wrong, and a bug in
+ * it is invisible from the outside until a six-file project builds as one
+ * stray .cpp.
+ */
+export async function detectBuildIn(
+  root: string,
+  options: BuildOptions = {}
+): Promise<BuildResult> {
   const config = options.config === "Debug" ? "Debug" : "Release";
   const platform = options.platform?.trim() || "x64";
   const extra = options.extraArgs ?? [];
   const restore = options.restore !== false;
 
-  const target = await detectTarget(root);
+  /*
+   * An explicit project beats any amount of cleverness.
+   *
+   * Discovery is a guess, however good; when the model already knows the
+   * answer — because it just read the tree, or because discovery got it
+   * wrong once — it must be able to say so instead of arguing with a
+   * heuristic.
+   */
+  const named = options.project?.trim();
+  const target = named
+    ? ({
+        kind: /\.sln$|\.slnx$|\.vcxproj$/i.test(named)
+          ? "msbuild"
+          : /\.csproj$/i.test(named)
+            ? "csproj"
+            : /\.fsproj$/i.test(named)
+              ? "dotnet"
+              : /CMakeLists\.txt$/i.test(named)
+                ? "cmake"
+                : /\.(c|cc|cpp|cxx)$/i.test(named)
+                  ? "single-cpp"
+                  : /\.cs$/i.test(named)
+                    ? "single-cs"
+                    : "none",
+        path: named,
+        searched: "named explicitly",
+      } as BuildTarget)
+    : await detectTarget(root);
+
+  if (named && target.kind === "none") {
+    throw new BuildError(
+      `"${named}" is not something this can build. Pass a .sln, .vcxproj, ` +
+        `.csproj, CMakeLists.txt, or a single .cpp/.cs file — or omit project ` +
+        `and let discovery find it.`
+    );
+  }
+
   let runner: BuildRunner;
   let restoreRunner: BuildRunner | undefined;
 
@@ -356,7 +642,12 @@ export async function detectBuild(
       const cc = findCppCompiler();
       if (!cc) {
         throw new BuildError(
-          "No C/C++ compiler found. Install Visual Studio (C++ workload), clang, or g++, or set APIM_CPP_COMPILER."
+          "No C/C++ compiler found. On Windows this means vswhere reported " +
+            "no VC++ toolset and cl/clang/g++ are not on PATH — install the " +
+            "\"Desktop development with C++\" workload, or set " +
+            "APIM_CPP_COMPILER to a compiler executable. If Visual Studio IS " +
+            "installed, build a .sln/.vcxproj instead: MSBuild sets up the " +
+            "compiler environment itself, which a bare cl.exe cannot."
         );
       }
       const outExe = "out" + (WIN ? ".exe" : "");
