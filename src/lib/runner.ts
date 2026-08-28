@@ -398,6 +398,35 @@ export function workspaceExecutable(
   }
 }
 
+/**
+ * Absolute toolchain paths this app discovered for itself.
+ *
+ * The bug this closes, exactly as reported: build_project walked vswhere,
+ * printed `C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\
+ * Current\Bin\MSBuild.exe`, and then died with `spawn msbuild ENOENT`. It
+ * found the address and did not use it — because validateCommand deliberately
+ * reduces every command to its bare NAME and lets PATH resolve it. That rule
+ * is right for anything a MODEL types (otherwise "C:/evil/npm.exe" would run
+ * whatever it liked), and wrong for a path apiM computed itself.
+ *
+ * So the two cases are separated rather than the rule being weakened. A path
+ * that this app's own discovery produced is registered here, and only a
+ * registered path survives normalisation. A model cannot register anything —
+ * there is no tool that reaches this function.
+ */
+const TOOLCHAIN_PATHS = new Set<string>();
+
+/** Called by build discovery with an absolute path it has verified exists. */
+export function registerToolchainPath(absolute: string | null | undefined): void {
+  if (!absolute) return;
+  const value = String(absolute).trim();
+  if (value && path.isAbsolute(value)) TOOLCHAIN_PATHS.add(value.toLowerCase());
+}
+
+export function isToolchainPath(command: string): boolean {
+  return TOOLCHAIN_PATHS.has(String(command ?? "").trim().toLowerCase());
+}
+
 export function isAllowedCommand(command: string): boolean {
   return ALLOWED.has(normaliseCommand(command));
 }
@@ -517,6 +546,19 @@ export function validateCommand(
     // The resolved absolute path, never the model's spelling of it, so a
     // relative path cannot be re-resolved against a different cwd later.
     return { ok: true, command: own, args: clean };
+  }
+
+  /*
+   * A toolchain this app located itself keeps its full path.
+   *
+   * `msbuild` is on the allow-list, so the name check above already passed;
+   * what follows would have thrown the path away and left cross-spawn to find
+   * an "msbuild" that is not on PATH. The allow-list still decides WHAT may
+   * run — this only decides WHICH COPY of it, using an answer apiM computed
+   * rather than one the model supplied.
+   */
+  if (isToolchainPath(command)) {
+    return { ok: true, command: String(command).trim(), args: clean };
   }
 
   const policy = checkBrowserPolicy(name, clean, workspaceDir);

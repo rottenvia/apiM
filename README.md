@@ -61,7 +61,7 @@ The executable will be in the `dist` folder. Just double-click to run!
 npm test
 ```
 
-Runs every suite — currently 2,516 checks across 55 suites — without calling
+Runs every suite — currently 2,526 checks across 55 suites — without calling
 the paid API; `npm run test:real` does that and is opt-in.
 
 ```bash
@@ -316,6 +316,12 @@ first `file:line`, linked artifact sizes) and classifies failures: known flaky
 races retry once automatically and say which rule fired, real compile errors
 never do, and a lock names whoever holds the file — including the
 antivirus-grip case where nothing holds it and only a rename works.
+
+Generated PowerShell (hidden launch, window capture) is ASCII-only and written
+with a BOM. Windows PowerShell 5.1 decodes a BOM-less file with the ANSI code
+page, where an em dash becomes `U+201D` — a character PowerShell accepts as a
+string delimiter, so one dash in a comment ends a string mid-sentence and the
+parser blames a brace twenty lines later.
 
 **Reading big files exactly.** `read_symbol` returns one function or class by
 name with its exact line range, ready to hand to `edit_file` as
