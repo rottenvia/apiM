@@ -775,6 +775,91 @@ check(
   "a hallucinated screenshot description is worse than no screenshot"
 );
 
+console.log("\n10d. read_symbol and verify_file, the two script-killers");
+
+await writeFile(
+  path.join(WS_DIR, "widget.cpp"),
+  [
+    "#include <windows.h>",
+    "",
+    "static int helper() { return 1; }",
+    "",
+    "void InjectorWindow::OnPaint(HDC dc) {",
+    "  int x = 0;   // a brace in a string should not fool it: \"}\"",
+    "  if (x) {",
+    "    x = 2;",
+    "  }",
+    "}",
+    "",
+    "int main() { return 0; }",
+  ].join("\n"),
+  "utf8"
+);
+
+res = await call("read_symbol", { path: "widget.cpp", name: "OnPaint" });
+check("read_symbol finds a qualified C++ definition", res.ok, res.summary);
+check(
+  "it returns the whole body and stops at the matching brace",
+  /void InjectorWindow::OnPaint/.test(res.content) &&
+    !/int main/.test(res.content),
+  "a brace inside a string literal is the classic way this goes wrong"
+);
+check(
+  "the exact line range comes back for edit_file to use",
+  /start_line=5/.test(res.content) && /end_line=10/.test(res.content),
+  res.summary
+);
+
+res = await call("read_symbol", { path: "widget.cpp", name: "NotThere" });
+check(
+  "a name with no definition is an honest miss, not an empty span",
+  !res.ok && /No definition/.test(res.content),
+  res.summary
+);
+
+await writeFile(
+  path.join(WS_DIR, "build.bin"),
+  Buffer.concat([
+    Buffer.from("prefix "),
+    Buffer.from("v17", "utf8"),
+    Buffer.from("---"),
+    Buffer.from("the compact law", "utf16le"),
+  ])
+);
+
+res = await call("verify_file", {
+  path: "build.bin",
+  required: ["v17", "the compact law"],
+  absent: ["v16 boot suffix"],
+});
+check("verify_file runs on a binary", res.ok, res.summary);
+check(
+  "it finds a marker that only exists as UTF-16LE",
+  /ALL MARKERS OK 3\/3/.test(res.content),
+  "a wide string literal is why a present marker looks missing"
+);
+check(
+  "size and sha256 are always reported",
+  /bytes, sha256 [0-9a-f]{64}/.test(res.content)
+);
+
+res = await call("verify_file", {
+  path: "build.bin",
+  required: ["v18"],
+  absent: ["v17"],
+});
+check(
+  "a stale artifact fails loudly and says which marker",
+  /MARKER CHECK FAILED/.test(res.content) &&
+    /MISSING required: "v18"/.test(res.content) &&
+    /STILL THERE: "v17"/.test(res.content),
+  res.summary
+);
+check(
+  "…and warns against reporting on a binary that failed verification",
+  /not the one you were about to describe/.test(res.content)
+);
+
 // --------------------------------------------------------------- the audit
 
 console.log("\n11. The audit this suite exists to satisfy");

@@ -27,10 +27,12 @@
 
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { statSync } from "node:fs";
 import { listProcesses, isRunning } from "@/lib/processes";
 
 export type BuildFailureKind =
   | "locked_file"
+  | "av_quarantine"
   | "flaky_race"
   | "missing_toolchain"
   | "out_of_space"
@@ -97,6 +99,14 @@ const LOCK_PATTERNS: RegExp[] = [
   /()The process cannot access the file because it is being used by another process/i,
 ];
 
+/** Said in two places, so it is written once. */
+const AV_ADVICE =
+  "This is a scanner, not your code and not a stale handle. Rename the " +
+  "output out of the way and build again — the rename gambit works because " +
+  "a quarantined path is denied while a NEW path is not. If it repeats every " +
+  "build, the real fix is an antivirus exclusion for the output directory, " +
+  "which only the user can add. Do not 'fix' source that compiled cleanly.";
+
 const MISSING_TOOLCHAIN =
   /is not recognized as an internal or external command|MSB1009|command not found|No such file or directory: '?(cl|link|msbuild|cmake|gcc|g\+\+|dotnet)/i;
 
@@ -162,6 +172,49 @@ export function diagnoseBuildFailure(output: string): BuildDiagnosis {
       advice:
         "Fix the errors in the source. A retry would produce the identical " +
         "failure and cost a round.",
+    };
+  }
+
+  /*
+   * Access denied with NO owning process: antivirus, not a build problem.
+   *
+   * The nastiest lock of the campaign, twice: "no owning process + access
+   * denied = AV quarantine grip, where the rename gambit is the only key."
+   * A freshly linked injector is exactly the shape a scanner grabs, and it
+   * grabs it BETWEEN the linker closing the handle and the next build
+   * opening it — so `handle.exe` finds nothing and the failure looks
+   * inexplicable. It gets its own bucket so it can never again be mistaken
+   * for a code problem or for an ordinary lock that waiting will clear.
+   */
+  /*
+   * Antivirus, said out loud by the toolchain.
+   *
+   * Windows Defender does sometimes announce itself — "contains a virus or
+   * potentially unwanted software" is a real, quotable message. When it does,
+   * this must never be classified as a code problem: nothing in the source
+   * changed, a rebuild will be eaten the same way, and the only keys are the
+   * rename gambit or an exclusion the user adds.
+   *
+   * The QUIET version of the same thing — access denied with no process
+   * holding the file — cannot be recognised from text alone, because the
+   * evidence is the absence of a holder. That escalation happens in
+   * formatLockReport(), which has actually asked the OS.
+   */
+  if (
+    /contains a virus or potentially unwanted software|operation did not complete successfully because the file contains|quarantin|Defender|threat was (?:detected|found)/i.test(
+      text
+    )
+  ) {
+    const named =
+      /([\w.\-\\/]+\.(?:exe|dll|sys|scr))/i.exec(text);
+    return {
+      kind: "av_quarantine",
+      // Waiting does not help and neither does an identical rebuild: the
+      // scanner grabs the next artefact at the same moment.
+      retryable: false,
+      lockedFile: named?.[1] ?? null,
+      rule: "the toolchain reported an antivirus/EDR interception by name",
+      advice: AV_ADVICE,
     };
   }
 
@@ -327,14 +380,36 @@ export function formatLockReport(
   const lines = [`Locked file: ${lockedFile}`];
 
   if (holders.length === 0) {
+    /*
+     * No holder + a freshly built binary is a SIGNATURE, not a shrug.
+     *
+     * It happened twice on the same project and cost a round each time,
+     * because "access denied, nothing holds it" reads as impossible and
+     * invites a hunt through the source. It is almost always a live scanner
+     * holding the artefact for the moment it takes to inspect it, and it is
+     * the one case where renaming is the whole fix.
+     */
+    const binary = /\.(exe|dll|sys|scr)$/i.test(lockedFile);
     lines.push(
       `No holder identified (probed: ${probed.join(", ") || "nothing"}` +
-        `${unavailable.length ? `; unavailable: ${unavailable.join(", ")}` : ""}).`,
-      `"No owning process" does not mean the lock is imaginary — a handle ` +
-        `can outlive its process briefly, and antivirus and indexers hold ` +
-        `files without appearing here. Rename the file out of the way and ` +
-        `rebuild: a running image refuses delete but allows rename.`
+        `${unavailable.length ? `; unavailable: ${unavailable.join(", ")}` : ""}).`
     );
+    if (binary) {
+      lines.push(
+        `Access denied on a freshly built binary that NO process holds is ` +
+          `the antivirus/EDR signature — the scanner grabs the artefact ` +
+          `between the linker closing it and the next build opening it, so ` +
+          `it never appears in a handle list.`,
+        AV_ADVICE
+      );
+    } else {
+      lines.push(
+        `"No owning process" does not mean the lock is imaginary — a handle ` +
+          `can outlive its process briefly, and antivirus and indexers hold ` +
+          `files without appearing here. Rename the file out of the way and ` +
+          `rebuild: a running image refuses delete but allows rename.`
+      );
+    }
     return lines.join("\n");
   }
 
@@ -357,4 +432,203 @@ export function formatLockReport(
     );
   }
   return lines.join("\n");
+}
+
+/* ------------------------------------------------------------------ digest */
+
+export interface BuildMessage {
+  /** "C2065", "MSB3021", "CS0103" — empty for compilers that print none. */
+  code: string;
+  /** First place it appeared. */
+  file: string;
+  line: number | null;
+  text: string;
+  /** How many times this exact code+text repeated across the log. */
+  count: number;
+}
+
+export interface BuildArtifact {
+  path: string;
+  bytes: number | null;
+}
+
+export interface BuildDigest {
+  errors: BuildMessage[];
+  warnings: BuildMessage[];
+  artifacts: BuildArtifact[];
+  /** Lines in the raw log the digest replaces, for an honest saving claim. */
+  logLines: number;
+}
+
+const MSG =
+  /^([^\s(][^(]*)\((\d+)(?:,\d+)?\)\s*:\s*(fatal error|error|warning)\s+([A-Z]{1,4}\d{3,5})\s*:\s*(.*)$/i;
+const MSG_NO_FILE =
+  /^(?:.*?:)?\s*(fatal error|error|warning)\s+([A-Z]{1,4}\d{3,5})\s*:\s*(.*)$/i;
+const GCC =
+  /^([^\s:][^:]*):(\d+):(?:\d+:)?\s*(error|warning):\s*(.*)$/i;
+
+/** One diagnostic line, whichever compiler wrote it. */
+function parseDiagnostic(
+  line: string
+): { kind: string; code: string; file: string; line: number | null; text: string } | null {
+  const msvc = MSG.exec(line);
+  if (msvc) {
+    return {
+      kind: msvc[3].toLowerCase(),
+      code: msvc[4],
+      file: msvc[1].trim(),
+      line: Number(msvc[2]),
+      text: msvc[5].trim(),
+    };
+  }
+  const gcc = GCC.exec(line);
+  if (gcc) {
+    return {
+      kind: gcc[3].toLowerCase(),
+      code: "",
+      file: gcc[1].trim(),
+      line: Number(gcc[2]),
+      text: gcc[4].trim(),
+    };
+  }
+  const bare = MSG_NO_FILE.exec(line);
+  if (bare) {
+    return {
+      kind: bare[1].toLowerCase(),
+      code: bare[2],
+      file: "",
+      line: null,
+      text: bare[3].trim(),
+    };
+  }
+  return null;
+}
+
+/** MSBuild prints the linked output as `  ProjectName -> C:\path\thing.exe`. */
+const LINKED = /->\s+([A-Za-z]:\\[^\s]+|\/[^\s]+)$/;
+
+/**
+ * One screen instead of forty lines of furniture.
+ *
+ * The ask, verbatim: "exit code, errors, unique warnings with first
+ * file:line, linked size — one screen instead of me wall-scanning for C4244s
+ * in forty lines of furniture." Every field here is one the reader was
+ * extracting by eye anyway; the point is that they now arrive already
+ * counted, already deduplicated, and in the same order every time, so two
+ * builds can be compared without re-reading either log.
+ *
+ * The raw log is NEVER replaced by this — a digest that hides the one line
+ * that mattered would be a worse version of the truncated-read problem. It
+ * goes on top.
+ */
+export function digestBuild(output: string): BuildDigest {
+  const lines = String(output ?? "").split(/\r?\n/);
+  const errors = new Map<string, BuildMessage>();
+  const warnings = new Map<string, BuildMessage>();
+  const artifacts: BuildArtifact[] = [];
+
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+
+    const linked = LINKED.exec(line);
+    if (linked && !artifacts.some((a) => a.path === linked[1])) {
+      let bytes: number | null = null;
+      try {
+        bytes = statSync(linked[1]).size;
+      } catch {
+        bytes = null;
+      }
+      artifacts.push({ path: linked[1], bytes });
+    }
+
+    const hit = parseDiagnostic(line);
+    if (!hit) continue;
+
+    const kind = hit.kind;
+    const message: BuildMessage = {
+      code: hit.code,
+      // Normalised first: path.basename() on a POSIX host leaves a Windows
+      // path whole, and "d:\\proj\\main.cpp:500" is not a location anyone
+      // can act on.
+      file: hit.file ? path.basename(hit.file.replace(/\\/g, "/")) : "",
+      line: hit.line,
+      text: hit.text,
+      count: 1,
+    };
+
+    // Deduplicated on code+text, so one warning repeated by every translation
+    // unit is one row with a count — that repetition is exactly the furniture.
+    const key = `${message.code}|${message.text}`;
+    const bucket = kind.includes("error") ? errors : warnings;
+    const existing = bucket.get(key);
+    if (existing) existing.count += 1;
+    else bucket.set(key, message);
+  }
+
+  return {
+    errors: [...errors.values()],
+    warnings: [...warnings.values()],
+    artifacts,
+    logLines: lines.length,
+  };
+}
+
+function where(m: BuildMessage): string {
+  if (!m.file) return "";
+  return m.line ? ` ${m.file}:${m.line}` : ` ${m.file}`;
+}
+
+export function formatBuildDigest(
+  digest: BuildDigest,
+  exitCode: number | null,
+  durationMs?: number
+): string {
+  const out: string[] = [
+    `DIGEST — exit ${exitCode ?? "?"}` +
+      (durationMs ? `, ${(durationMs / 1000).toFixed(1)}s` : "") +
+      `, ${digest.errors.length} distinct error(s), ` +
+      `${digest.warnings.length} distinct warning(s), ` +
+      `${digest.logLines} log line(s).`,
+  ];
+
+  if (digest.errors.length) {
+    out.push("", "Errors:");
+    for (const e of digest.errors.slice(0, 20)) {
+      out.push(
+        `  ${e.code || "error"}${where(e)}: ${e.text}` +
+          (e.count > 1 ? `  (x${e.count})` : "")
+      );
+    }
+    if (digest.errors.length > 20) {
+      out.push(`  … ${digest.errors.length - 20} more, in the log below.`);
+    }
+  }
+
+  if (digest.warnings.length) {
+    out.push("", "Warnings (unique, first sighting):");
+    for (const w of digest.warnings.slice(0, 15)) {
+      out.push(
+        `  ${w.code || "warning"}${where(w)}: ${w.text}` +
+          (w.count > 1 ? `  (x${w.count})` : "")
+      );
+    }
+    if (digest.warnings.length > 15) {
+      out.push(`  … ${digest.warnings.length - 15} more, in the log below.`);
+    }
+  }
+
+  if (digest.artifacts.length) {
+    out.push("", "Linked:");
+    for (const a of digest.artifacts.slice(0, 10)) {
+      out.push(
+        `  ${a.path}${
+          a.bytes === null
+            ? " (size unknown — the file is not where the log said)"
+            : ` — ${a.bytes.toLocaleString()} bytes`
+        }`
+      );
+    }
+  }
+
+  return out.join("\n");
 }
