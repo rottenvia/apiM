@@ -127,6 +127,22 @@ function vswherePath(): string | null {
  * setup hint rather than a guessed command.
  */
 export function findMSBuild(): string | null {
+  // Registered at the SOURCE rather than by each caller: anything this
+  // function hands back is a path apiM resolved for itself, and it must
+  // survive validateCommand's normalisation no matter who asked for it.
+  return remember(findMSBuildUncached());
+}
+
+/**
+ * Register a discovered absolute path with the runner and return it unchanged,
+ * so discovery reads as one expression instead of a temp variable per branch.
+ */
+function remember(found: string | null): string | null {
+  if (found && path.isAbsolute(found)) registerToolchainPath(found);
+  return found;
+}
+
+function findMSBuildUncached(): string | null {
   const explicit = process.env.APIM_MSBUILD_PATH?.trim();
   if (explicit && fsSync.existsSync(explicit)) return explicit;
   if (WIN) {
@@ -221,6 +237,10 @@ export function findMSBuild(): string | null {
  * the difference between a fixable error and a dead end.
  */
 export function findClPath(): string | null {
+  return remember(findClPathUncached());
+}
+
+function findClPathUncached(): string | null {
   if (!WIN) return null;
   const vswhere = vswherePath();
   if (!vswhere) return null;
@@ -265,6 +285,10 @@ function onPath(command: string): boolean {
 
 /** Locate the C# compiler. Prefers csc from the VS/.NET Framework install. */
 export function findCSharpCompiler(): string | null {
+  return remember(findCSharpCompilerUncached());
+}
+
+function findCSharpCompilerUncached(): string | null {
   const explicit = process.env.APIM_CSC_PATH?.trim();
   if (explicit && fsSync.existsSync(explicit)) return explicit;
   if (WIN) {
@@ -282,6 +306,10 @@ export function findCSharpCompiler(): string | null {
 
 /** Locate a native C++ compiler: clang-cl, cl (Visual Studio), clang, g++. */
 export function findCppCompiler(): string | null {
+  return remember(findCppCompilerUncached());
+}
+
+function findCppCompilerUncached(): string | null {
   const explicit = process.env.APIM_CPP_COMPILER?.trim();
   if (explicit) return explicit;
 

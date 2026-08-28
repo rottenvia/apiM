@@ -414,7 +414,18 @@ export function workspaceExecutable(
  * registered path survives normalisation. A model cannot register anything —
  * there is no tool that reaches this function.
  */
-const TOOLCHAIN_PATHS = new Set<string>();
+/*
+ * On globalThis, not in module scope. Next.js can instantiate the same module
+ * more than once (route bundle vs server bundle, and again on every hot
+ * reload). A plain module-level Set would then be written by build.ts's copy
+ * and read by an EMPTY copy here, and the absolute path would be silently
+ * discarded again — the exact symptom this fixes, so it must not depend on
+ * two files sharing one module instance.
+ */
+const REGISTRY_KEY = Symbol.for("apim.toolchainPaths");
+const TOOLCHAIN_PATHS: Set<string> = ((globalThis as Record<symbol, unknown>)[
+  REGISTRY_KEY
+] ??= new Set<string>()) as Set<string>;
 
 /** Called by build discovery with an absolute path it has verified exists. */
 export function registerToolchainPath(absolute: string | null | undefined): void {
@@ -968,7 +979,14 @@ export async function runCommand(
 
     child.on("error", (err) => {
       spawnError = err.message;
-      stderr += `\nFailed to start ${check.command}: ${err.message}`;
+      // Name the executable that was actually spawned, not the friendly name.
+      // "Failed to start msbuild" when a full path was resolved is precisely
+      // how this bug hid: the receipt showed one thing and the spawn did
+      // another, and nothing in the output admitted the difference.
+      stderr += `\nFailed to start ${resolved}: ${err.message}`;
+      if (resolved !== command) {
+        stderr += `\n(requested: ${command})`;
+      }
       finish(null);
     });
 

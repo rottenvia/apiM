@@ -902,8 +902,38 @@ check(
   "no tool exposes it; build discovery is the only caller"
 );
 check(
+  "the registry lives on globalThis, not in module scope",
+  (() => {
+    runner.registerToolchainPath(path.resolve("/opt/vs/MSBuild.exe"));
+    const shared = globalThis[Symbol.for("apim.toolchainPaths")];
+    return shared instanceof Set && shared.size > 0;
+  })(),
+  "Next can load a module twice; build.ts must not write to a Set that runner.ts cannot read"
+);
+check(
+  "discovery registers at the source, so every caller benefits",
+  (() => {
+    const src = readFileSync(path.join(ROOT, "src/lib/build.ts"), "utf8");
+    return (
+      /function remember\(/.test(src) &&
+      ["findMSBuild", "findClPath", "findCSharpCompiler", "findCppCompiler"].every(
+        (fn) => new RegExp(`export function ${fn}\\(\\): string \\| null \\{[^}]*?return remember\\(`).test(src)
+      )
+    );
+  })(),
+  "registering at the call sites left the ones nobody remembered"
+);
+check(
+  "a start failure names the executable actually spawned",
+  /Failed to start \$\{resolved\}/.test(
+    readFileSync(path.join(ROOT, "src/lib/runner.ts"), "utf8")
+  ),
+  "'Failed to start msbuild' after printing a full path is how this hid for two days"
+);
+
+check(
   "build discovery registers what vswhere found",
-  /registerToolchainPath\(msbuild\)/.test(
+  /registerToolchainPath\(found\)/.test(
     readFileSync(path.join(ROOT, "src/lib/build.ts"), "utf8")
   )
 );
