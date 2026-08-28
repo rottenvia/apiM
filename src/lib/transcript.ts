@@ -176,7 +176,24 @@ export function serializeForApi(
  * with truncated arguments, so nothing is executed until the stream ends.
  */
 export class ToolCallAccumulator {
-  private calls = new Map<number, ToolCall>();
+  /**
+   * Every call seen this round, in the order the model started them.
+   *
+   * An array rather than a Map keyed by index, because `index` cannot be
+   * trusted as an identity. Well-behaved providers number parallel calls
+   * 0,1,2… and stream their argument fragments interleaved. Others — GLM
+   * 5.3 Flash through OpenRouter among them — emit calls one after another
+   * and restart the numbering, or omit `index` entirely, so a round with
+   * eight `edit_file` calls arrived as eight deltas all claiming slot 0.
+   *
+   * Keyed only by index, those eight were concatenated into ONE call whose
+   * arguments were eight JSON objects glued together: unparseable, so the
+   * whole round was reported as "invalid tool arguments" and nothing was
+   * edited. That is the "it can't batch edit a lot of files" bug, and it
+   * gets worse the more files the model tries to do at once.
+   */
+  private open = new Map<number, ToolCall>();
+  private order: ToolCall[] = [];
 
   add(delta: {
     index?: number;
@@ -185,42 +202,84 @@ export class ToolCallAccumulator {
     function?: { name?: string; arguments?: string };
   }): void {
     const index = delta.index ?? 0;
-    const existing = this.calls.get(index);
+    const existing = this.open.get(index);
 
-    if (!existing) {
-      this.calls.set(index, {
+    if (existing && this.startsNewCall(existing, delta)) {
+      // The slot is being reused for a different call. Retire what is there
+      // — it stays in `order`, complete — and begin a fresh one rather than
+      // appending this delta to it.
+      this.open.delete(index);
+    }
+
+    const current = this.open.get(index);
+    if (!current) {
+      const call: ToolCall = {
         id: delta.id ?? "",
         type: "function",
         function: {
           name: delta.function?.name ?? "",
           arguments: delta.function?.arguments ?? "",
         },
-      });
+      };
+      this.open.set(index, call);
+      this.order.push(call);
       return;
     }
 
     // Later chunks fill in whichever pieces were missing.
-    if (delta.id) existing.id = delta.id;
-    if (delta.function?.name) existing.function.name = delta.function.name;
+    if (delta.id) current.id = delta.id;
+    if (delta.function?.name) {
+      /*
+       * Names arrive whole, but some providers repeat the name on every
+       * fragment and others send it once. Appending would produce
+       * "edit_fileedit_file"; overwriting an identical name is harmless.
+       */
+      current.function.name = delta.function.name;
+    }
     if (delta.function?.arguments) {
-      existing.function.arguments += delta.function.arguments;
+      current.function.arguments += delta.function.arguments;
     }
   }
 
-  /** Completed calls in the order the model emitted them. */
+  /**
+   * Is this delta a new call landing on an occupied slot?
+   *
+   * Only two signals are trusted, and both are unambiguous: a different
+   * non-empty id, or a different function name once arguments have already
+   * started. Anything looser would split a single call whose provider
+   * merely repeats metadata on each fragment.
+   */
+  private startsNewCall(
+    existing: ToolCall,
+    delta: { id?: string; function?: { name?: string } }
+  ): boolean {
+    if (delta.id && existing.id && delta.id !== existing.id) return true;
+    return Boolean(
+      delta.function?.name &&
+        existing.function.name &&
+        delta.function.name !== existing.function.name &&
+        existing.function.arguments.length > 0
+    );
+  }
+
+  /**
+   * Completed calls in the order the model emitted them.
+   *
+   * Insertion order, not index order: with a provider that reuses index 0
+   * for every call, index order says nothing, while the order they were
+   * started in is exactly the order the model asked for.
+   */
   result(): ToolCall[] {
-    return [...this.calls.entries()]
-      .sort(([a], [b]) => a - b)
-      .map(([, call]) => call)
-      .filter((c) => c.function.name);
+    return this.order.filter((c) => c.function.name);
   }
 
   get size(): number {
-    return this.calls.size;
+    return this.order.length;
   }
 
   reset(): void {
-    this.calls.clear();
+    this.open.clear();
+    this.order = [];
   }
 }
 
@@ -241,6 +300,199 @@ export function parseToolArguments(
       error: error instanceof Error ? error.message : "Invalid JSON",
     };
   }
+}
+
+/**
+ * Tools whose arguments are a list of jobs, and the key that holds it.
+ *
+ * These are the calls that get physically large: twenty edits or a dozen
+ * whole files is tens of thousands of tokens of JSON in ONE argument blob.
+ * They are also the calls a model is told to prefer, so "the batch was too
+ * big to finish streaming" cannot be allowed to mean "nothing happened".
+ */
+export const BATCH_TOOL_ITEMS: Record<string, string> = {
+  read_files: "paths",
+  write_files: "files",
+  edit_files: "edits",
+};
+
+/**
+ * What a complete item looks like for each batch tool.
+ *
+ * Used to throw away the half-written job at the end of a cut-off call. An
+ * edit with a path and no replacement text is not a smaller edit, it is a
+ * broken one, and applying it would corrupt a file the model believes it
+ * fixed. `read_files` takes plain strings, so it has no key list.
+ */
+export const BATCH_TOOL_REQUIRED: Record<string, string[]> = {
+  write_files: ["path", "content"],
+  edit_files: ["path", "old_text", "new_text"],
+};
+
+/**
+ * Recover the complete items from a tool call that was cut off mid-JSON.
+ *
+ * When a round hits the output ceiling in the middle of a batch call, the
+ * arguments are valid JSON right up to the point the budget ran out. The old
+ * behaviour threw all of it away and asked the model to send the batch again
+ * — which, being the same batch, was cut off in the same place. A model that
+ * tries to edit thirty files then makes no progress at all, forever.
+ *
+ * This closes the open brackets, drops the half-written item at the end, and
+ * hands back what was complete so those edits can actually land. Returns null
+ * when nothing usable can be recovered.
+ */
+export function salvageToolArguments(
+  raw: string,
+  toolName?: string
+): { value: Record<string, unknown> } | null {
+  const repaired = repairPartialJson(raw);
+  if (!repaired) return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(repaired);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return null;
+  }
+
+  const value = parsed as Record<string, unknown>;
+
+  /*
+   * Drop a trailing item that is only half there.
+   *
+   * The cut always lands on a value boundary, so the last object in a list
+   * can be missing the keys its siblings have — an edit with a path and no
+   * new_text. Applying that would be worse than not applying it.
+   */
+  const required = toolName ? BATCH_TOOL_REQUIRED[toolName] : undefined;
+
+  for (const key of Object.keys(value)) {
+    const list = value[key];
+    if (!Array.isArray(list) || list.length === 0) continue;
+
+    value[key] = list.filter((item) => {
+      if (typeof item !== "object" || item === null || Array.isArray(item)) {
+        // A bare string (a read_files path) is either whole or was never
+        // closed, and an unclosed one never survives the repair.
+        return true;
+      }
+      const keys = Object.keys(item as Record<string, unknown>);
+      if (required) {
+        return required.every((k) => typeof (item as Record<string, unknown>)[k] === "string");
+      }
+      /*
+       * No declared shape: fall back to the siblings. The items of a batch
+       * are uniform, so an item with fewer keys than the rest is the one the
+       * stream stopped in the middle of.
+       */
+      const shape = new Set<string>();
+      for (const other of list) {
+        if (other !== item && other && typeof other === "object" && !Array.isArray(other)) {
+          for (const k of Object.keys(other)) shape.add(k);
+        }
+      }
+      if (shape.size === 0) return keys.length > 0;
+      return keys.length >= shape.size;
+    });
+  }
+
+  return { value };
+}
+
+/** How many jobs a salvaged batch call still carries. */
+export function batchItemCount(
+  name: string,
+  args: Record<string, unknown>
+): number {
+  const key = BATCH_TOOL_ITEMS[name];
+  if (!key) return 0;
+  const list = args[key];
+  return Array.isArray(list) ? list.length : 0;
+}
+
+/**
+ * Close the containers a truncated JSON document left open.
+ *
+ * Walks once, remembering for every depth the offset just after the last
+ * COMPLETED value at that depth. Then it tries those cut points from the
+ * deepest outwards: the deepest one keeps the most work, and anything that
+ * does not parse falls back to a shallower, safer cut.
+ */
+function repairPartialJson(raw: string): string | null {
+  const text = raw.trimEnd();
+  if (!text.startsWith("{")) return null;
+
+  const stack: string[] = [];
+  // safe[depth] = offset just after the last completed value at that depth.
+  const safe: number[] = [];
+  // Which containers are open at each recorded cut point.
+  const openAt: string[][] = [];
+  let inString = false;
+  let escaped = false;
+
+  const mark = (offset: number) => {
+    const depth = stack.length;
+    if (depth === 0) return;
+    safe[depth] = offset;
+    openAt[depth] = [...stack];
+  };
+
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (c === "\\") escaped = true;
+      else if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') {
+      inString = true;
+      continue;
+    }
+    if (c === "{" || c === "[") {
+      stack.push(c);
+      mark(i + 1);
+      continue;
+    }
+    if (c === "}" || c === "]") {
+      stack.pop();
+      mark(i + 1);
+      continue;
+    }
+    if (c === ",") {
+      // Cut BEFORE the comma: everything up to here is a whole value.
+      mark(i);
+    }
+  }
+
+  // Nothing was left open — this is not a truncation, it is a bad document.
+  if (stack.length === 0) return null;
+
+  for (let depth = safe.length - 1; depth >= 1; depth--) {
+    const cut = safe[depth];
+    if (cut === undefined) continue;
+    const open = openAt[depth] ?? [];
+    let candidate = text.slice(0, cut).trimEnd();
+    // An empty container, or one whose only item was the truncated one.
+    if (/[[{,]$/.test(candidate)) candidate = candidate.replace(/,$/, "");
+    for (let k = open.length - 1; k >= 0; k--) {
+      candidate += open[k] === "{" ? "}" : "]";
+    }
+    try {
+      const value = JSON.parse(candidate);
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        return candidate;
+      }
+    } catch {
+      // Try a shallower cut.
+    }
+  }
+
+  return null;
 }
 
 /**

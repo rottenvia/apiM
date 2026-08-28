@@ -643,7 +643,13 @@ check(
 );
 check(
   "the agent loop has a hard round cap",
-  /MAX_AGENT_ROUNDS = 64/.test(route)
+  /MAX_AGENT_ROUNDS = agentRoundsFor\(model\)/.test(route) &&
+    /round > MAX_AGENT_ROUNDS/.test(route),
+  "per model now — a guard against a runaway loop, not a work budget"
+);
+check(
+  "hitting the cap is reported as the cap, not as a provider abort",
+  /stoppedPrematurely = "round_cap"/.test(route)
 );
 check(
   "meta is sent before search so Stop has an id",

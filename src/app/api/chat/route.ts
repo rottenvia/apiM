@@ -24,7 +24,7 @@ import {
   pinPluginDirectivesOnFirstSystem,
 } from "@/lib/plugins";
 import { workspaceToolsFor, runTool } from "@/lib/tools";
-import { modelHasOpenToolLimits } from "@/lib/tool-limits";
+import { agentRoundsFor, modelHasOpenToolLimits } from "@/lib/tool-limits";
 import type { ToolResult } from "@/lib/tools";
 import { buildWorkspaceContext } from "@/lib/workspace-context";
 import { TreeTracker } from "@/lib/tree-delta";
@@ -61,7 +61,9 @@ import { requestApproval, isRemembered, askQuestion } from "@/lib/approvals";
 import {
   ToolCallAccumulator,
   foldSystemMessagesToFront,
+  batchItemCount,
   parseToolArguments,
+  salvageToolArguments,
   serializeForApi,
 } from "@/lib/transcript";
 import type { TranscriptMessage } from "@/lib/transcript";
@@ -115,7 +117,7 @@ import { loadScopedConversationHistory } from "@/lib/chat-history";
 import type { ScopedChatMessage } from "@/lib/chat-history";
 import { buildUserContent, userHasContent } from "@/lib/multimodal";
 import type { StoredAttachment } from "@/lib/multimodal";
-import { getModel } from "@/lib/models";
+import { getModel, maxOutputTokensFor } from "@/lib/models";
 import {
   GITHUB_TOKEN_COOKIE,
   githubConfig,
@@ -151,25 +153,17 @@ import {
 
 export const maxDuration = 1800;
 
-/**
- * Ceiling on generated tokens, PER REPLY — not a total for the run.
+/*
+ * The per-reply output ceiling now lives on the model (see
+ * `maxOutputTokens` in models.ts), because it is a property of the model
+ * and not of the front door that serves it. Keying it off the provider gave
+ * GLM 5.3 Flash 64k of its documented 128k purely because it arrives via
+ * OpenRouter — which is exactly the round that cuts a twenty-file
+ * `edit_files` blob in half and loses the whole batch.
  *
- * A run is bounded by MAX_AGENT_ROUNDS and the (optional) spending limit,
- * never by this number: a forty-round task generates forty replies, each up
- * to this many tokens. It costs nothing when a reply is shorter.
- *
- * 8192 was far too low and silently truncated long answers (a full HTML game
- * hits it mid-line). 65536 bounds the worst-case single round on the PAID
- * models, where a 384K round is real money.
+ * A run is still bounded by the round cap and the (optional) spending limit,
+ * never by this number: a forty-round task generates forty replies.
  */
-const MAX_OUTPUT_TOKENS = 65536;
-
-/**
- * Ox Alpha's documented output window is 128k, and the model is free during
- * preview — so it gets the full window instead of the paid-model cap. There
- * is no bill to bound; the only reason to cap output would be cost.
- */
-const OX_MAX_OUTPUT_TOKENS = 131_072;
 
 /**
  * Derive a readable conversation title from the first user message.
@@ -1089,7 +1083,7 @@ export async function POST(req: NextRequest) {
         const workspaceInstruction = workspaceEnabled
           ? `\n\nYou have a workspace on the user's machine and tools to work in it. Prefer creating real files over printing code in chat: the user wants working files, not snippets to copy. List or read before editing so your replacements match exactly.${
               modelHasOpenToolLimits(model)
-                ? " This model has no per-call tool ceilings: read_file returns the whole file, read_files / write_files / edit_files accept as many items as you send, search_files returns every match, and fetch_url returns the full page."
+                ? " This model has no per-call tool ceilings: read_file returns the whole file, read_files / write_files / edit_files accept as many items as you send, search_files returns every match, and fetch_url returns the full page. Work in batches, not one item per call. Reading ten files is ONE read_files call — its paths accept globs, so \"src/lib/*.ts\" reads that whole directory at once — and changing ten files is ONE edit_files call. A round is a round whether it carries one job or thirty, and a reply that spends them one file at a time runs out of rounds with the task half done."
                 : ""
             }\n\nYou can also run code with run_command. After writing something runnable, run it and check the output rather than assuming it works. If it fails, read the error, fix the file, and run it again. Each command needs the user's approval, so keep them few and purposeful, and say briefly why in the reason field. There is no shell. run_command waits for the program to finish, so use it only for things that exit — scripts, tests, installs. You can install packages: pip install and npm install both work and go into this workspace, not the user's system, so install what you need rather than rewriting code to avoid a dependency. For anything that keeps running, such as a dev server or a watcher, use start_process instead: it returns straight away, and you can read its output with read_process and stop it with stop_process. Always stop what you started once you are done with it. Before anything that takes more than two or three actions, call make_plan: write down what finished looks like and the steps to get there, including how you will CHECK each one. On a long task your own reasoning from twenty rounds ago is gone, so without a written plan you will forget requirements from the first message and stop early because the work so far looks finished. When you work something out that a later turn would need - why an approach is dead, what a function actually does, which build or file is correct and why, an offset or value you verified, a command's exact error and what fixed it - call note_finding IMMEDIATELY, before continuing. Those findings are listed to you every turn and survive compaction, so you never have to re-read a file or re-run a command to remember it. Treat the findings list as your working memory: at the START of every turn, before doing anything, read the active findings and use them. When you find a finding is wrong or superseded, call note_finding with status='disproved' and the corrected claim so the list stays accurate and does not fill with stale notes. Do not record trivialities; one specific, evidence-backed line per finding. Keep it current with update_plan — a step is only done when you can say how you verified it.
 
@@ -1697,9 +1691,10 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         // messages before the next pass.
         // Write, run, read the error, fix, run again is four rounds for a
         // single bug. Real work is several of those plus the reading it takes
-        // to find the right file, so a hard cap used to cut tasks off mid-fix.
-        // There is no round budit stops,
-        // the user presses Stop, or a spending limit (if one is set) fires.
+        // to find the right file, so the round guard below is deliberately
+        // far above what an ordinary task needs: a reply ends when the model
+        // stops calling tools, the user presses Stop, or a spending limit
+        // (if one is set) fires.
         let round = 0;
         // Carried across Resume so the ask-early nudge and plan checks still
         // see how long this reply has already been working.
@@ -1714,13 +1709,21 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          */
         const MAX_CONTINUATIONS = 8;
         /**
-         * Hard ceiling on the agent loop.
+         * Hard ceiling on the agent loop, per model.
          *
          * There is no other round budget. Combined with a Stop that used
          * to miss the body reader, a model that kept calling tools never
-         * ended. 64 is enough for a real task and finite if Stop fails.
+         * ended, so the guard has to exist and has to be finite.
+         *
+         * It is per model because 64 is not the same amount of work
+         * everywhere. A model that batches its reads spends a handful of
+         * rounds on a codebase; GLM 5.3 Flash reads one file per call and
+         * can spend forty rounds before it has even looked at everything —
+         * then the guard fires and the user gets a half-finished reply that
+         * blames the provider. Open-ceiling models (1M window, free or
+         * cheap) get a much higher guard; everyone else keeps 64.
          */
-        const MAX_AGENT_ROUNDS = 64;
+        const MAX_AGENT_ROUNDS = agentRoundsFor(model);
         // Carried across a resume, so continuing cannot reset the guard and
         // spend another eight budgets on a model that never stops.
         let continuations = resumed?.continuations ?? 0;
@@ -1868,17 +1871,32 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         };
 
         while (true) {
-          if (stopped()) break;
-          if (round >= MAX_AGENT_ROUNDS) {
-            stoppedPrematurely = "provider_abort";
-            break;
-          }
           round += 1;
           appendPluginDirectives();
           // Ox ignores the tail copy after a few rounds. Re-pin every
           // round so a long agent loop cannot fade Direct Mode.
           if (target.providerId === "opencode" || target.providerId === "openrouter") {
             pinPluginDirectivesOnFirstSystem(transcript, pluginDirectives);
+          }
+
+          /*
+           * The guards sit after the pin, not before it.
+           *
+           * Plugin directives are re-appended and re-pinned on every single
+           * round — that is the whole priority mechanism — and anything
+           * inserted above it is how "every round" quietly becomes "every
+           * round except the ones that return early". Breaking out a few
+           * statements later costs nothing: an abandoned round only appends
+           * a directive block to a transcript that is saved unchanged.
+           */
+          if (stopped()) break;
+          if (round > MAX_AGENT_ROUNDS) {
+            // Named for what it is. It used to be filed as "provider_abort",
+            // which told the user their provider had cut them off when in
+            // fact this app's own guard had fired — and the revive nudge
+            // then repeated that same wrong explanation back to the model.
+            stoppedPrematurely = "round_cap";
+            break;
           }
 
           /*
@@ -2053,11 +2071,12 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             max_tokens: maxTokensFor(
               budget,
               model,
+              // Local Qwen cannot emit 65k into an 80k window that already
+              // holds the prompt, so the sidecar ceiling wins there; every
+              // hosted model uses its own documented output window.
               target.thinkingStyle === "qwen"
                 ? SIDECAR_MAX_OUTPUT
-                : isOxProvider(target.providerId)
-                  ? OX_MAX_OUTPUT_TOKENS
-                  : MAX_OUTPUT_TOKENS
+                : maxOutputTokensFor(model)
             ),
           };
 
@@ -3233,26 +3252,81 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               const looksTruncated =
                 truncated || /Unterminated|Unexpected end/i.test(parsed.error);
 
-              result = {
-                ok: false,
-                content: looksTruncated
-                  ? `Error: this ${call.function.name} call was cut off by the ` +
-                    `output limit — its arguments are incomplete, so nothing ` +
-                    `was written.\n\n` +
-                    `The content was too large for one call. Do NOT resend it ` +
-                    `whole. Instead:\n` +
-                    `  1. write_file with the FIRST part only (aim for under ` +
-                    `1500 lines).\n` +
-                    `  2. Then append each following part with edit_file, ` +
-                    `using the last few lines of what you just wrote as ` +
-                    `old_text.\n` +
-                    `Keep going until the file is complete. Say nothing else ` +
-                    `until it is.`
-                  : `Error: arguments were not valid JSON (${parsed.error})`,
-                summary: looksTruncated
-                  ? `Cut off mid-call — splitting into parts`
-                  : "Invalid tool arguments",
-              };
+              /*
+               * A cut-off BATCH call still contains finished work.
+               *
+               * edit_files across twenty files is one huge JSON blob, and a
+               * blob chopped at the output ceiling used to be discarded
+               * whole — so the model resent the same batch, it was cut in
+               * the same place, and nothing was ever edited. Reported as
+               * "it can't batch edit a lot of files".
+               *
+               * The complete items are recovered and applied, the
+               * half-written one at the end is dropped, and the model is
+               * told exactly how many landed so it can send the remainder
+               * instead of starting over.
+               */
+              const salvaged = looksTruncated
+                ? salvageToolArguments(
+                    call.function.arguments,
+                    call.function.name
+                  )
+                : null;
+              const salvagedCount = salvaged
+                ? batchItemCount(call.function.name, salvaged.value)
+                : 0;
+
+              if (salvaged && salvagedCount > 0) {
+                const partial = await runTool(
+                  workspace,
+                  call.function.name,
+                  salvaged.value,
+                  {
+                    modelId: model,
+                    visionKey: visionApiKey,
+                    visionModel,
+                    searchKey: tavilyApiKey,
+                    exaKey: exaApiKey,
+                    deepseekKey: helper.apiKey,
+                    planner,
+                    searchProfile,
+                    signal: runSignal,
+                  }
+                );
+                result = {
+                  ...partial,
+                  content:
+                    `This ${call.function.name} call was cut off by the ` +
+                    `output limit part-way through. The ${salvagedCount} ` +
+                    `complete item(s) were recovered and run; the item it ` +
+                    `stopped in the middle of was dropped.\n\n` +
+                    `${partial.content}\n\n` +
+                    `Send ONLY the remaining items in the next call, in ` +
+                    `smaller batches. Do not resend the ones above.`,
+                  summary: `Cut off — ran ${salvagedCount} recovered item(s)`,
+                };
+              } else {
+                result = {
+                  ok: false,
+                  content: looksTruncated
+                    ? `Error: this ${call.function.name} call was cut off by ` +
+                      `the output limit — its arguments are incomplete, so ` +
+                      `nothing was written.\n\n` +
+                      `The content was too large for one call. ` +
+                      `Do NOT resend it whole. Instead:\n` +
+                      `  1. write_file with the FIRST part only (aim for ` +
+                      `under 1500 lines).\n` +
+                      `  2. Then append each following part with edit_file, ` +
+                      `using the last few lines of what you just wrote as ` +
+                      `old_text.\n` +
+                      `Keep going until the file is complete. Say nothing ` +
+                      `else until it is.`
+                    : `Error: arguments were not valid JSON (${parsed.error})`,
+                  summary: looksTruncated
+                    ? `Cut off mid-call — splitting into parts`
+                    : "Invalid tool arguments",
+                };
+              }
             } else if (call.function.name === "make_plan") {
               /*
                * Handled here, not in runTool, because a plan is per-RUN state.

@@ -595,6 +595,34 @@ const MAX_SEARCHABLE_BYTES = 512 * 1024;
  * Without this, locating a function in a twenty-file project costs one round
  * per file read — the whole tool budget spent looking rather than working.
  */
+/**
+ * A simple glob, compiled once.
+ *
+ * `*` matches anything and `?` matches one character, which is enough for
+ * "*.py" or "src/*" without pulling in a dependency. Shared by search and by
+ * read_files so a pattern that selects files in one selects the same files in
+ * the other — a glob that quietly means two different things is worse than no
+ * glob at all.
+ */
+export function globPattern(glob?: string | null): RegExp | null {
+  if (!glob?.trim()) return null;
+  const escaped = glob
+    .trim()
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*/g, ".*")
+    .replace(/\?/g, ".");
+  try {
+    return new RegExp(`^${escaped}$`, "i");
+  } catch {
+    return null;
+  }
+}
+
+/** Does this look like a pattern rather than one literal path? */
+export function looksLikeGlob(value: string): boolean {
+  return /[*?]/.test(value);
+}
+
 export async function searchFiles(
   workspaceId: string,
   query: string,
@@ -638,21 +666,7 @@ export async function searchFiles(
       : (line) => line.toLowerCase().includes(lower);
   }
 
-  // A simple glob: * matches anything within a path segment-free sense,
-  // which is enough for "*.py" without pulling in a dependency.
-  let globRe: RegExp | null = null;
-  if (options.glob?.trim()) {
-    const escaped = options.glob
-      .trim()
-      .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-      .replace(/\*/g, ".*")
-      .replace(/\?/g, ".");
-    try {
-      globRe = new RegExp(`^${escaped}$`, "i");
-    } catch {
-      globRe = null;
-    }
-  }
+  const globRe = globPattern(options.glob);
 
   const files = await listFiles(workspaceId);
   const hits: SearchHit[] = [];

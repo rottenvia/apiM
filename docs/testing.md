@@ -76,7 +76,7 @@ Rough shape, so you know what a failure means:
 | Area | Suites |
 |---|---|
 | Agent behaviour | `plan` `adversarial` `agent` `agentloss` `lessons` `refine` |
-| Tools | `tools2` `tools3` `browser` `web` `documents` `runner` `processes` |
+| Tools | `tools2` `tools3` `batching` `browser` `web` `documents` `runner` `processes` |
 | Safety | `agentsafety` `hardening` `resilience` `auth` |
 | Cost | `cost` `budget` `compact` `balance` |
 | Files | `workspace` `archive` `zip` `snapshots` `diff` `tree` `install` |

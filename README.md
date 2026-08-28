@@ -61,7 +61,7 @@ The executable will be in the `dist` folder. Just double-click to run!
 npm test
 ```
 
-Runs every suite — currently 1,904 checks across 50 suites — without calling
+Runs every suite — currently 2,386 checks across 54 suites — without calling
 the paid API; `npm run test:real` does that and is opt-in.
 
 ```bash
@@ -274,6 +274,26 @@ vllm serve Qwen/Qwen3.8-27B \
 
 Then Settings → Local model → vLLM (`http://127.0.0.1:8000/v1`,
 `Qwen/Qwen3.8-27B`).
+
+## Batching and long agent runs
+
+Models with open tool ceilings — Ox Alpha and GLM 5.3 Flash — are meant to
+work in batches, and the app now makes that hard to get wrong:
+
+- `read_files` takes glob patterns, so `src/lib/*.ts` reads a whole directory
+  in one call instead of one call per file.
+- Parallel tool calls are kept separate even when the provider streams them
+  all on the same index — previously they were concatenated into one
+  unparseable call, so a round of eight edits applied nothing.
+- The per-round output ceiling comes from the model (128K for Ox Alpha and
+  GLM 5.3 Flash, 64K for the metered DeepSeek models), not from the provider
+  serving it. A big `edit_files` call is one large JSON argument blob; clipped
+  in half it can never parse.
+- A batch that still gets cut off has its finished items recovered and run.
+  The reply says how many landed and asks for only the rest.
+- The round guard is 64 for most models and 256 for the open-ceiling ones,
+  and hitting it now says so — and offers Resume — rather than blaming the
+  provider.
 
 ## Thinking Effort
 

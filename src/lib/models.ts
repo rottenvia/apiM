@@ -72,12 +72,44 @@ export interface ModelInfo {
    */
   openToolLimits: boolean;
   /**
+   * Ceiling on generated tokens for ONE round, in tokens.
+   *
+   * Keyed off the model, not the provider. The old rule was
+   * `provider === "opencode" ? 128k : 64k`, which quietly gave GLM 5.3
+   * Flash — a 128K-output model — half its window on OpenRouter. That is
+   * invisible on prose and fatal on a batch tool call: `edit_files` across
+   * twenty files is one enormous JSON argument blob, and a blob cut in
+   * half is unparseable, so the whole batch lands as nothing.
+   */
+  maxOutputTokens: number;
+  /**
    * OpenCode-provider models only: pin the model to one host, ignoring the
    * Ox Alpha host button. `x-preview-f-free` follows the button; the free
    * DeepSeek lane exists only on Zen.
    */
   fixedHost?: OxHost;
 }
+
+/**
+ * Output ceilings, per round.
+ *
+ * A run is bounded by the round cap and the (optional) spending limit, never
+ * by these: a forty-round task generates forty replies, each up to this many
+ * tokens, and a short reply costs nothing extra.
+ *
+ * The paid number exists to bound the worst case on a metered model. A free
+ * model has no bill to bound, so it gets its documented window — cutting it
+ * short only breaks long files and large batch tool calls.
+ */
+export const PAID_MAX_OUTPUT_TOKENS = 65_536;
+export const FREE_MAX_OUTPUT_TOKENS = 131_072;
+/**
+ * GLM 5.3 Flash documents 128K max output, and its whole point is long agent
+ * work: batch edits across many files are single tool calls whose arguments
+ * are tens of thousands of tokens of JSON. It is metered, but cheap, and the
+ * spending limit still caps a round through `maxTokensFor`.
+ */
+export const GLM_MAX_OUTPUT_TOKENS = 131_072;
 
 export const DEFAULT_MODEL_ID = "deepseek-v4-pro";
 
@@ -171,6 +203,7 @@ export const MODELS: ModelInfo[] = [
     vision: "helper",
     video: false,
     openToolLimits: false,
+    maxOutputTokens: PAID_MAX_OUTPUT_TOKENS,
   },
   {
     id: "deepseek-v4-flash",
@@ -188,6 +221,7 @@ export const MODELS: ModelInfo[] = [
     vision: "helper",
     video: false,
     openToolLimits: false,
+    maxOutputTokens: PAID_MAX_OUTPUT_TOKENS,
   },
   {
     id: "deepseek-v4-flash-free",
@@ -207,6 +241,7 @@ export const MODELS: ModelInfo[] = [
     vision: "helper",
     video: false,
     openToolLimits: false,
+    maxOutputTokens: FREE_MAX_OUTPUT_TOKENS,
   },
   {
     id: "ox-alpha",
@@ -225,6 +260,7 @@ export const MODELS: ModelInfo[] = [
     vision: "native",
     video: true,
     openToolLimits: true,
+    maxOutputTokens: FREE_MAX_OUTPUT_TOKENS,
   },
   {
     id: "glm-5.3-flash",
@@ -243,6 +279,7 @@ export const MODELS: ModelInfo[] = [
     vision: "native",
     video: false,
     openToolLimits: true,
+    maxOutputTokens: GLM_MAX_OUTPUT_TOKENS,
   },
   {
     id: QWEN_38_27B_ID,
@@ -261,6 +298,7 @@ export const MODELS: ModelInfo[] = [
     vision: "native",
     video: true,
     openToolLimits: false,
+    maxOutputTokens: PAID_MAX_OUTPUT_TOKENS,
   },
 ];
 
@@ -282,6 +320,14 @@ export function modelSeesVideo(id: string | null | undefined): boolean {
 
 export function modelVision(id: string | null | undefined): VisionMode {
   return getModel(id).vision;
+}
+
+/**
+ * Per-round output ceiling for this model. Local Qwen is the exception the
+ * caller handles: the sidecar's window, not the catalog, decides there.
+ */
+export function maxOutputTokensFor(id: string | null | undefined): number {
+  return getModel(id).maxOutputTokens;
 }
 
 export function getModel(id: string | null | undefined): ModelInfo {
