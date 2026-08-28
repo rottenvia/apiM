@@ -3,6 +3,11 @@ import crossSpawn from "cross-spawn";
 import { promises as fs } from "node:fs";
 import { workspaceDirectory } from "@/lib/workspace";
 import {
+  ensureHiddenSurface,
+  hiddenLaunchCommand,
+  parseHiddenPid,
+} from "@/lib/hidden-display";
+import {
   validateCommand,
   describeCommand,
   platformCommandName,
@@ -28,6 +33,12 @@ export const STARTUP_GRACE_MS = 4_000;
 
 export type ProcessKind = "user" | "decompiler";
 
+export interface HiddenPlacement {
+  kind: "windows-desktop" | "xvfb";
+  /** Desktop name or X display, which is what a capture needs. */
+  name: string;
+}
+
 export interface TrackedProcess {
   id: string;
   workspaceId: string;
@@ -49,6 +60,15 @@ export interface TrackedProcess {
    * the per-workspace start_process limit.
    */
   kind?: ProcessKind;
+  /**
+   * Set when the process was launched onto an off-screen surface, so
+   * screenshot_window knows where to look for its window and the dock can say
+   * "hidden" rather than leaving the user hunting for a window that is not on
+   * their desktop.
+   */
+  hidden?: HiddenPlacement;
+  /** The app's own pid when a launcher wrapper sits in front of it. */
+  innerPid?: number;
 }
 
 /** Command lines that belong to apiM's headless decompilers, never the user's app. */
@@ -407,7 +427,8 @@ export async function waitForOutput(
 export async function startProcess(
   workspaceId: string,
   command: string,
-  args: string[]
+  args: string[],
+  options: { hidden?: boolean } = {}
 ): Promise<
   | { ok: true; process: TrackedProcess; diedImmediately: boolean }
   | { ok: false; reason: string }
@@ -434,18 +455,46 @@ export async function startProcess(
   const cwd = workspaceDirectory(workspaceId);
   await fs.mkdir(cwd, { recursive: true });
 
+  /*
+   * Hidden launches go onto a surface the user is not looking at.
+   *
+   * Deliberately fails loudly rather than falling back to a visible launch:
+   * the whole point of asking for hidden is that a window must not appear on
+   * the user's desktop, and quietly doing the opposite is a promise you only
+   * get to break once.
+   */
+  let placement: HiddenPlacement | undefined;
+  let launchCommand = check.command;
+  let launchArgs = check.args;
+  let launchEnv: Record<string, string> = {};
+
+  if (options.hidden) {
+    const opened = await ensureHiddenSurface();
+    if (!opened.ok) return { ok: false, reason: opened.error };
+    const built = await hiddenLaunchCommand(
+      platformCommandName(check.command),
+      check.args,
+      cwd,
+      cwd
+    );
+    launchCommand = built.command;
+    launchArgs = built.args;
+    launchEnv = built.env;
+    placement = { kind: opened.surface.kind, name: opened.surface.name };
+  }
+
   let child: ChildProcess;
   try {
     // Resolve platform aliases through the SAME function as run_command.
     // On Windows `python3` is commonly the Microsoft Store shim while the
     // installed interpreter is `python`; running tools disagreed because only
     // run_command applied this mapping.
-    const executable = platformCommandName(check.command);
+    const executable = platformCommandName(launchCommand);
 
     // cross-spawn for the same reason as run_command: `npm run dev` is a
     // .cmd shim on Windows and a plain spawn cannot start it. See the long
     // note in lib/runner.ts.
-    child = crossSpawn(executable, check.args, {
+    child = crossSpawn(executable, launchArgs, {
       cwd,
       shell: false,
       windowsHide: true,
@@ -476,6 +525,7 @@ export async function startProcess(
         // Not CI=1 here: some dev servers refuse to start in watch mode when
         // they think they are on a build machine.
         FORCE_COLOR: "0",
+        ...launchEnv,
       } as unknown as NodeJS.ProcessEnv,
     });
   } catch (err) {
@@ -501,10 +551,22 @@ export async function startProcess(
     log: "",
     truncated: false,
     child,
+    hidden: placement,
   };
 
   child.stdout?.on("data", (d) => append(proc, d.toString()));
   child.stderr?.on("data", (d) => append(proc, d.toString()));
+
+  // A hidden Windows launch runs behind a PowerShell wrapper, so `pid` is the
+  // wrapper's. The app's own pid is printed by the launcher and is the one a
+  // capture must use.
+  if (placement?.kind === "windows-desktop") {
+    child.stdout?.on("data", () => {
+      if (proc.innerPid) return;
+      const found = parseHiddenPid(proc.log);
+      if (found) proc.innerPid = found;
+    });
+  }
 
   child.on("error", (err) => {
     append(proc, `\n[failed to start: ${err.message}]\n`);

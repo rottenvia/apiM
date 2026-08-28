@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import crossSpawn from "cross-spawn";
 import path from "node:path";
-import { promises as fs } from "node:fs";
+import { promises as fs, statSync } from "node:fs";
 import { workspaceDirectory } from "@/lib/workspace";
 import { checkBrowserPolicy } from "@/lib/browser-policy";
 
@@ -331,6 +331,73 @@ export function isReadOnlyCommand(command: string, args: string[]): boolean {
   return true;
 }
 
+/**
+ * Programs the agent BUILT, which the allow-list used to refuse.
+ *
+ * The reported wall: the agent compiles `injector/x64/Release/nightfall.exe`
+ * and then cannot launch the thing it just produced, because the allow-list
+ * matches on program NAME and no list can contain a binary that did not exist
+ * an hour ago. It reads as a permissions decision about nightfall; it was
+ * really "I have never heard of this name".
+ *
+ * The rule here is about LOCATION instead of name, and it is the same rule the
+ * rest of this app already enforces on every file operation: a path that
+ * resolves inside the workspace is the agent's own output and may run; a path
+ * anywhere else on the machine is not. Nothing outside the workspace becomes
+ * runnable, `..` cannot climb out, and a bare name like `nightfall.exe` with
+ * no directory is NOT accepted from PATH — it must resolve to a real file
+ * inside the workspace, which is precisely the set of things the agent made.
+ *
+ * Approval is unchanged. A workspace binary is arbitrary native code, so it
+ * goes to the same prompt as everything else; this only decides whether the
+ * user is allowed to be ASKED.
+ */
+export function workspaceExecutable(
+  command: string,
+  workspaceDir: string
+): string | null {
+  const raw = String(command ?? "").trim();
+  if (!raw || raw.includes("\0")) return null;
+  if (!workspaceDir || workspaceDir === ".") return null;
+
+  // A bare word is a PATH lookup, not a workspace file. `nightfall.exe` on its
+  // own would resolve against the workspace anyway, so it is allowed only when
+  // the file really is there — the existence check below is what decides.
+  const normalised = raw.replace(/\\/g, "/");
+
+  const root = path.resolve(workspaceDir);
+  const target = path.resolve(root, normalised);
+
+  // Containment, the same check every file tool uses: inside the root, and not
+  // the root itself.
+  const rel = path.relative(root, target);
+  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) return null;
+
+  try {
+    if (!statSync(target).isFile()) return null;
+  } catch {
+    return null;
+  }
+
+  /*
+   * On Windows the extension IS the executability bit, so it has to be one of
+   * the real ones. Notably absent: .ps1, .cmd and .bat — those are scripts
+   * interpreted by a shell, and letting one through would reintroduce the
+   * arbitrary-shell-text hole that the SHELLS list exists to close.
+   */
+  if (process.platform === "win32") {
+    return /\.(exe|com)$/i.test(target) ? target : null;
+  }
+
+  try {
+    // POSIX: the executable bit, for the same reason.
+    // eslint-disable-next-line no-bitwise
+    return (statSync(target).mode & 0o111) !== 0 ? target : null;
+  } catch {
+    return null;
+  }
+}
+
 export function isAllowedCommand(command: string): boolean {
   return ALLOWED.has(normaliseCommand(command));
 }
@@ -402,12 +469,17 @@ export function validateCommand(
     };
   }
 
-  if (!ALLOWED.has(name)) {
+  // A binary the agent built in this workspace runs under its full path.
+  const own = workspaceExecutable(command, workspaceDir);
+
+  if (!own && !ALLOWED.has(name)) {
     return {
       ok: false,
       reason:
         `"${name}" is not an allowed command. Allowed: ` +
-        `${allowedCommands().join(", ")}.`,
+        `${allowedCommands().join(", ")}. A program you built yourself can ` +
+        `be run by its path inside the workspace, e.g. ` +
+        `"build/app.exe" — the file has to exist there first.`,
     };
   }
 
@@ -441,6 +513,12 @@ export function validateCommand(
    * lib/browser-policy.ts for why this exists: an agent task closed the
    * user's running browser and drove their logged-in profile.
    */
+  if (own) {
+    // The resolved absolute path, never the model's spelling of it, so a
+    // relative path cannot be re-resolved against a different cwd later.
+    return { ok: true, command: own, args: clean };
+  }
+
   const policy = checkBrowserPolicy(name, clean, workspaceDir);
   if (policy.action === "refuse") {
     return { ok: false, reason: policy.reason ?? "Refused by browser policy." };

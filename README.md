@@ -61,14 +61,14 @@ The executable will be in the `dist` folder. Just double-click to run!
 npm test
 ```
 
-Runs every suite — currently 2,447 checks across 55 suites — without calling
+Runs every suite — currently 2,493 checks across 55 suites — without calling
 the paid API; `npm run test:real` does that and is opt-in.
 
 ```bash
 npm test plan       # one suite
 npm run typecheck   # types
 npm run lint        # unused code, React mistakes
-npm run score       # rates all 36 agent tools
+npm run score       # rates all agent tools
 ```
 
 See [docs/testing.md](docs/testing.md).
@@ -274,6 +274,46 @@ vllm serve Qwen/Qwen3.8-27B \
 
 Then Settings → Local model → vLLM (`http://127.0.0.1:8000/v1`,
 `Qwen/Qwen3.8-27B`).
+
+## Seeing what it built
+
+The agent can run and look at native programs, not just write them.
+
+**Running your own build.** `run_command` and `start_process` use an
+allow-list of program names, which by definition cannot contain a binary the
+agent compiled ten minutes ago. A program that resolves to a real executable
+*inside the workspace* is allowed by its path — `build/x64/Release/app.exe`
+runs, `/usr/bin/anything` does not, and `..` cannot climb out. Approval is
+unchanged: native code always goes to the prompt.
+
+**Launching where you cannot see it.** `start_process` takes `hidden: true`.
+On Windows the program is started on a second desktop object (CreateDesktop),
+so there is no taskbar button and it cannot steal focus; on Linux it runs on an
+Xvfb display. Both are fully rendered surfaces, which is what makes them
+capturable — a hidden *window* stops drawing and screenshots as a blank
+rectangle. If the surface cannot be created the launch fails and says why; it
+never quietly puts a window on your screen instead.
+
+**Looking at it.** `screenshot_window` takes `process_id` (from
+`start_process`) and finds the pid and the off-screen surface on its own, or a
+raw `pid` for something *you* launched — which is the route for a program that
+demands administrator rights, since the app cannot elevate. On a model with
+native vision the PNG is attached to the same round, so the model actually
+looks at the pixels instead of reading OCR of them.
+
+**Checking it is the right binary.** `verify_file` takes required and absent
+literals and searches both UTF-8 and UTF-16LE, plus size and sha256 — a build
+verifier as a tool rather than a script rewritten per version. `build_project`
+prints a digest first (exit code, distinct errors, unique warnings with their
+first `file:line`, linked artifact sizes) and classifies failures: known flaky
+races retry once automatically and say which rule fired, real compile errors
+never do, and a lock names whoever holds the file — including the
+antivirus-grip case where nothing holds it and only a rename works.
+
+**Reading big files exactly.** `read_symbol` returns one function or class by
+name with its exact line range, ready to hand to `edit_file` as
+`start_line`/`end_line`. A complete `read_file` is stamped `EXACT` with its
+character count and a hash of the bytes handed over.
 
 ## Batching and long agent runs
 

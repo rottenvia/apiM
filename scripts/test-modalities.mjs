@@ -210,8 +210,19 @@ check(
   /file\.description && !file\.analyzing/.test(chips)
 );
 check(
-  "lightbox Extracted text is gated on description",
-  /\{description && \(/.test(lightbox)
+  "the lightbox offers text for ANY image, not only helper-described ones",
+  /\(description \|\| kind === "image"\) && \(/.test(lightbox),
+  "on a native VLM there is no description, and the button used to vanish " +
+    "entirely — so a screenshot could not be read by the human either"
+);
+check(
+  "…and on-demand extraction is labelled as the user's copy, not the model's input",
+  /this text was never/.test(lightbox) && /extract/i.test(lightbox)
+);
+check(
+  "OCR output is scrubbed before it is rendered",
+  /tidyExtractedText/.test(lightbox),
+  "control characters and replacement glyphs are what made it look bugged"
 );
 check(
   "Settings no longer claims every model is DeepSeek-blind",
