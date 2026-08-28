@@ -477,6 +477,11 @@ export async function startProcess(
       cwd,
       cwd
     );
+    if (!built.ok) {
+      // Resolution failed BEFORE anything was started, which is worth saying
+      // plainly: "I could not find it" and "it crashed" have different fixes.
+      return { ok: false, reason: built.error };
+    }
     launchCommand = built.command;
     launchArgs = built.args;
     launchEnv = built.env;

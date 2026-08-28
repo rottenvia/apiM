@@ -20,7 +20,7 @@
  */
 import path from "node:path";
 import os from "node:os";
-import { chmod, mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -273,8 +273,42 @@ check(
 const text = logs.formatLogAnalysis(a);
 check(
   "the formatted report leads with the counts a human would ask for",
-  /Levels:/.test(text) && /Counted:/.test(text) && /Ratio phase:backstop/.test(text),
+  /Levels \(share of the \d+ levelled line/.test(text) &&
+    /Counted:/.test(text) &&
+    /Ratio phase:backstop/.test(text),
   text.split("\n").find((l) => /Ratio/.test(l))
+);
+check(
+  "a level share names its denominator, so 100% cannot read as 'the whole file'",
+  /% of levelled/.test(text) && /% of all/.test(text),
+  text.split("\n").find((l) => /Levels/.test(l))?.slice(0, 96)
+);
+check(
+  "a flag that flips once is not reported as the run counter",
+  logs.analyzeLog(
+    Array.from({ length: 12 }, (_, i) => `ground=${i < 6 ? 0 : 1} speed=${i}`).join("\n")
+  ).span?.key !== "ground",
+  "`ground=` is monotone and means nothing of the kind"
+);
+check(
+  "a real tick counter still is",
+  (() => {
+    const a2 = logs.analyzeLog(
+      Array.from({ length: 12 }, (_, i) => `tick=${1200 + i * 7} v=1`).join("\n")
+    );
+    return a2.span?.key === "tick" && a2.span.first === 1200 && a2.span.last === 1277;
+  })(),
+  "first and last tick is the whole point of the line"
+);
+check(
+  "…and the coverage line says 'run counter', not 'covers'",
+  /Run counter: tick 1200 → 1277/.test(
+    logs.formatLogAnalysis(
+      logs.analyzeLog(
+        Array.from({ length: 12 }, (_, i) => `tick=${1200 + i * 7} v=1`).join("\n")
+      )
+    )
+  )
 );
 check(
   "…and the numeric distribution is printed with its quantiles",
@@ -356,8 +390,6 @@ check(
   /ProcId/.test(script),
   "a borderless GUI may have no title to match"
 );
-
-await rm(tmp, { recursive: true, force: true });
 
 // ------------------------------------------------ 5. running your own build
 console.log("\n5. The allow-list lets the agent run what it built");
@@ -646,6 +678,159 @@ check(
   /pixels dropped from history/.test(routeSrc),
   "a UI session captures every round; re-sending them all is the bloat"
 );
+
+// -------------------------------------------- 11. the second-round fixes
+console.log("\n11. What the field report caught");
+
+const editsSrc = readFileSync(path.join(ROOT, "src/lib/tools.ts"), "utf8");
+const { normaliseEditEntry } = await load("src/lib/tools.ts");
+
+check(
+  "an edit sent as a JSON string is parsed, not called malformed",
+  normaliseEditEntry(
+    JSON.stringify({ path: "a.cpp", old_text: "x", new_text: "y" })
+  ).ok,
+  "a model that serialises array items individually meant the same thing"
+);
+check(
+  "alternative key spellings are accepted",
+  normaliseEditEntry({ file: "a.cpp", search: "x", replacement: "y" }).ok &&
+    normaliseEditEntry({ path: "a.cpp", oldText: "x", newText: "y" }).ok,
+  "newText / content / file all have exactly one possible meaning"
+);
+check(
+  "a genuinely malformed item names the keys it DID have",
+  (() => {
+    const r = normaliseEditEntry({ pathh: "a.cpp", nu: 1 });
+    return !r.ok && /pathh/.test(r.reason) && /nu/.test(r.reason);
+  })(),
+  '"malformed" with no evidence is the silence this campaign is about'
+);
+check(
+  "an item with a path and text but no location says which one is missing",
+  (() => {
+    const r = normaliseEditEntry({ path: "a.cpp", new_text: "y" });
+    return !r.ok && /old_text/.test(r.reason) && /start_line/.test(r.reason);
+  })()
+);
+check(
+  "single edit_file goes through the same normaliser as a batch item",
+  /const single = normaliseEditEntry\(args\)/.test(editsSrc),
+  "'it worked one at a time but not in a batch' cannot be about arguments now"
+);
+
+const buildLib = await load("src/lib/build.ts");
+const tree = await mkdtemp(path.join(os.tmpdir(), "apim-tree-"));
+await mkdir(path.join(tree, "uploads", "injector"), { recursive: true });
+await mkdir(path.join(tree, "uploads", "injector", "x64", "Release"), {
+  recursive: true,
+});
+await writeFile(path.join(tree, "stray.cpp"), "int main(){}", "utf8");
+await writeFile(
+  path.join(tree, "uploads", "injector", "nightfall.sln"),
+  "Microsoft Visual Studio Solution File",
+  "utf8"
+);
+await writeFile(
+  path.join(tree, "uploads", "injector", "nightfall.vcxproj"),
+  "<Project/>",
+  "utf8"
+);
+
+const detected = await buildLib.detectBuildIn(tree, {});
+check(
+  "a solution two directories down is found instead of a stray root .cpp",
+  detected.target.kind === "msbuild" && /nightfall\.sln$/.test(detected.target.path),
+  `${detected.target.kind}: ${detected.target.path}`
+);
+check(
+  "the report says where discovery looked",
+  typeof detected.target.searched === "string" && detected.target.searched.length > 0,
+  detected.target.searched
+);
+check(
+  "the .sln outranks the .vcxproj beside it",
+  /\.sln$/.test(detected.target.path),
+  "the solution is the thing that knows about the other projects"
+);
+
+const explicit = await buildLib.detectBuildIn(tree, {
+  project: "uploads/injector/nightfall.vcxproj",
+});
+check(
+  "an explicit project skips discovery entirely",
+  explicit.target.path === "uploads/injector/nightfall.vcxproj",
+  explicit.target.searched
+);
+
+await rm(tree, { recursive: true, force: true });
+
+check(
+  "MSBuild discovery asks vswhere for prereleases too",
+  /-prerelease/.test(readFileSync(path.join(ROOT, "src/lib/build.ts"), "utf8")),
+  "a VS 18 Preview install is invisible without it"
+);
+check(
+  "…and falls back to walking the install roots when vswhere is absent",
+  /Microsoft Visual Studio"\)[\s\S]{0,400}readdirSync/.test(
+    readFileSync(path.join(ROOT, "src/lib/build.ts"), "utf8")
+  ),
+  "the year folder is enumerated, so a future VS still works"
+);
+check(
+  "cl.exe is resolved to a full path rather than hoped for on PATH",
+  typeof buildLib.findClPath === "function",
+  "bare cl only exists inside a Developer Command Prompt"
+);
+
+check(
+  "a hidden launch resolves the program before CreateProcess sees it",
+  (() => {
+    const r = hidden.resolveExecutable("definitely-not-a-real-program-xyz", tmp);
+    return !r.ok && /not on PATH/.test(r.error);
+  })(),
+  "CreateProcess is not a shell: error 3 was an unresolved name"
+);
+check(
+  "…and a real program resolves to an absolute path",
+  (() => {
+    const r = hidden.resolveExecutable(process.platform === "win32" ? "cmd" : "sh", "/");
+    return r.ok && path.isAbsolute(r.path);
+  })()
+);
+check(
+  "the launcher refuses a path it cannot see, with the reason",
+  /no such executable/.test(hidden.hiddenLaunchScript()) &&
+    /Win32 error \$code/.test(hidden.hiddenLaunchScript())
+);
+
+const capture = shots.windowsCaptureScript();
+check(
+  "window matching is ranked, so a search window cannot outrank the app",
+  /\$score = 0/.test(capture) && /Sort-Object Score/.test(capture),
+  '"nightfall - Everything" was captured instead of nightfall'
+);
+check(
+  "the chosen window title is reported back",
+  /apim-window=/.test(capture) && /windowTitle/.test(
+    readFileSync(path.join(ROOT, "src/lib/screenshot.ts"), "utf8")
+  )
+);
+check(
+  "…and the other candidates are listed so a wrong aim is visible at once",
+  /apim-also=/.test(capture) &&
+    /Other windows also matched/.test(
+      readFileSync(path.join(ROOT, "src/lib/tools.ts"), "utf8")
+    )
+);
+check(
+  "a title-only capture warns that a title is a guess",
+  /Matched by title, which is a guess/.test(
+    readFileSync(path.join(ROOT, "src/lib/tools.ts"), "utf8")
+  )
+);
+
+await rm(tmp, { recursive: true, force: true });
 
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`

@@ -32,6 +32,7 @@
 
 import path from "node:path";
 import { promises as fs } from "node:fs";
+import { statSync } from "node:fs";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 
 export type HiddenSurfaceKind = "windows-desktop" | "xvfb";
@@ -111,12 +112,22 @@ $si.cb = [System.Runtime.InteropServices.Marshal]::SizeOf($si)
 $si.lpDesktop = "WinSta0\" + $Desktop
 $pi = New-Object ApimDesk+PROCESS_INFORMATION
 
+if (-not (Test-Path -LiteralPath $Exe)) {
+  Write-Error "no such executable: $Exe — the caller was supposed to resolve this to a full path"
+  exit 3
+}
+if (-not (Test-Path -LiteralPath $WorkDir)) { $WorkDir = (Get-Location).Path }
+
 $cmd = '"' + $Exe + '"'
 if ($Arguments) { $cmd = $cmd + " " + $Arguments }
 
 $ok = [ApimDesk]::CreateProcess($null, $cmd, [IntPtr]::Zero, [IntPtr]::Zero, $false, 0, [IntPtr]::Zero, $WorkDir, [ref]$si, [ref]$pi)
 if (-not $ok) {
   $code = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+  if ($code -eq 2 -or $code -eq 3) {
+    Write-Error "CreateProcess could not find '$Exe' (Win32 error $code). It is started without a shell, so it must be a real executable path — not a Store alias and not a shell builtin."
+    exit $code
+  }
   if ($code -eq 740) {
     Write-Error "the program demands administrator rights (error 740). apiM cannot elevate, and popping a UAC dialog on your desktop is exactly what hidden mode is avoiding. Launch it yourself, then screenshot it by pid."
     exit 740
@@ -269,19 +280,126 @@ export function closeHiddenSurface(): void {
   surface = null;
 }
 
+/**
+ * Turn whatever the model wrote into a path CreateProcess can open.
+ *
+ * CreateProcess is not a shell. Given "python3" with lpApplicationName null
+ * it does search PATH, but it does NOT apply PATHEXT the way cmd does, and on
+ * Windows `python3` is frequently a WindowsApps alias rather than a real
+ * file — which is exactly the reported failure: "the wrapper fails before
+ * python runs, CreateProcess error 3, it can't resolve even bare python3".
+ *
+ * So resolution happens here, in Node, where `where`/`which` and PATHEXT are
+ * available, and the launcher is handed an absolute path or nothing at all.
+ * A failure to resolve is reported as "I could not find X", which is a
+ * different sentence from "X crashed" and points at a different fix.
+ */
+export function resolveExecutable(
+  command: string,
+  workDir: string
+): { ok: true; path: string } | { ok: false; error: string } {
+  const raw = String(command ?? "").trim();
+  if (!raw) return { ok: false, error: "No program was given." };
+
+  const looksLikePath = /[\\/]/.test(raw);
+  const candidates: string[] = [];
+
+  if (looksLikePath || path.isAbsolute(raw)) {
+    candidates.push(path.resolve(workDir, raw));
+  } else {
+    // Ask the OS first — it knows about PATH, and on Windows `where` applies
+    // PATHEXT for us.
+    try {
+      const probe = spawnSync(process.platform === "win32" ? "where" : "which", [raw], {
+        encoding: "utf8",
+        windowsHide: true,
+      });
+      if (probe.status === 0) {
+        for (const line of String(probe.stdout ?? "").split(/\r?\n/)) {
+          const hit = line.trim();
+          if (hit) candidates.push(hit);
+        }
+      }
+    } catch {
+      /* fall through to the manual sweep */
+    }
+    candidates.push(path.resolve(workDir, raw));
+  }
+
+  const extensions =
+    process.platform === "win32"
+      ? [
+          "",
+          ...(process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD")
+            .split(";")
+            .map((e) => e.trim())
+            .filter(Boolean),
+        ]
+      : [""];
+
+  for (const candidate of candidates) {
+    for (const ext of extensions) {
+      const full = candidate + ext;
+      try {
+        if (statSync(full).isFile()) {
+          /*
+           * A WindowsApps stub is a zero-byte reparse point that only cmd
+           * knows how to launch. CreateProcess on it returns error 2 or 3,
+           * which is the very error being fixed, so it is rejected here with
+           * a message that names the real cause.
+           */
+          if (
+            process.platform === "win32" &&
+            /WindowsApps/i.test(full) &&
+            statSync(full).size === 0
+          ) {
+            return {
+              ok: false,
+              error:
+                `"${raw}" resolves to the Microsoft Store alias at ${full}, ` +
+                `which is a stub that only a shell can launch. Install real ` +
+                `Python (or whatever this is) and use its full path, or turn ` +
+                `the alias off in Settings → App execution aliases.`,
+            };
+          }
+          return { ok: true, path: full };
+        }
+      } catch {
+        /* not this one */
+      }
+    }
+  }
+
+  return {
+    ok: false,
+    error:
+      `Could not find "${raw}" — it is not on PATH and not a file in the ` +
+      `workspace. A hidden launch needs a real executable path, because it ` +
+      `is started with CreateProcess rather than a shell.`,
+  };
+}
+
 /** The command line that launches `exe` onto the surface. */
 export async function hiddenLaunchCommand(
   exe: string,
   args: string[],
   workDir: string,
   scriptDir: string
-): Promise<{ command: string; args: string[]; env: Record<string, string> }> {
+): Promise<
+  | { ok: true; command: string; args: string[]; env: Record<string, string> }
+  | { ok: false; error: string }
+> {
   const active = surface;
+
+  const resolved = resolveExecutable(exe, workDir);
+  if (!resolved.ok) return { ok: false, error: resolved.error };
+
   if (active?.kind === "windows-desktop") {
     const scriptPath = path.join(scriptDir, ".apim-hidden-launch.ps1");
     await fs.mkdir(scriptDir, { recursive: true });
     await fs.writeFile(scriptPath, hiddenLaunchScript(), "utf8");
     return {
+      ok: true,
       command: "powershell",
       args: [
         "-NoProfile",
@@ -290,7 +408,7 @@ export async function hiddenLaunchCommand(
         "-File",
         scriptPath,
         "-Exe",
-        exe,
+        resolved.path,
         "-Arguments",
         args.join(" "),
         "-Desktop",
@@ -303,7 +421,7 @@ export async function hiddenLaunchCommand(
   }
 
   // Xvfb: the program runs as itself, only DISPLAY differs.
-  return { command: exe, args, env: active?.env ?? {} };
+  return { ok: true, command: resolved.path, args, env: active?.env ?? {} };
 }
 
 /** Pull the real pid out of the launcher's output, when it has printed one. */

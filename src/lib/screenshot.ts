@@ -45,6 +45,10 @@ export interface CaptureRequest {
 
 export interface CaptureResult {
   ok: boolean;
+  /** The window that was actually captured, so the aim can be checked. */
+  windowTitle?: string;
+  /** Other windows that matched the title, when there were any. */
+  alsoMatched?: string[];
   /** Populated on success. */
   bytes?: number;
   width?: number;
@@ -128,17 +132,39 @@ if ($FullScreen) {
 }
 
 $target = $null
+$chosenTitle = ""
 if ($Desktop) {
   $target = Find-OnDesktop $deskHandle $ProcId $Title
   if (-not $target -or $target -eq [IntPtr]::Zero) { Write-Error "no window for that pid/title on desktop '$Desktop'"; exit 2 }
 }
 if (-not $target -and $ProcId -gt 0) {
   $p = Get-Process -Id $ProcId -ErrorAction SilentlyContinue
-  if ($p -and $p.MainWindowHandle -ne 0) { $target = $p.MainWindowHandle }
+  if ($p -and $p.MainWindowHandle -ne 0) { $target = $p.MainWindowHandle; $chosenTitle = $p.MainWindowTitle }
+  if (-not $target) { Write-Error "process $ProcId has no main window (still starting, or it draws none)"; exit 2 }
 }
 if (-not $target -and $Title) {
-  $p = Get-Process | Where-Object { $_.MainWindowTitle -like "*$Title*" -and $_.MainWindowHandle -ne 0 } | Select-Object -First 1
-  if ($p) { $target = $p.MainWindowHandle }
+  # Ranked, not first-come. A substring match grabbed "nightfall - Everything"
+  # — a file-search window with the app's name typed into it — and captured
+  # that instead of the app. Exact title wins, then the process NAME matching
+  # what was asked for, then a prefix, and only then a substring.
+  $cands = @(Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle } |
+    ForEach-Object {
+      $t = $_.MainWindowTitle
+      $score = 4
+      if ($t -eq $Title) { $score = 0 }
+      elseif ($_.ProcessName -like "*$Title*") { $score = 1 }
+      elseif ($t -like "$Title*") { $score = 2 }
+      elseif ($t -like "*$Title*") { $score = 3 }
+      [PSCustomObject]@{ Handle = $_.MainWindowHandle; Title = $t; Name = $_.ProcessName; Score = $score }
+    } | Where-Object { $_.Score -lt 4 } | Sort-Object Score)
+
+  if ($cands.Count -eq 0) { Write-Error "no window matching '$Title'"; exit 2 }
+  $target = $cands[0].Handle
+  $chosenTitle = $cands[0].Title
+  Write-Output ("apim-window=" + $chosenTitle)
+  if ($cands.Count -gt 1) {
+    Write-Output ("apim-also=" + (($cands | Select-Object -Skip 1 | ForEach-Object { $_.Title }) -join " | "))
+  }
 }
 if (-not $target) { Write-Error "no matching window"; exit 2 }
 
@@ -159,7 +185,7 @@ if (-not $ok) {
   $g.CopyFromScreen($r.Left, $r.Top, 0, 0, $bmp.Size)
 }
 Save-Bitmap $bmp $OutFile
-Write-Output "window $($bmp.Width)x$($bmp.Height)"
+Write-Output "window $($bmp.Width)x$($bmp.Height) $chosenTitle"
 `;
 }
 
@@ -219,6 +245,8 @@ export async function captureWindow(
   }
 
   let method = "";
+  let chosenTitle: string | undefined;
+  let alsoMatched: string[] | undefined;
 
   if (process.platform === "win32") {
     const script = windowsCaptureScript();
@@ -248,6 +276,10 @@ export async function captureWindow(
     );
     await fs.rm(scriptPath, { force: true });
     method = `PowerShell ${request.fullScreen ? "screen copy" : "PrintWindow"}`;
+    const stdout = String(out?.stdout ?? "");
+    chosenTitle = /apim-window=(.*)/.exec(stdout)?.[1]?.trim() || undefined;
+    const also = /apim-also=(.*)/.exec(stdout)?.[1]?.trim();
+    alsoMatched = also ? also.split(" | ").filter(Boolean) : undefined;
     if (!out || out.status !== 0) {
       const detail = `${out?.stderr ?? ""}`.trim().split("\n")[0] ?? "";
       return {
@@ -367,5 +399,7 @@ export async function captureWindow(
     width: size?.width,
     height: size?.height,
     method,
+    windowTitle: chosenTitle,
+    alsoMatched,
   };
 }
