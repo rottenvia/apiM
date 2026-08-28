@@ -16,6 +16,7 @@
 import fsSync, { promises as fs } from "node:fs";
 import path from "node:path";
 import { workspaceDirectory } from "@/lib/workspace";
+import { registerToolchainPath } from "@/lib/runner";
 
 export interface BuildRunner {
   /** Human label, e.g. "MSBuild (Release x64)". */
@@ -543,6 +544,12 @@ export async function detectBuildIn(
           "Visual Studio MSBuild was not found. Install Visual Studio (with the C++/.NET desktop workload) or set APIM_MSBUILD_PATH to MSBuild.exe."
         );
       }
+      // The discovered path is registered so the runner keeps it instead of
+      // reducing it to the bare name and asking PATH, which is what produced
+      // "spawn msbuild ENOENT" from a build that had just printed the full
+      // path to MSBuild.exe.
+      if (path.isAbsolute(msbuild)) registerToolchainPath(msbuild);
+
       runner = {
         name: `MSBuild ${config} ${platform}`,
         command: msbuild,
@@ -650,6 +657,7 @@ export async function detectBuildIn(
             "compiler environment itself, which a bare cl.exe cannot."
         );
       }
+      if (path.isAbsolute(cc)) registerToolchainPath(cc);
       const outExe = "out" + (WIN ? ".exe" : "");
       runner = {
         name: `compile ${target.path} (${cc})`,
@@ -676,6 +684,7 @@ export async function detectBuildIn(
           "No C# compiler (csc.exe) found. Install the .NET Framework/SDK or set APIM_CSC_PATH."
         );
       }
+      if (path.isAbsolute(csc)) registerToolchainPath(csc);
       runner = {
         name: `compile ${target.path} (csc)`,
         command: csc,
