@@ -23,6 +23,7 @@ export type PrematureStopReason =
   | "unfinished_plan"
   | "dangling_next"
   | "provider_abort"
+  | "round_cap"
   | "thinking_cut";
 
 export interface PrematureStopInput {
@@ -170,7 +171,9 @@ export function reviveInstruction(reason: PrematureStopReason): string {
             ? "your plan still has unfinished steps"
             : reason === "dangling_next"
               ? "you described the next action and then stopped instead of doing it"
-              : "the provider ended the round before the task was finished";
+              : reason === "round_cap"
+                ? "this reply used every tool round it was allowed; work in bigger batches from here (read_files / edit_files / write_files in one call each) instead of one file per call"
+                : "the provider ended the round before the task was finished";
 
   return (
     `You stopped before the task was finished — ${why}. ` +
@@ -189,6 +192,9 @@ export function prematureStopNotice(reason: PrematureStopReason): string {
   }
   if (reason === "unfinished_plan") {
     return "The model stopped with steps still left on the plan";
+  }
+  if (reason === "round_cap") {
+    return "The reply used every tool round it was allowed — Resume to carry on";
   }
   return "The model stopped mid-task before it finished";
 }

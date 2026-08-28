@@ -305,7 +305,11 @@ const route = await (await import("node:fs/promises")).readFile(
 );
 check(
   "the cap is actually applied to the request",
-  /max_tokens: maxTokensFor\(budget, model, MAX_OUTPUT_TOKENS\)/.test(route),
+  // The ceiling argument is now per model (a 128K-output model must not be
+  // clipped to 64K), but the spending cap still wraps it.
+  /max_tokens: maxTokensFor\(\s*budget,\s*model,[\s\S]{0,400}?maxOutputTokensFor\(model\)/.test(
+    route
+  ),
   "the function is useless if the request still asks for the full ceiling"
 );
 
