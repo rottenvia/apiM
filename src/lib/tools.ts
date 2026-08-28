@@ -1032,10 +1032,19 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
     function: {
       name: "build_project",
       description:
-        "Build the workspace with the installed toolchain: Visual Studio solutions/projects (.sln/.vcxproj/.csproj), CMake, dotnet, npm, cargo, go, make, Python, or a single .cpp/.cs file. Finds the compiler itself (no vcvars, no flag guessing), restores packages, builds Release x64 by default, and returns compiler errors so you can fix them without the user running anything. A failure is classified before you read it: a known toolchain race is rebuilt once automatically and reported as such, a locked output file names whoever holds the handle (and how to release it), and a real compiler error is never retried. Prefer this over run_command for building.",
+        "Build the workspace with the installed toolchain: Visual Studio solutions/projects (.sln/.vcxproj/.csproj), CMake, dotnet, npm, cargo, go, make, Python, or a single .cpp/.cs file. Finds the project anywhere in the tree (not just the root) and the compiler itself through vswhere, including Preview and Build Tools installs (no vcvars, no flag guessing), restores packages, builds Release x64 by default, and returns compiler errors so you can fix them without the user running anything. A failure is classified before you read it: a known toolchain race is rebuilt once automatically and reported as such, a locked output file names whoever holds the handle (and how to release it), and a real compiler error is never retried. Prefer this over run_command for building.",
       parameters: {
         type: "object",
         properties: {
+          project: {
+            type: "string",
+            description:
+              "Solution or project to build, e.g. " +
+              '"injector/nightfall.sln". Optional — discovery searches the ' +
+              "workspace up to four directories deep and prefers the " +
+              "shallowest .sln — but pass it when the tree holds several, or " +
+              "when discovery picked the wrong one.",
+          },
           config: {
             type: "string",
             enum: ["Release", "Debug"],
@@ -1869,6 +1878,157 @@ function num(args: Record<string, unknown>, key: string): number | null {
  * not have to prove it by reproducing the indentation byte for byte:
  * old_text, landmarks (start_anchor/end_anchor), or a line range.
  */
+/**
+ * Aliases the models actually send.
+ *
+ * Every entry here was a real, observed spelling. The tool asked for
+ * `new_text` and got `newText`, `content`, `replacement`; asked for `path`
+ * and got `file`. Rejecting those as "malformed" is technically defensible
+ * and practically a wasted round, because the INTENT was never ambiguous —
+ * there is exactly one thing `file` can mean in an edit.
+ */
+const EDIT_ALIASES: Record<string, string[]> = {
+  path: ["path", "file", "filename", "file_path", "filePath", "target"],
+  new_text: [
+    "new_text",
+    "newText",
+    "new",
+    "new_string",
+    "newString",
+    "replacement",
+    "replace",
+    "replace_with",
+    "content",
+    "text",
+  ],
+  old_text: [
+    "old_text",
+    "oldText",
+    "old",
+    "old_string",
+    "oldString",
+    "search",
+    "find",
+    "match",
+    "anchor",
+  ],
+  start_anchor: ["start_anchor", "startAnchor", "from", "begin", "after"],
+  end_anchor: ["end_anchor", "endAnchor", "to", "until", "before"],
+  start_line: ["start_line", "startLine", "line", "from_line"],
+  end_line: ["end_line", "endLine", "to_line"],
+  include_anchors: ["include_anchors", "includeAnchors"],
+  preview: ["preview", "dry_run", "dryRun"],
+};
+
+/**
+ * Turn one batch item into the arguments a single edit_file call would take.
+ *
+ * The reported failure, and it is a bad one: "malformed on input carrying
+ * exactly the fields it demanded — path, new_text, old_text, both hunks",
+ * while the identical edits sent one at a time landed immediately. Two
+ * separate causes, both fixed here:
+ *
+ *   1. The item arrived as a JSON *string* rather than an object, which
+ *      happens when a model serialises the array elements individually. The
+ *      old check asked `typeof edit.path !== "string"` of a string, got
+ *      undefined, and called the caller a liar.
+ *   2. A key was spelled differently (newText, content, file). Same verdict,
+ *      same wasted round.
+ *
+ * And when it really IS malformed, the message now lists the keys that were
+ * actually present, because "malformed" with no evidence is exactly the
+ * silence this whole campaign has been about.
+ */
+export function normaliseEditEntry(
+  entry: unknown
+): { ok: true; args: Record<string, unknown> } | { ok: false; reason: string } {
+  let value = entry;
+
+  // A JSON string that contains the object.
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (text.startsWith("{")) {
+      try {
+        value = JSON.parse(text);
+      } catch {
+        return {
+          ok: false,
+          reason:
+            "this item is a string of broken JSON, not an edit object — " +
+            "send edits as real objects, not as strings",
+        };
+      }
+    } else {
+      return {
+        ok: false,
+        reason: `this item is the bare string ${JSON.stringify(text.slice(0, 40))}, not an edit object`,
+      };
+    }
+  }
+
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { ok: false, reason: `this item is ${Array.isArray(value) ? "an array" : typeof value}, not an edit object` };
+  }
+
+  const source = value as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+
+  for (const [canonical, spellings] of Object.entries(EDIT_ALIASES)) {
+    for (const spelling of spellings) {
+      const found = source[spelling];
+      if (found === undefined || found === null) continue;
+      // Numbers and booleans are coerced rather than refused: a model that
+      // sends new_text as a number meant the digits.
+      out[canonical] =
+        canonical === "start_line" || canonical === "end_line"
+          ? found
+          : canonical === "include_anchors" || canonical === "preview"
+            ? found === true || found === "true"
+            : typeof found === "string"
+              ? found
+              : typeof found === "number" || typeof found === "boolean"
+                ? String(found)
+                : found;
+      break;
+    }
+  }
+
+  const keys = Object.keys(source);
+  if (typeof out.path !== "string" || !out.path.trim()) {
+    return {
+      ok: false,
+      reason:
+        `no file path in this item — keys present: ${
+          keys.length ? keys.join(", ") : "(none)"
+        }. Use "path".`,
+    };
+  }
+  if (typeof out.new_text !== "string") {
+    return {
+      ok: false,
+      reason:
+        `no replacement text in this item (${out.path}) — keys present: ` +
+        `${keys.join(", ")}. Use "new_text" (an empty string is fine for a ` +
+        `deletion, but it has to be there).`,
+    };
+  }
+  if (
+    typeof out.old_text !== "string" &&
+    typeof out.start_anchor !== "string" &&
+    out.start_line === undefined
+  ) {
+    return {
+      ok: false,
+      reason:
+        `nothing says WHERE to edit ${out.path} — keys present: ` +
+        `${keys.join(", ")}. Give one of old_text, start_anchor, or ` +
+        `start_line.`,
+    };
+  }
+
+  return { ok: true, args: out };
+}
+
 export function readEditSpec(args: Record<string, unknown>): EditSpec {
   return {
     oldText: typeof args.old_text === "string" ? args.old_text : null,
@@ -2575,8 +2735,18 @@ export async function runTool(
       }
 
       case "edit_file": {
-        const filePath = str(args, "path");
-        const spec = readEditSpec(args);
+        // Through the same door as a batch item: one matcher, one set of
+        // accepted spellings, one behaviour.
+        const single = normaliseEditEntry(args);
+        if (!single.ok) {
+          return {
+            ok: false,
+            content: `Error: ${single.reason}`,
+            summary: "Malformed edit",
+          };
+        }
+        const filePath = String(single.args.path);
+        const spec = readEditSpec(single.args);
 
         /*
          * Preview resolves the region and writes nothing.
@@ -3108,6 +3278,29 @@ export async function runTool(
             ? ` from the off-screen display ${display}`
             : "";
 
+        /*
+         * Say WHICH window this is, and what else answered to the name.
+         *
+         * A loose title match once captured "nightfall - Everything" — a file
+         * search window with the app's name typed into it — and the receipt
+         * said "captured nightfall", so the picture was believed to be the
+         * app. Matching is ranked now, but the honest fix is also to name the
+         * window that was taken and list the other candidates, so a wrong aim
+         * is visible in the same round instead of two rounds later.
+         */
+        const aim = shot.windowTitle
+          ? `\n\nWindow captured: "${shot.windowTitle}".` +
+            (shot.alsoMatched?.length
+              ? ` Other windows also matched that title: ` +
+                `${shot.alsoMatched.map((t) => `"${t}"`).join(", ")}. If the ` +
+                `image is not the app, capture by process_id or pid instead ` +
+                `of by title.`
+              : "")
+          : processId || pid
+            ? ""
+            : `\n\nMatched by title, which is a guess. Prefer process_id ` +
+              `(from start_process) or pid — a title can belong to any window.`;
+
         // A model that can see gets the pixels in the same round. Making it
         // call view_image afterwards costs a round and, on a long UI night,
         // that round is the difference between two iterations and one.
@@ -3120,7 +3313,7 @@ export async function runTool(
                 `Saved ${relative} (${shot.width ?? "?"}x${shot.height ?? "?"}` +
                 `, ${Math.round((shot.bytes ?? 0) / 1024)}KB, via ` +
                 `${shot.method}${where}). It is attached to this turn — look ` +
-                `at it and say what is actually on screen.`,
+                `at it and say what is actually on screen.${aim}`,
               summary: `Captured ${relative}`,
               changedPath: relative,
               image: { path: relative, dataUrl: shown.dataUrl },
@@ -3135,7 +3328,7 @@ export async function runTool(
           content:
             `Saved ${relative} (${shot.width ?? "?"}x${shot.height ?? "?"}, ` +
             `${Math.round((shot.bytes ?? 0) / 1024)}KB, via ${shot.method}` +
-            `${where}).\n\n` +
+            `${where}).${aim}\n\n` +
             `Call view_image on it now — the file existing is not the same ` +
             `as you having looked at it.`,
           summary: `Captured ${relative}`,
@@ -3233,17 +3426,17 @@ export async function runTool(
           secondPass: boolean
         ): Promise<{ ok: boolean; reason?: string }> => {
           const label = `edit ${index + 1}/${batch.length}`;
-          const edit = entry as Record<string, unknown>;
-          const editPath =
-            typeof edit.path === "string" ? edit.path : String(edit.path ?? "?");
 
-          if (typeof edit.path !== "string" || typeof edit.new_text !== "string") {
-            failures.push(
-              `${label} (${editPath}): malformed — every edit needs a path ` +
-                `and new_text, plus one of old_text / start_anchor / start_line`
-            );
+          // Exactly the same normalisation a single edit_file call gets, so
+          // "it worked one at a time but not in a batch" cannot be true of
+          // the arguments any more.
+          const parsed = normaliseEditEntry(entry);
+          if (!parsed.ok) {
+            failures.push(`${label}: ${parsed.reason}`);
             return { ok: false };
           }
+          const edit = parsed.args;
+          const editPath = String(edit.path);
 
           const spec = readEditSpec(edit);
           const wantsPreview = previewOnly || spec.preview === true;
@@ -3818,6 +4011,8 @@ export async function runTool(
               ? args.extra_args.map((a) => String(a))
               : undefined,
             dryRun: args.dry_run === true,
+            project:
+              typeof args.project === "string" ? args.project : undefined,
           });
         } catch (error) {
           return {
@@ -3840,7 +4035,9 @@ export async function runTool(
             ok: true,
             content:
               `Would build ${target.path || "the workspace"} using ` +
-              `${runner.name}.\n\nCommand: ${argv}\n\nReason: ${runner.reason}` +
+              `${runner.name}` +
+              `${target.searched ? ` (found by searching ${target.searched})` : ""}` +
+              `.\n\nCommand: ${argv}\n\nReason: ${runner.reason}` +
               (restore
                 ? `\n\nRestore first: ${[restore.command, ...restore.args].join(" ")}`
                 : ""),
@@ -3971,7 +4168,9 @@ export async function runTool(
           ok: true,
           content:
             `${verdict}${retryNote}${lockReport}\n\n${digest}\n\n` +
-            `Target: ${target.path || "(workspace)"}\n` +
+            `Target: ${target.path || "(workspace)"}` +
+            `${target.searched ? ` [found by searching ${target.searched}]` : ""}\n` +
+            `Toolchain: ${runner.command}\n` +
             `Command: ${argv}\n\n${combined}`.slice(0, 60_000),
           summary:
             run.exitCode === 0

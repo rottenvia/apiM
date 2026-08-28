@@ -249,14 +249,31 @@ export function analyzeLog(
       (k) => k.toLowerCase() === name
     );
     const values = key ? numbers.get(key)! : null;
-    if (key && values && monotone(values)) {
+    if (key && values && monotone(values) && new Set(values).size >= 2) {
       span = { key, first: values[0], last: values[values.length - 1], n: values.length };
       break;
     }
   }
   if (!span) {
     for (const [key, values] of numbers) {
-      if (values.length >= 5 && monotone(values) && values[0] !== values[values.length - 1]) {
+      /*
+       * A counter is not just "goes up".
+       *
+       * `ground=0 ... ground=1` is monotone and means nothing of the kind —
+       * it is a flag that happened to flip once, and reporting it as the run
+       * counter is worse than reporting none. A real counter takes many
+       * distinct values and is integral: at least eight samples, mostly
+       * distinct, whole numbers, spanning more than the sample count itself.
+       */
+      const distinct = new Set(values).size;
+      const spread = values[values.length - 1] - values[0];
+      if (
+        values.length >= 8 &&
+        distinct >= values.length * 0.8 &&
+        values.every((v) => Number.isInteger(v)) &&
+        spread >= values.length &&
+        monotone(values)
+      ) {
         span = { key, first: values[0], last: values[values.length - 1], n: values.length };
         break;
       }
@@ -308,18 +325,42 @@ export function analyzeLog(
 /** The receipt a human would have written by hand. */
 export function formatLogAnalysis(a: LogAnalysis): string {
   const out: string[] = [
+    /*
+     * "Covers ground 0 → 1" was the report on a bhop log with a `ground=`
+     * field: the counter heuristic latched onto a boolean-ish field, and the
+     * word "Covers" made it read as a statement about coverage of the log.
+     * Both halves are fixed — the label is now unambiguous, and the counter
+     * has to actually look like a counter (see analyzeLog).
+     */
     `${a.lines} line(s), ${a.counted} non-empty.` +
       (a.span
-        ? ` Covers ${a.span.key} ${a.span.first} → ${a.span.last} ` +
-          `(${a.span.n} line(s) carry it).`
+        ? ` Run counter: ${a.span.key} ${a.span.first} → ${a.span.last} ` +
+          `across ${a.span.n} line(s).`
         : ""),
   ];
 
   if (a.levels.length) {
+    /*
+     * "ERROR 1 (100%)" read as "the whole file is errors".
+     *
+     * It never meant that — the share is of LEVELLED lines, and one error in
+     * a log with no other levels really is 100% of them. The number was
+     * right and the sentence was wrong, which is the worse kind of wrong, so
+     * the denominator is now stated and the share of the whole file is given
+     * alongside it.
+     */
+    const levelled = a.levels.reduce((sum, l) => sum + l.count, 0);
     out.push(
       "",
-      "Levels: " +
-        a.levels.map((l) => `${l.label} ${l.count} (${l.percent}%)`).join(" · ")
+      `Levels (share of the ${levelled} levelled line(s), ` +
+        `${a.counted ? Math.round((levelled / a.counted) * 100) : 0}% of the log): ` +
+        a.levels
+          .map(
+            (l) =>
+              `${l.label} ${l.count} (${l.percent}% of levelled` +
+              `${a.counted ? `, ${Math.round((l.count / a.counted) * 100)}% of all` : ""})`
+          )
+          .join(" · ")
     );
   }
 
