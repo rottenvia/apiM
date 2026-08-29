@@ -415,6 +415,115 @@ export function batchItemCount(
 }
 
 /**
+ * A single file-writing call (write_file / write_files) cut off by the
+ * output ceiling, and its content is the giant string.
+ *
+ * The batch salvage path cannot help here: a cut lands INSIDE the string,
+ * so repairPartialJson backs out to before the string started and the
+ * recovered object has a path but no content. The recovered content — every
+ * byte of the file up to the cut — was once discarded entirely, which is the
+ * "it hit the limit, erased its work and had to redo it" report for long
+ * files. This decodes the prefix directly: a tolerant walk of the JSON
+ * string state from the opening quote to the end of the fragment, cut back
+ * to the last whole line and the last complete escape.
+ *
+ * Returns null unless a usable path AND a meaningful content prefix were
+ * found — a file with a few dozen bytes is not worth round-tripping as a
+ * "written" file.
+ */
+export function salvagePartialFile(
+  raw: string,
+  minPrefixChars = 200
+): { path: string; contentPrefix: string } | null {
+  // The path is always a complete, earlier field. The LAST path in the
+  // fragment belongs to the item that was still being written — earlier
+  // ones (a finished batch item) have already landed through the normal
+  // salvage path.
+  const pathMatches = [...raw.matchAll(/"(?:path|file|filePath)"\s*:\s*"((?:[^"\\]|\\.)*)"/g)];
+  if (pathMatches.length === 0) return null;
+  const path = unescapeJsonString(pathMatches[pathMatches.length - 1][1]);
+  if (!path || path.includes("\n")) return null;
+
+  // Locate the content field that comes after that path. Find its opening
+  // quote, then walk string state to the end of the fragment.
+  const afterPath = raw.indexOf(pathMatches[pathMatches.length - 1][0]) +
+    pathMatches[pathMatches.length - 1][0].length;
+  const tail = raw.slice(afterPath);
+  const keyMatch = tail.match(/"(?:content|text|contents|body)"\s*:\s*"/);
+  if (!keyMatch || keyMatch.index === undefined) return null;
+  const stringStart = afterPath + keyMatch.index + keyMatch[0].length;
+  const fragment = raw.slice(stringStart);
+
+  const prefix = decodePartialJsonString(fragment);
+  // Prefer whole lines, so a continuation edit_file can anchor on an exact
+  // last line. A single-line file (minified JSON, a one-line config) has no
+  // newline at all — keep that whole prefix and anchor on its tail instead.
+  const lastNewline = prefix.lastIndexOf("\n");
+  const contentPrefix =
+    lastNewline >= 40 ? prefix.slice(0, lastNewline + 1) : prefix;
+  if (contentPrefix.length < minPrefixChars) return null;
+
+  return { path, contentPrefix };
+}
+
+/**
+ * Decode a JSON string that was cut off before its closing quote.
+ *
+ * Walks the escaped-text state machine: `\\` introduces the next char, so
+ * a fragment ending on an incomplete escape (e.g. `\\u12`) is trimmed back
+ * past the backslash rather than decoded wrongly. Standard JSON escapes are
+ * mapped; `\uXXXX` sequences are decoded when all four hex digits arrived.
+ */
+function decodePartialJsonString(fragment: string): string {
+  let out = "";
+  for (let i = 0; i < fragment.length; i++) {
+    const c = fragment[i];
+    if (c !== "\\") {
+      out += c;
+      continue;
+    }
+    const esc = fragment[i + 1];
+    if (esc === undefined) break; // dangling backslash — stop here
+    switch (esc) {
+      case "n": out += "\n"; break;
+      case "t": out += "\t"; break;
+      case "r": out += "\r"; break;
+      case "b": out += "\b"; break;
+      case "f": out += "\f"; break;
+      case '"': out += '"'; break;
+      case "/": out += "/"; break;
+      case "\\": out += "\\"; break;
+      case "u": {
+        const hex = fragment.slice(i + 2, i + 6);
+        if (!/^[0-9a-fA-F]{4}$/.test(hex)) {
+          // Incomplete \uXXXX — the stream ended inside the sequence.
+          return out;
+        }
+        out += String.fromCharCode(parseInt(hex, 16));
+        i += 5;
+        break;
+      }
+      default:
+        // An unknown escape means the fragment is malformed at this point;
+        // keep the literal so no already-written bytes are lost.
+        out += esc;
+        break;
+    }
+    i += 1;
+  }
+  return out;
+}
+
+/** Fully decode a complete JSON string body (no surrounding quotes). */
+function unescapeJsonString(body: string): string {
+  try {
+    return JSON.parse('"' + body + '"') as string;
+  } catch {
+    return body.replace(/\\(.)/g, "$1");
+  }
+}
+
+/**
  * Close the containers a truncated JSON document left open.
  *
  * Walks once, remembering for every depth the offset just after the last
