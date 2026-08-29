@@ -490,9 +490,10 @@ check(
 );
 check(
   "fetched reasoning is written onto the live list before Resume sends",
-  /messagesRef\.current = messagesRef\.current\.map/.test(page) &&
+  /writeMessages\(\s*convId,/.test(page) &&
+    /Resume \(same tick, after this await\) reads the/.test(page) &&
     /needsReasoning/.test(page),
-  "setState alone left the ref stale, so Resume opened an empty thought box"
+  "the write helper updates session, ref and cache in one move, so Resume opens the real thought box"
 );
 check(
   "an unfinished plan survives a reload so typed resume can find it",
@@ -545,13 +546,14 @@ check(
 check(
   "the live error path calls the helper instead of always showing Resume",
   /shouldAutoResumeOnTimeout/.test(page) &&
-    /pendingAutoResumeRef/.test(page) &&
-    /force: true/.test(page)
+    /pendingAutoResume = streamingId/.test(page) &&
+    /force: true/.test(page),
+  "the pending resume is local to each run, so a background run cannot resume on another chat's bubble"
 );
 check(
   "a timeout keeps the bubble streaming so the Resume banner never mounts",
   /Keep the bubble streaming/.test(page) &&
-    page.indexOf("pendingAutoResumeRef.current = streamingId") <
+    page.indexOf("pendingAutoResume = streamingId") <
       page.indexOf("incomplete: true, canResume: true, errorNotice: evt.error")
 );
 check(
@@ -602,7 +604,8 @@ check(
 );
 check(
   "Stop cancels a pending auto-resume",
-  /cancelAutoResumeRef.current = true/.test(page)
+  /session.cancelResume = true/.test(page) &&
+    /getSession\(runConvId\)\.cancelResume/.test(page)
 );
 check(
   "a think-only output cut asks the model to act, not to think again",
@@ -634,8 +637,10 @@ check(
     /stopConversation/.test(read("src/app/api/chat/stop/route.ts"))
 );
 check(
-  "Stop aborts every client stream, not just currentConvId",
-  /for \(const ac of abortRefs\.current\.values\(\)\) ac\.abort\(\)/.test(page)
+  "Stop aborts the visible chat's stream, keyed by conversation (not a bare currentConvId)",
+  /abortRefs\.current\.get\(convId\)\?\.abort\(\)/.test(page) &&
+    !/for \(const ac of abortRefs\.current\.values\(\)\) ac\.abort\(\)/.test(page),
+  "stopping the chat you are looking at must not kill another chat's running task"
 );
 check(
   "the body reader honours Stop",

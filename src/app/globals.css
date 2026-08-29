@@ -1,4 +1,5 @@
-@import url('https://fonts.googleapis.com/css2?family=Instrument+Sans:ital,wght@0,400..700;1,400..700&family=JetBrains+Mono:wght@400;500&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&display=swap');
+/* Fonts are loaded via non-blocking <link> tags in layout.tsx
+   (a CSS @import here blocks first paint on the stylesheet round trip). */
 
 @import "tailwindcss";
 
