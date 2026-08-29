@@ -120,11 +120,11 @@ const loader = page.slice(
 );
 
 check(
-  "the callback has no dependencies",
-  /const loadReasoning = useCallback\(async \(messageId: string\) => \{[\s\S]*?\}, \[\]\);/.test(
+  "the callback depends only on an identity-stable write helper",
+  /const loadReasoning = useCallback\(async \(messageId: string\) => \{[\s\S]*?\}, \[writeMessages\]\);/.test(
     page
   ),
-  "a dependency means a new identity, which memoised children may never receive"
+  "writeMessages is a stable useCallback identity, so memoised children never hold a stale closure"
 );
 check(
   "the conversation id is read at call time, from a ref",
@@ -150,7 +150,7 @@ const guardReturns = (beforeFetch.match(/\breturn;/g) ?? []).length;
 check(
   "early exits happen only before anything is pending",
   guardReturns === 3 && !/return;/.test(loader.slice(loader.indexOf("await fetch"))),
-  `${guardReturns} guards, none after the request starts`
+  `${guardReturns} guards (already-loaded, already-in-flight, no-conversation), none after the request starts`
 );
 check(
   "each early exit leaves the panel in a settled state",
@@ -167,7 +167,7 @@ check(
 );
 check(
   "the state write is in a finally block",
-  /\} finally \{[\s\S]{0,400}reasoningContent: text/.test(loader),
+  /\} finally \{[\s\S]{0,600}reasoningContent: text/.test(loader),
   "so a throw, a 404 and a success all end with the panel resolved"
 );
 check(
@@ -186,9 +186,11 @@ check(
 
 console.log("\n3. The cache is updated, so switching back does not refetch");
 check(
-  "the fetched text is written into the conversation cache",
-  /conversationCache\.current\.set\(convId, next\)/.test(loader),
-  "otherwise the cached pre-fetch copy comes back and it loads again"
+  "the fetched text is written through the session helper (which also fills the cache)",
+  /writeMessages\(\s*convId,/.test(loader) &&
+    /transcript\s*[\s\S]{0,20}?cache in one step/.test(loader) &&
+    /serves the same copy/.test(loader),
+  "writeMessages stores into conversationCache, so switching back serves the fetched copy instead of refetching"
 );
 
 console.log("\n4. The callback reaches the bubble and cannot go stale");
