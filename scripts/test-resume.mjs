@@ -137,8 +137,29 @@ check(
   "the ask-early nudge and plan checks need the real length of the run"
 );
 check(
-  "continuations already used carry over too",
-  /continuations = resumed\?\.continuations \?\? 0/.test(route)
+  "output-limit continuation budgets start FRESH on resume",
+  // A ceiling stop used to resume with continuations already at the cap, so
+  // the very next long round stopped at the same message again and again.
+  /let continuations = 0;/.test(route) &&
+    !/continuations = resumed\?\.continuations \?\? 0/.test(route) &&
+    /Output-limit continuation budgets start FRESH/.test(route),
+  "an explicit Resume authorises another full set of budgets; only the round cap carries"
+);
+check(
+  "think nudges reset too, but force-no-thinking still carries",
+  /let thinkNudges = 0;/.test(route) &&
+    /forceNoThinking =[\s\S]{0,120}resumed\?\.thinkNudges/.test(route),
+  "a model that burned the ceiling on thinking must not be told it may think again"
+);
+check(
+  "the truncated tool call is repaired in the replayed transcript",
+  // The same call object is what gets pushed into the transcript, so a
+  // rewritten arguments blob keeps Resume from replaying broken JSON.
+  /call\.function\.arguments = JSON\.stringify\(salvaged\.value\)/.test(route) &&
+    /call\.function\.name = "write_file";/.test(route) &&
+    /call\.function\.arguments = JSON\.stringify\(prefixValue\)/.test(route) &&
+    /Repair the transcript's \(truncated\) copy/.test(route),
+  "Resume used to replay the cut-off call verbatim and re-hit the limit"
 );
 check(
   "text already shown is kept, so the reply extends",
