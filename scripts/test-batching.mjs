@@ -261,6 +261,66 @@ check(
     /Send ONLY the remaining items/.test(route)
 );
 
+// ---------------------------------------------------------------- 4b. single-file prefix
+console.log("\n4b. A huge single file cut mid-content keeps its prefix");
+
+const bigContent = "export function thing() {\n  // line " +
+  Array.from({ length: 220 }, (_, i) => `line ${i} of the big file`).join("\n  ") +
+  "\n}\n";
+const bigCall = JSON.stringify({ path: "src/big.ts", content: bigContent });
+const cutBig = bigCall.slice(0, 800);
+const pf = transcript.salvagePartialFile(cutBig);
+check("a cut-off single write_file recovers a prefix", Boolean(pf));
+check(
+  "the recovered path is the file being written",
+  pf?.path === "src/big.ts"
+);
+check(
+  "the recovered prefix is the exact start of the file",
+  Boolean(pf) && bigContent.startsWith(pf.contentPrefix)
+);
+check(
+  "the prefix ends on a complete line",
+  Boolean(pf) && pf.contentPrefix.endsWith("\n")
+);
+
+// A batch whose trailing item is the cut one: complete items salvage as a
+// batch AND the trailing file's prefix is recoverable.
+const batchCall = JSON.stringify({
+  files: [
+    { path: "a.txt", content: "AAAA" },
+    { path: "b.txt", content: "B".repeat(4000) },
+  ],
+});
+const cutBatch = batchCall.slice(0, batchCall.indexOf('"B"') + 700);
+const pf2 = transcript.salvagePartialFile(cutBatch);
+check(
+  "the streaming file of a cut batch is recovered too",
+  pf2?.path === "b.txt" && pf2.contentPrefix.length > 200
+);
+
+// A single-line file (no newlines) is still recovered.
+const oneLine = JSON.stringify({ path: "min.json", content: "x".repeat(3000) });
+const pf3 = transcript.salvagePartialFile(oneLine.slice(0, 900));
+check(
+  "a single-line file keeps its prefix",
+  pf3?.path === "min.json" && pf3.contentPrefix.length >= 200
+);
+
+check(
+  "a tiny fragment is refused rather than pretended complete",
+  transcript.salvagePartialFile(
+    JSON.stringify({ path: "x.ts", content: "short" })
+  ) === null
+);
+
+check(
+  "the route writes the recovered prefix and tells the model to append",
+  /salvagePartialFile\(/.test(route) &&
+    /RECOVERED AND WRITTEN/.test(route) &&
+    /Send the REST of the file only/.test(route)
+);
+
 // ------------------------------------------------------------- 5. read_files
 console.log("\n5. read_files takes globs, so a directory is one call");
 

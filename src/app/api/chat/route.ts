@@ -64,6 +64,7 @@ import {
   batchItemCount,
   parseToolArguments,
   salvageToolArguments,
+  salvagePartialFile,
   serializeForApi,
 } from "@/lib/transcript";
 import type { TranscriptMessage } from "@/lib/transcript";
@@ -3285,6 +3286,15 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 ? batchItemCount(call.function.name, salvaged.value)
                 : 0;
 
+              // The big file still streaming when the limit hit (a batch's
+              // trailing item, or the whole single-write call). Its prefix is
+              // intact even though the JSON object never closed; write that
+              // prefix too so the model appends the rest instead of resending
+              // the whole file into the same limit.
+              const prefixFile = looksTruncated
+                ? salvagePartialFile(call.function.arguments)
+                : null;
+
               if (salvaged && salvagedCount > 0) {
                 const partial = await runTool(
                   workspace,
@@ -3302,6 +3312,39 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                     signal: runSignal,
                   }
                 );
+                let extra = "";
+                // If the streaming file's path is NOT among the complete
+                // salvaged items, that item was dropped — recover its prefix
+                // too. If it is among them, it already landed whole.
+                const alreadyComplete = JSON.stringify(salvaged?.value ?? {})
+                  .includes(`"${prefixFile?.path ?? ""}"`);
+                if (prefixFile && !alreadyComplete) {
+                  const pf = await runTool(
+                    workspace,
+                    "write_file",
+                    {
+                      path: prefixFile.path,
+                      content: prefixFile.contentPrefix,
+                    },
+                    {
+                      modelId: model,
+                      visionKey: visionApiKey,
+                      visionModel,
+                      searchKey: tavilyApiKey,
+                      exaKey: exaApiKey,
+                      deepseekKey: helper.apiKey,
+                      planner,
+                      searchProfile,
+                      signal: runSignal,
+                    }
+                  );
+                  extra =
+                    `\n\nThe file still streaming at the cut, ` +
+                    `${prefixFile.path}, had ${prefixFile.contentPrefix.length} ` +
+                    `characters of its prefix recovered and written as well. ` +
+                    `${pf.content} Continue THAT file with edit_file, ` +
+                    `anchoring on its last line, sending only the remainder.`;
+                }
                 result = {
                   ...partial,
                   content:
@@ -3309,16 +3352,80 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                     `output limit part-way through. The ${salvagedCount} ` +
                     `complete item(s) were recovered and run; the item it ` +
                     `stopped in the middle of was dropped.\n\n` +
-                    `${partial.content}\n\n` +
+                    `${partial.content}${extra}\n\n` +
                     `Send ONLY the remaining items in the next call, in ` +
                     `smaller batches. Do not resend the ones above.`,
                   summary: `Cut off — ran ${salvagedCount} recovered item(s)`,
                 };
-              } else {
-                result = {
-                  ok: false,
-                  content: looksTruncated
-                    ? `Error: this ${call.function.name} call was cut off by ` +
+              } else if (looksTruncated) {
+                /*
+                 * A single long file cut off mid-content (or a batch whose
+                 * only item was the one still streaming). The batch salvage
+                 * found no complete items, but the file prefix itself is
+                 * intact up to the cut. Writing that prefix to disk and
+                 * telling the model exactly where to continue is what stops
+                 * "the limit threw everything away and it redid the file,
+                 * hitting the same limit forever".
+                 */
+                const partialFile = prefixFile;
+                if (partialFile) {
+                  const partial = await runTool(
+                    workspace,
+                    "write_file",
+                    {
+                      path: partialFile.path,
+                      content: partialFile.contentPrefix,
+                    },
+                    {
+                      modelId: model,
+                      visionKey: visionApiKey,
+                      visionModel,
+                      searchKey: tavilyApiKey,
+                      exaKey: exaApiKey,
+                      deepseekKey: helper.apiKey,
+                      planner,
+                      searchProfile,
+                      signal: runSignal,
+                    }
+                  );
+                  // Anchor lines for the continuation. A single-line file
+                  // (no newlines) gets its last 120 characters instead.
+                  const anchorLines = partialFile.contentPrefix.includes("\n")
+                    ? partialFile.contentPrefix
+                        .split("\n")
+                        .filter((l) => l.trim().length > 0)
+                        .slice(-3)
+                    : [
+                        partialFile.contentPrefix.slice(-120),
+                      ];
+                  result = {
+                    ...partial,
+                    ok: true,
+                    changedPath: partialFile.path,
+                    content:
+                      `This ${call.function.name} call was cut off by the ` +
+                      `output limit in the middle of the file. The part that ` +
+                      `finished streaming — ${partialFile.contentPrefix.length} ` +
+                      `characters — was RECOVERED AND WRITTEN to ` +
+                      `${partialFile.path}; it is on disk right now. Do NOT ` +
+                      `resend it from the beginning.\n\n` +
+                      `${partial.content}\n\n` +
+                      `Continue the file with edit_file using start_anchor/` +
+                      `end_anchor: anchor the append on the last lines that ` +
+                      `landed:\n` +
+                      anchorLines.map((l) => `  ${l.slice(0, 80)}`).join("\n") +
+                      `\nSend the REST of the file only, in parts under ` +
+                      `1200 lines each, appending after that anchor until the ` +
+                      `file is complete. Say nothing else until it is.`,
+                    summary:
+                      `Cut off — wrote ${partialFile.contentPrefix.length}-char prefix of ` +
+                      partialFile.path,
+                  };
+                } else {
+                  result = {
+                    ok: false,
+                    content:
+                      `Error: this ${call.function.name} call was cut off by ` +
                       `the output limit — its arguments are incomplete, so ` +
                       `nothing was written.\n\n` +
                       `The content was too large for one call. ` +
@@ -3329,11 +3436,15 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                       `using the last few lines of what you just wrote as ` +
                       `old_text.\n` +
                       `Keep going until the file is complete. Say nothing ` +
-                      `else until it is.`
-                    : `Error: arguments were not valid JSON (${parsed.error})`,
-                  summary: looksTruncated
-                    ? `Cut off mid-call — splitting into parts`
-                    : "Invalid tool arguments",
+                      `else until it is.`,
+                    summary: "Cut off mid-call — splitting into parts",
+                  };
+                }
+              } else {
+                result = {
+                  ok: false,
+                  content: `Error: arguments were not valid JSON (${parsed.error})`,
+                  summary: "Invalid tool arguments",
                 };
               }
             } else if (call.function.name === "make_plan") {
