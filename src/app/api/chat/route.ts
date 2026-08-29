@@ -1733,14 +1733,30 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          * cheap) get a much higher guard; everyone else keeps 64.
          */
         const MAX_AGENT_ROUNDS = agentRoundsFor(model);
-        // Carried across a resume, so continuing cannot reset the guard and
-        // spend another eight budgets on a model that never stops.
-        let continuations = resumed?.continuations ?? 0;
-        /** A think-only output-limit cut. One nudge to act, then stop. */
-        let thinkNudges = resumed?.thinkNudges ?? 0;
+        /*
+         * Output-limit continuation budgets start FRESH on every request —
+         * including a Resume.
+         *
+         * They used to be carried from the saved state, so a reply that
+         * stopped at the ceiling resumed with continuations already at the
+         * cap: the very next long round tripped hitOutputCeiling again, and
+         * the reply stopped at the same message over and over no matter how
+         * many times it was resumed. An explicit Resume IS the authorisation
+         * for another set of budgets; the user chose to keep paying. The
+         * round cap (toolRounds, below) still carries, so a genuinely
+         * runaway loop remains finite.
+         */
+        let continuations = 0;
+        /**
+         * A think-only output-limit cut: one nudge to act, then stop. Fresh
+         * budget on Resume for the same reason — but forceNoThinking below
+         * still carries, so a model that burned the whole ceiling on
+         * thinking is NOT told it may think again.
+         */
+        let thinkNudges = 0;
         /** After a think-only cut, the next call must not think again. */
         let forceNoThinking =
-          thinkNudges > 0 ||
+          (resumed?.thinkNudges ?? 0) > 0 ||
           /do not think more/i.test(resumeNote ?? "");
         /**
          * Times we auto-continued a mid-task stop that was not an output
@@ -3319,6 +3335,13 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 const alreadyComplete = JSON.stringify(salvaged?.value ?? {})
                   .includes(`"${prefixFile?.path ?? ""}"`);
                 if (prefixFile && !alreadyComplete) {
+                  // Make the replayed call match what actually executed:
+                  // the recovered complete items plus the prefix file.
+                  call.function.arguments = JSON.stringify({
+                    recovered: salvaged.value,
+                    note: "trailing file cut off; its prefix was written " +
+                      `to ${prefixFile.path} and is appended next`,
+                  });
                   const pf = await runTool(
                     workspace,
                     "write_file",
@@ -3344,6 +3367,10 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                     `characters of its prefix recovered and written as well. ` +
                     `${pf.content} Continue THAT file with edit_file, ` +
                     `anchoring on its last line, sending only the remainder.`;
+                } else {
+                  // Only complete items ran: rewrite the truncated blob to
+                  // the exact arguments that executed.
+                  call.function.arguments = JSON.stringify(salvaged.value);
                 }
                 result = {
                   ...partial,
@@ -3369,13 +3396,14 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                  */
                 const partialFile = prefixFile;
                 if (partialFile) {
+                  const prefixValue = {
+                    path: partialFile.path,
+                    content: partialFile.contentPrefix,
+                  };
                   const partial = await runTool(
                     workspace,
                     "write_file",
-                    {
-                      path: partialFile.path,
-                      content: partialFile.contentPrefix,
-                    },
+                    prefixValue,
                     {
                       modelId: model,
                       visionKey: visionApiKey,
@@ -3388,6 +3416,10 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                       signal: runSignal,
                     }
                   );
+                  // Repair the transcript's (truncated) copy so Resume does
+                  // not replay the broken JSON call.
+                  call.function.name = "write_file";
+                  call.function.arguments = JSON.stringify(prefixValue);
                   // Anchor lines for the continuation. A single-line file
                   // (no newlines) gets its last 120 characters instead.
                   const anchorLines = partialFile.contentPrefix.includes("\n")
@@ -3422,6 +3454,11 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                       partialFile.path,
                   };
                 } else {
+                  // Truncated but too small to salvage: replace the broken
+                  // arguments with an empty-but-valid object so a Resume
+                  // replays a well-formed (failing) call with the guidance
+                  // above, not unparseable JSON.
+                  call.function.arguments = "{}";
                   result = {
                     ok: false,
                     content:
