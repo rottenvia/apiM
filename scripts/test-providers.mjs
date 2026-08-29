@@ -815,7 +815,7 @@ check(
 );
 check(
   "content and reasoning clear the banner immediately",
-  /setLiveRetry\(null\)/.test(page) && /case "content":/.test(page)
+  /setLiveRetry\(runConvId \?\? requestConversationId, null\)/.test(page) && /case "content":/.test(page)
 );
 check(
   "a 200 with no first token is retried instead of hanging the route",

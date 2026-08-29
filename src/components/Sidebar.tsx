@@ -20,6 +20,11 @@ interface SidebarProps {
   onOpenSettings: () => void;
   /** How long the delete button stays locked, in seconds. */
   deleteDelay: number;
+  /**
+   * Ids of chats whose reply is still running server-side, so a background
+   * task is visible at a glance instead of appearing to have vanished.
+   */
+  runningIds?: Set<string>;
 }
 
 const EXPORT_FORMATS = [
@@ -42,6 +47,7 @@ export function Sidebar({
   onImported,
   onOpenSettings,
   deleteDelay,
+  runningIds,
 }: SidebarProps) {
   const [menuFor, setMenuFor] = useState<string | null>(null);
   const [exportFor, setExportFor] = useState<string | null>(null);
@@ -419,10 +425,24 @@ export function Sidebar({
                     )}
                     <span
                       className="pointer-events-none relative min-w-0 flex-1 truncate text-left text-sm leading-5"
-                      title={conv.title}
+                      title={
+                        runningIds?.has(conv.id)
+                          ? `${conv.title} — working in the background`
+                          : conv.title
+                      }
                     >
                       {conv.title}
                     </span>
+                    {runningIds?.has(conv.id) && (
+                      <span
+                        aria-label="Working in the background"
+                        title="This chat is still working"
+                        className="relative z-10 ml-1 flex h-2 w-2 flex-none items-center justify-center"
+                      >
+                        <span className="absolute h-2 w-2 animate-ping rounded-full bg-[#c96442]/50" />
+                        <span className="h-1.5 w-1.5 rounded-full bg-[#c96442]" />
+                      </span>
+                    )}
                   </>
                 )}
 

@@ -72,22 +72,93 @@ check(
   "one shared controller let a switched-away chat cancel the visible reply"
 );
 check("New chat allocates and synchronously stores a fresh workspace id", /const nextId = uuidv4\(\)/.test(newChat) && /workspaceIdRef\.current = nextId/.test(newChat));
-check("New chat clears the synchronous message ref", /messagesRef\.current = \[\]/.test(newChat));
 check(
-  "late stream frames are discarded by request id",
-  /workspaceIdRef\.current !== requestConversationId\) continue/.test(page)
+  "New chat activates a fresh, empty per-conversation session",
+  /activateSession\(nextId\)/.test(newChat)
+);
+check(
+  "each conversation owns its own transcript/UI session",
+  /type ChatSession = \{/.test(page) &&
+    /sessionsRef = useRef<Map<string, ChatSession>>/.test(page) &&
+    /writeMessages\(/.test(page)
+);
+check(
+  "late stream frames are NEVER discarded: they route to the run's own session",
+  // The old line dropped every frame of a backgrounded chat, which made a
+  // running task vanish the moment you clicked another conversation.
+  /const active = mirroredIdRef\.current === requestConversationId/.test(page) &&
+    !/workspaceIdRef\.current !== requestConversationId\) continue/.test(page)
+);
+check(
+  "background frames stay out of the visible chat",
+  /only touch the on-screen state when this conversation is\s*\n?\s*\/\/ the visible one/.test(page) ||
+    /mirroredIdRef\.current === key/.test(page),
+  "write helpers mirror state only for the visible conversation"
 );
 check(
   "an old request cannot clear the new request controller or final UI state",
-  // A finished run only ever deletes its own map entry (its run's key), so a
-  // newer chat's controller is untouched; stillActive gates the UI resets.
+  // A finished run only ever deletes its own map entry (keyed to its own
+  // runConvId), and the UI reset is patched onto its own session, so a newer
+  // chat's controller and spinner are untouched.
   /abortRefs\.current\.delete\(runConvId\)/.test(page) &&
-    /const stillActive = workspaceIdRef\.current === requestConversationId/.test(page)
+    /const stillActive = mirroredIdRef\.current === runConvId/.test(page) &&
+    /patchSession\(runConvId, \{/.test(page)
 );
 check(
   "the workspace ref includes an unsaved draft chat",
   /workspaceIdRef\.current = workspaceId/.test(page),
   "null between chats allowed old async work to lose its scope boundary"
+);
+
+console.log("\n2b. A backgrounded run keeps running — nothing disappears");
+
+const sidebar = (await readFile(
+  path.join(ROOT, "src/components/Sidebar.tsx"),
+  "utf8"
+)).replace(/\r\n/g, "\n");
+
+check(
+  "background frames update their own session even when not visible",
+  /writeMessages\(runConvId \?\? requestConversationId/.test(page) &&
+    // writeMessages only mirrors to React state for the visible conversation
+    /mirroredIdRef\.current === key/.test(page)
+);
+check(
+  "a disk refresh never overwrites a live, in-flight session",
+  /Never overwrite a LIVE session with the disk copy/.test(page) &&
+    /hasLiveRun/.test(page),
+  "switching back to a running chat used to wipe the streaming bubble with the saved transcript"
+);
+check(
+  "auto-resume continues in its own conversation, not the visible one",
+  /conversationId: runConvId/.test(page) &&
+    /let pendingAutoResume: string \| null = null/.test(page),
+  "a backgrounded run's timeout resume used to fire in whichever chat was open"
+);
+check(
+  "Stop aborts only the conversation you are looking at",
+  /abortRefs\.current\.get\(convId\)\?\.abort\(\)/.test(page) &&
+    /Stop belongs to the conversation the user is looking at/.test(page),
+  "a second chat keeps working while you stop the first"
+);
+check(
+  "a draft session migrates to the server-assigned id",
+  /migrateSession\(requestConversationId, evt\.conversationId\)/.test(page) &&
+    /sessions\.set\(toId/.test(page) &&
+    /abortRefs\.current\.set\(toId, ac\)/.test(page),
+  "a run started in a brand-new chat must not split across two ids when saved"
+);
+check(
+  "the sidebar shows which chats are still working",
+  /runningIds/.test(sidebar) &&
+    /animate-ping/.test(sidebar) &&
+    /runningIds=\{runningIds\}/.test(page),
+  "a background task is visible at a glance instead of appearing gone"
+);
+check(
+  "returning to the same chat skips re-rendering identical transcripts",
+  /Skip the swap when the disk copy is what is already on screen/.test(page),
+  "fresh object identities re-reconciled every memoised bubble — the heavy switch-back"
 );
 
 console.log("\n3. Stored conversations remain separate even with memorable phrases");

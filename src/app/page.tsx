@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { v4 as uuidv4 } from "uuid";
 import { Sidebar } from "@/components/Sidebar";
 import { ChatArea } from "@/components/ChatArea";
@@ -307,6 +307,30 @@ interface ChatResponse {
   usage?: { total_tokens?: number };
 }
 
+/**
+ * One chat's transcript plus its run-level UI state, as a unit.
+ *
+ * The app shows one chat at a time, but switching to another chat must not
+ * erase the one that is still working: a generation keeps streaming
+ * server-side, and its frames need somewhere to land when the user is
+ * looking at a different conversation. Each session is keyed by the
+ * workspace/conversation id; the React states the screen renders are just a
+ * mirror of whichever session is currently on top.
+ */
+type ChatSession = {
+  messages: Message[];
+  loading: boolean;
+  stage: StatusStage | null;
+  /** Persistent notice ("spending limit…", "connection dropped…"). */
+  retryNotice: string | null;
+  /** Transient retry/backoff, ticked by the 200ms clock while visible. */
+  liveRetry: (UpstreamNotice & { receivedAt: number }) | null;
+  /** Server-side id of the in-flight reply, for the stop endpoint. */
+  runMessageId: string | null;
+  /** Set by Stop / new-chat: a pending auto-resume must not fire. */
+  cancelResume: boolean;
+};
+
 export default function Home() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [currentConvId, setCurrentConvId] = useState<string | null>(null);
@@ -323,33 +347,204 @@ export default function Home() {
    */
   const [draftConvId, setDraftConvId] = useState<string>(() => uuidv4());
   const workspaceId = currentConvId ?? draftConvId;
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
-  const [statusStage, setStatusStage] = useState<StatusStage | null>(null);
-  // A transient upstream failure being retried. Shown rather than hidden: a
-  // silent 8-second pause reads as a freeze, and the user needs to know the
-  // work is not lost.
-  const [retryNotice, setRetryNotice] = useState<string | null>(null);
-  const retryLiveRef = useRef<(UpstreamNotice & { receivedAt: number }) | null>(
+  /*
+   * Per-conversation sessions (see ChatSession above).
+   *
+   * Every stream frame of a backgrounded chat is written into its own
+   * session here — never dropped — so the task keeps filling its transcript
+   * while the user chats in another conversation. Switching back shows the
+   * complete, up-to-date reply. `sessionsVersion` bumps on any session change
+   * so memoised UI (the sidebar's "running" dots) recomputes; the on-screen
+   * states below are only a mirror of the active session and are synced
+   * whenever the view changes OR the active session is written.
+   */
+  const sessionsRef = useRef<Map<string, ChatSession>>(new Map());
+  const [sessionsVersion, setSessionsVersion] = useState(0);
+  /** The id the mirrored React states below belong to. */
+  const mirroredIdRef = useRef<string | null>(null);
+
+  const getSession = (id: string | null | undefined): ChatSession => {
+    const key = id ?? "__none__";
+    let s = sessionsRef.current.get(key);
+    if (!s) {
+      s = {
+        messages: [],
+        loading: false,
+        stage: null,
+        retryNotice: null,
+        liveRetry: null,
+        runMessageId: null,
+        cancelResume: false,
+      };
+      sessionsRef.current.set(key, s);
+    }
+    return s;
+  };
+
+  // Mirror of the active session. Setters route to the session via the
+  // helpers below; writing these directly would desync on chat switch.
+  const [messages, setMessagesState] = useState<Message[]>([]);
+  const [isLoading, setIsLoadingState] = useState(false);
+  const [statusStage, setStatusStageState] = useState<StatusStage | null>(
     null
   );
+  // A persistent run notice ("spending limit…", "connection dropped…").
+  const [retryNotice, setRetryNoticeState] = useState<string | null>(null);
 
+  /** Copy a session's UI state into the mirrored React states. */
+  const mirrorSession = useCallback((s: ChatSession) => {
+    messagesRef.current = s.messages;
+    setMessagesState(s.messages);
+    setIsLoadingState(s.loading);
+    setStatusStageState(s.stage);
+    setRetryNoticeState(s.retryNotice);
+  }, []);
+
+  /**
+   * Point the mirrored states at a conversation's session, creating it
+   * empty if needed. Used whenever the view changes chats.
+   */
+  const activateSession = useCallback(
+    (id: string) => {
+      mirroredIdRef.current = id;
+      mirrorSession(getSession(id));
+    },
+    [mirrorSession]
+  );
+
+  /** Update one session's messages and its transcript cache in one move. */
+  const writeMessages = useCallback(
+    (
+      id: string | null | undefined,
+      updater: (prev: Message[]) => Message[],
+      opts: { cache?: boolean } = {}
+    ) => {
+      const key = id ?? "__none__";
+      const s = getSession(key);
+      const next = updater(s.messages);
+      s.messages = next;
+      if (opts.cache !== false) conversationCache.current.set(key, next);
+      // Only the visible chat drives the rendered transcript. Background
+      // chats just accumulate into their session until the user switches.
+      if (mirroredIdRef.current === key) {
+        messagesRef.current = next;
+        setMessagesState(next);
+      }
+      setSessionsVersion((v) => v + 1);
+    },
+    []
+  );
+
+  /** Patch one session's run-level UI fields, mirroring it if it is active. */
+  const patchSession = useCallback(
+    (
+      id: string | null | undefined,
+      patch: Partial<Omit<ChatSession, "messages">>
+    ) => {
+      const key = id ?? "__none__";
+      const s = getSession(key);
+      Object.assign(s, patch);
+      if (mirroredIdRef.current === key) {
+        if (patch.loading !== undefined) {
+          messagesRef.current = s.messages;
+          setMessagesState(s.messages);
+          setIsLoadingState(s.loading);
+        }
+        if (patch.stage !== undefined) setStatusStageState(s.stage);
+        if (patch.retryNotice !== undefined)
+          setRetryNoticeState(s.retryNotice);
+      }
+      setSessionsVersion((v) => v + 1);
+    },
+    []
+  );
+
+  const setIsLoading = useCallback(
+    (id: string | null | undefined, loading: boolean) =>
+      patchSession(id, { loading }),
+    [patchSession]
+  );
+  const setStatusStage = useCallback(
+    (id: string | null | undefined, stage: StatusStage | null) =>
+      patchSession(id, { stage }),
+    [patchSession]
+  );
+  const setRetryNotice = useCallback(
+    (id: string | null | undefined, notice: string | null) =>
+      patchSession(id, { retryNotice: notice }),
+    [patchSession]
+  );
+  /** Transient upstream failure being retried; shown rather than hidden. */
+  const setLiveRetry = useCallback(
+    (
+      id: string | null | undefined,
+      info: (UpstreamNotice & { receivedAt: number }) | null
+    ) => {
+      patchSession(id, {
+        liveRetry: info,
+        retryNotice: info ? visibleUpstreamNotice(info, Date.now()) : null,
+      });
+    },
+    [patchSession]
+  );
+
+  /**
+   * Move a draft conversation's whole client state under the real id the
+   * server just assigned. The session, transcript cache and abort controller
+   * all travel, so a run started before the chat was saved keeps streaming
+   * into the conversation it actually belongs to.
+   */
+  const migrateSession = useCallback(
+    (fromId: string, toId: string) => {
+      if (fromId === toId) return;
+      const sessions = sessionsRef.current;
+      const from = sessions.get(fromId);
+      if (from) {
+        const existing = sessions.get(toId);
+        sessions.set(toId, existing ? { ...existing, ...from } : from);
+        sessions.delete(fromId);
+      }
+      const cached = conversationCache.current.get(fromId);
+      if (cached) {
+        conversationCache.current.set(toId, cached);
+        conversationCache.current.delete(fromId);
+      }
+      const ac = abortRefs.current.get(fromId);
+      if (ac) {
+        abortRefs.current.set(toId, ac);
+        abortRefs.current.delete(fromId);
+      }
+      setSessionsVersion((v) => v + 1);
+    },
+    []
+  );
+
+  // The backoff countdown ticker: every 200ms re-derive the visible form of
+  // the ACTIVE chat's transient retry so "retrying in 8s…" counts down.
   useEffect(() => {
     const id = window.setInterval(() => {
-      const info = retryLiveRef.current;
+      const s = sessionsRef.current.get(mirroredIdRef.current ?? "__none__");
+      const info = s?.liveRetry;
       if (!info) return;
       const next = visibleUpstreamNotice(info, Date.now());
-      setRetryNotice((prev) => (prev === next ? prev : next));
+      if (s.retryNotice !== next) {
+        s.retryNotice = next;
+        setRetryNoticeState(next);
+      }
     }, 200);
     return () => window.clearInterval(id);
   }, []);
 
-  const setLiveRetry = (
-    info: (UpstreamNotice & { receivedAt: number }) | null
-  ) => {
-    retryLiveRef.current = info;
-    setRetryNotice(info ? visibleUpstreamNotice(info, Date.now()) : null);
-  };
+  /** Ids of conversations with a reply in flight, for sidebar activity dots. */
+  const runningIds = useMemo(() => {
+    void sessionsVersion; // recompute when any session changes
+    const ids = new Set<string>();
+    for (const [id, s] of sessionsRef.current) {
+      if (id === "__none__") continue;
+      if (s.loading || s.messages.some((m) => m.isStreaming)) ids.add(id);
+    }
+    return ids;
+  }, [sessionsVersion]);
 
   const [showSettings, setShowSettings] = useState(false);
   const [showPlugins, setShowPlugins] = useState(false);
@@ -504,15 +699,13 @@ export default function Home() {
   const abortRefs = useRef<Map<string, AbortController>>(new Map());
   const abortFor = (id: string | null | undefined) =>
     id ? abortRefs.current.get(id) : undefined;
-  /** Server-side id of the reply in flight, for the stop endpoint. */
-  const runMessageIdRef = useRef<string | null>(null);
   /**
-   * A timeout that left work on disk. The current request is dying; the
-   * next one resumes the same bubble. Counted so a hung host cannot loop.
+   * Per-chat run state — server-side message id (for Stop), the pending
+   * auto-resume bubble id, and the Stop/new-chat cancel flag — lives on the
+   * ChatSession now, not in globals: two chats running at once must not share
+   * one "the" running message or cancel each other's resume.
    */
-  const pendingAutoResumeRef = useRef<string | null>(null);
   const autoResumeCounts = useRef(new Map<string, number>());
-  const cancelAutoResumeRef = useRef(false);
 
   /*
    * The mid-run note channel.
@@ -649,6 +842,11 @@ export default function Home() {
           previousVersions?: Message["previousVersions"];
           /** Skip the in-flight guard so a timeout can resume itself. */
           force?: boolean;
+          /**
+           * Run in a specific conversation, even if the user has since
+           * switched to another. Used by a background run's auto-resume.
+           */
+          conversationId?: string;
         }
       ) => void)
     | null
@@ -779,10 +977,12 @@ export default function Home() {
     async (id: string, approved: boolean, remember: boolean) => {
       // Clear immediately: the server confirms separately, and leaving the
       // buttons live invites a second click that would 404.
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.pendingCommand?.id === id ? { ...m, pendingCommand: null } : m
-        )
+      writeMessages(
+        workspaceIdRef.current,
+        (prev) =>
+          prev.map((m) =>
+            m.pendingCommand?.id === id ? { ...m, pendingCommand: null } : m
+          )
       );
       try {
         await fetch("/api/chat/approve", {
@@ -794,28 +994,33 @@ export default function Home() {
         /* the request times out on its own if this never lands */
       }
     },
-    []
+    [writeMessages]
   );
 
   /** Sends the user's answer back to the waiting request. */
-  const answerQuestion = useCallback(async (id: string, answer: string) => {
-    // Cleared immediately: the server confirms separately, and leaving the
-    // input live invites a second submit that would 404.
-    setMessages((prev) =>
-      prev.map((m) =>
-        m.pendingQuestion?.id === id ? { ...m, pendingQuestion: null } : m
-      )
-    );
-    try {
-      await fetch("/api/chat/answer", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id, answer }),
-      });
-    } catch {
-      /* the request times out on its own if this never lands */
-    }
-  }, []);
+  const answerQuestion = useCallback(
+    async (id: string, answer: string) => {
+      // Cleared immediately: the server confirms separately, and leaving the
+      // input live invites a second submit that would 404.
+      writeMessages(
+        workspaceIdRef.current,
+        (prev) =>
+          prev.map((m) =>
+            m.pendingQuestion?.id === id ? { ...m, pendingQuestion: null } : m
+          )
+      );
+      try {
+        await fetch("/api/chat/answer", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id, answer }),
+        });
+      } catch {
+        /* the request times out on its own if this never lands */
+      }
+    },
+    [writeMessages]
+  );
 
   /**
    * Stable identity so it can be passed down to memoized message bubbles
@@ -924,34 +1129,41 @@ export default function Home() {
   const conversationCache = useRef(new Map<string, Message[]>());
   const loadSeq = useRef(0);
 
-  const loadConversation = useCallback(async (id: string) => {
-    // Switching chats deliberately does NOT abort the other chat's stream:
-    // it keeps generating server-side and its frames route back to its own
-    // conversation by message id, so you can watch one chat while another
-    // generates. Only an explicit Stop (or navigating away from the app)
-    // cancels a run. A note's POST is in-flight, though, and it belongs to
-    // the conversation being left — close the dock with it.
-    btwAbortRef.current?.abort();
-    setBtwEntry(null);
-    // Each load gets a sequence number; a slower earlier response is ignored
-    // once a newer one starts, so rapidly switching chats can't leave the
-    // wrong transcript on screen.
-    const seq = ++loadSeq.current;
-    workspaceIdRef.current = id;
-    setCurrentConvId(id);
-    setIsLoading(false);
-    setStatusStage(null);
-    setLiveRetry(null);
-    runMessageIdRef.current = null;
+  const loadConversation = useCallback(
+    async (id: string) => {
+      // Switching chats deliberately does NOT abort the other chat's stream:
+      // it keeps generating server-side and its frames keep landing in its
+      // own ChatSession, so a task that is running never disappears — and
+      // you can read or even chat in another conversation meanwhile. Only an
+      // explicit Stop (or navigating away from the app) cancels a run. A
+      // note's POST is in-flight, though, and it belongs to the conversation
+      // being left — close the dock with it.
+      btwAbortRef.current?.abort();
+      setBtwEntry(null);
+      // Each load gets a sequence number; a slower earlier response is ignored
+      // once a newer one starts, so rapidly switching chats can't leave the
+      // wrong transcript on screen.
+      const seq = ++loadSeq.current;
+      workspaceIdRef.current = id;
+      setCurrentConvId(id);
 
-    // Show the cached copy immediately, then refresh from disk.
-    const cached = conversationCache.current.get(id) ?? [];
-    messagesRef.current = cached;
-    setMessages(cached);
+      // Show this conversation's session immediately — cached transcript
+      // and, if it is still working, its live bubble, spinner and stage —
+      // then refresh from disk in the background.
+      activateSession(id);
 
-    try {
-      const res = await fetch(`/api/conversations/${id}`);
-      if (!res.ok || seq !== loadSeq.current) return;
+      // An empty session (never opened this tab) starts from the cached
+      // transcript so the paint is instant instead of waiting on disk.
+      const cached = conversationCache.current.get(id);
+      if (cached !== undefined) {
+        const s = sessionsRef.current.get(id);
+        if (s && s.messages.length === 0 && !s.loading) s.messages = cached;
+        activateSession(id);
+      }
+
+      try {
+        const res = await fetch(`/api/conversations/${id}`);
+        if (!res.ok || seq !== loadSeq.current) return;
 
       const data = (await res.json()) as { messages?: unknown };
       if (seq !== loadSeq.current) return;
@@ -1002,36 +1214,75 @@ export default function Home() {
         };
       });
 
-      conversationCache.current.set(id, parsed);
-      if (workspaceIdRef.current !== id) return;
-      messagesRef.current = parsed;
-      setMessages(parsed);
-    } catch {
-      /* ignore */
-    }
-  }, []);
+        /*
+         * Never overwrite a LIVE session with the disk copy.
+         *
+         * The saved transcript has no in-flight bubble at all, so a disk
+         * refresh mid-run used to wipe the streaming reply off the screen —
+         * exactly the "task fully disappears when I click another chat"
+         * report. A run in this chat owns its own messages until it ends;
+         * only then does the next load pull the finished transcript.
+         */
+        const live = sessionsRef.current.get(id);
+        const hasLiveRun =
+          live !== undefined &&
+          (live.loading || live.messages.some((m) => m.isStreaming));
+
+        if (!hasLiveRun) {
+          conversationCache.current.set(id, parsed);
+          // Only apply if the user has not switched away since the fetch
+          // started; a faster load owns the screen then.
+          if (seq === loadSeq.current && mirroredIdRef.current === id) {
+            // Skip the swap when the disk copy is what is already on screen.
+            // Parsing always builds fresh object identities, so without this
+            // every click on the SAME chat re-rendered the whole transcript
+            // (hundreds of memoised bubbles re-reconciled) — the 1-2s "heavy"
+            // pause on switching back. Content identity is enough: the live
+            // fields (open panels, scroll) are UI-only and unaffected.
+            const shown = live?.messages ?? [];
+            const same =
+              shown.length === parsed.length &&
+              parsed.every((m, i) => {
+                const o = shown[i];
+                return (
+                  o.id === m.id &&
+                  o.content === m.content &&
+                  o.reasoningContent === m.reasoningContent &&
+                  o.role === m.role &&
+                  o.toolEvents === m.toolEvents &&
+                  o.timeline === m.timeline &&
+                  o.plan === m.plan &&
+                  o.incomplete === m.incomplete &&
+                  o.isNote === m.isNote
+                );
+              });
+            if (!same) writeMessages(id, () => parsed, { cache: false });
+          } else {
+            setSessionsVersion((v) => v + 1);
+          }
+        }
+      } catch {
+        /* ignore — the cached/session copy stays on screen */
+      }
+    },
+    [activateSession, writeMessages]
+  );
 
   const startNewChat = useCallback(() => {
     // Starting a new chat does not cancel other chats' streams; they keep
-    // running and saving to their own conversations.
-    cancelAutoResumeRef.current = true;
-    pendingAutoResumeRef.current = null;
+    // running in their own sessions and saving to their own conversations.
     btwAbortRef.current?.abort();
     loadSeq.current += 1;
     const nextId = uuidv4();
     workspaceIdRef.current = nextId;
-    messagesRef.current = [];
     setCurrentConvId(null);
     setDraftConvId(nextId);
-    setMessages([]);
+    // A fresh, empty session for the new draft conversation.
+    activateSession(nextId);
     setBtwEntry(null);
-    setIsLoading(false);
-    runMessageIdRef.current = null;
-    setStatusStage(null);
-    setLiveRetry(null);
     setRecentlyChanged([]);
     setWorkspaceFiles([]);
-  }, []);
+  }, [activateSession]);
 
   const renameConversation = useCallback(
     async (id: string, title: string) => {
@@ -1206,18 +1457,37 @@ export default function Home() {
         previousVersions?: Message["previousVersions"];
         /** Skip the in-flight guard so a timeout can resume itself. */
         force?: boolean;
+        /**
+         * Run in a specific conversation, even if the user has since
+         * switched to another. Used by a background run's auto-resume.
+         */
+        conversationId?: string;
       }
     ) => {
+      // Read at send time, not from a render closure. New-chat/select-chat
+      // writes this ref synchronously before React commits the new screen.
+      // A backgrounded run's auto-resume names its own conversation.
+      const requestConversationId =
+        options?.conversationId ?? workspaceIdRef.current ?? workspaceId;
+
+      // Guarded per conversation: two chats may generate at once, and a
+      // resume in one must not be refused because the other is busy.
+      const targetSession = getSession(requestConversationId);
       if (
         (!content.trim() && !(options?.attachments && options.attachments.length)) ||
-        (isLoading && !options?.force) ||
+        (targetSession.loading && !options?.force) ||
         !hasKeys
       ) {
         return;
       }
 
       // A fresh send (not the silent timeout continue) may auto-resume again.
-      if (!options?.force) cancelAutoResumeRef.current = false;
+      if (!options?.force) targetSession.cancelResume = false;
+
+      // Keyed to the conversation THIS run belongs to (named explicitly, not
+      // read from the "current chat" ref). Becomes the real server id when a
+      // draft chat is saved mid-run (the meta event migrates it).
+      let runConvId = requestConversationId;
 
       const trimmed = content.trim();
       const regenerateFromId = options?.regenerateFromId;
@@ -1227,9 +1497,6 @@ export default function Home() {
       // applies to this reply only, so the next message uses the model the
       // user actually selected.
       const activeModel = options?.modelOverride ?? model;
-      // Read at send time, not from a render closure. New-chat/select-chat
-      // writes this ref synchronously before React commits the new screen.
-      const requestConversationId = workspaceIdRef.current ?? workspaceId;
       const userMsg: Message = {
         id: `temp-${Date.now()}`,
         role: "user",
@@ -1247,7 +1514,7 @@ export default function Home() {
       // interrupted message in place and the text already on screen is
       // extended rather than replaced by a second bubble.
       const existing = resumeMessageId
-        ? messagesRef.current.find((m) => m.id === resumeMessageId)
+        ? targetSession.messages.find((m) => m.id === resumeMessageId)
         : undefined;
       const streamingId = resumeMessageId ?? `stream-${Date.now()}`;
       const assistantMsg: Message = {
@@ -1273,7 +1540,7 @@ export default function Home() {
         previousVersions: options?.previousVersions,
       };
 
-      setMessages((prev) => {
+      writeMessages(runConvId ?? requestConversationId, (prev) => {
         // Resume swaps the interrupted reply for the streaming one, in place.
         if (resumeMessageId) {
           return prev.map((m) => (m.id === resumeMessageId ? assistantMsg : m));
@@ -1290,9 +1557,12 @@ export default function Home() {
           ? [...base, assistantMsg]
           : [...base, userMsg, assistantMsg];
       });
-      setIsLoading(true);
-      setStatusStage(webSearchMode === "off" ? "thinking" : "deciding");
-      setLiveRetry(null);
+      setIsLoading(requestConversationId, true);
+      setStatusStage(
+        requestConversationId,
+        webSearchMode === "off" ? "thinking" : "deciding"
+      );
+      setLiveRetry(runConvId ?? requestConversationId, null);
 
       /*
        * Conversation history is intentionally NOT sent by the browser.
@@ -1303,9 +1573,8 @@ export default function Home() {
        */
 
       const controller = new AbortController();
-      // Keyed to the conversation this run belongs to (the one currently
-      // active when Send was pressed), so aborting/stopping only this run.
-      const runConvId = workspaceIdRef.current;
+      // Stop only ever touches the chat the user stopped; the entry is
+      // re-keyed to the real id in migrateSession when a draft chat is saved.
       if (runConvId) abortRefs.current.set(runConvId, controller);
 
       // Batch deltas into one state update per animation frame. Without this a
@@ -1328,7 +1597,7 @@ export default function Home() {
         const r = pendingReasoning;
         pendingContent = "";
         pendingReasoning = "";
-        setMessages((prev) =>
+        writeMessages(runConvId ?? requestConversationId, (prev) =>
           prev.map((m) => {
             if (m.id !== streamingId) return m;
 
@@ -1370,13 +1639,20 @@ export default function Home() {
       /** Set when a tool changed the workspace, so the list can refresh. */
       let sawToolWrite = false;
       const changedPaths = new Set<string>();
+      // A bubble id whose dead connection THIS run should resume itself.
+      // Local to the run: a run in another chat must not resume on it.
+      let pendingAutoResume: string | null = null;
 
       const finish = (patch: Partial<Message>) => {
         flush();
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === streamingId ? { ...m, ...patch, isStreaming: false } : m
-          )
+        writeMessages(
+          runConvId ?? requestConversationId,
+          (prev) =>
+            prev.map((m) =>
+              m.id === streamingId
+                ? { ...m, ...patch, isStreaming: false }
+                : m
+            )
         );
       };
 
@@ -1476,10 +1752,17 @@ export default function Home() {
               continue;
             }
 
-            // The user switched chats while this run continued server-side.
-            // Ignore every late frame; it belongs exclusively to the id that
-            // started the request and must never repopulate the active chat.
-            if (workspaceIdRef.current !== requestConversationId) continue;
+            // Frames route to THIS run's conversation session, always.
+            //
+            // The user may have switched to another chat while the run
+            // continued server-side. Dropping these frames is exactly what
+            // used to make a running task "fully disappear" the moment you
+            // clicked another conversation: the bubble never got any more
+            // text, and a disk refresh on return wiped it. The write helpers
+            // below only touch the on-screen state when this conversation is
+            // the visible one, so a background run is never lost and never
+            // leaks into another chat.
+            const active = mirroredIdRef.current === requestConversationId;
 
             /*
              * Preserve stream order at visible boundaries.
@@ -1494,17 +1777,17 @@ export default function Home() {
 
             switch (evt.type) {
               case "status":
-                setStatusStage(evt.stage);
+                setStatusStage(runConvId ?? requestConversationId, evt.stage);
                 // Do not clear retryNotice here. The route sends "thinking"
                 // before it even calls Ox, so wiping the notice hid the hang.
                 break;
 
               case "retrying":
                 if (evt.phase === "clear") {
-                  setLiveRetry(null);
+                  setLiveRetry(runConvId ?? requestConversationId, null);
                   break;
                 }
-                setLiveRetry({
+                setLiveRetry(runConvId ?? requestConversationId, {
                   phase: evt.phase === "attempt" ? "attempt" : "backoff",
                   attempt: evt.attempt,
                   attempts: evt.attempts,
@@ -1521,8 +1804,7 @@ export default function Home() {
                 // model stopped mid-task (Ox does this on its own limits).
                 // Said plainly, because otherwise a long pause mid-file
                 // looks like the app has hung.
-                retryLiveRef.current = null;
-                setRetryNotice(
+                setRetryNotice(runConvId ?? requestConversationId,
                   evt.reason === "thinking_budget"
                     ? "Used the thinking budget — answering now, without another think"
                     : evt.reason === "output_limit"
@@ -1551,7 +1833,7 @@ export default function Home() {
                 // Attachments arrive as names only (the pixels are
                 // megabytes the client already has); a reload brings the
                 // full stored attachments, so thumbnails appear then.
-                setMessages((prev) => [
+                writeMessages(runConvId ?? requestConversationId, (prev) => [
                   ...prev,
                   {
                     id: evt.id,
@@ -1585,7 +1867,7 @@ export default function Home() {
                 // Applied immediately rather than batched with text: the plan
                 // changes a handful of times per reply, and seeing progress
                 // land as it happens is the entire point of showing it.
-                setMessages((prev) =>
+                writeMessages(runConvId ?? requestConversationId, (prev) =>
                   prev.map((m) =>
                     m.id === streamingId
                       ? {
@@ -1604,8 +1886,7 @@ export default function Home() {
               case "budget_warning":
                 // Warned rather than stopped. Being cut off with no notice is
                 // worse than knowing it is going to be close.
-                retryLiveRef.current = null;
-                setRetryNotice(
+                setRetryNotice(runConvId ?? requestConversationId,
                   `Spending limit approaching — $${evt.spentUsd.toFixed(4)} of ` +
                     `$${evt.limitUsd.toFixed(2)} used on this reply`
                 );
@@ -1614,8 +1895,7 @@ export default function Home() {
               case "budget_stopped":
                 // The reply itself explains this too, so the notice is short.
                 // It clears on the next message like every other notice.
-                retryLiveRef.current = null;
-                setRetryNotice(
+                setRetryNotice(runConvId ?? requestConversationId,
                   `Stopped at your $${evt.limitUsd.toFixed(2)} spending limit — ` +
                     `the work so far is saved, use Resume to continue`
                 );
@@ -1625,7 +1905,8 @@ export default function Home() {
                 streamTitle = evt.title;
                 // Needed by Stop: the server aborts by message id now, so a
                 // closed tab no longer doubles as a stop signal.
-                runMessageIdRef.current = evt.messageId;
+                getSession(evt.conversationId ?? requestConversationId).runMessageId =
+                  evt.messageId;
                 finalMeta = {
                   ...finalMeta,
                   thinkingEffort: evt.resolvedEffort,
@@ -1653,24 +1934,36 @@ export default function Home() {
                  * final yet and showing a half-filled meta row mid-reply
                  * would be worse than showing it at the end.
                  */
-                setMessages((prev) =>
+                writeMessages(runConvId ?? requestConversationId, (prev) =>
                   prev.map((m) =>
                     m.id === streamingId
                       ? { ...m, thinkingEffort: evt.resolvedEffort }
                       : m
                   )
                 );
-                if (evt.conversationId) {
-                  // Ref first: `finally` reads it to refresh the file count.
-                  // The active-request guard above guarantees this event still
-                  // belongs to the selected chat.
+                if (evt.conversationId &&
+                    evt.conversationId !== requestConversationId) {
+                  // The server has saved the conversation under its real id;
+                  // this run started on a draft id. Move the whole session,
+                  // transcript cache and abort controller across so the
+                  // backgrounded run keeps writing to the right chat.
+                  migrateSession(requestConversationId, evt.conversationId);
+                  runConvId = evt.conversationId as string;
+                  // Only jump the view to the new id if the user is still
+                  // looking at this run — not if they have since opened
+                  // another chat.
+                  if (mirroredIdRef.current === requestConversationId) {
+                    workspaceIdRef.current = evt.conversationId;
+                    setCurrentConvId(evt.conversationId);
+                    activateSession(evt.conversationId);
+                  }
+                } else if (evt.conversationId && active) {
                   workspaceIdRef.current = evt.conversationId;
-                  setCurrentConvId(evt.conversationId);
                 }
                 break;
 
               case "reasoning":
-                setLiveRetry(null);
+                setLiveRetry(runConvId ?? requestConversationId, null);
                 pendingReasoning += evt.delta;
                 scheduleFlush();
                 break;
@@ -1679,7 +1972,7 @@ export default function Home() {
                 const fields = evt.fieldsSeen.length
                   ? evt.fieldsSeen.join(", ")
                   : "no delta fields";
-                setMessages((prev) =>
+                writeMessages(runConvId ?? requestConversationId, (prev) =>
                   prev.map((m) =>
                     m.id === streamingId && !m.reasoningContent?.trim()
                       ? {
@@ -1699,13 +1992,13 @@ export default function Home() {
               // the "Writing app.py" line appear after the file already
               // existed.
               case "tool_start": {
-                setLiveRetry(null);
+                setLiveRetry(runConvId ?? requestConversationId, null);
                 const started: ToolEvent = {
                   id: evt.id,
                   name: evt.name,
                   args: evt.args,
                 };
-                setMessages((prev) =>
+                writeMessages(runConvId ?? requestConversationId, (prev) =>
                   prev.map((m) =>
                     m.id === streamingId
                       ? {
@@ -1733,7 +2026,7 @@ export default function Home() {
                   display: evt.display,
                   reason: evt.reason,
                 };
-                setMessages((prev) =>
+                writeMessages(runConvId ?? requestConversationId, (prev) =>
                   prev.map((m) =>
                     m.id === streamingId ? { ...m, pendingCommand: request } : m
                   )
@@ -1744,7 +2037,7 @@ export default function Home() {
               case "approval_resolved": {
                 // Clear the prompt whoever resolved it — the user clicking,
                 // a timeout, or Stop — so a dead prompt is never left behind.
-                setMessages((prev) =>
+                writeMessages(runConvId ?? requestConversationId, (prev) =>
                   prev.map((m) =>
                     m.id === streamingId && m.pendingCommand?.id === evt.id
                       ? { ...m, pendingCommand: null }
@@ -1755,7 +2048,7 @@ export default function Home() {
               }
 
               case "usage": {
-                setMessages((prev) =>
+                writeMessages(runConvId ?? requestConversationId, (prev) =>
                   prev.map((m) =>
                     m.id === streamingId
                       ? {
@@ -1777,7 +2070,7 @@ export default function Home() {
                   options: evt.options,
                   context: evt.context,
                 };
-                setMessages((prev) =>
+                writeMessages(runConvId ?? requestConversationId, (prev) =>
                   prev.map((m) =>
                     m.id === streamingId ? { ...m, pendingQuestion: asked } : m
                   )
@@ -1788,7 +2081,7 @@ export default function Home() {
               case "question_resolved": {
                 // Cleared however it ended — answered, timed out, or stopped —
                 // so a dead prompt is never left on screen.
-                setMessages((prev) =>
+                writeMessages(runConvId ?? requestConversationId, (prev) =>
                   prev.map((m) =>
                     m.id === streamingId && m.pendingQuestion?.id === evt.id
                       ? { ...m, pendingQuestion: null }
@@ -1820,7 +2113,7 @@ export default function Home() {
                   // they stop, not one per file.
                   scheduleWorkspaceRefresh();
                 }
-                setMessages((prev) =>
+                writeMessages(runConvId ?? requestConversationId, (prev) =>
                   prev.map((m) =>
                     m.id === streamingId
                       ? {
@@ -1843,7 +2136,7 @@ export default function Home() {
               }
 
               case "content":
-                setLiveRetry(null);
+                setLiveRetry(runConvId ?? requestConversationId, null);
                 pendingContent += evt.delta;
                 scheduleFlush();
                 break;
@@ -1874,7 +2167,12 @@ export default function Home() {
                   errorNotice: evt.stopReason || undefined,
                 });
                 if (evt.conversationId) {
-                  setCurrentConvId(evt.conversationId);
+                  // Enter the newly saved conversation in the sidebar only
+                  // when the user is still looking at this run.
+                  if (active) {
+                    workspaceIdRef.current = evt.conversationId;
+                    setCurrentConvId(evt.conversationId);
+                  }
                   setConversations((prev) =>
                     prev.some((c) => c.id === evt.conversationId)
                       ? prev
@@ -1904,7 +2202,8 @@ export default function Home() {
                  * it. The server has saved that work; the bubble has to keep
                  * showing it, marked incomplete, so Continue is offered.
                  */
-                const current = messagesRef.current.find(
+                const runSession = getSession(runConvId);
+                const current = runSession.messages.find(
                   (m) => m.id === streamingId
                 );
                 const hadWork = Boolean(
@@ -1924,7 +2223,7 @@ export default function Home() {
                  */
                 const used = autoResumeCounts.current.get(streamingId) ?? 0;
                 if (
-                  !cancelAutoResumeRef.current &&
+                  !runSession.cancelResume &&
                   shouldAutoResumeOnTimeout({
                     error: evt.error,
                     autoResume: evt.autoResume,
@@ -1937,7 +2236,9 @@ export default function Home() {
                   // what flashed the Resume button for a timeout the app is
                   // about to continue on its own.
                   autoResumeCounts.current.set(streamingId, used + 1);
-                  pendingAutoResumeRef.current = streamingId;
+                  // Pending auto-resume is local to THIS run, so a run in
+                  // another chat cannot resume on this bubble's behalf.
+                  pendingAutoResume = streamingId;
                   break;
                 }
                 finish(
@@ -1953,7 +2254,7 @@ export default function Home() {
 
         // Stream ended without a terminal frame (dropped connection).
         if (!sawError) {
-          setMessages((prev) =>
+          writeMessages(runConvId ?? requestConversationId, (prev) =>
             prev.map((m) => {
               if (m.id !== streamingId || !m.isStreaming) return m;
               const hadWork = Boolean(
@@ -1981,7 +2282,8 @@ export default function Home() {
           // model answered the abandoned question instead of the new one.
           // canResume must be set: incomplete-only used to show "Try again"
           // and rebuild the thinking box from scratch.
-          const current = messagesRef.current.find((m) => m.id === streamingId);
+          const curSession = getSession(runConvId);
+          const current = curSession.messages.find((m) => m.id === streamingId);
           const hadWork = Boolean(
             current?.content?.trim() ||
               current?.reasoningContent?.trim() ||
@@ -1998,35 +2300,44 @@ export default function Home() {
         }
       } finally {
         if (frame !== null) cancelAnimationFrame(frame);
-        // Drop this run's controller now that it has finished.
+        // Drop this run's controller now that it has finished (under the id
+        // it actually ran as, after any draft->real migration).
         if (runConvId) abortRefs.current.delete(runConvId);
-        const stillActive = workspaceIdRef.current === requestConversationId;
-        const resumeId = stillActive ? pendingAutoResumeRef.current : null;
+        // Whether the user is still looking at THIS run's conversation. The
+        // run finishes either way; the UI reset only applies if it is on top.
+        const stillActive = mirroredIdRef.current === runConvId;
+        const resumeId = pendingAutoResume;
+        const endSession = getSession(runConvId);
         if (resumeId) {
-          pendingAutoResumeRef.current = null;
-          setStatusStage("working");
-          retryLiveRef.current = null;
+          setStatusStage(runConvId, "working");
+          setLiveRetry(runConvId, null);
           setRetryNotice(
+            runConvId,
             "The connection dropped — continuing from where it left off"
           );
-        } else if (stillActive) {
-          setIsLoading(false);
-          setStatusStage(null);
-          setLiveRetry(null);
+        } else if (!resumeId) {
+          // Run is over: clear the spinner for its own conversation only.
+          patchSession(runConvId, {
+            loading: false,
+            stage: null,
+            liveRetry: null,
+            runMessageId: null,
+          });
         }
         // Re-sync the global chat list; this does not enter any transcript.
         void refreshConversations();
-        if (stillActive) {
-          // The balance only moves when a reply finishes, so this is the one
-          // moment worth re-reading it.
-          void refreshBalanceRef.current?.();
-          if (sawToolWrite) {
-            setRecentlyChanged([...changedPaths]);
-            void refreshWorkspaceFiles();
-          }
+        // The balance only moves when a reply finishes, so this is the one
+        // moment worth re-reading it.
+        void refreshBalanceRef.current?.();
+        if (stillActive && sawToolWrite) {
+          setRecentlyChanged([...changedPaths]);
+          void refreshWorkspaceFiles();
         }
         if (resumeId) {
-          const list = messagesRef.current;
+          // Resume in THIS conversation, even if the user has switched to
+          // another — the run continues in the background and its new
+          // frames land in its own session.
+          const list = endSession.messages;
           const index = list.findIndex((m) => m.id === resumeId);
           const prompt = index > 0 ? list[index - 1] : null;
           if (prompt?.role === "user") {
@@ -2036,29 +2347,30 @@ export default function Home() {
               !existing?.content?.trim() &&
               !(existing?.toolEvents?.length);
             queueMicrotask(() => {
-              if (cancelAutoResumeRef.current) {
-                setIsLoading(false);
-                setStatusStage(null);
-                setLiveRetry(null);
+              if (getSession(runConvId).cancelResume) {
+                patchSession(runConvId, {
+                  loading: false,
+                  stage: null,
+                  liveRetry: null,
+                });
                 return;
               }
               void sendMessageRef.current?.(prompt.content, {
                 resumeMessageId: resumeId,
                 force: true,
+                conversationId: runConvId,
                 resumeNote: thinkOnly
                   ? "You already thought. Do not think more. Call a tool or write the answer now."
                   : undefined,
               });
             });
-          } else if (stillActive) {
-            setIsLoading(false);
-            setStatusStage(null);
+          } else {
+            patchSession(runConvId, { loading: false, stage: null });
           }
         }
       }
     },
     [
-      isLoading,
       hasKeys,
       workspaceId,
       deepseekKey,
@@ -2086,6 +2398,14 @@ export default function Home() {
       visionModel,
       budgetUsd,
       refreshWorkspaceFiles,
+      writeMessages,
+      patchSession,
+      setIsLoading,
+      setStatusStage,
+      setLiveRetry,
+      setRetryNotice,
+      migrateSession,
+      activateSession,
     ]
   );
 
@@ -2160,35 +2480,41 @@ export default function Home() {
   }, []);
 
   const stopGeneration = useCallback(() => {
-    cancelAutoResumeRef.current = true;
-    pendingAutoResumeRef.current = null;
-    const messageId = runMessageIdRef.current;
+    // Stop belongs to the conversation the user is looking at. Other chats'
+    // runs are deliberately left alone — being able to keep one task running
+    // while you answer another is the entire point.
     const convId = workspaceIdRef.current ?? currentConvId;
+    if (!convId) return;
+    const session = getSession(convId);
+    // A stopped run must not silently resume itself.
+    session.cancelResume = true;
     void fetch("/api/chat/stop", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        messageId: messageId || undefined,
-        conversationId: convId || undefined,
+        messageId: session.runMessageId || undefined,
+        conversationId: convId,
       }),
       keepalive: true,
     }).catch(() => {});
-    // Abort every in-flight client stream. Keying only on currentConvId
-    // missed new chats (id still null) and auto-resume replacements.
-    for (const ac of abortRefs.current.values()) ac.abort();
-    abortRefs.current.clear();
-    runMessageIdRef.current = null;
-    setIsLoading(false);
-    setStatusStage(null);
-    setLiveRetry(null);
-    setMessages((prev) =>
-      prev.map((m) =>
-        m.isStreaming
-          ? { ...m, isStreaming: false, incomplete: true, canResume: true }
-          : m
-      )
+    abortRefs.current.get(convId)?.abort();
+    abortRefs.current.delete(convId);
+    patchSession(convId, {
+      loading: false,
+      stage: null,
+      liveRetry: null,
+      runMessageId: null,
+    });
+    writeMessages(
+      convId,
+      (prev) =>
+        prev.map((m) =>
+          m.isStreaming
+            ? { ...m, isStreaming: false, incomplete: true, canResume: true }
+            : m
+        )
     );
-  }, [currentConvId]);
+  }, [currentConvId, patchSession, writeMessages]);
 
   /** Resend an edited user message, discarding everything after it. */
   const editMessage = useCallback((messageId: string, newContent: string) => {
@@ -2227,14 +2553,17 @@ export default function Home() {
     //
     // Both the question AND its reply must go — removing only the question
     // left the old answer floating with nothing above it.
-    setMessages((prev) => {
-      const i = prev.findIndex((m) => m.id === messageId);
-      if (i === -1) return prev;
-      const removeCount = prev[i + 1]?.role === "assistant" ? 2 : 1;
-      return [...prev.slice(0, i), ...prev.slice(i + removeCount)];
-    });
+    writeMessages(
+      workspaceIdRef.current,
+      (prev) => {
+        const i = prev.findIndex((m) => m.id === messageId);
+        if (i === -1) return prev;
+        const removeCount = prev[i + 1]?.role === "assistant" ? 2 : 1;
+        return [...prev.slice(0, i), ...prev.slice(i + removeCount)];
+      }
+    );
     void sendMessageRef.current?.(newContent);
-  }, []);
+  }, [writeMessages]);
 
   /** Remove a whole exchange — the question and the reply — from UI and disk. */
   const deleteMessage = useCallback((messageId: string) => {
@@ -2256,25 +2585,37 @@ export default function Home() {
     const pair = list.slice(start, end);
     const isLastPair = end === list.length;
 
+    const convId = workspaceIdRef.current;
     if (pair.some((m) => m.isStreaming)) {
-      const runId = runMessageIdRef.current;
-      if (runId) {
+      const session = convId ? getSession(convId) : null;
+      if (session?.runMessageId) {
         void fetch("/api/chat/stop", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ messageId: runId }),
+          body: JSON.stringify({
+            messageId: session.runMessageId,
+            conversationId: convId,
+          }),
           keepalive: true,
         }).catch(() => {});
       }
-      abortRefs.current.get(workspaceIdRef.current ?? "")?.abort();
+      if (convId) {
+        abortRefs.current.get(convId)?.abort();
+        abortRefs.current.delete(convId);
+        patchSession(convId, {
+          loading: false,
+          stage: null,
+          liveRetry: null,
+          runMessageId: null,
+        });
+      }
     }
 
     const next = [...list.slice(0, start), ...list.slice(end)];
-    messagesRef.current = next;
-    setMessages(next);
-
-    const convId = workspaceIdRef.current;
-    if (convId) conversationCache.current.set(convId, next);
+    if (convId) writeMessages(convId, () => next);
+    else {
+      messagesRef.current = next;
+    }
 
     const persistId = pair.find(
       (m) =>
@@ -2289,7 +2630,7 @@ export default function Home() {
     void fetch(`/api/conversations/${convId}/messages?${params}`, {
       method: "DELETE",
     }).catch(() => {});
-  }, []);
+  }, [writeMessages, patchSession]);
 
   /** Re-run the user turn that produced `assistantId`. */
   // Read through refs so this callback keeps a stable identity. Depending on
@@ -2310,7 +2651,7 @@ export default function Home() {
     if (isProvisional) {
       // Drop the question and its abandoned reply, then ask again — sending
       // without removing the prompt would leave a duplicate question.
-      setMessages((prev) => {
+      writeMessages(workspaceIdRef.current, (prev) => {
         const i = prev.findIndex((m) => m.id === assistantId);
         return i < 1 ? prev : prev.slice(0, i - 1);
       });
@@ -2328,7 +2669,7 @@ export default function Home() {
           ]
         : undefined,
     });
-  }, []);
+  }, [writeMessages]);
 
   /**
    * Carry on an interrupted reply instead of starting it again.
@@ -2404,13 +2745,12 @@ export default function Home() {
     // An unsaved chat has nothing on disk. Resolve to empty rather than
     // leaving the panel loading against a request that can never come.
     if (!convId) {
-      messagesRef.current = messagesRef.current.map((m) =>
-        m.id === messageId ? { ...m, reasoningContent: "" } : m
-      );
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === messageId ? { ...m, reasoningContent: "" } : m
-        )
+      writeMessages(
+        null,
+        (prev) =>
+          prev.map((m) =>
+            m.id === messageId ? { ...m, reasoningContent: "" } : m
+          )
       );
       return;
     }
@@ -2429,24 +2769,19 @@ export default function Home() {
       /* fall through — an empty panel beats one that loads forever */
     } finally {
       reasoningInFlight.current.delete(messageId);
-      // Resume reads messagesRef in the same tick after this await.
-      // Updating only via setMessages left the ref stale, so the stream
-      // started with an empty thought box.
-      messagesRef.current = messagesRef.current.map((m) =>
-        m.id === messageId ? { ...m, reasoningContent: text } : m
+      // writeMessages keeps the live session, messagesRef and the transcript
+      // cache in one step, so Resume (same tick, after this await) reads the
+      // fetched text and switching away and back serves the same copy
+      // instead of fetching the whole panel again.
+      writeMessages(
+        convId,
+        (prev) =>
+          prev.map((m) =>
+            m.id === messageId ? { ...m, reasoningContent: text } : m
+          )
       );
-      setMessages((prev) => {
-        const next = prev.map((m) =>
-          m.id === messageId ? { ...m, reasoningContent: text } : m
-        );
-        // Keep the cache in step. Without this, switching away and back
-        // served the pre-fetch copy from `conversationCache` and the panel
-        // had to fetch all over again — which looked like the same bug.
-        if (convId) conversationCache.current.set(convId, next);
-        return next;
-      });
     }
-  }, []);
+  }, [writeMessages]);
 
   /**
    * Continue an interrupted reply.
@@ -2519,6 +2854,7 @@ export default function Home() {
         onRename={renameConversation}
         onArchive={archiveConversation}
         onOpenSettings={() => setShowSettings(true)}
+        runningIds={runningIds}
         deleteDelay={deleteDelay}
       />
 
