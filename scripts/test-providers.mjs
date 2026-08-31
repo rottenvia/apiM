@@ -484,6 +484,18 @@ check(
   "startEngine names the exact fix instead of running at 100% CPU"
 );
 check(
+  "the installed backend is read from the binary itself, not only the stamp",
+  /async function installedBackend\(/.test(engineSrc) &&
+    /ggml-.*cuda/.test(engineSrc) &&
+    /backendWrong/.test(engineSrc),
+  "an un-stamped CPU binary must not be trusted as CUDA on start"
+);
+check(
+  "Download reinstalls when the on-disk backend does not match the pick",
+  /onDiskBackend !== "cuda"/.test(engineSrc) &&
+    /Switching engine build/.test(engineSrc)
+);
+check(
   "a CUDA build missing its runtime refuses to start with an actionable error",
   /runtime libraries \(cudart/.test(engineSrc) &&
     /cudartPresent\(server\)/.test(engineSrc),
