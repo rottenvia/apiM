@@ -32,6 +32,8 @@ import {
   LLAMA_CPP_RELEASE,
   LLAMA_CPP_RELEASE_API,
   pickLlamaAsset,
+  pickCudartAsset,
+  needsCudart,
   sidecarArgs,
   sidecarLaunchId,
   SIDECAR_CTX,
@@ -438,7 +440,25 @@ export async function downloadEngine(
   const hasBinary = Boolean(await findServerBinary());
   // Re-fetch when the build changed (e.g. the user switched CUDA → Vulkan
   // after the GPU refused the other one), not only when nothing is there.
-  if (!hasBinary || installed !== asset.name) {
+  const needMain = !hasBinary || installed !== asset.name;
+  // The Windows CUDA build needs a SECOND archive (the CUDA runtime DLLs)
+  // placed next to llama-server, or ggml-cuda fails to load and the engine
+  // silently falls back to CPU. Re-fetch it too if it is missing, even when
+  // the main build is already installed — earlier installs never fetched it.
+  const cudartName = needsCudart(asset.name)
+    ? pickCudartAsset(
+        assets.map((a) => a.name),
+        asset.name
+      )
+    : null;
+  const cudartAsset = cudartName
+    ? assets.find((a) => a.name === cudartName)
+    : null;
+  const needCudart =
+    Boolean(cudartAsset) &&
+    (needMain || !(await cudartPresent(await findServerBinary())));
+
+  if (needMain) {
     if (installed && installed !== asset.name) {
       emit({
         type: "status",
@@ -474,7 +494,105 @@ export async function downloadEngine(
     await writeBuildStamp(asset.name);
   }
 
+  // CUDA runtime for the Windows CUDA build. ggml-cuda.dll loads these at
+  // startup; without them the plugin cannot initialise and the whole build
+  // runs on CPU — the "CUDA picked but 99% CPU / ~1% GPU" symptom.
+  if (cudartAsset && needCudart) {
+    emit({
+      type: "status",
+      message: "Downloading the CUDA runtime (~390 MB)…",
+    });
+    const rtArchive = engineArchivePath(cudartAsset.name);
+    await downloadToFile(
+      cudartAsset.browser_download_url,
+      rtArchive,
+      (completed, total) => {
+        emit({
+          type: "progress",
+          label: "CUDA",
+          completed,
+          total,
+          percent: downloadPercent(completed, total),
+        });
+      },
+      signal
+    );
+    emit({ type: "status", message: "Installing the CUDA runtime…" });
+    await installCudart(rtArchive, await findServerBinary());
+  }
+
   emit({ type: "done" });
+}
+
+/**
+ * Are the CUDA runtime DLLs installed next to the server?
+ *
+ * cublasLt64_*.dll is present in every shipped cudart archive and required by
+ * the CUDA backend, so its presence is the reliable signal that the runtime
+ * landed; checking only cudart64 missed partial/old extractions.
+ */
+async function cudartPresent(server: string | null): Promise<boolean> {
+  if (!server || process.platform !== "win32") return false;
+  const dir = path.dirname(server);
+  for (const dll of ["cublasLt64_12.dll", "cublasLt64_13.dll", "cudart64_12.dll"]) {
+    try {
+      await fs.access(path.join(dir, dll));
+      return true;
+    } catch {
+      /* try the next */
+    }
+  }
+  return false;
+}
+
+/**
+ * Unpack the cudart archive and copy its runtime DLLs beside llama-server.
+ *
+ * The archive nests files a directory or two deep, so the DLLs are found by
+ * walking the extraction folder rather than assuming a layout.
+ */
+async function installCudart(
+  archive: string,
+  server: string | null
+): Promise<void> {
+  if (!server) return;
+  const serverDir = path.dirname(server);
+  const staging = path.join(engineBinDir(), "__cudart_tmp");
+  await fs.rm(staging, { recursive: true, force: true }).catch(() => {});
+  await fs.mkdir(staging, { recursive: true });
+  try {
+    await extractArchive(archive, staging);
+    const dlls: string[] = [];
+    const collect = async (dir: string, depth: number): Promise<void> => {
+      if (depth > 8) return;
+      let entries;
+      try {
+        entries = await fs.readdir(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const e of entries) {
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) {
+          await collect(full, depth + 1);
+        } else if (/\.dll$/i.test(e.name)) {
+          dlls.push(full);
+        }
+      }
+    };
+    await collect(staging, 0);
+    for (const dll of dlls) {
+      const target = path.join(serverDir, path.basename(dll));
+      await fs.copyFile(dll, target).catch(() => {});
+    }
+    if (!(await cudartPresent(server))) {
+      throw new Error(
+        "The CUDA runtime extracted but its DLLs were not found in it."
+      );
+    }
+  } finally {
+    await fs.rm(staging, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
 let child: ChildProcess | null = null;
