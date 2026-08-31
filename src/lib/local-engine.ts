@@ -440,7 +440,22 @@ export async function downloadEngine(
   const hasBinary = Boolean(await findServerBinary());
   // Re-fetch when the build changed (e.g. the user switched CUDA → Vulkan
   // after the GPU refused the other one), not only when nothing is there.
-  const needMain = !hasBinary || installed !== asset.name;
+  const wantCuda = /-win-cuda-/.test(asset.name);
+  const wantVulkan = /-vulkan/.test(asset.name);
+  // Reinstall not only when the build changed or the binary is absent, but
+  // when the binary on disk is a different BACKEND than the one picked. An
+  // engine installed before build stamps exists is a CPU build even though
+  // no stamp says so, and trusting it left CUDA-selected machines on CPU.
+  const onDiskBackend = hasBinary ? await installedBackend(await findServerBinary()) : null;
+  const backendWrong =
+    wantCuda
+      ? onDiskBackend !== "cuda"
+      : wantVulkan
+        ? onDiskBackend !== "vulkan" && onDiskBackend !== "cuda"
+        : /-win-cpu-/.test(asset.name)
+          ? onDiskBackend === "cuda"
+          : false;
+  const needMain = !hasBinary || installed !== asset.name || backendWrong;
   // The Windows CUDA build needs a SECOND archive (the CUDA runtime DLLs)
   // placed next to llama-server, or ggml-cuda fails to load and the engine
   // silently falls back to CPU. Re-fetch it too if it is missing, even when
@@ -459,10 +474,14 @@ export async function downloadEngine(
     (needMain || !(await cudartPresent(await findServerBinary())));
 
   if (needMain) {
-    if (installed && installed !== asset.name) {
+    // Wipe whenever the new build differs from what is actually on disk —
+    // whether the stamp says so or not. Backing out a CPU extraction into
+    // the same folder otherwise leaves the old CPU llama-server and plugins
+    // next to the new files, and findServerBinary could return the wrong one.
+    if (installed !== asset.name || backendWrong) {
       emit({
         type: "status",
-        message: `Switching engine build (${installed} → ${asset.name})…`,
+        message: `Switching engine build (${installed ?? "CPU build without stamp"} → ${asset.name})…`,
       });
       rmSync(engineBinDir(), { recursive: true, force: true });
     }
@@ -543,6 +562,58 @@ async function cudartPresent(server: string | null): Promise<boolean> {
     }
   }
   return false;
+}
+
+/**
+ * Which GPU backend the INSTALLED binary actually carries, by looking for
+ * the shared plugin libraries llama.cpp loads on startup.
+ *
+ * A build stamp alone cannot answer this for engines installed before stamps
+ * existed: the binary on disk is the old auto-picked CPU build (which has no
+ * ggml-cuda library at all), so "CUDA" in the UI launched a server that had
+ * no CUDA loader and ran at 100% CPU / ~0% GPU. Scanning for the plugin names
+ * the binary directly next to, not what a file claims to be.
+ */
+type EngineBackend = "cuda" | "vulkan" | "cpu";
+
+async function installedBackend(
+  server: string | null
+): Promise<EngineBackend | null> {
+  if (!server) return null;
+  const root = engineBinDir();
+  const dlls: string[] = [];
+  const collect = async (current: string, depth: number): Promise<void> => {
+    if (depth > 8) return;
+    let entries;
+    try {
+      entries = await fs.readdir(current, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      const full = path.join(current, e.name);
+      if (e.isDirectory()) {
+        await collect(full, depth + 1);
+      } else if (/\.dll$/i.test(e.name)) {
+        dlls.push(e.name.toLowerCase());
+      } else if (
+        process.platform !== "win32" &&
+        /ggml-(cuda|vulkan)/i.test(e.name)
+      ) {
+        dlls.push(e.name.toLowerCase());
+      }
+    }
+  };
+  await collect(root, 0);
+  if (dlls.some((n) => /ggml-.*cuda/i.test(n))) return "cuda";
+  if (
+    dlls.some((n) => /ggml-.*vulkan/i.test(n)) ||
+    dlls.some((n) => /vulkan-1/i.test(n))
+  ) {
+    return "vulkan";
+  }
+  // The server exists but no GPU plugin was found beside it: CPU build.
+  return "cpu";
 }
 
 /**
@@ -1160,20 +1231,39 @@ export async function startEngine(): Promise<{ ok: boolean; error?: string }> {
    */
   if (process.platform === "win32") {
     const gpu = detectGpu();
-    const onCpuBuild = Boolean(installed && /-cpu-x64\.zip$/.test(installed));
-    const onCudaBuild = Boolean(installed && /-win-cuda-/.test(installed));
-    if (gpu === "nvidia" && onCpuBuild) {
+    const backend = await installedBackend(server ?? null);
+    const wantBackend =
+      spec.build === "cuda"
+        ? "cuda"
+        : spec.build === "vulkan"
+          ? "vulkan"
+          : gpu === "nvidia"
+            ? "cuda"
+            : gpu === "vulkan"
+              ? "vulkan"
+              : "cpu";
+    const onCpuBuild =
+      backend === "cpu" ||
+      /-cpu-x64\.zip$/.test(installed ?? "");
+    const onCudaBuild =
+      backend === "cuda" ||
+      /-win-cuda-/.test(installed ?? "");
+    if ((wantBackend === "cuda" || wantBackend === "vulkan") && onCpuBuild) {
       return {
         ok: false,
         error:
-          "This PC has an NVIDIA GPU but the installed engine is the CPU-only " +
-          "build, which is why Qwen runs at 100% CPU and ~0% GPU. Open Settings " +
-          "and click Download with the CUDA (NVIDIA) backend selected — it " +
-          "fetches the GPU engine (and the CUDA runtime it needs) and installs " +
-          "both before starting.",
+          wantBackend === "cuda"
+            ? "This PC has an NVIDIA GPU but the installed engine is the CPU-only " +
+              "build (it has no CUDA backend in it), which is why Qwen runs at " +
+              "100% CPU and ~0% GPU. Open Settings, select the CUDA (NVIDIA) " +
+              "backend and click Download — it replaces the engine with the GPU " +
+              "build and installs the CUDA runtime it needs, then Start."
+            : "The installed engine is the CPU-only build but a GPU backend is " +
+              "selected. Open Settings, select Vulkan and click Download to fetch " +
+              "the GPU engine.",
       };
     }
-    if (onCudaBuild && !(await cudartPresent(server))) {
+    if (onCudaBuild && !(await cudartPresent(server ?? null))) {
       return {
         ok: false,
         error:
