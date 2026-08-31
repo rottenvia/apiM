@@ -1139,14 +1139,49 @@ export async function startEngine(): Promise<{ ok: boolean; error?: string }> {
 
   // An explicit backend choice means a different binary than the one on
   // disk. macOS has one build (Metal is compiled in), so no mismatch there.
+  const installed = await readBuildStamp();
   if (spec.build && spec.build !== "auto" && process.platform !== "darwin") {
-    const installed = await readBuildStamp();
     if (installed && !installed.includes(spec.build)) {
       return {
         ok: false,
         error:
           `The installed engine is the ${installed} build, but ${spec.build} is ` +
           `selected. Click Download in Settings to fetch the ${spec.build} build.`,
+      };
+    }
+  }
+
+  /*
+   * GPU preflight. A 27B on CPU is useless (roughly a token every several
+   * seconds) and silently falling back was the reported "I picked CUDA but
+   * CPU is at 100% and GPU at 0%". Refuse to start on the CPU build when the
+   * machine has a GPU, and catch a CUDA build whose runtime DLLs were never
+   * fetched, so the failure names the fix instead of pretending it worked.
+   */
+  if (process.platform === "win32") {
+    const gpu = detectGpu();
+    const onCpuBuild = Boolean(installed && /-cpu-x64\.zip$/.test(installed));
+    const onCudaBuild = Boolean(installed && /-win-cuda-/.test(installed));
+    if (gpu === "nvidia" && onCpuBuild) {
+      return {
+        ok: false,
+        error:
+          "This PC has an NVIDIA GPU but the installed engine is the CPU-only " +
+          "build, which is why Qwen runs at 100% CPU and ~0% GPU. Open Settings " +
+          "and click Download with the CUDA (NVIDIA) backend selected — it " +
+          "fetches the GPU engine (and the CUDA runtime it needs) and installs " +
+          "both before starting.",
+      };
+    }
+    if (onCudaBuild && !(await cudartPresent(server))) {
+      return {
+        ok: false,
+        error:
+          "The CUDA engine is installed but its runtime libraries (cudart / " +
+          "cuBLAS) are missing, so ggml-cuda cannot load and the engine falls " +
+          "back to CPU. Open Settings and click Download again — it now also " +
+          "fetches the ~390 MB CUDA runtime archive and installs the DLLs " +
+          "beside llama-server.",
       };
     }
   }
