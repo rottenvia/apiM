@@ -450,6 +450,42 @@ check(
     gpu: "nvidia",
   }) === "llama-b10566-bin-win-cuda-12.4-x64.zip"
 );
+// The Windows CUDA build needs a SECOND archive (the CUDA runtime DLLs);
+// without it ggml-cuda fails to load and the engine silently runs on CPU —
+// the "CUDA picked but 99% CPU / ~1% GPU" report.
+const WIN_WITH_RUNTIME = [
+  "cudart-llama-bin-win-cuda-12.4-x64.zip",
+  "cudart-llama-bin-win-cuda-13.3-x64.zip",
+  ...WIN_ASSETS,
+];
+check(
+  "the CUDA build names its matching cudart runtime archive",
+  shared.pickCudartAsset(
+    WIN_WITH_RUNTIME,
+    "llama-b10566-bin-win-cuda-12.4-x64.zip"
+  ) === "cudart-llama-bin-win-cuda-12.4-x64.zip"
+);
+check(
+  "a 13.x CUDA build pairs with the 13.x runtime, not the 12.x one",
+  shared.pickCudartAsset(
+    WIN_WITH_RUNTIME,
+    "llama-b10566-bin-win-cuda-13.3-x64.zip"
+  ) === "cudart-llama-bin-win-cuda-13.3-x64.zip"
+);
+check(
+  "a CPU or Vulkan build needs no cudart archive",
+  shared.needsCudart("llama-b10566-bin-win-cpu-x64.zip") === false &&
+    shared.needsCudart("llama-b10566-bin-win-vulkan-x64.zip") === false &&
+    shared.pickCudartAsset(WIN_WITH_RUNTIME, null) === null
+);
+check(
+  "the installer fetches the cudart archive and copies its DLLs next to the server",
+  /pickCudartAsset\(/.test(engineSrc) &&
+    /installCudart\(/.test(engineSrc) &&
+    /cudartPresent\(/.test(engineSrc) &&
+    /\.dll/i.test(engineSrc)
+);
+
 check(
   "there is no CUDA ubuntu asset, so cuda on Linux lands on Vulkan",
   shared.pickLlamaAsset(WIN_ASSETS, {

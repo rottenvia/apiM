@@ -222,10 +222,10 @@ export function pickLlamaAsset(
   }
 
   if (platform === "win32") {
-    if (build === "cuda" && x64) return cudaWin() ?? vulkanWin() ?? cpuWin();
+    if (build === "cuda" && x64) return cudaWin();
     if (build === "vulkan" && x64) return vulkanWin() ?? cpuWin();
     if (build === "cpu" && x64) return cpuWin();
-    if (gpu === "nvidia" && x64) return cudaWin();
+    if (gpu === "nvidia" && x64) return cudaWin() ?? vulkanWin() ?? cpuWin();
     if (x64) return vulkanWin() ?? cpuWin();
     if (arm) return has(/llama-b\d+-bin-win-cpu-arm64\.zip$/);
   }
@@ -240,6 +240,40 @@ export function pickLlamaAsset(
   }
 
   return null;
+}
+
+/**
+ * The Windows CUDA build splits its dependencies into a SECOND archive.
+ *
+ * llama-server itself plus the ggml-cuda plugin ship in
+ * `llama-bXXXX-bin-win-cuda-12.4-x64.zip`; the CUDA runtime DLLs the plugin
+ * loads — cudart64, cublas64, cublasLt64 — ship in a separate
+ * `cudart-llama-bin-win-cuda-<ver>-x64.zip` (~390 MB). Without those DLLs
+ * next to the server, ggml-cuda fails to load, llama.cpp falls back to the
+ * CPU backend silently, and a picked CUDA build runs at 99% CPU / ~1% GPU.
+ * Returns the cudart asset that matches a chosen CUDA build, or null.
+ */
+export function pickCudartAsset(
+  assets: string[],
+  mainAsset: string | null
+): string | null {
+  if (!mainAsset) return null;
+  // Only the win-cuda build has a companion cudart archive.
+  const m = /win-cuda-(\d+\.\d+)-(x64|arm64)\.zip$/.exec(mainAsset);
+  if (!m) return null;
+  const [, ver, archSuffix] = m;
+  const names = assets.filter((n) => typeof n === "string" && n.length > 0);
+  const has = (re: RegExp) => names.find((n) => re.test(n)) ?? null;
+  // Prefer the exact version/arch, then any cudart for the same arch.
+  return (
+    has(new RegExp(`cudart-llama-bin-win-cuda-${ver.replace(".", "\\.")}-${archSuffix}\\.zip$`)) ??
+    has(new RegExp(`cudart-llama-bin-win-cuda-\\d+\\.\\d+-${archSuffix}\\.zip$`))
+  );
+}
+
+/** Whether a chosen build asset needs the separate cudart archive. */
+export function needsCudart(mainAsset: string | null): boolean {
+  return Boolean(mainAsset && /win-cuda-\d/.test(mainAsset));
 }
 
 /**
