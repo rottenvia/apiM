@@ -479,6 +479,17 @@ check(
     shared.pickCudartAsset(WIN_WITH_RUNTIME, null) === null
 );
 check(
+  "a GPU machine refuses to silently start the CPU-only build",
+  engineSrc.includes("CPU-only") && engineSrc.includes("-cpu-x64"),
+  "startEngine names the exact fix instead of running at 100% CPU"
+);
+check(
+  "a CUDA build missing its runtime refuses to start with an actionable error",
+  /runtime libraries \(cudart/.test(engineSrc) &&
+    /cudartPresent\(server\)/.test(engineSrc),
+  "the missing-cudart case that fell back to CPU is now caught before spawn"
+);
+check(
   "the installer fetches the cudart archive and copies its DLLs next to the server",
   /pickCudartAsset\(/.test(engineSrc) &&
     /installCudart\(/.test(engineSrc) &&
