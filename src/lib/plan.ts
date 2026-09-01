@@ -87,6 +87,45 @@ export const MAX_STEPS = 25;
 export class PlanError extends Error {}
 
 /**
+ * Phrasing that marks a "blocked" step as a refusal, not an obstacle.
+ *
+ * "blocked" is meant for things in the world that stop work — a missing key,
+ * a tool that will not install, a decision only the user can make. Some
+ * models instead use it to decline the task itself ("I can't help with
+ * that", "this isn't appropriate"), which then:
+ *   1. passes the evidence-length check (a full refusal sentence is long),
+ *   2. ends the run as if the work were genuinely stuck,
+ *   3. persists on disk, so the next message starts already "blocked".
+ *
+ * A real blocker names something outside the model's control; a refusal
+ * names the model's own unwillingness. Matching the refusal vocabulary is
+ * deliberately conservative — it catches the standard hedges, never a
+ * genuine blocker like "the build fails with error C1083".
+ */
+const REFUSAL_MARKERS = [
+  // First-person declines — the model's own unwillingness, not an obstacle.
+  // Anchored to "I" on purpose: "the build can't provide a symbol" is a real
+  // blocker, and matching it would send the agent chasing a refusal that is
+  // not there.
+  /\bI\s+(?:cannot|can'?t|won'?t|will\s+not|am\s+not\s+able\s+to)(?:\s+be\s+able\s+to)?\s+(?:help|assist|comply|do\b|create|write|generate|fulfill|fulfil)\b/,
+  /\bI'?m\s+unable\s+to\s+(?:help|assist|comply|create|write|generate|fulfill|fulfil)\b/,
+  /\bI\s+decline\b/,
+  /\bdecline\s+to\s+(?:help|assist|comply|create|write|generate|fulfill|fulfil)\b/,
+  // Rule-speak: a blocker names a tool's error, never a policy.
+  /\b(?:against|violates?)\s+(?:my|the|our|content|safety)\s+?(?:policy|policies|guidelines?|principles?)\b/,
+  /\b(?:my|the|our)\s+(?:policy|guidelines?|principles?)\s+(?:don'?t|do\s+not|prevent|prohibit)\b/,
+  /\bas\s+an\s+ai\b/i,
+  /\bi'?m\s+just\s+an?\s/i,
+  // Judgement words about the request itself ("not appropriate to generate").
+  /\b(?:not\s+)?(?:appropriate|suitable|advisable)\s+(?:to\s+|for\s+me\s+to\s+)(?:help|assist|create|write|generate|provide|fulfill|fulfil|continue|proceed|do)\b/,
+  /\bethical(?:ly)?\s+(?:cannot|can'?t|unable\s+to|concern|reason|issue|problem)\b/,
+];
+
+export function looksLikeRefusalBlocker(blocker: string): boolean {
+  return REFUSAL_MARKERS.some((re) => re.test(blocker));
+}
+
+/**
  * Shortest a goal or a step may be.
  *
  * "x" is not a goal and "done" is not a step. A one-word entry passes every
@@ -741,6 +780,27 @@ export function updatePlan(plan: Plan, updates: StepUpdate[]): Plan {
           `how you stop, so it has to be answerable by the user.`
       );
     }
+    /*
+     * "Blocked" is for obstacles, not refusals. If the blocker text says the
+     * task itself is off-limits rather than naming something in the way, the
+     * state is rejected outright — accepting it would end the run and persist
+     * the refusal to disk, locking every later message too. The work itself
+     * is legal creative/technical work on the user's own machine; a step you
+     * are unwilling to do is either done a different way or raised plainly
+     * in prose, not encoded as a stuck plan.
+     */
+    if (update.state === "blocked" && looksLikeRefusalBlocker(blocker)) {
+      throw new PlanError(
+        `Step ${update.id}'s blocker ("${blocker.slice(0, 120)}") is a ` +
+          `refusal, not an obstacle. "blocked" means something outside your ` +
+          `control is in the way — a failing command, a missing file, a ` +
+          `decision only the user can make. This is an ordinary creative or ` +
+          `technical task on the user's own machine: do the step instead. If ` +
+          `one approach is unsuitable, try another; if you genuinely need ` +
+          `input, use ask_user. Never mark a step blocked to decline the ` +
+          `work.`
+      );
+    }
   }
 
   const steps = plan.steps.map((step) => {
@@ -922,4 +982,34 @@ export async function writePlan(
  */
 export function planIsComplete(plan: Plan): boolean {
   return planProgress(plan).complete;
+}
+
+/**
+ * Does the plan carry any blocked steps?
+ */
+export function planHasBlocked(plan: Plan): boolean {
+  return plan.steps.some((s) => s.state === "blocked");
+}
+
+/**
+ * Return a copy with every blocked step reopened and its blocker cleared.
+ *
+ * A plan replayed at the start of a new user message must not start already
+ * "stuck": the blocked state meant the PREVIOUS reply gave up, and letting
+ * it stand means the new reply reads a plan whose end state is "refused"
+ * before it has done anything. The step text is kept (the work is still
+ * real), verified steps keep their evidence — only the block is lifted.
+ * Returns the same object when there is nothing to clear.
+ */
+export function reopenBlockedSteps(plan: Plan): Plan {
+  if (!planHasBlocked(plan)) return plan;
+  return {
+    ...plan,
+    steps: plan.steps.map((s) =>
+      s.state === "blocked"
+        ? { ...s, state: "todo" as StepState, blocker: undefined }
+        : s
+    ),
+    revision: plan.revision + 1,
+  };
 }

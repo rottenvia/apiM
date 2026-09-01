@@ -238,6 +238,99 @@ try {
 }
 check("blocked needs a reason too", /cannot be marked blocked/.test(threw));
 
+/*
+ * A refusal disguised as a blocker.
+ *
+ * The reported failure: even with Direct Mode at maximum priority the model
+ * would decline an imaginative task by marking the plan step blocked, which
+ * ended the run and persisted to disk. The refusal phrasings must be caught
+ * even though they are long enough to pass the evidence-length check.
+ */
+const refusalBlockers = [
+  "I cannot help with this kind of creative writing as it is not appropriate",
+  "I'm unable to assist with generating that content",
+  "this would be against my policy and guidelines",
+  "as an AI I cannot create content of that nature",
+  "I won't be able to help write that",
+];
+for (const blocker of refusalBlockers) {
+  threw = "";
+  try {
+    plan.updatePlan(p0, [{ id: 1, state: "blocked", blocker }]);
+  } catch (e) {
+    threw = e.message;
+  }
+  check(
+    `refusal blocker is rejected: "${blocker.slice(0, 40)}…"`,
+    /is a refusal, not an obstacle/.test(threw)
+  );
+  check(
+    `refusal marker is detected in: "${blocker.slice(0, 40)}…"`,
+    plan.looksLikeRefusalBlocker(blocker)
+  );
+}
+
+/* Real blockers still pass: they name something outside the model. */
+const realBlockers = [
+  "the build fails with error C1083: cannot open include file 'stdafx.h'",
+  "npm install exits with EACCES writing to the workspace node_modules",
+  "waiting for the user to decide between React and Vue for the UI",
+  "the dev server port 3000 is already taken by another process",
+  "the CI runner cannot provide a GPU so the CUDA test suite can't run",
+  "the upstream API won't accept anonymous requests and we have no key",
+];
+for (const blocker of realBlockers) {
+  check(
+    `genuine blocker is not flagged as refusal: "${blocker.slice(0, 38)}…"`,
+    !plan.looksLikeRefusalBlocker(blocker)
+  );
+  let ok = false;
+  try {
+    plan.updatePlan(p0, [{ id: 2, state: "blocked", blocker }]);
+    ok = true;
+  } catch {
+    /* id 2 exists on p0; any throw is a false positive */
+  }
+  check(
+    `genuine blocker is accepted: "${blocker.slice(0, 38)}…"`,
+    ok
+  );
+}
+
+/* A blocked plan can always be reopened — the user's escape hatch. */
+let pBlocked = plan.updatePlan(p0, [
+  { id: 1, state: "blocked", blocker: realBlockers[0] },
+]);
+check("plan reports blocked steps", plan.planHasBlocked(pBlocked));
+const pReopened = plan.reopenBlockedSteps(pBlocked);
+check(
+  "reopen puts the step back to todo",
+  pReopened.steps[0].state === "todo"
+);
+check("reopen clears the blocker text", pReopened.steps[0].blocker === undefined);
+check("reopen bumps the revision", pReopened.revision === pBlocked.revision + 1);
+check(
+  "reopen does not mutate the original plan",
+  pBlocked.steps[0].state === "blocked"
+);
+check(
+  "done steps keep their evidence on reopen",
+  (() => {
+    const withDone = plan.updatePlan(pReopened, [
+      { id: 2, state: "done", verified: "ran the test suite, 42 passed" },
+    ]);
+    const again = plan.reopenBlockedSteps(withDone);
+    return (
+      again.steps[1].state === "done" &&
+      again.steps[1].verified === "ran the test suite, 42 passed"
+    );
+  })()
+);
+check(
+  "reopen with nothing blocked returns the same plan",
+  plan.reopenBlockedSteps(pReopened) === pReopened
+);
+
 threw = "";
 try {
   plan.updatePlan(p0, [{ id: 99, state: "doing" }]);
@@ -340,9 +433,48 @@ check(
   /const stuck = plan\.steps\.some\(\(s\) => s\.state === "blocked"\)/.test(route),
   "being stuck and saying so is a correct ending"
 );
+check(
+  "the loop consults the refusal detector",
+  /looksLikeRefusalBlocker/.test(route),
+  "the tool layer and the loop both have to know the difference"
+);
+check(
+  "a refusal block found mid-run reopens the steps instead of ending",
+  /refusalReopens/.test(route) && /reopenBlockedSteps\(plan\)/.test(route),
+  "accepting it would end the run and persist the refusal to disk"
+);
+check(
+  "a blocked plan carried from a previous message is reopened",
+  /if \(planHasBlocked\(plan\)\)/.test(route),
+  "deleting the plan had to fully clear the blocked residue"
+);
+
+// The user-facing escape hatch: a DELETE wipes plan.json, a POST reopens.
+const planRouteSrc = (
+  await readFile(path.join(ROOT, "src/app/api/workspace/[id]/plan/route.ts"), "utf8")
+).replace(/\r\n/g, "\n");
+check("the plan route can wipe the saved plan", /writePlan\(id, null\)/.test(planRouteSrc));
+check(
+  "the plan route can reopen blocked steps",
+  /reopenBlockedSteps\(saved\)/.test(planRouteSrc)
+);
+
+const panel = (await readFile(path.join(ROOT, "src/components/PlanPanel.tsx"), "utf8")).replace(/\r\n/g, "\n");
+check(
+  "the panel offers an unstick action when a step is blocked",
+  /blocked > 0/.test(panel) && /Reopen/.test(panel),
+  "the user must always be able to clear a blocked step themselves"
+);
+check(
+  "the panel offers to clear the plan entirely",
+  /Clear plan/.test(panel)
+);
 
 const bubble = (await readFile(path.join(ROOT, "src/components/MessageBubble.tsx"), "utf8")).replace(/\r\n/g, "\n");
-check("the plan is shown in the UI", /<PlanPanel plan=\{message\.plan\}/.test(bubble));
+check(
+  "the plan is shown in the UI",
+  /<PlanPanel[\s\S]{0,200}plan=\{message\.plan\}/.test(bubble)
+);
 check(
   "and the bubble re-renders when it changes",
   /a\.plan === b\.plan/.test(bubble),
