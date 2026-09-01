@@ -469,7 +469,7 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
     function: {
       name: "update_plan",
       description:
-        "Mark steps as doing, done or blocked as you go. A step can only be marked done if you say how you checked it — the test you ran, the output you saw, the page you opened. If you have not checked it, it is not done.",
+        "Mark steps as doing, done or blocked as you go. A step can only be marked done if you say how you checked it — the test you ran, the output you saw, the page you opened. If you have not checked it, it is not done. \"blocked\" is ONLY for something outside your control stopping the work — a command that fails, a missing file, a decision only the user can make. It is never a way to decline the task: imaginative, creative and technical requests on the user's own machine are done, not blocked; if one approach is unsuitable, use another.",
       parameters: {
         type: "object",
         properties: {

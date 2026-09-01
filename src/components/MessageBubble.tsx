@@ -204,6 +204,10 @@ interface MessageBubbleProps {
   onDecideCommand?: (id: string, approved: boolean, remember: boolean) => void;
   /** Answers a question the model asked. */
   onAnswerQuestion?: (id: string, answer: string) => void;
+  /** Reopen blocked plan steps on disk. */
+  onUnblockPlan?: () => void;
+  /** Delete the saved plan on disk. */
+  onClearPlan?: () => void;
 }
 
 function MessageBubbleImpl({
@@ -220,6 +224,8 @@ function MessageBubbleImpl({
   onOpenWorkspaceFile,
   onDecideCommand,
   onAnswerQuestion,
+  onUnblockPlan,
+  onClearPlan,
 }: MessageBubbleProps) {
   /**
    * Whether this bubble was born as the live reply.
@@ -1344,7 +1350,11 @@ function MessageBubbleImpl({
                 make it something you find rather than something you see. */}
             {message.plan && (
               <div ref={planRef}>
-                <PlanPanel plan={message.plan} />
+                <PlanPanel
+                  plan={message.plan}
+                  onUnblock={onUnblockPlan}
+                  onClear={onClearPlan}
+                />
               </div>
             )}
 

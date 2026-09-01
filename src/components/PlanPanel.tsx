@@ -38,7 +38,17 @@ const MARK: Record<string, { symbol: string; className: string }> = {
   todo: { symbol: "·", className: "text-text-muted" },
 };
 
-export function PlanPanel({ plan }: { plan: PlanView }) {
+export function PlanPanel({
+  plan,
+  onUnblock,
+  onClear,
+}: {
+  plan: PlanView;
+  /** Reopen blocked steps and tell the agent to try again. */
+  onUnblock?: () => void;
+  /** Delete the saved plan entirely. */
+  onClear?: () => void;
+}) {
   const done = plan.steps.filter((s) => s.state === "done").length;
   const blocked = plan.steps.filter((s) => s.state === "blocked").length;
   const total = plan.steps.length;
@@ -146,6 +156,39 @@ export function PlanPanel({ plan }: { plan: PlanView }) {
             );
           })}
         </ul>
+      )}
+
+      {/*
+       * A plan the user cannot act on is a lock, not a status. When a step
+       * is blocked — most often a refusal encoded as an obstacle — the user
+       * gets two exits: reopen the blocked steps and let the reply try
+       * again, or delete the plan outright. Both hit the same plan store on
+       * disk the agent reads, so the blocked state cannot come back on the
+       * next message. Shown even when collapsed: the count is red, and the
+       * whole reason it exists is the stuck case.
+       */}
+      {blocked > 0 && (onUnblock || onClear) && (
+        <div className="flex items-center gap-2 border-t border-border px-3 py-2">
+          {onUnblock && (
+            <button
+              onClick={onUnblock}
+              className="rounded-lg bg-accent/90 px-2.5 py-1 text-[11px] font-medium text-white transition-colors hover:bg-accent"
+            >
+              Reopen &amp; retry
+            </button>
+          )}
+          {onClear && (
+            <button
+              onClick={onClear}
+              className="rounded-lg border border-border px-2.5 py-1 text-[11px] font-medium text-text-secondary transition-colors hover:bg-bg-hover/60"
+            >
+              Clear plan
+            </button>
+          )}
+          <span className="ml-auto text-[11px] text-text-muted">
+            Blocked steps can always be cleared
+          </span>
+        </div>
       )}
     </div>
   );

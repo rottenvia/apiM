@@ -125,6 +125,8 @@ interface ChatAreaProps {
   onOpenWorkspace: (path?: string) => void;
   onDecideCommand: (id: string, approved: boolean, remember: boolean) => void;
   onAnswerQuestion: (id: string, answer: string) => void;
+  /** User cleared or unblocked the agent's plan from the plan panel. */
+  onPlanAction?: (action: "unblock" | "clear") => void;
   /** Current workspace id, for the background-process dock. */
   workspaceId: string | null;
   onProcessesChanged?: () => void;
@@ -173,6 +175,7 @@ export function ChatArea({
   onOpenWorkspace,
   onDecideCommand,
   onAnswerQuestion,
+  onPlanAction,
   workspaceId,
   onProcessesChanged,
   sidePanelOpen,
@@ -1386,6 +1389,8 @@ export function ChatArea({
                 onOpenWorkspaceFile={openWorkspaceFile}
                 onDecideCommand={onDecideCommand}
                 onAnswerQuestion={onAnswerQuestion}
+                onUnblockPlan={onPlanAction ? () => onPlanAction("unblock") : undefined}
+                onClearPlan={onPlanAction ? () => onPlanAction("clear") : undefined}
               />
 
               {/* Thinking dots only until the bubble has something to show.
@@ -1875,6 +1880,8 @@ const MessageList = memo(function MessageList({
   onOpenWorkspaceFile,
   onDecideCommand,
   onAnswerQuestion,
+  onUnblockPlan,
+  onClearPlan,
 }: {
   messages: Message[];
   onRegenerate: (assistantId: string) => void;
@@ -1885,6 +1892,8 @@ const MessageList = memo(function MessageList({
   onOpenWorkspaceFile: (path: string) => void;
   onDecideCommand: (id: string, approved: boolean, remember: boolean) => void;
   onAnswerQuestion: (id: string, answer: string) => void;
+  onUnblockPlan?: () => void;
+  onClearPlan?: () => void;
   searchQuery?: string;
   searchWholeWord: boolean;
   searchIndex: ChatSearchIndex;
@@ -1984,6 +1993,8 @@ const MessageList = memo(function MessageList({
             onOpenWorkspaceFile={onOpenWorkspaceFile}
             onDecideCommand={onDecideCommand}
             onAnswerQuestion={onAnswerQuestion}
+            onUnblockPlan={onUnblockPlan}
+            onClearPlan={onClearPlan}
           />
         );
       })}
