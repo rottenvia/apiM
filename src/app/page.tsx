@@ -1023,6 +1023,55 @@ export default function Home() {
   );
 
   /**
+   * User acted on the plan panel.
+   *
+   * "unblock" reopens blocked steps on disk (the agent reads it next reply);
+   * "clear" deletes plan.json outright. Both reflect immediately in the UI —
+   * a stuck red step that stays on screen after the click would look like
+   * the action did nothing.
+   */
+  const planAction = useCallback(
+    async (action: "unblock" | "clear") => {
+      const id = workspaceIdRef.current;
+      if (!id) return;
+
+      writeMessages(id, (prev) =>
+        prev.map((m) => {
+          if (!m.plan) return m;
+          if (action === "clear") return { ...m, plan: undefined };
+          return {
+            ...m,
+            plan: {
+              ...m.plan,
+              steps: m.plan.steps.map((s) =>
+                s.state === "blocked"
+                  ? { ...s, state: "todo", blocker: undefined }
+                  : s
+              ),
+            },
+          };
+        })
+      );
+
+      try {
+        if (action === "clear") {
+          await fetch(`/api/workspace/${id}/plan`, { method: "DELETE" });
+        } else {
+          await fetch(`/api/workspace/${id}/plan`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "unblock" }),
+          });
+        }
+      } catch {
+        /* The UI already moved; a disk failure just means the next reply
+           re-sees the old plan — recoverable, not worth an error toast. */
+      }
+    },
+    [writeMessages]
+  );
+
+  /**
    * Stable identity so it can be passed down to memoized message bubbles
    * without giving them a new prop on every render.
    */
@@ -2935,6 +2984,7 @@ export default function Home() {
         onOpenWorkspace={openWorkspace}
         onDecideCommand={decideCommand}
         onAnswerQuestion={answerQuestion}
+        onPlanAction={planAction}
         workspaceId={workspaceId}
         onProcessesChanged={() => void refreshWorkspaceFiles()}
         sidePanelOpen={sidePanelOpen}
