@@ -665,7 +665,13 @@ check(
 );
 check(
   "the body reader honours Stop",
-  /readChunk\(reader, runSignal\)/.test(route)
+  /readWithTimeout\(\s*reader,[\s\S]{0,120}?runSignal\s*\)/.test(route),
+  "reader.read() ignores abort; the read must race runSignal so Stop fires"
+);
+check(
+  "a silent stream mid-reply cannot hang forever",
+  /STREAM_IDLE_MS/.test(route),
+  "twenty minutes of thinking then a frozen UI is a dead connection, not a deep think"
 );
 check(
   "the agent loop has a hard round cap",

@@ -394,11 +394,34 @@ check("update_plan is offered", names.includes("update_plan"));
 
 const { readFile } = await import("node:fs/promises");
 const route = (await readFile(path.join(ROOT, "src/app/api/chat/route.ts"), "utf8")).replace(/\r\n/g, "\n");
+const toolsSrc = await readFile(path.join(ROOT, "src/lib/tools.ts"), "utf8");
+check(
+  "the make_plan tool says to explore first, not call it first",
+  /Do NOT call this first: explore first/.test(toolsSrc)
+);
+check(
+  "a stream that falls silent mid-reply is treated as a dead connection",
+  /STREAM_IDLE_MS/.test(route) && /idleTimedOut/.test(route),
+  "the model thinking for twenty minutes then hanging froze with no error"
+);
 
 check(
   "the system prompt tells the model to plan",
   /call make_plan/.test(route),
   "a tool the model never reaches for is not a feature"
+);
+check(
+  "planning comes after understanding, not before anything",
+  /first read the files and explore enough to understand the task, then call make_plan/.test(
+    route
+  ),
+  "planning before you know the task burns a round on a guessed plan"
+);
+check(
+  "the plan can be replaced at runtime when work changes it",
+  /call make_plan again immediately to replace it/.test(route) &&
+    /Call it again any time the situation changes mid-run/.test(toolsSrc),
+  "a dead approach or wrong assumption should re-plan, not be fought"
 );
 check(
   "make_plan coerces messy arguments instead of refusing them",

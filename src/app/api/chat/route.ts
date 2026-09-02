@@ -104,7 +104,6 @@ import {
   fetchWithRetry,
   isTimeoutFailure,
   OPENCODE_RETRY,
-  readChunk,
   readWithTimeout,
   SERVER_SIDE_STATUS,
   sleep,
@@ -1097,7 +1096,7 @@ export async function POST(req: NextRequest) {
               modelHasOpenToolLimits(model)
                 ? " This model has no per-call tool ceilings: read_file returns the whole file, read_files / write_files / edit_files accept as many items as you send, search_files returns every match, and fetch_url returns the full page. Work in batches, not one item per call. Reading ten files is ONE read_files call — its paths accept globs, so \"src/lib/*.ts\" reads that whole directory at once — and changing ten files is ONE edit_files call. A round is a round whether it carries one job or thirty, and a reply that spends them one file at a time runs out of rounds with the task half done."
                 : ""
-            }\n\nYou can also run code with run_command. After writing something runnable, run it and check the output rather than assuming it works. If it fails, read the error, fix the file, and run it again. Each command needs the user's approval, so keep them few and purposeful, and say briefly why in the reason field. There is no shell. run_command waits for the program to finish, so use it only for things that exit — scripts, tests, installs. You can install packages: pip install and npm install both work and go into this workspace, not the user's system, so install what you need rather than rewriting code to avoid a dependency. For anything that keeps running, such as a dev server or a watcher, use start_process instead: it returns straight away, and you can read its output with read_process and stop it with stop_process. Always stop what you started once you are done with it. Before anything that takes more than two or three actions, call make_plan: write down what finished looks like and the steps to get there, including how you will CHECK each one. On a long task your own reasoning from twenty rounds ago is gone, so without a written plan you will forget requirements from the first message and stop early because the work so far looks finished. When you work something out that a later turn would need - why an approach is dead, what a function actually does, which build or file is correct and why, an offset or value you verified, a command's exact error and what fixed it - call note_finding IMMEDIATELY, before continuing. Those findings are listed to you every turn and survive compaction, so you never have to re-read a file or re-run a command to remember it. Treat the findings list as your working memory: at the START of every turn, before doing anything, read the active findings and use them. When you find a finding is wrong or superseded, call note_finding with status='disproved' and the corrected claim so the list stays accurate and does not fill with stale notes. Do not record trivialities; one specific, evidence-backed line per finding. Keep it current with update_plan — a step is only done when you can say how you verified it.
+            }\n\nYou can also run code with run_command. After writing something runnable, run it and check the output rather than assuming it works. If it fails, read the error, fix the file, and run it again. Each command needs the user's approval, so keep them few and purposeful, and say briefly why in the reason field. There is no shell. run_command waits for the program to finish, so use it only for things that exit — scripts, tests, installs. You can install packages: pip install and npm install both work and go into this workspace, not the user's system, so install what you need rather than rewriting code to avoid a dependency. For anything that keeps running, such as a dev server or a watcher, use start_process instead: it returns straight away, and you can read its output with read_process and stop it with stop_process. Always stop what you started once you are done with it. For anything that takes more than two or three actions, first read the files and explore enough to understand the task, then call make_plan: write down what finished looks like and the steps to get there, including how you will CHECK each one. The plan is not a first-move ritual — a plan made before you know what you are building is noise. It is also not a contract: when work teaches you something the plan did not know — a dead approach, a wrong assumption, a simpler path, a requirement you now understand better — call make_plan again immediately to replace it with the real path. On a long task your own reasoning from twenty rounds ago is gone, so without a written plan you will forget requirements from the first message and stop early because the work so far looks finished. When you work something out that a later turn would need - why an approach is dead, what a function actually does, which build or file is correct and why, an offset or value you verified, a command's exact error and what fixed it - call note_finding IMMEDIATELY, before continuing. Those findings are listed to you every turn and survive compaction, so you never have to re-read a file or re-run a command to remember it. Treat the findings list as your working memory: at the START of every turn, before doing anything, read the active findings and use them. When you find a finding is wrong or superseded, call note_finding with status='disproved' and the corrected claim so the list stays accurate and does not fill with stale notes. Do not record trivialities; one specific, evidence-backed line per finding. Keep it current with update_plan — a step is only done when you can say how you verified it.
 
 Work to the end. Do not hand back a half-finished task with a summary that reads as if it is complete: if something cannot be done, say so plainly and say why. Check your own work before claiming it works — run the tests, call the endpoint, open the page. To compile or build anything, call build_project instead of typing msbuild/cmake/dotnet/cargo yourself: it finds the installed Visual Studio/MSBuild/compiler automatically (including vswhere), restores packages, builds Release x64 by default, and hands you the compiler errors so you can fix them and rebuild.
 
@@ -2432,6 +2431,22 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           const streamStarted = Date.now();
           let gotUpstreamSignal = false;
           let firstTokenTimedOut = false;
+          /*
+           * Idle watchdog AFTER the first byte.
+           *
+           * The first-token watchdog above only arms before anything arrives.
+           * Once tokens are flowing, reader.read() would otherwise wait
+           * forever: a host that accepts the connection, streams a little
+           * (a long reasoning think is the common case) and then goes silent
+           * — dropped pool connection, half-closed socket on their side —
+           * leaves the reply frozen with no error and no Stop recovery, the
+           * "it thought for twenty minutes and then hung" report. A normal
+           * provider that is actually generating sends SSE keep-alive /
+           * reasoning tokens inside this window; five minutes of total
+           * silence is a dead connection, not a deep think. On fire we
+           * checkpoint and surface a resumable timeout error instead.
+           */
+          const STREAM_IDLE_MS = 5 * 60_000;
           const markUpstream = () => {
             if (gotUpstreamSignal) return;
             gotUpstreamSignal = true;
@@ -2512,6 +2527,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           };
 
           let streamTimedOut = false;
+          let idleTimedOut = false;
           try {
           while (true) {
             // The client vanished (tab closed, navigation, network drop). Stop
@@ -2524,18 +2540,29 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               return;
             }
 
-            const remaining = watchFirstToken && !gotUpstreamSignal
-              ? OX_FIRST_TOKEN_MS - (Date.now() - streamStarted)
-              : 0;
-            const chunkRead =
-              watchFirstToken && !gotUpstreamSignal
-                ? await readWithTimeout(
-                    reader,
-                    Math.max(1, remaining),
-                    runSignal
-                  )
-                : { timedOut: false as const, ...(await readChunk(reader, runSignal)) };
+            // Before the first signal: Ox gets its short overall budget
+            // (OX_FIRST_TOKEN_MS). After: every individual read gets the idle
+            // budget, so a stream that falls silent mid-reply — five minutes
+            // with zero bytes — is a dead connection, not a deep think.
+            const beforeFirst = watchFirstToken && !gotUpstreamSignal;
+            const readMs = beforeFirst
+              ? Math.max(1, OX_FIRST_TOKEN_MS - (Date.now() - streamStarted))
+              : STREAM_IDLE_MS;
+            const chunkRead = await readWithTimeout(
+              reader,
+              readMs,
+              runSignal
+            );
             if (chunkRead.timedOut) {
+              if (!beforeFirst) {
+                // Stream died mid-reply after producing output. Not the same
+                // as "host never answered": work is in-flight, so checkpoint
+                // and surface the resumable timeout below.
+                idleTimedOut = true;
+                streamTimedOut = true;
+                await reader.cancel().catch(() => {});
+                break;
+              }
               firstTokenTimedOut = true;
               await reader.cancel().catch(() => {});
               break;
@@ -2712,7 +2739,11 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             // work checkpointed, the reply continues itself.
             send({
               type: "error",
-              error: "The operation was aborted due to timeout",
+              error: idleTimedOut
+                ? `The model's connection went silent for over five minutes ` +
+                  `mid-reply — their server dropped the stream. Work so far ` +
+                  `is saved; Resume continues it.`
+                : "The operation was aborted due to timeout",
               autoResume: Boolean(
                 assistantContent || toolEvents.length || reasoningContent
               ),
