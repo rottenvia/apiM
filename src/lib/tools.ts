@@ -445,7 +445,7 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
     function: {
       name: "make_plan",
       description:
-        "Write down the goal and the steps before starting anything that will take more than two or three actions. This is not paperwork: on a long task your own reasoning from twenty rounds ago is gone, and without a plan you will forget requirements from the first message and stop early because the work so far looks finished. Include verification steps — 'run the tests', 'open the page and check it renders' — not just the building. steps MUST be an array of sentences (not one numbered string, not labels like 'Search'). Replaces any existing plan.",
+        "Plan any task that will take more than two or three actions. Do NOT call this first: explore first — read the relevant files, run the search, look at the code — so the plan reflects what is actually there rather than a guess; planning before you understand the task wastes a round and is usually wrong. Call it once you know what finished looks like, with the goal and the steps to get there, including how you will CHECK each one. This is not paperwork: on a long task your reasoning from twenty rounds ago is gone, and without a plan you will forget requirements from the first message and stop early because the work so far looks finished. Call it again any time the situation changes mid-run — a dead approach, a wrong assumption, a better path you found after starting: it replaces the plan with the real one, keeping completed work. steps MUST be an array of sentences (not one numbered string, not labels like 'Search').",
       parameters: {
         type: "object",
         properties: {
