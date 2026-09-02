@@ -495,6 +495,16 @@ check(
 
 const bubble = (await readFile(path.join(ROOT, "src/components/MessageBubble.tsx"), "utf8")).replace(/\r\n/g, "\n");
 check(
+  "the dead air between tool rounds is not left silent in the UI",
+  /Reading the results and deciding the next step/.test(bubble),
+  "after the last tool result, the host reads results back and prefills — tens of seconds with nothing typing"
+);
+check(
+  "the gap indicator only appears when the stream is idle",
+  /streamIdle/.test(bubble),
+  "it must vanish the instant new reasoning or prose streams in"
+);
+check(
   "the plan is shown in the UI",
   /<PlanPanel[\s\S]{0,200}plan=\{message\.plan\}/.test(bubble)
 );

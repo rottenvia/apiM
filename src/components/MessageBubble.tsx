@@ -322,6 +322,31 @@ function MessageBubbleImpl({
     c: number;
     last: "reasoning" | "content" | null;
   } | null>(null);
+  /*
+   * When the most recent text arrived. The inter-round gap — the host
+   * reading tool results back, then prefilling — has no events at all, so
+   * without this the bubble can only guess from "has it EVER streamed".
+   * This state flips false ~1.5s after the last token, which is what the
+   * "reading results" indicator below keys off. The interval runs only on
+   * live bubbles and costs one render a second while streaming.
+   */
+  const [streamIdle, setStreamIdle] = useState(false);
+  const lastArrivalRef = useRef(Date.now());
+  useEffect(() => {
+    lastArrivalRef.current = Date.now();
+    setStreamIdle(false);
+  }, [message.reasoningContent, message.content]);
+  useEffect(() => {
+    if (!message.isStreaming) {
+      setStreamIdle(false);
+      return;
+    }
+    const t = setInterval(() => {
+      setStreamIdle(Date.now() - lastArrivalRef.current > 1500);
+    }, 1000);
+    return () => clearInterval(t);
+  }, [message.isStreaming]);
+
   if (arriveRef.current === null) {
     // First render: seed with what is already here. A resumed reply that
     // already carries prose is mid-answer (the reasoning had its moment), so
@@ -1343,6 +1368,34 @@ function MessageBubbleImpl({
                   events={message.toolEvents}
                   onOpenFile={onOpenWorkspaceFile}
                 />
+              )}
+
+            {/* Between tool rounds.
+
+                After the last tool result lands, the host still has to read
+                every tool result back and prefill the next round. On a long
+                context that is the slowest stretch of the whole reply — tens
+                of seconds where nothing types, every tool row shows its green
+                check, and the reasoning panel has gone quiet. It looks done;
+                it is the opposite of done. This row is only that gap: it
+                appears once the tool work is finished and vanishes the moment
+                any new reasoning or prose streams in. Shown in both the flat
+                and timeline layouts (the comment block above the plan is the
+                one both branches render before). Purely presentational —
+                zero server work, nothing about the run changes. */}
+            {message.isStreaming &&
+              message.toolEvents &&
+              message.toolEvents.length > 0 &&
+              message.toolEvents.every((e) => e.ok !== undefined) &&
+              streamIdle && (
+                <div className="mb-2.5 flex items-center gap-2 text-[13px] text-text-secondary">
+                  <span className="text-accent-light">
+                    <Dots size={4} />
+                  </span>
+                  <span className="animate-thinking">
+                    Reading the results and deciding the next step
+                  </span>
+                </div>
               )}
 
             {/* The plan sits above the reply: it is the frame the rest of the
