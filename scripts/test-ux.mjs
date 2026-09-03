@@ -139,13 +139,13 @@ console.log('\n3. "web seems like useless feature"');
  * key is set, while the prompt promised it unconditionally.
  */
 check(
-  "the prompt only promises web_search when a key exists",
-  /\$\{canSearch \? "When you hit something you do not know/.test(route),
+  "the prompt only promises web_search when the toggle is on and a key exists",
+  /\$\{webSearchMode !== "off" && canSearch \? "When you hit something you do not know/.test(route),
   "otherwise the model is told to use a tool it cannot see"
 );
 check(
   "and says plainly when there is none",
-  /There is no web_search in this workspace/.test(route)
+  /There is no web_search tool available in this reply/.test(route)
 );
 check(
   "it tells the model to admit it rather than guess",

@@ -429,19 +429,18 @@ const readSrc = (rel) => rf(path.join(ROOT, rel), "utf8").replace(/\r\n/g, "\n")
 const searchSrc = readSrc("src/lib/smart-search.ts");
 const routeSrc2 = readSrc("src/app/api/chat/route.ts");
 
+// The pre-agent "should I search?" judge is gone — search is now the agent's
+// own web_search tool, decided in-context where the plugin block already
+// applies. decideSearch remains exported for callers that want it, but the
+// chat route must not spend a model round on it before the agent runs.
 check(
-  "decideSearch accepts the plugin block",
-  /standingOrders\?: string/.test(searchSrc),
-  "it is a separate model call with its own prompt — plugins were invisible to it"
+  "the route no longer runs a separate search judge",
+  !/decideSearch\(/.test(routeSrc2),
+  "that judge cost a Flash round on every message and searched before the agent had read anything"
 );
 check(
-  "the route passes it in",
-  /runSignal,[\s\S]{0,400}pluginDirectives/.test(routeSrc2),
-  "decideSearch still receives the plugin block; a planner arg may follow"
-);
-check(
-  "the judge is told the orders apply to this decision",
-  /They apply to this decision too/.test(searchSrc)
+  "the web search tool is gated on the toggle, not pre-judged",
+  /webSearchMode !== "off" && Boolean\(tavilyApiKey \|\| exaApiKey\)/.test(routeSrc2)
 );
 check(
   "including whether to ask a clarifying question",
