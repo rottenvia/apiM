@@ -1842,6 +1842,22 @@ export interface ToolResult {
    * else's OCR of it.
    */
   image?: { path: string; dataUrl: string };
+  /**
+   * Structured search data, only from web_search.
+   *
+   * Search used to run BEFORE the agent (a separate judge call decided
+   * whether to, then the results were injected into the first prompt). The
+   * agent now searches itself with this same tool, so the citation chips and
+   * "used the web" marker that the old pre-search fed have to come from the
+   * tool result instead.
+   */
+  search?: {
+    results: { title: string; url: string; domain: string }[];
+    queries: string[];
+    searchesPerformed: number;
+    cacheHits: number;
+    estimatedUsd: number;
+  };
 }
 
 function str(args: Record<string, unknown>, key: string): string {
@@ -3785,6 +3801,19 @@ export async function runTool(
             `Cite the URLs you use. Call fetch_url on one for the full page.` +
             `\n[via ${ran}${errs}]`,
           summary: `Searched via ${ran}: ${query.slice(0, 35)}`,
+          // Feeds the citation chips and the "used the web" marker, which
+          // previously came from the pre-agent search that no longer exists.
+          search: {
+            results: found.results.map((r) => ({
+              title: r.title,
+              url: r.url,
+              domain: r.domain,
+            })),
+            queries: found.queries,
+            searchesPerformed: found.searchesPerformed,
+            cacheHits: found.cacheHits,
+            estimatedUsd: found.estimatedUsd,
+          },
         };
       }
 

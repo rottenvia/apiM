@@ -261,6 +261,14 @@ type StreamEvent =
       summary: string;
       changedPath?: string;
     }
+  | {
+      type: "web_search";
+      results: { title: string; url: string; domain: string }[];
+      queries: string[];
+      searchesPerformed: number;
+      cacheHits: number;
+      usd: number;
+    }
   | { type: "content"; delta: string }
   | {
       type: "done";
@@ -1607,10 +1615,9 @@ export default function Home() {
           : [...base, userMsg, assistantMsg];
       });
       setIsLoading(requestConversationId, true);
-      setStatusStage(
-        requestConversationId,
-        webSearchMode === "off" ? "thinking" : "deciding"
-      );
+      // Web search is now an agent tool, decided in-context: there is no
+      // separate "checking if I need the web" phase before the reply.
+      setStatusStage(requestConversationId, "thinking");
       setLiveRetry(runConvId ?? requestConversationId, null);
 
       /*
@@ -2180,6 +2187,31 @@ export default function Home() {
                         }
                       : m
                   )
+                );
+                break;
+              }
+
+              case "web_search": {
+                // The agent searched itself (there is no longer a pre-agent
+                // search). Accumulate onto the live reply so the citation
+                // chips and "used the web" marker still appear, just like
+                // they did for the old injected search.
+                writeMessages(runConvId ?? requestConversationId, (prev) =>
+                  prev.map((m) => {
+                    if (m.id !== streamingId) return m;
+                    const oldResults = m.searchResults ?? [];
+                    const oldQueries = m.searchQueries ?? [];
+                    const byUrl = new Map(oldResults.map((r) => [r.url, r]));
+                    for (const r of evt.results) if (!byUrl.has(r.url)) byUrl.set(r.url, r);
+                    return {
+                      ...m,
+                      webSearchUsed: true,
+                      searchResults: Array.from(byUrl.values()),
+                      searchQueries: [...oldQueries, ...evt.queries.filter((q) => !oldQueries.includes(q))],
+                      searchesPerformed:
+                        (m.searchesPerformed ?? 0) + evt.searchesPerformed,
+                    };
+                  })
                 );
                 break;
               }

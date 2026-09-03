@@ -352,10 +352,10 @@ check(
 );
 check(
   "and the route hides it from the model entirely",
-  /t\.function\.name === "web_search"\)\s*\n?\s*return Boolean\(tavilyApiKey \|\| exaApiKey\)/.test(
+  /webSearchMode !== "off" && Boolean\(tavilyApiKey \|\| exaApiKey\)/.test(
     route
   ),
-  "withheld only when NEITHER provider has a key"
+  "withheld when Web is off OR when NEITHER provider has a key"
 );
 
 // write_files
@@ -607,14 +607,22 @@ check(
 );
 
 const routeSrc3 = readSourceSync(path.join(ROOT, "src/app/api/chat/route.ts"));
+// Search failures are now reported by the web_search TOOL (there is no
+// pre-agent automatic search anymore); the message still must reach the
+// model rather than only the server console.
 check(
-  "the automatic search path also tells the model",
-  /<web_search_failed>/.test(routeSrc3),
-  "it was logged to the server console and nowhere the model could see"
+  "the search failure is told to the model via the tool result",
+  /Search FAILED/.test(toolsSrc3),
+  "it used to be logged to the server console and nowhere the model could see"
 );
 check(
   "and says it is not the same as finding nothing",
-  /this is not the same as/.test(routeSrc3)
+  /this is not .?no results?|not the same as/i.test(toolsSrc3)
+);
+check(
+  "there is no pre-agent search judge anymore",
+  !/decideSearch\(/.test(routeSrc3),
+  "the Flash 'should I search?' judge cost a model round before the agent ran"
 );
 
 /*
@@ -726,12 +734,12 @@ check(
 );
 
 check(
-  "either key enables the web_search tool",
-  /return Boolean\(tavilyApiKey \|\| exaApiKey\)/.test(routeSrc3),
-  "it was withheld unless Tavily specifically was set"
+  "either key enables the web_search tool when the Web toggle is on",
+  /webSearchMode !== "off" && Boolean\(tavilyApiKey \|\| exaApiKey\)/.test(routeSrc3),
+  "off must withhold the tool; either key must offer it"
 );
 check(
-  "and either key enables the automatic search",
+  "and the canSearch gate respects the toggle and either key",
   /\(tavilyApiKey \|\| exaApiKey\) && webSearchMode !== "off"/.test(routeSrc3)
 );
 

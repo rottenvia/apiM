@@ -9,13 +9,7 @@ import {
   drainBtwNotes,
 } from "@/lib/store";
 import type { StoredMessage } from "@/lib/store";
-import {
-  smartSearch,
-  autoThinkingEffort,
-  decideSearch,
-  SearchProviderError,
-} from "@/lib/smart-search";
-import type { SmartSearchContext } from "@/lib/smart-search";
+import { autoThinkingEffort } from "@/lib/smart-search";
 import {
   ALL_PLUGINS,
   BASE_PROMPT,
@@ -428,6 +422,14 @@ type StreamEvent =
       ok: boolean;
       summary: string;
       changedPath?: string;
+    }
+  | {
+      type: "web_search";
+      results: { title: string; url: string; domain: string }[];
+      queries: string[];
+      searchesPerformed: number;
+      cacheHits: number;
+      usd: number;
     }
   | { type: "content"; delta: string }
   | {
@@ -926,102 +928,39 @@ export async function POST(req: NextRequest) {
         }
 
         // ---------------- Web search ----------------
-        let searchContext: SmartSearchContext | null = null;
-        let searchSummary = "";
+        /*
+         * No pre-agent judge, no pre-search.
+         *
+         * This used to spend a whole extra model call (a Flash "should I
+         * search?" judge) before the agent did anything, then run the search
+         * up front and inject the results into the first prompt. Two
+         * problems: the judge was a wasted round-trip on every message
+         * ("Checking if I need the web…" latency even for code questions),
+         * and it searched before the agent had read anything, so the query
+         * was a guess about what the task needed.
+         *
+         * The web_search tool is already one of the agent's tools. The Web
+         * toggle now only decides whether that tool exists: on → the agent
+         * calls web_search itself, once it knows what it is looking for; off
+         * → the tool is withheld entirely. Results flow back through the
+         * tool and are collected here for the citation chips and cost total.
+         */
+        const searchAccum = {
+          results: [] as { title: string; url: string; domain: string }[],
+          queries: [] as string[],
+          searchesPerformed: 0,
+          cacheHits: 0,
+          estimatedUsd: 0,
+          used: false,
+        };
 
-        const recentContext = scopedHistory
-          .slice(-4)
-          .map((m) => `${m.role}: ${m.content || "(attachment)"}`)
-          .join("\n");
-
-        // Decide whether this turn needs the web. In "auto" the model itself
-        // judges (one cheap Flash call, thinking off) instead of a keyword
-        // guess, so ordinary coding questions skip the search entirely.
-        let doSearch = false;
-        let searchReason = "";
-        let clarifyHint = "";
-        if (canSearch) {
-          if (webSearchMode === "always") {
-            doSearch = true;
-          } else {
-            send({ type: "status", stage: "deciding" });
-            const decision = await decideSearch(
-              userText,
-              recentContext,
-              helper.apiKey,
-              runSignal,
-              // The plugin block governs this call too. Without it a plugin
-              // that says "always look it up" or "never ask me questions"
-              // had no effect on the one decision it most clearly applies to.
-              pluginDirectives,
-              planner
-            );
-            doSearch = decision.needed;
-            searchReason = decision.reason;
-            // Underspecified questions get a clarifying question instead of a
-            // search that would only return generic articles.
-            if (decision.clarify) clarifyHint = decision.clarify;
-          }
-        }
-
-        if (doSearch) {
-          send({ type: "status", stage: "searching" });
-
-          try {
-            searchContext = await smartSearch(
-              userText,
-              recentContext,
-              helper.apiKey,
-              tavilyApiKey as string,
-              runSignal,
-              searchProfile,
-              exaApiKey,
-              planner
-            );
-          } catch (searchError) {
-            /*
-             * Carry on, but SAY so.
-             *
-             * A failed search should not kill the answer — that part was
-             * right. But it was logged to the server console and nowhere
-             * else, so the model answered from memory believing it had
-             * simply found nothing, and the user saw a confident answer with
-             * no hint the web was never consulted.
-             *
-             * The note goes into the prompt, so the reply can be honest
-             * about what it is based on.
-             */
-            console.error("Search failed:", searchError);
-            const status =
-              searchError instanceof SearchProviderError ? searchError.status : 0;
-            const why =
-              status === 401 || status === 403
-                ? "the Tavily key was rejected"
-                : status === 429 || status === 432
-                  ? "the Tavily quota is spent"
-                  : status
-                    ? `the search service returned HTTP ${status}`
-                    : "the search service could not be reached";
-            searchSummary =
-              `\n\n<web_search_failed>\nA web search was attempted and FAILED: ` +
-              `${why}. No results were retrieved — this is not the same as ` +
-              `finding nothing. Answer from your own knowledge, and tell the ` +
-              `user plainly that you could not look it up.\n` +
-              `</web_search_failed>`;
-            recordAsync({
-              kind: "api_error",
-              subject: "web_search",
-              detail: why,
-              context: { status },
-            });
-          }
-
-          if (searchContext && searchContext.results.length > 0) {
-            searchSummary = `\n\n<web_search_results>\nI performed ${searchContext.searchesPerformed} targeted search(es) using queries: ${searchContext.queries
-              .map((q) => `"${q}"`)
-              .join(", ")}\n\nFound ${searchContext.sourcesUsed} relevant sources:\n\n${searchContext.summary}\n</web_search_results>\n\nIMPORTANT: Use the search results above to provide accurate, up-to-date information. Cite sources with their URLs. If the search results contain links to GitHub repos, documentation, or solutions, include those EXACT URLs. Never make up URLs.`;
-          }
-        }
+        // "Every message" mode is a nudge, not a different pipeline: it tells
+        // the agent to default to looking something up rather than answering
+        // from memory, but the agent still makes the call in-context.
+        const searchAlwaysNudge =
+          webSearchMode === "always" && canSearch
+            ? "\n\nThe user has web search set to 'every message': before answering anything that could depend on current information — versions, APIs, pricing, news, recent changes — call web_search rather than relying on memory."
+            : "";
 
         if (stopped()) {
           close();
@@ -1035,27 +974,18 @@ export async function POST(req: NextRequest) {
           title,
           resolvedEffort,
           thinkingEnabled,
-          webSearchUsed: doSearch,
-          searchReason,
-          searchRounds: searchContext?.rounds ?? 0,
-          searchStopReason: searchContext?.stopReason ?? "",
-          searchResults:
-            searchContext?.results.map((r) => ({
-              title: r.title,
-              url: r.url,
-              domain: r.domain,
-            })) ?? null,
-          searchQueries: searchContext?.queries ?? null,
-          searchesPerformed: searchContext?.searchesPerformed ?? 0,
-          searchCacheHits: searchContext?.cacheHits ?? 0,
-          searchUsd: searchContext?.estimatedUsd ?? 0,
+          webSearchUsed: false,
+          searchReason: "",
+          searchRounds: 0,
+          searchStopReason: "",
+          searchResults: null,
+          searchQueries: null,
+          searchesPerformed: 0,
+          searchCacheHits: 0,
+          searchUsd: 0,
         });
 
         // ---------------- Build the request ----------------
-        const clarifyInstruction = clarifyHint
-          ? `\n\nThis question depends on details only the user has. Before giving a general answer, ask them: "${clarifyHint}" Keep it to one short question, explain in a sentence why it changes the answer, and offer what general guidance you can meanwhile.`
-          : "";
-
         const workspace = workspaceId ?? convId;
         const githubConnection = workspaceEnabled
           ? await readGitHubConnection(workspace)
@@ -1100,7 +1030,7 @@ export async function POST(req: NextRequest) {
 
 Work to the end. Do not hand back a half-finished task with a summary that reads as if it is complete: if something cannot be done, say so plainly and say why. Check your own work before claiming it works — run the tests, call the endpoint, open the page. To compile or build anything, call build_project instead of typing msbuild/cmake/dotnet/cargo yourself: it finds the installed Visual Studio/MSBuild/compiler automatically (including vswhere), restores packages, builds Release x64 by default, and hands you the compiler errors so you can fix them and rebuild.
 
-Ask before you build the wrong thing. If a choice would change what you produce and you cannot settle it by reading a file or looking it up, call ask_user — one question up front is far cheaper than twenty rounds of work in the wrong direction, and the user would rather be asked than handed something they have to throw away. Ask early, while the work is cheap to redo, not after you have committed to an approach. Offer concrete options with a sensible default so it is one click. Do not ask about things you can find out yourself, and do not ask the same thing twice. When you are done, briefly say what you changed and whether it ran.\n\nUse search_files to find where something lives rather than opening files one at a time, and read_files when you already know you need several — each separate call costs a whole round.\n\nYou can also look at the live web. When a task depends on what is actually on a page — its markup, its data, its exact wording — fetch it rather than reasoning from memory. Before writing anything that targets a site, such as a content script, a userscript or a scraper, call inspect_page on the real URL and use the ids and classes it returns. Never invent a selector you have not seen: a plausible-looking one that does not exist produces code that runs and does nothing, which is worse than admitting you need to look. Use fetch_url to read a page, fetch_url with raw for its HTML, and download_file to save something from a URL straight into the workspace. ${canSearch ? "When you hit something you do not know — an unfamiliar error, a library's current API — use web_search rather than guessing, because a wrong assumption compounds over every round after it. One web_search costs several model calls of its own, so make the query specific and read what comes back before searching again." : "There is no web_search in this workspace — no Tavily key is set in Settings. fetch_url still works if you already know the URL. When you genuinely do not know something and cannot look it up, say so instead of guessing, and name what you would have searched for."}\n\nIf an edit turns out to be wrong, undo_file puts that file back exactly as it was; reverting is safer than patching your own mistake. restore_snapshot rolls the whole workspace back to a restore point, which is a much larger step — list_snapshots first, and say what you are undoing before you do it. read_document opens PDF, Word, Excel, PowerPoint, EPUB and ODT files, which read_file cannot. inspect_binary statically reads Windows EXEs/DLLs without executing them. Select only the layers the request needs: analyses:["decompile"] to test Ghidra/ILSpy, ["strings"] for a strings dump, ["entropy"], ["carve"], ["dependencies"], or ["capa"] for those individual jobs, and ["all"] only when the user asks to check everything. Omitted analyses means a cheap summary, not everything. After download_file of a large DLL, start with summary/strings and then decompile only the functions you name in focus_terms for THAT file — enable a specific analyzer such as Decompiler Parameter ID via enable_analyzers if you need it. Do not dump the whole binary and do not rely on a default hook list. Ghidra leftover after a closed or refreshed tab has no inspect UI: call list_processes and stop_process id=leftover to kill it. Decompiling is expensive and its artifacts persist on disk; the system message lists every executable already analyzed in this workspace with its hash and artifact paths - if the binary you need is already there, read those artifacts with read_file instead of running inspect_binary again, and never re-decompile the same hash unless the user asks you to. The moment you reach a conclusion about a binary - which one works, what is flawed, where the good build is, what a hook actually does - call note_binary so that verdict survives Stop and compaction instead of being paid for twice. write_files creates several files in one call, which is worth using whenever you are scaffolding.\n\nBatch the changes that belong together. move_file renames in one step instead of read-write-delete. edit_files applies several replacements at once, across one file or many. replace_in_files changes the same text everywhere it appears, which is what you want for renaming a function or an import path — doing that file by file costs a round each. When a string might occur somewhere you did not intend, run it with preview first and read the list before committing.${
+Ask before you build the wrong thing. If a choice would change what you produce and you cannot settle it by reading a file or looking it up, call ask_user — one question up front is far cheaper than twenty rounds of work in the wrong direction, and the user would rather be asked than handed something they have to throw away. Ask early, while the work is cheap to redo, not after you have committed to an approach. Offer concrete options with a sensible default so it is one click. Do not ask about things you can find out yourself, and do not ask the same thing twice. When you are done, briefly say what you changed and whether it ran.\n\nUse search_files to find where something lives rather than opening files one at a time, and read_files when you already know you need several — each separate call costs a whole round.\n\nYou can also look at the live web. When a task depends on what is actually on a page — its markup, its data, its exact wording — fetch it rather than reasoning from memory. Before writing anything that targets a site, such as a content script, a userscript or a scraper, call inspect_page on the real URL and use the ids and classes it returns. Never invent a selector you have not seen: a plausible-looking one that does not exist produces code that runs and does nothing, which is worse than admitting you need to look. Use fetch_url to read a page, fetch_url with raw for its HTML, and download_file to save something from a URL straight into the workspace. ${webSearchMode !== "off" && canSearch ? "When you hit something you do not know — an unfamiliar error, a library's current API — call web_search rather than guessing, because a wrong assumption compounds over every round after it. One web_search costs several model calls of its own, so make the query specific and read what comes back before searching again." : "There is no web_search tool available in this reply — the Web toggle is off or no Tavily/Exa key is set in Settings. fetch_url still works if you already know the URL. When you genuinely do not know something and cannot look it up, say so instead of guessing, and name what you would have searched for."}\n\nIf an edit turns out to be wrong, undo_file puts that file back exactly as it was; reverting is safer than patching your own mistake. restore_snapshot rolls the whole workspace back to a restore point, which is a much larger step — list_snapshots first, and say what you are undoing before you do it. read_document opens PDF, Word, Excel, PowerPoint, EPUB and ODT files, which read_file cannot. inspect_binary statically reads Windows EXEs/DLLs without executing them. Select only the layers the request needs: analyses:["decompile"] to test Ghidra/ILSpy, ["strings"] for a strings dump, ["entropy"], ["carve"], ["dependencies"], or ["capa"] for those individual jobs, and ["all"] only when the user asks to check everything. Omitted analyses means a cheap summary, not everything. After download_file of a large DLL, start with summary/strings and then decompile only the functions you name in focus_terms for THAT file — enable a specific analyzer such as Decompiler Parameter ID via enable_analyzers if you need it. Do not dump the whole binary and do not rely on a default hook list. Ghidra leftover after a closed or refreshed tab has no inspect UI: call list_processes and stop_process id=leftover to kill it. Decompiling is expensive and its artifacts persist on disk; the system message lists every executable already analyzed in this workspace with its hash and artifact paths - if the binary you need is already there, read those artifacts with read_file instead of running inspect_binary again, and never re-decompile the same hash unless the user asks you to. The moment you reach a conclusion about a binary - which one works, what is flawed, where the good build is, what a hook actually does - call note_binary so that verdict survives Stop and compaction instead of being paid for twice. write_files creates several files in one call, which is worth using whenever you are scaffolding.\n\nBatch the changes that belong together. move_file renames in one step instead of read-write-delete. edit_files applies several replacements at once, across one file or many. replace_in_files changes the same text everywhere it appears, which is what you want for renaming a function or an import path — doing that file by file costs a round each. When a string might occur somewhere you did not intend, run it with preview first and read the list before committing.${
               visionApiKey || modelHasOpenToolLimits(model)
                 ? " You can also view_image to look at a screenshot or mockup saved in the workspace."
                 : ""
@@ -1195,8 +1125,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             // where role plus recency give them real weight.
             content:
               systemPrompt +
-              searchSummary +
-              clarifyInstruction +
+              searchAlwaysNudge +
               workspaceInstruction +
               binaryLedgerBlock +
               findingsBlock +
@@ -2155,7 +2084,11 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 return Boolean(visionApiKey) || modelHasOpenToolLimits(model);
               }
               if (t.function.name === "web_search")
-                return Boolean(tavilyApiKey || exaApiKey);
+                // Off = the tool does not exist for the agent. On = offered
+                // whenever keys exist, and the agent decides when to call it.
+                return (
+                  webSearchMode !== "off" && Boolean(tavilyApiKey || exaApiKey)
+                );
               // The browser is an optional install. Offering it when Chromium
               // is absent buys an error, an apology and a worse fallback.
               if (t.function.name === "browse") return hasBrowser;
@@ -2481,14 +2414,13 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 content: assistantContent,
                 reasoningContent: reasoningContent || null,
                 thinkingEffort: resolvedEffort,
-                webSearchUsed: doSearch,
-                searchResults:
-                  searchContext?.results.map((r) => ({
-                    title: r.title,
-                    url: r.url,
-                    domain: r.domain,
-                  })) ?? null,
-                searchQueries: searchContext?.queries ?? null,
+                webSearchUsed: searchAccum.used,
+                searchResults: searchAccum.results.length
+                  ? searchAccum.results
+                  : null,
+                searchQueries: searchAccum.queries.length
+                  ? searchAccum.queries
+                  : null,
                 pluginsUsed: enabledPluginIds.length ? enabledPluginIds : null,
                 tokenCount: null,
                 toolEvents: toolEvents.length ? toolEvents : null,
@@ -3375,6 +3307,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               summary: string;
               changedPath?: string;
               image?: { path: string; dataUrl: string };
+              search?: ToolResult["search"];
             };
 
             if (!parsed.ok) {
@@ -4151,6 +4084,35 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               ok: result.ok,
               summary: result.summary,
             });
+
+            /*
+             * Collect the agent's own web searches for the citation chips
+             * and cost total. The web now comes through this tool rather
+             * than a pre-agent search, so this is where that data appears —
+             * forwarded to the client and accumulated for the saved message.
+             */
+            if (call.function.name === "web_search" && result.ok && result.search) {
+              searchAccum.used = true;
+              searchAccum.searchesPerformed += result.search.searchesPerformed;
+              searchAccum.cacheHits += result.search.cacheHits;
+              searchAccum.estimatedUsd += result.search.estimatedUsd;
+              for (const q of result.search.queries) {
+                if (!searchAccum.queries.includes(q)) searchAccum.queries.push(q);
+              }
+              for (const r of result.search.results) {
+                if (!searchAccum.results.some((have) => have.url === r.url)) {
+                  searchAccum.results.push(r);
+                }
+              }
+              send({
+                type: "web_search",
+                results: result.search.results,
+                queries: result.search.queries,
+                searchesPerformed: result.search.searchesPerformed,
+                cacheHits: result.search.cacheHits,
+                usd: result.search.estimatedUsd,
+              });
+            }
           }
 
           // The next round must see the workspace as it is now, not as it was
@@ -4302,14 +4264,13 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             content: assistantContent,
             reasoningContent: reasoningContent || null,
             thinkingEffort: resolvedEffort,
-            webSearchUsed: doSearch,
-            searchResults:
-              searchContext?.results.map((r) => ({
-                title: r.title,
-                url: r.url,
-                domain: r.domain,
-              })) ?? null,
-            searchQueries: searchContext?.queries ?? null,
+            webSearchUsed: searchAccum.used,
+            searchResults: searchAccum.results.length
+              ? searchAccum.results
+              : null,
+            searchQueries: searchAccum.queries.length
+              ? searchAccum.queries
+              : null,
             pluginsUsed: enabledPluginIds.length ? enabledPluginIds : null,
             tokenCount: totalUsage.total_tokens || null,
             usage: totalUsage.total_tokens ? { ...totalUsage } : null,

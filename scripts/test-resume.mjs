@@ -684,9 +684,9 @@ check(
   /stoppedPrematurely = "round_cap"/.test(route)
 );
 check(
-  "meta is sent before search so Stop has an id",
+  "meta is sent before the first model call so Stop has an id",
   /Named before search/.test(route) &&
-    route.indexOf("Named before search") < route.indexOf('stage: "searching"')
+    route.indexOf("Named before search") < route.indexOf("dsRequestBody")
 );
 check(
   "a think-only cut disables thinking on the next call",

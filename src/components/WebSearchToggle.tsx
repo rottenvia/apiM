@@ -114,17 +114,17 @@ export function WebSearchToggle({
                 {
                   id: "auto" as const,
                   label: "On",
-                  blurb: "Looks things up when the question needs it.",
+                  blurb: "Gives the agent the web_search tool; it looks things up when it decides it needs to.",
                 },
                 {
                   id: "always" as const,
                   label: "Every message",
-                  blurb: "Searches even when it plainly is not needed.",
+                  blurb: "Same tool, but nudged to default to looking things up.",
                 },
                 {
                   id: "off" as const,
                   label: "Off",
-                  blurb: "Answers from the model's own knowledge only.",
+                  blurb: "The web_search tool is hidden; answers from the model's own knowledge only.",
                 },
               ]
             ).map((mode) => {
