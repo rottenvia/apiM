@@ -1059,3 +1059,17 @@ input:focus-visible {
     opacity: 0.7;
   }
 }
+
+/* In-chat find highlights. Kept as classes rather than tailwind utilities on
+   each <mark> so that next/prev can flip the focused match by attribute alone
+   (a layoutEffect), without re-rendering and re-parsing the whole bubble. */
+.search-hit {
+  border-radius: 3px;
+  background-color: rgba(201, 100, 66, 0.25);
+  color: #ede9e2;
+  padding: 0 2px;
+}
+.search-hit[data-active-match] {
+  background-color: #c96442;
+  color: #ffffff;
+}
