@@ -986,7 +986,13 @@ check(
     { prompt_tokens: 1_000_000, completion_tokens: 1_000_000 },
     "glm-5.3-flash",
     "peak"
-  ) === 0.65
+  ) === 0.325,
+  "half-price launch window is active until 2026-09-09; list is $0.65 and used only for the cap"
+);
+check(
+  "GLM rates return to list after the launch window",
+  pricing.ratesFor("glm-5.3-flash", "peak", Date.UTC(2026, 8, 10)).input ===
+    0.15
 );
 check(
   "the route's resilience gates cover the new provider, not just Ox",
