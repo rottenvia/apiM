@@ -116,10 +116,13 @@ export async function runRefine(
       signal,
       body: JSON.stringify({
         // Cheapest capable model: this is extraction, not reasoning.
-        model: "deepseek-v4-flash",
+        model: options?.model ?? "deepseek-v4-flash",
         // Reasoning tokens are the single most expensive part of a request,
-        // and this task does not need any.
-        thinking: { type: "disabled" },
+        // and this task does not need any. DeepSeek needs an explicit
+        // disable; OpenAI-compatible providers ignore the object.
+        ...((!options?.thinkingStyle || options.thinkingStyle === "deepseek")
+          ? { thinking: { type: "disabled" } }
+          : {}),
         // Enough for a dozen short lessons and no more.
         max_tokens: 800,
         response_format: { type: "json_object" },

@@ -36,20 +36,44 @@ export const MODEL_RATES: Record<string, ModelRates> = {
 /** Off-peak multiplier for input/output (Beijing 16:30-00:30). Cache-hit unchanged. */
 const OFFPEAK_FACTOR = 0.5;
 
+/**
+ * GLM 5.3 Flash launched at half list price through 2026-09-09 16:00 UTC.
+ *
+ * The spending limit deliberately uses MODEL_RATES directly (list price), so
+ * it never undercounts. The cost shown after a reply should reflect the rate
+ * actually billed, though, or the number is "safe" but wrong by 2x during a
+ * week-long launch window.
+ */
+const GLM_DISCOUNT_END_MS = Date.UTC(2026, 8, 9, 16, 0, 0);
+
+function applyTemporaryDiscount(
+  model: string,
+  rates: ModelRates,
+  now: number
+): ModelRates {
+  if (model !== "glm-5.3-flash" || now >= GLM_DISCOUNT_END_MS) return rates;
+  return {
+    input: +(rates.input * 0.5).toFixed(6),
+    cachedInput: +(rates.cachedInput * 0.5).toFixed(6),
+    output: +(rates.output * 0.5).toFixed(6),
+  };
+}
+
 export function ratesFor(
   model: string,
-  period: DeepSeekPeriod = getDeepSeekPeriod().period
+  period: DeepSeekPeriod = getDeepSeekPeriod().period,
+  now: number = Date.now()
 ): ModelRates | null {
   const base = MODEL_RATES[model];
   if (!base) return null;
   if (period === "offpeak") {
-    return {
+    return applyTemporaryDiscount(model, {
       input: +(base.input * OFFPEAK_FACTOR).toFixed(6),
       cachedInput: base.cachedInput,
       output: +(base.output * OFFPEAK_FACTOR).toFixed(6),
-    };
+    }, now);
   }
-  return base;
+  return applyTemporaryDiscount(model, base, now);
 }
 
 export interface UsageLike {
@@ -59,11 +83,70 @@ export interface UsageLike {
   prompt_cache_hit_tokens?: number;
   prompt_cache_miss_tokens?: number;
   /**
+   * OpenRouter's cache fields.
+   *
+   * DeepSeek reports cached prompt tokens as `prompt_cache_hit_tokens`;
+   * OpenRouter (GLM 5.3 Flash, Ox-on-OpenRouter, etc.) follows the OpenAI
+   * shape and reports them as `prompt_tokens_details.cached_tokens`. If we
+   * read only DeepSeek's field, every OpenRouter cache hit is priced as a
+   * full-price miss — a cached read costs ~1/5 of a miss for GLM, so easy
+   * follow-up requests appeared to cost cents when their real incremental
+   * cost was a fraction of that.
+   */
+  prompt_tokens_details?: {
+    cached_tokens?: number;
+    cache_read_tokens?: number;
+    cache_creation_tokens?: number;
+  };
+  /**
    * Reasoning tokens, when reported separately (completion_tokens_details.
    * reasoning_tokens). They are a subset of completion_tokens and are billed
    * as output; kept so the UI can prove thinking was counted.
    */
   completion_tokens_details?: { reasoning_tokens?: number };
+}
+
+function num(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+/**
+ * Normalize DeepSeek and OpenRouter usage shapes to the same cache split.
+ *
+ * Cache writes are charged at input rates, not cache-read rates: they are a
+ * one-time full-price prefix read. Keeping them out of the cache-hit bucket
+ * also prevents a miss from being silently discounted.
+ */
+export function cacheSplit(usage: UsageLike): {
+  prompt: number;
+  completion: number;
+  hit: number;
+  miss: number;
+} {
+  const completion = num(usage.completion_tokens);
+  const prompt = num(usage.prompt_tokens);
+  const created = num(
+    usage.prompt_tokens_details?.cache_creation_tokens
+  );
+  const hit = Math.max(
+    0,
+    num(usage.prompt_cache_hit_tokens) +
+      num(usage.prompt_tokens_details?.cached_tokens) +
+      num(usage.prompt_tokens_details?.cache_read_tokens)
+  );
+  const explicitMiss = num(usage.prompt_cache_miss_tokens);
+  // Cache writes are charged like ordinary input, not cache reads.
+  const miss =
+    explicitMiss > 0
+      ? explicitMiss
+      : Math.max(0, prompt - hit);
+
+  return {
+    prompt,
+    completion,
+    hit,
+    miss: Math.max(miss, created),
+  };
 }
 
 /**
@@ -85,11 +168,7 @@ export function estimateCost(
   const rates = ratesFor(model, period);
   if (!rates) return null;
 
-  const completion = usage.completion_tokens ?? 0;
-  const prompt = usage.prompt_tokens ?? 0;
-  const hit = usage.prompt_cache_hit_tokens ?? 0;
-  const miss =
-    usage.prompt_cache_miss_tokens ?? Math.max(0, prompt - hit);
+  const { completion, hit, miss } = cacheSplit(usage);
 
   return (
     (miss / 1e6) * rates.input +
