@@ -485,6 +485,49 @@ check(
   chatArea.includes("overflow-anchor:none")
 );
 
+console.log("\n10. find-in-chat must not freeze the app while typing");
+
+/*
+ * Reported: opening find in a big thinking-heavy chat and typing a word froze
+ * the whole UI for ~30 seconds. Size is not the reason — even a megabyte of
+ * text is milliseconds to scan — the freeze was synchronous re-render work on
+ * every keystroke: the query went to every bubble, every bubble rebuilt a
+ * highlighting components map, and react-markdown re-parsed the full reply.
+ */
+const chatSearch = await read("src/lib/chat-search.ts");
+
+check(
+  "the index scan runs against a deferred query, not the live input",
+  /useDeferredValue\(findQuery\)/.test(chatArea),
+  "deferred renders are interruptible, so the input keeps up while highlighting catches up"
+);
+check(
+  "bubbles without a match never receive the query",
+  /bubbleSearchQuery/.test(chatArea) &&
+    /messageHasMatch\(msg\.content/.test(chatArea) &&
+    /searchQuery=\{bubbleSearchQuery\}/.test(chatArea),
+  "a memoised bubble with an undefined searchQuery never re-parses"
+);
+check(
+  "there is a first-match-only test for skipping",
+  /export function messageHasMatch/.test(chatSearch),
+  "one regex search decides whether a bubble is in the result set"
+);
+check(
+  "markdown is parsed by a memoised body keyed on content and query",
+  /const MarkdownBody = memo\(/.test(bubble) &&
+    /<MarkdownBody content=\{displayContent\} regex=\{searchRegex\}/.test(bubble),
+  "unrelated re-renders can no longer re-parse the markdown"
+);
+check(
+  "stepping next/prev flips an attribute instead of re-parsing",
+  /markActiveHit\(/.test(bubble) &&
+    /data-active-match/.test(bubble) &&
+    /querySelectorAll[^;]*search-hit/.test(bubble) &&
+    !/highlightingComponents\(searchRegex, activeMatchIndex\)/.test(bubble),
+  "the highlight map is keyed on the regex alone; the active mark is DOM-only"
+);
+
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
 );

@@ -6,6 +6,7 @@ import {
   memo,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -39,6 +40,35 @@ const markdownComponents: Components = {
 };
 
 /**
+ * The parsed markdown of one reply.
+ *
+ * Parsing is the single expensive part of rendering a message, and nothing
+ * about it depends on anything except the text itself and whether a find bar
+ * is open. Wrapping it in memo() means unrelated re-renders of the bubble
+ * (meta changes, other prop updates) never re-parse, and during an in-chat
+ * search only messages that actually contain the term are re-parsed at all.
+ */
+const MarkdownBody = memo(function MarkdownBody({
+  content,
+  regex,
+}: {
+  content: string;
+  regex: RegExp | null;
+}) {
+  // Rebuilt only when the query changes — not when the focused match moves
+  // (that is handled by flipping data-active-match on the existing marks).
+  const components = useMemo<Components>(
+    () => (regex ? highlightingComponents(regex) : markdownComponents),
+    [regex]
+  );
+  return (
+    <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+      {content}
+    </ReactMarkdown>
+  );
+});
+
+/**
  * Build a react-markdown `components` map that highlights matches inside the
  * text of each rendered block.
  *
@@ -46,11 +76,13 @@ const markdownComponents: Components = {
  * <ReactMarkdown> element itself: at that point the markdown has not been
  * parsed, so there are no text nodes to walk. The counter is shared across
  * every block so match numbering stays continuous down the message.
+ *
+ * Deliberately keyed by the regex ALONE. The map (and therefore the whole
+ * markdown re-parse) used to be rebuilt whenever the focused match moved on
+ * next/prev; the focused match is now flipped by flipping a DOM attribute,
+ * so pressing Enter to step through results never re-parses anything.
  */
-function highlightingComponents(
-  regex: RegExp,
-  activeIndex: number
-): Components {
+function highlightingComponents(regex: RegExp): Components {
   const counter = { n: 0 };
   const wrap = (Tag: keyof React.JSX.IntrinsicElements) => {
     const Highlighted = ({
@@ -62,11 +94,7 @@ function highlightingComponents(
     }: {
       children?: ReactNode;
       node?: unknown;
-    }) => (
-      <Tag {...props}>
-        {highlightNode(children, regex, activeIndex, counter)}
-      </Tag>
-    );
+    }) => <Tag {...props}>{highlightNode(children, regex, counter)}</Tag>;
     Highlighted.displayName = `Highlighted(${Tag})`;
     return Highlighted;
   };
@@ -86,6 +114,27 @@ function highlightingComponents(
 }
 
 /**
+ * Flip the `data-active-match` attribute on this bubble's marks to follow
+ * the focused result.
+ *
+ * Match numbering (counter.n) is baked into the DOM at parse time. Moving the
+ * focus used to mean a new components map and a full markdown re-parse of
+ * every visible bubble; marking the DOM directly is microseconds and keeps
+ * next/prev buttery even in a megabyte conversation.
+ */
+function markActiveHit(root: HTMLElement | null, activeIndex: number) {
+  if (!root) return;
+  const marks = root.querySelectorAll<HTMLElement>(".search-hit");
+  marks.forEach((el) => {
+    if (el.dataset.matchN === String(activeIndex)) {
+      el.setAttribute("data-active-match", "");
+    } else {
+      el.removeAttribute("data-active-match");
+    }
+  });
+}
+
+/**
  * Wrap matches of `regex` in <mark> inside already-rendered markdown output.
  *
  * Operates on the rendered React tree rather than the raw source, so the
@@ -96,7 +145,6 @@ function highlightingComponents(
 function highlightNode(
   node: ReactNode,
   regex: RegExp,
-  activeIndex: number,
   counter: { n: number },
   key = 0
 ): ReactNode {
@@ -111,16 +159,11 @@ function highlightNode(
 
     while ((match = regex.exec(node)) !== null) {
       if (match.index > cursor) parts.push(node.slice(cursor, match.index));
-      const isActive = counter.n === activeIndex;
       parts.push(
         <mark
           key={`${key}-${match.index}`}
-          data-active-match={isActive || undefined}
-          className={
-            isActive
-              ? "rounded-[3px] bg-[#c96442] px-0.5 text-white"
-              : "rounded-[3px] bg-[#c96442]/25 px-0.5 text-[#ede9e2]"
-          }
+          data-match-n={counter.n}
+          className="search-hit"
         >
           {match[0]}
         </mark>
@@ -136,7 +179,7 @@ function highlightNode(
 
   if (Array.isArray(node)) {
     return node.map((child, i) =>
-      highlightNode(child, regex, activeIndex, counter, i)
+      highlightNode(child, regex, counter, i)
     );
   }
 
@@ -149,7 +192,7 @@ function highlightNode(
     if (children === undefined) return node;
 
     return cloneElement(element, {
-      children: highlightNode(children, regex, activeIndex, counter, key),
+      children: highlightNode(children, regex, counter, key),
     });
   }
 
@@ -482,6 +525,20 @@ function MessageBubbleImpl({
     [searchQuery, searchWholeWord]
   );
 
+  /**
+   * Focused-match highlighting is DOM-only.
+   *
+   * The <mark> elements carry their global match number; moving the active
+   * result flips one attribute, which must not trigger React to re-parse the
+   * markdown (that was the 30-second freeze: every next/prev keypress
+   * re-parsed every visible message).
+   */
+  const bubbleRootRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    if (!searchRegex) return;
+    markActiveHit(bubbleRootRef.current, activeMatchIndex);
+  }, [searchRegex, activeMatchIndex]);
+
   const sourceCount = message.searchResults?.length ?? 0;
 
   const modelCost = useMemo(
@@ -578,6 +635,7 @@ function MessageBubbleImpl({
 
   return (
     <div
+      ref={bubbleRootRef}
       className={`animate-fade-in ${isUser ? "flex justify-end" : "flex justify-start"}`}
     >
       <div
@@ -1440,16 +1498,7 @@ function MessageBubbleImpl({
                       : "text-text-primary"
                 }`}
               >
-                <ReactMarkdown
-                  remarkPlugins={[remarkGfm]}
-                  components={
-                    searchRegex
-                      ? highlightingComponents(searchRegex, activeMatchIndex)
-                      : markdownComponents
-                  }
-                >
-                  {displayContent}
-                </ReactMarkdown>
+                <MarkdownBody content={displayContent} regex={searchRegex} />
                 {message.isStreaming && displayContent && !hasPendingCode && (
                   <span className="stream-caret" aria-hidden="true" />
                 )}
@@ -1623,6 +1672,9 @@ function MessageBubbleImpl({
 
 /**
  * Applies highlighting to plain text (user bubbles, which are not markdown).
+ *
+ * The active-match attribute is set imperatively after render for the same
+ * reason as MarkdownBody: stepping next/prev must not re-highlight.
  */
 function SearchHighlight({
   query,
@@ -1635,13 +1687,19 @@ function SearchHighlight({
   activeIndex: number;
   children: ReactNode;
 }) {
+  const ref = useRef<HTMLSpanElement>(null);
   const regex = useMemo(
     () => (query ? buildSearchRegex(query, wholeWord) : null),
     [query, wholeWord]
   );
 
+  useLayoutEffect(() => {
+    if (!regex) return;
+    markActiveHit(ref.current, activeIndex);
+  }, [regex, activeIndex]);
+
   if (!regex) return <>{children}</>;
-  return <>{highlightNode(children, regex, activeIndex, { n: 0 })}</>;
+  return <span ref={ref}>{highlightNode(children, regex, { n: 0 })}</span>;
 }
 
 /**

@@ -67,6 +67,27 @@ export function countMatches(
   return count;
 }
 
+/**
+ * Whether the text contains at least one match.
+ *
+ * The find bar used to pass the query to every bubble, so a chat of 70
+ * messages re-parsed the markdown of all 70 on every keystroke — most of
+ * them contained no match at all. Callers use this to skip those bubbles
+ * entirely: the first match ends the scan, so even a megabyte of text costs
+ * one regex search rather than the full highlight pass.
+ */
+export function messageHasMatch(
+  text: string,
+  query: string,
+  wholeWord: boolean
+): boolean {
+  if (!query.trim() || !text) return false;
+  const regex = buildSearchRegex(query, wholeWord);
+  if (!regex) return false;
+  regex.lastIndex = 0;
+  return regex.test(text);
+}
+
 export interface MessageLike {
   id: string;
   content: string;
