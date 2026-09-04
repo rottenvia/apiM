@@ -1,8 +1,8 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback, useMemo } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo, useDeferredValue } from "react";
 import { memo } from "react";
-import { buildChatSearchIndex } from "@/lib/chat-search";
+import { buildChatSearchIndex, messageHasMatch } from "@/lib/chat-search";
 import { estimateCost, formatCost, formatDuration } from "@/lib/pricing";
 import type { ChatSearchIndex } from "@/lib/chat-search";
 import { ChatSearchBar } from "@/components/ChatSearchBar";
@@ -791,9 +791,17 @@ export function ChatArea({
   const [findWholeWord, setFindWholeWord] = useState(true);
   const [rawActiveMatch, setActiveMatch] = useState(0);
 
+  // The input stays one frame ahead of the search work. Without this every
+  // keystroke synchronously re-scanned the whole conversation and re-parsed
+  // every matching message's markdown on the main thread, which froze typing
+  // for tens of seconds in large thinking-heavy chats. Deferred renders are
+  // interruptible, so the input keeps up even while a megabyte of text is
+  // being re-highlighted behind it.
+  const deferredFindQuery = useDeferredValue(findQuery);
+
   const searchIndex = useMemo(
-    () => buildChatSearchIndex(messages, findOpen ? findQuery : "", findWholeWord),
-    [messages, findOpen, findQuery, findWholeWord]
+    () => buildChatSearchIndex(messages, findOpen ? deferredFindQuery : "", findWholeWord),
+    [messages, findOpen, deferredFindQuery, findWholeWord]
   );
 
   // Clamp during render rather than syncing via an effect, so the counter can
@@ -1381,11 +1389,11 @@ export function ChatArea({
                 onLoadReasoning={onLoadReasoning}
                 onEdit={onEdit}
                 onDeleteMessage={onDeleteMessage}
-                searchQuery={findOpen ? findQuery : undefined}
+                searchQuery={findOpen ? deferredFindQuery : undefined}
                 searchWholeWord={findWholeWord}
                 searchIndex={searchIndex}
                 activeMatch={activeMatch}
-                revealAll={findOpen && findQuery.trim().length > 0}
+                revealAll={findOpen && deferredFindQuery.trim().length > 0}
                 onOpenWorkspaceFile={openWorkspaceFile}
                 onDecideCommand={onDecideCommand}
                 onAnswerQuestion={onAnswerQuestion}
@@ -1929,8 +1937,9 @@ const MessageList = memo(function MessageList({
 
   // Map each visible message to where its matches start globally, so only the
   // bubble containing the focused match highlights it as active.
-  const offsetById = new Map(
-    searchIndex.entries.map((e) => [e.messageId, e] as const)
+  const offsetById = useMemo(
+    () => new Map(searchIndex.entries.map((e) => [e.messageId, e] as const)),
+    [searchIndex]
   );
 
   return (
@@ -1966,6 +1975,14 @@ const MessageList = memo(function MessageList({
           activeMatch < entry.offset + entry.count
             ? activeMatch - entry.offset
             : -1;
+        // Only bubbles that actually contain a hit receive the query. A
+        // bubble whose searchQuery prop is undefined stays memoised and never
+        // re-parses its markdown — the difference between a find bar that
+        // froze the whole chat and one that doesn't, on long conversations.
+        const bubbleSearchQuery =
+          searchQuery && (entry || messageHasMatch(msg.content ?? "", searchQuery, searchWholeWord))
+            ? searchQuery
+            : undefined;
         return (
           /*
            * Do not stop the loader at MessageList. Historical messages only
@@ -1987,7 +2004,7 @@ const MessageList = memo(function MessageList({
             onLoadReasoning={onLoadReasoning}
             onEdit={msg.role === "user" ? onEdit : undefined}
             onDelete={msg.isStreaming ? undefined : onDeleteMessage}
-            searchQuery={searchQuery}
+            searchQuery={bubbleSearchQuery}
             searchWholeWord={searchWholeWord}
             activeMatchIndex={localActive}
             onOpenWorkspaceFile={onOpenWorkspaceFile}
