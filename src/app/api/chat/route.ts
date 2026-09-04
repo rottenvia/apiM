@@ -137,7 +137,7 @@ import {
   budgetStopMessage,
   maxTokensFor,
 } from "@/lib/budget";
-import { estimateCost, getDeepSeekPeriod } from "@/lib/pricing";
+import { cacheSplit, estimateCost, getDeepSeekPeriod } from "@/lib/pricing";
 import { listCustomPlugins } from "@/lib/plugin-store";
 import {
   applyThinking,
@@ -621,13 +621,23 @@ export async function POST(req: NextRequest) {
   // on Ox (free in preview, never balance-starved), a DeepSeek conversation
   // on Flash. Passing `model` is what keeps a dead DeepSeek key from
   // hijacking the web judge of a free Ox run.
-  const helper = resolveHelperTarget(creds, model) ?? target;
-  const planner = {
-    apiKey: helper.apiKey,
-    baseUrl: helper.baseUrl,
-    apiModel: helper.apiModel,
-    thinkingStyle: helper.thinkingStyle,
-  };
+  // Search planning is a tiny JSON side call. It may only ride a genuinely
+  // cheaper/free helper target (DeepSeek Flash or Ox preview); resolving to
+  // the main GLM/OpenRouter model made an agent search perform extra paid
+  // GLM calls that were never part of the reply's usage total.
+  const helperTarget = resolveHelperTarget(creds, model);
+  const helperIsCheap =
+    helperTarget !== null && helperTarget.model.id !== target.model.id;
+  const helper = helperIsCheap ? helperTarget : null;
+  const planner = helper
+    ? {
+        apiKey: helper.apiKey,
+        baseUrl: helper.baseUrl,
+        apiModel: helper.apiModel,
+        thinkingStyle: helper.thinkingStyle,
+      }
+    : null;
+  const helperApiKey = helper?.apiKey ?? "";
 
   // Resolve "auto" to a concrete level based on the message.
   // Local 27B on CPU cannot spend xhigh — it fills the output budget with
@@ -2560,11 +2570,12 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 totalUsage.total_tokens += u.total_tokens ?? 0;
                 // Kept per round and summed, since each round has its own
                 // split — the first is mostly a miss, later ones mostly hits.
-                const roundHit = u.prompt_cache_hit_tokens ?? 0;
-                totalUsage.prompt_cache_hit_tokens += roundHit;
-                totalUsage.prompt_cache_miss_tokens +=
-                  u.prompt_cache_miss_tokens ??
-                  Math.max(0, (u.prompt_tokens ?? 0) - roundHit);
+                // Normalize OpenRouter's prompt_tokens_details.cached_tokens
+                // too; otherwise GLM cache reads are billed in the UI and
+                // spending cap as full-price misses.
+                const split = cacheSplit(u as Parameters<typeof cacheSplit>[0]);
+                totalUsage.prompt_cache_hit_tokens += split.hit;
+                totalUsage.prompt_cache_miss_tokens += split.miss;
                 // Charge the running total for this round, at the real
                 // cache-split rates, so the limit is enforced against what is
                 // actually being billed rather than a token count.
@@ -3261,8 +3272,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   visionModel,
                   searchKey: tavilyApiKey,
                   exaKey: exaApiKey,
-                  deepseekKey: helper.apiKey,
-                  planner,
+                  deepseekKey: helperApiKey,
+                  planner: planner ?? undefined,
                   searchProfile,
                   signal: runSignal,
                 }).catch((error) => ({
@@ -3368,8 +3379,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                     visionModel,
                     searchKey: tavilyApiKey,
                     exaKey: exaApiKey,
-                    deepseekKey: helper.apiKey,
-                    planner,
+                    deepseekKey: helperApiKey,
+                    planner: planner ?? undefined,
                     searchProfile,
                     signal: runSignal,
                   }
@@ -3401,8 +3412,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                       visionModel,
                       searchKey: tavilyApiKey,
                       exaKey: exaApiKey,
-                      deepseekKey: helper.apiKey,
-                      planner,
+                      deepseekKey: helperApiKey,
+                      planner: planner ?? undefined,
                       searchProfile,
                       signal: runSignal,
                     }
@@ -3456,8 +3467,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                       visionModel,
                       searchKey: tavilyApiKey,
                       exaKey: exaApiKey,
-                      deepseekKey: helper.apiKey,
-                      planner,
+                      deepseekKey: helperApiKey,
+                      planner: planner ?? undefined,
                       searchProfile,
                       signal: runSignal,
                     }
@@ -3946,8 +3957,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                       visionModel,
                       searchKey: tavilyApiKey,
                       exaKey: exaApiKey,
-                      deepseekKey: helper.apiKey,
-                      planner,
+                      deepseekKey: helperApiKey,
+                      planner: planner ?? undefined,
                       searchProfile,
                       signal: runSignal,
                     }
@@ -3988,8 +3999,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   visionModel,
                   searchKey: tavilyApiKey,
                   exaKey: exaApiKey,
-                  deepseekKey: helper.apiKey,
-                  planner,
+                  deepseekKey: helperApiKey,
+                  planner: planner ?? undefined,
                   searchProfile,
                   signal: runSignal,
                 }
@@ -4319,6 +4330,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         if (
           workspaceEnabled &&
           lessonsEnabled &&
+          helper !== null &&
           !hitOutputCeiling &&
           // Pressing Stop means stop. Spending money to reflect on a task the
           // user just cancelled is the opposite of what they asked for, and

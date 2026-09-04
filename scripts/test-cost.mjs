@@ -23,6 +23,7 @@ const tree = await load("src/lib/tree-delta.ts");
 const budget = await load("src/lib/budget.ts");
 const compact = await load("src/lib/compact.ts");
 const pricing = await load("src/lib/pricing.ts");
+const { readFileSync: rfs } = await import("node:fs");
 
 const COLOR = process.stdout.isTTY && !process.env.NO_COLOR;
 const g = (s) => (COLOR ? `\x1b[32m${s}\x1b[0m` : s);
@@ -184,7 +185,69 @@ check(
   compact.compactTranscript(shortRun).stats.rounds === 0
 );
 
-console.log("\n4. The spending limit");
+console.log("\n4. Provider usage shapes are priced consistently");
+
+const glmCached = {
+  prompt_tokens: 100_000,
+  completion_tokens: 100,
+  total_tokens: 100_100,
+  // OpenRouter / OpenAI shape. This is what GLM 5.3 Flash actually returns.
+  prompt_tokens_details: { cached_tokens: 95_000 },
+};
+const glmSplit = pricing.cacheSplit(glmCached);
+check(
+  "OpenRouter cached_tokens are recognized as cache hits",
+  glmSplit.hit === 95_000 && glmSplit.miss === 5_000,
+  "without this GLM follow-ups looked 5x pricier because cached input was billed as a miss"
+);
+const glmCost = pricing.estimateCost(glmCached, "glm-5.3-flash", "peak");
+// During the launch window (through 2026-09-09) display rates are half
+// list; the spending cap still budgets against list.
+const glmExpected =
+  (95_000 / 1e6) * 0.015 + (5_000 / 1e6) * 0.075 + (100 / 1e6) * 0.25;
+check(
+  "GLM cached input is priced at the cache-read rate",
+  glmCost !== null && Math.abs(glmCost - glmExpected) < 1e-9,
+  `$${glmCost?.toFixed(5)} vs $${glmExpected.toFixed(5)}`
+);
+
+const deepseekCached = {
+  prompt_tokens: 100_000,
+  completion_tokens: 100,
+  total_tokens: 100_100,
+  prompt_cache_hit_tokens: 95_000,
+  prompt_cache_miss_tokens: 5_000,
+};
+check(
+  "DeepSeek's explicit hit/miss fields still work",
+  pricing.estimateCost(deepseekCached, "deepseek-v4-pro", "peak") !== null
+);
+
+console.log("\n5. Search helper calls cannot ride the main GLM model");
+
+const routeTextForHelper = rfs(path.join(ROOT, "src/app/api/chat/route.ts"), "utf8").replace(
+  /\r\n/g,
+  "\n"
+);
+check(
+  "the helper target is resolved separately from the main target",
+  /const helperTarget = resolveHelperTarget\(creds, model\)/.test(routeTextForHelper) &&
+    /const helper = helperIsCheap \? helperTarget : null/.test(routeTextForHelper),
+  "falling back to the main target used to make every search-planner call bill the model answering the chat"
+);
+check(
+  "the main model is never used as the cheap JSON planner",
+  /helperTarget\.model\.id !== target\.model\.id/.test(routeTextForHelper) &&
+    /const planner = helper\s*\?/.test(routeTextForHelper),
+  "a GLM main model with only an OpenRouter key used to spawn extra paid GLM search calls"
+);
+check(
+  "tools receive undefined planner rather than null",
+  /planner: planner \?\? undefined/.test(routeTextForHelper),
+  "a null planner must mean 'skip the model side call', not crash or fall back to another key"
+);
+
+console.log("\n6. The spending limit");
 
 check("no cap means no cap", budget.createBudget(null).limitUsd === null);
 check(
@@ -318,7 +381,6 @@ check(
  */
 console.log("\n8. The file tree does not sit in front of the transcript");
 
-const { readFileSync: rfs } = await import("node:fs");
 const routeText = rfs(path.join(ROOT, "src/app/api/chat/route.ts"), "utf8").replace(
   /\r\n/g,
   "\n"

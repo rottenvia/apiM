@@ -447,12 +447,15 @@ check(
 );
 check(
   "each round's split is summed, not overwritten",
-  /totalUsage\.prompt_cache_hit_tokens \+= roundHit/.test(route),
+  /totalUsage\.prompt_cache_hit_tokens \+= split\.hit/.test(route),
   "round one is mostly a miss, later rounds mostly hits"
 );
 check(
-  "a missing miss count is derived rather than dropped",
-  /Math\.max\(0, \(u\.prompt_tokens \?\? 0\) - roundHit\)/.test(route)
+  "both DeepSeek and OpenRouter cache shapes are normalized",
+  /cacheSplit\(u/.test(route) && /prompt_tokens_details\?\.cached_tokens/.test(
+    readFileSync(path.join(ROOT, "src/lib/pricing.ts"), "utf8")
+  ),
+  "GLM comes through OpenRouter, which reports cached tokens in prompt_tokens_details"
 );
 check(
   "the done event reports the accumulated total",
