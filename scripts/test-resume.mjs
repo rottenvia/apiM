@@ -29,6 +29,9 @@ const { rebuildResumeFromStored, rebuiltResumeInstruction } = await load(
   "src/lib/rebuild-resume.ts"
 );
 const { serializeForApi } = await load("src/lib/transcript.ts");
+const { createContinuationDedup } = await load(
+  "src/lib/continuation-dedup.ts"
+);
 
 const COLOR = process.stdout.isTTY && !process.env.NO_COLOR;
 const g = (s) => (COLOR ? `\x1b[32m${s}\x1b[0m` : s);
@@ -771,6 +774,99 @@ check(
   "opening a folder by hand survives the tree rebuilding",
   /userOpened/.test(panel) && /userClosed/.test(panel),
   "it used to snap shut again whenever a file changed"
+);
+
+console.log("\nContinuation that echoes back what it already wrote");
+
+/*
+ * Reported: after a mid-answer cut the stitched reply read
+ * "The chain is closed — **`m_hPawn = The chain closed, love — **`m_hPawn"
+ * — the model ignored "do not repeat" and restarted the sentence, and the two
+ * copies were concatenated. The continuation round now buffers until the new
+ * text diverges from the tail of the text already streamed, and drops the
+ * repeated prefix.
+ */
+// The cut happened mid-sentence; this tail is exactly what was streamed.
+const existing =
+  "Once the offset is written I will close the chain. " +
+  "The chain is closed, love — **`m_hPawn";
+{
+  const d = createContinuationDedup(existing);
+  // The model ignores "do not repeat", restarts the sentence it was writing
+  // byte-for-byte, and only diverges after a point already streamed.
+  const echo =
+    "The chain is closed, love — **`m_hPawn` = " +
+    "0x9F4C3A20 — value 12345, fully resolved and written to memory.";
+  let out = "";
+  for (const ch of echo) out += d.push(ch);
+  check(
+    "an echoed sentence prefix is removed from a continuation",
+    out.startsWith("` = 0x9F4C3A20") || out.startsWith("0x9F4C3A20"),
+    out.slice(0, 50)
+  );
+  check(
+    "the echoed opening is gone while the genuinely new text survives",
+    !out.startsWith("The chain is closed") && out.includes("0x9F4C3A20"),
+    out.slice(0, 50)
+  );
+}
+
+{
+  const d = createContinuationDedup(existing);
+  // Model actually obeys: straight continuation, no echo.
+  let out = "";
+  for (const ch of " = 0x9F4C3A20 was the missing handle.") out += d.push(ch);
+  check(
+    "a clean continuation with no echo passes through intact",
+    out.includes("0x9F4C3A20 was the missing handle"),
+    out
+  );
+}
+
+{
+  const d = createContinuationDedup(existing);
+  // Short coincidental repeat (a word) must not be chopped.
+  let out = "";
+  for (const ch of "The offset you asked about is stable now.") out += d.push(ch);
+  check(
+    "a single repeated word is treated as coincidence, not an echo",
+    out.startsWith("The offset you asked about"),
+    out
+  );
+}
+
+{
+  // Echos arrive across many tiny deltas, as real SSE frames do.
+  const d = createContinuationDedup(existing);
+  const frames = [];
+  const full = "The chain is closed — **`m_hPawn` now reads 0x9F4C3A20 here.";
+  for (let i = 0; i < full.length; i += 3)
+    frames.push(d.push(full.slice(i, i + 3)));
+  const joined = frames.join("");
+  check(
+    "buffering across deltas still removes the echo",
+    joined.startsWith("` now reads") || joined.includes("0x9F4C3A20 here"),
+    joined.slice(0, 40)
+  );
+}
+
+check(
+  "the route wires the dedup into a prose continuation round",
+  /proseContinuationPending = true/.test(route) &&
+    /createContinuationDedup\(assistantContent\)/.test(route) &&
+    /dedup \? dedup\.push\(delta\.content\)/.test(route),
+  "the flagged round buffers opening prose against the streamed tail"
+);
+check(
+  "a think-only continuation and tool rounds do not dedup prose",
+  /const dedup = proseContinuationPending/.test(route),
+  "only the 'carry on from the last character' path can echo"
+);
+check(
+  "plan tool results no longer echo the full plan",
+  /Plan recorded and now pinned/.test(route) &&
+    /the pinned copy above reflects it/.test(route),
+  "the pinned system copy is the plan the model reads; a second copy was twice the tokens"
 );
 
 console.log(

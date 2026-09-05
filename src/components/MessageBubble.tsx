@@ -163,7 +163,7 @@ function highlightNode(
         <mark
           key={`${key}-${match.index}`}
           data-match-n={counter.n}
-          className="search-hit"
+          className="search-hit rounded-[3px] px-0.5"
         >
           {match[0]}
         </mark>
