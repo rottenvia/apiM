@@ -86,7 +86,9 @@ console.log("\napiM context compaction checks\n");
 console.log("1. The transcript stays valid for the API");
 
 const long = build(20);
-const res = C.compactForResume(long);
+// Forced folding (threshold 0) exercises the same folding mechanics a size
+// safety valve uses; the real resume path no longer folds unconditionally.
+const res = C.compactTranscript(long, { thresholdChars: 0, step: 1 });
 
 check("tool calls and replies stay paired", toolCallsAreBalanced(res.messages),
   "an orphaned call is a 400");
@@ -167,7 +169,7 @@ check(
   (() => {
     const t = build(12);
     t[3] = { role: "tool", tool_call_id: "c0", content: "Error: No such file: x.js" };
-    const out = C.compactForResume(t);
+    const out = C.compactTranscript(t, { thresholdChars: 0, step: 1 });
     return out.messages.some(
       (m) => typeof m.content === "string" && /failed/.test(m.content)
     );
@@ -191,7 +193,7 @@ check(
 );
 check(
   "a reply with no tool rounds at all is safe",
-  C.compactForResume([
+  C.compactTranscript([
     { role: "system", content: "s" },
     { role: "user", content: "u" },
     { role: "assistant", content: "just an answer" },
@@ -233,15 +235,41 @@ check(
     // The wire build may pass options (includeReasoning) after the array.
     /serializeForApi\(wireMessages[,)]/.test(route)
 );
+/*
+ * Resume must replay the attempt VERBATIM by default. A folding resume
+ * dropped every folded round's tool results, so the model could not see
+ * what commands returned or what files contained — and re-ran the same
+ * work ("no memory on resume"). Folding now happens only at the size safety
+ * valve, via the same high-threshold compactor the live loop uses.
+ */
 check(
-  "resuming compacts the replayed attempt",
-  /const folded = compactForResume\(resumed\.messages\)/.test(route),
-  "a resume replays a whole finished attempt in one request"
+  "resume no longer calls the unconditional folder",
+  !route.includes("compactForResume"),
+  "it used to drop the tool results that tell the model what it already did"
 );
 check(
-  "resume compacts before the transcript is used, not after",
-  route.indexOf("compactForResume(resumed.messages)") <
-    route.indexOf("await refreshFileTree();")
+  "resume replays the full attempt and only folds as a safety valve",
+  /const folded = compactTranscript\(resumed\.messages\)/.test(route),
+  "the high-threshold compactor leaves ordinary transcripts untouched"
+);
+check(
+  "a normal-size resume keeps every tool result verbatim",
+  (() => {
+    const ordinary = build(8);
+    const out = C.compactTranscript(ordinary); // default high threshold
+    const results = out.messages.filter((m) => m.role === "tool").length;
+    return results === 8 && out.messages === ordinary;
+  })(),
+  "an 8-round attempt replays 8/8 results so nothing is redone"
+);
+check(
+  "only an enormous resume is folded to fit",
+  (() => {
+    const huge = build(60); // ~2.8M chars, over the safety threshold
+    const out = C.compactTranscript(huge);
+    return out.stats.rounds > 0 && toolCallsAreBalanced(out.messages);
+  })(),
+  "approaching the context window still folds, but keeps structure valid"
 );
 
 console.log(
