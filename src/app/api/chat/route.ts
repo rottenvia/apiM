@@ -66,7 +66,7 @@ import {
 } from "@/lib/transcript";
 import type { TranscriptMessage } from "@/lib/transcript";
 import { pruneTranscript } from "@/lib/prune";
-import { compactTranscript, compactForResume } from "@/lib/compact";
+import { compactTranscript } from "@/lib/compact";
 import {
   QWEN_COMPACT,
   QWEN_PRUNE,
@@ -1544,19 +1544,29 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           transcript.length = 0;
 
           /*
-           * Compact before replaying, not after.
+           * Replay the COMPLETE attempt: every tool call, every result, all
+           * the reasoning.
            *
-           * A resume drops a whole finished attempt into one request — on max
-           * thinking, twenty rounds is ~180k tokens of reasoning alone, and
-           * that then rides along on every remaining round. Folding the older
-           * rounds first is what makes continuing cheaper than starting over
-           * rather than merely different.
+           * This used to fold the attempt unconditionally, collapsing all
+           * but the last four rounds into one-line notes
+           * ("- write_file(src/m0.js)")
+           * and dropped the tool RESULTS for every folded round. A resumed
+           * model then could not see what a command returned, whether a file
+           * was fully written, or what a test printed — so it re-ran the same
+           * commands and re-did the same work ("it has no memory on resume").
            *
-           * Done unconditionally and without quantising: the prefix is
-           * rewritten exactly once here and is stable afterwards, so there is
-           * no cache being thrashed to pay for it.
+           * The full transcript is the memory. Keeping it is also cheap: the
+           * repo's own measurements (lib/compact.ts) show old reasoning lives
+           * in the cached prefix at ~1/120th the rate, so folding it to save
+           * money does not pay for itself short of 100+ rounds. We therefore
+           * only fold as a safety valve, at the SAME high threshold the live
+           * loop uses — a transcript approaching the context window is folded
+           * to fit, keeping the recent rounds verbatim; anything smaller is
+           * replayed byte for byte. The per-round prune that follows still
+           * collapses very large old *file reads*, and findings/plan are
+           * refreshed below.
            */
-          const folded = compactForResume(resumed.messages);
+          const folded = compactTranscript(resumed.messages);
           transcript.push(...folded.messages);
           if (folded.stats.rounds > 0) {
             send({
