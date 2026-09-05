@@ -255,24 +255,4 @@ export function compactTranscript(
   };
 }
 
-/**
- * Compact a transcript being resumed, in one pass.
- *
- * Distinct from the live path because the trade-off is different. A resume
- * replays a whole finished attempt at once — twenty rounds of reasoning
- * arriving in a single request — and then continues from there, so the
- * prefix is rewritten exactly once and stays stable for everything after.
- * There is no cache to thrash, which means it is worth compacting harder and
- * without waiting for a size threshold.
- */
-export function compactForResume(
-  messages: TranscriptMessage[]
-): { messages: TranscriptMessage[]; stats: CompactStats } {
-  return compactTranscript(messages, {
-    keepRecentRounds: KEEP_RECENT_ROUNDS,
-    // Always worth doing: this is a one-off rewrite with no cache cost.
-    thresholdChars: 0,
-    // No quantising either, for the same reason.
-    step: 1,
-  });
-}
+
