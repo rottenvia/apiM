@@ -1062,12 +1062,12 @@ input:focus-visible {
 
 /* In-chat find highlights. Kept as classes rather than tailwind utilities on
    each <mark> so that next/prev can flip the focused match by attribute alone
-   (a layoutEffect), without re-rendering and re-parsing the whole bubble. */
+   (a layoutEffect), without re-rendering and re-parsing the whole bubble.
+   No border-radius here: the rounded-[3px] utility is applied on the element
+   so the design scale keeps 3px as its single sanctioned highlight radius. */
 .search-hit {
-  border-radius: 3px;
   background-color: rgba(201, 100, 66, 0.25);
   color: #ede9e2;
-  padding: 0 2px;
 }
 .search-hit[data-active-match] {
   background-color: #c96442;

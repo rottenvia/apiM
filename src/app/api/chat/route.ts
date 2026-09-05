@@ -138,6 +138,7 @@ import {
   maxTokensFor,
 } from "@/lib/budget";
 import { cacheSplit, estimateCost, getDeepSeekPeriod } from "@/lib/pricing";
+import { createContinuationDedup } from "@/lib/continuation-dedup";
 import { listCustomPlugins } from "@/lib/plugin-store";
 import {
   applyThinking,
@@ -1715,6 +1716,13 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          */
         let continuations = 0;
         /**
+         * Set when the next round is a "carry on from where you stopped"
+         * prose continuation, so that round de-duplicates any text the model
+         * incorrectly echoes back instead of continuing (GLM/Ox restart the
+         * sentence). Consumed by the round that requested it.
+         */
+        let proseContinuationPending = false;
+        /**
          * A think-only output-limit cut: one nudge to act, then stop. Fresh
          * budget on Resume for the same reason — but forceNoThinking below
          * still carries, so a model that burned the whole ceiling on
@@ -1967,6 +1975,24 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           const roundDeltaFields = new Set<string>();
           /** "stop" if the model finished, "length" if it ran out of room. */
           let roundFinishReason = "";
+
+          /*
+           * Continuation de-duplication.
+           *
+           * When a reply is cut mid-sentence we ask the model to "carry
+           * straight on from the last character". GLM and Ox often ignore
+           * that and restart the sentence instead — so the new stream's
+           * beginning is a copy of text already streamed and saved, and the
+           * two got concatenated into one garbled line ("The chain is closed —
+           * **`m_hPawn = The chain closed, love — **`m_hPawn"). This round
+           * buffers its opening prose until it diverges from the tail of what
+           * we already have, then drops the repeated prefix. One fresh dedup
+           * per round; see lib/continuation-dedup.ts.
+           */
+          const dedup = proseContinuationPending
+            ? createContinuationDedup(assistantContent)
+            : null;
+          proseContinuationPending = false;
 
           // Collapse old tool results before sending. The stored transcript
           // keeps everything; only the copy going upstream is reduced, so a
@@ -2645,15 +2671,19 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               }
               if (delta.content) {
                 markUpstream();
+                // A prose-continuation round may echo back text already
+                // streamed; drop the repeated prefix before anything sees it.
+                const emit = dedup ? dedup.push(delta.content) : delta.content;
+                if (!emit) continue;
                 if (!announcedWriting) {
                   announcedWriting = true;
                   send({ type: "status", stage: "writing" });
                 }
-                assistantContent += delta.content;
-                roundContent += delta.content;
+                assistantContent += emit;
+                roundContent += emit;
                 sawWork = true;
-                appendTimelineText(delta.content);
-                send({ type: "content", delta: delta.content });
+                appendTimelineText(emit);
+                send({ type: "content", delta: emit });
                 void checkpoint();
               }
             }
@@ -2882,6 +2912,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             // costs only the remaining tokens rather than a full retry.
             if (continuations < MAX_CONTINUATIONS) {
               continuations += 1;
+              proseContinuationPending = true;
               transcript.push({
                 role: "assistant",
                 content: roundContent || null,
@@ -3580,11 +3611,17 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   steps: plan.steps,
                   summary: planSummary(plan),
                 });
+                // Short acknowledgement only: the full plan is appended as a
+                // system message and kept pinned at the end of the transcript
+                // every round. Echoing it here too meant every subsequent
+                // round paid for two copies of the plan; the pinned copy is
+                // the one compaction can't summarise away.
                 result = {
                   ok: true,
                   content:
-                    `Plan set.\n\n${formatPlan(plan)}\n\nStart on step 1. ` +
-                    `Update it with update_plan as you go.`,
+                    `Plan recorded and now pinned above your next reply — ` +
+                    `it stays there, updated, for the whole run. Start on ` +
+                    `step 1; update progress with update_plan as you go.`,
                   summary: `Planned ${plan.steps.length} steps`,
                 };
               } catch (error) {
@@ -3674,9 +3711,12 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                     steps: plan.steps,
                     summary: planSummary(plan),
                   });
+                  // The full updated plan is re-pinned as a system message at
+                  // the end of this same round; echoing it here as well made
+                  // every round carry two copies of the growing plan.
                   result = {
                     ok: true,
-                    content: formatPlan(plan),
+                    content: "Plan updated; the pinned copy above reflects it.",
                     summary: planSummary(plan),
                   };
                 } catch (error) {
