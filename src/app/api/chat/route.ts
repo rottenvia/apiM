@@ -126,8 +126,7 @@ import { getModel, maxOutputTokensFor, modelVision } from "@/lib/models";
 const TOOL_IMAGE_TAG = "[tool image]";
 import {
   GITHUB_TOKEN_COOKIE,
-  githubConfig,
-  openGitHubToken,
+  resolveGitHubToken,
   pushGitHubWorkspace,
   readGitHubConnection,
 } from "@/lib/github";
@@ -236,6 +235,13 @@ interface ChatRequestBody {
   tavilyApiKey?: string;
   /** Optional fallback search provider, used when Tavily refuses. */
   exaApiKey?: string;
+  /**
+   * GitHub Personal Access Token sent by the client for the no-OAuth
+   * connector path. Used only for git operations; never written into the
+   * repo, transcript, or git config. GITHUB_TOKEN env and the OAuth cookie
+   * are the other sources.
+   */
+  githubToken?: string;
   model?: string;
   thinkingEffort?: string;
   /** "off" | "auto" | "always" — "auto" lets the model decide per message. */
@@ -1002,13 +1008,19 @@ export async function POST(req: NextRequest) {
         const githubConnection = workspaceEnabled
           ? await readGitHubConnection(workspace)
           : null;
-        const githubOauth = githubConfig();
-        const githubToken = githubOauth
-          ? await openGitHubToken(
-              req.cookies.get(GITHUB_TOKEN_COOKIE)?.value,
-              githubOauth.tokenSecret
-            )
-          : null;
+        // Token sources: a PAT sent with the request (the no-OAuth path),
+        // GITHUB_TOKEN env, or an OAuth cookie. Any one is enough to push.
+        let githubToken: string | null = null;
+        try {
+          githubToken = (
+            await resolveGitHubToken({
+              cookieValue: req.cookies.get(GITHUB_TOKEN_COOKIE)?.value,
+              requestToken: body.githubToken,
+            })
+          ).token;
+        } catch {
+          githubToken = null;
+        }
         // The model is otherwise blind to what already exists, and will
         // happily create a second copy of a file it never knew was there.
         const workspaceFiles = workspaceEnabled
