@@ -590,14 +590,16 @@ check(
   "a no-response failure is the server's, and saved work continues itself"
 );
 check(
-  "a server-side HTTP status auto-resumes, a rate limit does not",
-  /autoResume:\s*hadWork && SERVER_SIDE_STATUS\.has\(dsResponse\.status\)/.test(
-    route
-  ) &&
+  "a server-side HTTP status auto-resumes, and a rate limit is ridden out first",
+  /if \(dsResponse\.status === 429\)/.test(route) &&
+    /rateLimitRetries < MAX_RATE_LIMIT_WAITS/.test(route) &&
+    /SERVER_SIDE_STATUS\.has\(dsResponse\.status\) \|\|\s*\n?\s*dsResponse\.status === 429/.test(
+      route
+    ) &&
     /SERVER_SIDE_STATUS = new Set\(\[408, 409, 425, 500, 502, 503, 504\]\)/.test(
       retry
     ),
-  "429 belongs to the limit-resume agent; 401/402 to the user's wallet"
+  "a 429 waits and re-issues the same round; after the wait budget it auto-resumes like other server blips; 401/402 stay with the user"
 );
 check(
   "an explicit server autoResume is trusted for any provider",

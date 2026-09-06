@@ -18,6 +18,7 @@ import {
   pinPluginDirectivesOnFirstSystem,
 } from "@/lib/plugins";
 import { workspaceToolsFor, runTool } from "@/lib/tools";
+import { RunFileMemory } from "@/lib/run-memory";
 import { agentRoundsFor, modelHasOpenToolLimits } from "@/lib/tool-limits";
 import type { ToolResult } from "@/lib/tools";
 import { buildWorkspaceContext } from "@/lib/workspace-context";
@@ -1756,6 +1757,15 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          * user sees "retrying" then a blank reply.
          */
         let emptyStreamRetries = 0;
+        /**
+         * Times we have waited out a 429 ("service busy / rate limited") and
+         * re-issued the SAME round instead of ending the reply. A shared
+         * pool 429 is transient load, not a user error — stopping on it made
+         * long tasks die with "the AI service is busy" when the right move
+         * is to back off and try the round again. Bounded so a genuinely
+         * saturated pool eventually surfaces, rather than looping forever.
+         */
+        let rateLimitRetries = 0;
         /** Set when the reply stopped because it ran out of room. */
         let hitOutputCeiling = false;
         /** Set when the spending limit ended the run rather than the model. */
@@ -1795,6 +1805,13 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           summary?: string;
           changedPath?: string;
         }[] = [...resumedToolEvents];
+
+        // Memory of the files THIS run has written. A model that writes a
+        // file and then asks to read it back in the next round is paying a
+        // whole tool round for text it already holds in its own write call;
+        // runTool serves that read from these bytes instead. Discarded with
+        // the reply, so it never serves stale content across conversations.
+        const fileMemory = new RunFileMemory();
 
         /**
          * What happened, in order.
@@ -2381,12 +2398,58 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             }
 
             /*
+             * A 429 is the shared pool saying "busy — slow down". It is
+             * transient, but the in-flight retry budget (a handful of tries,
+             * capped at ~10s of backoff) is short for an evening spike. When
+             * the retries are spent, WAIT and re-issue the same round rather
+             * than killing the reply: the transcript is checkpointed, so the
+             * only cost of waiting is time, and stopping forced the user to
+             * press Resume on something the model could have ridden out. A
+             * Retry-After header is honoured (capped); after a bounded number
+             * of waits we surface the message so a truly saturated pool is not
+             * hidden forever.
+             */
+            if (dsResponse.status === 429) {
+              const MAX_RATE_LIMIT_WAITS = 6;
+              if (!stopped() && rateLimitRetries < MAX_RATE_LIMIT_WAITS) {
+                rateLimitRetries += 1;
+                const retryAfter = Number(
+                  dsResponse.headers.get("retry-after") ?? ""
+                );
+                const headerMs = Number.isFinite(retryAfter)
+                  ? Math.max(0, retryAfter) * 1000
+                  : null;
+                // Exponential wait: 5s, 10s, 20s, 40s, up to ~60s, capped.
+                const backoffMs = Math.min(
+                  60_000,
+                  headerMs ?? 5_000 * 2 ** (rateLimitRetries - 1)
+                );
+                send({
+                  type: "retrying",
+                  phase: "backoff",
+                  attempt: rateLimitRetries,
+                  attempts: MAX_RATE_LIMIT_WAITS,
+                  delayMs: Math.round(backoffMs),
+                  reason: "service busy",
+                  host: target.providerName,
+                  inputChars,
+                });
+                await dsResponse.body?.cancel().catch(() => {});
+                try {
+                  await sleep(backoffMs, runSignal);
+                } catch {
+                  // Stop aborted the wait — fall through to normal teardown.
+                }
+                continue;
+              }
+            }
+
+            /*
              * Server-side statuses (their 5xx / 408 / 409 / 425) mean the
              * host is down or overloaded — the same failure a dropped
-             * stream is, so saved work continues itself. A 429 is the pool
-             * saying "slow down" (the limit-resume agent owns it), and a
-             * 401/402 is the key or balance — retrying those just delays
-             * the error the user needs to see.
+             * stream is, so saved work continues itself. A 429 that exceeded
+             * the wait budget above, and a 401/402 (key or balance), are
+             * surfaced — retrying those any longer just delays the truth.
              */
             send({
               type: "error",
@@ -2396,7 +2459,9 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 detail
               ),
               autoResume:
-                hadWork && SERVER_SIDE_STATUS.has(dsResponse.status),
+                hadWork &&
+                (SERVER_SIDE_STATUS.has(dsResponse.status) ||
+                  dsResponse.status === 429),
             });
             close();
             return;
@@ -3315,6 +3380,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   exaKey: exaApiKey,
                   deepseekKey: helperApiKey,
                   planner: planner ?? undefined,
+                  fileMemory,
                   searchProfile,
                   signal: runSignal,
                 }).catch((error) => ({
@@ -3422,6 +3488,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                     exaKey: exaApiKey,
                     deepseekKey: helperApiKey,
                     planner: planner ?? undefined,
+                  fileMemory,
                     searchProfile,
                     signal: runSignal,
                   }
@@ -3455,6 +3522,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                       exaKey: exaApiKey,
                       deepseekKey: helperApiKey,
                       planner: planner ?? undefined,
+                  fileMemory,
                       searchProfile,
                       signal: runSignal,
                     }
@@ -3510,6 +3578,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                       exaKey: exaApiKey,
                       deepseekKey: helperApiKey,
                       planner: planner ?? undefined,
+                  fileMemory,
                       searchProfile,
                       signal: runSignal,
                     }
@@ -4009,6 +4078,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                       exaKey: exaApiKey,
                       deepseekKey: helperApiKey,
                       planner: planner ?? undefined,
+                  fileMemory,
                       searchProfile,
                       signal: runSignal,
                     }
@@ -4051,6 +4121,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   exaKey: exaApiKey,
                   deepseekKey: helperApiKey,
                   planner: planner ?? undefined,
+                  fileMemory,
                   searchProfile,
                   signal: runSignal,
                 }
