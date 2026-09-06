@@ -11,6 +11,7 @@
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { createServer } from "node:http";
+import { readFileSync } from "node:fs";
 import { finishSuite } from "./lib/proc.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
@@ -617,6 +618,73 @@ check(
   `${parallelRounds * 2} calls across ${parallelRounds} rounds`
 );
 check("parallel calls still got pruned", res.stats.collapsed > 0);
+
+// ---------------------------------------------------------- service busy
+console.log("\nA 'service busy' (429) waits and re-issues the round instead of stopping");
+
+const route = readFileSync(
+  path.join(ROOT, "src/app/api/chat/route.ts"),
+  "utf8"
+);
+check(
+  "a 429 that exhausts the in-flight retries is waited out, not fatal",
+  /if \(dsResponse\.status === 429\)/.test(route) &&
+    /rateLimitRetries < MAX_RATE_LIMIT_WAITS/.test(route) &&
+    /await sleep\(backoffMs, runSignal\)/.test(route),
+  "shared-pool load is transient; stopping forced a manual Resume"
+);
+check(
+  "the wait honours Retry-After and is capped",
+  /retry-after/.test(route) && /60_000/.test(route) && /MAX_RATE_LIMIT_WAITS/.test(route),
+  "a saturated pool still surfaces instead of looping forever"
+);
+check(
+  "a 429 beyond the wait budget still auto-resumes the checkpointed work",
+  /SERVER_SIDE_STATUS\.has\(dsResponse\.status\) \|\|\s*\n?\s*dsResponse\.status === 429/.test(route),
+  "the saved transcript continues itself rather than ending"
+);
+
+// ----------------------------------------------------------- file memory
+console.log("\nThe agent remembers files it just wrote instead of re-reading them");
+
+const toolsSrc = readFileSync(
+  path.join(ROOT, "src/lib/tools.ts"),
+  "utf8"
+);
+const memSrc = readFileSync(
+  path.join(ROOT, "src/lib/run-memory.ts"),
+  "utf8"
+);
+check(
+  "a run-scoped file memory exists and is invalidated by commands",
+  /class RunFileMemory/.test(memSrc) &&
+    /invalidateAll/.test(memSrc) &&
+    memSrc.includes("recordWrite"),
+  "the disk becomes the truth once a shell command could have changed files"
+);
+check(
+  "read_file serves a just-written file from the run memory",
+  /mem\.get\(filePath\)/.test(toolsSrc) &&
+    /served from the run's own write/.test(toolsSrc),
+  "re-reading text the model already wrote was a wasted round and a flood of tokens"
+);
+check(
+  "write_file records the bytes it wrote into the memory",
+  /mem\?\.recordWrite/.test(toolsSrc)
+);
+check(
+  "command-like tools clear the memory",
+  /invalidateAll\(\)/.test(toolsSrc) &&
+    /name === "run_command"/.test(toolsSrc) &&
+    /name === "run_tests"/.test(toolsSrc),
+  "after a command the file on disk, not the write args, is the truth"
+);
+check(
+  "the route passes one shared memory to every tool call in a reply",
+  /const fileMemory = new RunFileMemory\(\)/.test(route) &&
+    (route.match(/fileMemory,/g)?.length ?? 0) >= 6,
+  "the memory spans the whole run, not one tool call"
+);
 
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`

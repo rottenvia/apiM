@@ -77,6 +77,7 @@ import {
   formatTestSummary,
 } from "@/lib/testing";
 import { runCommand } from "@/lib/runner";
+import { RunFileMemory } from "@/lib/run-memory";
 import { detectBuild, BuildError } from "@/lib/build";
 import {
   digestBuild,
@@ -2164,6 +2165,12 @@ export interface ToolContext {
   searchProfile?: string;
   /** Explicit Stop signal; expensive static/decompiler work must release promptly. */
   signal?: AbortSignal;
+  /**
+   * Run-scoped memory of files THIS reply already wrote. When set, an
+   * immediate re-read of a file the agent wrote is answered from these bytes
+   * instead of a costly read round-trip. See lib/run-memory.ts.
+   */
+  fileMemory?: RunFileMemory;
 }
 
 export async function runTool(
@@ -2173,7 +2180,20 @@ export async function runTool(
   context: ToolContext = {}
 ): Promise<ToolResult> {
   const limits: ToolLimits = toolLimitsFor(context.modelId);
+  const mem = context.fileMemory;
   try {
+    // Tools that can mutate files outside of the writers invalidate the
+    // run memory: a command may rewrite, reformat or generate anything, so
+    // after one of them the disk is the source of truth.
+    if (
+      mem &&
+      (name === "run_command" ||
+        name === "run_tests" ||
+        name === "build_project" ||
+        name === "start_process")
+    ) {
+      mem.invalidateAll();
+    }
     switch (name) {
       case "list_files": {
         const sub = typeof args.path === "string" ? args.path : ".";
@@ -2197,11 +2217,38 @@ export async function runTool(
 
       case "read_file": {
         const filePath = str(args, "path");
-        const result = await readFile(workspaceId, filePath, {
-          maxChars: limits.readChars,
-          startLine: num(args, "start_line"),
-          endLine: num(args, "end_line"),
-        });
+        const rangeRequested =
+          num(args, "start_line") != null || num(args, "end_line") != null;
+        // A whole-file re-read of something THIS reply just wrote is answered
+        // from the run memory: the bytes are already in the transcript (the
+        // write call carried them), so re-reading is a wasted round. A region
+        // read is left to disk, since a slice line count from memory would
+        // need to mirror the on-disk numbering.
+        const recalled =
+          mem && !rangeRequested ? mem.get(filePath) : null;
+        const result =
+          recalled != null
+            ? (() => {
+                const lines = recalled.split("\n").length;
+                return {
+                  path: filePath,
+                  content: recalled,
+                  truncated: false,
+                  size: Buffer.byteLength(recalled, "utf8"),
+                  totalLines: lines,
+                  totalChars: recalled.length,
+                  firstLine: 1,
+                  lastLine: lines,
+                  nextLine: null as number | null,
+                  rangeRequested: false,
+                  fromMemory: true,
+                };
+              })()
+            : await readFile(workspaceId, filePath, {
+                maxChars: limits.readChars,
+                startLine: num(args, "start_line"),
+                endLine: num(args, "end_line"),
+              });
 
         /*
          * Numbered when the offset matters, plain when it does not.
@@ -2245,22 +2292,32 @@ export async function runTool(
               .digest("hex")
               .slice(0, 16)}`;
 
+        // When the bytes are the ones this reply just wrote, say so: the model
+        // is seeing its own file, not a disk read, and must not treat this as
+        // a reason to re-read — it already had the content.
+        const memoryNote = (result as { fromMemory?: boolean }).fromMemory
+          ? " — served from the run's own write (you wrote these exact bytes in this reply; no re-read was needed)"
+          : "";
+
         const header =
           `${result.path} — lines ${result.firstLine}-${result.lastLine} of ` +
           `${result.totalLines}` +
           (result.rangeRequested || result.truncated
             ? ` (${describeCoverage(result)})`
             : " (whole file)") +
-          exactness;
+          exactness +
+          memoryNote;
 
         return {
           ok: true,
           content: `${header}:\n\n${body}${truncationNotice(result)}`,
-          summary: result.truncated
-            ? `Read ${result.path} lines ${result.firstLine}-${result.lastLine} — INCOMPLETE`
-            : result.rangeRequested
-              ? `Read ${result.path} lines ${result.firstLine}-${result.lastLine}`
-              : `Read ${result.path}`,
+          summary: (result as { fromMemory?: boolean }).fromMemory
+            ? `Have ${result.path} — already written this reply`
+            : result.truncated
+              ? `Read ${result.path} lines ${result.firstLine}-${result.lastLine} — INCOMPLETE`
+              : result.rangeRequested
+                ? `Read ${result.path} lines ${result.firstLine}-${result.lastLine}`
+                : `Read ${result.path}`,
         };
       }
 
@@ -2737,14 +2794,19 @@ export async function runTool(
       }
 
       case "write_file": {
+        const content = str(args, "content");
         const result = await writeFile(
           workspaceId,
           str(args, "path"),
-          str(args, "content")
+          content
         );
+        mem?.recordWrite(result.path, content);
         return {
           ok: true,
-          content: `${result.created ? "Created" : "Updated"} ${result.path} (${result.bytes} bytes).`,
+          content:
+            `${result.created ? "Created" : "Updated"} ${result.path} ` +
+            `(${result.bytes} bytes). You have the full contents above — ` +
+            `do not read it back in the next round.`,
           summary: `${result.created ? "Created" : "Updated"} ${result.path}`,
           changedPath: result.path,
         };
@@ -2796,6 +2858,19 @@ export async function runTool(
         }
 
         const result = await applyEdit(workspaceId, filePath, spec);
+        // The edit changed the file on disk. The run memory held the pre-edit
+        // bytes from a write; refresh them so an immediate re-read still sees
+        // the current content rather than the stale version.
+        if (mem) {
+          try {
+            mem.recordWrite(
+              result.path,
+              (await readFileWhole(workspaceId, filePath)).content
+            );
+          } catch {
+            mem.invalidate(result.path);
+          }
+        }
 
         let confirmation =
           `Edited ${result.path} at lines ${result.startLine}-${result.endLine} ` +
@@ -2838,6 +2913,7 @@ export async function runTool(
 
       case "delete_file": {
         const result = await deleteFile(workspaceId, str(args, "path"));
+        mem?.invalidate(result.path);
         return {
           ok: true,
           content: `Deleted ${result.path}.`,
@@ -4589,6 +4665,7 @@ export async function runTool(
           try {
             const result = await writeFile(workspaceId, file.path, file.content);
             written.push(result.path);
+            mem?.recordWrite(result.path, file.content);
           } catch (error) {
             // One bad path must not lose the rest of the batch.
             failed.push(

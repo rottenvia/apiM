@@ -372,13 +372,37 @@ function MessageBubbleImpl({
    * This state flips false ~1.5s after the last token, which is what the
    * "reading results" indicator below keys off. The interval runs only on
    * live bubbles and costs one render a second while streaming.
+   *
+   * Time alone cannot tell the true between-rounds gap from a quiet spell
+   * inside a long think (reasoning tokens arrive in sparse bursts, with
+   * gaps well over 1.5s). `lastActivityRef` therefore also records WHAT
+   * arrived last: the "reading results" row is only honest when tools have
+   * all finished and nothing of the next round has started yet. Labeling a
+   * mid-think pause "reading results" is what made long thinking look
+   * frozen on that row.
    */
   const [streamIdle, setStreamIdle] = useState(false);
   const lastArrivalRef = useRef(Date.now());
+  const lastActivityRef = useRef<"text" | "toolsDone" | null>(null);
   useEffect(() => {
     lastArrivalRef.current = Date.now();
+    // Any reasoning or prose means a round is actively producing; the model
+    // is thinking or writing, not sitting between rounds.
+    lastActivityRef.current = "text";
     setStreamIdle(false);
   }, [message.reasoningContent, message.content]);
+  const toolEventCount = message.toolEvents?.length ?? 0;
+  const resolvedToolCount =
+    message.toolEvents?.filter((e) => e.ok !== undefined).length ?? 0;
+  // When a tool result lands (and no text has arrived since), we are at the
+  // end of a round's tool work. Keyed on the RESOLVED count so a new call
+  // starting does not mark the round finished.
+  useEffect(() => {
+    if (resolvedToolCount === 0) return;
+    lastArrivalRef.current = Date.now();
+    lastActivityRef.current = "toolsDone";
+    setStreamIdle(false);
+  }, [resolvedToolCount]);
   useEffect(() => {
     if (!message.isStreaming) {
       setStreamIdle(false);
@@ -389,6 +413,16 @@ function MessageBubbleImpl({
     }, 1000);
     return () => clearInterval(t);
   }, [message.isStreaming]);
+  /**
+   * The genuine gap: every tool call this round has resolved, and no
+   * reasoning/prose of the NEXT round has arrived since. This is the only
+   * state in which "reading the results and deciding the next step" is
+   * literally true; a quiet moment inside a think is not it.
+   */
+  const betweenToolRounds =
+    toolEventCount > 0 &&
+    resolvedToolCount === toolEventCount &&
+    lastActivityRef.current === "toolsDone";
 
   if (arriveRef.current === null) {
     // First render: seed with what is already here. A resumed reply that
@@ -1442,9 +1476,7 @@ function MessageBubbleImpl({
                 one both branches render before). Purely presentational —
                 zero server work, nothing about the run changes. */}
             {message.isStreaming &&
-              message.toolEvents &&
-              message.toolEvents.length > 0 &&
-              message.toolEvents.every((e) => e.ok !== undefined) &&
+              betweenToolRounds &&
               streamIdle && (
                 <div className="mb-2.5 flex items-center gap-2 text-[13px] text-text-secondary">
                   <span className="text-accent-light">
