@@ -29,6 +29,7 @@ const load = (p) => import(pathToFileURL(path.join(ROOT, p)).href);
 
 const ws = await load("src/lib/workspace.ts");
 const { runTool, WORKSPACE_TOOLS } = await load("src/lib/tools.ts");
+const { RunFileMemory } = await load("src/lib/run-memory.ts");
 const patch = await load("src/lib/patch.ts");
 const testing = await load("src/lib/testing.ts");
 
@@ -301,6 +302,72 @@ check("read_file advertises the line range",
   JSON.stringify(WORKSPACE_TOOLS.find((t) => t.function.name === "read_file")).includes("start_line"));
 check("search_files advertises context",
   JSON.stringify(WORKSPACE_TOOLS.find((t) => t.function.name === "search_files")).includes("context"));
+
+console.log("\n8. The model does not re-read a file it just wrote");
+
+const MEMWS = "tools2mem";
+await rm(path.join(DATA_ROOT, "workspaces", MEMWS), {
+  recursive: true,
+  force: true,
+});
+const mem = new RunFileMemory();
+
+// Write through the tool with the run memory attached.
+let w = await runTool(
+  MEMWS,
+  "write_file",
+  { path: "just_wrote.ts", content: "export const ANSWER = 42;\n" },
+  { fileMemory: mem }
+);
+check("write_file with memory succeeds", w.ok);
+
+// Immediately read it back: served from the written bytes, marked as such.
+let rd = await runTool(
+  MEMWS,
+  "read_file",
+  { path: "just_wrote.ts" },
+  { fileMemory: mem }
+);
+check(
+  "an immediate re-read returns the written content",
+  rd.ok && rd.content.includes("export const ANSWER = 42;"),
+  rd.content.slice(0, 60)
+);
+check(
+  "and says it came from this reply's own write",
+  rd.content.includes("you wrote these exact bytes in this reply") &&
+    /already written this reply/.test(rd.summary),
+  "so the model knows re-reading was unnecessary"
+);
+
+// A shell command must invalidate the memory — the file may have changed on
+// disk. Read without a memory object still works (disk path).
+mem.invalidateAll();
+check(
+  "after a command the written bytes are no longer served from memory",
+  mem.get("just_wrote.ts") === null,
+  "the disk is the source of truth once a command could have touched it"
+);
+const rdDisk = await runTool(
+  MEMWS,
+  "read_file",
+  { path: "just_wrote.ts" }
+);
+check("a read with no memory still hits the real file", rdDisk.ok && rdDisk.content.includes("ANSWER = 42"));
+
+// A region read is never faked from memory.
+const ranged = await runTool(
+  MEMWS,
+  "read_file",
+  { path: "just_wrote.ts", start_line: 1, end_line: 1 },
+  { fileMemory: new RunFileMemory() /* empty anyway */ }
+);
+check("a line-range read goes to disk, not memory", ranged.ok);
+
+await rm(path.join(DATA_ROOT, "workspaces", MEMWS), {
+  recursive: true,
+  force: true,
+});
 
 await rm(path.join(DATA_ROOT, "workspaces", WS), { recursive: true, force: true });
 await rm(DETECT, { recursive: true, force: true });
