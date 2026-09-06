@@ -38,23 +38,50 @@ export function GitHubConnector({
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  // Personal Access Token: the no-OAuth way to connect. Persisted in
+  // localStorage (the same store as the other API keys) and sent on each
+  // GitHub API call, so a self-hoster needs no registered GitHub App.
+  const [pat, setPat] = useState("");
+  const [patUsed, setPatUsed] = useState(false);
+  const [oauthAvailable, setOauthAvailable] = useState(false);
+
+  // Token header helper — empty object when no PAT, so OAuth cookies still work.
+  const authHeaders = useCallback(
+    (): Record<string, string> =>
+      pat.trim() ? { "x-github-token": pat.trim() } : {},
+    [pat]
+  );
 
   const load = useCallback(async () => {
     setLoading(true);
     setError("");
+    const token = (
+      localStorage.getItem("nexusai-github-pat") ?? ""
+    ).trim();
+    if (token) setPat(token);
     try {
       const [statusRes, connectionRes] = await Promise.all([
-        fetch("/api/github/status"),
+        fetch("/api/github/status", {
+          headers: token ? { "x-github-token": token } : {},
+        }),
         fetch(`/api/github/connection?workspaceId=${encodeURIComponent(workspaceId)}`),
       ]);
       const status = await statusRes.json();
       const connectedRepo = await connectionRes.json();
-      setConfigured(status.configured !== false);
+      setOauthAvailable(status.oauth === true);
+      // "configured" used to gate everything on an OAuth app. With a PAT the
+      // feature is usable even without one, so only treat "nothing works" as
+      // unconfigured.
+      setConfigured(
+        status.configured !== false || Boolean(token)
+      );
       setConnected(status.connected === true);
       setLogin(status.user?.login ?? "");
       setConnection(connectedRepo.connection ?? null);
       if (status.connected) {
-        const repoRes = await fetch("/api/github/repos");
+        const repoRes = await fetch("/api/github/repos", {
+          headers: token ? { "x-github-token": token } : {},
+        });
         const repoData = await repoRes.json();
         if (!repoRes.ok) throw new Error(repoData.error ?? "Could not list repositories");
         setRepos(repoData.repos ?? []);
@@ -104,7 +131,8 @@ export function GitHubConnector({
     setError("");
     try {
       const res = await fetch(
-        `/api/github/branches?repo=${encodeURIComponent(repo.fullName)}`
+        `/api/github/branches?repo=${encodeURIComponent(repo.fullName)}`,
+        { headers: authHeaders() }
       );
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Could not list branches");
@@ -114,6 +142,41 @@ export function GitHubConnector({
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not list branches");
+    }
+  };
+
+  const savePatAndConnect = async () => {
+    const token = pat.trim();
+    setError("");
+    if (!token) {
+      setError("Paste a GitHub Personal Access Token (or use the GitHub button if the host signed one in).");
+      return;
+    }
+    setBusy(true);
+    setPatUsed(false);
+    try {
+      // Verify the token against /user before offering repositories.
+      const statusRes = await fetch("/api/github/status", {
+        headers: { "x-github-token": token },
+      });
+      const status = await statusRes.json();
+      if (!status.connected) {
+        throw new Error("That token did not authenticate with GitHub. Check it has the repo scope.");
+      }
+      localStorage.setItem("nexusai-github-pat", token);
+      setPatUsed(true);
+      setLogin(status.user?.login ?? "GitHub user");
+      setConnected(true);
+      const repoRes = await fetch("/api/github/repos", {
+        headers: { "x-github-token": token },
+      });
+      const repoData = await repoRes.json();
+      if (!repoRes.ok) throw new Error(repoData.error ?? "Could not list repositories");
+      setRepos(repoData.repos ?? []);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not verify the token");
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -129,6 +192,9 @@ export function GitHubConnector({
           workspaceId,
           repo: selected.fullName,
           baseBranch: branch,
+          // Pass along a PAT when the host has no OAuth app; the server also
+          // falls back to OAuth cookie / env token.
+          token: pat.trim() || undefined,
         }),
       });
       const data = await res.json();
@@ -144,6 +210,10 @@ export function GitHubConnector({
 
   const disconnectAccount = async () => {
     await fetch("/api/github/status", { method: "DELETE" });
+    // Forget any locally-stored PAT too, so "disconnect" means disconnect.
+    localStorage.removeItem("nexusai-github-pat");
+    setPat("");
+    setPatUsed(false);
     setConnected(false);
     setRepos([]);
     setSelected(null);
@@ -171,13 +241,64 @@ export function GitHubConnector({
               GitHub OAuth is not configured. Set <code>GITHUB_CLIENT_ID</code> and <code>GITHUB_CLIENT_SECRET</code>, then restart apiM.
             </div>
           ) : !connected ? (
-            <div className="flex flex-col items-center py-16 text-center">
-              <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-bg-tertiary text-text-primary">
-                <GitHubMark />
+            <div className="space-y-4">
+              <div className="flex flex-col items-center py-10 text-center">
+                <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-bg-tertiary text-text-primary">
+                  <GitHubMark />
+                </div>
+                <h3 className="text-[15px] font-semibold text-text-primary">Connect GitHub</h3>
+                <p className="mt-1 max-w-sm text-[12px] leading-5 text-text-muted">
+                  The repository is cloned into this workspace, the agent commits here,
+                  and apiM pushes only a dedicated <code>apim/…</code> branch. Your
+                  credentials are never written into the repo or shown to the agent.
+                </p>
               </div>
-              <h3 className="text-[15px] font-semibold text-text-primary">Connect your GitHub account</h3>
-              <p className="mt-1 max-w-sm text-[12px] leading-5 text-text-muted">Repositories remain normal workspace files. Credentials stay in an encrypted HttpOnly cookie and are never exposed to the agent.</p>
-              <button onClick={connectAccount} className="mt-5 rounded-lg bg-text-primary px-4 py-2 text-[13px] font-semibold text-bg-primary">Connect GitHub</button>
+
+              {/* Personal Access Token — works with no server-side OAuth app. */}
+              <div className="rounded-xl border border-border bg-bg-tertiary/50 p-3">
+                <label className="text-[12px] font-semibold text-text-secondary">
+                  Personal Access Token
+                </label>
+                <p className="mt-1 text-[11px] leading-4 text-text-muted">
+                  Create one at GitHub → Settings → Developer settings → Personal access
+                  tokens → Fine-grained, with <b>Repository access</b> and <b>Contents: read &amp; write</b> on
+                  the repos you want. Paste it below.
+                </p>
+                <div className="mt-2 flex gap-2">
+                  <input
+                    type="password"
+                    value={pat}
+                    onChange={(e) => setPat(e.target.value)}
+                    placeholder="github_pat_… or ghp_…"
+                    autoComplete="off"
+                    spellCheck={false}
+                    className="min-w-0 flex-1 rounded-lg border border-border bg-bg-primary px-3 py-2 font-mono text-[12px] text-text-primary outline-none focus:border-border-light"
+                  />
+                  <button
+                    onClick={() => void savePatAndConnect()}
+                    disabled={busy}
+                    className="flex-none rounded-lg bg-accent px-3 py-2 text-[12px] font-semibold text-white disabled:opacity-50"
+                  >
+                    {busy ? "Verifying…" : "Verify token"}
+                  </button>
+                </div>
+                {patUsed && (
+                  <p className="mt-1.5 text-[11px] text-success">Token works — pick a repository below.</p>
+                )}
+              </div>
+
+              {oauthAvailable && (
+                <>
+                  <div className="flex items-center gap-3 text-[11px] text-text-muted">
+                    <div className="h-px flex-1 bg-border" />
+                    or
+                    <div className="h-px flex-1 bg-border" />
+                  </div>
+                  <button onClick={connectAccount} className="w-full rounded-lg border border-border bg-bg-tertiary px-4 py-2 text-[13px] font-semibold text-text-primary hover:bg-bg-hover">
+                    Sign in with GitHub (OAuth)
+                  </button>
+                </>
+              )}
             </div>
           ) : connection ? (
             <div className="space-y-3">

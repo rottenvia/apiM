@@ -3,26 +3,49 @@ import {
   GITHUB_TOKEN_COOKIE,
   githubApi,
   githubConfig,
-  openGitHubToken,
+  resolveGitHubToken,
+  envGitHubToken,
 } from "@/lib/github";
 
 export async function GET(req: NextRequest) {
-  const config = githubConfig();
-  if (!config) return NextResponse.json({ configured: false, connected: false });
-  const token = await openGitHubToken(
-    req.cookies.get(GITHUB_TOKEN_COOKIE)?.value,
-    config.tokenSecret
-  );
-  if (!token) return NextResponse.json({ configured: true, connected: false });
+  // An OAuth app is optional: a Personal Access Token (supplied with each
+  // request or via GITHUB_TOKEN env) works without one.
+  const oauthConfig = githubConfig();
+  const requestToken = req.headers.get("x-github-token") ?? "";
+
+  if (!oauthConfig && !requestToken && !envGitHubToken()) {
+    return NextResponse.json({ configured: false, oauth: false, connected: false });
+  }
+
   try {
-    const user = await githubApi<{ login?: string; avatar_url?: string }>(token, "/user");
+    const resolved = await resolveGitHubToken({
+      cookieValue: req.cookies.get(GITHUB_TOKEN_COOKIE)?.value,
+      requestToken: requestToken || undefined,
+    });
+    if (!resolved.token) {
+      return NextResponse.json({
+        configured: true,
+        oauth: Boolean(oauthConfig),
+        connected: false,
+      });
+    }
+    const user = await githubApi<{ login?: string; avatar_url?: string }>(
+      resolved.token,
+      "/user"
+    );
     return NextResponse.json({
       configured: true,
+      oauth: Boolean(oauthConfig),
       connected: true,
+      via: resolved.via,
       user: { login: user.login ?? "GitHub user", avatarUrl: user.avatar_url ?? "" },
     });
   } catch {
-    return NextResponse.json({ configured: true, connected: false });
+    return NextResponse.json({
+      configured: true,
+      oauth: Boolean(oauthConfig),
+      connected: false,
+    });
   }
 }
 

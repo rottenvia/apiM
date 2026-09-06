@@ -1734,6 +1734,12 @@ export default function Home() {
             // never sees a key it must not use.
             tavilyApiKey: tavilyEnabled ? tavilyKey : "",
             exaApiKey: exaEnabled ? exaKey : "",
+            // Personal Access Token for GitHub push with no OAuth app.
+            // Stored in localStorage by the connector; never logged.
+            githubToken:
+              typeof window !== "undefined"
+                ? localStorage.getItem("nexusai-github-pat") ?? ""
+                : "",
             model: activeModel,
             thinkingEffort,
             webSearchMode,

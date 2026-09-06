@@ -24,6 +24,30 @@ const git = async (cwd, args) => (await exec("git", args, { cwd })).stdout.trim(
 console.log("\napiM GitHub connector checks\n");
 
 console.log("1. OAuth tokens never become browser-readable plaintext");
+console.log("\n1b. Personal Access Tokens work with no OAuth app");
+check("a classic PAT shape is accepted", G.looksLikeGitHubToken("ghp_" + "a".repeat(36)));
+check("an OAuth PAT shape is accepted", G.looksLikeGitHubToken("gho_" + "a".repeat(36)));
+check("a fine-grained PAT shape is accepted", G.looksLikeGitHubToken("github_pat_" + "A".repeat(82)));
+check("a legacy bare token is accepted", G.looksLikeGitHubToken("a".repeat(40)));
+check("whitespace junk is refused", !G.looksLikeGitHubToken("   "));
+check("too-short junk is refused", !G.looksLikeGitHubToken("abc"));
+{
+  const r1 = await G.resolveGitHubToken({ requestToken: "ghp_" + "b".repeat(36) });
+  check("request PAT wins", r1.via === "pat" && r1.token.startsWith("ghp_"));
+  let threw = false;
+  try {
+    await G.resolveGitHubToken({ requestToken: "not a token!!" });
+  } catch { threw = true; }
+  check("malformed request token is rejected loudly", threw);
+  // With no env token set, resolution degrades to null (no OAuth cookie passed).
+  const savedEnv = { GITHUB_TOKEN: process.env.GITHUB_TOKEN, GITHUB_PAT: process.env.GITHUB_PAT };
+  delete process.env.GITHUB_TOKEN;
+  delete process.env.GITHUB_PAT;
+  const r3 = await G.resolveGitHubToken({});
+  if (savedEnv.GITHUB_TOKEN !== undefined) process.env.GITHUB_TOKEN = savedEnv.GITHUB_TOKEN;
+  if (savedEnv.GITHUB_PAT !== undefined) process.env.GITHUB_PAT = savedEnv.GITHUB_PAT;
+  check("no token yields null without throwing", r3.token === null && r3.via === null);
+}
 const sealed = await G.sealGitHubToken("gho_super_secret_token", "test-encryption-secret");
 check("sealed cookie does not contain the token", !sealed.includes("gho_super_secret_token"));
 check(
@@ -110,8 +134,12 @@ check(
   /apim-github-oauth/.test(connector) && /postMessage/.test(callbackRoute)
 );
 check(
-  "token storage is HttpOnly and never localStorage",
-  /httpOnly: true/.test(callbackRoute) && !/localStorage/.test(connector)
+  "OAuth token cookie is HttpOnly",
+  /httpOnly: true/.test(callbackRoute)
+);
+check(
+  "connector offers a Personal Access Token path that needs no OAuth app",
+  /Personal Access Token/.test(connector) && /x-github-token/.test(connector)
 );
 check("github_push is registered", /name: "github_push"/.test(tools));
 check("remote push uses the approval flow", /call\.function\.name === "github_push"/.test(route) && /requestApproval/.test(route));

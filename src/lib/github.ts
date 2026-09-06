@@ -14,9 +14,86 @@ const DATA_ROOT = process.env.APIM_DATA_ROOT
 const GITHUB_DATA = path.join(DATA_ROOT, "github");
 
 export interface GitHubConfig {
+  /** Present when a GitHub OAuth app is registered. Optional. */
   clientId: string;
   clientSecret: string;
   tokenSecret: string;
+}
+
+/**
+ * Resolve the credentials used to talk to GitHub.
+ *
+ * OAuth requires registering a whole GitHub App — fine in a hosted product,
+ * a non-starter for someone running this at home. A Personal Access Token
+ * works with nothing to configure server-side, so auth accepts, in order:
+ *
+ *   1. a token supplied on the request (PAT typed in the connector)
+ *   2. a GITHUB_TOKEN / GITHUB_PAT environment variable
+ *   3. an OAuth token sealed in the HttpOnly cookie (when an app exists)
+ *
+ * `oauthConfig` is reported separately so the UI can still offer the
+ * "Connect with GitHub" button when an app IS configured.
+ */
+export function githubConfig(): GitHubConfig | null {
+  const clientId = process.env.GITHUB_CLIENT_ID?.trim() ?? "";
+  const clientSecret = process.env.GITHUB_CLIENT_SECRET?.trim() ?? "";
+  const tokenSecret =
+    process.env.GITHUB_TOKEN_SECRET?.trim() ||
+    process.env.AUTH_SECRET?.trim() ||
+    clientSecret ||
+    "github-token-seal";
+  if (!clientId || !clientSecret) return null;
+  return { clientId, clientSecret, tokenSecret };
+}
+
+/** A Personal Access Token supplied via env, used with no OAuth app. */
+export function envGitHubToken(): string {
+  return (
+    process.env.GITHUB_TOKEN?.trim() ||
+    process.env.GITHUB_PAT?.trim() ||
+    ""
+  );
+}
+
+/** Validate that a string looks like a GitHub personal access token. */
+export function looksLikeGitHubToken(value: string): boolean {
+  const t = value.trim();
+  if (t.length < 8) return false;
+  // Classic: gho_/ghp_/ghu_/ghr_/ghs_ prefixes, fine-grained (github_pat_),
+  // or a bare hex/alnum legacy token. Whitespace inside means it is a paste
+  // of something else (a sentence), which must not be sent as a header.
+  return /^(?:gh[opusr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{40,}|[A-Za-z0-9_]{20,})$/.test(
+    t
+  ) && !/\s/.test(t);
+}
+
+/**
+ * The token to use for GitHub calls for one request, trying every source.
+ * OAuth cookies are only read when an OAuth app is configured; a PAT works
+ * regardless.
+ */
+export async function resolveGitHubToken(options: {
+  cookieValue?: string;
+  requestToken?: string;
+}): Promise<{ token: string | null; via: "pat" | "env" | "oauth" | null }> {
+  const provided = options.requestToken?.trim() ?? "";
+  if (provided) {
+    if (looksLikeGitHubToken(provided)) return { token: provided, via: "pat" };
+    throw new Error("That does not look like a GitHub access token.");
+  }
+
+  const env = envGitHubToken();
+  if (env) return { token: env, via: "env" };
+
+  const config = githubConfig();
+  if (config) {
+    const sealed = await openGitHubToken(
+      options.cookieValue,
+      config.tokenSecret
+    );
+    if (sealed) return { token: sealed, via: "oauth" };
+  }
+  return { token: null, via: null };
 }
 
 export interface GitHubRepo {
@@ -36,17 +113,6 @@ export interface GitHubConnection {
   baseBranch: string;
   workingBranch: string;
   connectedAt: string;
-}
-
-export function githubConfig(): GitHubConfig | null {
-  const clientId = process.env.GITHUB_CLIENT_ID?.trim() ?? "";
-  const clientSecret = process.env.GITHUB_CLIENT_SECRET?.trim() ?? "";
-  const tokenSecret =
-    process.env.GITHUB_TOKEN_SECRET?.trim() ||
-    process.env.AUTH_SECRET?.trim() ||
-    clientSecret;
-  if (!clientId || !clientSecret || !tokenSecret) return null;
-  return { clientId, clientSecret, tokenSecret };
 }
 
 function bytes(input: string): ArrayBuffer {
@@ -296,7 +362,7 @@ export async function cloneGitHubRepoToWorkspace(options: {
   const repo = assertRepoName(options.repo);
   const baseBranch = assertBranch(options.baseBranch);
   const cloneUrl = options.cloneUrl;
-  const visible = await listFiles(options.workspaceId);
+  const visible = await listFiles(options.workspaceId).catch(() => []);
   if (visible.length > 0) {
     throw new Error("This workspace already has files. Connect GitHub from a new empty chat so nothing is overwritten.");
   }
@@ -307,25 +373,37 @@ export async function cloneGitHubRepoToWorkspace(options: {
     `apim/${options.workspaceId.slice(0, 8)}-${Date.now().toString(36)}`
   );
   await fs.rm(temp, { recursive: true, force: true });
+  // An aborted earlier attempt may have left a partial workspace; start the
+  // move into an empty target.
+  await fs.rm(root, { recursive: true, force: true });
   await fs.mkdir(path.dirname(root), { recursive: true });
 
   try {
-    await runGit(path.dirname(root), ["clone", "--no-checkout", cloneUrl, temp], options.token, 300_000);
-    await runGit(temp, ["checkout", "-b", workingBranch, `origin/${baseBranch}`], undefined);
-    await runGit(temp, ["config", "user.name", "apiM Agent"]);
-    await runGit(temp, ["config", "user.email", "apim-agent@users.noreply.github.com"]);
+    // Full clone (with the working tree). The token is passed for the fetch
+    // only via credential env, so auth headers apply. --no-hardlinks keeps the
+    // subsequent cross-directory rename safe.
+    await runGit(
+      path.dirname(root),
+      ["clone", "--no-hardlinks", cloneUrl, temp],
+      options.token,
+      600_000
+    );
+    // Create and switch to the dedicated writable branch. Run WITH the token
+    // env too (same env as the clone) so any remote-tracking resolution works
+    // and credentials never land in config.
+    await runGit(temp, ["checkout", "-b", workingBranch, `origin/${baseBranch}`], options.token);
+    await runGit(temp, ["config", "user.name", "apiM Agent"], undefined);
+    await runGit(temp, ["config", "user.email", "apim-agent@users.noreply.github.com"], undefined);
 
+    // Move EVERYTHING — including the hidden .git directory, which is what
+    // makes the workspace itself the repository (without it git push/status
+    // fail with "not a git repository"). readdir includes dotfiles; rename
+    // within the same filesystem is atomic.
     await fs.mkdir(root, { recursive: true });
     for (const name of await fs.readdir(temp)) {
-      const destination = path.join(root, name);
-      try {
-        await fs.access(destination);
-        throw new Error(`Workspace path already exists: ${name}`);
-      } catch (error) {
-        if (error instanceof Error && error.message.startsWith("Workspace path")) throw error;
-      }
-      await fs.rename(path.join(temp, name), destination);
+      await fs.rename(path.join(temp, name), path.join(root, name));
     }
+    await fs.rm(temp, { recursive: true, force: true });
 
     const connection: GitHubConnection = {
       workspaceId: options.workspaceId,
