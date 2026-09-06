@@ -2,9 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   GITHUB_TOKEN_COOKIE,
   connectGitHubRepo,
-  githubConfig,
-  openGitHubToken,
   readGitHubConnection,
+  resolveGitHubToken,
 } from "@/lib/github";
 
 export async function GET(req: NextRequest) {
@@ -14,19 +13,46 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const config = githubConfig();
-  if (!config) return NextResponse.json({ error: "GitHub OAuth is not configured" }, { status: 503 });
-  const token = await openGitHubToken(req.cookies.get(GITHUB_TOKEN_COOKIE)?.value, config.tokenSecret);
-  if (!token) return NextResponse.json({ error: "GitHub is not connected" }, { status: 401 });
-  let body: { workspaceId?: string; repo?: string; baseBranch?: string };
+  let body: {
+    workspaceId?: string;
+    repo?: string;
+    baseBranch?: string;
+    token?: string;
+  };
   try {
     body = await req.json();
   } catch {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
   if (!body.workspaceId || !body.repo || !body.baseBranch) {
-    return NextResponse.json({ error: "workspaceId, repo and baseBranch are required" }, { status: 400 });
+    return NextResponse.json(
+      { error: "workspaceId, repo and baseBranch are required" },
+      { status: 400 }
+    );
   }
+
+  // Accept a Personal Access Token in the body (the connector's no-OAuth
+  // path), the GITHUB_TOKEN env var, or the OAuth cookie.
+  let token: string | null;
+  try {
+    token = (
+      await resolveGitHubToken({
+        cookieValue: req.cookies.get(GITHUB_TOKEN_COOKIE)?.value,
+        requestToken: body.token,
+      })
+    ).token;
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Bad token" },
+      { status: 400 }
+    );
+  }
+  if (!token)
+    return NextResponse.json(
+      { error: "GitHub is not connected — add a Personal Access Token or sign in with GitHub OAuth." },
+      { status: 401 }
+    );
+
   try {
     const connection = await connectGitHubRepo({
       workspaceId: body.workspaceId,
