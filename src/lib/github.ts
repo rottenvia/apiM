@@ -442,3 +442,184 @@ export async function pushGitHubWorkspace(
   );
   return { connection, output: (pushed.stderr || pushed.stdout).trim() };
 }
+
+/**
+ * Forget the GitHub connection for a workspace ("turn off" the project
+ * link). The cloned files stay exactly where they are in the workspace —
+ * only the metadata that binds the workspace to the repository is removed,
+ * so the agent stops pushing and the connector offers a fresh connect.
+ */
+export async function clearGitHubConnection(workspaceId: string): Promise<void> {
+  await fs.rm(metadataPath(workspaceId), { force: true });
+}
+
+export interface GitHubFileChange {
+  path: string;
+  /** M modified · A added · D deleted · R renamed · C copied. */
+  status: "M" | "A" | "D" | "R" | "C";
+  additions: number;
+  deletions: number;
+}
+
+export interface GitHubChanges {
+  connection: GitHubConnection | null;
+  /** Commits on the working branch that are not on the base yet. */
+  ahead: number;
+  /** Files changed vs the base branch, each with line counts. */
+  files: GitHubFileChange[];
+  totalAdditions: number;
+  totalDeletions: number;
+  /** A unified diff, capped, for the expandable review pane. */
+  diff: string;
+  uncommitted: number;
+}
+
+/**
+ * What this workspace would change on GitHub relative to the base branch.
+ *
+ * Runs entirely against the local clone — no token, no network — comparing
+ * the working branch (committed work plus uncommitted edits) with the point
+ * it diverged from the base.
+ */
+export async function gitHubWorkspaceChanges(
+  workspaceId: string
+): Promise<GitHubChanges> {
+  const connection = await readGitHubConnection(workspaceId);
+  if (!connection) {
+    return {
+      connection: null,
+      ahead: 0,
+      files: [],
+      totalAdditions: 0,
+      totalDeletions: 0,
+      diff: "",
+      uncommitted: 0,
+    };
+  }
+  const root = workspaceDirectory(workspaceId);
+
+  // Uncommitted work (agent edits not yet committed) — "uncommitted" count.
+  const statusOut = (await runGit(root, ["status", "--porcelain"])).stdout;
+  const uncommitted = statusOut
+    .split("\n")
+    .filter((line) => line.trim().length > 0).length;
+
+  // Base ref: prefer the local remote-tracking ref from the clone.
+  const baseRef = `origin/${connection.baseBranch}`;
+
+  // Commits ahead of base.
+  const aheadOut = (
+    await runGit(root, [
+      "rev-list",
+      "--count",
+      `${baseRef}..HEAD`,
+    ]).catch(() => ({ stdout: "0", stderr: "" }))
+  ).stdout.trim();
+  const ahead = Number.parseInt(aheadOut, 10) || 0;
+
+  // Per-file change summary: status letter + numstat line counts, including
+  // uncommitted changes by diffing the working tree against the merge-base.
+  const numstat = (
+    await runGit(root, [
+      "diff",
+      "--numstat",
+      `${baseRef}...HEAD`,
+    ]).catch(() => ({ stdout: "", stderr: "" }))
+  ).stdout;
+  // Also fold in uncommitted edits so the review shows live work too.
+  const numstatWork = (
+    await runGit(root, ["diff", "--numstat", baseRef]).catch(() => ({
+      stdout: "",
+      stderr: "",
+    }))
+  ).stdout;
+
+  const files = new Map<string, GitHubFileChange>();
+  const merge = (out: string) => {
+    for (const line of out.split("\n")) {
+      const parts = line.trim().split(/\t/);
+      if (parts.length < 3) continue;
+      const [add, del, p] = parts;
+      const additions = add === "-" ? 0 : Number.parseInt(add, 10) || 0;
+      const deletions = del === "-" ? 0 : Number.parseInt(del, 10) || 0;
+      const path = p.split(/ -> /).pop() ?? p;
+      const prev = files.get(path);
+      files.set(path, {
+        path,
+        status: prev?.status ?? (deletions === 0 ? "A" : "M"),
+        additions: Math.max(prev?.additions ?? 0, additions),
+        deletions: Math.max(prev?.deletions ?? 0, deletions),
+      });
+    }
+  };
+  merge(numstat);
+  merge(numstatWork);
+
+  // Status letters for added/deleted.
+  const nameStatus = (
+    await runGit(root, ["diff", "--name-status", baseRef]).catch(() => ({
+      stdout: "",
+      stderr: "",
+    }))
+  ).stdout;
+  for (const line of nameStatus.split("\n")) {
+    const parts = line.trim().split(/\t/);
+    if (parts.length < 2) continue;
+    const letter = parts[0][0] as GitHubFileChange["status"];
+    const p = parts[parts.length - 1];
+    const entry = files.get(p);
+    if (entry) entry.status = letter;
+    else files.set(p, { path: p, status: letter, additions: 0, deletions: 0 });
+  }
+
+  // Untracked files (brand-new, not yet added) do not appear in `git diff`,
+  // so fold them in from porcelain status as additions with no line counts.
+  for (const line of statusOut.split("\n")) {
+    if (line.length < 3) continue;
+    const code = line.slice(0, 2);
+    const p = line.slice(3).split(" -> ").pop()?.trim() ?? "";
+    if (!p) continue;
+    if (code === "??" && !files.has(p)) {
+      files.set(p, { path: p, status: "A", additions: 0, deletions: 0 });
+    }
+  }
+
+  const list = [...files.values()].sort((a, b) => a.path.localeCompare(b.path));
+
+  // Unified diff, capped so a huge change cannot flood the UI.
+  let diff = (
+    await runGit(root, [
+      "diff",
+      "--no-color",
+      "--unified=3",
+      baseRef,
+    ]).catch(() => ({ stdout: "", stderr: "" }))
+  ).stdout;
+  // Untracked files are absent from `git diff`; render each as a pure
+  // addition against /dev/null (text files only — binaries are skipped).
+  for (const line of statusOut.split("\n")) {
+    if (line.slice(0, 2) !== "??") continue;
+    const p = line.slice(3).trim();
+    if (!p) continue;
+    const content = await fs
+      .readFile(path.join(root, p), "utf8")
+      .catch(() => null);
+    if (content === null) continue; // binary or unreadable — listed, not diffed
+    const body = content
+      .split("\n")
+      .map((l) => `+${l}`)
+      .join("\n");
+    diff += `\ndiff --git a/${p} b/${p}\nnew file mode 100644\n--- /dev/null\n+++ b/${p}\n${body}\n`;
+  }
+  diff = diff.slice(0, 200_000);
+
+  return {
+    connection,
+    ahead,
+    files: list,
+    totalAdditions: list.reduce((s, f) => s + f.additions, 0),
+    totalDeletions: list.reduce((s, f) => s + f.deletions, 0),
+    diff,
+    uncommitted,
+  };
+}

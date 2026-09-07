@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
   GITHUB_TOKEN_COOKIE,
+  clearGitHubConnection,
   connectGitHubRepo,
   readGitHubConnection,
   resolveGitHubToken,
@@ -10,6 +11,20 @@ export async function GET(req: NextRequest) {
   const workspaceId = req.nextUrl.searchParams.get("workspaceId") ?? "";
   if (!workspaceId) return NextResponse.json({ connection: null });
   return NextResponse.json({ connection: await readGitHubConnection(workspaceId) });
+}
+
+/**
+ * Turn OFF the GitHub link for one workspace. The workspace files are left
+ * untouched — only the binding metadata is removed, so the agent stops
+ * pushing and the connector can connect a different project.
+ */
+export async function DELETE(req: NextRequest) {
+  const workspaceId = req.nextUrl.searchParams.get("workspaceId") ?? "";
+  if (!workspaceId) {
+    return NextResponse.json({ error: "workspaceId is required" }, { status: 400 });
+  }
+  await clearGitHubConnection(workspaceId);
+  return NextResponse.json({ disconnected: true });
 }
 
 export async function POST(req: NextRequest) {
