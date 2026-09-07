@@ -195,27 +195,16 @@ export function WorkspaceSidePanel({
   );
 
   /*
-   * Folders start open, except anything unpacked from an archive.
+   * Folders start collapsed.
    *
-   * Work the agent creates is worth showing: it is usually a handful of files
-   * and the point is to watch them appear. An uploaded zip is the opposite —
-   * a whole project, often hundreds of files, which unrolled in full buries
-   * everything else and turns the panel into a wall of rows.
-   *
-   * So `uploads/` and everything beneath it arrives shut. You see one folder
-   * with a count, and open it when you actually want to look inside.
+   * A connected/cloned project is a whole tree — often hundreds of files —
+   * and unrolling every folder at chat start turned the panel into a wall of
+   * rows. You now see the top-level layout (and each folder's file count)
+   * and expand only what you want to look at. The "Expand all" control below
+   * opens everything in one click for the small workspaces where that helps.
    */
   const defaultClosed = useMemo(() => {
-    const shut = new Set<string>();
-    for (const dirPath of allDirPaths(tree)) {
-      // Chains are collapsed for display, so the row for an unpacked archive
-      // can be "uploads/EXT-Faceit" rather than a bare "uploads" — matching
-      // the segment prefix catches both.
-      if (dirPath === "uploads" || dirPath.startsWith("uploads/")) {
-        shut.add(dirPath);
-      }
-    }
-    return shut;
+    return new Set<string>(allDirPaths(tree));
   }, [tree]);
 
   /**
@@ -499,7 +488,7 @@ export function WorkspaceSidePanel({
           hosted service's numbers. Everything lives on the user's own disk,
           so there is no quota to fill and a bar creeping toward a limit that
           does not exist is worse than no bar at all. */}
-      <div className="flex items-baseline gap-1.5 px-3 pb-2 pt-3 text-[11px] text-text-muted">
+      <div className="flex items-center gap-1.5 px-3 pb-2 pt-3 text-[11px] text-text-muted">
         <span className="tabular-nums text-text-secondary">
           {files.length.toLocaleString()}
         </span>
@@ -509,6 +498,29 @@ export function WorkspaceSidePanel({
             <span className="opacity-40">·</span>
             <span className="tabular-nums">{formatBytes(totalBytes)}</span>
           </>
+        )}
+        {files.length > 0 && !showHistory && (
+          <button
+            onClick={() => {
+              const every = allDirPaths(tree);
+              const allOpen = every.every((p) => openDirs.has(p));
+              if (allOpen) {
+                // Collapse everything: mark each dir closed by hand and clear
+                // the opened set so the collapsed default takes over.
+                setUserClosed(new Set(every));
+                setUserOpened(new Set());
+              } else {
+                setUserOpened(new Set(every));
+                setUserClosed(new Set());
+              }
+            }}
+            className="ml-auto rounded px-1.5 py-0.5 text-[11px] text-text-muted hover:bg-bg-hover hover:text-text-primary"
+            title="Expand or collapse every folder"
+          >
+            {allDirPaths(tree).every((p) => openDirs.has(p))
+              ? "Collapse all"
+              : "Expand all"}
+          </button>
         )}
       </div>
 

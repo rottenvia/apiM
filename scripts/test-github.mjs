@@ -118,6 +118,26 @@ try { await G.pushGitHubWorkspace(workspaceId, "dummy"); } catch (error) {
 }
 check("push is refused from any other branch", wrongBranchRefused);
 
+console.log("\n4b. Changes review and the on/off toggle");
+await git(workspace, ["checkout", connection.workingBranch]);
+// A committed change and an uncommitted one, both vs the base branch.
+await fs.appendFile(path.join(workspace, "README.md"), "more committed work\n");
+await git(workspace, ["add", "README.md"]);
+await git(workspace, ["commit", "-m", "second change"]);
+await fs.writeFile(path.join(workspace, "NEW.md"), "# brand new file\n", "utf8");
+const changes = await G.gitHubWorkspaceChanges(workspaceId);
+check("changes report the connection", changes.connection?.repo === "owner/sample");
+check("changes list the edited file", changes.files.some((f) => f.path === "README.md"));
+check("changes list the added file", changes.files.some((f) => f.path === "NEW.md" && f.status === "A"));
+check("uncommitted edits are counted", changes.uncommitted >= 1);
+check("ahead count reflects the working commits", changes.ahead >= 2);
+check("unified diff is produced and mentions the new file", changes.diff.includes("brand new file"));
+// Turn OFF: metadata is forgotten but the workspace files remain in place.
+await G.clearGitHubConnection(workspaceId);
+check("turning off forgets the connection", (await G.readGitHubConnection(workspaceId)) === null);
+check("turning off keeps the workspace files", await fs.readFile(path.join(workspace, "README.md"), "utf8").then(() => true).catch(() => false));
+check("changes with no connection are empty", (await G.gitHubWorkspaceChanges(workspaceId)).files.length === 0);
+
 console.log("\n5. UI and agent wiring");
 const connector = await fs.readFile(path.join(ROOT, "src/components/GitHubConnector.tsx"), "utf8");
 const callbackRoute = await fs.readFile(
