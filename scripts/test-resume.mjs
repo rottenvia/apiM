@@ -213,8 +213,11 @@ check(
 check(
   "the saved transcript is never sent to the browser",
   /const \{ resumeState, \.\.\.rest \} = m/.test(convRoute) &&
-    /canResume,\s*\n\s*\};/.test(convRoute) &&
-    !/return \{ \.\.\.m,/.test(convRoute),
+    /canResume,/.test(convRoute) &&
+    !/return \{ \.\.\.m,/.test(convRoute) &&
+    // Tool arguments are clipped in the same mapping: the browser gets a
+    // preview, disk keeps the full text for resume and export.
+    /args: clipArgs\(event\.args\)/.test(convRoute),
   "it can run to megabytes; the UI only needs a boolean"
 );
 check(

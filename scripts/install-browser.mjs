@@ -171,4 +171,4 @@ console.log(
     "  read the console. It always uses its own profile inside the workspace\n" +
     "  and runs headless — it will never touch the browser you are using.\n"
 );
-console.log(bold("  Check it worked:") + "  npm run test:browser:live\n");
+  console.log(bold("  Check it worked:") + "  npm run test:browser-live\n");

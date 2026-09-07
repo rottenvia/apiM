@@ -444,12 +444,12 @@ check(
 );
 check(
   "and points at the test that proves it works",
-  /test:browser:live/.test(installSrc)
+  /test:browser-live/.test(installSrc)
 );
 
 check(
   "there is a live test that uses a real browser",
-  Boolean(pkg.scripts["test:browser:live"]),
+  Boolean(pkg.scripts["test:browser-live"]),
   "44 checks against a fake driver is not the same as one against Chromium"
 );
 

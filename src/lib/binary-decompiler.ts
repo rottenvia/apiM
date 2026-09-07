@@ -154,6 +154,9 @@ function runCaptured(
     );
     let timer: NodeJS.Timeout | undefined;
     let child: ReturnType<typeof crossSpawn>;
+    // Set by onAbort: the close event below must not report a requested
+    // stop as a crash (Windows gives a taskkilled tree exit code 1).
+    let stopRequested = false;
     try {
       child = crossSpawn(command, args, {
         cwd,
@@ -202,6 +205,9 @@ function runCaptured(
       resolve(result);
     };
     const onAbort = () => {
+      // Mark the stop BEFORE killing: close fires the moment taskkill
+      // lands, and whichever handler runs first settles the promise.
+      stopRequested = true;
       void killTree(child).finally(() =>
         finish({
           started,
@@ -218,7 +224,17 @@ function runCaptured(
       finish({ started: false, code: null, timedOut: false, output, error: error.message });
     });
     child.once("close", (code) => {
-      finish({ started, code, timedOut: false, output });
+      finish(
+        stopRequested
+          ? {
+              started,
+              code: null,
+              timedOut: false,
+              output,
+              error: "Executable decompilation was stopped",
+            }
+          : { started, code, timedOut: false, output }
+      );
     });
 
     // Optional wall timer. Disabled entirely when timeoutMs is 0, so a large

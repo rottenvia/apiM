@@ -159,9 +159,14 @@ check(
 );
 
 const tools = await read("src/lib/tools.ts");
+const toolLimits = await read("src/lib/tool-limits.ts");
 check(
   "results still carry real page text, not just links",
-  /hit\.content \?\? ""\)\.slice\(0, 700\)/.test(tools),
+  // 700 may be spelled as the constant — the refactor to limits.searchSnippet
+  // is fine; what must not come back is a smaller default, so the constant
+  // itself is pinned here too.
+  (/hit\.content \?\? ""\)\.slice\(0, (700|limits\.searchSnippet)\)/.test(tools) &&
+    /DEFAULT_SEARCH_SNIPPET = 700;/.test(toolLimits)),
   "700 chars per hit, up to 8 hits"
 );
 
@@ -198,10 +203,12 @@ check(
   "two views of the same steps would drift apart"
 );
 check(
-  "the big panel is still there",
-  /<PlanPanel plan=\{message\.plan\}/.test(bubble),
-  "explicitly asked to keep it"
-);
+    "the big panel is still there",
+    // \s+ rather than a literal space: prettier wraps the JSX attributes and
+    // the panel itself is exactly what must not disappear.
+    /<PlanPanel\s+plan=\{message\.plan\}/.test(bubble),
+    "explicitly asked to keep it"
+  );
 check(
   "the meta row renders for a reply that has only a plan",
   /message\.plan && message\.plan\.steps\.length > 0\s*\)/.test(

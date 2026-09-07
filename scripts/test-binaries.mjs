@@ -504,7 +504,11 @@ const fakeHeadless = path.join(
 await fs.writeFile(
   fakeHeadless,
   process.platform === "win32"
-    ? "@echo off\r\nping 127.0.0.1 -n 20 > nul\r\n"
+    // Node, not ping: the sleep here must survive environments where ICMP
+    // loopback is blocked by firewall policy — `ping 127.0.0.1` then exits 1
+    // in ~150 ms and the stop check races a process that was never running.
+    // execPath is the same trick the pip-capa fixture below uses.
+    ? `@echo off\r\n"${process.execPath}" -e "setInterval(function(){},1000)"\r\n`
     : "#!/bin/sh\nsleep 20\n"
 );
 if (process.platform !== "win32") await fs.chmod(fakeHeadless, 0o755);
@@ -700,7 +704,11 @@ check(
 );
 check(
   "pip-installed capa receives explicit rules and signatures paths",
-  /args:.*-r .*capa-rules.*-s .*capa-sigs/i.test(capaText),
+  // The report quotes every argument (args: "-r" "C:\..."), so a regex that
+  // wants a space right after the flag never matches even though the flag
+  // and both paths are there. Strip the quotes and match the values — that
+  // is what this check is actually about.
+  /args:.*-r .*capa-rules.*-s .*capa-sigs/i.test(capaText.replace(/"/g, "")),
   capaText.split("\n")[0]
 );
 

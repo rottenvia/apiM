@@ -1,7 +1,7 @@
 /**
  * Does the browser adapter actually work?
  *
- * Run:  npm run test:browser:live
+ * Run:  npm run test:browser-live
  *
  * `npm run test:browser` has 44 checks and every one of them runs against a
  * FAKE driver. That was the right call — the logic is worth testing and
