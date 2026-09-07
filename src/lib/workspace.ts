@@ -295,6 +295,32 @@ async function mergeInto(src: string, dest: string): Promise<void> {
  * Best effort: if it fails the files are still reachable under the old name,
  * which matters more than the names matching.
  */
+/**
+ * rename() with patience, because Windows needs it.
+ *
+ * A directory can hold a handle for a beat after its last write — the search
+ * indexer, antivirus, a lingering watcher — and then EPERM or EBUSY a rename
+ * that is legal a moment later. Retrying is the same remedy `rm()` gets in
+ * test-all.mjs. Without it, one lost race was silently eaten by the bare
+ * catch below and the folder split in two: the chat under its new name, the
+ * workspace under its old one.
+ */
+async function renameWithRetry(src: string, dest: string): Promise<boolean> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      await fs.rename(src, dest);
+      return true;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES") {
+        return false;
+      }
+      await new Promise((r) => setTimeout(r, 75 * (attempt + 1)));
+    }
+  }
+  return false;
+}
+
 export async function renameWorkspaceFolder(
   from: string,
   to: string
@@ -321,20 +347,23 @@ export async function renameWorkspaceFolder(
     .then(() => true)
     .catch(() => false);
 
+  let moved = false;
   try {
     if (destExists) {
       // Fold the stray folder into the real one instead of giving up.
       await mergeInto(src, dest);
-    } else {
-      // History and snapshots live inside the folder now, so they move with it.
-      await fs.rename(src, dest);
+      moved = true;
+    } else if (await renameWithRetry(src, dest)) {
+      moved = true;
     }
-    // Older layouts kept them as siblings; carry those across too, or undo
-    // and restore break for any workspace created before the change.
-    for (const suffix of [".history", ".snapshots"]) {
-      await fs
-        .rename(`${src}${suffix}`, path.join(dest, suffix))
-        .catch(() => {});
+    if (moved) {
+      // Older layouts kept them as siblings; carry those across too, or undo
+      // and restore break for any workspace created before the change.
+      for (const suffix of [".history", ".snapshots"]) {
+        await fs
+          .rename(`${src}${suffix}`, path.join(dest, suffix))
+          .catch(() => {});
+      }
     }
   } catch {
     /* keep the old folder rather than losing files */
@@ -343,6 +372,11 @@ export async function renameWorkspaceFolder(
   // The old name is gone, so anything that cached it as "exists" is wrong.
   verifiedFolders.delete(from);
   verifiedFolders.delete(to);
+
+  // Only repoint the mapping when the move actually happened. Flipping it on
+  // a failed rename would make every later lookup trust a folder that was
+  // never populated — the vanishing-upload bug again, one step removed.
+  if (!moved) return;
 
   for (const [id, folder] of folderNames) {
     if (folder === from) folderNames.set(id, to);

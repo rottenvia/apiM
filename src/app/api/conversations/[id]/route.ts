@@ -8,6 +8,27 @@ import {
 
 export const dynamic = "force-dynamic";
 
+/*
+ * Tool arguments are clipped for the browser, not for disk.
+ *
+ * Every tool call stores its full arguments, and on a long agent run that is
+ * the text of every file ever read — 4.6MB of a 4.7MB chat — re-sent on every
+ * open of that chat. The activity list only previews them, so the response
+ * carries a clipped copy; the stored conversation keeps the full text for
+ * resume, export and the reasoning endpoint, which all read the file, not
+ * this route.
+ */
+const ARGS_PREVIEW_CHARS = 2048;
+const clipArgs = (args: unknown): unknown => {
+  if (typeof args !== "string" || args.length <= ARGS_PREVIEW_CHARS) {
+    return args;
+  }
+  return `${args.slice(
+    0,
+    ARGS_PREVIEW_CHARS
+  )}\n…[clipped ${args.length - ARGS_PREVIEW_CHARS} chars — full text stays on disk]`;
+};
+
 export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -59,6 +80,10 @@ export async function GET(
         ...withoutReasoning,
         reasoningLength: reasoningContent?.length ?? 0,
         canResume,
+        toolEvents: withoutReasoning.toolEvents?.map((event) => ({
+          ...event,
+          args: clipArgs(event.args),
+        })),
       };
     });
 

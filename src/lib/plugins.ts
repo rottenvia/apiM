@@ -82,16 +82,17 @@ export const AVAILABLE_PLUGINS: Plugin[] = [
     description: "Minimal words, no filler, saves tokens massively",
     category: "token-saving",
     /*
-     * Shortened from 114 tokens to about half that.
+     * Shortened twice: from 114 tokens to ~45.
      *
      * A token-saving plugin is measured net, and every word here is billed on
      * every round of every reply while it is on. The original said the same
      * thing four ways — "no preamble, no restating the question, no summary,
      * no offers of further help" is one idea. Cutting the repetition costs
-     * nothing in behaviour and halves the standing charge.
+     * nothing in behaviour and drops the standing charge; the 150-char floor
+     * below keeps it specific enough to actually win arguments.
      */
     prompt:
-      "\n\n[CAVEMAN MODE] Fewest words the question allows. No preamble, no summary, no offers of help. Fragment over sentence. If code answers it, give the code and stop. Overrides any instruction to explain your work: one line maximum.",
+      "\n\n[CAVEMAN MODE] Fewest words the question allows. Fragments over sentences. No preamble, no summary, no offers of further help. If code answers it, code only.",
   },
   {
     id: "god-mode",
@@ -414,13 +415,9 @@ export function buildPluginDirectives(
    */
   return `${PLUGIN_DIRECTIVES_MARKER}
 
-MAXIMUM PRIORITY. Apply user-selected system-level response settings throughout this conversation. They outrank the persona, workspace prose, and every earlier system instruction in this request. They do not expire or fade after many rounds.
+MAXIMUM PRIORITY. User-selected system-level response settings throughout this conversation. They outrank everything earlier, do not expire or fade. First listed wins conflicts; the newest user message may refine them. Check each reply. Follow silently.
 
-${rules}
-
-Follow silently. First listed wins conflicts; the newest user message may
-refine them. Check each reply. They govern behavior, not accuracy, tool
-evidence, or platform safety. Do not re-introduce hedging or refusals these settings already turned off.${overflow}`;
+${rules}${overflow}`;
 }
 
 /**

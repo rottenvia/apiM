@@ -219,17 +219,42 @@ async function migrateFlatFiles(): Promise<void> {
   }
 }
 
+/**
+ * id → folder name, cached until the directory listing changes.
+ *
+ * Building it reads and parses every chat.json in the archive, so an
+ * uncached call costs O(total archive size) — and `folderFor` called it on
+ * every chat open, which is where "clicking a chat takes minutes" came from.
+ * The listing signature (sorted directory names) is one readdir: anything
+ * that adds, removes or renames a chat folder changes it, and a plain
+ * content edit does not, which is exactly when the index stays valid.
+ */
+let folderIndexCache: Map<string, string> | null = null;
+let folderIndexSignature: string | null = null;
+
 async function folderIndex(): Promise<Map<string, string>> {
   await ensureDir();
   await migrateFlatFiles();
-  const index = new Map<string, string>();
 
   let entries;
   try {
     entries = await fs.readdir(DATA_DIR, { withFileTypes: true });
   } catch {
-    return index;
+    folderIndexCache = new Map();
+    folderIndexSignature = "";
+    return folderIndexCache;
   }
+
+  const signature = entries
+    .filter((e) => e.isDirectory())
+    .map((e) => e.name)
+    .sort()
+    .join("\n");
+  if (folderIndexCache && folderIndexSignature === signature) {
+    return folderIndexCache;
+  }
+
+  const index = new Map<string, string>();
 
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
@@ -251,6 +276,8 @@ async function folderIndex(): Promise<Map<string, string>> {
     }
   }
 
+  folderIndexCache = index;
+  folderIndexSignature = signature;
   return index;
 }
 
@@ -393,14 +420,58 @@ export async function listConversations(): Promise<ConversationSummary[]> {
   return out;
 }
 
+/**
+ * Whole conversations, keyed by file path, validated by size and mtime —
+ * the same contract as `summaryCache`, so an outside edit or a restore is
+ * picked up rather than served stale. Opening a chat used to re-read the
+ * file right after `folderFor` had already located it, and a streaming reply
+ * re-read it again on every checkpoint; with the warm copy both become a
+ * stat. `writeConversationNow` refreshes the entry with what it just wrote,
+ * so the next checkpoint of the same reply skips the read entirely.
+ *
+ * Entries are stored AND returned as clones: callers mutate the conversation
+ * they are handed, and handing several of them the same object would let one
+ * caller's local edit bleed into everyone else's view.
+ */
+const conversationCache = new Map<
+  string,
+  { fingerprint: string; conv: StoredConversation }
+>();
+const CONVERSATION_CACHE_MAX = 4;
+
+function touchConversationCache(
+  file: string,
+  fingerprint: string,
+  conv: StoredConversation
+): void {
+  conversationCache.delete(file);
+  conversationCache.set(file, { fingerprint, conv });
+  if (conversationCache.size > CONVERSATION_CACHE_MAX) {
+    const oldest = conversationCache.keys().next().value;
+    if (oldest !== undefined) conversationCache.delete(oldest);
+  }
+}
+
 export async function getConversation(
   id: string
 ): Promise<StoredConversation | null> {
   try {
     const folder = await folderFor(id);
     if (!folder) return null;
-    const raw = await fs.readFile(fileIn(folder), "utf8");
-    return JSON.parse(raw) as StoredConversation;
+    const file = fileIn(folder);
+    const stat = await fs.stat(file);
+    const fingerprint = `${stat.size}:${stat.mtimeMs}`;
+    const hit = conversationCache.get(file);
+    if (hit && hit.fingerprint === fingerprint) {
+      // Refresh recency so the LRU evicts the coldest entry, not this one.
+      conversationCache.delete(file);
+      conversationCache.set(file, hit);
+      return structuredClone(hit.conv);
+    }
+    const raw = await fs.readFile(file, "utf8");
+    const conv = JSON.parse(raw) as StoredConversation;
+    touchConversationCache(file, fingerprint, structuredClone(conv));
+    return conv;
   } catch {
     return null;
   }
@@ -480,8 +551,25 @@ async function writeConversationNow(conv: StoredConversation): Promise<void> {
   // Unique suffix so two writers can never collide on the same temp path.
   const tmp = `${target}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
   try {
-    await fs.writeFile(tmp, JSON.stringify(conv, null, 2), "utf8");
+    // Compact, not pretty-printed: this runs on every streaming checkpoint
+    // and stringify+write of the whole conversation is its remaining cost.
+    // Indentation bought nothing — JSON.parse is indifferent — it only added
+    // bytes to stringify, write, and read back (large on many-small-object
+    // shapes, ~1% on long-string fat chats; never negative).
+    await fs.writeFile(tmp, JSON.stringify(conv), "utf8");
     await fs.rename(tmp, target);
+    // Keep the warm copy in step with what just hit disk, so the next
+    // checkpoint of the same reply is a clone instead of a read+parse.
+    try {
+      const stat = await fs.stat(target);
+      touchConversationCache(
+        target,
+        `${stat.size}:${stat.mtimeMs}`,
+        structuredClone(conv)
+      );
+    } catch {
+      /* Best-effort: the fingerprint check re-reads on any mismatch. */
+    }
   } catch (err) {
     await fs.unlink(tmp).catch(() => {});
     throw err;
