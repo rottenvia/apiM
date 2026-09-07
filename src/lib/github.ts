@@ -351,6 +351,33 @@ export async function connectGitHubRepo(options: {
   return cloneGitHubRepoToWorkspace({ ...options, repo, cloneUrl });
 }
 
+/**
+ * Copy a directory tree without overwriting anything that already exists.
+ * Used to lay a freshly cloned repo OVER a workspace that already has
+ * files: anything already present (the user's work) wins, anything only in
+ * the clone (the rest of the project) is filled in. Dotfiles/dotdirs like
+ * .gitignore are copied too. Returns how many entries were added.
+ */
+async function mergeTreeWithoutOverwriting(
+  from: string,
+  to: string
+): Promise<number> {
+  let added = 0;
+  await fs.mkdir(to, { recursive: true });
+  for (const name of await fs.readdir(from)) {
+    const src = path.join(from, name);
+    const dst = path.join(to, name);
+    const stat = await fs.lstat(src);
+    if (stat.isDirectory()) {
+      added += await mergeTreeWithoutOverwriting(src, dst);
+    } else if (!await fs.access(dst).then(() => true, () => false)) {
+      await fs.copyFile(src, dst);
+      added++;
+    }
+  }
+  return added;
+}
+
 /** Exported for an offline local-bare-repository integration test. */
 export async function cloneGitHubRepoToWorkspace(options: {
   workspaceId: string;
@@ -362,47 +389,89 @@ export async function cloneGitHubRepoToWorkspace(options: {
   const repo = assertRepoName(options.repo);
   const baseBranch = assertBranch(options.baseBranch);
   const cloneUrl = options.cloneUrl;
-  const visible = await listFiles(options.workspaceId).catch(() => []);
-  if (visible.length > 0) {
-    throw new Error("This workspace already has files. Connect GitHub from a new empty chat so nothing is overwritten.");
-  }
 
   const root = workspaceDirectory(options.workspaceId);
+  const existingFiles = await listFiles(options.workspaceId).catch(() => []);
+  const hasWorkspaceFiles = existingFiles.length > 0;
+  const rootExists = await fs
+    .access(root)
+    .then(() => true)
+    .catch(() => false);
+  // A leftover .git in the workspace (e.g. after a disconnect, or files the
+  // user imported from a git checkout) must never be shadowed by the clone's
+  // one — if the same path is already a repo we attach to what is there.
+  const rootHasGit =
+    rootExists &&
+    (await fs
+      .access(path.join(root, ".git"))
+      .then(() => true)
+      .catch(() => false));
+
   const temp = `${root}.github-${Date.now().toString(36)}`;
   const workingBranch = assertBranch(
     `apim/${options.workspaceId.slice(0, 8)}-${Date.now().toString(36)}`
   );
   await fs.rm(temp, { recursive: true, force: true });
-  // An aborted earlier attempt may have left a partial workspace; start the
-  // move into an empty target.
-  await fs.rm(root, { recursive: true, force: true });
   await fs.mkdir(path.dirname(root), { recursive: true });
 
   try {
-    // Full clone (with the working tree). The token is passed for the fetch
-    // only via credential env, so auth headers apply. --no-hardlinks keeps the
-    // subsequent cross-directory rename safe.
+    // Full clone (with the working tree) into a temp dir. The token is
+    // passed only via credential env, so it never lands in git config.
     await runGit(
       path.dirname(root),
       ["clone", "--no-hardlinks", cloneUrl, temp],
       options.token,
       600_000
     );
-    // Create and switch to the dedicated writable branch. Run WITH the token
-    // env too (same env as the clone) so any remote-tracking resolution works
-    // and credentials never land in config.
+    // Create and switch to the dedicated writable branch IN THE CLONE, so
+    // checkout can never touch or conflict with workspace files.
     await runGit(temp, ["checkout", "-b", workingBranch, `origin/${baseBranch}`], options.token);
     await runGit(temp, ["config", "user.name", "apiM Agent"], undefined);
     await runGit(temp, ["config", "user.email", "apim-agent@users.noreply.github.com"], undefined);
 
-    // Move EVERYTHING — including the hidden .git directory, which is what
-    // makes the workspace itself the repository (without it git push/status
-    // fail with "not a git repository"). readdir includes dotfiles; rename
-    // within the same filesystem is atomic.
-    await fs.mkdir(root, { recursive: true });
-    for (const name of await fs.readdir(temp)) {
-      await fs.rename(path.join(temp, name), path.join(root, name));
+    if (rootHasGit) {
+      // The workspace is already a git repo (typically a reconnect after a
+      // "turn off", or an imported git checkout). Keep its history and files
+      // exactly as they are; only make sure origin points at the connected
+      // repository.
+      const remotes = (await runGit(root, ["remote"]).catch(() => ({ stdout: "" }))).stdout;
+      if (!remotes.split("\n").includes("origin")) {
+        await runGit(root, ["remote", "add", "origin", cloneUrl]);
+      } else {
+        await runGit(root, ["remote", "set-url", "origin", cloneUrl]);
+      }
+      await runGit(root, ["fetch", "origin"], options.token, 300_000).catch(() => {});
+      await runGit(root, ["config", "user.name", "apiM Agent"]).catch(() => {});
+      await runGit(root, ["config", "user.email", "apim-agent@users.noreply.github.com"]).catch(() => {});
+      // Put the repo on the (new) dedicated working branch, anchored at the
+      // CURRENT commit so no file is touched — all existing work is preserved
+      // and will be pushed to this fresh apim/ branch.
+      await runGit(root, ["checkout", "-B", workingBranch], undefined);
+    } else {
+      if (!rootExists) await fs.mkdir(root, { recursive: true });
+      // Attach the clone's history by moving ONLY .git into the workspace.
+      // Doing it first means the repo files we are about to fill in are
+      // tracked by index/HEAD, while the user's existing files simply show
+      // up as working-tree changes.
+      await fs.rename(path.join(temp, ".git"), path.join(root, ".git"));
+      // Local git identity for agent commits.
+      await runGit(root, ["config", "user.name", "apiM Agent"]).catch(() => {});
+      await runGit(root, ["config", "user.email", "apim-agent@users.noreply.github.com"]).catch(() => {});
+      // Point the working branch at the clone's tip WITHOUT checking out, so
+      // the workspace tree is never modified by git.
+      await runGit(root, ["checkout", "-B", workingBranch], undefined).catch(() => {});
+      // Lay the cloned project files in. Files already in the workspace are
+      // never overwritten — the user's copy wins; missing project files are
+      // added. Empty workspace -> this is effectively a full clone.
+      await mergeTreeWithoutOverwriting(temp, root);
+      // Refresh the index so `git status` reflects the merged tree: files
+      // copied from the repo that match HEAD are clean; anything that was
+      // already in the workspace and differs shows as a real change. Never
+      // committing here — the agent stages/commits its own work; this only
+      // makes the status report correct.
+      await runGit(root, ["add", "-A", "--"], undefined).catch(() => {});
     }
+
     await fs.rm(temp, { recursive: true, force: true });
 
     const connection: GitHubConnection = {
@@ -417,6 +486,11 @@ export async function cloneGitHubRepoToWorkspace(options: {
     return connection;
   } catch (error) {
     await fs.rm(temp, { recursive: true, force: true });
+    // If we created .git in what was a non-repo workspace and failed, leave
+    // the files but remove the half-attached repo so a retry starts clean.
+    if (!hasWorkspaceFiles && !rootHasGit) {
+      await fs.rm(path.join(root, ".git"), { recursive: true, force: true }).catch(() => {});
+    }
     throw error;
   }
 }
