@@ -81,7 +81,9 @@ await git(seed, ["init", "-b", "main"]);
 await git(seed, ["config", "user.name", "Fixture"]);
 await git(seed, ["config", "user.email", "fixture@example.com"]);
 await fs.writeFile(path.join(seed, "README.md"), "# connected repo\n", "utf8");
-await git(seed, ["add", "README.md"]);
+await fs.mkdir(path.join(seed, "src"), { recursive: true });
+await fs.writeFile(path.join(seed, "src", "index.ts"), "export const repoFile = true;\n", "utf8");
+await git(seed, ["add", "README.md", "src/index.ts"]);
 await git(seed, ["commit", "-m", "seed"]);
 const mainBefore = await git(seed, ["rev-parse", "HEAD"]);
 await git(seed, ["remote", "add", "origin", bare]);
@@ -137,6 +139,50 @@ await G.clearGitHubConnection(workspaceId);
 check("turning off forgets the connection", (await G.readGitHubConnection(workspaceId)) === null);
 check("turning off keeps the workspace files", await fs.readFile(path.join(workspace, "README.md"), "utf8").then(() => true).catch(() => false));
 check("changes with no connection are empty", (await G.gitHubWorkspaceChanges(workspaceId)).files.length === 0);
+
+console.log("\n4c. Connecting works even when the workspace already has files");
+const preWs = path.join(DATA_ROOT, "workspaces", "githubpre");
+await fs.rm(preWs, { recursive: true, force: true });
+await fs.mkdir(preWs, { recursive: true });
+// The user's pre-existing work: a file that collides with a repo file
+// (README.md) and a brand-new file the repo does not have.
+await fs.writeFile(path.join(preWs, "README.md"), "# USER VERSION — must win\n", "utf8");
+await fs.mkdir(path.join(preWs, "src"), { recursive: true });
+await fs.writeFile(path.join(preWs, "src", "user-app.ts"), "export const mine = true;\n", "utf8");
+
+const preConnection = await G.cloneGitHubRepoToWorkspace({
+  workspaceId: "githubpre",
+  repo: "owner/sample",
+  cloneUrl: bare,
+  baseBranch: "main",
+});
+check("connection into a non-empty workspace succeeds", Boolean(preConnection));
+check("the user's colliding file is never overwritten",
+  (await fs.readFile(path.join(preWs, "README.md"), "utf8")).includes("USER VERSION"));
+check("the user's own new file is kept",
+  (await fs.readFile(path.join(preWs, "src", "user-app.ts"), "utf8")).includes("mine"));
+check("the workspace became a git repository",
+  await fs.access(path.join(preWs, ".git")).then(() => true, () => false));
+check("repo files missing from the workspace are filled in",
+  (await fs.readFile(path.join(preWs, "src", "index.ts"), "utf8")).includes("repoFile"));
+const preStatus = await git(preWs, ["status", "--porcelain"]);
+check("git status works after merging into existing files", typeof preStatus === "string");
+check("reconnected workspace is on a dedicated branch",
+  (await git(preWs, ["branch", "--show-current"])) === preConnection.workingBranch);
+// Reconnect after a disconnect: files + .git stay, rebinding must not throw.
+await G.clearGitHubConnection("githubpre");
+await fs.writeFile(path.join(preWs, "after-disconnect.txt"), "still here\n", "utf8");
+const reConnection = await G.cloneGitHubRepoToWorkspace({
+  workspaceId: "githubpre",
+  repo: "owner/sample",
+  cloneUrl: bare,
+  baseBranch: "main",
+});
+check("reconnecting a workspace that is already a git repo works", Boolean(reConnection));
+check("reconnect keeps the post-disconnect file",
+  (await fs.readFile(path.join(preWs, "after-disconnect.txt"), "utf8")).includes("still here"));
+check("reconnect keeps user content",
+  (await fs.readFile(path.join(preWs, "README.md"), "utf8")).includes("USER VERSION"));
 
 console.log("\n5. UI and agent wiring");
 const connector = await fs.readFile(path.join(ROOT, "src/components/GitHubConnector.tsx"), "utf8");
