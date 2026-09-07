@@ -760,17 +760,19 @@ check(
 );
 
 // -------------------------------------------------------------- task 5
-console.log("\n5. An uploaded zip arrives collapsed");
+console.log("\n5. The file tree starts collapsed at chat start");
 
 check(
-  "uploads and everything under it start closed",
-  /dirPath === "uploads" \|\| dirPath\.startsWith\("uploads\/"\)/.test(panel),
-  "a project of hundreds of files buried everything else"
+  "every folder starts closed, not just uploads/",
+  /const defaultClosed = useMemo\(\(\) => \{\s*return new Set<string>\(allDirPaths\(tree\)\)/.test(
+    panel
+  ),
+  "a connected project of hundreds of files buried everything else"
 );
 check(
-  "folders the agent creates still start open",
-  /const defaultClosed/.test(panel) && /allDirPaths\(tree\)/.test(panel),
-  "only uploads is collapsed, not the whole tree"
+  "an expand-all control exists for small workspaces",
+  /Expand all/.test(panel) && /Collapse all/.test(panel),
+  "collapsed by default must not mean tedious to open"
 );
 check(
   "opening a folder by hand survives the tree rebuilding",
