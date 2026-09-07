@@ -79,10 +79,15 @@ check(
   "nothing renders while the balance is fine",
   /if \(level === "ok"\) return null/.test(read("src/components/BalanceWarning.tsx"))
 );
+// page.tsx does run one 200 ms interval — the retry-countdown ticker, which
+// is UI state, not a balance poll. Assert what the invariant actually
+// promises: no interval body may touch the balance, rather than banning
+// setInterval across the whole file.
+const intervalBodies = page.match(/setInterval\([^;]{0,800}/g) ?? [];
 check(
   "it is only re-read when a reply finishes",
   /void refreshBalanceRef\.current\?\.\(\)/.test(page) &&
-    !/setInterval/.test(page),
+    !intervalBodies.some((body) => /balance/i.test(body)),
   "polling would spend requests to learn nothing between messages"
 );
 check(

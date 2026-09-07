@@ -1,5 +1,6 @@
 import type { NextConfig } from "next";
 import path from "node:path";
+import fsSync from "node:fs";
 import { fileURLToPath } from "node:url";
 
 /**
@@ -18,6 +19,42 @@ import { fileURLToPath } from "node:url";
  * pointed at a whole user profile and tried to scan it.
  */
 const projectRoot = path.dirname(fileURLToPath(import.meta.url));
+
+/**
+ * The Turbopack root must contain both the source and the dependencies.
+ *
+ * Pinning it to the project was the right call against misinference: Next
+ * walks up for lockfiles and picks the highest one, so a stray lockfile above
+ * the project made it choose somewhere above and then nothing resolved.
+ *
+ * But when this checkout is a copy living inside another clone's data
+ * directory — which is how the agent harness runs it — the copy has no
+ * node_modules of its own: `next` resolves from the ancestor install. Two
+ * fixes fail here: pinning the root to the copy puts that install outside
+ * the boundary ("We couldn't find the Next.js package … from the project
+ * directory", right after "✓ Ready"), and junctioning the ancestor's
+ * node_modules into the copy makes Turbopack abort outright ("Symlink
+ * [project]/node_modules is invalid, it points out of the filesystem root").
+ *
+ * So the root is the nearest directory at or above the project that actually
+ * holds node_modules/next: the project itself for a normal clone (unchanged
+ * behaviour), the outer clone for a nested copy — whose source and deps are
+ * then both inside the boundary.
+ */
+function findTurbopackRoot(): string {
+  let dir = projectRoot;
+  for (let hop = 0; hop < 10; hop++) {
+    if (fsSync.existsSync(path.join(dir, "node_modules", "next"))) {
+      return dir;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) return projectRoot;
+    dir = parent;
+  }
+  return projectRoot;
+}
+
+const turbopackRoot = findTurbopackRoot();
 
 const nextConfig: NextConfig = {
   /*
@@ -39,7 +76,7 @@ const nextConfig: NextConfig = {
   devIndicators: false,
 
   turbopack: {
-    root: projectRoot,
+    root: turbopackRoot,
   },
 
   // proxy.ts clones every request body. The default 10MB cap silently
