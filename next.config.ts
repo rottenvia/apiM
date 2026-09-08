@@ -75,6 +75,13 @@ const nextConfig: NextConfig = {
   // builds, but it overlaps the sidebar's Settings button, so switch it off.
   devIndicators: false,
 
+  // Next 16 blocks dev resources (/_next/webpack-hmr, stack-frame requests)
+  // from hosts it doesn't trust — default is localhost only. The render bench
+  // and any human opening the app via 127.0.0.1 got 403s on every dev asset,
+  // which killed HMR and hydration. Next's own warning prescribes this entry.
+  // Dev-only: no effect on production builds.
+  allowedDevOrigins: ["127.0.0.1"],
+
   turbopack: {
     root: turbopackRoot,
   },
