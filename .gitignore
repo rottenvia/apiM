@@ -58,6 +58,19 @@ scripts/tmp/
 # Per-suite test data, created by `npm test`.
 .test-data/
 
+# Harness machine noise, created around (and inside) workspace copies:
+# browser-tool Chrome profiles, bench fixtures and archives, and the caches
+# of the harness runtimes. Tailwind's automatic source detection respects
+# .gitignore — without these entries it walks into Chrome's leveldb and the
+# dev server panics reading a LOCK file (os error 33), 500ing the page route.
+.agent-browser/
+.bench-data/
+apim-render-bench/
+node-compile-cache/
+npm-cache/
+tsx-*/
+.next/dev/logs/
+
 # Optional local reverse-engineering resources. These are large external Git
 # checkouts installed by the user, not application source.
 tools/capa/

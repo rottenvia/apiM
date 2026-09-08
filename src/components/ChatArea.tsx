@@ -1872,6 +1872,10 @@ function EmptyState({
 const WINDOW_SIZE = 60;
 /** How many additional messages each "load earlier" click reveals. */
 const WINDOW_STEP = 60;
+/** How many of the newest messages render full markdown immediately. */
+const INITIAL_HYDRATED = 12;
+/** How many deferred bubbles upgrade to markdown per idle slice. */
+const HYDRATION_BATCH = 6;
 
 const MessageList = memo(function MessageList({
   messages,
@@ -1914,6 +1918,11 @@ const MessageList = memo(function MessageList({
   // searchable and exportable, since those read from disk rather than the DOM.
   const [limit, setLimit] = useState(WINDOW_SIZE);
 
+  // How many messages (counted from the bottom, where the viewport opens)
+  // render full markdown. Everything older renders as plain text — nearly
+  // free — and upgrades in idle slices (scheduler below).
+  const [hydrated, setHydrated] = useState(INITIAL_HYDRATED);
+
   // A new conversation should start from the bottom again.
   const firstId = messages[0]?.id;
   const prevFirstId = useRef(firstId);
@@ -1921,6 +1930,7 @@ const MessageList = memo(function MessageList({
     if (prevFirstId.current !== firstId) {
       prevFirstId.current = firstId;
       setLimit(WINDOW_SIZE);
+      setHydrated(INITIAL_HYDRATED);
     }
   }, [firstId]);
 
@@ -1934,6 +1944,37 @@ const MessageList = memo(function MessageList({
   const hidden = Math.max(0, messages.length - effectiveLimit);
   const visible = hidden > 0 ? messages.slice(hidden) : messages;
   const lastId = messages[messages.length - 1]?.id;
+
+  // Progressive hydration: opening a fat chat used to parse and mount every
+  // bubble's markdown in ONE commit — 241-288ms of blocked main thread for 60
+  // bubbles (bench/render-bench baseline). Bubbles beyond the initially
+  // visible viewport now render as instant plain text and upgrade to full
+  // markdown a batch per idle slice, so the content is readable immediately
+  // and no frame ever carries the whole parse.
+  const deferredCount = Math.max(0, visible.length - Math.min(hydrated, visible.length));
+  useEffect(() => {
+    if (deferredCount <= 0) return;
+    let cancelled = false;
+    let idleId = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const step = () => {
+      if (cancelled) return;
+      setHydrated((n) => Math.min(visible.length, n + HYDRATION_BATCH));
+    };
+    const schedule = () => {
+      if (typeof requestIdleCallback === "function") {
+        idleId = requestIdleCallback(step, { timeout: 200 });
+      } else {
+        timer = setTimeout(step, 32);
+      }
+    };
+    schedule();
+    return () => {
+      cancelled = true;
+      if (idleId) cancelIdleCallback(idleId);
+      if (timer !== undefined) clearTimeout(timer);
+    };
+  }, [deferredCount, visible.length]);
 
   // Map each visible message to where its matches start globally, so only the
   // bubble containing the focused match highlights it as active.
@@ -1967,7 +2008,7 @@ const MessageList = memo(function MessageList({
         </div>
       )}
 
-      {visible.map((msg) => {
+      {visible.map((msg, index) => {
         const entry = offsetById.get(msg.id);
         const localActive =
           entry &&
@@ -1983,6 +2024,11 @@ const MessageList = memo(function MessageList({
           searchQuery && (entry || messageHasMatch(msg.content ?? "", searchQuery, searchWholeWord))
             ? searchQuery
             : undefined;
+        // Bubbles older than the hydrated window render as instant plain text
+        // and upgrade to full markdown in idle slices. A bubble with a search
+        // hit always renders full markdown — the find bar's highlight runs
+        // inside the markdown pipeline, so plain text cannot carry it.
+        const deferred = index < deferredCount && !bubbleSearchQuery;
         return (
           /*
            * Do not stop the loader at MessageList. Historical messages only
@@ -1999,6 +2045,7 @@ const MessageList = memo(function MessageList({
             key={msg.clientRenderKey ?? msg.id}
             message={msg}
             isLast={msg.id === lastId}
+            deferred={deferred}
             onRegenerate={onRegenerate}
             onResume={onResume}
             onLoadReasoning={onLoadReasoning}
