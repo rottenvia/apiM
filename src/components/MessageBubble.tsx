@@ -51,9 +51,17 @@ const markdownComponents: Components = {
 const MarkdownBody = memo(function MarkdownBody({
   content,
   regex,
+  plain,
 }: {
   content: string;
   regex: RegExp | null;
+  /** Render as a plain <div> — no markdown parse, no virtual DOM beyond one
+   * text node. Used by MessageList's progressive hydration: bubbles outside
+   * the initially visible viewport paint instantly as text and upgrade
+   * (plain flips off) in idle slices, so opening a fat chat never carries
+   * the whole parse in one commit. Mutually exclusive with `regex` by
+   * construction: deferred bubbles never receive a search query. */
+  plain?: boolean;
 }) {
   // Rebuilt only when the query changes — not when the focused match moves
   // (that is handled by flipping data-active-match on the existing marks).
@@ -61,6 +69,9 @@ const MarkdownBody = memo(function MarkdownBody({
     () => (regex ? highlightingComponents(regex) : markdownComponents),
     [regex]
   );
+  if (plain) {
+    return <div className="whitespace-pre-wrap">{content}</div>;
+  }
   return (
     <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
       {content}
@@ -221,6 +232,10 @@ interface MessageBubbleProps {
   message: Message;
   /** Only the newest reply offers regenerate, to avoid rewriting history. */
   isLast?: boolean;
+  /** Render the body as instant plain text; MessageList flips this off in
+   * idle slices to upgrade the bubble to full markdown (progressive
+   * hydration — see MarkdownBody's `plain`). */
+  deferred?: boolean;
   onRegenerate?: (assistantId: string) => void;
   /** Continue an interrupted reply instead of redoing it. */
   /**
@@ -256,6 +271,7 @@ interface MessageBubbleProps {
 function MessageBubbleImpl({
   message,
   isLast,
+  deferred,
   onRegenerate,
   onResume,
   onLoadReasoning,
@@ -1530,7 +1546,7 @@ function MessageBubbleImpl({
                       : "text-text-primary"
                 }`}
               >
-                <MarkdownBody content={displayContent} regex={searchRegex} />
+                <MarkdownBody content={displayContent} regex={searchRegex} plain={deferred} />
                 {message.isStreaming && displayContent && !hasPendingCode && (
                   <span className="stream-caret" aria-hidden="true" />
                 )}
@@ -1787,7 +1803,12 @@ export const MessageBubble = memo(MessageBubbleImpl, (prev, next) => {
     // received, and that closure knew only the conversation open at the time.
     // The callback is now identity-stable so this can never go stale again,
     // but an omitted prop in a comparator is a trap either way.
-    prev.onLoadReasoning === next.onLoadReasoning &&
-    prev.onAnswerQuestion === next.onAnswerQuestion
-  );
-});
+        prev.onLoadReasoning === next.onLoadReasoning &&
+        prev.onAnswerQuestion === next.onAnswerQuestion &&
+        // The hydration upgrade: when MessageList flips this, the bubble must
+        // re-render to swap its plain-text body for full markdown. An omitted
+        // prop here would swallow every upgrade — the same trap as the comment
+        // below documents for onLoadReasoning.
+        prev.deferred === next.deferred
+      );
+    });
