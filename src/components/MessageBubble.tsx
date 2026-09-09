@@ -712,26 +712,34 @@ function MessageBubbleImpl({
             </div>
 
             {/* Attachments that rode along with the note: a dropped
-                screenshot, a binary. Same shapes as a user bubble —
-                thumbnails where the pixels are on hand (a reload brings
-                them; a live chip may carry names only), name chips
-                otherwise. */}
+                screenshot, a binary, a video as a frame strip. Same shapes
+                as a user bubble — thumbnails where the pixels are on hand
+                (a reload brings them; a live chip may carry names only),
+                name chips otherwise. */}
             {message.attachments && message.attachments.length > 0 && (
               <div className="flex flex-wrap gap-1.5">
                 {message.attachments.map((file, i) =>
-                  (file.kind === "image" || file.kind === "video") && file.dataUrl ? (
+                  (file.kind === "image" || file.kind === "video") &&
+                  (file.dataUrl || file.frames?.length) ? (
                     <button
                       key={i}
                       onClick={() => setPreviewImage(file)}
                       title={`${file.name} — click to enlarge`}
                       className="overflow-hidden rounded-lg border border-border transition-transform hover:scale-[1.03]"
                     >
-                      {file.kind === "video" ? (
+                      {file.kind === "video" && file.dataUrl ? (
                         <video
                           src={file.dataUrl}
                           muted
                           playsInline
                           preload="metadata"
+                          className="h-24 w-auto max-w-[12rem] object-cover"
+                        />
+                      ) : file.kind === "video" && file.frames?.length ? (
+                        /* eslint-disable-next-line @next/next/no-img-element */
+                        <img
+                          src={file.frames[0].dataUrl}
+                          alt={file.name}
                           className="h-24 w-auto max-w-[12rem] object-cover"
                         />
                       ) : (
@@ -771,19 +779,27 @@ function MessageBubbleImpl({
             {message.attachments && message.attachments.length > 0 && (
               <div className="flex flex-wrap gap-1.5">
                 {message.attachments.map((file, i) =>
-                  (file.kind === "image" || file.kind === "video") && file.dataUrl ? (
+                  (file.kind === "image" || file.kind === "video") &&
+                  (file.dataUrl || file.frames?.length) ? (
                     <button
                       key={i}
                       onClick={() => setPreviewImage(file)}
                       title={`${file.name} — click to enlarge`}
                       className="overflow-hidden rounded-lg border border-border transition-transform hover:scale-[1.03]"
                     >
-                      {file.kind === "video" ? (
+                      {file.kind === "video" && file.dataUrl ? (
                         <video
                           src={file.dataUrl}
                           muted
                           playsInline
                           preload="metadata"
+                          className="h-24 w-auto max-w-[12rem] object-cover"
+                        />
+                      ) : file.kind === "video" && file.frames?.length ? (
+                        /* eslint-disable-next-line @next/next/no-img-element */
+                        <img
+                          src={file.frames[0].dataUrl}
+                          alt={file.name}
                           className="h-24 w-auto max-w-[12rem] object-cover"
                         />
                       ) : (

@@ -15,8 +15,10 @@ import {
   readTextFile,
   readFolder,
   readVideoFile,
-  MAX_FILES,
-} from "@/lib/attachments";
+  readVideoFileFrames,
+    MAX_FILES,
+  } from "@/lib/attachments";
+  import { nativeVideoFiles } from "@/lib/video-frames";
 import { isImageFile } from "@/lib/vision";
 import {
   getModel,
@@ -567,10 +569,17 @@ export function ChatArea({
             analyze: modelNeedsVisionHelper(model),
           }));
         } else if (isVideoFile(item.file)) {
-          if (!modelSeesVideo(model)) {
+          if (!modelSeesVideo(model) && getModel(model).vision !== "native") {
             error =
               `${item.file.name} is a video. ${getModel(model).label} cannot ` +
-              `watch MP4 — switch to Ox Alpha or Qwen 3.8 27B to attach it.`;
+              `watch video — switch to Ox Alpha, GLM 5.3 Flash or Qwen 3.8 27B to attach it.`;
+          } else if (getModel(model).vision === "native") {
+            // Frames by default: the browser samples ~32 stills and the
+            // provider ingests ordinary images, skipping the video pipeline
+            // that chokes on long prefills. Falls back to the native data
+            // URL when the browser cannot decode the clip.
+            setStage(placeholder.id, "frames");
+            ({ attachment, error } = await readVideoFileFrames(item.file));
           } else {
             ({ attachment, error } = await readVideoFile(item.file));
           }
@@ -783,9 +792,41 @@ export function ChatArea({
   );
 
   const removeAttachment = useCallback((id: string) => {
-    setAttachments((prev) => prev.filter((a) => a.id !== id));
-    setAttachError(null);
-  }, []);
+      setAttachments((prev) => prev.filter((a) => a.id !== id));
+      setAttachError(null);
+    }, []);
+
+  // Flip a video chip between frames mode and the native clip. The bytes
+  // live in the session (video-frames.ts); a reload drops them and the
+  // toggle with them — old attachments simply stay in their stored mode.
+  const switchVideoMode = useCallback(async (id: string) => {
+      const current = attachmentsRef.current.find((a) => a.id === id);
+      const file = nativeVideoFiles.get(id);
+      if (!current || current.kind !== "video" || !file) return;
+      if (current.dataUrl) {
+        // native → frames
+        setAttachments((prev) =>
+          prev.map((a) => (a.id === id ? { ...a, stage: "frames" } : a))
+        );
+        const { attachment } = await readVideoFileFrames(file, { id });
+        if (attachment) {
+          setAttachments((prev) =>
+            prev.map((a) => (a.id === id ? attachment : a))
+          );
+        }
+      } else if (current.frames?.length) {
+        // frames → native
+        setAttachments((prev) =>
+          prev.map((a) => (a.id === id ? { ...a, stage: "reading" } : a))
+        );
+        const { attachment } = await readVideoFile(file);
+        if (attachment) {
+          setAttachments((prev) =>
+            prev.map((a) => (a.id === id ? { ...attachment, id } : a))
+          );
+        }
+      }
+    }, []);
 
   // Switching onto a blind model with screenshots already attached: describe
   // them now. Switching onto a seeing model must not leave a helper spinner.
@@ -810,11 +851,11 @@ export function ChatArea({
       }
     }
     if (
-      !modelSeesVideo(model) &&
+      getModel(model).vision !== "native" &&
       attachmentsRef.current.some((a) => a.kind === "video")
     ) {
       setAttachError(
-        `${getModel(model).label} cannot watch MP4. Remove the video or switch to Ox Alpha / Qwen 3.8 27B.`
+        `${getModel(model).label} cannot watch video. Remove the video or switch to Ox Alpha / GLM 5.3 Flash / Qwen 3.8 27B.`
       );
     }
   }, [model, analyzeImage]);
@@ -1053,14 +1094,19 @@ export function ChatArea({
     // the pixels to native-vision models. Dropping the file without sending
     // it with the note is how a "btw look at this" loses the "this".
     if (isBtw) {
-      videoWaitRef.current = attachments.some((a) => a.kind === "video");
-      onAskBtw?.(
+      videoWaitRef.current = attachments.some(
+        (a) => a.kind === "video" && !a.frames
+      );
+        onAskBtw?.(
         btwNote,
         buildMessageWithAttachments(btwNote, attachments, getModel(model).vision),
         attachments.map((a) => ({
           name: a.name,
           kind: a.kind,
           dataUrl: a.dataUrl,
+          frames: a.frames,
+          durationSec: a.durationSec,
+          frameIntervalSec: a.frameIntervalSec,
           description: a.description,
           descriptionSource: a.descriptionSource,
         }))
@@ -1116,13 +1162,18 @@ export function ChatArea({
     if ((!input.trim() && attachments.length === 0) || isLoading) return;
     // The model receives the file contents and (for blind models) image
     // descriptions; the transcript shows only what the user typed, plus chips.
-    videoWaitRef.current = attachments.some((a) => a.kind === "video");
-    onSend(buildMessageWithAttachments(input, attachments, getModel(model).vision), {
+    videoWaitRef.current = attachments.some(
+      (a) => a.kind === "video" && !a.frames
+    );
+      onSend(buildMessageWithAttachments(input, attachments, getModel(model).vision), {
       displayContent: input,
       attachments: attachments.map((a) => ({
         name: a.name,
         kind: a.kind,
         dataUrl: a.dataUrl,
+        frames: a.frames,
+        durationSec: a.durationSec,
+        frameIntervalSec: a.frameIntervalSec,
         description: a.description,
         descriptionSource: a.descriptionSource,
       })),
@@ -1590,6 +1641,7 @@ export function ChatArea({
               attachments={attachments}
               onRemove={removeAttachment}
               onRetry={retryImage}
+              onSwitchVideoMode={(id) => void switchVideoMode(id)}
             />
 
             {attachError && (

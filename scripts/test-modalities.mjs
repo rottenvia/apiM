@@ -176,10 +176,10 @@ check(
   "readImageFile is told not to spin the helper chip on native",
   /analyze: modelNeedsVisionHelper\(model\)/.test(chatSrc)
 );
-check(
-  "MP4 is refused on DeepSeek with a model-specific error",
-  /cannot ` \+\s*`watch MP4/.test(chatSrc) || /cannot watch MP4/.test(chatSrc)
-);
+  check(
+    "MP4 is refused on DeepSeek with a model-specific error",
+    /cannot ` \+\s*`watch video/.test(chatSrc) || /cannot watch video/.test(chatSrc)
+  );
 check("ChatArea persists helper descriptions", /description: a\.description/.test(chatSrc));
 check(
   "send is blocked while a video is attached to a blind model",
@@ -487,7 +487,72 @@ check(
   /NOT READ/.test(flashBatch.content)
 );
 
-await rm(tmpData, { recursive: true, force: true });
+  // Video rides as frames by default; the native clip stays one click away
+
+  const framesAtt = {
+    name: "clip.mp4",
+    kind: "video",
+    frames: [
+      { dataUrl: "data:image/jpeg;base64,AAAA", t: 0 },
+      { dataUrl: "data:image/jpeg;base64,BBBB", t: 2 },
+      { dataUrl: "data:image/jpeg;base64,CCCC", t: 4 },
+    ],
+    durationSec: 6,
+    frameIntervalSec: 2,
+  };
+
+  const framesParts = mm.buildUserContent(
+    "what is the speed at second 5?",
+    [framesAtt],
+    "native"
+  );
+  check(
+    "a frames video rides as image parts with a timing header, no video_url",
+    framesParts.some((p) => p.type === "text" && /one every 2s/.test(p.text)) &&
+      framesParts.filter((p) => p.type === "image_url").length === 3 &&
+      !framesParts.some((p) => p.type === "video_url"),
+    "the video pipeline that chokes on long prefills is never touched"
+  );
+
+  const framesWindowed = mm.buildUserContent("hi", [framesAtt], "native", {
+    mediaWindow: { images: true, videos: false },
+  });
+  check(
+    "a frames video windows exactly like a native video",
+    !framesWindowed.some((p) => p.type === "image_url") &&
+      framesWindowed.some(
+        (p) => p.type === "text" && /video as frames/.test(p.text)
+      ),
+    "32 stills must not re-bill on every old round"
+  );
+
+  const nativeStill = mm.buildUserContent(
+    "hi",
+    [{ name: "old.mp4", kind: "video", dataUrl: "data:video/mp4;base64,AAAA" }],
+    "native"
+  );
+  check(
+    "old native videos still ride as video_url",
+    nativeStill.some((p) => p.type === "video_url"),
+    "stored conversations from before frames mode keep working"
+  );
+
+  const chipsSrc = read("src/components/AttachmentChips.tsx");
+  const bubbleSrc = read("src/components/MessageBubble.tsx");
+  check(
+    "the composer attaches videos through readVideoFileFrames",
+    /readVideoFileFrames/.test(chatSrc),
+    "extraction happens in the browser; the MP4 never rides the wire by default"
+  );
+  check(
+    "the chip and bubble render the frame strip and offer the native toggle",
+    /frames\[0\]\.dataUrl/.test(chipsSrc) &&
+      /onSwitchVideoMode/.test(chipsSrc) &&
+      /frames\[0\]\.dataUrl/.test(bubbleSrc),
+    "first frame is the thumbnail; the toggle keeps audio reachable"
+  );
+
+  await rm(tmpData, { recursive: true, force: true });
 
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`

@@ -134,6 +134,14 @@ export interface MessageAttachment {
   kind: "text" | "image" | "video";
   /** Images and video: data URL for the inline thumbnail. */
   dataUrl?: string;
+  /**
+   * Videos in frames mode: the sampled stills; the first doubles as the
+   * thumbnail. dataUrl present means a native clip instead. Never both.
+   */
+  frames?: { dataUrl: string; t: number }[];
+  /** Frames metadata, display only. */
+  durationSec?: number;
+  frameIntervalSec?: number;
   /** Helper path only: what vision or OCR extracted. */
   description?: string;
   descriptionSource?: "vision" | "ocr";
