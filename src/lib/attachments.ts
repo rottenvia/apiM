@@ -106,11 +106,13 @@ export const MAX_ARCHIVE_BYTES = 50 * 1024 * 1024;
 export const MAX_FILES = 10;
 /** Images are capped separately — they are sent to the vision model whole. */
 export const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
-/**
- * Native video (MP4) on Ox Alpha / Qwen. 32 MB raw is ~43 MB as a data URL,
- * well under the 256 MB request body the server accepts.
- */
-export const MAX_VIDEO_BYTES = 32 * 1024 * 1024;
+  /**
+   * Native video (MP4) on GLM / Ox Alpha / Qwen. 100 MB raw is ~137 MB as a
+   * data URL, still under the 256 MB request body the server accepts. Past
+   * this constant the practical ceiling is the serving route, which accepts
+   * empirically — the model bills duration as frames, not bytes.
+   */
+  export const MAX_VIDEO_BYTES = 100 * 1024 * 1024;
 
 const VIDEO_MIME_TYPES = new Set(["video/mp4", "video/mpeg"]);
 
