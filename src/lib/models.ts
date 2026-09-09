@@ -269,15 +269,15 @@ export const MODELS: ModelInfo[] = [
     label: "GLM 5.3 Flash",
     shortLabel: "GLM 5.3 Flash",
     description:
-      "Z.ai's agent model — the model that ran as the Ox Alpha stealth preview, now official on OpenRouter. 1M context, native images, built for long agent tasks. 50% launch discount through Sep 9.",
-    specs: "1M context · 128K max output · image · open tools",
+      "Z.ai's agent model — the model that ran as the Ox Alpha stealth preview, now official on OpenRouter. 1M context, native images and video, built for long agent tasks. 50% launch discount through Sep 9.",
+    specs: "1M context · 128K max output · image + video · open tools",
     resumeBlurb: "Ox Alpha, now official",
     settingsSubtitle: "OpenRouter · 1M context · fast",
     mapsLowToHigh: false,
     helper: false,
     peakHours: false,
     vision: "native",
-    video: false,
+    video: true,
     openToolLimits: true,
     maxOutputTokens: GLM_MAX_OUTPUT_TOKENS,
   },
@@ -313,7 +313,7 @@ export function modelNeedsVisionHelper(id: string | null | undefined): boolean {
   return getModel(id).vision === "helper";
 }
 
-/** Native video input (MP4). DeepSeek cannot; Ox and Qwen can. */
+/** Native video input (MP4). DeepSeek cannot; Ox, GLM and Qwen can. */
 export function modelSeesVideo(id: string | null | undefined): boolean {
   return getModel(id).video;
 }

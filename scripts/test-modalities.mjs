@@ -62,8 +62,9 @@ check("Flash needs the helper", models.modelNeedsVisionHelper("deepseek-v4-flash
 check("Ox does not need the helper", models.modelNeedsVisionHelper("ox-alpha") === false);
 check("Qwen does not need the helper", models.modelNeedsVisionHelper("qwen-3.8-27b") === false);
 
-check("Ox can watch video", models.modelSeesVideo("ox-alpha"));
-check("Qwen can watch video", models.modelSeesVideo("qwen-3.8-27b"));
+    check("Ox can watch video", models.modelSeesVideo("ox-alpha"));
+    check("Qwen can watch video", models.modelSeesVideo("qwen-3.8-27b"));
+    check("GLM can watch video", models.modelSeesVideo("glm-5.3-flash"));
 check("Pro cannot watch video", models.modelSeesVideo("deepseek-v4-pro") === false);
 check("all catalog models can receive images somehow", models.MODELS.every((m) => models.modelSeesImages(m.id)));
 
