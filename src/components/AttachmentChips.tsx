@@ -4,6 +4,7 @@ import { useState } from "react";
 import { formatBytes, STAGE_LABELS } from "@/lib/attachments";
 import type { Attachment } from "@/lib/attachments";
 import { ImageLightbox } from "@/components/ImageLightbox";
+import { nativeVideoFiles } from "@/lib/video-frames";
 
 function Spinner() {
   return (
@@ -30,11 +31,14 @@ export function AttachmentChips({
   attachments,
   onRemove,
   onRetry,
+  onSwitchVideoMode,
 }: {
   attachments: Attachment[];
   onRemove: (id: string) => void;
   /** Re-run a failed image description without re-attaching the file. */
   onRetry?: (id: string) => void;
+  /** Flip a video between frames mode and the native clip (session only). */
+  onSwitchVideoMode?: (id: string) => void;
 }) {
   const [preview, setPreview] = useState<Attachment | null>(null);
 
@@ -42,13 +46,13 @@ export function AttachmentChips({
 
   return (
     <div className="flex flex-wrap gap-1.5 px-3 pt-3">
-      {preview?.dataUrl && (
+      {preview && (preview.dataUrl || preview.frames?.[0]) && (
         <ImageLightbox
-          src={preview.dataUrl}
+          src={(preview.frames?.[0]?.dataUrl ?? preview.dataUrl) as string}
           name={preview.name}
           description={preview.description}
           source={preview.descriptionSource}
-          kind={preview.kind === "video" ? "video" : "image"}
+          kind={preview.kind === "video" && preview.dataUrl ? "video" : "image"}
           onClose={() => setPreview(null)}
         />
       )}
@@ -73,12 +77,19 @@ export function AttachmentChips({
               }
               className="block"
             >
-              {file.kind === "video" ? (
+              {file.kind === "video" && file.dataUrl ? (
                 <video
                   src={file.dataUrl}
                   muted
                   playsInline
                   preload="metadata"
+                  className="h-16 w-16 object-cover transition-transform duration-150 group-hover:scale-105"
+                />
+              ) : file.kind === "video" && file.frames?.length ? (
+                /* eslint-disable-next-line @next/next/no-img-element */
+                <img
+                  src={file.frames[0].dataUrl}
+                  alt={file.name}
                   className="h-16 w-16 object-cover transition-transform duration-150 group-hover:scale-105"
                 />
               ) : (
@@ -89,6 +100,35 @@ export function AttachmentChips({
                   className="h-16 w-16 object-cover transition-transform duration-150 group-hover:scale-105"
                 />
               )}
+
+              {file.kind === "video" &&
+                file.frames &&
+                file.frames.length > 0 &&
+                !file.stage && (
+                  <span className="absolute bottom-0 left-0 bg-black/70 px-1 py-0.5 text-[9px] text-white">
+                    {file.frames.length} frames
+                  </span>
+                )}
+
+              {onSwitchVideoMode &&
+                file.kind === "video" &&
+                !file.stage &&
+                nativeVideoFiles.has(file.id) && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onSwitchVideoMode(file.id);
+                    }}
+                    title={
+                      file.frames?.length
+                        ? "Switch to the native clip (audio, provider video pipeline)"
+                        : "Switch to frames (smaller upload, faster prefill)"
+                    }
+                    className="absolute bottom-0.5 right-0.5 rounded bg-black/70 px-1 py-0.5 text-[9px] text-white opacity-0 transition-opacity hover:bg-black group-hover:opacity-100"
+                  >
+                    {file.frames?.length ? "→ native" : "→ frames"}
+                  </button>
+                )}
 
               {(file.analyzing || file.stage) && (
                 <span className="absolute inset-0 flex flex-col items-center justify-center gap-1 bg-black/65 text-[9px] font-medium text-white">
