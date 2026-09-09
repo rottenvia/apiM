@@ -134,6 +134,41 @@ interface ChatAreaProps {
   onToggleSidePanel: () => void;
 }
 
+/**
+ * Elapsed-seconds row for the silent wait between sending and the first
+ * token. A 23s video is ~26k visual tokens of provider prefill — minutes of
+ * a quiet dots row that gives no sense of whether the request is working,
+ * hung, or dying. Own clock at module level so the interval identity is
+ * stable across ChatArea re-renders (status-stage updates would otherwise
+ * remount a nested component and reset the count every stage change).
+ */
+function WaitTimer({
+  visible,
+  hasVideo,
+}: {
+  visible: boolean;
+  hasVideo: boolean;
+}) {
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    if (!visible) return;
+    setSeconds(0);
+    const t = setInterval(() => setSeconds((s) => s + 1), 1000);
+    return () => clearInterval(t);
+  }, [visible]);
+  if (!visible) return null;
+  return (
+    <div className="flex justify-start px-1 pb-2">
+      <span className="pl-[18px] text-[11px] leading-4 tabular-nums text-[#a29d92]">
+        {seconds}s elapsed
+        {hasVideo
+          ? " · watching your video — replies can take a few minutes"
+          : ""}
+      </span>
+    </div>
+  );
+}
+
 export function ChatArea({
   messages,
   isLoading,
@@ -853,6 +888,9 @@ export function ChatArea({
   }, []);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // Whether the round being sent carries a video — read by WaitTimer so the
+  // silent provider prefill gets an honest "watching your video" hint.
+  const videoWaitRef = useRef(false);
 
   // Keep the UI in sync with the browser's real fullscreen state
   useEffect(() => {
@@ -1015,6 +1053,7 @@ export function ChatArea({
     // the pixels to native-vision models. Dropping the file without sending
     // it with the note is how a "btw look at this" loses the "this".
     if (isBtw) {
+      videoWaitRef.current = attachments.some((a) => a.kind === "video");
       onAskBtw?.(
         btwNote,
         buildMessageWithAttachments(btwNote, attachments, getModel(model).vision),
@@ -1077,6 +1116,7 @@ export function ChatArea({
     if ((!input.trim() && attachments.length === 0) || isLoading) return;
     // The model receives the file contents and (for blind models) image
     // descriptions; the transcript shows only what the user typed, plus chips.
+    videoWaitRef.current = attachments.some((a) => a.kind === "video");
     onSend(buildMessageWithAttachments(input, attachments, getModel(model).vision), {
       displayContent: input,
       attachments: attachments.map((a) => ({
@@ -1407,6 +1447,10 @@ export function ChatArea({
               {isLoading && !streamingHasOutput && (
                 <LoadingIndicator stage={statusStage} />
               )}
+              <WaitTimer
+                visible={isLoading && !streamingHasOutput}
+                hasVideo={videoWaitRef.current}
+              />
               {retryNotice && <RetryBanner text={retryNotice} />}
 
               <div ref={messagesEndRef} />

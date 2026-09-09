@@ -535,6 +535,36 @@ check(
   "the highlight map is keyed on the regex alone; the active mark is DOM-only"
 );
 
+console.log("\n11. video sends must show the wait, not a silent dots row");
+
+/*
+ * Reported: a 23s MP4 to GLM 5.3 Flash sat on "waiting answer" for 170
+ * seconds — normal provider cost (a 23s clip is ~26k visual tokens of
+ * prefill), but the UI gave no sense of working / hung / dying. The
+ * WaitTimer row makes the wait legible; the video flag is stamped at send
+ * time in BOTH send paths (main + btw) so a side-question round can never
+ * inherit the previous round's flag.
+ */
+check(
+  "the wait timer exists as a module-level component with its own clock",
+  chatArea.indexOf("function WaitTimer(") !== -1 &&
+    chatArea.indexOf("function WaitTimer(") <
+      chatArea.indexOf("export function ChatArea({") &&
+    /const t = setInterval\(\(\) => setSeconds/.test(chatArea),
+  "module level keeps the interval identity stable across status-stage re-renders"
+);
+check(
+  "video sends announce what the provider is doing",
+  /watching your video — replies can take a few minutes/.test(chatArea),
+  "an elapsed counter alone would not explain minutes of prefill"
+);
+check(
+  "the flag is stamped at send time in both send paths",
+  (chatArea.match(/videoWaitRef\.current = attachments\.some/g) || []).length ===
+    2,
+  "main send + btw send; a stale flag from the previous round would mislabel it"
+);
+
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
 );
