@@ -354,6 +354,16 @@ check(
   /not[\s\S]{0,120}as a new task/.test(BASE_PROMPT) &&
     /continue from where you were/.test(BASE_PROMPT)
 );
+check(
+  "…and demands visible acknowledgment, not just silent reasoning",
+  /begin your next response by acknowledging/.test(BASE_PROMPT) &&
+    /one short line of plain text/.test(BASE_PROMPT),
+  "acknowledgment inside reasoning alone can stay invisible to the user"
+);
+check(
+  "…and ranks the note above the running plan",
+  /most recent, highest-priority instruction/.test(BASE_PROMPT)
+);
 
 // ------------------------------------------------------------------
 console.log("\n4. The client contract");
