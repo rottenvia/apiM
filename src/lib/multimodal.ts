@@ -19,6 +19,15 @@ export interface StoredAttachment {
   kind: AttachmentKind;
   /** Images and video: data URL so native models can replay the pixels. */
   dataUrl?: string;
+  /**
+   * Videos only: still frames sampled at attach time. Present (and dataUrl
+   * absent) means the video rides as a strip of image parts; dataUrl
+   * present means it rides as one native video_url part. Never both.
+   */
+  frames?: { dataUrl: string; t: number }[];
+  /** Videos only: source duration and uniform frame spacing, in seconds. */
+  durationSec?: number;
+  frameIntervalSec?: number;
   /** Images only, helper path: what vision or OCR extracted. */
   description?: string;
   descriptionSource?: "vision" | "ocr";
@@ -80,7 +89,10 @@ export function buildUserContent(
 ): UserContent {
   const body = typeof text === "string" ? text : "";
   const media = (attachments ?? []).filter(
-    (a) => (a.kind === "image" || a.kind === "video") && Boolean(a.dataUrl)
+    (a) =>
+      (a.kind === "image" && Boolean(a.dataUrl)) ||
+      (a.kind === "video" &&
+        (Boolean(a.dataUrl) || (a.frames?.length ?? 0) > 0))
   );
 
   if (vision === "native" && media.length > 0) {
@@ -90,16 +102,41 @@ export function buildUserContent(
     const trimmed = body.trim();
     if (trimmed) parts.push({ type: "text", text: trimmed });
     for (const a of media) {
+      // A frames-mode video is images on the wire but a video in spirit:
+      // it windows (and stops re-billing) exactly like a native video.
+      const asFrames =
+        a.kind === "video" && !a.dataUrl && (a.frames?.length ?? 0) > 0;
       const keep =
         !window ||
         (a.kind === "video"
           ? window.videos !== false
           : window.images !== false);
       if (!keep) {
-        dropped.push(`${a.name} (${a.kind})`);
+        dropped.push(
+          asFrames ? `${a.name} (video as frames)` : `${a.name} (${a.kind})`
+        );
         continue;
       }
-      if (a.kind === "video") {
+      if (asFrames) {
+        const n = a.frames!.length;
+        const iv = (a.frameIntervalSec ?? 0).toFixed(2).replace(/\.?0+$/, "");
+        const cadence =
+          n === 1
+            ? "a single still at 0.0s"
+            : `${n} still frames sampled evenly across the clip, one every ` +
+              `${iv}s starting at 0.0s, in order — frame k of ${n} sits at ` +
+              `about (k-1)×${iv}s`;
+        parts.push({
+          type: "text",
+          text:
+            `[Video "${a.name}" (${(a.durationSec ?? 0).toFixed(1)}s) attached as ` +
+            `${cadence}. Motion between frames is not visible; reason across ` +
+            `the sequence for anything time-based.]`,
+        });
+        for (const f of a.frames!) {
+          parts.push({ type: "image_url", image_url: { url: f.dataUrl } });
+        }
+      } else if (a.kind === "video") {
         parts.push({ type: "video_url", video_url: { url: a.dataUrl as string } });
       } else {
         parts.push({ type: "image_url", image_url: { url: a.dataUrl as string } });

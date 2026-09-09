@@ -13,6 +13,7 @@ import {
   unsupportedArchiveNote,
 } from "@/lib/archive";
 import { documentKind, readDocument } from "@/lib/documents";
+import { extractVideoFrames, nativeVideoFiles } from "@/lib/video-frames";
 
 /**
  * What a file is doing while it is being read.
@@ -27,7 +28,8 @@ export type AttachStage =
   | "saving"
   | "unpacking"
   | "extracting"
-  | "analyzing";
+  | "analyzing"
+  | "frames";
 
 export const STAGE_LABELS: Record<AttachStage, string> = {
   reading: "Reading",
@@ -35,6 +37,7 @@ export const STAGE_LABELS: Record<AttachStage, string> = {
   unpacking: "Unpacking",
   extracting: "Extracting text",
   analyzing: "Looking at image",
+  frames: "Extracting frames",
 };
 
 export interface Attachment {
@@ -67,6 +70,17 @@ export interface Attachment {
   kind: "text" | "image" | "video";
   /** Images and video: base64 data URL used for the thumbnail and the API call. */
   dataUrl?: string;
+  /**
+   * Videos only: still frames sampled at attach time, replacing the whole
+   * MP4 on the wire. Present (with dataUrl absent) means the attachment
+   * rides as a strip of images; dataUrl present means native video.
+   * Never both.
+   */
+  frames?: { dataUrl: string; t: number }[];
+  /** Videos only: source duration in seconds. */
+  durationSec?: number;
+  /** Videos only: uniform spacing between frames in seconds. */
+  frameIntervalSec?: number;
   /** Images only, helper path: description produced by vision or OCR. */
   description?: string;
   /** How `description` was produced. */
@@ -354,6 +368,51 @@ export async function readVideoFile(file: File): Promise<ReadResult> {
       dataUrl,
     },
   };
+}
+
+/**
+ * Sample a video into still frames — the default way a video rides.
+ *
+ * The browser decodes and downsamples; the model receives ~32 JPEGs
+ * instead of the whole MP4, which cuts the upload from ~137MB of base64
+ * to a few MB and feeds the provider an image pipeline that cannot choke
+ * on a minutes-long video prefill. Falls back to readVideoFile (native
+ * data URL) when the browser cannot decode the clip: the provider's
+ * server-side decoder may still handle what the browser cannot.
+ */
+export async function readVideoFileFrames(
+  file: File,
+  opts?: { id?: string; onProgress?: (done: number, total: number) => void }
+): Promise<ReadResult> {
+  if (file.size > MAX_VIDEO_BYTES) {
+    return {
+      error: `${file.name} is ${formatBytes(file.size)} — the video limit is ${formatBytes(MAX_VIDEO_BYTES)}`,
+    };
+  }
+
+  const id =
+    opts?.id ??
+    `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  nativeVideoFiles.set(id, file);
+  try {
+    const result = await extractVideoFrames(file, opts?.onProgress);
+    return {
+      attachment: {
+        id,
+        name: file.name,
+        size: file.size,
+        content: "",
+        truncated: false,
+        kind: "video",
+        frames: result.frames,
+        durationSec: result.durationSec,
+        frameIntervalSec: result.intervalSec,
+      },
+    };
+  } catch {
+    nativeVideoFiles.delete(id);
+    return readVideoFile(file);
+  }
 }
 
 /**
