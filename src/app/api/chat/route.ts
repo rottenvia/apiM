@@ -1770,6 +1770,15 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          */
         let emptyStreamRetries = 0;
         /**
+         * A video round whose stream lives at least this long before dying
+         * empty is a prefill choke, not a pool blink: the provider spent
+         * minutes ingesting frames and then dropped the connection.
+         * Retrying re-uploads the whole clip for the same fate, so such a
+         * round goes straight to the honest error instead of burning two
+         * more multi-minute attempts.
+         */
+        const VIDEO_RETRY_FAST_MS = 45_000;
+        /**
          * Times we have waited out a 429 ("service busy / rate limited") and
          * re-issued the SAME round instead of ending the reply. A shared
          * pool 429 is transient load, not a user error — stopping on it made
@@ -2177,7 +2186,14 @@ Ask before you build the wrong thing. If a choice would change what you produce 
 
           send({ type: "status", stage: thinkingEnabled ? "thinking" : "writing" });
 
-          const inputChars = JSON.stringify(dsRequestBody).length;
+          const bodyJson = JSON.stringify(dsRequestBody);
+          const inputChars = bodyJson.length;
+          // One check for the whole request: a round carrying a video dies
+          // differently from a text round — minutes of prefill silence, then
+          // an empty stream — and its retry budget below is sized for that.
+          // (Quotes can't appear inside base64, so this can't false-positive
+          // on the data URL itself.)
+          const roundHasVideo = bodyJson.includes('"video_url"');
           const retryAttempts =
             target.providerId === "opencode" || target.providerId === "openrouter"
               ? OPENCODE_RETRY.attempts
@@ -2818,10 +2834,20 @@ Ask before you build the wrong thing. If a choice would change what you produce 
            * success, so without this the user sees a blank reply after
            * "retrying". Only retry a stream that never even named a
            * finish_reason — a real empty `stop` is left alone.
+           *
+           * A video round is budgeted differently: every attempt re-uploads
+           * the whole clip, and an empty end after minutes of prefill
+           * silence is a choke with a predictable outcome, not a blink
+           * worth another 100MB of hope. Fast video deaths keep one retry;
+           * slow ones fall straight through to the error below.
            */
+          const emptyRetryBudget = roundHasVideo ? 1 : 2;
+          const videoPrefillChoke =
+            roundHasVideo && Date.now() - streamStarted >= VIDEO_RETRY_FAST_MS;
           if (
             (target.providerId === "opencode" || target.providerId === "openrouter") &&
-            emptyStreamRetries < 2 &&
+            !videoPrefillChoke &&
+            emptyStreamRetries < emptyRetryBudget &&
             !roundContent &&
             !roundReasoning &&
             toolAcc.result().length === 0 &&
@@ -2832,7 +2858,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               type: "retrying",
               phase: "backoff",
               attempt: emptyStreamRetries,
-              attempts: 2,
+              attempts: emptyRetryBudget,
               delayMs: 1_200,
               reason: firstTokenTimedOut ? "no first token" : "empty reply",
               host: target.providerName,
@@ -2862,7 +2888,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
            */
           if (
             (target.providerId === "opencode" || target.providerId === "openrouter") &&
-            emptyStreamRetries >= 2 &&
+            (emptyStreamRetries >= emptyRetryBudget || videoPrefillChoke) &&
             !roundContent &&
             !roundReasoning &&
             toolAcc.result().length === 0 &&
@@ -2875,11 +2901,17 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             }
             send({
               type: "error",
-              error:
-                `${target.providerName} returned an empty response after ` +
-                `${emptyStreamRetries + 1} attempt(s). The host is overloaded ` +
-                `or down right now — this is their pool, not your key. Wait a ` +
-                `minute and try again, or switch the Ox host in Settings.`,
+              error: videoPrefillChoke
+                ? `${target.providerName} dropped the request while ingesting ` +
+                  `your video — long clips prefill for minutes (~2 sampled ` +
+                  `frames/sec) and can outlive the route's patience, so this ` +
+                  `fails fast instead of re-uploading the same bytes for the ` +
+                  `same fate. Trim the clip to the seconds that matter and ` +
+                  `send it again; shorter clips almost always go through.`
+                : `${target.providerName} returned an empty response after ` +
+                  `${emptyStreamRetries + 1} attempt(s). The host is overloaded ` +
+                  `or down right now — this is their pool, not your key. Wait a ` +
+                  `minute and try again, or switch the Ox host in Settings.`,
               // Their pool is down — a server-side failure. Work from
               // earlier rounds is checkpointed, so the client continues it;
               // the re-post rides the retry backoff, and the cap stops a

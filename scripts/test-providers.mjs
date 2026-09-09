@@ -774,11 +774,18 @@ check(
     /not your key/.test(providers.providerHttpError(429, "OpenCode Zen", "")),
   "mornings are quiet; evenings look like the key is broken"
 );
-check(
-  "the chat route gives OpenCode extra attempts",
-  /OPENCODE_RETRY/.test(route) && /emptyStreamRetries/.test(route),
-  "Zen 503s last longer than three tries, and 200+empty is the other failure mode"
-);
+  check(
+    "the chat route gives OpenCode extra attempts",
+    /OPENCODE_RETRY/.test(route) && /emptyStreamRetries/.test(route),
+    "Zen 503s last longer than three tries, and 200+empty is the other failure mode"
+  );
+  check(
+    "a video round skips doomed empty-stream retries",
+    /roundHasVideo/.test(route) &&
+      /VIDEO_RETRY_FAST_MS/.test(route) &&
+      /while ingesting/.test(route),
+    "re-uploading the clip for the same prefill choke is a ritual, not a retry"
+  );
 check(
   "the live retry label uses the real attempt total",
   /visibleUpstreamNotice/.test(page) && !/attempts - 1/.test(page)
