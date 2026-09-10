@@ -553,6 +553,58 @@ check(
     "first frame is the thumbnail; the toggle keeps audio reachable"
   );
 
+  console.log("\n10. Videos ride once — the 54M-body leak is closed");
+
+  const videoMsg = {
+    role: "user",
+    content: [
+      { type: "text", text: "what is the speed at second 10?" },
+      { type: "video_url", video_url: { url: "data:video/mp4;base64,BBBB" } },
+    ],
+  };
+  const stripped = mm.stripRideAlongVideos(
+    [
+      { role: "system", content: "sys" },
+      videoMsg,
+      { role: "assistant", content: "around 140" },
+      { role: "user", content: "okay where did you land the new update?" },
+    ],
+    false
+  );
+  check(
+    "a resumed/mid-run round replaces the old clip with a reference",
+    !JSON.stringify(stripped).includes('"video_url"') &&
+      JSON.stringify(stripped).includes("already rode once") &&
+      typeof stripped[3].content === "string",
+    "the provider ingested the frames on the first ride; replaying ~54M chars of base64 priced OpenRouter's estimate past small balances"
+  );
+  check(
+    "the opening request of a fresh send still carries the clip",
+    mm
+      .stripRideAlongVideos(
+        [
+          { role: "system", content: "sys" },
+          {
+            role: "user",
+            content: [
+              { type: "video_url", video_url: { url: "data:video/mp4;base64,CCC" } },
+            ],
+          },
+        ],
+        true
+      )
+      .some(
+        (m) =>
+          Array.isArray(m.content) &&
+          m.content.some((p) => p.type === "video_url")
+      ),
+    "the round that introduces the clip still needs the pixels"
+  );
+  check(
+    "the strip is a wire-copy only — stored transcripts keep their originals",
+    videoMsg.content.some((p) => p.type === "video_url")
+  );
+
   await rm(tmpData, { recursive: true, force: true });
 
 console.log(

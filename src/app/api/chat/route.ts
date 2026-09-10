@@ -113,7 +113,11 @@ import type { PrematureStopReason } from "@/lib/revive";
 import { extractReasoningDelta } from "@/lib/reasoning-stream";
 import { loadScopedConversationHistory } from "@/lib/chat-history";
 import type { ScopedChatMessage } from "@/lib/chat-history";
-import { buildUserContent, userHasContent } from "@/lib/multimodal";
+import {
+  buildUserContent,
+  stripRideAlongVideos,
+  userHasContent,
+} from "@/lib/multimodal";
 import type { StoredAttachment } from "@/lib/multimodal";
 import { getModel, maxOutputTokensFor, modelVision } from "@/lib/models";
 
@@ -2059,8 +2063,22 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           // keeps everything; only the copy going upstream is reduced, so a
           // long agent run does not re-pay for the full text of a file it
           // read thirty rounds ago.
-          const pruned = pruneTranscript(
+          // Videos ride once. The current turn's clip is built without the
+          // media window, so its native video_url part persists in this
+          // transcript for the whole run — and `resumeState` snapshots that
+          // transcript with the clip still inside it (the window only guards
+          // the rebuilt-from-history path). Every later round and every
+          // resumed round therefore re-shipped ~54M chars of base64, which
+          // OpenRouter's pre-flight estimate prices as plain text tokens —
+          // 402ing balances below an estimate the round does not actually
+          // carry. Keep the pixels only on the request that introduces the
+          // clip; every other request sees the reference line.
+          const mediaStripped = stripRideAlongVideos(
             transcript,
+            toolRounds === 0 && !resumeMessageId
+          );
+          const pruned = pruneTranscript(
+            mediaStripped,
             target.thinkingStyle === "qwen" ? QWEN_PRUNE : undefined
           );
           if (pruned.stats.collapsed > 0) {
