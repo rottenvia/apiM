@@ -2146,6 +2146,22 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             ),
           };
 
+          /*
+           * Sticky cache routing (OpenRouter): a per-conversation session_id
+           * pins every round of this conversation to the provider endpoint
+           * that served its first request, from turn one — before any cache
+           * hit is even detected. Without it, stickiness is derived from
+           * hashing the first messages, so the moment the compact valve
+           * rewrites the transcript front mid-run, the conversation un-pins
+           * and re-prices its whole (largest) prompt at full rate on a cold
+           * endpoint. GLM's routes cache prefixes implicitly at ~0.2x the
+           * input rate once the prefix matches; this keeps the prefix warm
+           * on one endpoint for the whole conversation.
+           */
+          if (target.providerId === "openrouter" && convId) {
+            dsRequestBody.session_id = `conv-${convId}`;
+          }
+
           applyThinking(
             dsRequestBody,
             target.thinkingStyle,

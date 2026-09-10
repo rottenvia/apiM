@@ -784,8 +784,15 @@ check(
     /roundHasVideo/.test(route) &&
       /VIDEO_RETRY_FAST_MS/.test(route) &&
       /while ingesting/.test(route),
-    "re-uploading the clip for the same prefill choke is a ritual, not a retry"
-  );
+        "re-uploading the clip for the same prefill choke is a ritual, not a retry"
+      );
+    check(
+      "the OpenRouter body carries a per-conversation session_id",
+      /session_id/.test(route) &&
+        /conv-\$\{convId\}/.test(route) &&
+        /providerId === "openrouter"/.test(route),
+      "sticky routing keeps every round on the endpoint holding the warm cache"
+    );
 check(
   "the live retry label uses the real attempt total",
   /visibleUpstreamNotice/.test(page) && !/attempts - 1/.test(page)
@@ -988,14 +995,26 @@ check(
 );
 check("the free Flash costs nothing in the rate table", pricing.MODEL_RATES["deepseek-v4-flash-free"]?.input === 0 && pricing.MODEL_RATES["deepseek-v4-flash-free"]?.output === 0);
 check(
-  "GLM replies are billed, so the cost chip can show real money",
-  pricing.estimateCost(
-    { prompt_tokens: 1_000_000, completion_tokens: 1_000_000 },
-    "glm-5.3-flash",
-    "peak"
-  ) === 0.325,
-  "half-price launch window is active until 2026-09-09; list is $0.65 and used only for the cap"
-);
+    "GLM replies are billed, so the cost chip can show real money",
+    (() => {
+      const r = pricing.ratesFor("glm-5.3-flash", "peak", Date.now());
+      if (!r) return false;
+      // Full-cache-miss shape: 1M prompt tokens billed at input, 1M completion
+      // tokens at output — must equal exactly what the rate table says for the
+      // window we are currently in. The old hardcoded 0.325 detonated the day
+      // the launch discount expired (2026-09-09 16:00 UTC); a date-aware sum
+      // can never go stale.
+      return (
+        pricing.estimateCost(
+          { prompt_tokens: 1_000_000, completion_tokens: 1_000_000 },
+          "glm-5.3-flash",
+          "peak"
+        ) ===
+        r.input + r.output
+      );
+    })(),
+    "estimateCost must bill the current window's rates — launch discount ended 2026-09-09 16:00 UTC; list $0.15 in / $0.50 out since"
+  );
 check(
   "GLM rates return to list after the launch window",
   pricing.ratesFor("glm-5.3-flash", "peak", Date.UTC(2026, 8, 10)).input ===
