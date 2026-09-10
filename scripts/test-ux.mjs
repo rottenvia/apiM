@@ -535,22 +535,27 @@ check(
   "the highlight map is keyed on the regex alone; the active mark is DOM-only"
 );
 
-console.log("\n11. video sends must show the wait, not a silent dots row");
+console.log("\n11. one status row while waiting; edit never drops the question");
 
 /*
- * Reported: a 23s MP4 to GLM 5.3 Flash sat on "waiting answer" for 170
- * seconds — normal provider cost (a 23s clip is ~26k visual tokens of
- * prefill), but the UI gave no sense of working / hung / dying. The
- * WaitTimer row makes the wait legible; the video flag is stamped at send
- * time in BOTH send paths (main + btw) so a side-question round can never
- * inherit the previous round's flag.
+ * Reported: during a video wait the UI stacked FOUR voices — the thinking
+ * panel, the dots row, the elapsed row and the retry line — which read as
+ * a mess. The dots row and the elapsed row are now ONE status row; the
+ * retry line stays its own row (remount safety) but aligns under the
+ * status row's text column, and huge bodies format as 541M, not 540880k.
+ * Also reported: editing a message dropped the question from the list
+ * (sendMessage's optimistic update removes the regenerateFromId message)
+ * and older edits moved the exchange to the bottom with later exchanges
+ * stranded, so the model re-answered already-solved material.
  */
 check(
-  "the wait timer exists as a module-level component with its own clock",
-  chatArea.indexOf("function WaitTimer(") !== -1 &&
-    chatArea.indexOf("function WaitTimer(") <
+  "the status row exists as a module-level component with its own clock",
+  chatArea.indexOf("function StatusRow(") !== -1 &&
+    chatArea.indexOf("function StatusRow(") <
       chatArea.indexOf("export function ChatArea({") &&
-    /const t = setInterval\(\(\) => setSeconds/.test(chatArea),
+    /const t = setInterval\(\(\) => setSeconds/.test(chatArea) &&
+    /<Dots size=\{5\} \/>/.test(chatArea) &&
+    /STAGE_LABELS\[stage \?\? "thinking"\]/.test(chatArea),
   "module level keeps the interval identity stable across status-stage re-renders"
 );
 check(
@@ -563,6 +568,28 @@ check(
   (chatArea.match(/videoWaitRef\.current = attachments\.some/g) || []).length ===
     2,
   "main send + btw send; a stale flag from the previous round would mislabel it"
+);
+check(
+  "the retry banner aligns under the status row's text column",
+  /pl-\[31px\]/.test(chatArea) && !/pl-\[18px\]/.test(chatArea),
+  "both rows share the text column; the old 18px sat left of it"
+);
+check(
+  "the message hover row clusters actions on one side instead of scattering them",
+  /mt-1 flex items-center justify-end gap-1/.test(bubble),
+  "the old justify-between pushed Edit and Delete to opposite edges"
+);
+check(
+  "copy sits in the hover row, before edit",
+  /"Copy message text"/.test(bubble) &&
+    bubble.indexOf("Copy message text") < bubble.indexOf("Edit and resend"),
+  "copy, edit, delete — one cluster, right-aligned"
+);
+check(
+  "the edit textarea never opens smaller than the message it edits",
+  /rows=\{Math\.max\(/.test(bubble) &&
+    /message\.content\.split\("\\n"\)\.length \+ 1/.test(bubble),
+  "the old editor sized rows from the draft only, collapsing a 3-line message"
 );
 
 console.log(

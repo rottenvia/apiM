@@ -488,6 +488,7 @@ function MessageBubbleImpl({
   const [comparing, setComparing] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
+  const [copied, setCopied] = useState(false);
   const thinkingRef = useRef<HTMLDivElement>(null);
   /** Scroll target for the plan pill in the meta row. */
   const planRef = useRef<HTMLDivElement>(null);
@@ -846,7 +847,11 @@ function MessageBubbleImpl({
                     }
                   }}
                   autoFocus
-                  rows={Math.min(10, draft.split("\n").length + 1)}
+                  rows={Math.max(
+                    3,
+                    Math.min(12, draft.split("\n").length + 1),
+                    Math.min(12, message.content.split("\n").length + 1)
+                  )}
                   className="w-full resize-y rounded-lg border border-accent/40 bg-bg-primary px-3 py-2 text-[15px] leading-6 text-text-primary outline-none"
                 />
                 <div className="flex items-center justify-end gap-1.5">
@@ -885,37 +890,61 @@ function MessageBubbleImpl({
                   {(onEdit || onDelete) && (
                     <div className="grid grid-rows-[0fr] opacity-0 transition-all duration-150 focus-within:grid-rows-[1fr] focus-within:opacity-100 group-hover/msg:grid-rows-[1fr] group-hover/msg:opacity-100">
                       <div className="overflow-hidden">
-                        <div className="mt-1 flex items-center justify-between gap-2">
-                      {onEdit && (
-                        <button
-                          onClick={() => {
-                            setDraft(message.content);
-                            setEditing(true);
-                          }}
-                          title="Edit and resend"
-                          aria-label="Edit message"
-                          className="flex h-6 items-center gap-1 rounded-lg px-1.5 text-[11px] font-medium text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
-                        >
-                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} aria-hidden="true">
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                          </svg>
-                          Edit
-                        </button>
-                      )}
+                        {/* Clustered on one side — the old justify-between
+                            scattered Edit and Delete to opposite edges. */}
+                        <div className="mt-1 flex items-center justify-end gap-1">
+                          <button
+                            onClick={() => {
+                              void navigator.clipboard.writeText(message.content);
+                              setCopied(true);
+                              window.setTimeout(() => setCopied(false), 1200);
+                            }}
+                            title="Copy message text"
+                            aria-label="Copy message"
+                            className="flex h-6 items-center gap-1 rounded-lg px-1.5 text-[11px] font-medium text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
+                          >
+                            {copied ? (
+                              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} aria-hidden="true">
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M20 6L9 17l-5-5" />
+                              </svg>
+                            ) : (
+                              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} aria-hidden="true">
+                                <rect x="9" y="9" width="11" height="11" rx="2" />
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
+                              </svg>
+                            )}
+                            {copied ? "Copied" : "Copy"}
+                          </button>
+                          {onEdit && (
+                            <button
+                              onClick={() => {
+                                setDraft(message.content);
+                                setEditing(true);
+                              }}
+                              title="Edit and resend"
+                              aria-label="Edit message"
+                              className="flex h-6 items-center gap-1 rounded-lg px-1.5 text-[11px] font-medium text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
+                            >
+                              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} aria-hidden="true">
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                              </svg>
+                              Edit
+                            </button>
+                          )}
 
-                      {onDelete && (
-                        <button
-                          onClick={() => onDelete(message.id)}
-                          title="Delete this question and the reply — both forget it"
-                          aria-label="Delete this exchange"
-                          className="flex h-6 items-center gap-1 rounded-lg px-1.5 text-[11px] font-medium text-text-muted transition-colors hover:bg-danger/12 hover:text-danger"
-                        >
-                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} aria-hidden="true">
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M4 7h16" />
-                          </svg>
-                          Delete
-                        </button>
-                      )}
+                          {onDelete && (
+                            <button
+                              onClick={() => onDelete(message.id)}
+                              title="Delete this question and the reply — both forget it"
+                              aria-label="Delete this exchange"
+                              className="flex h-6 items-center gap-1 rounded-lg px-1.5 text-[11px] font-medium text-text-muted transition-colors hover:bg-danger/12 hover:text-danger"
+                            >
+                              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} aria-hidden="true">
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M4 7h16" />
+                              </svg>
+                              Delete
+                            </button>
+                          )}
                         </div>
                       </div>
                     </div>

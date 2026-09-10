@@ -244,10 +244,14 @@ function tenths(ms: number): string {
   return `${Math.round(Math.max(0, ms) / 100) / 10}`;
 }
 
-function sizeNote(inputChars?: number): string {
-  if (typeof inputChars !== "number" || inputChars < 8_000) return "";
-  return ` · ${(inputChars / 1000).toFixed(0)}k chars in`;
-}
+  function sizeNote(inputChars?: number): string {
+    if (typeof inputChars !== "number" || inputChars < 8_000) return "";
+    if (inputChars >= 1e9)
+      return ` · ${(inputChars / 1e9).toFixed(1)}B chars in`;
+    if (inputChars >= 1e6)
+      return ` · ${(inputChars / 1e6).toFixed(0)}M chars in`;
+    return ` · ${(inputChars / 1000).toFixed(0)}k chars in`;
+  }
 
 /**
  * Live label for the Ox / upstream banner.
