@@ -541,9 +541,25 @@ function MessageBubbleImpl({
    * that lands after the answer has begun.
    */
   const isThinkingPhase = Boolean(
-    message.isStreaming &&
-      hasThinking &&
-      (reasoningLen === 0 || arriveRef.current?.last === "reasoning")
+      message.isStreaming &&
+        hasThinking &&
+        (reasoningLen === 0 || arriveRef.current?.last === "reasoning")
+    );
+
+  /**
+   * Does the panel have anything real to show right now?
+   *
+   * The silent gap — streaming, thinking requested, no reasoning text yet —
+   * belongs to ChatArea's status row (dots + stage + elapsed). The panel used
+   * to mount here anyway with "Loading…" in its body, which read as a second
+   * redundant "Thinking" loader stacked above the status row. The panel now
+   * appears only when reasoning text, a reasoning notice, or a finished reply
+   * gives it content; historical bubbles keep the fetch-on-demand placeholder.
+   */
+  const panelHasContent = Boolean(
+    message.reasoningNotice ||
+      (typeof message.reasoningContent === "string" &&
+        message.reasoningContent.trim().length > 0)
   );
 
   // Keep the reasoning panel pinned to the newest text while "Follow" is on.
@@ -1198,7 +1214,7 @@ function MessageBubbleImpl({
               is coming. "none" means the model was told not to think, and
               then there is correctly nothing to show.
             */}
-            {hasThinking && (
+            {hasThinking && (panelHasContent || !isThinkingPhase) && (
               <div className="thinking-panel">
                 <div
                   data-thinking={isThinkingPhase}
