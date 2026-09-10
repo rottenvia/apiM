@@ -346,32 +346,50 @@ export async function readImageFile(
   };
 }
 
-/** Read an MP4 as a data URL for models that accept native video. */
-export async function readVideoFile(file: File): Promise<ReadResult> {
-  if (file.size > MAX_VIDEO_BYTES) {
+  /**
+   * Read an MP4 as a native data URL — the default way a video rides.
+   *
+   * The provider's video pipeline works when given time, and the app side
+   * is patient: no doomed retries, no idle killers, one honest error. The
+   * File is kept in the session map under the attachment's id so the chip's
+   * toggle can still switch to frames mode (the fast path for the days the
+   * provider's queue misbehaves).
+   */
+  export async function readVideoFile(
+    file: File,
+    opts?: { id?: string }
+  ): Promise<ReadResult> {
+    if (file.size > MAX_VIDEO_BYTES) {
+      return {
+        error: `${file.name} is ${formatBytes(file.size)} — the video limit is ${formatBytes(MAX_VIDEO_BYTES)}`,
+      };
+    }
+
+    const id =
+      opts?.id ??
+      `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    nativeVideoFiles.set(id, file);
+    const dataUrl = await readAsDataUrl(file);
+    if (!dataUrl) {
+      nativeVideoFiles.delete(id);
+      return { error: `Couldn't read ${file.name}` };
+    }
+
     return {
-      error: `${file.name} is ${formatBytes(file.size)} — the video limit is ${formatBytes(MAX_VIDEO_BYTES)}`,
+      attachment: {
+        id,
+        name: file.name,
+        size: file.size,
+        content: "",
+        truncated: false,
+        kind: "video",
+        dataUrl,
+      },
     };
   }
 
-  const dataUrl = await readAsDataUrl(file);
-  if (!dataUrl) return { error: `Couldn't read ${file.name}` };
-
-  return {
-    attachment: {
-      id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-      name: file.name,
-      size: file.size,
-      content: "",
-      truncated: false,
-      kind: "video",
-      dataUrl,
-    },
-  };
-}
-
 /**
- * Sample a video into still frames — the default way a video rides.
+ * Sample a video into still frames — the chip's opt-in fast path.
  *
  * The browser decodes and downsamples; the model receives ~32 JPEGs
  * instead of the whole MP4, which cuts the upload from ~137MB of base64
@@ -410,8 +428,9 @@ export async function readVideoFileFrames(
       },
     };
   } catch {
-    nativeVideoFiles.delete(id);
-    return readVideoFile(file);
+    // Undecodable in this browser: fall back to the native data URL under
+    // the SAME id, so the chip's toggle keeps working either direction.
+    return readVideoFile(file, { id });
   }
 }
 

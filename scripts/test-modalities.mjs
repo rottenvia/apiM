@@ -487,7 +487,7 @@ check(
   /NOT READ/.test(flashBatch.content)
 );
 
-  // Video rides as frames by default; the native clip stays one click away
+  // Video rides native by default; frames mode stays one click away
 
   const framesAtt = {
     name: "clip.mp4",
@@ -540,9 +540,10 @@ check(
   const chipsSrc = read("src/components/AttachmentChips.tsx");
   const bubbleSrc = read("src/components/MessageBubble.tsx");
   check(
-    "the composer attaches videos through readVideoFileFrames",
-    /readVideoFileFrames/.test(chatSrc),
-    "extraction happens in the browser; the MP4 never rides the wire by default"
+    "the composer attaches videos natively; the chip toggle opts into frames",
+    /readVideoFile\(item\.file\)/.test(chatSrc) &&
+      /readVideoFileFrames\(file, \{ id \}\)/.test(chatSrc),
+    "the native MP4 is the default ride; extraction stays one click away"
   );
   check(
     "the chip and bubble render the frame strip and offer the native toggle",
