@@ -573,14 +573,11 @@ export function ChatArea({
             error =
               `${item.file.name} is a video. ${getModel(model).label} cannot ` +
               `watch video — switch to Ox Alpha, GLM 5.3 Flash or Qwen 3.8 27B to attach it.`;
-          } else if (getModel(model).vision === "native") {
-            // Frames by default: the browser samples ~32 stills and the
-            // provider ingests ordinary images, skipping the video pipeline
-            // that chokes on long prefills. Falls back to the native data
-            // URL when the browser cannot decode the clip.
-            setStage(placeholder.id, "frames");
-            ({ attachment, error } = await readVideoFileFrames(item.file));
           } else {
+            // Native clip by default: the provider's video pipeline works
+            // when given time, and our side is patient — no doomed
+            // retries, no idle killers, one honest error. Frames stay one
+            // click away on the chip for the days the queue misbehaves.
             ({ attachment, error } = await readVideoFile(item.file));
           }
         } else if (
@@ -819,10 +816,10 @@ export function ChatArea({
         setAttachments((prev) =>
           prev.map((a) => (a.id === id ? { ...a, stage: "reading" } : a))
         );
-        const { attachment } = await readVideoFile(file);
+        const { attachment } = await readVideoFile(file, { id });
         if (attachment) {
           setAttachments((prev) =>
-            prev.map((a) => (a.id === id ? { ...attachment, id } : a))
+            prev.map((a) => (a.id === id ? attachment : a))
           );
         }
       }
