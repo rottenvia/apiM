@@ -2617,46 +2617,53 @@ export default function Home() {
     const index = list.findIndex((m) => m.id === messageId);
     if (index === -1) return;
 
-    const isLastTurn = index >= list.length - 2;
+    // The reply directly after the question is the one being replaced.
+    // Regenerating from the REPLY id keeps the question in the optimistic
+    // list and in the stored transcript; regenerating from the question id
+    // made sendMessage drop the question itself — the transcript rendered
+    // an answer with no question above it, and on reload the stored
+    // conversation had lost the question entirely. Editing an older
+    // message also used to move the exchange to the bottom with the later
+    // exchanges stranded above it, so the model re-answered material that
+    // was already solved.
+    const reply = list[index + 1];
+    const carried =
+      reply?.role === "assistant" && reply.content
+        ? [
+            ...(reply.previousVersions ?? []),
+            {
+              content: reply.content,
+              model: reply.model,
+              createdAt: reply.createdAt,
+            },
+          ]
+        : undefined;
 
-    if (isLastTurn) {
-      // Editing the most recent turn: replace it in place, carrying the old
-      // reply forward so the two can be compared.
-      const replaced = list[index + 1];
-      const carried =
-        replaced?.role === "assistant" && replaced.content
-          ? [
-              ...(replaced.previousVersions ?? []),
-              {
-                content: replaced.content,
-                model: replaced.model,
-                createdAt: replaced.createdAt,
-              },
-            ]
-          : undefined;
+    // The question's new text must already be in the store before the
+    // regenerate round starts: the server drops everything from the reply
+    // id onward and replays the stored question, so the stored text is
+    // what the model sees unless it is updated here.
+    writeMessages(workspaceIdRef.current, (prev) =>
+      prev.map((m) =>
+        m.id === messageId ? { ...m, content: newContent } : m
+      )
+    );
 
+    if (reply?.role === "assistant") {
       void sendMessageRef.current?.(newContent, {
-        regenerateFromId: messageId,
+        regenerateFromId: reply.id,
         previousVersions: carried,
       });
       return;
     }
 
-    // Editing an older message: asking it again in place would answer a
-    // question buried in the middle of the transcript, leaving the newest
-    // exchange stranded. Move the whole exchange to the end instead.
-    //
-    // Both the question AND its reply must go — removing only the question
-    // left the old answer floating with nothing above it.
-    writeMessages(
-      workspaceIdRef.current,
-      (prev) => {
-        const i = prev.findIndex((m) => m.id === messageId);
-        if (i === -1) return prev;
-        const removeCount = prev[i + 1]?.role === "assistant" ? 2 : 1;
-        return [...prev.slice(0, i), ...prev.slice(i + removeCount)];
-      }
-    );
+    // No reply to replace (the question stands alone): move it to the end
+    // and answer it as a fresh send.
+    writeMessages(workspaceIdRef.current, (prev) => {
+      const i = prev.findIndex((m) => m.id === messageId);
+      if (i === -1) return prev;
+      return [...prev.slice(0, i), ...prev.slice(i + 1)];
+    });
     void sendMessageRef.current?.(newContent);
   }, [writeMessages]);
 
