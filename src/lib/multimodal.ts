@@ -53,6 +53,60 @@ export function userHasContent(content: UserContent | null | undefined): boolean
   });
 }
 
+/**
+ * Replace native video parts with a one-line reference — for the wire copy.
+ *
+ * A clip's first ride does the work: the provider ingests its frames on the
+ * request that carries it, and the model's perception of those frames lives
+ * in the turns it produced afterwards. Replaying the same ~54M characters of
+ * base64 on every later round re-ships megabytes the model cannot re-ingest,
+ * and OpenRouter's pre-flight estimate prices that body as plain text
+ * tokens — 402ing balances below an estimate the round does not actually
+ * carry.
+ *
+ * The door this closes: the current turn is built without the media window,
+ * so its native video part persists in the run transcript, and `resumeState`
+ * snapshots that transcript with the clip still inside it. `pruneTranscript`
+ * collapses tool results and `compactTranscript` folds reasoning rounds —
+ * neither touches a video_url part, so a resumed run re-shipped the clip on
+ * every round until it was interrupted again.
+ *
+ * `keepLastUserVideo` is true only for the opening request of a fresh send —
+ * the round that introduces the clip still needs the pixels. Returns a new
+ * array; stored transcripts keep their originals.
+ */
+export function stripRideAlongVideos<
+  M extends { role: string; content: unknown }
+>(messages: M[], keepLastUserVideo: boolean): M[] {
+  let lastUser = -1;
+  if (keepLastUserVideo) {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (messages[i].role === "user") {
+        lastUser = i;
+        break;
+      }
+    }
+  }
+  return messages.map((msg, i) => {
+    if (msg.role !== "user" || i === lastUser || !Array.isArray(msg.content)) {
+      return msg;
+    }
+    const parts = msg.content as ContentPart[];
+    if (!parts.some((part) => part.type === "video_url")) return msg;
+    return {
+      ...msg,
+      content: parts.map((part) =>
+        part.type === "video_url"
+          ? ({
+              type: "text",
+              text: "[video omitted — it already rode once; re-attach the clip or flip the chip to frames to look again]",
+            } satisfies ContentPart)
+          : part
+      ),
+    } as M;
+  });
+}
+
 /** Flatten to plain text for titles, search planning, and logs. */
 export function userContentText(content: UserContent | null | undefined): string {
   if (content == null) return "";
