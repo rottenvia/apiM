@@ -137,36 +137,43 @@ interface ChatAreaProps {
 }
 
 /**
- * Elapsed-seconds row for the silent wait between sending and the first
- * token. A 23s video is ~26k visual tokens of provider prefill — minutes of
- * a quiet dots row that gives no sense of whether the request is working,
- * hung, or dying. Own clock at module level so the interval identity is
- * stable across ChatArea re-renders (status-stage updates would otherwise
- * remount a nested component and reset the count every stage change).
+ * The single status row for the silent wait between sending and the first
+ * token: bouncing dots, the stage label, elapsed seconds and — for video
+ * rounds — the reason the wait can run minutes. One row replaces the old
+ * stack of dots row + elapsed row + retry line, which read as three
+ * separate voices describing the same wait. Own clock at module level so
+ * the interval identity is stable across ChatArea re-renders (status-stage
+ * updates would otherwise remount a nested component and reset the count).
  */
-function WaitTimer({
-  visible,
+function StatusRow({
+  stage,
   hasVideo,
 }: {
-  visible: boolean;
+  stage: StatusStage | null;
   hasVideo: boolean;
 }) {
   const [seconds, setSeconds] = useState(0);
   useEffect(() => {
-    if (!visible) return;
     setSeconds(0);
     const t = setInterval(() => setSeconds((s) => s + 1), 1000);
     return () => clearInterval(t);
-  }, [visible]);
-  if (!visible) return null;
+  }, []);
   return (
-    <div className="flex justify-start px-1 pb-2">
-      <span className="pl-[18px] text-[11px] leading-4 tabular-nums text-[#a29d92]">
-        {seconds}s elapsed
-        {hasVideo
-          ? " · watching your video — replies can take a few minutes"
-          : ""}
-      </span>
+    <div className="flex justify-start px-1 py-2">
+      <div className="flex items-center gap-2.5">
+        <span className="text-[#c96442]">
+          <Dots size={5} />
+        </span>
+        <span className="animate-thinking text-xs text-[#a29d92]">
+          {STAGE_LABELS[stage ?? "thinking"]}…
+        </span>
+        <span className="text-[11px] leading-4 tabular-nums text-[#8a857a]">
+          · {seconds}s elapsed
+          {hasVideo
+            ? " · watching your video — replies can take a few minutes"
+            : ""}
+        </span>
+      </div>
     </div>
   );
 }
@@ -1489,16 +1496,16 @@ export function ChatArea({
                 onClearPlan={onPlanAction ? () => onPlanAction("clear") : undefined}
               />
 
-              {/* Thinking dots only until the bubble has something to show.
-                  The retry line is its own row so it can snap on/off without
-                  remounting Thinking… ten seconds after tokens started. */}
+              {/* One status row until the bubble has something to show:
+                  dots + stage + elapsed (+ the video hint). The retry line
+                  is its own row so it can snap on/off without remounting
+                  the status row ten seconds after tokens started. */}
               {isLoading && !streamingHasOutput && (
-                <LoadingIndicator stage={statusStage} />
+                <StatusRow
+                  stage={statusStage}
+                  hasVideo={videoWaitRef.current}
+                />
               )}
-              <WaitTimer
-                visible={isLoading && !streamingHasOutput}
-                hasVideo={videoWaitRef.current}
-              />
               {retryNotice && <RetryBanner text={retryNotice} />}
 
               <div ref={messagesEndRef} />
@@ -2167,34 +2174,13 @@ const STAGE_LABELS: Record<StatusStage, string> = {
   working: "Working on your files",
 };
 
-/**
- * Bouncing-dots indicator. Sizes come from inline styles rather than custom
- * CSS classes so it renders correctly even if a stale stylesheet is served.
- */
-function LoadingIndicator({
-  stage,
-}: {
-  stage: StatusStage | null;
-}) {
-  return (
-    <div className="flex justify-start">
-      <div className="flex items-center gap-2.5 px-1 py-2">
-        <span className="text-[#c96442]">
-          <Dots size={5} />
-        </span>
-        <span className="animate-thinking text-xs text-[#a29d92]">
-          {STAGE_LABELS[stage ?? "thinking"]}…
-        </span>
-      </div>
-    </div>
-  );
-}
+
 
 /** Instant appear / disappear — no fade. A 300ms slide is the "10s late" feel. */
 function RetryBanner({ text }: { text: string }) {
   return (
     <div className="flex justify-start px-1 pb-2">
-      <span className="pl-[18px] text-[11px] leading-4 tabular-nums text-[#cfa25a]">
+      <span className="pl-[31px] text-[11px] leading-4 tabular-nums text-[#cfa25a]">
         {text}
       </span>
     </div>
