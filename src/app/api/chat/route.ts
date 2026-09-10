@@ -2906,8 +2906,9 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   `your video — long clips prefill for minutes (~2 sampled ` +
                   `frames/sec) and can outlive the route's patience, so this ` +
                   `fails fast instead of re-uploading the same bytes for the ` +
-                  `same fate. Trim the clip to the seconds that matter and ` +
-                  `send it again; shorter clips almost always go through.`
+                  `same fate. Trim the clip to the seconds that matter, or ` +
+                  `switch the chip to frames mode (it samples stills) and ` +
+                  `send again; shorter clips almost always go through.`
                 : `${target.providerName} returned an empty response after ` +
                   `${emptyStreamRetries + 1} attempt(s). The host is overloaded ` +
                   `or down right now — this is their pool, not your key. Wait a ` +
