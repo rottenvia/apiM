@@ -282,7 +282,9 @@ export function formatUpstreamNotice(
   }
   const why = info.reason?.trim();
   const prefix = why ? `${why} — waiting on ${host}` : `Waiting on ${host}`;
-  return `${prefix} — try ${info.attempt} of ${info.attempts}, ${tenths(waited)}s${size}`;
+  // No elapsed timer here: the status row owns the clock, and a second
+  // ticking count read as two clocks disagreeing about the same wait.
+  return `${prefix} — try ${info.attempt} of ${info.attempts}${size}`;
 }
 
 /**

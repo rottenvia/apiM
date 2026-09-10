@@ -206,7 +206,7 @@ check(
       inputChars: 48_000,
     },
     13_400
-  ) === "Waiting on OpenCode Zen — try 1 of 5, 3.4s · 48k chars in"
+  ) === "Waiting on OpenCode Zen — try 1 of 5 · 48k chars in"
 );
 check(
   "try 2 of a retry shows immediately so the backoff line does not vanish",

@@ -138,8 +138,12 @@ interface ChatAreaProps {
 
 /**
  * The single status row for the silent wait between sending and the first
- * token: bouncing dots, the stage label, elapsed seconds and — for video
- * rounds — the reason the wait can run minutes. One row replaces the old
+ * token: bouncing dots, the elapsed clock and — for video rounds — the
+ * reason the wait can run minutes. The stage word renders only for named
+ * stages the thinking panel does not already speak for (searching, reading);
+ * the default thinking stage stays quiet or the word would read twice, which
+ * is what made the wait look like a stack of disagreeing voices. One row
+ * replaces the old
  * stack of dots row + elapsed row + retry line, which read as three
  * separate voices describing the same wait. Own clock at module level so
  * the interval identity is stable across ChatArea re-renders (status-stage
@@ -158,17 +162,24 @@ function StatusRow({
     const t = setInterval(() => setSeconds((s) => s + 1), 1000);
     return () => clearInterval(t);
   }, []);
+  // The thinking panel on the streaming message already says "Thinking" —
+  // saying it here too is the duplication that made the wait read as a mess.
+  // Named stages (searching, reading) still announce themselves.
+  const showStage = stage != null && stage !== "thinking";
   return (
     <div className="flex justify-start px-1 py-2">
       <div className="flex items-center gap-2.5">
         <span className="text-[#c96442]">
           <Dots size={5} />
         </span>
-        <span className="animate-thinking text-xs text-[#a29d92]">
-          {STAGE_LABELS[stage ?? "thinking"]}…
-        </span>
+        {showStage && (
+          <span className="animate-thinking text-xs text-[#a29d92]">
+            {STAGE_LABELS[stage ?? "thinking"]}…
+          </span>
+        )}
         <span className="text-[11px] leading-4 tabular-nums text-[#8a857a]">
-          · {seconds}s elapsed
+          {showStage ? "· " : ""}
+          {seconds}s elapsed
           {hasVideo
             ? " · watching your video — replies can take a few minutes"
             : ""}
