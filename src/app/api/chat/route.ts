@@ -1178,10 +1178,15 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          * one clip alone made a ~43MB body on every round, which is the
          * "invalid zstd request body" 1210 the Zen gateway returns, and on
          * the free pool the image tokens were re-billed every turn. What the
-         * model saw is already reflected in its own earlier turns, so pixels
-         * stay full only for the newest media-bearing turns (videos keep
-         * strictly less of a window than images — they are the huge ones)
-         * and become a one-line reference before that.
+         * model saw is already reflected in its own earlier turns, so image
+         * pixels stay full for the newest two media-bearing turns and become
+         * a one-line reference before that. Videos never replay — not even
+         * the most recent one: with the old window-of-one, a ~40MB clip kept
+         * riding as a ~54M-char body on every follow-up round, and
+         * OpenRouter's pre-flight estimate prices that body as millions of
+         * text tokens, 402ing accounts whose balance sits below the estimate
+         * on rounds that carry no video at all. Re-attach or switch the chip
+         * to frames to look at a clip again.
          */
         const mediaWindowFor: (
           msg: ScopedChatMessage
@@ -1191,7 +1196,6 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 const imgWindow = new Map<number, boolean>();
                 const vidWindow = new Map<number, boolean>();
                 let imgSeen = 0;
-                let vidSeen = 0;
                 for (let i = scopedHistory.length - 1; i >= 0; i--) {
                   const m = scopedHistory[i];
                   if (m.role !== "user") continue;
@@ -1199,15 +1203,24 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   let hasVid = false;
                   for (const a of m.attachments ?? []) {
                     if (a.kind === "image" && a.dataUrl) hasImg = true;
-                    if (a.kind === "video" && a.dataUrl) hasVid = true;
+                    // Frames-mode clips are videos in spirit — window them
+                    // like videos so their stills stop re-riding too.
+                    if (
+                      a.kind === "video" &&
+                      (Boolean(a.dataUrl) || (a.frames?.length ?? 0) > 0)
+                    )
+                      hasVid = true;
                   }
                   if (hasImg) {
                     imgWindow.set(i, imgSeen < 2);
                     imgSeen += 1;
                   }
                   if (hasVid) {
-                    vidWindow.set(i, vidSeen < 1);
-                    vidSeen += 1;
+                    // A video never replays from history — its first ride
+                    // did the work, and re-riding a ~54M-char body on every
+                    // follow-up is what 402'd small text rounds (see the
+                    // window comment above).
+                    vidWindow.set(i, false);
                   }
                 }
                 return (m: ScopedChatMessage) => {
