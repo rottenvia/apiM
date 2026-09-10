@@ -66,6 +66,8 @@ scripts/tmp/
 .agent-browser/
 .bench-data/
 apim-render-bench/
+apim-waiting-bench/
+bench-shots/
 node-compile-cache/
 npm-cache/
 tsx-*/
