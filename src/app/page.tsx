@@ -23,8 +23,14 @@ import { warmRoutes } from "@/lib/warmup";
 import {
   DEFAULT_LOCAL_API_MODEL,
   DEFAULT_LOCAL_BASE_URL,
+  DEFAULT_MODEL_ID,
+  MAX_CUSTOM_MODELS,
+  customModelId,
   getModel,
   hasKeyForModel,
+  parseCustomModelDefs,
+  registerCustomModels,
+  type CustomModelDef,
 } from "@/lib/models";
 import { replyCanContinue } from "@/lib/resume-target";
 import {
@@ -609,6 +615,31 @@ export default function Home() {
   const [localApiKey, setLocalApiKey] = useState("");
   const [localApiModel, setLocalApiModel] = useState(DEFAULT_LOCAL_API_MODEL);
 
+  const [tavilyKey, setTavilyKey] = useState("");
+  /** Optional fallback provider, used only when Tavily refuses. */
+  const [exaKey, setExaKey] = useState("");
+  const [visionKey, setVisionKey] = useState("");
+  const [visionModel, setVisionModel] = useState("gpt-4o-mini");
+  const [model, setModel] = useState("deepseek-v4-pro");
+  /**
+   * Models the user added themselves — any OpenRouter or OpenCode Zen wire
+   * id. Stored here (and in localStorage), registered into the catalog, and
+   * sent along with every chat request so the server can resolve them too.
+   */
+  const [customModels, setCustomModels] = useState<CustomModelDef[]>([]);
+  /** False until localStorage has been read, so we don't unload Qwen on the default model. */
+  const [settingsHydrated, setSettingsHydrated] = useState(false);
+  const [thinkingEffort, setThinkingEffort] = useState("auto");
+  const [webSearchMode, setWebSearchMode] = useState<"off" | "auto" | "always">("auto");
+  const [enabledPlugins, setEnabledPlugins] = useState<string[]>([]);
+  /** Seconds the delete button stays locked in the confirmation dialog. */
+  const [deleteDelay, setDeleteDelay] = useState(DEFAULT_DELETE_DELAY);
+  /**
+   * Spend ceiling per reply, in USD. `null` is no cap, which is the default:
+   * a limit nobody chose that stops a task halfway is its own kind of bug.
+   */
+  const [budgetUsd, setBudgetUsd] = useState<number | null>(null);
+
   /*
    * What is actually left in the DeepSeek account.
    *
@@ -632,6 +663,10 @@ export default function Home() {
 
   const refreshBalance = useCallback(async () => {
     if (!deepseekKey) return;
+    // The DeepSeek balance only matters while a DeepSeek model is selected.
+    // On Ox, GLM, Nemotron or Qwen the figure is irrelevant — the warning
+    // was pure noise there.
+    if (getModel(model).provider !== "deepseek") return;
     setCheckingBalance(true);
     try {
       const res = await fetch("/api/balance", {
@@ -654,14 +689,15 @@ export default function Home() {
     } finally {
       setCheckingBalance(false);
     }
-  }, [deepseekKey]);
+  }, [deepseekKey, model]);
 
   useEffect(() => {
     refreshBalanceRef.current = refreshBalance;
   }, [refreshBalance]);
 
-  // One check when a key is first available. After that it only re-reads when
-  // a reply finishes, which is the only time the figure can have moved.
+  // One check when a key is first available, and again whenever the model
+  // switches back to a DeepSeek one. After that it only re-reads when a
+  // reply finishes, which is the only time the figure can have moved.
   useEffect(() => {
     if (deepseekKey) void refreshBalance();
   }, [deepseekKey, refreshBalance]);
@@ -672,28 +708,13 @@ export default function Home() {
   const balanceLevel = balance
     ? levelFor(balance.total, balance.available)
     : "ok";
+  // DeepSeek-specific: hidden entirely while another provider's model is
+  // selected, where its balance has no say in whether the next reply runs.
   const showBalanceWarning =
     balance !== null &&
+    getModel(model).provider === "deepseek" &&
     balanceLevel !== "ok" &&
     (balanceDismissedAt === null || balance.total < balanceDismissedAt - 0.001);
-  const [tavilyKey, setTavilyKey] = useState("");
-  /** Optional fallback provider, used only when Tavily refuses. */
-  const [exaKey, setExaKey] = useState("");
-  const [visionKey, setVisionKey] = useState("");
-  const [visionModel, setVisionModel] = useState("gpt-4o-mini");
-  const [model, setModel] = useState("deepseek-v4-pro");
-  /** False until localStorage has been read, so we don't unload Qwen on the default model. */
-  const [settingsHydrated, setSettingsHydrated] = useState(false);
-  const [thinkingEffort, setThinkingEffort] = useState("auto");
-  const [webSearchMode, setWebSearchMode] = useState<"off" | "auto" | "always">("auto");
-  const [enabledPlugins, setEnabledPlugins] = useState<string[]>([]);
-  /** Seconds the delete button stays locked in the confirmation dialog. */
-  const [deleteDelay, setDeleteDelay] = useState(DEFAULT_DELETE_DELAY);
-  /**
-   * Spend ceiling per reply, in USD. `null` is no cap, which is the default:
-   * a limit nobody chose that stops a task halfway is its own kind of bug.
-   */
-  const [budgetUsd, setBudgetUsd] = useState<number | null>(null);
 
   const hasKeys = hasKeyForModel(model, {
     deepseekKey,
@@ -899,6 +920,11 @@ export default function Home() {
             if (s.visionKey) setVisionKey(s.visionKey);
             if (s.visionModel) setVisionModel(s.visionModel);
             if (s.model) setModel(s.model);
+            if (s.customModels) {
+              const defs = parseCustomModelDefs(s.customModels);
+              registerCustomModels(defs);
+              setCustomModels(defs);
+            }
             if (s.thinkingEffort) setThinkingEffort(s.thinkingEffort);
             if (s.enabledPlugins) setEnabledPlugins(s.enabledPlugins);
             if (s.webSearchMode) setWebSearchMode(s.webSearchMode);
@@ -950,6 +976,7 @@ export default function Home() {
           visionKey,
           visionModel,
           model,
+          customModels,
           thinkingEffort,
           enabledPlugins,
           webSearchMode,
@@ -977,6 +1004,7 @@ export default function Home() {
     visionKey,
     visionModel,
     model,
+    customModels,
     thinkingEffort,
     enabledPlugins,
     webSearchMode,
@@ -987,6 +1015,36 @@ export default function Home() {
     deleteDelay,
     budgetUsd,
   ]);
+
+  // Keep the client-side catalog in sync with the user's custom models so
+  // getModel() resolves them everywhere — selector, key checks, provider
+  // labels. The server gets the same list with each chat request.
+  useEffect(() => {
+    registerCustomModels(customModels);
+  }, [customModels]);
+
+  /** Add (or replace) one custom model. */
+  const addCustomModel = useCallback((def: CustomModelDef) => {
+    setCustomModels((prev) => {
+      const id = customModelId(def.provider, def.apiModel);
+      const without = prev.filter(
+        (d) => customModelId(d.provider, d.apiModel) !== id
+      );
+      const next = [...without, def];
+      // Oldest additions make room once the cap is reached.
+      return next.length > MAX_CUSTOM_MODELS
+        ? next.slice(next.length - MAX_CUSTOM_MODELS)
+        : next;
+    });
+  }, []);
+
+  /** Remove a custom model, deselecting it if it is the current one. */
+  const removeCustomModel = useCallback((id: string) => {
+    setCustomModels((prev) =>
+      prev.filter((d) => customModelId(d.provider, d.apiModel) !== id)
+    );
+    setModel((prev) => (prev === id ? DEFAULT_MODEL_ID : prev));
+  }, []);
 
   /** Sends the user's Run / Skip answer back to the waiting request. */
   const decideCommand = useCallback(
@@ -1749,6 +1807,9 @@ export default function Home() {
                 ? localStorage.getItem("nexusai-github-pat") ?? ""
                 : "",
             model: activeModel,
+            // The user's own models (any OpenRouter / OpenCode wire id) —
+            // the server registers them before resolving `model`.
+            customModels,
             thinkingEffort,
             webSearchMode,
             enabledPluginIds: enabledPlugins,
@@ -2480,6 +2541,7 @@ export default function Home() {
       tavilyEnabled,
       exaEnabled,
       model,
+      customModels,
       thinkingEffort,
       webSearchMode,
       enabledPlugins,
@@ -3081,6 +3143,9 @@ export default function Home() {
           onVisionModelChange={setVisionModel}
           model={model}
           defaultEffort={thinkingEffort}
+          customModels={customModels}
+          onAddCustomModel={addCustomModel}
+          onRemoveCustomModel={removeCustomModel}
           onDeepseekKeyChange={setDeepseekKey}
           onLocalBaseUrlChange={setLocalBaseUrl}
           onLocalApiKeyChange={setLocalApiKey}

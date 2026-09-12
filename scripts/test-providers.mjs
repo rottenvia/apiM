@@ -211,7 +211,11 @@ check(
 console.log("\n6. The UI offers both providers");
 
 check("Settings has an OpenCode key field", /OpenCode API Key/.test(settings));
-check("Settings offers Ox Alpha as a model", /onModelChange\("ox-alpha"\)/.test(settings));
+check(
+  "Settings offers Ox Alpha as a model",
+  /MODELS\.map/.test(settings) && models.MODELS.some((m) => m.id === "ox-alpha"),
+  "the model grid renders the whole catalog, so every entry is offered"
+);
 check("the composer selector lists the catalog", /from "@\/lib\/models"/.test(selector));
 check("the page persists the OpenCode key", /opencodeKey/.test(page));
 check("the page sends the OpenCode key with the chat request", /opencodeApiKey: opencodeKey/.test(page));
@@ -1028,6 +1032,105 @@ check(
 check(
   "Settings says one key covers both OpenRouter models",
   /z-ai\/glm-5\.3-flash/.test(settings)
+);
+
+console.log("\n8. Nemotron 3 Ultra");
+
+const nem = models.MODELS.find((m) => m.id === "nemotron-3-ultra");
+check("Nemotron 3 Ultra is listed", Boolean(nem));
+check(
+  "it rides OpenRouter",
+  nem?.provider === "openrouter",
+  nem?.provider
+);
+check(
+  "the wire id is OpenRouter's free lane",
+  nem?.apiModel === "nvidia/nemotron-3-ultra-550b-a55b:free",
+  nem?.apiModel
+);
+check(
+  "the documented max output is the model's own 65K",
+  models.maxOutputTokensFor("nemotron-3-ultra") === 65_536
+);
+const nemResolved = models.hasKeyForModel("nemotron-3-ultra", {})
+  ? null
+  : providers.resolveChatTarget("nemotron-3-ultra", {
+      openrouterApiKey: "sk-or-v1-test",
+    });
+check(
+  "it resolves with the OpenRouter key",
+  Boolean(nemResolved?.ok) &&
+    nemResolved.ok && nemResolved.target.apiModel === nem?.apiModel
+);
+check(
+  "the free lane is priced free",
+  pricing.ratesFor("nemotron-3-ultra")?.input === 0 &&
+    pricing.ratesFor("nemotron-3-ultra")?.output === 0
+);
+
+console.log("\n9. Custom models — any wire id on OpenRouter / OpenCode");
+
+const defs = models.parseCustomModelDefs([
+  { provider: "openrouter", apiModel: "anthropic/claude-sonnet-4.5", label: "Sonnet" },
+  { provider: "opencode", apiModel: "some-zen-model", vision: true },
+  { provider: "bogus", apiModel: "junk" },
+  { provider: "openrouter", apiModel: "   " },
+]);
+check(
+  "parseCustomModelDefs keeps only well-formed defs",
+  defs.length === 2,
+  String(defs.length)
+);
+models.registerCustomModels(defs);
+const sonnetId = models.customModelId("openrouter", "anthropic/claude-sonnet-4.5");
+check("a custom id joins the catalog", models.isKnownModel(sonnetId));
+check(
+  "allModels() is built-ins plus custom",
+  models.allModels().length === models.MODELS.length + 2
+);
+const orResolved = providers.resolveChatTarget(sonnetId, {
+  openrouterApiKey: "sk-or-v1-test",
+});
+check(
+  "a custom OpenRouter model resolves to the wire id",
+  orResolved.ok &&
+    orResolved.target.apiModel === "anthropic/claude-sonnet-4.5" &&
+    orResolved.target.baseUrl === "https://openrouter.ai/api/v1"
+);
+const zenResolved = providers.resolveChatTarget(
+  models.customModelId("opencode", "some-zen-model"),
+  { opencodeApiKey: "sk-zen-test" }
+);
+check(
+  "a custom OpenCode model stays on Zen with its own wire id",
+  zenResolved.ok &&
+    zenResolved.target.apiModel === "some-zen-model" &&
+    zenResolved.target.baseUrl === "https://opencode.ai/zen/v1"
+);
+check(
+  "custom models still need their provider's key",
+  !models.hasKeyForModel(sonnetId, {}) &&
+    models.hasKeyForModel(sonnetId, { openrouterKey: "sk-or-v1-x" })
+);
+check(
+  "the chat route registers the request's custom models before resolving",
+  /registerCustomModels\(customModels\)/.test(route) &&
+    route.indexOf("registerCustomModels(customModels)") <
+      route.indexOf("resolveChatTarget(model, creds)")
+);
+check(
+  "the page persists custom models and sends them with each request",
+  /customModels/.test(page) && /parseCustomModelDefs/.test(page)
+);
+check(
+  "Settings has an add-any-model panel",
+  /Add any model/.test(settings) && /CustomModelsPanel/.test(settings)
+);
+models.registerCustomModels([]);
+check(
+  "re-registering replaces the registry",
+  !models.isKnownModel(sonnetId) &&
+    models.allModels().length === models.MODELS.length
 );
 
 console.log(

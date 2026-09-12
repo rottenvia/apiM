@@ -15,10 +15,15 @@ import {
   DEFAULT_LOCAL_API_MODEL,
   DEFAULT_LOCAL_BASE_URL,
   LOCAL_HOST_PRESETS,
+  MAX_CUSTOM_MODELS,
+  MODELS,
   QWEN_38_27B_ID,
+  customModelId,
   getModel,
   modelNeedsVisionHelper,
   modelSeesVideo,
+  type CustomModelDef,
+  type CustomModelProvider,
 } from "@/lib/models";
 import { OX_HOSTS, type OxHost } from "@/lib/ox-host";
 
@@ -113,6 +118,10 @@ interface SettingsModalProps {
   visionKey: string;
   visionModel: string;
   model: string;
+  /** Models the user added themselves (any OpenRouter / OpenCode wire id). */
+  customModels: CustomModelDef[];
+  onAddCustomModel: (def: CustomModelDef) => void;
+  onRemoveCustomModel: (id: string) => void;
   defaultEffort: string;
   onDeepseekKeyChange: (key: string) => void;
   onOpencodeKeyChange: (key: string) => void;
@@ -250,6 +259,242 @@ function OxProbeButton({ host, apiKey }: { host: OxHost; apiKey: string }) {
   );
 }
 
+/**
+ * Add ANY model from OpenRouter or OpenCode Zen by wire id.
+ *
+ * The built-in catalog is curated, but the providers list hundreds of
+ * models; this panel lets the user register any of them ("add ability to
+ * add any model i want from openrouter and opencode"). A def is just a
+ * provider + wire id + optional label and capability flags, and it joins
+ * the model picker immediately.
+ */
+function CustomModelsPanel({
+  customModels,
+  onAdd,
+  onRemove,
+}: {
+  customModels: CustomModelDef[];
+  onAdd: (def: CustomModelDef) => void;
+  onRemove: (id: string) => void;
+}) {
+  const [provider, setProvider] =
+    useState<CustomModelProvider>("openrouter");
+  const [apiModel, setApiModel] = useState("");
+  const [label, setLabel] = useState("");
+  const [vision, setVision] = useState(false);
+  const [video, setVideo] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = () => {
+    const wire = apiModel.trim();
+    if (!wire) {
+      setError("Enter the model id, e.g. nvidia/nemotron-3-ultra-550b-a55b");
+      return;
+    }
+    if (wire.length > 200) {
+      setError("That model id is too long.");
+      return;
+    }
+    if (customModels.length >= MAX_CUSTOM_MODELS) {
+      setError(`Limit of ${MAX_CUSTOM_MODELS} custom models reached — remove one first.`);
+      return;
+    }
+    onAdd({
+      provider,
+      apiModel: wire,
+      label: label.trim() || undefined,
+      vision,
+      video,
+    });
+    setApiModel("");
+    setLabel("");
+    setVision(false);
+    setVideo(false);
+    setError(null);
+  };
+
+  return (
+    <div>
+      <label className="block text-sm font-semibold text-text-primary mb-2">
+        Add any model
+        <span className="ml-1 text-xs font-normal text-text-muted">
+          (OpenRouter · OpenCode Zen)
+        </span>
+      </label>
+      <p className="mb-2.5 text-[12px] leading-relaxed text-text-secondary">
+        Paste any model id from{" "}
+        <a
+          href="https://openrouter.ai/models"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-accent-light underline underline-offset-2"
+        >
+          openrouter.ai/models
+        </a>{" "}
+        or the{" "}
+        <a
+          href="https://opencode.ai/docs/zen"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-accent-light underline underline-offset-2"
+        >
+          OpenCode Zen catalog
+        </a>{" "}
+        and it joins the model picker. The matching API key (above) pays for
+        it. Unknown models get a 65K output ceiling and a text-only wire —
+        screenshots are described by the free local OCR first, like DeepSeek.
+        Tick the boxes below when the model takes pixels natively.
+      </p>
+
+      <div className="mb-2 grid grid-cols-2 gap-1.5">
+        {(
+          [
+            { id: "openrouter", name: "OpenRouter", hint: "needs your OpenRouter key" },
+            { id: "opencode", name: "OpenCode Zen", hint: "needs your Zen key" },
+          ] as const
+        ).map((p) => (
+          <button
+            key={p.id}
+            type="button"
+            onClick={() => {
+              setProvider(p.id);
+              setError(null);
+            }}
+            className={`rounded-xl border px-3 py-2 text-left text-[12px] font-medium transition-all ${
+              provider === p.id
+                ? "border-accent/30 bg-accent/15 text-accent-light"
+                : "border-border bg-bg-tertiary text-text-secondary hover:border-border-light"
+            }`}
+          >
+            <span className="block">{p.name}</span>
+            <span className="mt-0.5 block text-[11px] font-normal opacity-70">
+              {p.hint}
+            </span>
+          </button>
+        ))}
+      </div>
+
+      <label className="mb-1 block text-[11px] font-medium text-text-muted">
+        Model id (what goes on the wire)
+      </label>
+      <input
+        type="text"
+        value={apiModel}
+        onChange={(e) => {
+          setApiModel(e.target.value);
+          setError(null);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") submit();
+        }}
+        placeholder={
+          provider === "openrouter"
+            ? "nvidia/nemotron-3-ultra-550b-a55b"
+            : "deepseek-v4-flash-free"
+        }
+        className="mb-2 w-full px-4 py-2.5 rounded-xl bg-bg-tertiary border border-border font-mono text-sm text-text-primary placeholder-text-muted outline-none focus:border-accent/50 focus:ring-1 focus:ring-accent/25 transition-all"
+      />
+
+      <label className="mb-1 block text-[11px] font-medium text-text-muted">
+        Display name (optional)
+      </label>
+      <input
+        type="text"
+        value={label}
+        onChange={(e) => setLabel(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") submit();
+        }}
+        placeholder="e.g. Nemotron 3 Ultra (paid)"
+        maxLength={60}
+        className="mb-2.5 w-full px-4 py-2.5 rounded-xl bg-bg-tertiary border border-border text-sm text-text-primary placeholder-text-muted outline-none focus:border-accent/50 focus:ring-1 focus:ring-accent/25 transition-all"
+      />
+
+      <div className="mb-2.5 flex flex-wrap gap-x-4 gap-y-1.5">
+        <label className="flex items-center gap-1.5 text-[12px] text-text-secondary">
+          <input
+            type="checkbox"
+            checked={vision}
+            onChange={(e) => setVision(e.target.checked)}
+            className="accent-accent"
+          />
+          Sees images natively
+        </label>
+        <label className="flex items-center gap-1.5 text-[12px] text-text-secondary">
+          <input
+            type="checkbox"
+            checked={video}
+            onChange={(e) => setVideo(e.target.checked)}
+            className="accent-accent"
+          />
+          Sees video natively
+        </label>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={submit}
+          disabled={!apiModel.trim()}
+          className="rounded-lg border border-accent/40 bg-accent/15 px-3 py-1.5 text-[12px] font-medium text-accent-light transition-colors hover:bg-accent/25 disabled:opacity-40"
+        >
+          Add model
+        </button>
+        {error && (
+          <span className="text-[11px] leading-4 text-danger">{error}</span>
+        )}
+      </div>
+
+      {customModels.length > 0 && (
+        <div className="mt-3 space-y-1.5">
+          <p className="text-[11px] font-medium text-text-muted">
+            Your models ({customModels.length}/{MAX_CUSTOM_MODELS})
+          </p>
+          {customModels.map((def) => {
+            const id = customModelId(def.provider, def.apiModel);
+            const info = getModel(id);
+            return (
+              <div
+                key={id}
+                className="flex items-center gap-2 rounded-xl border border-border bg-bg-tertiary px-3 py-2"
+              >
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-[13px] font-medium text-text-primary">
+                    {info.label}
+                  </p>
+                  <p className="truncate font-mono text-[11px] text-text-muted">
+                    {def.provider === "openrouter" ? "OpenRouter" : "Zen"} ·{" "}
+                    {def.apiModel}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onRemove(id)}
+                  title="Remove this model"
+                  aria-label={`Remove ${info.label}`}
+                  className="flex-none rounded-lg p-1.5 text-text-muted transition-colors hover:bg-bg-hover hover:text-danger"
+                >
+                  <svg
+                    width="13"
+                    height="13"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth={2}
+                    aria-hidden="true"
+                  >
+                    <path strokeLinecap="round" d="M6 6l12 12M18 6L6 18" />
+                  </svg>
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function SettingsModal({
   deepseekKey,
   opencodeKey,
@@ -269,6 +514,9 @@ export function SettingsModal({
   visionKey,
   visionModel,
   model,
+  customModels,
+  onAddCustomModel,
+  onRemoveCustomModel,
   defaultEffort,
   onDeepseekKeyChange,
   onOpencodeKeyChange,
@@ -904,64 +1152,52 @@ export function SettingsModal({
 
             {tab === "model" && (
               <>
-              {/* Model Selection */}
+              {/* Model Selection — the whole built-in catalog, so new
+                  entries (GLM, Nemotron, free lanes) appear here without
+                  another hand-wired button. */}
               <div>
                 <label className="block text-sm font-semibold text-text-primary mb-2">
                   Model
                 </label>
                 <div className="grid grid-cols-2 gap-2">
-                  <button
-                    onClick={() => onModelChange("deepseek-v4-pro")}
-                    className={`px-4 py-3 rounded-xl text-sm font-medium transition-all duration-150 ${
-                      model === "deepseek-v4-pro"
-                        ? "bg-accent/15 text-accent-light border border-accent/30"
-                        : "bg-bg-tertiary text-text-secondary border border-border hover:border-border-light"
-                    }`}
-                  >
-                    <span className="block font-semibold">V4 Pro</span>
-                    <span className="text-[11px] opacity-70">
-                      49B params • Frontier
-                    </span>
-                  </button>
-                  <button
-                    onClick={() => onModelChange("deepseek-v4-flash")}
-                    className={`px-4 py-3 rounded-xl text-sm font-medium transition-all duration-150 ${
-                      model === "deepseek-v4-flash"
-                        ? "bg-accent/15 text-accent-light border border-accent/30"
-                        : "bg-bg-tertiary text-text-secondary border border-border hover:border-border-light"
-                    }`}
-                  >
-                    <span className="block font-semibold">V4 Flash</span>
-                    <span className="text-[11px] opacity-70">
-                      13B params • Fast
-                    </span>
-                  </button>
-                  <button
-                    onClick={() => onModelChange("ox-alpha")}
-                    className={`col-span-2 px-4 py-3 rounded-xl text-sm font-medium transition-all duration-150 ${
-                      model === "ox-alpha"
-                        ? "bg-accent/15 text-accent-light border border-accent/30"
-                        : "bg-bg-tertiary text-text-secondary border border-border hover:border-border-light"
-                    }`}
-                  >
-                    <span className="block font-semibold">Ox Alpha</span>
-                    <span className="text-[11px] opacity-70">
-                      Zen or OpenRouter • 1M context • free preview
-                    </span>
-                  </button>
-                  <button
-                    onClick={() => onModelChange(QWEN_38_27B_ID)}
-                    className={`col-span-2 px-4 py-3 rounded-xl text-sm font-medium transition-all duration-150 ${
-                      model === QWEN_38_27B_ID
-                        ? "bg-accent/15 text-accent-light border border-accent/30"
-                        : "bg-bg-tertiary text-text-secondary border border-border hover:border-border-light"
-                    }`}
-                  >
-                    <span className="block font-semibold">Qwen 3.8 27B</span>
-                    <span className="text-[11px] opacity-70">
-                      On this PC · 80K window · thinking
-                    </span>
-                  </button>
+                  {MODELS.map((m) => (
+                    <button
+                      key={m.id}
+                      onClick={() => onModelChange(m.id)}
+                      className={`px-4 py-3 rounded-xl text-left text-sm font-medium transition-all duration-150 ${
+                        model === m.id
+                          ? "bg-accent/15 text-accent-light border border-accent/30"
+                          : "bg-bg-tertiary text-text-secondary border border-border hover:border-border-light"
+                      }`}
+                    >
+                      <span className="block font-semibold">{m.label}</span>
+                      <span className="text-[11px] opacity-70">
+                        {m.settingsSubtitle}
+                      </span>
+                    </button>
+                  ))}
+                  {customModels.map((def) => {
+                    const id = customModelId(def.provider, def.apiModel);
+                    const info = getModel(id);
+                    return (
+                      <button
+                        key={id}
+                        onClick={() => onModelChange(id)}
+                        className={`px-4 py-3 rounded-xl text-left text-sm font-medium transition-all duration-150 ${
+                          model === id
+                            ? "bg-accent/15 text-accent-light border border-accent/30"
+                            : "bg-bg-tertiary text-text-secondary border border-border hover:border-border-light"
+                        }`}
+                      >
+                        <span className="block truncate font-semibold">
+                          {info.label}
+                        </span>
+                        <span className="block truncate font-mono text-[11px] opacity-70">
+                          {def.apiModel}
+                        </span>
+                      </button>
+                    );
+                  })}
                 </div>
                 {model === QWEN_38_27B_ID && (
                   <div className="mt-2">
@@ -973,6 +1209,13 @@ export function SettingsModal({
                   </div>
                 )}
               </div>
+
+              {/* Any model on OpenRouter / OpenCode Zen, by wire id */}
+              <CustomModelsPanel
+                customModels={customModels}
+                onAdd={onAddCustomModel}
+                onRemove={onRemoveCustomModel}
+              />
 
               {/* Default Thinking Effort */}
               <div>

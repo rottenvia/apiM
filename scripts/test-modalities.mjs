@@ -66,7 +66,16 @@ check("Qwen does not need the helper", models.modelNeedsVisionHelper("qwen-3.8-2
     check("Qwen can watch video", models.modelSeesVideo("qwen-3.8-27b"));
     check("GLM can watch video", models.modelSeesVideo("glm-5.3-flash"));
 check("Pro cannot watch video", models.modelSeesVideo("deepseek-v4-pro") === false);
-check("all catalog models can receive images somehow", models.MODELS.every((m) => models.modelSeesImages(m.id)));
+check(
+  "all catalog models can receive images somehow",
+  models.MODELS.every((m) => models.modelSeesImages(m.id)),
+  "a silent drop is the bug this guards against — even a text-only wire gets the OCR helper"
+);
+check(
+  "Nemotron 3 Ultra's text-only wire rides the OCR helper",
+  models.modelNeedsVisionHelper("nemotron-3-ultra"),
+  "its OpenRouter lane accepts text only"
+);
 
 console.log("\n2. Wire format");
 

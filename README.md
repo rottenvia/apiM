@@ -9,6 +9,7 @@ The smartest API manager with intelligent web search, thinking effort control, a
 
 - 🚀 **DeepSeek V4 Pro & Flash** - Switch between models instantly
 - 🐂 **Ox Alpha via OpenCode** - Same Chat Completions loop, free stealth preview
+- 🧭 **OpenRouter** - GLM 5.3 Flash, Nemotron 3 Ultra (free lane), or ANY model you add yourself in Settings → Model
 - 🔍 **Smart Web Search** - Multi-step query planning with Tavily
 - 💡 **Thinking Modes** - Auto/None/Low/High/Max reasoning effort
 - 🧩 **8 Plugins** - Caveman, God Mode, Code Only, Expert, and more
@@ -201,7 +202,22 @@ regressions with `npm run test:binaries`.
   - DeepSeek from [platform.deepseek.com](https://platform.deepseek.com), or
   - OpenCode Zen from [opencode.ai/auth](https://opencode.ai/auth) for Ox Alpha
     (`x-preview-f-free` on `https://opencode.ai/zen/v1`), or
+  - OpenRouter from [openrouter.ai/settings/keys](https://openrouter.ai/settings/keys)
+    for GLM 5.3 Flash, Nemotron 3 Ultra (free lane), and any custom model, or
   - Qwen 3.8 27B downloaded in Settings (runs on this PC, no cloud key)
+
+### Custom models (any OpenRouter / OpenCode model)
+
+**Settings → Model → Add any model.** Paste a wire id from
+[openrouter.ai/models](https://openrouter.ai/models) (e.g.
+`nvidia/nemotron-3-ultra-550b-a55b`) or the OpenCode Zen catalog, give it an
+optional display name, and it joins the model picker immediately. Custom
+models are stored locally, travel with each request, and use the matching
+provider key. Unknown models default to text-only with a 65K output ceiling;
+the image/video checkboxes cover models that accept them.
+
+The DeepSeek balance warning only shows while a DeepSeek model is selected —
+on OpenRouter, OpenCode or local models it has nothing to say.
 - (Optional) Tavily API key from [app.tavily.com](https://app.tavily.com) for web search
 
 ## Files

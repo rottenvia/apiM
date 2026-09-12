@@ -115,6 +115,8 @@ export const DEFAULT_MODEL_ID = "deepseek-v4-pro";
 
 export const QWEN_38_27B_ID = "qwen-3.8-27b";
 
+export const NEMOTRON_3_ULTRA_ID = "nemotron-3-ultra";
+
 export const LOCAL_HOST_PRESETS = [
   {
     id: "ollama",
@@ -282,6 +284,25 @@ export const MODELS: ModelInfo[] = [
     maxOutputTokens: GLM_MAX_OUTPUT_TOKENS,
   },
   {
+    id: NEMOTRON_3_ULTRA_ID,
+    apiModel: "nvidia/nemotron-3-ultra-550b-a55b:free",
+    provider: "openrouter",
+    label: "Nemotron 3 Ultra",
+    shortLabel: "Nemotron 3",
+    description:
+      "NVIDIA's open frontier model — 550B MoE with 55B active, built for reasoning and agent orchestration. Runs on OpenRouter's free lane; the wire is text-only, so screenshots go through the free local OCR helper. The paid lane can be added as a custom model: nvidia/nemotron-3-ultra-550b-a55b.",
+    specs: "1M context · 65K max output · OpenRouter free lane",
+    resumeBlurb: "NVIDIA's open frontier MoE",
+    settingsSubtitle: "OpenRouter · 1M context · free",
+    mapsLowToHigh: false,
+    helper: false,
+    peakHours: false,
+    vision: "helper",
+    video: false,
+    openToolLimits: false,
+    maxOutputTokens: 65_536,
+  },
+  {
     id: QWEN_38_27B_ID,
     apiModel: DEFAULT_LOCAL_API_MODEL,
     provider: "local",
@@ -301,6 +322,153 @@ export const MODELS: ModelInfo[] = [
     maxOutputTokens: PAID_MAX_OUTPUT_TOKENS,
   },
 ];
+
+/**
+ * Custom models — any wire id on OpenRouter or OpenCode Zen, added by the
+ * user in Settings → Model.
+ *
+ * The built-in catalog above is curated; this registry is not. A def is
+ * just a provider and a wire id (plus optional label and capability
+ * flags), and it becomes a full ModelInfo with conservative defaults:
+ * text on the wire (screenshots reach it through the free local OCR
+ * helper, exactly like DeepSeek), metered-style 65K output ceiling,
+ * closed tool limits. The defs live in the browser's localStorage and
+ * travel with each chat request, so both sides resolve the same ids:
+ *
+ *   browser  — registerCustomModels() from the settings state
+ *   server   — registerCustomModels() from the request body, before
+ *              resolveChatTarget() runs
+ *
+ * Catalog ids are `custom:<provider>:<wire id>` so a custom entry can
+ * never collide with a built-in one, and the wire id stays visible in it.
+ */
+export type CustomModelProvider = "openrouter" | "opencode";
+
+export interface CustomModelDef {
+  provider: CustomModelProvider;
+  /** Value of the Chat Completions `model` field, e.g. `nvidia/...`. */
+  apiModel: string;
+  /** Optional display name; derived from the wire id when omitted. */
+  label?: string;
+  /** Per-round output ceiling. Defaults to the paid-model ceiling. */
+  maxOutputTokens?: number;
+  /** Native image input. Off by default — pixels go through the OCR helper. */
+  vision?: boolean;
+  /** Native video input. Off by default. */
+  video?: boolean;
+}
+
+export const MAX_CUSTOM_MODELS = 24;
+
+const CUSTOM_ID_PREFIX = "custom:";
+
+export function customModelId(
+  provider: CustomModelProvider,
+  apiModel: string
+): string {
+  return `${CUSTOM_ID_PREFIX}${provider}:${apiModel}`;
+}
+
+/** `nvidia/nemotron-3-ultra-550b-a55b:free` → `Nemotron 3 Ultra 550b`. */
+function labelFromWireId(apiModel: string): string {
+  const tail = apiModel.split("/").pop() ?? apiModel;
+  const cleaned = tail.replace(/:free$/i, "");
+  const words = cleaned.split(/[-_.]+/).filter(Boolean);
+  const pretty = words
+    .map((w) => (w.length > 2 ? w[0].toUpperCase() + w.slice(1) : w))
+    .join(" ");
+  return pretty.trim() || apiModel;
+}
+
+export function toCustomModel(def: CustomModelDef): ModelInfo {
+  const label = def.label?.trim() || labelFromWireId(def.apiModel);
+  const providerName =
+    def.provider === "openrouter" ? "OpenRouter" : "OpenCode Zen";
+  const maxOutput =
+    typeof def.maxOutputTokens === "number" && def.maxOutputTokens > 0
+      ? Math.min(def.maxOutputTokens, FREE_MAX_OUTPUT_TOKENS)
+      : PAID_MAX_OUTPUT_TOKENS;
+  return {
+    id: customModelId(def.provider, def.apiModel),
+    apiModel: def.apiModel,
+    provider: def.provider,
+    // A custom OpenCode model lives on Zen only — the Ox host button is
+    // about Ox Alpha's two front doors, not about arbitrary Zen models.
+    ...(def.provider === "opencode" ? { fixedHost: "zen" as const } : {}),
+    label,
+    shortLabel: label.length > 18 ? `${label.slice(0, 17)}…` : label,
+    description: `Custom model on ${providerName} — wire id ${def.apiModel}. Added by you in Settings.`,
+    specs: `${Math.round(maxOutput / 1024)}K max output${def.vision ? " · image" : ""}${def.video ? " + video" : ""} · added by you`,
+    resumeBlurb: `${label} (${providerName})`,
+    settingsSubtitle: `${providerName} · custom`,
+    mapsLowToHigh: false,
+    helper: false,
+    peakHours: false,
+    // The wire is assumed text-only: screenshots are described by the free
+    // local OCR helper (DeepSeek's path) unless the user ticked native.
+    // Silently dropping attached pixels is the failure this avoids.
+    vision: def.vision ? "native" : "helper",
+    video: def.video === true,
+    openToolLimits: false,
+    maxOutputTokens: maxOutput,
+  };
+}
+
+/**
+ * Accept an unknown payload (localStorage, request body) and return only
+ * the well-formed defs. A hand-edited or corrupted blob must never throw
+ * during settings hydration or break a chat request.
+ */
+export function parseCustomModelDefs(raw: unknown): CustomModelDef[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const defs: CustomModelDef[] = [];
+  for (const item of raw) {
+    if (defs.length >= MAX_CUSTOM_MODELS) break;
+    if (!item || typeof item !== "object") continue;
+    const rec = item as Record<string, unknown>;
+    const provider =
+      rec.provider === "openrouter" || rec.provider === "opencode"
+        ? (rec.provider as CustomModelProvider)
+        : null;
+    const apiModel =
+      typeof rec.apiModel === "string" ? rec.apiModel.trim() : "";
+    if (!provider || !apiModel || apiModel.length > 200) continue;
+    const id = customModelId(provider, apiModel);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    defs.push({
+      provider,
+      apiModel,
+      label: typeof rec.label === "string" ? rec.label.slice(0, 60) : undefined,
+      maxOutputTokens:
+        typeof rec.maxOutputTokens === "number" &&
+        Number.isFinite(rec.maxOutputTokens)
+          ? rec.maxOutputTokens
+          : undefined,
+      vision: rec.vision === true,
+      video: rec.video === true,
+    });
+  }
+  return defs;
+}
+
+/** The live registry, consulted after the built-in catalog. */
+const customModelRegistry: ModelInfo[] = [];
+
+/** Replace the registry. Called on hydration (client) and per request (server). */
+export function registerCustomModels(raw: unknown): void {
+  const defs = parseCustomModelDefs(raw);
+  customModelRegistry.length = 0;
+  for (const def of defs) customModelRegistry.push(toCustomModel(def));
+}
+
+/** Built-in catalog plus whatever the user added. */
+export function allModels(): ModelInfo[] {
+  return customModelRegistry.length
+    ? [...MODELS, ...customModelRegistry]
+    : MODELS;
+}
 
 /** Screenshots can reach this model — either natively or via the helper. */
 export function modelSeesImages(id: string | null | undefined): boolean {
@@ -331,7 +499,11 @@ export function maxOutputTokensFor(id: string | null | undefined): number {
 }
 
 export function getModel(id: string | null | undefined): ModelInfo {
-  return MODELS.find((m) => m.id === id) ?? MODELS[0];
+  return (
+    MODELS.find((m) => m.id === id) ??
+    customModelRegistry.find((m) => m.id === id) ??
+    MODELS[0]
+  );
 }
 
 export function getProviderInfo(id: ProviderId): ProviderInfo {
@@ -339,7 +511,11 @@ export function getProviderInfo(id: ProviderId): ProviderInfo {
 }
 
 export function isKnownModel(id: string | null | undefined): boolean {
-  return Boolean(id && MODELS.some((m) => m.id === id));
+  return Boolean(
+    id &&
+      (MODELS.some((m) => m.id === id) ||
+        customModelRegistry.some((m) => m.id === id))
+  );
 }
 
 /** True when the selected model has whatever it needs to send. */

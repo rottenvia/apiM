@@ -28,7 +28,7 @@ import { CodeBlock } from "@/components/CodeBlock";
 import { PlanPanel } from "@/components/PlanPanel";
 import type { PlanView } from "@/components/PlanPanel";
 import { normalisePlanStepText } from "@/lib/plan-view";
-import { MODELS } from "@/lib/models";
+import { allModels } from "@/lib/models";
 
 /**
  * Render fenced code blocks with a language label and copy button.
@@ -1475,7 +1475,7 @@ function MessageBubbleImpl({
                           <p className="border-b border-border px-3 py-2 text-[11px] leading-4 text-text-muted">
                             Continue the same work with:
                           </p>
-                          {MODELS.map((m) => ({
+                          {allModels().map((m) => ({
                             id: m.id,
                             label: m.shortLabel,
                             blurb: m.resumeBlurb,

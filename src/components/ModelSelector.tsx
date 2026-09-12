@@ -5,7 +5,7 @@ import {
   getDeepSeekPeriod,
   formatCountdown,
 } from "@/lib/deepseek-hours";
-import { MODELS, getModel } from "@/lib/models";
+import { allModels, getModel } from "@/lib/models";
 
 interface ModelSelectorProps {
   value: string;
@@ -112,7 +112,7 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
                   Model
                 </p>
                 <p className="mt-0.5 text-[11px] leading-4 text-text-muted">
-                  DeepSeek, OpenCode, or a local Qwen
+                  Built-in models plus your own — add any in Settings → Model
                 </p>
               </div>
               <button
@@ -175,7 +175,7 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
               aria-label="Model"
               className="max-h-[min(22rem,calc(100dvh-260px))] overflow-y-auto p-1.5"
             >
-              {MODELS.map((model) => {
+              {allModels().map((model) => {
                 const selected = value === model.id;
                 return (
                   <button

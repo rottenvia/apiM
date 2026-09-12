@@ -210,8 +210,7 @@ export function resolveChatTarget(
     if (!apiKey) {
       return {
         ok: false,
-        error:
-          "An OpenRouter API key is required for GLM 5.3 Flash. Add one in Settings (openrouter.ai/settings/keys).",
+        error: `An OpenRouter API key is required for ${model.label}. Add one in Settings (openrouter.ai/settings/keys).`,
       };
     }
     return {

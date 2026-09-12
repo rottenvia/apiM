@@ -201,10 +201,10 @@ check(
   "without this GLM follow-ups looked 5x pricier because cached input was billed as a miss"
 );
 const glmCost = pricing.estimateCost(glmCached, "glm-5.3-flash", "peak");
-// During the launch window (through 2026-09-09) display rates are half
-// list; the spending cap still budgets against list.
+// The 50% launch discount ended 2026-09-09 16:00 UTC, so display rates are
+// list price now: $0.15 in / $0.03 cache-read / $0.50 out per 1M.
 const glmExpected =
-  (95_000 / 1e6) * 0.015 + (5_000 / 1e6) * 0.075 + (100 / 1e6) * 0.25;
+  (95_000 / 1e6) * 0.03 + (5_000 / 1e6) * 0.15 + (100 / 1e6) * 0.5;
 check(
   "GLM cached input is priced at the cache-read rate",
   glmCost !== null && Math.abs(glmCost - glmExpected) < 1e-9,

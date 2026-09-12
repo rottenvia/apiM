@@ -119,7 +119,12 @@ import {
   userHasContent,
 } from "@/lib/multimodal";
 import type { StoredAttachment } from "@/lib/multimodal";
-import { getModel, maxOutputTokensFor, modelVision } from "@/lib/models";
+import {
+  getModel,
+  maxOutputTokensFor,
+  modelVision,
+  registerCustomModels,
+} from "@/lib/models";
 
 /**
  * Marks a user turn that exists only to carry a tool's image.
@@ -247,6 +252,12 @@ interface ChatRequestBody {
    */
   githubToken?: string;
   model?: string;
+  /**
+   * The user's custom models (any OpenRouter / OpenCode wire id added in
+   * Settings). Registered into the catalog before the model is resolved,
+   * so `model` below may be one of these ids.
+   */
+  customModels?: unknown;
   thinkingEffort?: string;
   /** "off" | "auto" | "always" — "auto" lets the model decide per message. */
   webSearchMode?: "off" | "auto" | "always";
@@ -568,6 +579,7 @@ export async function POST(req: NextRequest) {
     tavilyApiKey,
     exaApiKey,
     model = "deepseek-v4-pro",
+    customModels,
     thinkingEffort = "auto",
     webSearchMode = "off",
     enabledPluginIds = [],
@@ -593,6 +605,11 @@ export async function POST(req: NextRequest) {
   if (!userText.trim() && !attachments?.length) {
     return NextResponse.json({ error: "A message is required" }, { status: 400 });
   }
+
+  // The model list lives in the browser (localStorage), so user-added
+  // models travel with the request. Register them before anything looks
+  // `model` up — parsing is defensive and drops malformed entries.
+  registerCustomModels(customModels);
 
   const creds = {
     deepseekApiKey,

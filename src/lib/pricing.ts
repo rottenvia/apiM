@@ -29,6 +29,8 @@ export const MODEL_RATES: Record<string, ModelRates> = {
   "glm-5.3-flash": { input: 0.15, cachedInput: 0.03, output: 0.5 },
   // OpenCode Zen's free preview lane for DeepSeek V4 Flash.
   "deepseek-v4-flash-free": { input: 0, cachedInput: 0, output: 0 },
+  // OpenRouter's free lane for NVIDIA Nemotron 3 Ultra.
+  "nemotron-3-ultra": { input: 0, cachedInput: 0, output: 0 },
   // Electricity only — the weights run on the user's GPU.
   "qwen-3.8-27b": { input: 0, cachedInput: 0, output: 0 },
 };
