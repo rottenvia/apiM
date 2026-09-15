@@ -60,7 +60,29 @@ async function readStore(workspaceId: string): Promise<FindingsStore> {
       await fs.readFile(storePath(workspaceId), "utf8")
     ) as Partial<FindingsStore>;
     if (parsed.version !== 1 || !Array.isArray(parsed.findings)) return EMPTY;
-    return { version: 1, findings: parsed.findings };
+    // Sanitize on read. Findings written before the size caps existed can
+    // carry megabytes of pasted content inside claim/evidence, and this
+    // store rides the system prompt on EVERY request — one fat legacy note
+    // is the "900k chars in" on a small request. Normalize whatever sits on
+    // disk so nothing oversized can reach the prompt, no matter who wrote it.
+    const now = new Date().toISOString();
+    const findings: Finding[] = [];
+    for (const f of parsed.findings) {
+      if (!f || typeof f !== "object") continue;
+      const rec = f as Partial<Finding>;
+      const claim = String(rec.claim ?? "").trim().slice(0, 400);
+      if (!claim) continue;
+      findings.push({
+        id: String(rec.id ?? `f${findings.length}-${now}`),
+        claim,
+        refs: normaliseRefs(rec.refs),
+        evidence: String(rec.evidence ?? "").trim().slice(0, 300),
+        status: rec.status === "disproved" ? "disproved" : "active",
+        createdAt: String(rec.createdAt ?? now),
+        updatedAt: String(rec.updatedAt ?? rec.createdAt ?? now),
+      });
+    }
+    return { version: 1, findings };
   } catch {
     return EMPTY;
   }
@@ -204,8 +226,8 @@ export function formatFindingsForPrompt(store: FindingsStore): string {
   const shown = active.slice(0, 25);
   const lines = shown.map((f) => {
     const where = f.refs.length ? ` (${f.refs.slice(0, 4).join(", ")})` : "";
-    const why = f.evidence ? ` — ${f.evidence}` : "";
-    return `- [${f.id}] ${f.claim}${where}${why}`;
+    const why = f.evidence ? ` — ${f.evidence.slice(0, 300)}` : "";
+    return `- [${f.id}] ${f.claim.slice(0, 400)}${where}${why}`;
   });
   if (active.length > shown.length) {
     lines.push(`  … ${active.length - shown.length} more established findings.`);

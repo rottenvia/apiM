@@ -26,7 +26,7 @@ export const settings = pgTable("settings", {
   id: text("id").primaryKey().default(sql`'default'`),
   deepseekApiKey: text("deepseek_api_key"),
   tavilyApiKey: text("tavily_api_key"),
-  defaultModel: text("default_model").default("deepseek-v4-pro"),
+  defaultModel: text("default_model").default("glm-5.3-flash"),
   defaultThinkingEffort: text("default_thinking_effort").default("auto"),
   enabledPlugins: jsonb("enabled_plugins").default(sql`'[]'::jsonb`),
   createdAt: timestamp("created_at").defaultNow().notNull(),

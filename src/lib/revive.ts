@@ -106,8 +106,19 @@ export function detectPrematureStop(
 
   if (looksLikeUserQuestion(tail)) return null;
 
-  if (hasLimitLanguage(tail) || hasLimitLanguage(thinking)) {
-    return "limit_language";
+  // A finished answer is never an inner-limit stop, whatever its
+  // deliberation muttered on the way: "all done — say continue for
+  // tweaks" is an invitation, and a "pausing here" inside the thought
+  // box is routine mid-deliberation, not an abort. The excuse only
+  // counts when the round itself is (almost) empty — Ox's real shape —
+  // or when the visible answer claims a limit with no completion
+  // language alongside it.
+  const answered = COMPLETION.test(tail) && input.planComplete !== false;
+  if (!answered) {
+    if (hasLimitLanguage(tail)) return "limit_language";
+    if (round.length < 40 && hasLimitLanguage(thinking)) {
+      return "limit_language";
+    }
   }
 
   if (

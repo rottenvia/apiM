@@ -54,7 +54,28 @@ let block = formatFindingsForPrompt(store);
 check("prompt block is marker-wrapped", block.includes(FINDINGS_MARKER_OPEN) && block.includes("</workspace-findings>"));
 check("prompt block contains the claim", block.includes("bar.dll is the good build"));
 check("prompt block contains refs", block.includes("bar.dll") && block.includes("CreateMove"));
-check("empty store yields empty string", formatFindingsForPrompt({ version: 1, findings: [] }) === "");
+  check("empty store yields empty string", formatFindingsForPrompt({ version: 1, findings: [] }) === "");
+
+  // 3b. A fat legacy store cannot flood the prompt: slices are hard.
+  const fatBlock = formatFindingsForPrompt({
+    version: 1,
+    findings: [
+      {
+        id: "f-fat",
+        claim: "x".repeat(100_000),
+        refs: ["big.log"],
+        evidence: "y".repeat(100_000),
+        status: "active",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+    ],
+  });
+  check(
+    "a fat legacy finding is sliced before it reaches the prompt",
+    fatBlock.length < 2_000,
+    String(fatBlock.length)
+  );
 
 // 4. Revise/supersede.
 const f2 = await addFinding(WS, {

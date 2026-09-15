@@ -119,7 +119,12 @@ import {
   userHasContent,
 } from "@/lib/multimodal";
 import type { StoredAttachment } from "@/lib/multimodal";
-import { getModel, maxOutputTokensFor, modelVision } from "@/lib/models";
+import {
+  DEFAULT_MODEL_ID,
+  getModel,
+  maxOutputTokensFor,
+  modelVision,
+} from "@/lib/models";
 
 /**
  * Marks a user turn that exists only to carry a tool's image.
@@ -567,7 +572,7 @@ export async function POST(req: NextRequest) {
     localApiModel,
     tavilyApiKey,
     exaApiKey,
-    model = "deepseek-v4-pro",
+    model = DEFAULT_MODEL_ID,
     thinkingEffort = "auto",
     webSearchMode = "off",
     enabledPluginIds = [],

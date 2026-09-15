@@ -44,8 +44,13 @@ console.log("\napiM provider checks\n");
 
 console.log("1. The catalog");
 
-check("DeepSeek V4 Pro is still listed", models.MODELS.some((m) => m.id === "deepseek-v4-pro"));
-check("DeepSeek V4 Flash is still listed", models.MODELS.some((m) => m.id === "deepseek-v4-flash"));
+  check("DeepSeek V4 Pro is still listed", models.MODELS.some((m) => m.id === "deepseek-v4-pro"));
+  check("DeepSeek V4 Flash is still listed", models.MODELS.some((m) => m.id === "deepseek-v4-flash"));
+  check(
+    "GLM 5.3 Flash is the default model",
+    models.DEFAULT_MODEL_ID === "glm-5.3-flash" && models.MODELS[0].id === "glm-5.3-flash",
+    models.DEFAULT_MODEL_ID
+  );
 const ox = models.MODELS.find((m) => m.id === "ox-alpha");
 check("Ox Alpha is listed", Boolean(ox));
 check(
