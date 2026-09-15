@@ -143,14 +143,37 @@ check(
   }) === null,
   "they have to answer; continuing would guess"
 );
-check(
-  "a completed plan with a closing summary is left alone",
-  R.detectPrematureStop({
-    ...base,
-    planComplete: true,
-    roundContent: "All done. Here's what I changed: parser.py now handles empty input.",
-  }) === null
-);
+  check(
+    "a completed plan with a closing summary is left alone",
+    R.detectPrematureStop({
+      ...base,
+      planComplete: true,
+      roundContent: "All done. Here's what I changed: parser.py now handles empty input.",
+    }) === null
+  );
+  check(
+    "a finished answer that invites iteration is not an inner-limit stop",
+    R.detectPrematureStop({
+      ...base,
+      toolRounds: 3,
+      roundContent:
+        "All done — the file is on disk. You can pick this up anytime; just say continue if you want tweaks.",
+      reasoning: "Wrapping up.",
+    }) === null,
+    "the same closing language used to trip the limit detector on a done task"
+  );
+  check(
+    "a finished answer is not flagged by limit mutters in its thinking",
+    R.detectPrematureStop({
+      ...base,
+      toolRounds: 3,
+      roundContent:
+        "All done. Here's what I changed: parser.py now handles empty input.",
+      reasoning:
+        "Long round — I have to stop planning and just write the summary now.",
+    }) === null,
+    "the thought box mutters about stopping on the way to a normal ending"
+  );
 check(
   "a blocked plan is a correct ending",
   R.detectPrematureStop({

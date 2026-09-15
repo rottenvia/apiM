@@ -1381,7 +1381,7 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
     function: {
       name: "note_finding",
       description:
-        "Record a conclusion you reached so you do not re-derive or forget it after context is compacted. Use it for anything established by reading files, running commands or decompiling: a dead approach, what a function actually does, which option works and why, what an error meant. One specific, factual line with the evidence. Shown to you every later turn; if it turns out wrong, call note_finding again with status 'disproved'. Record findings as you go, not only at the end.",
+        "Record a conclusion you reached so you do not re-derive or forget it after context is compacted. Use it for anything established by reading files, running commands or decompiling: a dead approach, what a function actually does, which option works and why, what an error meant. One specific, factual line with the evidence. Shown to you every later turn; if it turns out wrong, call note_finding again with status 'disproved'. Record findings as you go, not only at the end. Keep every finding SHORT: a one-sentence claim and evidence under ~300 characters (oversized text is sliced, never shipped whole). Never paste file contents, logs, command output or data blobs into a finding — save those to a file with write_file and reference the path in refs; the finding itself only carries the conclusion and where the details live.",
       parameters: {
         type: "object",
         properties: {

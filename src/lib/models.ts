@@ -111,7 +111,7 @@ export const FREE_MAX_OUTPUT_TOKENS = 131_072;
  */
 export const GLM_MAX_OUTPUT_TOKENS = 131_072;
 
-export const DEFAULT_MODEL_ID = "deepseek-v4-pro";
+export const DEFAULT_MODEL_ID = "glm-5.3-flash";
 
 export const QWEN_38_27B_ID = "qwen-3.8-27b";
 
@@ -188,6 +188,25 @@ export const PROVIDER_INFO: Record<ProviderId, ProviderInfo> = {
  */
 export const MODELS: ModelInfo[] = [
   {
+    id: "glm-5.3-flash",
+    apiModel: "z-ai/glm-5.3-flash",
+    provider: "openrouter",
+    label: "GLM 5.3 Flash",
+    shortLabel: "GLM 5.3 Flash",
+    description:
+      "Z.ai's agent model — the model that ran as the Ox Alpha stealth preview, now official on OpenRouter. 1M context, native images and video, built for long agent tasks. This app's default.",
+    specs: "1M context · 128K max output · image + video · open tools",
+    resumeBlurb: "Ox Alpha, now official",
+    settingsSubtitle: "OpenRouter · 1M context · fast",
+    mapsLowToHigh: false,
+    helper: false,
+    peakHours: false,
+    vision: "native",
+    video: true,
+    openToolLimits: true,
+    maxOutputTokens: GLM_MAX_OUTPUT_TOKENS,
+  },
+  {
     id: "deepseek-v4-pro",
     apiModel: "deepseek-v4-pro",
     provider: "deepseek",
@@ -262,25 +281,7 @@ export const MODELS: ModelInfo[] = [
     openToolLimits: true,
     maxOutputTokens: FREE_MAX_OUTPUT_TOKENS,
   },
-  {
-    id: "glm-5.3-flash",
-    apiModel: "z-ai/glm-5.3-flash",
-    provider: "openrouter",
-    label: "GLM 5.3 Flash",
-    shortLabel: "GLM 5.3 Flash",
-    description:
-      "Z.ai's agent model — the model that ran as the Ox Alpha stealth preview, now official on OpenRouter. 1M context, native images and video, built for long agent tasks. 50% launch discount through Sep 9.",
-    specs: "1M context · 128K max output · image + video · open tools",
-    resumeBlurb: "Ox Alpha, now official",
-    settingsSubtitle: "OpenRouter · 1M context · fast",
-    mapsLowToHigh: false,
-    helper: false,
-    peakHours: false,
-    vision: "native",
-    video: true,
-    openToolLimits: true,
-    maxOutputTokens: GLM_MAX_OUTPUT_TOKENS,
-  },
+
   {
     id: QWEN_38_27B_ID,
     apiModel: DEFAULT_LOCAL_API_MODEL,
