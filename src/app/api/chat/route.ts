@@ -3080,6 +3080,13 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             if (continuations < MAX_CONTINUATIONS) {
               continuations += 1;
               proseContinuationPending = true;
+              // The continuation's job is to finish a sentence, not to plan
+              // again — and its round-1 reasoning is already riding in the
+              // transcript above. Without this, every continuation re-spent
+              // the whole output ceiling on fresh reasoning and eight of them
+              // still could not finish one long file: the run stopped with
+              // the resume banner on work a continuation should have closed.
+              forceNoThinking = true;
               transcript.push({
                 role: "assistant",
                 content: roundContent || null,

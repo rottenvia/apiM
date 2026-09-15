@@ -434,7 +434,7 @@ export function providerHttpError(
     return `Your ${providerName} API key was rejected. Check it in Settings.`;
   }
   if (status === 402) {
-    return `Your ${providerName} account has insufficient balance. Everything done so far is saved — add credit and press Continue on the reply above.`;
+    return `Your ${providerName} account has insufficient balance. Everything done so far is saved — add credit and press Continue on the reply above. If your balance is not actually low, an old media attachment was still riding in the request body — the pre-flight estimate prices the whole body as text tokens and refuses a round whose real cost is small.`;
   }
   if (status === 429) {
     if (providerName === "OpenCode Zen" || providerName === "OpenRouter") {
