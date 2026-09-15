@@ -604,6 +604,60 @@ check(
     "the strip is a wire-copy only — stored transcripts keep their originals",
     videoMsg.content.some((p) => p.type === "video_url")
   );
+  check(
+    "a frames-mode group (cadence header + stills) is stripped on resume rounds",
+    (() => {
+      const framesRide = {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: '[Video "run.mp4" — 3 still frames, one every 2s]',
+          },
+          { type: "image_url", image_url: { url: "data:image/jpeg;base64,FFF1" } },
+          { type: "image_url", image_url: { url: "data:image/jpeg;base64,FFF2" } },
+          { type: "image_url", image_url: { url: "data:image/jpeg;base64,FFF3" } },
+        ],
+      };
+      const out = mm.stripRideAlongVideos(
+        [framesRide, { role: "user", content: "next" }],
+        false
+      );
+      return (
+        !JSON.stringify(out).includes("image_url") &&
+        JSON.stringify(out).includes("already rode once")
+      );
+    })(),
+    "the video-only guard was blind to image groups — a frames clip re-rode every resumed round"
+  );
+  check(
+    "inline base64 blobs inside string content are stripped (legacy carriers)",
+    (() => {
+      const blob =
+        "before data:image/jpeg;base64," + "A".repeat(150000) + " after";
+      const out = mm.stripRideAlongVideos(
+        [{ role: "user", content: blob }, { role: "user", content: "next" }],
+        false
+      );
+      return (
+        typeof out[0].content === "string" &&
+        !out[0].content.includes("AAAA") &&
+        out[0].content.includes("[media omitted")
+      );
+    })(),
+    "a string sails past any part-based guard — the last unguarded encoding"
+  );
+  check(
+    "string content without media passes through byte-identical",
+    (() => {
+      const out = mm.stripRideAlongVideos(
+        [{ role: "user", content: "plain text question" }],
+        false
+      );
+      return out[0].content === "plain text question";
+    })(),
+    "the legacy path pays nothing when there is nothing to strip"
+  );
 
   await rm(tmpData, { recursive: true, force: true });
 

@@ -54,7 +54,7 @@ export function userHasContent(content: UserContent | null | undefined): boolean
 }
 
 /**
- * Replace native video parts with a one-line reference — for the wire copy.
+ * Replace media payloads with one-line references — for the wire copy.
  *
  * A clip's first ride does the work: the provider ingests its frames on the
  * request that carries it, and the model's perception of those frames lives
@@ -64,17 +64,36 @@ export function userHasContent(content: UserContent | null | undefined): boolean
  * tokens — 402ing balances below an estimate the round does not actually
  * carry.
  *
- * The door this closes: the current turn is built without the media window,
- * so its native video part persists in the run transcript, and `resumeState`
- * snapshots that transcript with the clip still inside it. `pruneTranscript`
- * collapses tool results and `compactTranscript` folds reasoning rounds —
- * neither touches a video_url part, so a resumed run re-shipped the clip on
- * every round until it was interrupted again.
+ * The doors this closes — the current turn is built without the media
+ * window, so its media parts persist in the run transcript, and
+ * `resumeState` snapshots that transcript with the payload still inside it.
+ * `pruneTranscript` collapses tool results and `compactTranscript` folds
+ * reasoning rounds; neither touches media, so a resumed run re-shipped the
+ * payload on every round until it was interrupted again. THREE encodings can
+ * carry those pixels, so all three are guarded here:
+ *
+ * 1. a native `video_url` part;
+ * 2. a frames-mode group — the `[Video "…" — N still frames]` cadence header
+ *    followed by its image_url parts (the video-only guard was blind to
+ *    these, and a frames-mode clip therefore re-rode every resumed round);
+ * 3. inline `data:image|video;base64` blobs embedded in STRING content by
+ *    older transcript shapes — a string sails past any part-based guard.
  *
  * `keepLastUserVideo` is true only for the opening request of a fresh send —
- * the round that introduces the clip still needs the pixels. Returns a new
+ * the round that introduces the media still needs the pixels. Returns a new
  * array; stored transcripts keep their originals.
  */
+
+/** Inline base64 media of 100KB+ inside string content — legacy carriers. */
+const INLINE_MEDIA_BLOB =
+  /data:(?:image|video)\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]{100000,}/g;
+
+/** The cadence header that introduces a frames-mode still group. */
+const FRAME_GROUP_PREFIX = /^\[Video "/;
+
+const RIDE_ALONG_REFERENCE =
+  "[video omitted — it already rode once; re-attach the clip or flip the chip to frames to look again]";
+
 export function stripRideAlongVideos<
   M extends { role: string; content: unknown }
 >(messages: M[], keepLastUserVideo: boolean): M[] {
@@ -88,22 +107,52 @@ export function stripRideAlongVideos<
     }
   }
   return messages.map((msg, i) => {
-    if (msg.role !== "user" || i === lastUser || !Array.isArray(msg.content)) {
-      return msg;
+    if (msg.role !== "user" || i === lastUser) return msg;
+
+    // Legacy shape: base64 embedded directly in the text of the turn.
+    if (typeof msg.content === "string") {
+      if (!msg.content.includes(";base64,")) return msg;
+      const stripped = msg.content.replace(
+        INLINE_MEDIA_BLOB,
+        "[media omitted — it already rode once; re-attach the file to look again]"
+      );
+      return stripped === msg.content
+        ? msg
+        : ({ ...msg, content: stripped } as M);
     }
+
+    if (!Array.isArray(msg.content)) return msg;
     const parts = msg.content as ContentPart[];
-    if (!parts.some((part) => part.type === "video_url")) return msg;
-    return {
-      ...msg,
-      content: parts.map((part) =>
-        part.type === "video_url"
-          ? ({
-              type: "text",
-              text: "[video omitted — it already rode once; re-attach the clip or flip the chip to frames to look again]",
-            } satisfies ContentPart)
-          : part
-      ),
-    } as M;
+    const hasNative = parts.some((part) => part.type === "video_url");
+    const hasFrameGroup = parts.some(
+      (part) =>
+        part.type === "text" &&
+        typeof part.text === "string" &&
+        FRAME_GROUP_PREFIX.test(part.text)
+    );
+    if (!hasNative && !hasFrameGroup) return msg;
+    const out: ContentPart[] = [];
+    for (let p = 0; p < parts.length; p += 1) {
+      const part = parts[p];
+      if (part.type === "video_url") {
+        out.push({ type: "text", text: RIDE_ALONG_REFERENCE });
+        continue;
+      }
+      if (
+        part.type === "text" &&
+        typeof part.text === "string" &&
+        FRAME_GROUP_PREFIX.test(part.text)
+      ) {
+        out.push({ type: "text", text: RIDE_ALONG_REFERENCE });
+        // Swallow the still frames that belong to this cadence header.
+        while (p + 1 < parts.length && parts[p + 1].type === "image_url") {
+          p += 1;
+        }
+        continue;
+      }
+      out.push(part);
+    }
+    return { ...msg, content: out } as M;
   });
 }
 
