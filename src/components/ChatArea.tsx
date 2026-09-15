@@ -1757,9 +1757,12 @@ export function ChatArea({
                 aria-hidden="true"
               />
 
-              {/* Uniform chips in a single row — scrolls instead of wrapping
-                  on narrow resolutions, so spacing never breaks */}
-              <div className="no-scrollbar flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto">
+              {/* Uniform chips in a single row — wraps on narrow resolutions.
+                  The old overflow-x-auto + no-scrollbar silently ate whatever
+                  sat past the right edge: on a ~800px window the thinking
+                  selector was still in the DOM but unreachable — a control
+                  that vanished with no scrollbar to find it by. */}
+              <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
                 <ModelSelector value={model} onChange={onSetModel} />
 
                 <ThinkingEffortSelector
@@ -2187,11 +2190,14 @@ const STAGE_LABELS: Record<StatusStage, string> = {
 
 
 
-/** Instant appear / disappear — no fade. A 300ms slide is the "10s late" feel. */
+/** Instant appear / disappear — no fade. A 300ms slide is the "10s late" feel.
+ *  Starts at the dots' left edge (the outer px-1): the old pl-[31px] pushed
+ *  the line right of the dots it belongs to, and the wait read as two
+ *  misaligned columns instead of one stack. */
 function RetryBanner({ text }: { text: string }) {
   return (
     <div className="flex justify-start px-1 pb-2">
-      <span className="pl-[31px] text-[11px] leading-4 tabular-nums text-[#cfa25a]">
+      <span className="text-[11px] leading-4 tabular-nums text-[#cfa25a]">
         {text}
       </span>
     </div>

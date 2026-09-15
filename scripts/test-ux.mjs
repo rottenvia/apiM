@@ -569,11 +569,17 @@ check(
     2,
   "main send + btw send; a stale flag from the previous round would mislabel it"
 );
-check(
-  "the retry banner aligns under the status row's text column",
-  /pl-\[31px\]/.test(chatArea) && !/pl-\[18px\]/.test(chatArea),
-  "both rows share the text column; the old 18px sat left of it"
-);
+  check(
+    "the retry banner starts at the dots' left edge, one column for the whole wait",
+    /<span className="text-\[11px\] leading-4 tabular-nums text-\[#cfa25a\]">/.test(chatArea),
+    "the old indent sat right of the dots; the banner shares their left edge now — pinned on the span markup itself so prose can never fake it"
+  );
+  check(
+    "the composer chip row wraps instead of scrolling controls out of view",
+    /flex min-w-0 flex-1 flex-wrap items-center gap-1\.5/.test(chatArea) &&
+      !/no-scrollbar flex min-w-0 flex-1/.test(chatArea),
+    "overflow-x-auto + no-scrollbar silently ate the effort selector on narrow windows"
+  );
 check(
   "the message hover row clusters actions on one side instead of scattering them",
   /mt-1 flex items-center justify-end gap-1/.test(bubble),
