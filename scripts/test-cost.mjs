@@ -150,7 +150,10 @@ console.log("\n3. Compaction no longer fires where it loses money");
  * reached on any real agent task. Rewriting the middle of the transcript
  * costs a full-price re-read of everything after the edit, and the tokens it
  * removes were cached at 1/120th the price. Measured, it made a 40-round task
- * more expensive, not less.
+ * more expensive, not less. (GLM 5.3 Flash on OpenRouter caches at ~1/5th,
+ * not 1/120th — there a fold whose head is larger than the kept tail breaks
+ * even in a couple of rounds, which is why the valve below is a latency cap
+ * rather than a never-fold rule.)
  */
 const MISS = 0.435 / 1e6;
 const HIT = 0.003625 / 1e6;
@@ -166,9 +169,9 @@ check(
   `break-even is ${Math.round(breakEvenRounds)} rounds at these rates`
 );
 check(
-  "so the threshold is above anything a normal task reaches",
-  compact.COMPACT_THRESHOLD_CHARS >= 1_000_000,
-  `${compact.COMPACT_THRESHOLD_CHARS.toLocaleString()} chars`
+  "so the threshold caps the prefill, not just the window",
+  compact.COMPACT_THRESHOLD_CHARS / 3.6 < 50_000,
+  `~${Math.round(compact.COMPACT_THRESHOLD_CHARS / 3.6 / 1000)}k tokens of prefill — a small request must not prefill a novel`
 );
 check(
   "but it still fires before the context window is exhausted",
@@ -201,14 +204,19 @@ check(
   "without this GLM follow-ups looked 5x pricier because cached input was billed as a miss"
 );
 const glmCost = pricing.estimateCost(glmCached, "glm-5.3-flash", "peak");
-// During the launch window (through 2026-09-09) display rates are half
-// list; the spending cap still budgets against list.
-const glmExpected =
-  (95_000 / 1e6) * 0.015 + (5_000 / 1e6) * 0.075 + (100 / 1e6) * 0.25;
+// During the launch window (through 2026-09-09 16:00 UTC) display rates are
+// half list; after it the display shows list. The spending cap always
+// budgets against list either way. The window end is imported so this pin
+// can never drift from the constant it mirrors — the pre-expiry hardcode
+// here went stale exactly one week after the window closed.
+const inLaunchWindow = Date.now() < pricing.GLM_DISCOUNT_END_MS;
+const glmExpected = inLaunchWindow
+  ? (95_000 / 1e6) * 0.015 + (5_000 / 1e6) * 0.075 + (100 / 1e6) * 0.25
+  : (95_000 / 1e6) * 0.03 + (5_000 / 1e6) * 0.15 + (100 / 1e6) * 0.5;
 check(
   "GLM cached input is priced at the cache-read rate",
   glmCost !== null && Math.abs(glmCost - glmExpected) < 1e-9,
-  `$${glmCost?.toFixed(5)} vs $${glmExpected.toFixed(5)}`
+  `window ${inLaunchWindow ? "open" : "closed"}: $${glmCost?.toFixed(5)} vs $${glmExpected.toFixed(5)}`
 );
 
 const deepseekCached = {

@@ -44,7 +44,7 @@ const OFFPEAK_FACTOR = 0.5;
  * actually billed, though, or the number is "safe" but wrong by 2x during a
  * week-long launch window.
  */
-const GLM_DISCOUNT_END_MS = Date.UTC(2026, 8, 9, 16, 0, 0);
+export const GLM_DISCOUNT_END_MS = Date.UTC(2026, 8, 9, 16, 0, 0);
 
 function applyTemporaryDiscount(
   model: string,

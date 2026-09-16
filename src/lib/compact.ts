@@ -44,58 +44,56 @@ import type { TranscriptMessage } from "@/lib/transcript";
 export const KEEP_RECENT_ROUNDS = 4;
 
 /**
- * Don't compact below this size — and this is much larger than it looks.
+ * Don't compact below this size — and know why it moved twice.
  *
- * This was 120_000 chars (~33k tokens), on the reasoning that reasoning is
- * 93% of a transcript and therefore worth removing. The first half of that is
- * true. The conclusion was wrong, and measuring it (`npm run cost:lab`)
- * showed compaction was making a 40-round task MORE expensive, not less:
+ * It started at 120_000 chars (~33k tokens), on the reasoning that reasoning
+ * is 93% of a transcript and therefore worth removing. The first half of that
+ * is true; the conclusion was wrong. Measured (`npm run cost:lab`), compaction
+ * at DeepSeek's rates made a 40-round task MORE expensive:
  *
  *     compaction on   $0.5236
  *     compaction off  $0.4929
  *
- * The arithmetic nobody did:
+ * The arithmetic nobody did: old reasoning sits in the cached prefix at
+ * $0.003625/M — a hundred and twenty times less than fresh input. It is the
+ * largest thing in the transcript and very nearly the cheapest, and compaction
+ * rewrites the middle of that prefix, so everything after the edit point is
+ * re-read at full price, once. At a 120x cache discount, break-even is 120+
+ * rounds — so the threshold climbed (1.8M, then 600k) and folding became a
+ * pure window safety valve.
  *
- * Old reasoning is not expensive. It sits in the cached prefix, where it
- * costs $0.003625/M — a hundred and twenty times less than fresh input. It is
- * the largest thing in the transcript and very nearly the cheapest.
+ * But 600k was tuned for the wrong model. GLM 5.3 Flash — the default —
+ * caches on OpenRouter at roughly 1/5th, not 1/120th, so folding a head
+ * larger than the kept tail breaks even in a couple of rounds. And cost was
+ * never the binding constraint on this model; latency is. Every round
+ * prefills the whole transcript before the first token: OpenRouter's
+ * pre-flight prices that body cache-blind (402ing balances below an estimate
+ * the round does not actually bill), and a Flash-tier model crawls through
+ * 166k tokens of its own old deliberations for minutes before emitting a
+ * word. The valve therefore caps the prefill at a size that answers fast:
  *
- * Compaction rewrites the middle of that prefix. Everything from the edit
- * point onward stops matching the cache and is re-read at $0.435/M, once, in
- * full. So the trade is: pay full price for the whole remaining transcript
- * today, to save the cached rate on the removed part every round after.
- *
- * Break-even, at these rates, is 120 rounds if compaction removes half the
- * transcript and 480 rounds if it removes a fifth. Most tasks never get
- * there, so the old threshold could not pay for itself.
- *
- * Compaction still has a real job, just not this one: DeepSeek's window is
-  * 1M tokens, and a transcript that reaches it fails outright. So it still
-  * fires as a safety valve — but the valve now sits at 600k chars (~166k
-  * tokens), not 1.8M. Cost is not the only axis: OpenRouter's pre-flight
-  * estimate prices the raw body cache-blind, and 402s accounts whose balance
-  * sits below the estimate (a $0.90 balance "can't afford" a 900k-char body
-  * even when the cached round would bill cents). And a Flash-tier model
-  * prefills 200k+ tokens of history for minutes before its first token —
-  * the crawl the user feels as "fast model, slow output". Below 600k chars,
-  * leaving history alone is still strictly cheaper.
-  */
- export const COMPACT_THRESHOLD_CHARS = 600_000;
+ *     160_000 chars ≈ ~44k tokens of prefill — seconds on Flash, not minutes.
+ */
+export const COMPACT_THRESHOLD_CHARS = 160_000;
 
 /**
  * How far the compaction boundary jumps at a time.
  *
- * This exists for the prompt cache, not for tidiness. DeepSeek matches a
- * prefix from the start of the messages array, so anything that rewrites an
- * earlier message costs a full-price re-read of the request.
+ * This exists for the prompt cache, not for tidiness: anything that rewrites
+ * an earlier message stops the prefix matching and costs a one-time re-read.
+ * Quantising the boundary means it stays put for several rounds and only
+ * jumps occasionally, so one miss buys several cheap rounds.
  *
- * A boundary of "everything except the last four rounds" would move forward
- * by one every single round, rewriting history each time and missing the
- * cache on every request — which would cost far more than the reasoning it
- * saved. Quantising to a step means the boundary stays put for several rounds
- * and only jumps occasionally, so one miss buys many cheap rounds.
+ * It was 8 — which quietly disabled the valve. Compactable rounds are
+ * `rounds - KEEP_RECENT_ROUNDS`, and floor(compactable / 8) is zero until
+ * twelve rounds exist, so a fat nine-round transcript sat unshaved even past
+ * the threshold, and bodies swung between "just folded" and "fattened again"
+ * as the boundary jumped — the round-to-round fast/slow the user felt. At the
+ * default model's ~5x cache discount the re-read a step costs is cheap, so
+ * the step drops to 4: the valve can bite at eight rounds, while the
+ * boundary still holds still for four rounds at a time.
  */
-export const COMPACT_STEP = 8;
+export const COMPACT_STEP = 4;
 
 export interface CompactStats {
   /** Agent rounds folded into a summary. */
