@@ -26,7 +26,7 @@ export const QWEN_PRUNE = {
   thresholdChars: 8_000,
 } as const;
 
-/** Fold finished rounds far earlier than the DeepSeek 500k-token valve. */
+/** Fold finished rounds far earlier than the cloud safety-valve threshold. */
 export const QWEN_COMPACT = {
   keepRecentRounds: 2,
   thresholdChars: 24_000,
