@@ -136,6 +136,40 @@ check(
   "reviving a Q&A wastes a round and pads the answer"
 );
 check(
+  "a polite sign-off on a finished answer is not an inner-limit stop",
+  R.detectPrematureStop({
+    ...base,
+    toolRounds: 3,
+    roundContent:
+      "The module is written and the hook is wired. Pausing here for now — say continue if you want more tweaks.",
+    reasoning: "Wrapping up.",
+  }) === null,
+  "casual goodbye language used to trip the limit detector on a concluded reply"
+);
+check(
+  "the same sign-off over a mid-word cut IS a limit stop",
+  (() => {
+    const reason = R.detectPrematureStop({
+      ...base,
+      roundContent:
+        "The module is written. Continuing with the FastSwitch wiring — pausing here for now, the next handler re-arms the weapon switch on the next tick and re-arms the we",
+      content:
+        "The module is written. Continuing with the FastSwitch wiring — pausing here for now, the next handler re-arms the weapon switch on the next tick and re-arms the we",
+    });
+    return reason === "limit_language" || reason === "mid_sentence";
+  })(),
+  "soft language plus real truncation is still a stop (either reason revives)"
+);
+check(
+  "an explicit 'I have to stop' still flags on a substantial reply",
+  R.detectPrematureStop({
+    ...base,
+    roundContent:
+      "The layout is done and matches the notes. I have to stop here. Say continue and I will keep going.",
+  }) === "limit_language",
+  "explicit abort declarations are hard language, not sign-offs"
+);
+check(
   "a real question to the user is not revived",
   R.detectPrematureStop({
     ...base,
