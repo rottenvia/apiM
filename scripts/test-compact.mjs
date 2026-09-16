@@ -255,15 +255,24 @@ check(
 check(
   "a normal-size resume keeps every tool result verbatim",
   (() => {
-    const ordinary = build(8);
-    const out = C.compactTranscript(ordinary); // default high threshold
+    const ordinary = build(4);
+    const out = C.compactTranscript(ordinary); // under KEEP_RECENT_ROUNDS: nothing to fold
     const results = out.messages.filter((m) => m.role === "tool").length;
-    return results === 8 && out.messages === ordinary;
+    return results === 4 && out.messages === ordinary;
   })(),
-  "an 8-round attempt replays 8/8 results so nothing is redone"
+  "a 4-round attempt replays 4/4 results so nothing is redone"
 );
 check(
-  "only an enormous resume is folded to fit",
+  "a reasoning-heavy 8-round resume folds at the new valve",
+  (() => {
+    const fat = build(8); // ~324k chars, mostly replayed reasoning
+    const out = C.compactTranscript(fat); // default threshold
+    return out.stats.rounds === 4 && out.stats.reasoningChars > 100_000;
+  })(),
+  `the valve caps the prefill (~44k tokens) instead of replaying minutes of old thinking`
+);
+check(
+  "a very long resume is folded to fit",
   (() => {
     const huge = build(60); // ~2.8M chars, over the safety threshold
     const out = C.compactTranscript(huge);

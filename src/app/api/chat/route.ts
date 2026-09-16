@@ -1590,16 +1590,15 @@ Ask before you build the wrong thing. If a choice would change what you produce 
            * was fully written, or what a test printed — so it re-ran the same
            * commands and re-did the same work ("it has no memory on resume").
            *
-           * The full transcript is the memory. Keeping it is also cheap: the
-           * repo's own measurements (lib/compact.ts) show old reasoning lives
-           * in the cached prefix at ~1/120th the rate, so folding it to save
-           * money does not pay for itself short of 100+ rounds. We therefore
-           * only fold as a safety valve, at the SAME high threshold the live
-           * loop uses — a transcript approaching the context window is folded
-           * to fit, keeping the recent rounds verbatim; anything smaller is
-           * replayed byte for byte. The per-round prune that follows still
-           * collapses very large old *file reads*, and findings/plan are
-           * refreshed below.
+           * The full transcript is the memory. Keeping it is also cheap:
+           * on DeepSeek old reasoning sits in the cached prefix at ~1/120th
+           * the fresh rate (on GLM via OpenRouter, ~1/5th), and replaying
+           * rather than rewriting also keeps the prefix cache-stable. Only
+           * the live loop's safety-valve threshold folds — a transcript over
+           * the valve is folded to fit, keeping the recent rounds verbatim;
+           * anything smaller is replayed byte for byte. The per-round prune
+           * that follows still collapses very large old *file reads*, and
+           * findings/plan are refreshed below.
            */
           const folded = compactTranscript(resumed.messages);
           transcript.push(...folded.messages);

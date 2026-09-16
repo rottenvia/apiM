@@ -206,8 +206,6 @@ export const MODELS: ModelInfo[] = [
     peakHours: false,
     vision: "native",
     video: true,
-    vision: "native",
-          video: true,
           // Capped: the runtime gate is Ox-only, and uncapped 401k reads are
           // what re-fed fat fresh results into the transcript on the default
           // model — the exact fat-wire disease this repo just cured for old
