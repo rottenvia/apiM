@@ -919,9 +919,9 @@ check(
 );
 check("it is its own provider (openrouter), not a second Ox entry", glm?.provider === "openrouter");
 check(
-  "it keeps the open tool limits — it IS the model Ox Alpha previewed",
-  glm?.openToolLimits === true
-);
+  "it runs capped like every paid model — uncapped 401k reads fed fat fresh results into the transcript",
+    glm?.openToolLimits === false
+  );
 check("it is a native VLM like Ox", glm?.vision === "native");
 check("DeepSeek V4 Flash Free is in the catalog", Boolean(free));
 check("the free lane rides the opencode (Zen) provider", free?.provider === "opencode");

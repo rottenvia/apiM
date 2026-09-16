@@ -93,8 +93,39 @@ store = await readFindings(WS);
 const old = store.findings.find((f) => f.id === f2.id);
 check("old finding is marked disproved", old && old.status === "disproved");
 block = formatFindingsForPrompt(store);
-check("disproved finding is hidden from the prompt", !block.includes("foo.dll works"));
 check("replacement is shown", block.includes("foo.dll is flawed"));
+
+// 4b. Retire-on-completion: finished work must stop riding the prompt.
+check(
+  "the prompt block teaches retire-on-completion",
+  block.includes("DONE and shipped") && block.includes("status 'disproved'"),
+  "findings are working memory, not an archive — finished items retire"
+);
+const doneStore = {
+  version: 1,
+  findings: [
+    {
+      id: "f-done",
+      claim: "fixed the fat-wire leak",
+      refs: ["src/lib/prune.ts"],
+      evidence: "shipped in commit abc1234",
+      status: "superseded",
+      supersededBy: "f-new",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    },
+  ],
+};
+const doneBlock = formatFindingsForPrompt(doneStore);
+check(
+  "a superseded finding is hidden from the prompt",
+  !doneBlock.includes("fixed the fat-wire leak")
+);
+check(
+  "formatFindingsForPrompt's intro carries the retire recipe",
+  block.includes("status 'disproved'") && block.includes("DONE and shipped"),
+  "the model must know the exact retirement call"
+);
 
 // 5. replaceFindings swaps a stale block in place (used on resume).
 const stale = "prefix\n<workspace-findings>\nold wrong thing\n</workspace-findings>\nsuffix";

@@ -47,8 +47,19 @@ export interface PrematureStopInput {
 
 const LIMIT_LANGUAGE =
   /\b(?:hit|reached|hitting|ran out of) (?:the |my |an )?(?:token |context |output |length |character |internal )?limit\b/i;
+/** Hard limit language — names a limit or an abort outright. Always counts.
+ * "I have to stop" is an explicit stop declaration, not a casual sign-off. */
 const LIMIT_LANGUAGE_EXTRA =
-  /\b(?:context window|token budget|max tokens|output limit|inner limit|internal limit|due to (?:length|limits?)|I(?:'ll| will) have to stop|I(?:'m| am) (?:stopping|pausing) (?:here|for now)|stop(?:ping)? here(?: for now)?|continue in (?:the )?(?:next|another) (?:message|reply|turn)|to be continued|say (?:\"|')?(?:continue|resume)|type (?:\"|')?(?:continue|resume)|ask me to (?:continue|resume)|I cannot continue|pick this up|please (?:send|type) (?:continue|resume))\b/i;
+  /\b(?:context window|token budget|max tokens|output limit|inner limit|internal limit|due to (?:length|limits?)|I(?:(?:'ll| will| must)| have) to stop|I cannot continue)\b/i;
+/**
+ * Casual sign-offs, not limit language. "Pausing here for now — say continue
+ * if you want more" is how a model politely ends a FINISHED answer; flagging
+ * it as an abort produced the false "inner limit" banner on replies that had
+ * simply concluded. A soft phrase only counts when the reply is ALSO
+ * truncated (ends mid-word) or the round is nearly empty — the real Ox shape.
+ */
+const SOFT_STOP_LANGUAGE =
+  /\b(?:(?:I(?:'m| am) )?(?:stopping|pausing) (?:here|for now)|stop(?:ping)? here(?: for now)?|continue in (?:the )?(?:next|another) (?:message|reply|turn)|to be continued|say (?:\"|')?(?:continue|resume)|type (?:\"|')?(?:continue|resume)|ask me to (?:continue|resume)|pick this up|please (?:send|type) (?:continue|resume))\b/i;
 
 const COMPLETION =
   /\b(?:all (?:done|finished)|task is complete|everything (?:is |looks )?(?:done|working|finished)|here(?:'s| is) what I (?:changed|did|built|fixed)|verified (?:it |that )?(?:works|passed))\b/i;
@@ -87,7 +98,11 @@ function endsMidSentence(text: string): boolean {
 }
 
 function hasLimitLanguage(text: string): boolean {
-  return LIMIT_LANGUAGE.test(text) || LIMIT_LANGUAGE_EXTRA.test(text);
+  return (
+    LIMIT_LANGUAGE.test(text) ||
+    LIMIT_LANGUAGE_EXTRA.test(text) ||
+    SOFT_STOP_LANGUAGE.test(text)
+  );
 }
 
 /**
@@ -115,7 +130,18 @@ export function detectPrematureStop(
   // language alongside it.
   const answered = COMPLETION.test(tail) && input.planComplete !== false;
   if (!answered) {
-    if (hasLimitLanguage(tail)) return "limit_language";
+    if (LIMIT_LANGUAGE.test(tail) || LIMIT_LANGUAGE_EXTRA.test(tail)) {
+      return "limit_language";
+    }
+    // A soft sign-off alone never flags a substantial reply — "pausing here
+    // for now" is how a finished answer politely ends. It counts only when
+    // the reply is genuinely truncated (mid-word cut) or nearly empty.
+    if (
+      SOFT_STOP_LANGUAGE.test(tail) &&
+      (endsMidSentence(full) || round.length < 40)
+    ) {
+      return "limit_language";
+    }
     if (round.length < 40 && hasLimitLanguage(thinking)) {
       return "limit_language";
     }

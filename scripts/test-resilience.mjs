@@ -474,6 +474,60 @@ check(
   "recent reads must stay whole so the model can work from them"
 );
 
+/*
+ * Tool-call ARGUMENTS are the carrier nothing used to prune.
+ *
+ * A write_file argument IS the file being written: one 300k-char Lua module
+ * rode inside tool_calls[].function.arguments on every round after the write,
+ * invisible to result collapsing (which only touches role:"tool") — the
+ * "small follow-up question, 900k-char body" bug. Arguments must stub the
+ * same way results do, without breaking the call/reply pairing.
+ */
+const fatWrite = [
+  { role: "system", content: "You are a helpful assistant." },
+  { role: "user", content: "Write the module." },
+  {
+    role: "assistant",
+    content: null,
+    reasoning_content: "Writing the file now.",
+    tool_calls: [
+      {
+        id: "call_fat",
+        type: "function",
+        function: {
+          name: "write_file",
+          arguments: JSON.stringify({ path: "big.lua", content: "x".repeat(300_000) }),
+        },
+      },
+    ],
+  },
+  { role: "tool", tool_call_id: "call_fat", content: "wrote 300000 chars to big.lua" },
+  { role: "user", content: "What did you just write?" },
+];
+const resFat = P.pruneTranscript(fatWrite);
+const fatArgs = resFat.messages[2].tool_calls[0].function.arguments;
+check(
+  "a fat write_file's arguments are stubbed once the call has run",
+  fatArgs.length < P.MAX_VERBATIM_ARGS_CHARS + 200,
+  `${fatArgs.length} chars on the wire (was ~300k)`
+);
+check(
+  "argument stubbing preserves the call/reply pairing",
+  resFat.messages[2].tool_calls[0].id === "call_fat" &&
+    resFat.messages[3].tool_call_id === "call_fat",
+  "the API validates pairing, never argument content"
+);
+check(
+  "the stub tells the model the call already ran",
+  fatArgs.includes("arguments trimmed from history"),
+  "so the model does not think its write was lost"
+);
+check(
+  "small tool calls keep their arguments verbatim",
+  P.pruneTranscript(short).messages === short,
+  "ordinary coding below the threshold is untouched"
+);
+
 // Big enough to actually exceed the threshold, so the collapse path is still
 // covered. Sized from the constant rather than hardcoded, so raising the
 // budget again does not silently stop testing this.

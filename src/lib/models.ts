@@ -67,10 +67,13 @@ export interface ModelInfo {
   /**
    * Ox Alpha only: no per-call tool ceilings. The model can read a whole
    * file, a whole page, and as many paths as it asks for in one call.
-   * (GLM 5.3 Flash is the same model Ox Alpha previewed, so it keeps the
-   * open limits.)
-   */
-  openToolLimits: boolean;
+       * (GLM 5.3 Flash briefly carried open limits because it is the same
+       * model Ox Alpha previewed — but uncapped reads are exactly what fed
+       * 401k-char results into the transcript and re-bloated the body, and
+       * the runtime gate was Ox-only anyway. It runs capped like every other
+       * paid model.)
+       */
+     openToolLimits: boolean;
   /**
    * Ceiling on generated tokens for ONE round, in tokens.
    *
@@ -203,11 +206,17 @@ export const MODELS: ModelInfo[] = [
     peakHours: false,
     vision: "native",
     video: true,
-    openToolLimits: true,
-    maxOutputTokens: GLM_MAX_OUTPUT_TOKENS,
-  },
-  {
-    id: "deepseek-v4-pro",
+    vision: "native",
+          video: true,
+          // Capped: the runtime gate is Ox-only, and uncapped 401k reads are
+          // what re-fed fat fresh results into the transcript on the default
+          // model — the exact fat-wire disease this repo just cured for old
+          // ones.
+          openToolLimits: false,
+          maxOutputTokens: GLM_MAX_OUTPUT_TOKENS,
+        },
+        {
+          id: "deepseek-v4-pro",
     apiModel: "deepseek-v4-pro",
     provider: "deepseek",
     label: "DeepSeek V4 Pro",

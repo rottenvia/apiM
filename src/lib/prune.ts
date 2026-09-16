@@ -60,6 +60,22 @@ export const KEEP_VERBATIM_RESULTS = 8;
 export const MIN_COLLAPSE_CHARS = 1_500;
 
 /**
+ * Tool-call ARGUMENTS are the carrier nothing ever reduced.
+ *
+ * A write_file argument IS the file being written — one 300k-char Lua module
+ * rides inside `tool_calls[].function.arguments` on every subsequent round,
+ * invisible to result collapsing (which only touches `role: "tool"`) and to
+ * compaction (which folds whole rounds, but only above its own valve). The
+ * model already acted on its own arguments; the paired result records the
+ * outcome. Stub past this cap, same as results.
+ *
+ * Wire-safe: the API validates the call/reply pairing, never the argument
+ * string's content — unlike `reasoning_content`, which must stay verbatim
+ * on tool-calling turns.
+ */
+export const MAX_VERBATIM_ARGS_CHARS = 2_000;
+
+/**
  * Leave the transcript alone until it is actually large.
  *
  * Pruning a short conversation saves nothing and only risks dropping context
@@ -182,39 +198,64 @@ export function pruneTranscript(
   }
 
   // Index every tool result, newest last.
-  const resultIndices: number[] = [];
-  messages.forEach((m, i) => {
-    if (m.role === "tool") resultIndices.push(i);
-  });
+    const resultIndices: number[] = [];
+    messages.forEach((m, i) => {
+      if (m.role === "tool") resultIndices.push(i);
+    });
 
-  if (resultIndices.length <= keepVerbatim) {
-    return { messages, stats: empty };
-  }
-
-  // Everything except the most recent `keepVerbatim` is a candidate.
-  const collapsible = new Set(
-    resultIndices.slice(0, resultIndices.length - keepVerbatim)
-  );
+    // Result collapsing needs old results to exist; argument stubbing does not.
+    // One fat write_file in a young run is exactly the case that used to ride
+    // every later round as a 300k-char body, so the args pass must run even
+    // when every result is still inside the verbatim window.
+    const collapsible =
+      resultIndices.length <= keepVerbatim
+        ? new Set<number>()
+        : new Set(resultIndices.slice(0, resultIndices.length - keepVerbatim));
 
   let collapsed = 0;
   let charsSaved = 0;
 
   const out = messages.map((m, i) => {
-    if (m.role !== "tool" || !collapsible.has(i)) return m;
-    if (m.content.length < minChars) return m;
+      if (m.role === "tool") {
+        if (!collapsible.has(i)) return m;
+        if (m.content.length < minChars) return m;
 
-    const name = toolNameFor(messages, m.tool_call_id);
-    const replacement = placeholder(name, m.content);
+        const name = toolNameFor(messages, m.tool_call_id);
+        const replacement = placeholder(name, m.content);
 
-    // Never grow a message by "shrinking" it.
-    if (replacement.length >= m.content.length) return m;
+        // Never grow a message by "shrinking" it.
+        if (replacement.length >= m.content.length) return m;
 
-    collapsed += 1;
-    charsSaved += m.content.length - replacement.length;
+        collapsed += 1;
+        charsSaved += m.content.length - replacement.length;
 
-    // Same role and tool_call_id, so the call/reply pairing is preserved.
-    return { ...m, content: replacement };
-  });
+        // Same role and tool_call_id, so the call/reply pairing is preserved.
+        return { ...m, content: replacement };
+      }
+
+      if (m.role === "assistant" && m.tool_calls?.length) {
+        // Fat arguments stub regardless of recency: the model never needs its
+        // own JSON back, and one 300k write_file blob re-billed on every later
+        // round is what turned small follow-up questions into 900k-char bodies.
+        let touched = false;
+        const calls = m.tool_calls.map((call) => {
+          const args = call.function.arguments;
+          if (args.length <= MAX_VERBATIM_ARGS_CHARS) return call;
+          const trimmed =
+            args.slice(0, MAX_VERBATIM_ARGS_CHARS) +
+            "\n…[arguments trimmed from history — this call already ran; its paired result records what it did]";
+          touched = true;
+          charsSaved += args.length - trimmed.length;
+          return {
+            ...call,
+            function: { ...call.function, arguments: trimmed },
+          };
+        });
+        return touched ? { ...m, tool_calls: calls } : m;
+      }
+
+      return m;
+    });
 
   return {
     messages: out,

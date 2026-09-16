@@ -77,7 +77,17 @@ async function readStore(workspaceId: string): Promise<FindingsStore> {
         claim,
         refs: normaliseRefs(rec.refs),
         evidence: String(rec.evidence ?? "").trim().slice(0, 300),
-        status: rec.status === "disproved" ? "disproved" : "active",
+        // Preserve every terminal status the store wrote. The pre-cap
+        // sanitizer collapsed "superseded" back to "active", so a finding
+        // revised as done came back from disk still riding the prompt —
+        // finished work resurrecting itself every session.
+        status:
+          rec.status === "disproved" || rec.status === "superseded"
+            ? rec.status
+            : "active",
+        ...(rec.supersededBy
+          ? { supersededBy: String(rec.supersededBy) }
+          : {}),
         createdAt: String(rec.createdAt ?? now),
         updatedAt: String(rec.updatedAt ?? rec.createdAt ?? now),
       });
@@ -234,7 +244,7 @@ export function formatFindingsForPrompt(store: FindingsStore): string {
   }
   return (
     `\n\n${FINDINGS_MARKER_OPEN}\n` +
-    "Findings already established in this workspace (your own prior conclusions — use them, do not re-derive them; if one is wrong, correct it with note_finding):\n\n" +
+    "Findings already established in this workspace (your own prior conclusions — use them, do not re-derive them; if one is wrong, correct it with note_finding; when the work a finding describes is DONE and shipped, retire it — note_finding with that id, status 'disproved', and claim 'done — shipped in <commit/fix>' — so finished items stop riding every prompt):\n\n" +
     lines.join("\n") +
     `\n${FINDINGS_MARKER_CLOSE}\n`
   );
