@@ -94,6 +94,9 @@ const FRAME_GROUP_PREFIX = /^\[Video "/;
 const RIDE_ALONG_REFERENCE =
   "[video omitted — it already rode once; re-attach the clip or flip the chip to frames to look again]";
 
+const RIDE_ALONG_IMAGE_REFERENCE =
+  "[earlier attachment(s) omitted — they already rode once; re-attach the image to look again]";
+
 export function stripRideAlongVideos<
   M extends { role: string; content: unknown }
 >(messages: M[], keepLastUserVideo: boolean): M[] {
@@ -130,7 +133,12 @@ export function stripRideAlongVideos<
         typeof part.text === "string" &&
         FRAME_GROUP_PREFIX.test(part.text)
     );
-    if (!hasNative && !hasFrameGroup) return msg;
+    // A plain screenshot rides as an ordinary image_url part — no video
+    // shapes at all. It still re-ships on every mid-run round unless guarded,
+    // and one 600KB screenshot is ~800k chars of base64: the "small request,
+    // 900k chars in" body.
+    const hasPlainImage = parts.some((part) => part.type === "image_url");
+    if (!hasNative && !hasFrameGroup && !hasPlainImage) return msg;
     const out: ContentPart[] = [];
     for (let p = 0; p < parts.length; p += 1) {
       const part = parts[p];
@@ -148,6 +156,12 @@ export function stripRideAlongVideos<
         while (p + 1 < parts.length && parts[p + 1].type === "image_url") {
           p += 1;
         }
+        continue;
+      }
+      if (part.type === "image_url") {
+        // A plain screenshot outside any frame group. Its pixels rode on the
+        // opening round; later rounds get the reference, not the payload.
+        out.push({ type: "text", text: RIDE_ALONG_IMAGE_REFERENCE });
         continue;
       }
       out.push(part);

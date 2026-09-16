@@ -70,11 +70,17 @@ export const KEEP_RECENT_ROUNDS = 4;
  * there, so the old threshold could not pay for itself.
  *
  * Compaction still has a real job, just not this one: DeepSeek's window is
- * 1M tokens, and a transcript that reaches it fails outright. So it now fires
- * only as a safety valve, at ~500k tokens — half the window, with plenty of
- * room for the reply. Below that, leaving history alone is strictly cheaper.
- */
-export const COMPACT_THRESHOLD_CHARS = 1_800_000;
+  * 1M tokens, and a transcript that reaches it fails outright. So it still
+  * fires as a safety valve — but the valve now sits at 600k chars (~166k
+  * tokens), not 1.8M. Cost is not the only axis: OpenRouter's pre-flight
+  * estimate prices the raw body cache-blind, and 402s accounts whose balance
+  * sits below the estimate (a $0.90 balance "can't afford" a 900k-char body
+  * even when the cached round would bill cents). And a Flash-tier model
+  * prefills 200k+ tokens of history for minutes before its first token —
+  * the crawl the user feels as "fast model, slow output". Below 600k chars,
+  * leaving history alone is still strictly cheaper.
+  */
+ export const COMPACT_THRESHOLD_CHARS = 600_000;
 
 /**
  * How far the compaction boundary jumps at a time.
