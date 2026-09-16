@@ -80,7 +80,7 @@ const nextConfig: NextConfig = {
   // and any human opening the app via 127.0.0.1 got 403s on every dev asset,
   // which killed HMR and hydration. Next's own warning prescribes this entry.
   // Dev-only: no effect on production builds.
-  allowedDevOrigins: ["127.0.0.1"],
+  allowedDevOrigins: ["127.0.0.1", "localhost", "*.e2b.app"],
 
   turbopack: {
     root: turbopackRoot,

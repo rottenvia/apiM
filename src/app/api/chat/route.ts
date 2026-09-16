@@ -706,7 +706,6 @@ export async function POST(req: NextRequest) {
           }
         } catch {
           // The consumer went away between our check and this enqueue, so the
-          // controller is already closed. Mark it so later frames are droppedenqueue, so the
           // controller is already closed. Mark it so later frames are dropped
           // quietly instead of throwing into the catch-all as a fake error.
           closed = true;
@@ -729,7 +728,7 @@ export async function POST(req: NextRequest) {
 
       /*
        * A normal UI request uses the same id for conversation and workspace.
-       * Refuse a disagreement instead of letting Chat B pointhat B point at Chat A's
+       * Refuse a disagreement instead of letting Chat B point at Chat A's
        * LESSONS.md, plan, GitHub checkout or files. Direct API callers that
        * omit conversationId may still name a standalone workspace.
        */
@@ -1320,20 +1319,6 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          */
         const treeTracker = new TreeTracker();
 
-        /**
-         * The agent's plan for this reply, if it made one.
-         *
-         * Lives for the duration of the run. It is appended to the request as
-         * a trailing message so it can change every round without disturbing
-         * the cached prefix, the same reason the file tree sits at the end.
-         */
-        /*
-         * Loaded from disk, not started empty.
-         *
-         * This was `let plan = null` with a comment saying it to the request as
-         * a trailing message so it can change every round without disturbing
-         * the cached prefix, the same reason the file tree sits at the end.
-         */
         /*
          * Loaded from disk, not started empty.
          *
@@ -1345,7 +1330,9 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          *
          * A finished plan is not carried into the next message: it belongs to
          * the task that ended, and handing it to an unrelated question would
-         * be worse than having none.
+         * be worse than having none. The plan is appended as a trailing
+         * message so it can change every round without disturbing the cached
+         * prefix, the same reason the file tree sits at the end.
          */
         let plan: Plan | null = null;
         /*
@@ -1480,17 +1467,6 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             /* the tracker simply baselines on its first successful refresh */
           }
         }
-
-        /*
-         * Replace everything above with the saved transcript when resuming.
-         *
-         * Built fresh first and then swapped, rather than branching earlier,
-         * so the ordinary path stays exactly as it was. The tree is rebuilt
-         * from the live workspace afterwards: the files on disk have moved on
-         * since the reply stopped, and the stale listing inside the saved
-         * transcript would describe a workspace that no longer exists.
-         */
-
 
         /**
          * Keep the tree honest as the agent works.
