@@ -86,6 +86,31 @@ check(
   (route.match(/MAX_CONTINUATIONS = \d+/) ?? [""])[0]
 );
 check(
+  "the output-limit pool is doubled now that drops have their own pool",
+  /MAX_CONTINUATIONS = 16/.test(route),
+  "a long answer used to exhaust the shared pool of 8 and stop with the resume banner"
+);
+check(
+  "connection drops spend their own small pool",
+  /MAX_STREAM_CUTS = 4/.test(route) &&
+    /hardTruncated && continuations < MAX_CONTINUATIONS/.test(route) &&
+    /!hardTruncated && streamCuts < MAX_STREAM_CUTS/.test(route),
+  "pool flakiness used to eat the real work's continuations"
+);
+check(
+  "exhausting the connection pool does not blame the output limit",
+  /connectionCutsExhausted = true/.test(route) &&
+    /connection kept dropping/.test(route),
+  "a dropped stream is not an output limit"
+);
+check(
+  "a connection-exhausted run is still unfinished work worth resuming",
+  /Boolean\(stoppedPrematurely\) \|\|[\s\S]{0,20}connectionCutsExhausted/.test(
+    route
+  ),
+  "the resume chain must know every way a run can stop half-done"
+);
+check(
   "a reply stopped at the ceiling is not saved as complete",
   /incomplete: unfinished/.test(route) &&
     /hitOutputCeiling/.test(route) &&

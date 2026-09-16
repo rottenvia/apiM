@@ -1722,13 +1722,27 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         let toolRounds = resumed?.toolRounds ?? 0;
 
         /**
-         * Automatic "carry on" rounds after hitting the output limit.
+         * Automatic "carry on" rounds after the answer is cut short by a real
+         * output limit.
          *
          * Capped so a model that ends every round at the ceiling cannot loop
-         * forever, but high enough that a genuinely long file finishes: each
-         * continuation adds another full output budget.
+         * forever, but high enough that a genuinely long answer finishes:
+         * each continuation adds another full output budget. Eight was sized
+         * when one counter was shared with connection drops; with the pools
+         * split (MAX_STREAM_CUTS below) the real pool is doubled without
+         * loosening the loop guard.
          */
-        const MAX_CONTINUATIONS = 8;
+        const MAX_CONTINUATIONS = 16;
+        /**
+         * Dropped connections cut answers mid-content too, and they used to
+         * spend the same counter — on a flaky pool the drops ate most of the
+         * eight before the real output-limit cut ever arrived, and long
+         * answers stopped with the resume banner on work a continuation
+         * should have closed. A dropped stream usually heals on the first or
+         * second retry, so a small separate pool is enough; exhausting it
+         * stops the run with its own honest reason, never "output limit".
+         */
+        const MAX_STREAM_CUTS = 4;
         /**
          * Hard ceiling on the agent loop, per model.
          *
@@ -1784,6 +1798,13 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          */
         let autoRevives = 0;
         /**
+         * Times a dropped connection cut the answer mid-content. Separate
+         * from MAX_CONTINUATIONS so provider flakiness cannot spend the
+         * output-limit pool. Fresh on every request — including a Resume —
+         * for the same reason as continuations above.
+         */
+        let streamCuts = 0;
+        /**
          * Times we re-issued an OpenCode call that came back HTTP 200 with
          * an empty SSE body. Zen does this during the same outages as 503;
          * built-in retries only fire on a bad status, so without this the
@@ -1810,6 +1831,12 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         let rateLimitRetries = 0;
         /** Set when the reply stopped because it ran out of room. */
         let hitOutputCeiling = false;
+        /**
+         * The connection dropped past its own pool. Not an output limit —
+         * the banner must not claim one — but still unfinished work that
+         * Resume should keep.
+         */
+        let connectionCutsExhausted = false;
         /** Set when the spending limit ended the run rather than the model. */
         let stoppedByBudget = false;
         /**
@@ -3081,8 +3108,20 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             // Plain prose cut short. Ask for the rest instead of stopping —
             // the transcript already holds what arrived, so the continuation
             // costs only the remaining tokens rather than a full retry.
-            if (continuations < MAX_CONTINUATIONS) {
-              continuations += 1;
+            //
+            // Two different deaths reach this branch and they used to share
+            // one counter: a real output-limit cut and a dropped connection
+            // mid-content. On a flaky pool the drops ate most of the eight
+            // before the real cut arrived. Each now spends its own pool.
+            if (
+              (hardTruncated && continuations < MAX_CONTINUATIONS) ||
+              (!hardTruncated && streamCuts < MAX_STREAM_CUTS)
+            ) {
+              if (hardTruncated) {
+                continuations += 1;
+              } else {
+                streamCuts += 1;
+              }
               proseContinuationPending = true;
               // The continuation's job is to finish a sentence, not to plan
               // again — and its round-1 reasoning is already riding in the
@@ -3106,7 +3145,12 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   "anything you already wrote, do not restate the plan, and " +
                   "do not apologise. Carry straight on from the last character.",
               });
-              send({ type: "continuing", reason: hardTruncated ? "output_limit" : "connection_cut", of: MAX_CONTINUATIONS, n: continuations });
+              send({
+                type: "continuing",
+                reason: hardTruncated ? "output_limit" : "connection_cut",
+                of: hardTruncated ? MAX_CONTINUATIONS : MAX_STREAM_CUTS,
+                n: hardTruncated ? continuations : streamCuts,
+              });
               continue;
             }
             // Out of continuations: keep what arrived and stop cleanly.
@@ -3115,7 +3159,14 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               content: roundContent || null,
               reasoning_content: roundReasoning || null,
             });
-            hitOutputCeiling = true;
+            // A real output limit and connection flakiness get different
+            // honest reasons — the old single flag blamed the output limit
+            // even when the connection was what kept dying.
+            if (hardTruncated) {
+              hitOutputCeiling = true;
+            } else {
+              connectionCutsExhausted = true;
+            }
             break;
           }
 
@@ -4491,7 +4542,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         const unfinished =
           hitOutputCeiling ||
           stoppedByBudget ||
-          Boolean(stoppedPrematurely);
+          Boolean(stoppedPrematurely) ||
+          connectionCutsExhausted;
         try {
           await upsertMessage(convId, title, {
             id: assistantMsgId,
@@ -4556,6 +4608,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           lessonsEnabled &&
           helper !== null &&
           !hitOutputCeiling &&
+          !connectionCutsExhausted &&
           // Pressing Stop means stop. Spending money to reflect on a task the
           // user just cancelled is the opposite of what they asked for, and
           // the run is half-finished anyway, so anything learned from it
@@ -4653,7 +4706,9 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             ? prematureStopNotice(stoppedPrematurely)
             : hitOutputCeiling
               ? "The answer hit the output limit before it finished"
-              : undefined,
+              : connectionCutsExhausted
+                ? "The connection kept dropping before the answer finished"
+                : undefined,
           reasoningDiagnostic: {
             expected: thinkingEnabled,
             chars: reasoningContent.length,
