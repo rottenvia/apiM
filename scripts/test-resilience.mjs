@@ -167,8 +167,8 @@ check(
   "the old (1/2) counter looked like the last retry when two were left"
 );
 check(
-  "OpenCode is given more than the default three tries",
-  R.OPENCODE_RETRY.attempts === 5 && R.DEFAULT_RETRY.attempts === 3
+  "OpenRouter is given more than the default three tries",
+  R.OPENROUTER_RETRY.attempts === 5 && R.DEFAULT_RETRY.attempts === 3
 );
 
 const backoffAt = 1_000;

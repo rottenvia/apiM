@@ -421,7 +421,7 @@ check(
 );
 check(
   "the open shell is explicitly styled as a surface",
-  /data-open=\{showThinking\}/.test(bubble) &&
+  /data-open=\{thinkBodyOpen\}/.test(bubble) &&
     /\.thinking-shell\[data-open='true'\]/.test(css),
   "expanded reasoning must read as a box, not text between hairlines"
 );
@@ -571,7 +571,7 @@ check(
 );
   check(
     "the retry banner starts at the dots' left edge, one column for the whole wait",
-    /<span className="text-\[11px\] leading-4 tabular-nums text-\[#cfa25a\]">/.test(chatArea),
+    /<span[^>]{0,80}text-\[11px\] leading-4 tabular-nums text-warning"/.test(chatArea),
     "the old indent sat right of the dots; the banner shares their left edge now — pinned on the span markup itself so prose can never fake it"
   );
   check(

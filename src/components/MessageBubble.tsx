@@ -1387,9 +1387,6 @@ function MessageBubbleImpl({
                             {message.reasoningNotice}
                           </span>
                         ) : isThinkingPhase ? (
-                          // Unreachable in practice — the body stays shut
-                          // through the silent gap — but kept so no state
-                          // combination can ever show a bare empty frame.
                           <span className="thinking-shimmer">
                             Waiting for reasoning text…
                           </span>

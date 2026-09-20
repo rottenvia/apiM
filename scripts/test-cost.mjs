@@ -239,7 +239,7 @@ const routeTextForHelper = rfs(path.join(ROOT, "src/app/api/chat/route.ts"), "ut
 );
 check(
   "the helper target is resolved separately from the main target",
-  /const helperTarget = resolveHelperTarget\(creds, model\)/.test(routeTextForHelper) &&
+  /const helperTarget = resolveHelperTarget\(creds, customs\)/.test(routeTextForHelper) &&
     /const helper = helperIsCheap \? helperTarget : null/.test(routeTextForHelper),
   "falling back to the main target used to make every search-planner call bill the model answering the chat"
 );
