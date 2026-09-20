@@ -271,6 +271,20 @@ export function isSizeRejection(status: number, detail: string): boolean {
 }
 
 /**
+ * True when the rejection names the MODEL, not the body.
+ *
+ * "X is not a valid model ID" will never pass no matter how the body is
+ * reshaped — the fold/strip/cascade retries would burn two more huge
+ * requests to learn nothing. Fail fast so the error names the bad ID
+ * instead of the retries that couldn't save it.
+ */
+export function isUnknownModelRejection(detail: string): boolean {
+  return /not a valid model|invalid model|model not found|unknown model/i.test(
+    detail
+  );
+}
+
+/**
  * The provider's real rejection message, unwrapped.
  *
  * OpenRouter wraps a provider failure in its own envelope, and the outer
