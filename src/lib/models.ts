@@ -390,7 +390,7 @@ export const MODELS: ModelInfo[] = [
   },
   {
     id: FREE_OPENROUTER_MODEL_ID,
-    apiModel: "nvidia/nemotron-3-ultra-550b-a558:free",
+    apiModel: "nvidia/nemotron-3-ultra-550b-a55b:free",
     provider: "openrouter",
     label: "Nemotron 3 Ultra Free",
     shortLabel: "Nemotron Free",

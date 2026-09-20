@@ -71,8 +71,19 @@ check(
 );
 check(
   "the wire id is the official :free slug",
-  freeNemotron?.apiModel === "nvidia/nemotron-3-ultra-550b-a558:free",
-  "openrouter.ai/nvidia lists the free lane as nemotron-3-ultra-550b-a558:free"
+  freeNemotron?.apiModel === "nvidia/nemotron-3-ultra-550b-a55b:free",
+  "openrouter.ai/nvidia lists the free lane as nemotron-3-ultra-550b-a55b:free"
+);
+check(
+  "the old a558 typo never comes back",
+  !/a558/.test(read("src/lib/models.ts")),
+  "one wrong char 400'd every free-lane request as 'not a valid model ID'"
+);
+check(
+  "an unknown model id skips every retry",
+  /isUnknownModelRejection\(rejectedDetail\)/.test(route) &&
+    /!modelUnknown &&/.test(route),
+  "a bad model burned a 697k strip retry and a 313k composed retry to learn nothing"
 );
 check(
   "unknown ids fall back to the default model",
@@ -111,7 +122,7 @@ const freeOk = providers.resolveChatTarget("nvidia-nemotron-3-ultra-free", {
 check("the Nemotron free lane resolves with an OpenRouter key", freeOk.ok);
 check(
   "and sends the :free slug on the wire",
-  freeOk.ok && freeOk.target.apiModel === "nvidia/nemotron-3-ultra-550b-a558:free"
+  freeOk.ok && freeOk.target.apiModel === "nvidia/nemotron-3-ultra-550b-a55b:free"
 );
 
 const noOr = providers.resolveChatTarget("glm-5.3-flash", { deepseekApiKey: "sk-ds" });
@@ -947,9 +958,9 @@ check(
   "sanitize keeps the :free routing suffix — verified free models must be addable",
   models.sanitizeCustomModelDef({
     label: "Nemotron 3 Ultra (free)",
-    apiModel: "nvidia/nemotron-3-ultra-550b-a558:free",
+    apiModel: "nvidia/nemotron-3-ultra-550b-a55b:free",
     vision: "helper",
-  })?.id === "custom:nvidia/nemotron-3-ultra-550b-a558:free",
+  })?.id === "custom:nvidia/nemotron-3-ultra-550b-a55b:free",
   "the pattern once rejected ':' so every :free slug verified and then refused to add"
 );
 check(
@@ -995,7 +1006,7 @@ check("Nemotron 3 Ultra Free is in the catalog", Boolean(free));
 check("the free lane rides the openrouter provider", free?.provider === "openrouter");
 check(
   "the free lane sends the official :free slug on the wire",
-  free?.apiModel === "nvidia/nemotron-3-ultra-550b-a558:free"
+  free?.apiModel === "nvidia/nemotron-3-ultra-550b-a55b:free"
 );
 check("Ox Alpha is gone from the catalog", !models.MODELS.some((m) => m.id === "ox-alpha"));
 
@@ -1032,7 +1043,7 @@ check(
 );
 check(
   "and sends the :free slug on the wire",
-  freeResolved.ok && freeResolved.target.apiModel === "nvidia/nemotron-3-ultra-550b-a558:free"
+  freeResolved.ok && freeResolved.target.apiModel === "nvidia/nemotron-3-ultra-550b-a55b:free"
 );
 check(
   "the free lane is refused with only a DeepSeek key",

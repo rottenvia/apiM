@@ -101,6 +101,7 @@ import {
   fetchWithRetry,
   isTimeoutFailure,
   isSizeRejection,
+  isUnknownModelRejection,
   OPENROUTER_RETRY,
   readWithTimeout,
   SERVER_SIDE_STATUS,
@@ -2488,11 +2489,23 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             // real cause in metadata.raw, and the size-vs-shape verdict
             // below is only as good as this string.
             const rejectedDetail = extractRejectionDetail(earlyErrText);
+            // The model ID itself is unknown: no body reshape can fix that,
+            // so skip every retry and let the final error name the bad ID.
+            // (Observed as a 400 "X is not a valid model ID" that burned a
+            // 697k strip retry and a 313k composed retry to learn nothing.)
+            const modelUnknown = isUnknownModelRejection(rejectedDetail);
+            if (modelUnknown) {
+              console.log(
+                `[chat] ${target.model.id} round ${round}: not retrying — ${rejectedDetail.slice(0, 160)}`
+              );
+            }
             if (
-              dsResponse.status === 400 ||
-              dsResponse.status === 413 ||
-              dsResponse.status === 422 ||
-              (dsResponse.status >= 500 && /endpoint is unavailable/i.test(rejectedDetail))
+              !modelUnknown &&
+              (dsResponse.status === 400 ||
+                dsResponse.status === 413 ||
+                dsResponse.status === 422 ||
+                (dsResponse.status >= 500 &&
+                  /endpoint is unavailable/i.test(rejectedDetail)))
             ) {
               const sizeDriven = isSizeRejection(dsResponse.status, rejectedDetail);
               let retryBody: Record<string, unknown> | null = null;
