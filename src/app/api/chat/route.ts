@@ -115,6 +115,12 @@ import {
   reviveInstruction,
 } from "@/lib/revive";
 import type { PrematureStopReason } from "@/lib/revive";
+import {
+  LoopBreaker,
+  loopTripMarker,
+  loopTripUserNote,
+  loopWarningText,
+} from "@/lib/loop-breaker";
 import { extractReasoningDelta } from "@/lib/reasoning-stream";
 import { loadScopedConversationHistory } from "@/lib/chat-history";
 import type { ScopedChatMessage } from "@/lib/chat-history";
@@ -1484,6 +1490,14 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          * keeping them would make this grow without bound on a long task.
          */
         const toolsUsedThisRun: string[] = [];
+
+        /*
+         * Loop-breaker state: one tracker per reply. Consecutive identical
+         * tool failures warn the model at two and halt the run at three —
+         * see lib/loop-breaker.ts for why only consecutive failures count.
+         */
+        const loopBreaker = new LoopBreaker();
+        let breakerTripped = false;
 
         const setFileTree = (text: string) => {
           currentFileTree = text;
@@ -4604,6 +4618,35 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               );
             }
 
+            /*
+             * Circuit breaker, checked before the result enters the
+             * transcript: the warning must be IN the tool message the model
+             * reads next, not beside it. A trip still records this result
+             * normally below (it ran — the client should show it) and breaks
+             * out at the end of the calls loop instead of here.
+             */
+            const loop = loopBreaker.observe(
+              call.function.name,
+              parsed.ok ? parsed.value : call.function.arguments,
+              result.ok
+            );
+            if (loop.warn) {
+              result.content += loopWarningText(call.function.name);
+            }
+            if (loop.trip) {
+              const lastError =
+                result.summary || result.content.slice(0, 300);
+              result.content += loopTripMarker(call.function.name);
+              const tripNote =
+                (assistantContent.trim() ? "\n\n" : "") +
+                loopTripUserNote(call.function.name, lastError);
+              assistantContent += tripNote;
+              send({ type: "content", delta: tripNote });
+              appendTimelineText(tripNote);
+              stoppedPrematurely = "loop_breaker";
+              breakerTripped = true;
+            }
+
             transcript.push({
               role: "tool",
               tool_call_id: call.id,
@@ -4721,6 +4764,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 usd: result.search.estimatedUsd,
               });
             }
+            if (breakerTripped) break;
           }
 
           // The next round must see the workspace as it is now, not as it was
@@ -4763,6 +4807,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             transcript.push({ role: "system", content: formatPlan(plan) });
           }
 
+          if (breakerTripped) break;
           if (stopped()) break;
         }
 

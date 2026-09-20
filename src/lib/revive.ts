@@ -24,7 +24,8 @@ export type PrematureStopReason =
   | "dangling_next"
   | "provider_abort"
   | "round_cap"
-  | "thinking_cut";
+  | "thinking_cut"
+  | "loop_breaker";
 
 export interface PrematureStopInput {
   /** The whole reply so far, including earlier rounds. */
@@ -276,6 +277,9 @@ export function prematureStopNotice(reason: PrematureStopReason): string {
   }
   if (reason === "round_cap") {
     return "The reply used every tool round it was allowed — Resume to carry on";
+  }
+  if (reason === "loop_breaker") {
+    return "The same tool call failed three times running — Resume to steer it another way";
   }
   if (reason === "dangling_next") {
     return "The model kept describing its next action instead of doing it";
