@@ -26,8 +26,8 @@ export const MODEL_RATES: Record<string, ModelRates> = {
   // (0.075 / 0.015 / 0.25) runs through 2026-09-09 — budget against the
   // list price so the spending cap never undercounts.
   "glm-5.3-flash": { input: 0.15, cachedInput: 0.03, output: 0.5 },
-  // OpenRouter's free tier for DeepSeek V4 Flash 0731.
-  "deepseek-v4-flash-0731-free": { input: 0, cachedInput: 0, output: 0 },
+  // OpenRouter's free tier, currently NVIDIA Nemotron 3 Ultra.
+  "nvidia-nemotron-3-ultra-free": { input: 0, cachedInput: 0, output: 0 },
   // Electricity only — the weights run on the user's GPU.
   "qwen-3.8-27b": { input: 0, cachedInput: 0, output: 0 },
 };

@@ -170,7 +170,7 @@ export function maxTokensFor(
     ? customRatesFor(custom)
     : (MODEL_RATES[model] ?? null);
   if (!rates) return ceiling;
-  // A free model (the 0731 lane) has a zero output rate. Dividing the
+  // A free model (the Nemotron lane) has a zero output rate. Dividing the
   // remaining budget by zero is Infinity; the ceiling is the real cap.
   if (rates.output <= 0) return ceiling;
 

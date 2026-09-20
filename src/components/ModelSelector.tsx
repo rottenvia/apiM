@@ -148,7 +148,7 @@ export function ModelSelector({
               </button>
             </div>
 
-            {/* Peak/off-peak is DeepSeek-only. The 0731 lane is free on OpenRouter. */}
+            {/* Peak/off-peak is DeepSeek-only. The Nemotron lane is free on OpenRouter. */}
             {showPeakHours && (
             <div className="border-b border-border px-4 py-2.5">
               <div className="flex items-center gap-2">
