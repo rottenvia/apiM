@@ -1558,9 +1558,10 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         const toolsUsedThisRun: string[] = [];
 
         /*
-         * Loop-breaker state: one tracker per reply. Consecutive identical
-         * tool failures warn the model at two and halt the run at three —
-         * see lib/loop-breaker.ts for why only consecutive failures count.
+         * Loop-breaker state: one tracker per reply. One tool call failing
+         * three times with identical arguments warns the model at two and
+         * halts the run at three — see lib/loop-breaker.ts for why strikes
+         * are per call rather than consecutive.
          */
         const loopBreaker = new LoopBreaker();
         let breakerTripped = false;
@@ -4688,9 +4689,11 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             /*
              * Circuit breaker, checked before the result enters the
              * transcript: the warning must be IN the tool message the model
-             * reads next, not beside it. A trip still records this result
-             * normally below (it ran — the client should show it) and breaks
-             * out at the end of the calls loop instead of here.
+             * reads next, not beside it. Strikes are per call, so reads (or
+             * anything else) interleaved between identical failures do not
+             * clear them. A trip still records this result normally below
+             * (it ran — the client should show it) and breaks out at the end
+             * of the calls loop instead of here.
              */
             const loop = loopBreaker.observe(
               call.function.name,
