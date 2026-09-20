@@ -35,6 +35,9 @@ const snaps = await load("src/lib/snapshots.ts");
 const L = await load("src/lib/lessons.ts");
 const approvals = await load("src/lib/approvals.ts");
 const store = await load("src/lib/store.ts");
+const transcript = await load("src/lib/transcript.ts");
+const pruneLib = await load("src/lib/prune.ts");
+const transcriptSrc = read("src/lib/transcript.ts");
 const route = read("src/app/api/chat/route.ts");
 
 const COLOR = process.stdout.isTTY && !process.env.NO_COLOR;
@@ -1261,6 +1264,118 @@ check(
   "pricing a cached prompt costs materially less than pricing it naively",
   cached < naive * 0.6,
   `$${cached.toFixed(5)} against $${naive.toFixed(5)} — the old line showed the larger one`
+);
+
+console.log("\n19. Tool-call arguments survive strict API validation");
+
+const H = transcript.hardenToolCallArguments;
+check(
+  "valid arguments ride the wire verbatim",
+  H('{"path":"x"}') === '{"path":"x"}',
+  "working flows cannot tell the hardener exists"
+);
+check(
+  "pretty-printed arguments are already valid",
+  (() => {
+    const pretty = '{\n  "a": 1\n}';
+    return H(pretty) === pretty;
+  })(),
+  "whitespace between tokens is legal JSON — only in-string controls are repaired"
+);
+check(
+  "a raw newline inside a string is escaped, not dropped",
+  (() => {
+    const out = H('{"a":"x\ny"}');
+    return !out.includes("\n") && JSON.parse(out).a === "x\ny";
+  })(),
+  "the observed Nemotron 400: a control char the model emitted mid-string"
+);
+check(
+  "a raw tab and other controls become escapes with content preserved",
+  (() => {
+    const one = String.fromCharCode(1);
+    const out = H('{"a":"x\ty' + one + 'z"}');
+    const back = JSON.parse(out).a;
+    return back === "x\ty" + one + "z";
+  })(),
+  "every U+0000-U+001F inside strings, not just whitespace"
+);
+check(
+  "empty arguments become an empty object",
+  H("") === "{}" && H("   ") === "{}",
+  "a no-arg call is {}, not an empty string"
+);
+check(
+  "valid JSON that is not an object is wrapped",
+  H("[1,2]") === '{"_value":[1,2]}',
+  "validation demands an object string"
+);
+check(
+  "garbage becomes an honest marker",
+  (() => {
+    const m = JSON.parse(H("{oops"));
+    return m._unparseable === true && m._raw === "{oops";
+  })(),
+  "a placeholder passes validation; a corrupt string never does"
+);
+check(
+  "an unbalanced quote declines repair and marks",
+  (() => {
+    const m = JSON.parse(H('{"a":"oops'));
+    return m._unparseable === true;
+  })(),
+  "a confused fix must not make things worse"
+);
+check(
+  "non-string arguments stringify, nullish means no-arg",
+  H({ a: 1 }) === '{"a":1}' && H(null) === "{}" && H(undefined) === "{}",
+  "a rebuilt transcript can hold anything"
+);
+check(
+  "serialize hardens the wire copy and keeps the stored original",
+  (() => {
+    const stored = {
+      role: "assistant",
+      content: "",
+      tool_calls: [
+        { id: "c1", type: "function", function: { name: "f", arguments: '{"a":"x\ny"}' } },
+      ],
+    };
+    const wire = transcript.serializeForApi([stored])[0].tool_calls[0].function.arguments;
+    return (
+      JSON.parse(wire).a === "x\ny" &&
+      stored.tool_calls[0].function.arguments.includes("\n")
+    );
+  })(),
+  "execution used the original; only the wire copy is repaired, every send"
+);
+check(
+  "prune stubs are valid JSON objects",
+  (() => {
+    const fat = [
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          {
+            id: "c1",
+            type: "function",
+            function: { name: "write_file", arguments: '{"path":"x","content":"' + "y".repeat(5000) + '"}' },
+          },
+        ],
+      },
+      { role: "tool", tool_call_id: "c1", content: "ok" },
+    ];
+    const stub = pruneLib.pruneTranscript(fat, { thresholdChars: 1 }).messages[0].tool_calls[0].function.arguments;
+    const parsed = JSON.parse(stub);
+    return parsed._trimmed === true && stub.includes("arguments trimmed from history");
+  })(),
+  "the old stub glued prose onto cut-off JSON — one stubbed write_file 400'd the whole body"
+);
+check(
+  "serialize routes every tool call through the hardener",
+  /hardenToolCallArguments\(c\.function\.arguments\)/.test(transcriptSrc),
+  "the single choke point every request passes through"
 );
 
 console.log(

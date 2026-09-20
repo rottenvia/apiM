@@ -138,6 +138,31 @@ check(
   "unknown stays on the strip-tools path — and the cascade below covers a wrong guess"
 );
 check(
+  "a tool_calls validation error is shape, not size",
+  !R.isSizeRejection(
+    400,
+    "Bad Request · Validation: `messages[28].tool_calls[0].function.arguments` must be a valid JSON object string: control character found while parsing a string at line 2 column 0"
+  ),
+  "messages[28].tool_calls fired the bare 'too' inside 'tool' — the fold retry carried the poison twice"
+);
+check(
+  "request/message lookalikes do not read as size",
+  !R.isSizeRejection(
+    400,
+    "Invalid request: messages[0].tool_calls[1].function.arguments must be a valid JSON object string"
+  ) &&
+    !R.isSizeRejection(400, "Error in context: Windows path invalid") &&
+    !R.isSizeRejection(400, "request largely unchanged") &&
+    !R.isSizeRejection(400, "cannot merge context windows")
+);
+check(
+  "genuine size phrasing still reads as size",
+  R.isSizeRejection(400, "prompt is too long") &&
+    R.isSizeRejection(400, "message too large") &&
+    R.isSizeRejection(400, "Request Entity Too Large") &&
+    R.isSizeRejection(400, "Input length exceeds model maximum of 200000 tokens")
+);
+check(
   "an unknown model id never retries — no reshape can fix the routing",
   R.isUnknownModelRejection(
     "nvidia/nemotron-3-ultra-550b-a558:free is not a valid model ID"
@@ -619,7 +644,7 @@ check(
   "argument stubbing preserves the call/reply pairing",
   resFat.messages[2].tool_calls[0].id === "call_fat" &&
     resFat.messages[3].tool_call_id === "call_fat",
-  "the API validates pairing, never argument content"
+  "pairing still validated — and strict gateways validate content too"
 );
 check(
   "the stub tells the model the call already ran",
