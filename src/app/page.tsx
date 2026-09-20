@@ -121,6 +121,12 @@ export interface Message {
   contextChars?: number;
   /** Where those bytes lived, largest first. */
   contextBreakdown?: { label: string; chars: number }[];
+  /** How the reply ended: final finish_reason plus continuations spent. */
+  ending?: {
+    finish: string | null;
+    continuedOutput: number;
+    continuedConnection: number;
+  };
   /** How many search rounds ran, and why the loop stopped. */
   searchRounds?: number;
   searchStopReason?: string;
@@ -313,6 +319,11 @@ type StreamEvent =
       reasoningMs?: number;
       contextChars?: number;
       contextBreakdown?: { label: string; chars: number }[];
+      ending?: {
+        finish: string | null;
+        continuedOutput: number;
+        continuedConnection: number;
+      };
       model: string;
       incomplete?: boolean;
       canResume?: boolean;
@@ -1390,6 +1401,7 @@ export default function Home() {
           contextBreakdown: Array.isArray(m.contextBreakdown)
             ? (m.contextBreakdown as { label: string; chars: number }[])
             : undefined,
+          ending: (m.ending as Message["ending"]) ?? undefined,
           createdAt: m.createdAt as string | undefined,
           incomplete: m.incomplete === true,
           // The server sends a flag, never the saved transcript itself: it
@@ -2402,6 +2414,7 @@ export default function Home() {
                   reasoningMs: evt.reasoningMs,
                   contextChars: evt.contextChars,
                   contextBreakdown: evt.contextBreakdown,
+                  ending: evt.ending,
                   // A limit-stop must land as Resume on the SAME bubble.
                   // Ignoring these flags made every `done` look finished, so
                   // the next send opened a new thinking box from scratch.

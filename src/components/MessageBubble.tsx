@@ -1234,6 +1234,34 @@ function MessageBubbleImpl({
                       : `${message.contextChars} ctx`}
                   </span>
                 ) : null}
+
+                {message.ending &&
+                (message.ending.finish ||
+                  message.ending.continuedOutput > 0 ||
+                  message.ending.continuedConnection > 0) ? (
+                  <span
+                    className="text-[11px] text-text-muted"
+                    /*
+                     * Why the reply is exactly as long as it is. A short
+                     * answer with `stop` and zero continuations means the
+                     * model ended it itself — nothing cut it, and Resume
+                     * (not a bug report) is the remedy. Anything else names
+                     * the cutter and what the continuation pools spent.
+                     */
+                    title={
+                      `Final finish_reason: ${message.ending.finish ?? "none (stream ended mid-content)"}` +
+                      `\nOutput-limit continuations: ${message.ending.continuedOutput}` +
+                      `\nConnection-cut continuations: ${message.ending.continuedConnection}`
+                    }
+                  >
+                    · {message.ending.finish ?? "cut"}
+                    {message.ending.continuedOutput +
+                      message.ending.continuedConnection >
+                    0
+                      ? ` +${message.ending.continuedOutput + message.ending.continuedConnection} cont`
+                      : ""}
+                  </span>
+                ) : null}
               </div>
             )}
 
@@ -1947,6 +1975,7 @@ export const MessageBubble = memo(MessageBubbleImpl, (prev, next) => {
     a.durationMs === b.durationMs &&
     a.contextChars === b.contextChars &&
     a.contextBreakdown === b.contextBreakdown &&
+    a.ending === b.ending &&
     a.previousVersions === b.previousVersions &&
     // New array identity on every tool frame, so this is what makes the
     // "Writing app.py" lines appear as they happen.
