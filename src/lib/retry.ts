@@ -260,11 +260,73 @@ export function isRetryableStatus(status: number): boolean {
 export function isSizeRejection(status: number, detail: string): boolean {
   if (status === 413) return true;
   if (status !== 400 && status !== 422) return false;
+  // Codes arrive in snake_case (`input_too_long`), messages in prose —
+  // normalize so one pattern reads both.
+  const words = detail.replace(/_/g, " ");
   return (
-    /too large|too long|maximum|exceeds?|context.{0,20}(length|limit|size|window)|input.{0,20}(tokens?|length)|tokens?.{0,20}(limit|exceed|maximum)|request.{0,20}(too|large|entity|limit)|payload|content.{0,20}(too|large|length)|message.{0,20}(too|large)/i.test(
-      detail
+    /too large|too long|maximum|exceeds?|context.{0,20}(length|limit|size|window)|input.{0,20}(tokens?|length|long)|tokens?.{0,20}(limit|exceed|maximum)|request.{0,20}(too|large|entity|limit)|payload|content.{0,20}(too|large|length)|message.{0,20}(too|large)/i.test(
+      words
     )
   );
+}
+
+/**
+ * The provider's real rejection message, unwrapped.
+ *
+ * OpenRouter wraps a provider failure in its own envelope, and the outer
+ * `error.message` is sometimes all gateway ("Provider returned error")
+ * with the actual cause — the limit named, the parameter rejected —
+ * nested one level down in `error.metadata.raw` as a JSON string. The
+ * size-vs-shape verdict reads this string, so a missed unwrap doesn't
+ * just hide the message: it sends the retry down the wrong path, and a
+ * 697k body retried whole fails exactly the way it just did.
+ *
+ * `error.code`/`error.type` ride along too: some providers name the
+ * fault in the code (`context_length_exceeded`) while the message stays
+ * terse. Whatever survives is capped — this lands in banners and logs.
+ */
+export function extractRejectionDetail(errText: string, cap = 300): string {
+  const clip = (value: string): string => value.slice(0, cap);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(errText);
+  } catch {
+    return clip(errText);
+  }
+  const root = (parsed ?? {}) as Record<string, unknown>;
+  const err = (root.error ?? {}) as Record<string, unknown>;
+  const message = String(err.message ?? root.message ?? "");
+  const codes = [err.code, err.type].filter(
+    (v): v is string => typeof v === "string" && v.length > 0
+  );
+  const generic =
+    !message ||
+    /provider returned error|an error occurred|internal error|something went wrong|request failed/i.test(
+      message
+    );
+  if (generic) {
+    const meta = (err.metadata ?? {}) as Record<string, unknown>;
+    const raw = meta.raw;
+    if (typeof raw === "string" && raw) {
+      try {
+        const nested = JSON.parse(raw) as Record<string, unknown>;
+        const nestedErr = (nested.error ?? {}) as Record<string, unknown>;
+        const nestedCodes = [nestedErr.code, nestedErr.type].filter(
+          (v): v is string => typeof v === "string" && v.length > 0
+        );
+        const nestedMessage = String(
+          nestedErr.message ?? nested.message ?? ""
+        );
+        if (nestedMessage) {
+          return clip([...nestedCodes, nestedMessage].join(" · "));
+        }
+      } catch {
+        return clip(raw);
+      }
+    }
+  }
+  const detail = [...codes, message].filter(Boolean).join(" · ");
+  return clip(detail || errText);
 }
 
 function tenths(ms: number): string {

@@ -96,6 +96,7 @@ import {
 } from "@/lib/rebuild-resume";
 import type { RebuiltResume } from "@/lib/rebuild-resume";
 import {
+  extractRejectionDetail,
   fetchUntilHeaders,
   fetchWithRetry,
   isTimeoutFailure,
@@ -2483,14 +2484,10 @@ Ask before you build the wrong thing. If a choice would change what you produce 
            */
           if (!dsResponse.ok && target.providerId === "openrouter") {
             earlyErrText = await dsResponse.text().catch(() => "");
-            const rejectedDetail = (() => {
-              try {
-                const parsed = JSON.parse(earlyErrText);
-                return String(parsed?.error?.message ?? parsed?.message ?? "");
-              } catch {
-                return earlyErrText.slice(0, 300);
-              }
-            })();
+            // Unwrapped, not just read: the gateway sometimes buries the
+            // real cause in metadata.raw, and the size-vs-shape verdict
+            // below is only as good as this string.
+            const rejectedDetail = extractRejectionDetail(earlyErrText);
             if (
               dsResponse.status === 400 ||
               dsResponse.status === 413 ||
@@ -2525,6 +2522,23 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   retryBody = sanitized;
                   retryReason =
                     "host rejected the payload — retrying without tools and media";
+                } else if (Array.isArray(dsRequestBody.messages)) {
+                  // A shape verdict with nothing to strip — a plain chat the
+                  // gateway refused anyway. The diagnosis may be wrong (a
+                  // generic wrapper names nothing), and a 697k body is guilty
+                  // until proven innocent: fold once rather than failing
+                  // without a second try.
+                  const folded = foldOldestHistory(
+                    dsRequestBody.messages as Record<string, unknown>[],
+                    FOLD_RETRY_TARGET_CHARS
+                  );
+                  const media = stripMediaParts(folded.messages);
+                  if (folded.stats.dropped > 0 || media.stripped) {
+                    retryBody = { ...dsRequestBody, messages: media.messages };
+                    retryReason =
+                      `host rejected the payload — retrying with ${folded.stats.dropped} ` +
+                      `older turn${folded.stats.dropped === 1 ? "" : "s"} folded`;
+                  }
                 }
               }
               if (retryBody) {
@@ -2563,21 +2577,109 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   if (second.ok && second.body) {
                     recordAsync({
                       kind: "api_error",
-                      subject: "openrouter_shape_rejection",
-                      detail: `Recovered on sanitized retry after HTTP ${dsResponse.status}: ${rejectedDetail.slice(0, 160)}`,
+                      subject: "openrouter_rejection_recovery",
+                      detail: `Recovered on rejection retry after HTTP ${dsResponse.status}: ${retryReason} — ${rejectedDetail.slice(0, 160)}`,
                       context: { status: dsResponse.status },
                     });
                     dsResponse = second;
                   } else {
                     const t2 = await second.text().catch(() => "");
+                    const secondDetail = extractRejectionDetail(t2);
                     console.error(
-                      "OpenRouter sanitized retry failed:",
+                      "OpenRouter rejection retry failed:",
                       second.status,
                       t2.slice(0, 300)
                     );
+                    /*
+                     * The targeted retry just proved one transform
+                     * insufficient — a double fault (oversized AND tool-shy)
+                     * or a misread first error. Compose both transforms once:
+                     * fold the history AND strip tools and media. Each retry
+                     * differs materially from the last, so this terminates;
+                     * the one exception is a fold that still came back too
+                     * large, where stripping kilobytes of tools cannot help
+                     * and the honest outcome is the error below.
+                     */
+                    const retry1HadTools = "tools" in retryBody;
+                    const secondIsRejection =
+                      second.status === 400 ||
+                      second.status === 413 ||
+                      second.status === 422 ||
+                      (second.status >= 500 &&
+                        /endpoint is unavailable/i.test(secondDetail));
+                    const stillTooBig =
+                      retry1HadTools &&
+                      isSizeRejection(second.status, secondDetail);
+                    if (
+                      secondIsRejection &&
+                      !stillTooBig &&
+                      Array.isArray(dsRequestBody.messages)
+                    ) {
+                      const refolded = foldOldestHistory(
+                        dsRequestBody.messages as Record<string, unknown>[],
+                        FOLD_RETRY_TARGET_CHARS
+                      );
+                      const composed = sanitizeOpenRouterRequestBody({
+                        ...dsRequestBody,
+                        messages: refolded.messages,
+                      });
+                      const composedJson = JSON.stringify(composed);
+                      if (composedJson !== retryJson) {
+                        const composedChars = composedJson.length;
+                        send({
+                          type: "retrying",
+                          phase: "attempt",
+                          attempt: attempt.attempts + 2,
+                          attempts: (retryAttempts ?? attempt.attempts) + 2,
+                          delayMs: 0,
+                          reason:
+                            "still rejected — retrying once more, smaller and without tools",
+                          detail: secondDetail.slice(0, 200) || undefined,
+                          host: target.providerName,
+                          inputChars: composedChars,
+                          breakdown: breakdownRequestMessages(
+                            composed.messages,
+                            0
+                          ),
+                        });
+                        try {
+                          const third = await fetchUntilHeaders(
+                            (signal) =>
+                              fetch(`${target.baseUrl}/chat/completions`, {
+                                method: "POST",
+                                headers: completionHeaders(target),
+                                body: composedJson,
+                                signal,
+                              }),
+                            attemptTimeoutMs(target, composedChars),
+                            runSignal
+                          );
+                          if (third.ok && third.body) {
+                            recordAsync({
+                              kind: "api_error",
+                              subject: "openrouter_rejection_recovery",
+                              detail:
+                                `Recovered on composed retry after HTTP ${dsResponse.status} ` +
+                                `then ${second.status}: ${secondDetail.slice(0, 160)}`,
+                              context: { status: second.status },
+                            });
+                            dsResponse = third;
+                          } else {
+                            const t3 = await third.text().catch(() => "");
+                            console.error(
+                              "OpenRouter composed retry failed:",
+                              third.status,
+                              t3.slice(0, 300)
+                            );
+                          }
+                        } catch (e) {
+                          console.error("OpenRouter composed retry threw:", e);
+                        }
+                      }
+                    }
                   }
                 } catch (e) {
-                  console.error("OpenRouter sanitized retry threw:", e);
+                  console.error("OpenRouter rejection retry threw:", e);
                 }
               }
             }
@@ -2587,13 +2689,10 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             const errText = earlyErrText || (await dsResponse.text().catch(() => ""));
             console.error("DeepSeek error:", dsResponse.status, errText);
 
-            let detail = "";
-            try {
-              const parsed = JSON.parse(errText);
-              detail = parsed?.error?.message ?? parsed?.message ?? "";
-            } catch {
-              detail = errText.slice(0, 200);
-            }
+            // Same unwrapping as the retry verdict: the final error names
+            // the real cause (including a nested provider message), not the
+            // gateway's wrapper.
+            const detail = extractRejectionDetail(errText, 200);
 
             /*
              * Keep the work before giving up.

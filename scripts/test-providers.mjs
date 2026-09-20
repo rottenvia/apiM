@@ -825,6 +825,25 @@ check(
     /sanitizeOpenRouterRequestBody/.test(route)
 );
 check(
+  "rejection detail is unwrapped in both the retry verdict and the final error",
+  /extractRejectionDetail\(earlyErrText\)/.test(route) &&
+    /extractRejectionDetail\(errText, 200\)/.test(route) &&
+    !/openrouter_shape_rejection/.test(route),
+  "metadata.raw buries the real cause one level down; the old subject lied about size recoveries"
+);
+check(
+  "a shape verdict with nothing to strip folds once instead of failing outright",
+  /} else if \(Array\.isArray\(dsRequestBody\.messages\)\) \{/.test(route),
+  "a generic wrapper names nothing — a 697k body is guilty until proven innocent"
+);
+check(
+  "a rejected targeted retry gets one composed last chance",
+  /still rejected — retrying once more/.test(route) &&
+    /composedJson !== retryJson/.test(route) &&
+    /stillTooBig/.test(route),
+  "a double fault (oversized AND tool-shy) defeats either transform alone"
+);
+check(
   "the retry event carries the provider's own message",
   /detail: rejectedDetail/.test(route) &&
     /Provider said/.test(read("src/components/ChatArea.tsx")),

@@ -78,6 +78,71 @@ check(
     !R.isSizeRejection(502, "No endpoints found for the request")
 );
 
+// The gateway wraps provider failures: a bare error.message is sometimes
+// all envelope ("Provider returned error") with the real cause nested in
+// metadata.raw. Classification reads the unwrapped string.
+const wrappedSize = JSON.stringify({
+  error: {
+    message: "Provider returned error",
+    code: 400,
+    metadata: {
+      provider_name: "Nvidia",
+      raw: JSON.stringify({
+        error: {
+          message:
+            "This model's maximum context length is 131072 tokens, however you requested 178432 tokens.",
+          code: "context_length_exceeded",
+        },
+      }),
+    },
+  },
+});
+check(
+  "a wrapped size error unwraps to the provider's message",
+  (() => {
+    const detail = R.extractRejectionDetail(wrappedSize);
+    return (
+      detail.includes("maximum context length") &&
+      R.isSizeRejection(400, detail)
+    );
+  })(),
+  "a missed unwrap sends a 697k body down the strip-tools path and fails it identically"
+);
+check(
+  "a terse message with a size code still reads as size",
+  (() => {
+    const detail = R.extractRejectionDetail(
+      JSON.stringify({
+        error: { message: "Bad request", code: "context_length_exceeded" },
+      })
+    );
+    return R.isSizeRejection(400, detail);
+  })(),
+  "some providers name the fault in the code while the message stays terse"
+);
+check(
+  "snake_case codes read the same as prose",
+  R.isSizeRejection(400, "input_too_long · x") &&
+    R.isSizeRejection(400, "request_too_large")
+);
+check(
+  "a generic wrapper with nothing nested stays a shape verdict",
+  (() => {
+    const detail = R.extractRejectionDetail(
+      JSON.stringify({ error: { message: "Provider returned error" } })
+    );
+    return (
+      detail === "Provider returned error" && !R.isSizeRejection(400, detail)
+    );
+  })(),
+  "unknown stays on the strip-tools path — and the cascade below covers a wrong guess"
+);
+check(
+  "extraction caps a runaway body and passes plain text through",
+  R.extractRejectionDetail("boom: " + "x".repeat(500)).length === 300 &&
+    R.extractRejectionDetail("plain gateway text").startsWith("plain gateway")
+);
+
 check(
   "a dropped connection is transient",
   R.isTransientNetworkError(Object.assign(new Error("socket hang up"), { name: "TypeError" }))
