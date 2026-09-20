@@ -235,7 +235,7 @@ interface ChatRequestBody {
   conversationId?: string | null;
   deepseekApiKey?: string;
   /**
-   * OpenRouter key — serves GLM, the free 0731 lane and custom models.
+   * OpenRouter key — serves GLM, the free Nemotron lane and custom models.
    * Customs ride this key by construction; there is no second key for them.
    */
   openrouterApiKey?: string;
@@ -661,9 +661,9 @@ export async function POST(req: NextRequest) {
   // resolving them to the main GLM/OpenRouter model once made an agent
   // search perform extra paid calls that were never part of the reply's
   // usage total. Flash when a DeepSeek key exists (the key already paying
-  // for the reply keeps the side calls cheap), else the free 0731 lane.
+  // for the reply keeps the side calls cheap), else the free Nemotron lane.
   // The caller drops the helper when it equals the main model — a Flash
-  // conversation judges on Flash already, a 0731-free one on itself.
+  // conversation judges on Flash already, a Nemotron-free one on itself.
   const helperTarget = resolveHelperTarget(creds, customs);
   const helperIsCheap =
     helperTarget !== null && helperTarget.model.id !== target.model.id;

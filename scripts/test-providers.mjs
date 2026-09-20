@@ -4,13 +4,13 @@
  * Run:  npm run test:providers
  *
  * DeepSeek used to be the only Chat Completions host. OpenRouter is the
- * second (GLM 5.3 Flash, the free DeepSeek 0731 lane, and any custom model
+ * second (GLM 5.3 Flash, the free Nemotron lane, and any custom model
  * the user adds); a local OpenAI-compatible host serves Qwen. The agent
  * loop stays identical — only the URL, key and on-the-wire model id
  * change. Plugin directive priority is left alone.
  *
  * (Ox Alpha / OpenCode Zen was removed 2026-09: the trial lane is the
- * free 0731 model on OpenRouter now.)
+ * free Nemotron model on OpenRouter now.)
  */
 import path from "node:path";
 import { readFileSync } from "node:fs";
@@ -59,19 +59,19 @@ check(
   "Ox Alpha is gone from the catalog",
   !models.MODELS.some((m) => m.id === "ox-alpha")
 );
-const free0731 = models.MODELS.find(
-  (m) => m.id === "deepseek-v4-flash-0731-free"
+const freeNemotron = models.MODELS.find(
+  (m) => m.id === "nvidia-nemotron-3-ultra-free"
 );
-check("DeepSeek V4 Flash 0731 Free is listed", Boolean(free0731));
+check("Nemotron 3 Ultra Free is listed", Boolean(freeNemotron));
 check(
   "the free lane rides OpenRouter, not a Zen host",
-  free0731?.provider === "openrouter",
-  free0731?.provider
+  freeNemotron?.provider === "openrouter",
+  freeNemotron?.provider
 );
 check(
   "the wire id is the official :free slug",
-  free0731?.apiModel === "deepseek/deepseek-v4-flash-0731:free",
-  "openrouter.ai/deepseek lists the free lane as deepseek-v4-flash-0731:free"
+  freeNemotron?.apiModel === "nvidia/nemotron-3-ultra-550b-a558:free",
+  "openrouter.ai/nvidia lists the free lane as nemotron-3-ultra-550b-a558:free"
 );
 check(
   "unknown ids fall back to the default model",
@@ -104,13 +104,13 @@ check(
   glmOk.ok ? glmOk.target.baseUrl : ""
 );
 
-const freeOk = providers.resolveChatTarget("deepseek-v4-flash-0731-free", {
+const freeOk = providers.resolveChatTarget("nvidia-nemotron-3-ultra-free", {
   openrouterApiKey: "sk-or-v1-test",
 });
-check("the 0731 free lane resolves with an OpenRouter key", freeOk.ok);
+check("the Nemotron free lane resolves with an OpenRouter key", freeOk.ok);
 check(
   "and sends the :free slug on the wire",
-  freeOk.ok && freeOk.target.apiModel === "deepseek/deepseek-v4-flash-0731:free"
+  freeOk.ok && freeOk.target.apiModel === "nvidia/nemotron-3-ultra-550b-a558:free"
 );
 
 const noOr = providers.resolveChatTarget("glm-5.3-flash", { deepseekApiKey: "sk-ds" });
@@ -128,14 +128,14 @@ check(
 
 const helperFree = providers.resolveHelperTarget({ openrouterApiKey: "sk-or" });
 check(
-  "the helper falls back to the 0731 free lane without DeepSeek",
-  helperFree?.model.id === "deepseek-v4-flash-0731-free" &&
+  "the helper falls back to the Nemotron free lane without DeepSeek",
+  helperFree?.model.id === "nvidia-nemotron-3-ultra-free" &&
     helperFree?.providerId === "openrouter",
   "the free judge never depends on a paid balance"
 );
 
 // The helper no longer follows the main model: it is always the cheapest
-// known lane (Flash on DeepSeek, 0731-free on OpenRouter), and the caller
+// known lane (Flash on DeepSeek, Nemotron-free on OpenRouter), and the caller
 // drops it when it equals the main model. A second argument would be dead.
 check(
   "DeepSeek still wins when both keys exist",
@@ -175,17 +175,17 @@ check("OpenRouter thinking-off sends neither field", ocOff.thinking === undefine
 
 console.log("\n4. Pricing");
 
-check("the 0731 free lane is in the rate table", Boolean(pricing.MODEL_RATES["deepseek-v4-flash-0731-free"]));
+check("the Nemotron free lane is in the rate table", Boolean(pricing.MODEL_RATES["nvidia-nemotron-3-ultra-free"]));
 check(
   "the free lane is free",
   pricing.estimateCost(
     { prompt_tokens: 10_000, completion_tokens: 2_000, prompt_cache_miss_tokens: 10_000 },
-    "deepseek-v4-flash-0731-free"
+    "nvidia-nemotron-3-ultra-free"
   ) === 0
 );
 check(
   "a free model does not divide-by-zero the budget cap",
-  budget.maxTokensFor(budget.createBudget(0.1), "deepseek-v4-flash-0731-free", 65_536) === 65_536
+  budget.maxTokensFor(budget.createBudget(0.1), "nvidia-nemotron-3-ultra-free", 65_536) === 65_536
 );
 check(
   "DeepSeek Pro rates are unchanged",
@@ -857,7 +857,7 @@ check(
 check(
   "the helper never rides a custom",
   providers.resolveHelperTarget({ openrouterApiKey: "sk-or" }, customs)
-    ?.model.id === "deepseek-v4-flash-0731-free",
+    ?.model.id === "nvidia-nemotron-3-ultra-free",
   "a side call must ride a known-cheap lane, not a user-typed price"
 );
 check(
@@ -877,6 +877,21 @@ check(
   /Your models/.test(selector)
 );
 check(
+  "sanitize keeps the :free routing suffix — verified free models must be addable",
+  models.sanitizeCustomModelDef({
+    label: "Nemotron 3 Ultra (free)",
+    apiModel: "nvidia/nemotron-3-ultra-550b-a558:free",
+    vision: "helper",
+  })?.id === "custom:nvidia/nemotron-3-ultra-550b-a558:free",
+  "the pattern once rejected ':' so every :free slug verified and then refused to add"
+);
+check(
+  "the retired 0731 id migrates to the current free lane",
+  /deepseek-v4-flash-0731-free/.test(page) &&
+    /setModel\(FREE_OPENROUTER_MODEL_ID\)/.test(page),
+  "saved settings pointing at the pulled slug must land on Nemotron, not dangle"
+);
+check(
   "the live banner is driven by visibleUpstreamNotice, not a late 8s hint",
   /visibleUpstreamNotice/.test(page) &&
     !/Still waiting on/.test(page) &&
@@ -893,10 +908,10 @@ check(
     /no first token/.test(route)
 );
 
-console.log("\n11. GLM 5.3 Flash (OpenRouter) and the free 0731 lane");
+console.log("\n11. GLM 5.3 Flash (OpenRouter) and the free Nemotron lane");
 
 const glm = models.MODELS.find((m) => m.id === "glm-5.3-flash");
-const free = models.MODELS.find((m) => m.id === "deepseek-v4-flash-0731-free");
+const free = models.MODELS.find((m) => m.id === "nvidia-nemotron-3-ultra-free");
 check("GLM 5.3 Flash is in the catalog", Boolean(glm));
 check(
   "its wire id is the official OpenRouter slug",
@@ -909,11 +924,11 @@ check(
     glm?.openToolLimits === false
   );
 check("it is a native VLM", glm?.vision === "native");
-check("DeepSeek V4 Flash 0731 Free is in the catalog", Boolean(free));
+check("Nemotron 3 Ultra Free is in the catalog", Boolean(free));
 check("the free lane rides the openrouter provider", free?.provider === "openrouter");
 check(
   "the free lane sends the official :free slug on the wire",
-  free?.apiModel === "deepseek/deepseek-v4-flash-0731:free"
+  free?.apiModel === "nvidia/nemotron-3-ultra-550b-a558:free"
 );
 check("Ox Alpha is gone from the catalog", !models.MODELS.some((m) => m.id === "ox-alpha"));
 
@@ -939,7 +954,7 @@ check(
   !providers.resolveChatTarget("glm-5.3-flash", { deepseekApiKey: "sk-ds" }).ok
 );
 
-const freeResolved = providers.resolveChatTarget("deepseek-v4-flash-0731-free", {
+const freeResolved = providers.resolveChatTarget("nvidia-nemotron-3-ultra-free", {
   openrouterApiKey: "sk-or-v1-test",
 });
 check("the free lane resolves with an OpenRouter key", freeResolved.ok);
@@ -950,11 +965,11 @@ check(
 );
 check(
   "and sends the :free slug on the wire",
-  freeResolved.ok && freeResolved.target.apiModel === "deepseek/deepseek-v4-flash-0731:free"
+  freeResolved.ok && freeResolved.target.apiModel === "nvidia/nemotron-3-ultra-550b-a558:free"
 );
 check(
   "the free lane is refused with only a DeepSeek key",
-  !providers.resolveChatTarget("deepseek-v4-flash-0731-free", {
+  !providers.resolveChatTarget("nvidia-nemotron-3-ultra-free", {
     deepseekApiKey: "sk-ds",
   }).ok
 );
@@ -965,8 +980,8 @@ check(
 );
 check(
   "and the free lane wants the OpenRouter key too",
-  models.hasKeyForModel("deepseek-v4-flash-0731-free", { openrouterKey: "sk-or-v1" }) &&
-    !models.hasKeyForModel("deepseek-v4-flash-0731-free", { deepseekKey: "sk-ds" })
+  models.hasKeyForModel("nvidia-nemotron-3-ultra-free", { openrouterKey: "sk-or-v1" }) &&
+    !models.hasKeyForModel("nvidia-nemotron-3-ultra-free", { deepseekKey: "sk-ds" })
 );
 
 check(
@@ -975,7 +990,7 @@ check(
     pricing.MODEL_RATES["glm-5.3-flash"]?.output === 0.5,
   "the 50% discount ends 2026-09-09; the cap must never undercount"
 );
-check("the free lane costs nothing in the rate table", pricing.MODEL_RATES["deepseek-v4-flash-0731-free"]?.input === 0 && pricing.MODEL_RATES["deepseek-v4-flash-0731-free"]?.output === 0);
+check("the free lane costs nothing in the rate table", pricing.MODEL_RATES["nvidia-nemotron-3-ultra-free"]?.input === 0 && pricing.MODEL_RATES["nvidia-nemotron-3-ultra-free"]?.output === 0);
 check(
     "GLM replies are billed, so the cost chip can show real money",
     (() => {

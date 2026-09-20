@@ -946,11 +946,16 @@ export default function Home() {
             if (s.exaEnabled === false) setExaEnabled(false);
             if (s.visionKey) setVisionKey(s.visionKey);
             if (s.visionModel) setVisionModel(s.visionModel);
-            // Retired ids land on the lane that replaced them: both free
-            // lanes merged into the dated 0731 id. A dangling custom id (a
-            // deleted model, a hand-edited blob) falls back to the default
+            // Retired ids land on the lane that replaced them: Ox, the
+            // first free Flash, and the pulled 0731 free slug all merge
+            // into the current free id. A dangling custom id (a deleted
+            // model, a hand-edited blob) falls back to the default
             // rather than displaying a model that no longer exists.
-            if (s.model === "ox-alpha" || s.model === "deepseek-v4-flash-free") {
+            if (
+              s.model === "ox-alpha" ||
+              s.model === "deepseek-v4-flash-free" ||
+              s.model === "deepseek-v4-flash-0731-free"
+            ) {
               setModel(FREE_OPENROUTER_MODEL_ID);
             } else if (typeof s.model === "string" && s.model) {
               const dangling =

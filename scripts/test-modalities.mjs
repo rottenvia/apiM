@@ -50,7 +50,7 @@ console.log("1. Catalog capabilities");
 const pro = models.MODELS.find((m) => m.id === "deepseek-v4-pro");
 const flash = models.MODELS.find((m) => m.id === "deepseek-v4-flash");
 const glm = models.MODELS.find((m) => m.id === "glm-5.3-flash");
-const free0731 = models.MODELS.find((m) => m.id === "deepseek-v4-flash-0731-free");
+const freeNemotron = models.MODELS.find((m) => m.id === "nvidia-nemotron-3-ultra-free");
 const qwen = models.MODELS.find((m) => m.id === "qwen-3.8-27b");
 
 check("DeepSeek Pro uses the vision helper", pro?.vision === "helper" && pro?.video === false);
@@ -63,7 +63,7 @@ check("Flash needs the helper", models.modelNeedsVisionHelper("deepseek-v4-flash
 check("GLM does not need the helper", models.modelNeedsVisionHelper("glm-5.3-flash") === false);
 check("Qwen does not need the helper", models.modelNeedsVisionHelper("qwen-3.8-27b") === false);
 
-    check("the 0731 free lane cannot watch video", models.modelSeesVideo("deepseek-v4-flash-0731-free") === false);
+    check("the Nemotron free lane cannot watch video", models.modelSeesVideo("nvidia-nemotron-3-ultra-free") === false);
     check("Qwen can watch video", models.modelSeesVideo("qwen-3.8-27b"));
     check("GLM can watch video", models.modelSeesVideo("glm-5.3-flash"));
 check("Pro cannot watch video", models.modelSeesVideo("deepseek-v4-pro") === false);

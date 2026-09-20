@@ -2,7 +2,7 @@
  * Resolve which LLM endpoint a request should hit.
  *
  * Three front doors, one Chat Completions shape: DeepSeek's own API, the
- * OpenRouter gateway (GLM 5.3 Flash, the free DeepSeek 0731 lane, and any
+ * OpenRouter gateway (GLM 5.3 Flash, the free Nemotron lane, and any
  * custom model the user added), and a local OpenAI-compatible host for the
  * on-device Qwen sidecar. The rest of the agent loop stays identical — only
  * the URL, key and on-the-wire model id change.
@@ -37,7 +37,7 @@ export {
 
 export interface ChatCredentials {
   deepseekApiKey?: string | null;
-  /** OpenRouter key — serves GLM, the free 0731 lane, and customs. */
+  /** OpenRouter key — serves GLM, the free Nemotron lane, and customs. */
   openrouterApiKey?: string | null;
   /** OpenAI-compatible host, e.g. http://127.0.0.1:18765/v1 */
   localBaseUrl?: string | null;
@@ -223,13 +223,13 @@ export function resolveChatTarget(
  * A cheap (or free) model for search planning, refine and asides.
  *
  * DeepSeek Flash when a DeepSeek key exists — the key already paying for
- * the reply keeps the side calls cheap. Otherwise the free 0731 lane on
+ * the reply keeps the side calls cheap. Otherwise the free Nemotron lane on
  * OpenRouter when that key exists. Local 27B is deliberately not a helper —
  * it is the main model, not a planner — and customs are never helpers: a
  * side call must ride a known-cheap lane, not a user-typed price.
  *
  * The caller drops the helper when it equals the main model (a Flash
- * conversation judges on Flash already; a 0731-free conversation judges on
+ * conversation judges on Flash already; a Nemotron-free conversation judges on
  * itself).
  */
 export function resolveHelperTarget(

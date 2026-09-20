@@ -97,7 +97,11 @@ export function CustomModelsManager({
       vision: verified.supportsVision ? "native" : "helper",
     });
     if (!def) {
-      setVerifyError("That model could not be added. Try verifying it again.");
+      // Verify already passed, so this is a malformed wire id, not a
+      // lookup failure — say so instead of sending the user in a loop.
+      setVerifyError(
+        `The verified id "${verified.id}" is not a usable model id. Copy it fresh from openrouter.ai.`
+      );
       return;
     }
     // Same wire id, same def id — this replaces rather than duplicates.

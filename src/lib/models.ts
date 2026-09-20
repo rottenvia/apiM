@@ -129,7 +129,11 @@ export function isCustomModelId(id: string | null | undefined): boolean {
 }
 
 /** OpenRouter slugs look like `vendor/model-name` with an optional `:free`-style suffix. */
-const SLUG_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]{1,126}[A-Za-z0-9]$|^[A-Za-z0-9]{1,128}$/;
+// Length is guarded at the call site; this guards shape. The optional
+// `:variant` suffix is OpenRouter routing (`:free`, `:nitro`, `:floor`) —
+// Verify accepts it, so this must too, or free models verify and then
+// refuse to add.
+const SLUG_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._/-]*[A-Za-z0-9])?(?::[A-Za-z0-9-]+)?$/;
 
 /**
  * Validate a custom model definition from the client or localStorage.
@@ -228,7 +232,7 @@ export function customToModelInfo(def: CustomModelDef): ModelInfo {
     settingsSubtitle: `OpenRouter · ${def.apiModel}`,
     mapsLowToHigh: false,
     // Customs are main models, never side-call helpers: the helper must be
-    // a known-cheap lane (Flash on DeepSeek, 0731-free on OpenRouter), and a
+    // a known-cheap lane (Flash on DeepSeek, Nemotron-free on OpenRouter), and a
     // custom's price is user-typed rather than verified.
     helper: false,
     peakHours: false,
@@ -265,7 +269,7 @@ export const DEFAULT_MODEL_ID = "glm-5.3-flash";
 export const QWEN_38_27B_ID = "qwen-3.8-27b";
 
 /** The free OpenRouter lane customs and GLM fall back to for side calls. */
-export const FREE_OPENROUTER_MODEL_ID = "deepseek-v4-flash-0731-free";
+export const FREE_OPENROUTER_MODEL_ID = "nvidia-nemotron-3-ultra-free";
 
 export const LOCAL_HOST_PRESETS = [
   {
@@ -305,7 +309,7 @@ export const PROVIDER_INFO: Record<ProviderId, ProviderInfo> = {
     authLabel: "openrouter.ai/settings/keys",
     keyPlaceholder: "sk-or-v1-...",
     keyBlurb:
-      "One key covers every OpenRouter model: GLM 5.3 Flash, DeepSeek V4 Flash 0731 (free), and anything custom you add.",
+      "One key covers every OpenRouter model: GLM 5.3 Flash, Nemotron 3 Ultra (free), and anything custom you add.",
     thinkingStyle: "openai",
   },
   local: {
@@ -386,12 +390,12 @@ export const MODELS: ModelInfo[] = [
   },
   {
     id: FREE_OPENROUTER_MODEL_ID,
-    apiModel: "deepseek/deepseek-v4-flash-0731:free",
+    apiModel: "nvidia/nemotron-3-ultra-550b-a558:free",
     provider: "openrouter",
-    label: "DeepSeek V4 Flash 0731 Free",
-    shortLabel: "0731 Free",
+    label: "Nemotron 3 Ultra Free",
+    shortLabel: "Nemotron Free",
     description:
-      "DeepSeek's GA revision of V4 Flash (Jul 31, 2026) on OpenRouter's free tier. 13B active params for coding, reasoning and agent work. Free — but it is a shared pool, so evenings can be slow.",
+      "NVIDIA's 550B-MoE flagship on OpenRouter's free tier. The smartest $0 lane for coding, reasoning and agent work. Free — but it is a shared pool, so evenings can be slow.",
     specs: "1M context · free · tools + reasoning",
     resumeBlurb: "Free on OpenRouter",
     settingsSubtitle: "OpenRouter · free",
