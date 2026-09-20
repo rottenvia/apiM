@@ -2,8 +2,8 @@
  * Per-model user content: text, or OpenAI-compat image/video parts.
  *
  * DeepSeek's hosted Chat Completions API is text-only, so screenshots are
- * described by a vision helper and inlined as `<image>` blocks. GLM, the
- * free 0731 lane and Qwen 3.8 27B take pixels (and MP4) on the wire —
+ * described by a vision helper and inlined as `<image>` blocks. GLM and
+ * Qwen 3.8 27B take pixels (and MP4) on the wire —
  * calling `/api/vision` for those models is the bug that made "extracted
  * text" appear on a native VLM.
  */
