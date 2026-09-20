@@ -7,6 +7,7 @@ import {
   availableTitle,
   getConversation,
   drainBtwNotes,
+  saveHistorySummary,
 } from "@/lib/store";
 import type { StoredMessage } from "@/lib/store";
 import { autoThinkingEffort } from "@/lib/smart-search";
@@ -122,7 +123,12 @@ import {
   loopWarningText,
 } from "@/lib/loop-breaker";
 import { extractReasoningDelta } from "@/lib/reasoning-stream";
-import { loadScopedConversationHistory } from "@/lib/chat-history";
+import { loadHistoryForRequest } from "@/lib/chat-history";
+import {
+  renderHistorySummary,
+  runHistorySummary,
+  shouldRefreshHistorySummary,
+} from "@/lib/history-summary";
 import type { ScopedChatMessage } from "@/lib/chat-history";
 import {
   buildUserContent,
@@ -909,10 +915,64 @@ export async function POST(req: NextRequest) {
          * id has no stored history, and an existing id can only read itself.
          */
         let scopedHistory: ScopedChatMessage[] = [];
+        let historySummaryText: string | null = null;
         try {
-          scopedHistory = await loadScopedConversationHistory(convId, {
+          /*
+           * Rolling history: newest turns ride verbatim, older ones ride as
+           * a stored summary the cheap helper keeps current. The refresh
+           * runs here — before the transcript is built — so this request
+           * already benefits; it only fires once the uncovered backlog
+           * passes the trigger, and a miss just stretches the window until
+           * the next request retries. Runs on resume too: persisting a
+           * fresher summary is still useful even though the resumed
+           * transcript (rebuilt from save, never from history) ignores it.
+           */
+          const full = await loadHistoryForRequest(convId, {
             dropLastUser: Boolean(regenerateFromId || resumeMessageId),
           });
+          scopedHistory = full.verbatim;
+          let summary = full.stored;
+          const lastPending = full.pending.at(-1);
+          if (
+            lastPending &&
+            shouldRefreshHistorySummary(full.pending) &&
+            helper
+          ) {
+            const fresh = await runHistorySummary(
+              summary?.text ?? null,
+              full.pending,
+              {
+                apiKey: helper.apiKey,
+                baseUrl: helper.baseUrl,
+                model: helper.apiModel,
+                thinkingStyle: helper.thinkingStyle,
+              },
+              runSignal
+            );
+            if (fresh) {
+              summary = {
+                text: fresh.text,
+                upToId: lastPending.id,
+                droppedTurns:
+                  (summary?.droppedTurns ?? 0) + fresh.droppedTurns,
+                updatedAt: new Date().toISOString(),
+              };
+              // False means a concurrent request summarised first — its
+              // cursor wins the write, ours still applies to this request.
+              await saveHistorySummary(
+                convId,
+                full.stored?.upToId ?? null,
+                summary
+              );
+              if (fresh.usage) {
+                console.info(
+                  `History summary refreshed (${full.pending.length} turns): ` +
+                    `${fresh.usage.prompt_tokens} in / ${fresh.usage.completion_tokens} out`
+                );
+              }
+            }
+          }
+          historySummaryText = summary ? renderHistorySummary(summary) : null;
         } catch (e) {
           console.error("Could not load scoped conversation history:", e);
         }
@@ -1317,6 +1377,12 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               })()
             : () => null;
 
+        // Older turns, compressed: the summary rides as its own system
+        // message ahead of the verbatim window, with its own request-size
+        // bucket so the receipt line shows the compaction working.
+        if (historySummaryText) {
+          transcript.push({ role: "system", content: historySummaryText });
+        }
         for (const msg of scopedHistory) {
           if (msg.role === "assistant") {
             if (!msg.content?.trim()) continue;
