@@ -109,6 +109,7 @@ import {
 } from "@/lib/retry";
 import {
   MAX_AUTO_REVIVES,
+  describesImminentAction,
   detectPrematureStop,
   prematureStopNotice,
   reviveInstruction,
@@ -1856,6 +1857,10 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          * Resume: an explicit continue is the user asking us to try again.
          */
         let autoRevives = 0;
+        // Rounds that completed via a tool-less retry. Owed to the user in
+        // the stop notice — "stopped mid-task" alone hides that some rounds
+        // could not act at all.
+        let degradedRoundsThisRun = 0;
         /**
          * Times a dropped connection cut the answer mid-content. Separate
          * from MAX_CONTINUATIONS so provider flakiness cannot spend the
@@ -2136,6 +2141,9 @@ Ask before you build the wrong thing. If a choice would change what you produce 
 
           const toolAcc = new ToolCallAccumulator();
           let roundContent = "";
+          // True when the response being processed came from a retry that
+          // stripped the tools. A stop on such a round is harness-caused.
+          let roundRanWithoutTools = false;
           let roundReasoning = "";
           const roundDeltaFields = new Set<string>();
           /** "stop" if the model finished, "length" if it ran out of room. */
@@ -2594,6 +2602,17 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                       detail: `Recovered on rejection retry after HTTP ${dsResponse.status}: ${retryReason} — ${rejectedDetail.slice(0, 160)}`,
                       context: { status: dsResponse.status },
                     });
+                    // A tool-less recovery changes what the model COULD do
+                    // this round: narration after it is harness-caused, not
+                    // defiance. The revive shove and the stop notice read this.
+                    roundRanWithoutTools = !("tools" in retryBody);
+                    if (roundRanWithoutTools) {
+                      degradedRoundsThisRun += 1;
+                      console.log(
+                        `[chat] ${target.model.id} round ${round}: continuing without tools — ` +
+                          `HTTP ${dsResponse.status} rejected the request (${rejectedDetail.slice(0, 120)})`
+                      );
+                    }
                     dsResponse = second;
                   } else {
                     const t2 = await second.text().catch(() => "");
@@ -2676,6 +2695,12 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                                 `then ${second.status}: ${secondDetail.slice(0, 160)}`,
                               context: { status: second.status },
                             });
+                            roundRanWithoutTools = true;
+                            degradedRoundsThisRun += 1;
+                            console.log(
+                              `[chat] ${target.model.id} round ${round}: continuing smaller and without tools — ` +
+                                `HTTP ${second.status} rejected the targeted retry (${secondDetail.slice(0, 120)})`
+                            );
                             dsResponse = third;
                           } else {
                             const t3 = await third.text().catch(() => "");
@@ -3620,6 +3645,10 @@ Ask before you build the wrong thing. If a choice would change what you produce 
 
               if (!progress.complete && !stuck && progress.next) {
                 nudgedIncomplete = true;
+                // A generic "carry on" after narrated intent just buys another
+                // narration: the model reads it as approval of what it said.
+                // Name the failure — describe-versus-do — so the shove lands.
+                const narratedIdle = describesImminentAction(roundContent ?? "");
                 transcript.push({
                   role: "user",
                   content:
@@ -3629,7 +3658,12 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                     `Either carry on with it, or if it genuinely cannot be ` +
                     `done, mark that step blocked with update_plan and tell ` +
                     `the user what is in the way. Do not present unfinished ` +
-                    `work as complete.`,
+                    `work as complete.` +
+                    (narratedIdle
+                      ? `\n\nYou just described the next action instead of doing it. ` +
+                        `Do not narrate, plan aloud, or repeat what you already said — ` +
+                        `call the tool in this response.`
+                      : ""),
                 });
                 send({ type: "status", stage: "working" });
                 continue;
@@ -3668,7 +3702,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               autoRevives += 1;
               transcript.push({
                 role: "user",
-                content: reviveInstruction(premature),
+                content: reviveInstruction(premature, roundRanWithoutTools),
               });
               send({
                 type: "continuing",
@@ -4979,13 +5013,20 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           model,
           incomplete: unfinished,
           canResume: unfinished,
-          stopReason: stoppedPrematurely
-            ? prematureStopNotice(stoppedPrematurely)
-            : hitOutputCeiling
-              ? "The answer hit the output limit before it finished"
-              : connectionCutsExhausted
-                ? "The connection kept dropping before the answer finished"
-                : undefined,
+          stopReason: (() => {
+            const base = stoppedPrematurely
+              ? prematureStopNotice(stoppedPrematurely)
+              : hitOutputCeiling
+                ? "The answer hit the output limit before it finished"
+                : connectionCutsExhausted
+                  ? "The connection kept dropping before the answer finished"
+                  : undefined;
+            if (!base || degradedRoundsThisRun === 0) return base;
+            return (
+              `${base} — ${degradedRoundsThisRun} round` +
+              `${degradedRoundsThisRun === 1 ? "" : "s"} ran without tools after rejections`
+            );
+          })(),
           reasoningDiagnostic: {
             expected: thinkingEnabled,
             chars: reasoningContent.length,
