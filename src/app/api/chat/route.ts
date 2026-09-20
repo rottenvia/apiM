@@ -98,7 +98,7 @@ import {
   fetchUntilHeaders,
   fetchWithRetry,
   isTimeoutFailure,
-  OPENCODE_RETRY,
+  OPENROUTER_RETRY,
   readWithTimeout,
   SERVER_SIDE_STATUS,
   sleep,
@@ -121,10 +121,9 @@ import {
 import type { StoredAttachment } from "@/lib/multimodal";
 import {
   DEFAULT_MODEL_ID,
-  getModel,
-  maxOutputTokensFor,
-  modelVision,
+  sanitizeCustomModelDef,
 } from "@/lib/models";
+import type { CustomModelDef } from "@/lib/models";
 
 /**
  * Marks a user turn that exists only to carry a tool's image.
@@ -153,13 +152,17 @@ import {
   applyThinking,
   attemptTimeoutMs,
   completionHeaders,
+  OPENROUTER_FIRST_TOKEN_MS,
   providerHttpError,
   providerTimedOut,
   providerUnreachable,
   resolveChatTarget,
   resolveHelperTarget,
 } from "@/lib/providers";
-import { OX_FIRST_TOKEN_MS, isOxProvider } from "@/lib/ox-host";
+import {
+  breakdownRequestMessages,
+  formatBreakdown,
+} from "@/lib/request-size";
 import {
   ensureEngineRunning,
   isManagedEngineUrl,
@@ -231,12 +234,16 @@ interface ChatRequestBody {
   attachments?: StoredAttachment[];
   conversationId?: string | null;
   deepseekApiKey?: string;
-  /** OpenCode Zen key — required when Ox Alpha is on the Zen host. */
-  opencodeApiKey?: string;
-  /** OpenRouter key — required when Ox Alpha is on the OpenRouter host. */
+  /**
+   * OpenRouter key — serves GLM, the free 0731 lane and custom models.
+   * Customs ride this key by construction; there is no second key for them.
+   */
   openrouterApiKey?: string;
-  /** `zen` or `openrouter`. Defaults to Zen. */
-  oxHost?: string;
+  /**
+   * The user's own OpenRouter models, as added in Settings. Re-sanitized
+   * here — the client copy is convenience, this copy is authority.
+   */
+  customModels?: CustomModelDef[];
   /** Local OpenAI-compatible host (in-app sidecar or a custom one). */
   localBaseUrl?: string;
   localApiKey?: string;
@@ -361,6 +368,8 @@ type StreamEvent =
       reason: string;
       host?: string;
       inputChars?: number;
+      /** Where the request bytes live, largest first (see lib/request-size). */
+      breakdown?: { label: string; chars: number }[];
     }
   | {
       /** Old tool output was collapsed to keep a long run affordable. */
@@ -459,6 +468,13 @@ type StreamEvent =
       durationMs: number;
       model: string;
       /**
+       * How long the model spent reasoning, first trace token to last,
+       * across every round (and carried across Resume). The thinking
+       * panel's "Thought for 12s" — measured server-side, where the
+       * tokens actually arrive, so network jitter never inflates it.
+       */
+      reasoningMs?: number;
+      /**
        * True when the reply stopped unfinished and Resume should keep the
        * same transcript (output ceiling, budget, or an inner-limit abort).
        * The live UI used to ignore this and treat every `done` as complete,
@@ -491,12 +507,12 @@ type StreamEvent =
  * The least-shaped version of a Chat Completions body: no tools, no tool
  * choice, and no image/video parts (replaced by a text note).
  *
- * The Ox Alpha free model's tool path has been flapping on the OpenCode
- * gateway (anomalyco/opencode #44300, #44382 — "Endpoint is unavailable" /
- * network_error on ANY request that offers tools, while the identical
- * request without them streams fine). It is their adapter, not our key, but
- * while it is down a workspace turn — which always offers tools — fails
- * 100% and looks "50/50" as their side recovers and breaks again.
+ * The free DeepSeek lane's tool path flaps on the OpenRouter gateway
+ * several times a week — "Endpoint is unavailable" / network_error on ANY
+ * request that offers tools, while the identical request without them
+ * streams fine. It is their adapter, not our key, but while it is down a
+ * workspace turn — which always offers tools — fails 100% and looks
+ * "50/50" as their side recovers and breaks again.
  *
  * This is the fallback body for ONE retry after such a rejection: the round
  * degrades to prose (the model can still emit tool calls learned from the
@@ -504,7 +520,7 @@ type StreamEvent =
  * Everything else — thinking fields, stream options, message text — stays
  * exactly as it was.
  */
-function sanitizeOxRequestBody(body: Record<string, unknown>): Record<string, unknown> {
+function sanitizeOpenRouterRequestBody(body: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = { ...body };
   delete out.tools;
   delete out.tool_choice;
@@ -564,9 +580,8 @@ export async function POST(req: NextRequest) {
     message,
     conversationId,
     deepseekApiKey,
-    opencodeApiKey,
     openrouterApiKey,
-    oxHost,
+    customModels = [],
     localBaseUrl,
     localApiKey,
     localApiModel,
@@ -601,14 +616,21 @@ export async function POST(req: NextRequest) {
 
   const creds = {
     deepseekApiKey,
-    opencodeApiKey,
     openrouterApiKey,
-    oxHost,
     localBaseUrl,
     localApiKey,
     localApiModel,
   };
-  const resolved = resolveChatTarget(model, creds);
+  // The client copy is convenience; only entries that survive the server
+  // sanitizer can be resolved, priced or costed below.
+  const customs: CustomModelDef[] = [];
+  if (Array.isArray(customModels)) {
+    for (const entry of customModels) {
+      const clean = sanitizeCustomModelDef(entry);
+      if (clean) customs.push(clean);
+    }
+  }
+  const resolved = resolveChatTarget(model, creds, customs);
   if (!resolved.ok) {
     return NextResponse.json({ error: resolved.error }, { status: 400 });
   }
@@ -634,15 +656,15 @@ export async function POST(req: NextRequest) {
       );
     }
   }
-  // The helper follows the main model's provider: an Ox conversation judges
-  // on Ox (free in preview, never balance-starved), a DeepSeek conversation
-  // on Flash. Passing `model` is what keeps a dead DeepSeek key from
-  // hijacking the web judge of a free Ox run.
-  // Search planning is a tiny JSON side call. It may only ride a genuinely
-  // cheaper/free helper target (DeepSeek Flash or Ox preview); resolving to
-  // the main GLM/OpenRouter model made an agent search perform extra paid
-  // GLM calls that were never part of the reply's usage total.
-  const helperTarget = resolveHelperTarget(creds, model);
+  // The helper is always a known-cheap lane, never the main model and never
+  // a custom: search planning and refine are tiny JSON side calls, and
+  // resolving them to the main GLM/OpenRouter model once made an agent
+  // search perform extra paid calls that were never part of the reply's
+  // usage total. Flash when a DeepSeek key exists (the key already paying
+  // for the reply keeps the side calls cheap), else the free 0731 lane.
+  // The caller drops the helper when it equals the main model — a Flash
+  // conversation judges on Flash already, a 0731-free one on itself.
+  const helperTarget = resolveHelperTarget(creds, customs);
   const helperIsCheap =
     helperTarget !== null && helperTarget.model.id !== target.model.id;
   const helper = helperIsCheap ? helperTarget : null;
@@ -864,6 +886,7 @@ export async function POST(req: NextRequest) {
         } | null = null;
         let resumedContent = "";
         let resumedReasoning = "";
+        let resumedReasoningMs = 0;
         let resumedToolEvents: NonNullable<StoredMessage["toolEvents"]> = [];
         let resumedTimeline: NonNullable<StoredMessage["timeline"]> = [];
         /** Set when the transcript was reconstructed rather than replayed. */
@@ -916,6 +939,8 @@ export async function POST(req: NextRequest) {
               // rather than replacing it with only the new part.
               resumedContent = prior.content ?? "";
               resumedReasoning = prior.reasoningContent ?? "";
+              resumedReasoningMs =
+                typeof prior.reasoningMs === "number" ? prior.reasoningMs : 0;
               // The actions and the narration that went with them, so the
               // finished reply reads as one continuous piece of work rather
               // than starting abruptly at the point it was interrupted.
@@ -1056,7 +1081,7 @@ export async function POST(req: NextRequest) {
 
         const workspaceInstruction = workspaceEnabled
           ? `\n\nYou have a workspace on the user's machine and tools to work in it. Prefer creating real files over printing code in chat: the user wants working files, not snippets to copy. List or read before editing so your replacements match exactly.${
-              modelHasOpenToolLimits(model)
+              modelHasOpenToolLimits(model, target.model.openToolLimits)
                 ? " This model has no per-call tool ceilings: read_file returns the whole file, read_files / write_files / edit_files accept as many items as you send, search_files returns every match, and fetch_url returns the full page. Work in batches, not one item per call. Reading ten files is ONE read_files call — its paths accept globs, so \"src/lib/*.ts\" reads that whole directory at once — and changing ten files is ONE edit_files call. A round is a round whether it carries one job or thirty, and a reply that spends them one file at a time runs out of rounds with the task half done."
                 : ""
             }\n\nYou can also run code with run_command. After writing something runnable, run it and check the output rather than assuming it works. If it fails, read the error, fix the file, and run it again. Each command needs the user's approval, so keep them few and purposeful, and say briefly why in the reason field. There is no shell. run_command waits for the program to finish, so use it only for things that exit — scripts, tests, installs. You can install packages: pip install and npm install both work and go into this workspace, not the user's system, so install what you need rather than rewriting code to avoid a dependency. For anything that keeps running, such as a dev server or a watcher, use start_process instead: it returns straight away, and you can read its output with read_process and stop it with stop_process. Always stop what you started once you are done with it. For anything that takes more than two or three actions, first read the files and explore enough to understand the task, then call make_plan: write down what finished looks like and the steps to get there, including how you will CHECK each one. The plan is not a first-move ritual — a plan made before you know what you are building is noise. It is also not a contract: when work teaches you something the plan did not know — a dead approach, a wrong assumption, a simpler path, a requirement you now understand better — call make_plan again immediately to replace it with the real path. On a long task your own reasoning from twenty rounds ago is gone, so without a written plan you will forget requirements from the first message and stop early because the work so far looks finished. When you work something out that a later turn would need - why an approach is dead, what a function actually does, which build or file is correct and why, an offset or value you verified, a command's exact error and what fixed it - call note_finding IMMEDIATELY, before continuing. Those findings are listed to you every turn and survive compaction, so you never have to re-read a file or re-run a command to remember it. Treat the findings list as your working memory: at the START of every turn, before doing anything, read the active findings and use them. When you find a finding is wrong or superseded, call note_finding with status='disproved' and the corrected claim so the list stays accurate and does not fill with stale notes. Do not record trivialities; one specific, evidence-backed line per finding. Keep it current with update_plan — a step is only done when you can say how you verified it.
@@ -1064,7 +1089,7 @@ export async function POST(req: NextRequest) {
 Work to the end. Do not hand back a half-finished task with a summary that reads as if it is complete: if something cannot be done, say so plainly and say why. Check your own work before claiming it works — run the tests, call the endpoint, open the page. To compile or build anything, call build_project instead of typing msbuild/cmake/dotnet/cargo yourself: it finds the installed Visual Studio/MSBuild/compiler automatically (including vswhere), restores packages, builds Release x64 by default, and hands you the compiler errors so you can fix them and rebuild.
 
 Ask before you build the wrong thing. If a choice would change what you produce and you cannot settle it by reading a file or looking it up, call ask_user — one question up front is far cheaper than twenty rounds of work in the wrong direction, and the user would rather be asked than handed something they have to throw away. Ask early, while the work is cheap to redo, not after you have committed to an approach. Offer concrete options with a sensible default so it is one click. Do not ask about things you can find out yourself, and do not ask the same thing twice. When you are done, briefly say what you changed and whether it ran.\n\nUse search_files to find where something lives rather than opening files one at a time, and read_files when you already know you need several — each separate call costs a whole round.\n\nYou can also look at the live web. When a task depends on what is actually on a page — its markup, its data, its exact wording — fetch it rather than reasoning from memory. Before writing anything that targets a site, such as a content script, a userscript or a scraper, call inspect_page on the real URL and use the ids and classes it returns. Never invent a selector you have not seen: a plausible-looking one that does not exist produces code that runs and does nothing, which is worse than admitting you need to look. Use fetch_url to read a page, fetch_url with raw for its HTML, and download_file to save something from a URL straight into the workspace. ${webSearchMode !== "off" && canSearch ? "When you hit something you do not know — an unfamiliar error, a library's current API — call web_search rather than guessing, because a wrong assumption compounds over every round after it. One web_search costs several model calls of its own, so make the query specific and read what comes back before searching again." : "There is no web_search tool available in this reply — the Web toggle is off or no Tavily/Exa key is set in Settings. fetch_url still works if you already know the URL. When you genuinely do not know something and cannot look it up, say so instead of guessing, and name what you would have searched for."}\n\nIf an edit turns out to be wrong, undo_file puts that file back exactly as it was; reverting is safer than patching your own mistake. restore_snapshot rolls the whole workspace back to a restore point, which is a much larger step — list_snapshots first, and say what you are undoing before you do it. read_document opens PDF, Word, Excel, PowerPoint, EPUB and ODT files, which read_file cannot. inspect_binary statically reads Windows EXEs/DLLs without executing them. Select only the layers the request needs: analyses:["decompile"] to test Ghidra/ILSpy, ["strings"] for a strings dump, ["entropy"], ["carve"], ["dependencies"], or ["capa"] for those individual jobs, and ["all"] only when the user asks to check everything. Omitted analyses means a cheap summary, not everything. After download_file of a large DLL, start with summary/strings and then decompile only the functions you name in focus_terms for THAT file — enable a specific analyzer such as Decompiler Parameter ID via enable_analyzers if you need it. Do not dump the whole binary and do not rely on a default hook list. Ghidra leftover after a closed or refreshed tab has no inspect UI: call list_processes and stop_process id=leftover to kill it. Decompiling is expensive and its artifacts persist on disk; the system message lists every executable already analyzed in this workspace with its hash and artifact paths - if the binary you need is already there, read those artifacts with read_file instead of running inspect_binary again, and never re-decompile the same hash unless the user asks you to. The moment you reach a conclusion about a binary - which one works, what is flawed, where the good build is, what a hook actually does - call note_binary so that verdict survives Stop and compaction instead of being paid for twice. write_files creates several files in one call, which is worth using whenever you are scaffolding.\n\nBatch the changes that belong together. move_file renames in one step instead of read-write-delete. edit_files applies several replacements at once, across one file or many. replace_in_files changes the same text everywhere it appears, which is what you want for renaming a function or an import path — doing that file by file costs a round each. When a string might occur somewhere you did not intend, run it with preview first and read the list before committing.${
-              visionApiKey || modelHasOpenToolLimits(model)
+              visionApiKey || modelHasOpenToolLimits(model, target.model.openToolLimits)
                 ? " You can also view_image to look at a screenshot or mockup saved in the workspace."
                 : ""
             }${
@@ -1167,17 +1192,17 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         ];
 
         /*
-         * Ox / OpenCode often treats only the first system message as binding
-         * and ignores a later "priority" one after a few rounds. Pin the
+         * OpenRouter's free lanes often treat only the first system message
+         * as binding and ignore a later "priority" one after a few rounds. Pin the
          * same standing orders onto that first message — start and end —
          * so Direct Mode cannot fade. DeepSeek still gets the tail-only
          * copy (cache prefix).
          */
-        if (target.providerId === "opencode" || target.providerId === "openrouter") {
+        if (target.providerId === "openrouter") {
           pinPluginDirectivesOnFirstSystem(transcript, pluginDirectives);
         }
 
-        const vision = getModel(model).vision;
+        const vision = target.model.vision;
 
         /*
          * Which history turns still replay their pixels in full.
@@ -1185,7 +1210,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          * Every past user turn used to re-send its full base64 image/video on
          * EVERY request: up to twenty messages, 8MB images and 32MB clips —
          * one clip alone made a ~43MB body on every round, which is the
-         * "invalid zstd request body" 1210 the Zen gateway returns, and on
+         * "invalid zstd request body" 1210 the OpenRouter gateway returns, and on
          * the free pool the image tokens were re-billed every turn. What the
          * model saw is already reflected in its own earlier turns, so image
          * pixels stay full for the newest two media-bearing turns and become
@@ -1282,7 +1307,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          */
         const appendPluginDirectives = () => {
           // Only the dedicated tail copy moves. The first system message may
-          // START with the same marker (Ox pin) and must not be deleted.
+          // START with the same marker (OpenRouter pin) and must not be deleted.
           for (let i = transcript.length - 1; i >= 0; i--) {
             const entry = transcript[i];
             if (
@@ -1702,7 +1727,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           await refreshFileTree();
         }
 
-        if (target.providerId === "opencode" || target.providerId === "openrouter") {
+        if (target.providerId === "openrouter") {
           pinPluginDirectivesOnFirstSystem(transcript, pluginDirectives);
         }
 
@@ -1758,7 +1783,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          * blames the provider. Open-ceiling models (1M window, free or
          * cheap) get a much higher guard; everyone else keeps 64.
          */
-        const MAX_AGENT_ROUNDS = agentRoundsFor(model);
+        const MAX_AGENT_ROUNDS = agentRoundsFor(model, target.model.openToolLimits);
         /*
          * Output-limit continuation budgets start FRESH on every request —
          * including a Resume.
@@ -1776,7 +1801,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         /**
          * Set when the next round is a "carry on from where you stopped"
          * prose continuation, so that round de-duplicates any text the model
-         * incorrectly echoes back instead of continuing (GLM/Ox restart the
+         * incorrectly echoes back instead of continuing (GLM and the free lanes restart the
          * sentence). Consumed by the round that requested it.
          */
         let proseContinuationPending = false;
@@ -1805,8 +1830,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          */
         let streamCuts = 0;
         /**
-         * Times we re-issued an OpenCode call that came back HTTP 200 with
-         * an empty SSE body. Zen does this during the same outages as 503;
+         * Times we re-issued an OpenRouter call that came back HTTP 200 with
+         * an empty SSE body. The shared pool does this during the same outages as 503;
          * built-in retries only fire on a bad status, so without this the
          * user sees "retrying" then a blank reply.
          */
@@ -1859,6 +1884,15 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         // message grows rather than being overwritten by only the new half.
         let assistantContent = resumedContent;
         let reasoningContent = resumedReasoning;
+        // First/last reasoning token of THIS request. A resume adds its own
+        // span onto `resumedReasoningMs` above rather than resetting it.
+        let firstReasoningAt = 0;
+        let lastReasoningAt = 0;
+        const currentReasoningMs = () =>
+          resumedReasoningMs +
+          (firstReasoningAt && lastReasoningAt
+            ? Math.max(0, lastReasoningAt - firstReasoningAt)
+            : 0);
         // Diagnostics contain field NAMES and counts only, never private text.
         // They tell us whether the provider omitted reasoning or used an
         // alternate compatible field that the parser normalized.
@@ -1949,6 +1983,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             role: "assistant",
             content: assistantContent,
             reasoningContent: reasoningContent || null,
+            reasoningMs: currentReasoningMs() || null,
             thinkingEffort: resolvedEffort,
             model,
             tokenCount: totalUsage.total_tokens || null,
@@ -1969,9 +2004,9 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         while (true) {
           round += 1;
           appendPluginDirectives();
-          // Ox ignores the tail copy after a few rounds. Re-pin every
+          // The free lanes ignore the tail copy after a few rounds. Re-pin every
           // round so a long agent loop cannot fade Direct Mode.
-          if (target.providerId === "opencode" || target.providerId === "openrouter") {
+          if (target.providerId === "openrouter") {
             pinPluginDirectivesOnFirstSystem(transcript, pluginDirectives);
           }
 
@@ -2076,7 +2111,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
            * Continuation de-duplication.
            *
            * When a reply is cut mid-sentence we ask the model to "carry
-           * straight on from the last character". GLM and Ox often ignore
+           * straight on from the last character". GLM and the free lanes often ignore
            * that and restart the sentence instead — so the new stream's
            * beginning is a copy of text already streamed and saved, and the
            * two got concatenated into one garbled line ("The chain is closed —
@@ -2144,8 +2179,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             });
           }
           // Compact returns a new array. Re-pin the copy that actually
-          // goes on the wire so Ox cannot lose MAXIMUM PRIORITY.
-          if (target.providerId === "opencode" || target.providerId === "openrouter") {
+          // goes on the wire so the free lanes cannot lose MAXIMUM PRIORITY.
+          if (target.providerId === "openrouter") {
             pinPluginDirectivesOnFirstSystem(
               compacted.messages,
               pluginDirectives
@@ -2154,7 +2189,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
 
           // Qwen's jinja template only accepts a system message at index 0.
           // File-tree / plan / plugin tails stay in `transcript` (and so in
-          // resume state) so DeepSeek/Ox keep their cache-friendly layout.
+          // resume state) so DeepSeek/OpenRouter keep their cache-friendly layout.
           // The sidecar window is 80K, not 1M — fit the wire copy so a
           // workspace turn cannot 400 with "exceeds the available context".
           const foldedForQwen =
@@ -2170,17 +2205,17 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               : foldedForQwen;
 
           const dsRequestBody: Record<string, unknown> = {
-            // On the wire this may differ from the app id (Ox Alpha is
-            // `x-preview-f-free` on OpenCode Zen). Saved usage still uses
+            // On the wire this may differ from the app id (a custom model
+            // is its OpenRouter slug, e.g. `x/y:free`). Saved usage still uses
             // the app id so pricing looks it up correctly.
             model: target.apiModel,
             // DeepSeek REQUIRES the verbatim reasoning on tool-calling
-            // turns; the OpenCode Zen gateway validates its schema strictly
-            // and the Ox catalog marks the field as not required — sending
+            // turns; the OpenRouter gateway validates its schema strictly
+            // and the GLM catalog marks the field as not required — sending
             // it is a 400 "[1210] Invalid API parameter" once any tool round
             // is in the transcript (and every resume replays those rounds).
             messages: serializeForApi(wireMessages, {
-              includeReasoning: !isOxProvider(target.providerId),
+              includeReasoning: target.providerId !== "openrouter",
             }),
             stream: true,
             stream_options: { include_usage: true },
@@ -2204,7 +2239,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               // hosted model uses its own documented output window.
               target.thinkingStyle === "qwen"
                 ? SIDECAR_MAX_OUTPUT
-                : maxOutputTokensFor(model)
+                : target.model.maxOutputTokens,
+              customs
             ),
           };
 
@@ -2237,13 +2273,16 @@ Ask before you build the wrong thing. If a choice would change what you produce 
              *
              * A model given a tool it has no key for will call it, get an
              * error, apologise, and try something worse — a wasted round and
-             * a worse answer. view_image needs a vision key except on Ox
-             * Alpha, which can use free local OCR; web_search needs a
+             * a worse answer. view_image needs a vision key except on an
+             * open-ceiling model, which can use free local OCR; web_search needs a
              * Tavily or Exa key.
              */
-            dsRequestBody.tools = workspaceToolsFor(model).filter((t) => {
+            dsRequestBody.tools = workspaceToolsFor(
+              model,
+              target.model.openToolLimits
+            ).filter((t) => {
               if (t.function.name === "view_image") {
-                return Boolean(visionApiKey) || modelHasOpenToolLimits(model);
+                return Boolean(visionApiKey) || modelHasOpenToolLimits(model, target.model.openToolLimits);
               }
               if (t.function.name === "web_search")
                 // Off = the tool does not exist for the agent. On = offered
@@ -2266,6 +2305,21 @@ Ask before you build the wrong thing. If a choice would change what you produce 
 
           const bodyJson = JSON.stringify(dsRequestBody);
           const inputChars = bodyJson.length;
+          /*
+           * Forensics for the retry banner: attribute every byte to a bucket
+           * so "612k chars in" arrives with its cause attached. The log line
+           * only fires on fat bodies — a small chat stays quiet.
+           */
+          const sizeParts = breakdownRequestMessages(
+            dsRequestBody.messages,
+            dsRequestBody.tools ? JSON.stringify(dsRequestBody.tools).length : 0
+          );
+          if (inputChars >= 100_000) {
+            console.log(
+              `[chat] ${target.model.id} round ${round}: ` +
+                formatBreakdown(inputChars, sizeParts)
+            );
+          }
           // One check for the whole request: a round carrying a video dies
           // differently from a text round — minutes of prefill silence, then
           // an empty stream — and its retry budget below is sized for that.
@@ -2273,8 +2327,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           // on the data URL itself.)
           const roundHasVideo = bodyJson.includes('"video_url"');
           const retryAttempts =
-            target.providerId === "opencode" || target.providerId === "openrouter"
-              ? OPENCODE_RETRY.attempts
+            target.providerId === "openrouter"
+              ? OPENROUTER_RETRY.attempts
               : undefined;
 
           // ---------------- Call DeepSeek ----------------
@@ -2296,7 +2350,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 runSignal
               ),
             {
-              ...((target.providerId === "opencode" || target.providerId === "openrouter") ? OPENCODE_RETRY : {}),
+              ...((target.providerId === "openrouter") ? OPENROUTER_RETRY : {}),
               signal: runSignal,
               onAttempt: ({ attempt: n, attempts }) => {
                 send({
@@ -2308,6 +2362,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   reason: "",
                   host: target.providerName,
                   inputChars,
+                  breakdown: sizeParts,
                 });
               },
               onRetry: ({ attempt: n, attempts, delayMs, reason }) => {
@@ -2320,6 +2375,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   reason,
                   host: target.providerName,
                   inputChars,
+                  breakdown: sizeParts,
                 });
               },
             }
@@ -2368,23 +2424,23 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           let earlyErrText = "";
 
           /*
-           * Ox: one more chance with a body the gateway will actually take.
+           * OpenRouter: one more chance with a body the gateway will actually take.
            *
            * A 400 "Invalid API parameter" is a REJECTION OF THE REQUEST
            * SHAPE, not of the content — retrying it identically fails
            * identically, which is why the retry policy treats 400 as fatal.
-           * The shapes only Ox has rejected in the wild are the tool path
-           * (their adapter for the free model flaps: anomalyco/opencode
-           * #44300, #44382 — while it is down, every request that offers
-           * tools fails while plain chat works) and oversized or foreign
-           * media payloads (the "invalid zstd request body" variant of the
-           * same 1210). So: if the rejection looks like a shape problem,
+           * The shapes the gateway has rejected in the wild are the tool path
+           * (their adapter for the free model flaps several times a week —
+           * while it is down, every request that offers tools fails while
+           * plain chat works) and oversized or foreign media payloads (the
+           * "invalid zstd request body" variant of the same 1210). So: if
+           * the rejection looks like a shape problem,
            * retry ONCE with the sanitized body — no tools, no media pixels.
            * The round degrades to prose at worst; the model can still emit
            * tool calls learned from the history and we execute those. Either
            * way the task survives instead of a hard stop mid-run.
            */
-          if (!dsResponse.ok && (target.providerId === "opencode" || target.providerId === "openrouter")) {
+          if (!dsResponse.ok && target.providerId === "openrouter") {
             earlyErrText = await dsResponse.text().catch(() => "");
             const rejectedDetail = (() => {
               try {
@@ -2398,7 +2454,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               dsResponse.status === 400 ||
               (dsResponse.status >= 500 && /endpoint is unavailable/i.test(rejectedDetail))
             ) {
-              const sanitized = sanitizeOxRequestBody(dsRequestBody);
+              const sanitized = sanitizeOpenRouterRequestBody(dsRequestBody);
               if (JSON.stringify(sanitized) !== JSON.stringify(dsRequestBody)) {
                 const sanitizedChars = JSON.stringify(sanitized).length;
                 send({
@@ -2410,6 +2466,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   reason: "host rejected the payload — retrying without tools and media",
                   host: target.providerName,
                   inputChars: sanitizedChars,
+                  breakdown: breakdownRequestMessages(sanitized.messages, 0),
                 });
                 try {
                   const second = await fetchUntilHeaders(
@@ -2426,7 +2483,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   if (second.ok && second.body) {
                     recordAsync({
                       kind: "api_error",
-                      subject: "ox_shape_rejection",
+                      subject: "openrouter_shape_rejection",
                       detail: `Recovered on sanitized retry after HTTP ${dsResponse.status}: ${rejectedDetail.slice(0, 160)}`,
                       context: { status: dsResponse.status },
                     });
@@ -2434,13 +2491,13 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   } else {
                     const t2 = await second.text().catch(() => "");
                     console.error(
-                      "Ox sanitized retry failed:",
+                      "OpenRouter sanitized retry failed:",
                       second.status,
                       t2.slice(0, 300)
                     );
                   }
                 } catch (e) {
-                  console.error("Ox sanitized retry threw:", e);
+                  console.error("OpenRouter sanitized retry threw:", e);
                 }
               }
             }
@@ -2483,6 +2540,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   role: "assistant",
                   content: assistantContent,
                   reasoningContent: reasoningContent || null,
+                  reasoningMs: currentReasoningMs() || null,
                   thinkingEffort: resolvedEffort,
                   model,
                   tokenCount: totalUsage.total_tokens || null,
@@ -2539,6 +2597,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   reason: "service busy",
                   host: target.providerName,
                   inputChars,
+                  breakdown: sizeParts,
                 });
                 await dsResponse.body?.cancel().catch(() => {});
                 try {
@@ -2577,7 +2636,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           const reader = dsResponse.body.getReader();
           const decoder = new TextDecoder();
           let buffer = "";
-          const watchFirstToken = isOxProvider(target.providerId);
+          const watchFirstToken = target.providerId === "openrouter";
           const streamStarted = Date.now();
           let gotUpstreamSignal = false;
           let firstTokenTimedOut = false;
@@ -2689,13 +2748,13 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               return;
             }
 
-            // Before the first signal: Ox gets its short overall budget
-            // (OX_FIRST_TOKEN_MS). After: every individual read gets the idle
+            // Before the first signal: OpenRouter gets its short overall budget
+            // (OPENROUTER_FIRST_TOKEN_MS). After: every individual read gets the idle
             // budget, so a stream that falls silent mid-reply — five minutes
             // with zero bytes — is a dead connection, not a deep think.
             const beforeFirst = watchFirstToken && !gotUpstreamSignal;
             const readMs = beforeFirst
-              ? Math.max(1, OX_FIRST_TOKEN_MS - (Date.now() - streamStarted))
+              ? Math.max(1, OPENROUTER_FIRST_TOKEN_MS - (Date.now() - streamStarted))
               : STREAM_IDLE_MS;
             const chunkRead = await readWithTimeout(
               reader,
@@ -2786,7 +2845,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 // Charge the running total for this round, at the real
                 // cache-split rates, so the limit is enforced against what is
                 // actually being billed rather than a token count.
-                lastRoundCost = chargeRound(budget, u, model);
+                lastRoundCost = chargeRound(budget, u, model, undefined, customs);
 
                 const period = getDeepSeekPeriod().period;
                 send({
@@ -2797,7 +2856,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   // Recompute from the summed split so the live figure always
                   // uses the period active right now, proving cache-hit/miss,
                   // output and reasoning are all included in the number.
-                  spentUsd: estimateCost(totalUsage, model, period) ?? budget.spentUsd,
+                  spentUsd: estimateCost(totalUsage, model, period, customs) ?? budget.spentUsd,
                   limitUsd: budget.limitUsd ?? undefined,
                 });
               }
@@ -2842,6 +2901,9 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 reasoningContent += reasoningDelta.text;
                 roundReasoning += reasoningDelta.text;
                 sawWork = true;
+                const reasoningNow = Date.now();
+                if (!firstReasoningAt) firstReasoningAt = reasoningNow;
+                lastReasoningAt = reasoningNow;
                 markUpstream();
                 send({ type: "reasoning", delta: reasoningDelta.text });
                 void checkpoint();
@@ -2907,7 +2969,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           }
 
           /*
-           * OpenCode Zen sometimes returns HTTP 200 with an empty SSE body
+           * The shared OpenRouter pool sometimes returns HTTP 200 with an empty SSE body
            * during the same outages as 503. fetchWithRetry treats 200 as
            * success, so without this the user sees a blank reply after
            * "retrying". Only retry a stream that never even named a
@@ -2923,7 +2985,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           const videoPrefillChoke =
             roundHasVideo && Date.now() - streamStarted >= VIDEO_RETRY_FAST_MS;
           if (
-            (target.providerId === "opencode" || target.providerId === "openrouter") &&
+            target.providerId === "openrouter" &&
             !videoPrefillChoke &&
             emptyStreamRetries < emptyRetryBudget &&
             !roundContent &&
@@ -2941,6 +3003,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               reason: firstTokenTimedOut ? "no first token" : "empty reply",
               host: target.providerName,
               inputChars,
+              breakdown: sizeParts,
             });
             try {
               await sleep(1_200, runSignal);
@@ -2965,7 +3028,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
            * it stays resumable.
            */
           if (
-            (target.providerId === "opencode" || target.providerId === "openrouter") &&
+            target.providerId === "openrouter" &&
             (emptyStreamRetries >= emptyRetryBudget || videoPrefillChoke) &&
             !roundContent &&
             !roundReasoning &&
@@ -2990,7 +3053,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 : `${target.providerName} returned an empty response after ` +
                   `${emptyStreamRetries + 1} attempt(s). The host is overloaded ` +
                   `or down right now — this is their pool, not your key. Wait a ` +
-                  `minute and try again, or switch the Ox host in Settings.`,
+                  `minute and try again, or switch to a DeepSeek model in Settings.`,
               // Their pool is down — a server-side failure. Work from
               // earlier rounds is checkpointed, so the client continues it;
               // the re-post rides the retry backoff, and the cap stops a
@@ -3044,7 +3107,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
            * A stream that ended without the model finishing it.
            *
            * The other half of "cut off": the shared free pool drops
-           * connections mid-generation under load — OpenCode Zen sends
+           * connections mid-generation under load — the gateway sends
            * `finish_reason: "network_error"`, and during outages the body can
            * simply end with NO finish_reason. Neither is a completion, but
            * only `length` was matched before, so a dropped stream fell into
@@ -3383,7 +3446,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
 
             /*
              * The model stopped without a tool call, and it does not look
-             * finished. Ox in particular will halt on an inner limit the
+             * finished. The free lanes in particular will halt on an inner limit the
              * app never set, or write "say continue" and wait. Resume
              * already exists for that — this fires it automatically,
              * from the same transcript, a couple of times at most.
@@ -3528,6 +3591,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 call.id,
                 runTool(workspace, call.function.name, parsedArgs.value, {
                   modelId: model,
+                  openLimits: target.model.openToolLimits,
+                  modelNativeVision: target.model.vision === "native",
                   visionKey: visionApiKey,
                   visionModel,
                   searchKey: tavilyApiKey,
@@ -3636,6 +3701,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   salvaged.value,
                   {
                     modelId: model,
+                    openLimits: target.model.openToolLimits,
+                    modelNativeVision: target.model.vision === "native",
                     visionKey: visionApiKey,
                     visionModel,
                     searchKey: tavilyApiKey,
@@ -3670,6 +3737,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                     },
                     {
                       modelId: model,
+                      openLimits: target.model.openToolLimits,
+                      modelNativeVision: target.model.vision === "native",
                       visionKey: visionApiKey,
                       visionModel,
                       searchKey: tavilyApiKey,
@@ -3726,6 +3795,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                     prefixValue,
                     {
                       modelId: model,
+                      openLimits: target.model.openToolLimits,
+                      modelNativeVision: target.model.vision === "native",
                       visionKey: visionApiKey,
                       visionModel,
                       searchKey: tavilyApiKey,
@@ -4226,6 +4297,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                     parsed.value,
                     {
                       modelId: model,
+                      openLimits: target.model.openToolLimits,
+                      modelNativeVision: target.model.vision === "native",
                       visionKey: visionApiKey,
                       visionModel,
                       searchKey: tavilyApiKey,
@@ -4269,6 +4342,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 parsed.value,
                 {
                   modelId: model,
+                  openLimits: target.model.openToolLimits,
+                  modelNativeVision: target.model.vision === "native",
                   visionKey: visionApiKey,
                   visionModel,
                   searchKey: tavilyApiKey,
@@ -4303,7 +4378,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
              * older ones collapse to one line naming the file, which is
              * enough to refer back to.
              */
-            if (result.image && modelVision(model) === "native") {
+            if (result.image && target.model.vision === "native") {
               for (const message of transcript) {
                 if (
                   message.role === "user" &&
@@ -4563,6 +4638,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             usage: totalUsage.total_tokens ? { ...totalUsage } : null,
             model,
             durationMs: Date.now() - startedAt,
+            reasoningMs: currentReasoningMs() || null,
             toolEvents: toolEvents.length ? toolEvents : null,
             timeline: timeline.length ? timeline : null,
             createdAt: new Date().toISOString(),
@@ -4576,7 +4652,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             // would throw away everything it just paid for, which is the
             // opposite of what a spending limit is for.
             //
-            // An inner-limit abort (Ox stopping mid-thought) used to fall
+            // An inner-limit abort (a free lane stopping mid-thought) used to fall
             // through as a normal done. Resume vanished; the next send
             // opened a new thinking box and rebuilt from scratch.
             incomplete: unfinished,
@@ -4699,6 +4775,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
            */
           usage: totalUsage.total_tokens ? { ...totalUsage } : usage,
           durationMs: Date.now() - startedAt,
+          reasoningMs: currentReasoningMs() || undefined,
           model,
           incomplete: unfinished,
           canResume: unfinished,

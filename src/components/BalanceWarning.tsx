@@ -39,19 +39,19 @@ const COPY: Record<
     title: "Running low",
     detail:
       "Enough for a short reply, probably not a full agent task. Top up before starting anything long.",
-    tone: "#cfa25a",
+    tone: "var(--color-warning)",
   },
   critical: {
     title: "Almost empty",
     detail:
       "A long task will stop partway. Whatever it has done is kept, and Continue picks it up once you top up.",
-    tone: "#cfa25a",
+    tone: "var(--color-warning)",
   },
   empty: {
     title: "Out of balance",
     detail:
       "DeepSeek bills after each request, so a long run can finish overdrawn. Requests will fail until this is positive again.",
-    tone: "#cf6a5f",
+    tone: "var(--color-danger)",
   },
 };
 

@@ -228,6 +228,20 @@ export function Dots({ size = 5 }: { size?: number }) {
   );
 }
 
+/**
+ * "12s", "3m 04s" — the finished thinking label ("Thought for 12s").
+ *
+ * Fed by the server's first-to-last reasoning-token span, so it measures
+ * thought rather than network. Rounds to whole seconds; a sub-second think
+ * still reads as 1s, because "Thought for 0s" would look broken.
+ */
+function formatThoughtTime(ms: number): string {
+  const total = Math.max(1, Math.round(ms / 1000));
+  if (total < 60) return `${total}s`;
+  const minutes = Math.floor(total / 60);
+  return `${minutes}m ${String(total % 60).padStart(2, "0")}s`;
+}
+
 interface MessageBubbleProps {
   message: Message;
   /** Only the newest reply offers regenerate, to avoid rewriting history. */
@@ -549,18 +563,37 @@ function MessageBubbleImpl({
   /**
    * Does the panel have anything real to show right now?
    *
-   * The silent gap — streaming, thinking requested, no reasoning text yet —
-   * belongs to ChatArea's status row (dots + stage + elapsed). The panel used
-   * to mount here anyway with "Loading…" in its body, which read as a second
-   * redundant "Thinking" loader stacked above the status row. The panel now
-   * appears only when reasoning text, a reasoning notice, or a finished reply
-   * gives it content; historical bubbles keep the fetch-on-demand placeholder.
+   * This gates the BODY, not the mount. The shell mounts through the silent
+   * gap — streaming, thinking requested, no reasoning text yet — as a bare
+   * shimmering "Thinking" with no frame, and warms into the full box when the
+   * first token lands. The label never re-mounts: the loader IS the header,
+   * so "loading text transforms into box" is literally one node changing
+   * state. ChatArea's status row keeps the elapsed heartbeat meanwhile; the
+   * panel is the thought, the row is the run.
    */
   const panelHasContent = Boolean(
     message.reasoningNotice ||
       (typeof message.reasoningContent === "string" &&
         message.reasoningContent.trim().length > 0)
   );
+
+  /** Live, but the first reasoning token has not landed yet: loader, no box. */
+  const thinkLoading = isThinkingPhase && !panelHasContent;
+  /** The body stays shut through the silent gap — an open frame around
+   * nothing was the empty outline this replaced. */
+  const thinkBodyOpen = showThinking && !thinkLoading;
+
+  /**
+   * The finished label's duration. Present once `done` lands; a dropped
+   * stream or an older stored reply has no timing and falls back to a bare
+   * "Thinking" rather than guessing.
+   */
+  const thoughtMs =
+    !isThinkingPhase &&
+    typeof message.reasoningMs === "number" &&
+    message.reasoningMs > 0
+      ? message.reasoningMs
+      : 0;
 
   // Keep the reasoning panel pinned to the newest text while "Follow" is on.
   // A user scroll upward turns Follow off — same rule as the chat pane, so
@@ -708,7 +741,7 @@ function MessageBubbleImpl({
       <div
         className={`max-w-[85%] md:max-w-[75%] ${
           isNote
-            ? "rounded-xl border border-[#6ba3a0]/30 bg-[#6ba3a0]/[0.08] px-3.5 py-2.5"
+            ? "rounded-xl border border-search/30 bg-search/[0.08] px-3.5 py-2.5"
             : isUser
               ? "rounded-2xl bg-bg-elevated px-4 py-2.5"
               : "bg-transparent px-4"
@@ -720,7 +753,7 @@ function MessageBubbleImpl({
         {isNote && (
           <div className="space-y-1">
             <div className="flex items-center gap-1.5">
-              <span className="rounded-lg bg-[#6ba3a0]/20 px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-[#6ba3a0]">
+              <span className="rounded-lg bg-search/20 px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-search">
                 note
               </span>
               <span className="text-[11px] text-text-muted">
@@ -1008,7 +1041,7 @@ function MessageBubbleImpl({
               <div className="flex flex-wrap items-center gap-1.5">
                 {message.thinkingEffort &&
                   message.thinkingEffort !== "none" && (
-                    <span className="inline-flex items-center gap-1 rounded-lg border border-[#cfa25a]/25 bg-[#cfa25a]/10 px-1.5 py-0.5 text-[11px] font-medium text-[#cfa25a]">
+                    <span className="inline-flex items-center gap-1 rounded-lg border border-thinking/25 bg-thinking/10 px-1.5 py-0.5 text-[11px] font-medium text-thinking">
                       <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} aria-hidden="true">
                         <path strokeLinecap="round" strokeLinejoin="round" d="M12 3l1.85 5.15L19 10l-5.15 1.85L12 17l-1.85-5.15L5 10l5.15-1.85L12 3z" />
                       </svg>
@@ -1045,8 +1078,8 @@ function MessageBubbleImpl({
                       planBlocked > 0
                         ? "border-danger/25 bg-danger/10 text-danger hover:bg-danger/20"
                         : planCurrent
-                          ? "border-[#cfa25a]/25 bg-[#cfa25a]/10 text-[#cfa25a] hover:bg-[#cfa25a]/20"
-                          : "border-[#7ea05a]/25 bg-[#7ea05a]/10 text-[#7ea05a] hover:bg-[#7ea05a]/20"
+                          ? "border-warning/25 bg-warning/10 text-warning hover:bg-warning/20"
+                          : "border-success/25 bg-success/10 text-success hover:bg-success/20"
                     }`}
                   >
                     <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} aria-hidden="true">
@@ -1067,7 +1100,7 @@ function MessageBubbleImpl({
                     onClick={() => setShowSources((v) => !v)}
                     aria-expanded={showSources}
                     title={searchTooltip}
-                    className="inline-flex items-center gap-1 rounded-lg border border-[#6ba3a0]/25 bg-[#6ba3a0]/10 px-1.5 py-0.5 text-[11px] font-medium text-[#6ba3a0] transition-colors hover:bg-[#6ba3a0]/20"
+                    className="inline-flex items-center gap-1 rounded-lg border border-search/25 bg-search/10 px-1.5 py-0.5 text-[11px] font-medium text-search transition-colors hover:bg-search/20"
                   >
                     <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} aria-hidden="true">
                       <circle cx="11" cy="11" r="8" />
@@ -1086,7 +1119,7 @@ function MessageBubbleImpl({
 
                 {message.tokenCount ? (
                   <span
-                    className="text-[11px] text-[#6d685d]"
+                    className="text-[11px] text-text-muted"
                     /*
                      * The cache split belongs here.
                      *
@@ -1115,7 +1148,7 @@ function MessageBubbleImpl({
 
                 {cost !== null && (
                   <span
-                    className="text-[11px] font-medium text-[#8b857a]"
+                    className="text-[11px] font-medium text-text-muted"
                     title={
                       [
                         `Model: ${formatCost(modelCost ?? 0)}`,
@@ -1136,7 +1169,7 @@ function MessageBubbleImpl({
 
                 {message.durationMs ? (
                   <span
-                    className="inline-flex items-center gap-1 text-[11px] text-[#6d685d]"
+                    className="inline-flex items-center gap-1 text-[11px] text-text-muted"
                     title="Time from sending to the last token"
                   >
                     <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} aria-hidden="true">
@@ -1151,30 +1184,30 @@ function MessageBubbleImpl({
 
             {/* Sources list — opened from the pill above */}
             {showSources && sourceCount > 0 && (
-              <div className="animate-fade-in space-y-0.5 rounded-xl border border-[#6ba3a0]/20 bg-[#141210]/60 p-1.5">
+              <div className="animate-fade-in space-y-0.5 rounded-xl border border-search/20 bg-bg-secondary/60 p-1.5">
                 {message.searchResults!.map((result, i) => (
                   <a
                     key={i}
                     href={result.url}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="group flex items-center gap-2.5 rounded-lg px-2 py-1.5 transition-colors hover:bg-[#33302a]"
+                    className="group flex items-center gap-2.5 rounded-lg px-2 py-1.5 transition-colors hover:bg-bg-hover"
                   >
-                    <span className="flex h-4 w-4 flex-none items-center justify-center rounded bg-[#6ba3a0]/15 text-[9px] font-bold text-[#6ba3a0]">
+                    <span className="flex h-4 w-4 flex-none items-center justify-center rounded bg-search/15 text-[9px] font-bold text-search">
                       {i + 1}
                     </span>
                     <span className="min-w-0 flex-1">
-                      <span className="block truncate text-xs text-[#ede9e2] transition-colors group-hover:text-[#6ba3a0]">
+                      <span className="block truncate text-xs text-text-primary transition-colors group-hover:text-search">
                         {result.title}
                       </span>
-                      <span className="block truncate text-[11px] text-[#6d685d]">
+                      <span className="block truncate text-[11px] text-text-muted">
                         {result.domain}
                       </span>
                     </span>
                     <svg
                       width="11" height="11" viewBox="0 0 24 24" fill="none"
                       stroke="currentColor" strokeWidth={2} aria-hidden="true"
-                      className="flex-none text-[#6d685d] opacity-0 transition-opacity group-hover:opacity-100"
+                      className="flex-none text-text-muted opacity-0 transition-opacity group-hover:opacity-100"
                     >
                       <path strokeLinecap="round" strokeLinejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
                     </svg>
@@ -1214,21 +1247,22 @@ function MessageBubbleImpl({
               is coming. "none" means the model was told not to think, and
               then there is correctly nothing to show.
             */}
-            {hasThinking && (panelHasContent || !isThinkingPhase) && (
+            {hasThinking && (
               <div className="thinking-panel">
                 <div
                   data-thinking={isThinkingPhase}
-                  data-open={showThinking}
+                  data-open={thinkBodyOpen}
+                  data-loading={thinkLoading}
                   className="thinking-shell overflow-hidden rounded-lg"
                 >
-                {/* The box and the amber arrive, rather than appearing.
-                    
-                    Previously the row was plain text one frame and a filled
-                    amber panel the next, which is the jump that read as a
-                    glitch. Border, background and text colour now all ease
-                    from transparent over the same 0.3s, so the label starts
-                    as ordinary metadata and warms into the panel — the change
-                    is legible as a transition rather than a repaint. */}
+                {/* The loader IS the header. Before the first reasoning token
+                    the shell is frameless — just a shimmering "Thinking" — and
+                    when text lands the same node gains its border, background
+                    and body over one 0.3s ease. Nothing spawns; the waiting
+                    state warms into the box. The row geometry never changes
+                    (same padding, chevron kept mounted but hidden, Follow
+                    kept mounted but hidden), so the transform cannot shift a
+                    pixel sideways. */}
                 <div className="flex items-center gap-2">
                   <button
                     onClick={() => {
@@ -1245,42 +1279,52 @@ function MessageBubbleImpl({
                     <svg
                       width="13" height="13" viewBox="0 0 24 24" fill="none"
                       stroke="currentColor" strokeWidth={2.2} aria-hidden="true"
-                      className={`flex-none transition-transform duration-150 ${showThinking ? "rotate-90" : ""}`}
+                      className={`flex-none transition-transform duration-150 ${showThinking ? "rotate-90" : ""} ${thinkLoading ? "invisible" : ""}`}
                     >
                       <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
                     </svg>
-                    {/* The collapsed row has to say there is something in it.
-
-                        Historical replies intentionally start compact. A bare
-                        word "Thinking" gives no hint that it holds anything,
-                        so it reads as a decorative line rather than a control.
-                        A length makes it obviously openable; replies watched
-                        live remain expanded instead of collapsing into it. */}
-                    <span className="truncate">
+                    {/* Live the label shimmers; finished it states how long the
+                        model thought ("Thought for 12s"). The old "Thought for
+                        40.9k characters" confused a length for a duration and
+                        read as an error — the character count survives only as
+                        the collapsed row's tooltip, for the curious. */}
+                    <span
+                      className={`truncate ${isThinkingPhase ? "thinking-shimmer" : ""}`}
+                      title={
+                        thoughtMs > 0 && reasoningChars > 0
+                          ? `${reasoningChars.toLocaleString()} characters of reasoning`
+                          : undefined
+                      }
+                    >
                       {isThinkingPhase
                         ? "Thinking"
-                        : reasoningChars > 0
-                          ? `Thought for ${
-                              reasoningChars >= 1000
-                                ? `${(reasoningChars / 1000).toFixed(1)}k`
-                                : reasoningChars
-                            } characters`
+                        : thoughtMs > 0
+                          ? `Thought for ${formatThoughtTime(thoughtMs)}`
                           : "Thinking"}
                     </span>
                     {isThinkingPhase && <Dots size={3} />}
                   </button>
 
-                  {/* Only while reasoning is actually arriving.
+                  {/* Mounted for the whole open body, interactive only while
+                      reasoning is actually arriving.
                       
-                      It used to be tied to `message.isStreaming`, so it stayed
-                      on screen through the whole reply — long after the
+                      It used to mount and unmount with the thinking phase, so
+                      finishing visibly re-centred the header — the "unsymmetric
+                      box". Now the finished body keeps the same right-hand
+                      control at zero opacity: the living row and the finished
+                      row are geometrically identical. (Kept mounted rather
+                      than `hidden` for the same reason the chevron is: no
+                      layout shift at the transform moment.)
+                      
+                      Before that it was tied to `message.isStreaming`, so it
+                      stayed on screen through the whole reply — long after the
                       reasoning had stopped updating. Toggling it then did
                       nothing at all, which is what made it feel broken: the
                       control was live but the thing it controlled had
                       finished. The right-hand margin also read as misaligned
                       because it was 8px against the label's 12px padding; both
                       edges now match. */}
-                  {showThinking && isThinkingPhase && (
+                  {thinkBodyOpen && (
                     <button
                       onClick={() => setFollowThinking((v) => !v)}
                       title={
@@ -1289,10 +1333,14 @@ function MessageBubbleImpl({
                           : "Scrolling freely — click to follow the text"
                       }
                       aria-pressed={followThinking}
+                      aria-hidden={!isThinkingPhase}
+                      tabIndex={isThinkingPhase ? 0 : -1}
                       className={`mr-3 flex h-6 flex-none items-center gap-1 rounded-lg px-2 text-[11px] font-medium transition-colors ${
+                        isThinkingPhase ? "" : "pointer-events-none invisible"
+                      } ${
                         followThinking
-                          ? "bg-[#cfa25a]/20 text-[#cfa25a]"
-                          : "text-[#cfa25a]/55 hover:bg-[#cfa25a]/10 hover:text-[#cfa25a]"
+                          ? "bg-thinking/20 text-thinking"
+                          : "text-thinking/55 hover:bg-thinking/10 hover:text-thinking"
                       }`}
                     >
                       <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} aria-hidden="true">
@@ -1306,7 +1354,7 @@ function MessageBubbleImpl({
                 {/* Always mounted, so the body can animate its height open
                     and shut. Rendering it only when open meant the text
                     appeared instantly at full size with nothing to ease. */}
-                <div className="thinking-body" data-open={showThinking}>
+                <div className="thinking-body" data-open={thinkBodyOpen}>
                   <div>
                     <div
                       ref={thinkingRef}
@@ -1339,7 +1387,10 @@ function MessageBubbleImpl({
                             {message.reasoningNotice}
                           </span>
                         ) : isThinkingPhase ? (
-                          <span className="thinking-loading">
+                          // Unreachable in practice — the body stays shut
+                          // through the silent gap — but kept so no state
+                          // combination can ever show a bare empty frame.
+                          <span className="thinking-shimmer">
                             Waiting for reasoning text…
                           </span>
                         ) : (
@@ -1348,7 +1399,7 @@ function MessageBubbleImpl({
                           </span>
                         )
                       ) : showThinking ? (
-                        <span className="thinking-loading">Loading…</span>
+                        <span className="thinking-shimmer">Loading…</span>
                       ) : (
                         ""
                       )}
@@ -1374,14 +1425,14 @@ function MessageBubbleImpl({
                * Resume is now a full-width button on its own line, labelled
                * with what it does rather than with a bare verb.
                */
-              <div className="overflow-hidden rounded-xl border border-[#cfa25a]/30 bg-[#cfa25a]/[0.07]">
+              <div className="overflow-hidden rounded-xl border border-warning/30 bg-warning/[0.07]">
                 <div className="flex items-start gap-2.5 px-3 py-2.5">
-                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} aria-hidden="true" className="mt-0.5 flex-none text-[#cfa25a]">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} aria-hidden="true" className="mt-0.5 flex-none text-warning">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
                   </svg>
 
                   <div className="min-w-0 flex-1">
-                    <p className="text-[13px] font-medium leading-snug text-[#cfa25a]">
+                    <p className="text-[13px] font-medium leading-snug text-warning">
                       {/* The reason, when there is one. "Insufficient balance"
                           is far more use than a generic "interrupted", and it
                           names the one thing to fix before Resume will work. */}
@@ -1423,7 +1474,7 @@ function MessageBubbleImpl({
                     already written and pays only for the remaining rounds.
                     Starting over buys the same work a second time, so it stays
                     reachable but quiet. */}
-                <div className="flex items-stretch gap-1.5 border-t border-[#cfa25a]/20 p-1.5">
+                <div className="flex items-stretch gap-1.5 border-t border-warning/20 p-1.5">
                   {onResume && message.canResume && (
                     /*
                      * Resume, with the option of a different model.
@@ -1447,7 +1498,7 @@ function MessageBubbleImpl({
                       <button
                         onClick={() => onResume(message.id)}
                         title="Carry on from where it stopped, keeping the work already done"
-                        className="flex flex-1 items-center justify-center gap-1.5 rounded-lg rounded-r-none bg-[#cfa25a] px-3 py-2 text-[13px] font-semibold text-[#191715] transition-colors hover:bg-[#dbb271]"
+                        className="flex flex-1 items-center justify-center gap-1.5 rounded-lg rounded-r-none bg-warning px-3 py-2 text-[13px] font-semibold text-bg-primary transition-colors hover:brightness-110"
                       >
                         <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                           <path d="M8 5v14l11-7z" />
@@ -1459,7 +1510,7 @@ function MessageBubbleImpl({
                         aria-expanded={resumeMenuOpen}
                         aria-haspopup="menu"
                         title="Resume with a different model"
-                        className="flex flex-none items-center rounded-lg rounded-l-none border-l border-[#191715]/20 bg-[#cfa25a] px-2 text-[#191715] transition-colors hover:bg-[#dbb271]"
+                        className="flex flex-none items-center rounded-lg rounded-l-none border-l border-bg-primary/20 bg-warning px-2 text-bg-primary transition-colors hover:brightness-110"
                       >
                         <svg
                           width="13" height="13" viewBox="0 0 24 24" fill="none"
@@ -1515,8 +1566,8 @@ function MessageBubbleImpl({
                       }
                       className={`flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-[13px] font-medium transition-colors ${
                         message.canResume
-                          ? "flex-none text-[#cfa25a] hover:bg-[#cfa25a]/15"
-                          : "flex-1 bg-[#cfa25a] text-[#191715] hover:bg-[#dbb271]"
+                          ? "flex-none text-warning hover:bg-warning/15"
+                          : "flex-1 bg-warning text-bg-primary hover:brightness-110"
                       }`}
                     >
                       {message.canResume ? "Start over" : "Try again"}
@@ -1639,7 +1690,7 @@ function MessageBubbleImpl({
                   onClick={() => onDelete(message.id)}
                   title="Delete this reply and your question — both forget it"
                   aria-label="Delete this exchange"
-                  className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-[11px] font-medium text-[#6d685d] opacity-0 transition-opacity hover:bg-danger/12 hover:text-danger group-hover/del:opacity-100 focus:opacity-100"
+                  className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-[11px] font-medium text-text-muted opacity-0 transition-opacity hover:bg-danger/12 hover:text-danger group-hover/del:opacity-100 focus:opacity-100"
                 >
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} aria-hidden="true">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M4 7h16" />
@@ -1650,8 +1701,8 @@ function MessageBubbleImpl({
             )}
 
             {hasPendingCode && (
-              <div className="my-3 flex w-full items-center gap-3 rounded-xl border border-[#2c2924] bg-[#141210] px-3 py-2.5">
-                <span className="flex h-9 w-9 flex-none items-center justify-center rounded-lg bg-[#2a2723] text-[#d97f5d]">
+              <div className="my-3 flex w-full items-center gap-3 rounded-xl border border-border bg-bg-secondary px-3 py-2.5">
+                <span className="flex h-9 w-9 flex-none items-center justify-center rounded-lg bg-bg-elevated text-accent-light">
                   <svg
                     width="16"
                     height="16"
@@ -1666,16 +1717,16 @@ function MessageBubbleImpl({
                   </svg>
                 </span>
                 <span className="flex min-w-0 flex-1 flex-col">
-                  <span className="truncate text-sm font-medium text-[#ede9e2]">
+                  <span className="truncate text-sm font-medium text-text-primary">
                     {pendingLanguage
                       ? `Writing ${pendingLanguage}…`
                       : "Writing code…"}
                   </span>
-                  <span className="text-[11px] text-[#6d685d]">
+                  <span className="text-[11px] text-text-muted">
                     {pendingLines} {pendingLines === 1 ? "line" : "lines"} so far
                   </span>
                 </span>
-                <span className="flex-none text-[#c96442]">
+                <span className="flex-none text-accent">
                   <Dots size={4} />
                 </span>
               </div>
@@ -1690,14 +1741,14 @@ function MessageBubbleImpl({
                   <button
                     onClick={copyMessage}
                     title="Copy reply"
-                    className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-[11px] font-medium text-[#6d685d] transition-colors hover:bg-[#33302a] hover:text-[#ede9e2]"
+                    className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-[11px] font-medium text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
                   >
                     {copiedMessage ? (
                       <>
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#7ba478" strokeWidth={2.2} aria-hidden="true">
                           <path strokeLinecap="round" strokeLinejoin="round" d="M20 6L9 17l-5-5" />
                         </svg>
-                        <span className="text-[#7ba478]">Copied</span>
+                        <span className="text-success">Copied</span>
                       </>
                     ) : (
                       <>
@@ -1714,13 +1765,13 @@ function MessageBubbleImpl({
                     <button
                       onClick={() => setComparing(true)}
                       title="Compare with the previous reply"
-                      className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-[11px] font-medium text-[#d97f5d] transition-colors hover:bg-[#c96442]/12"
+                      className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-[11px] font-medium text-accent-light transition-colors hover:bg-accent/12"
                     >
                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} aria-hidden="true">
                         <path strokeLinecap="round" strokeLinejoin="round" d="M8 7h12m0 0l-4-4m4 4l-4 4M16 17H4m0 0l4 4m-4-4l4-4" />
                       </svg>
                       Compare
-                      <span className="text-[#6d685d]">
+                      <span className="text-text-muted">
                         {(message.previousVersions?.length ?? 0) + 1}
                       </span>
                     </button>
@@ -1730,7 +1781,7 @@ function MessageBubbleImpl({
                     <button
                       onClick={() => onRegenerate(message.id)}
                       title="Generate a different reply"
-                      className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-[11px] font-medium text-[#6d685d] transition-colors hover:bg-[#33302a] hover:text-[#ede9e2]"
+                      className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-[11px] font-medium text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
                     >
                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} aria-hidden="true">
                         <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v6h6M20 20v-6h-6" />
@@ -1745,7 +1796,7 @@ function MessageBubbleImpl({
                       onClick={() => onDelete(message.id)}
                       title="Delete this reply and your question — both forget it"
                       aria-label="Delete this exchange"
-                      className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-[11px] font-medium text-[#6d685d] transition-colors hover:bg-danger/12 hover:text-danger"
+                      className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-[11px] font-medium text-text-muted transition-colors hover:bg-danger/12 hover:text-danger"
                     >
                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} aria-hidden="true">
                         <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M4 7h16" />
@@ -1764,7 +1815,7 @@ function MessageBubbleImpl({
                   onClick={() => onDelete(message.id)}
                   title="Delete this reply and your question — both forget it"
                   aria-label="Delete this exchange"
-                  className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-[11px] font-medium text-[#6d685d] transition-colors hover:bg-danger/12 hover:text-danger"
+                  className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-[11px] font-medium text-text-muted transition-colors hover:bg-danger/12 hover:text-danger"
                 >
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} aria-hidden="true">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M4 7h16" />

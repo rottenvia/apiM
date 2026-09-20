@@ -148,11 +148,11 @@ export function ImageLightbox({
       />
 
       <div
-        className={`relative flex max-h-full max-w-full flex-col overflow-hidden rounded-2xl border border-[#403c34] bg-[#141210] shadow-[0_28px_80px_rgba(0,0,0,0.6)] transition-all duration-150 ${
+        className={`relative flex max-h-full max-w-full flex-col overflow-hidden rounded-2xl border border-border-light bg-bg-secondary shadow-[0_28px_80px_rgba(0,0,0,0.6)] transition-all duration-150 ${
           visible ? "scale-100 opacity-100" : "scale-[0.97] opacity-0"
         }`}
       >
-        <header className="flex flex-none items-center justify-between gap-3 border-b border-[#2c2924] px-3.5 py-2.5">
+        <header className="flex flex-none items-center justify-between gap-3 border-b border-border px-3.5 py-2.5">
           <div className="flex min-w-0 items-center gap-2">
             <svg
               width="15"
@@ -162,13 +162,13 @@ export function ImageLightbox({
               stroke="currentColor"
               strokeWidth={1.7}
               aria-hidden="true"
-              className="flex-none text-[#d97f5d]"
+              className="flex-none text-accent-light"
             >
               <rect x="3" y="3" width="18" height="18" rx="2" />
               <circle cx="8.5" cy="8.5" r="1.5" />
               <path strokeLinecap="round" strokeLinejoin="round" d="M21 15l-5-5L5 21" />
             </svg>
-            <p className="truncate text-sm font-medium text-[#ede9e2]">{name}</p>
+            <p className="truncate text-sm font-medium text-text-primary">{name}</p>
           </div>
 
           <div className="flex flex-none items-center gap-1.5">
@@ -176,7 +176,7 @@ export function ImageLightbox({
               <button
                 onClick={() => (description ? setShowText((v) => !v) : extract())}
                 data-active={showText}
-                className="flex h-8 items-center gap-1.5 rounded-lg border border-[#2c2924] px-2.5 text-xs font-medium text-[#a29d92] transition-colors hover:border-[#403c34] hover:bg-[#33302a] hover:text-[#ede9e2] data-[active=true]:border-[#c96442]/40 data-[active=true]:bg-[#c96442]/10 data-[active=true]:text-[#d97f5d]"
+                className="flex h-8 items-center gap-1.5 rounded-lg border border-border px-2.5 text-xs font-medium text-text-secondary transition-colors hover:border-border-light hover:bg-bg-hover hover:text-text-primary data-[active=true]:border-accent/40 data-[active=true]:bg-accent/10 data-[active=true]:text-accent-light"
               >
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h10" />
@@ -195,7 +195,7 @@ export function ImageLightbox({
               onClick={handleClose}
               title="Close (Esc)"
               aria-label="Close preview"
-              className="flex h-8 w-8 items-center justify-center rounded-lg text-[#a29d92] transition-colors hover:bg-[#cf6a5f]/15 hover:text-[#cf6a5f]"
+              className="flex h-8 w-8 items-center justify-center rounded-lg text-text-secondary transition-colors hover:bg-danger/15 hover:text-danger"
             >
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
@@ -228,8 +228,8 @@ export function ImageLightbox({
           </div>
 
           {showText && (
-            <div className="max-h-56 min-h-0 shrink-0 overflow-y-auto border-t border-[#2c2924] bg-[#141210] p-3.5 md:max-h-none md:w-80 md:border-l md:border-t-0 [overscroll-behavior:contain]">
-              <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.1em] text-[#6d685d]">
+            <div className="max-h-56 min-h-0 shrink-0 overflow-y-auto border-t border-border bg-bg-secondary p-3.5 md:max-h-none md:w-80 md:border-l md:border-t-0 [overscroll-behavior:contain]">
+              <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.1em] text-text-muted">
                 {shownSource === "local"
                   ? "OCR — read here, for you"
                   : shownSource === "ocr"
@@ -237,12 +237,12 @@ export function ImageLightbox({
                     : "What the assistant receives"}
               </p>
               {shownSource === "local" && (
-                <p className="mb-2 text-[11px] leading-relaxed text-[#6d685d]">
+                <p className="mb-2 text-[11px] leading-relaxed text-text-muted">
                   This model reads the picture itself, so this text was never
                   part of its input — it is here so you can read it too.
                 </p>
               )}
-              <pre className="whitespace-pre-wrap break-words font-mono text-[12px] leading-relaxed text-[#a29d92]">
+              <pre className="whitespace-pre-wrap break-words font-mono text-[12px] leading-relaxed text-text-secondary">
                 {extracting && !shown
                   ? "Reading the image…"
                   : shown || extractError || "No text found in this image."}

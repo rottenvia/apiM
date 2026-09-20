@@ -318,7 +318,7 @@ export function LocalModelRuntime({
             ready && !windowTooSmall
               ? "bg-success"
               : busy || windowTooSmall
-                ? "bg-[#cfa25a]"
+                ? "bg-warning"
                 : "bg-text-muted"
           }`}
           aria-hidden="true"

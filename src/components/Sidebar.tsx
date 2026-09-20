@@ -315,7 +315,7 @@ export function Sidebar({
                     return next;
                   });
                 }}
-                className="h-4 w-4 flex-none accent-[#c96442]"
+                className="h-4 w-4 flex-none accent-accent"
               />
               <span className="truncate">
                 {selectedHere.length > 0
@@ -420,7 +420,7 @@ export function Sidebar({
                         onClick={(e) => e.stopPropagation()}
                         tabIndex={-1}
                         aria-hidden="true"
-                        className="relative z-10 h-4 w-4 flex-none accent-[#c96442]"
+                        className="relative z-10 h-4 w-4 flex-none accent-accent"
                       />
                     )}
                     <span
@@ -439,8 +439,8 @@ export function Sidebar({
                         title="This chat is still working"
                         className="relative z-10 ml-1 flex h-2 w-2 flex-none items-center justify-center"
                       >
-                        <span className="absolute h-2 w-2 animate-ping rounded-full bg-[#c96442]/50" />
-                        <span className="h-1.5 w-1.5 rounded-full bg-[#c96442]" />
+                        <span className="absolute h-2 w-2 animate-ping rounded-full bg-accent/50" />
+                        <span className="h-1.5 w-1.5 rounded-full bg-accent" />
                       </span>
                     )}
                   </>

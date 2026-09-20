@@ -96,12 +96,12 @@ export function foldSystemMessagesToFront(
  *
  * `includeReasoning` exists for hosts that are NOT DeepSeek. `reasoning_content`
  * is a DeepSeek wire field: DeepSeek 400s when a tool-calling turn omits it,
- * but OpenCode Zen validates its Chat Completions schema strictly and the
- * Ox Alpha catalog says the field is not required there
- * (`requiresReasoningContentOnAssistantMessages: No`) — replaying it is what
- * turns a 20-round agent run into a 400 "[1210] Invalid API parameter" on
- * every subsequent round and every resume. Stripping it for those hosts also
- * stops resending ~9k tokens of chain-of-thought per round on a free pool.
+ * but OpenRouter validates Chat Completions strictly and the GLM catalog
+ * does not require the field there (`requiresReasoningContentOnAssistant-
+ * Messages: No`) — replaying it is what turns a 20-round agent run into a
+ * 400 "[1210] Invalid API parameter" on every subsequent round and every
+ * resume. Stripping it for those hosts also stops resending ~9k tokens of
+ * chain-of-thought per round on a free pool.
  */
 export function serializeForApi(
   messages: TranscriptMessage[],
@@ -117,7 +117,15 @@ export function serializeForApi(
       // Only replay reasoning for turns that actually called a tool. The API
       // ignores it otherwise, and sending it everywhere wastes tokens.
       if (m.tool_calls?.length) {
-        out.tool_calls = m.tool_calls;
+        // Deep copy: the caller compacts the serialised body (tool-call
+        // args are stubbed once their results have landed). Sharing the
+        // stored objects would let that compaction eat the transcript the
+        // resume path replays — permanently.
+        out.tool_calls = m.tool_calls.map((c) => ({
+          id: c.id,
+          type: "function" as const,
+          function: { name: c.function.name, arguments: c.function.arguments },
+        }));
         if (includeReasoning && m.reasoning_content)
           out.reasoning_content = m.reasoning_content;
         // A tool-calling turn legitimately has no prose.
@@ -162,6 +170,22 @@ export function serializeForApi(
         };
       }
       return { role: "user", content: parts };
+    }
+
+    // Same aliasing rule as tool_calls above: a part array is cloned so the
+    // caller can drop media parts (the re-send guard) without rewriting the
+    // transcript. Strings are immutable and pass through untouched.
+    if (m.role === "user" && Array.isArray(m.content)) {
+      return {
+        role: m.role,
+        content: m.content.map((p) => {
+          if (p.type === "image_url")
+            return { type: p.type, image_url: { ...p.image_url } };
+          if (p.type === "video_url")
+            return { type: p.type, video_url: { ...p.video_url } };
+          return { ...p };
+        }),
+      };
     }
 
     return { role: m.role, content: m.content };

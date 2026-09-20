@@ -806,8 +806,16 @@ input:focus-visible {
   background: color-mix(in oklab, var(--color-bg-tertiary) 72%, transparent);
 }
 .thinking-shell[data-thinking='true'] {
-  border-color: color-mix(in oklab, #cfa25a 32%, transparent);
-  background: color-mix(in oklab, #cfa25a 8%, transparent);
+  border-color: color-mix(in oklab, var(--color-thinking) 32%, transparent);
+  background: color-mix(in oklab, var(--color-thinking) 8%, transparent);
+}
+/* The silent gap: no frame at all, just the shimmering label. This rule sits
+ * after the amber state so it wins while loading; when the first token lands
+ * `data-loading` flips and the same 0.3s ease warms the frame in around the
+ * already-visible text — the loader becomes the box. */
+.thinking-shell[data-loading='true'] {
+  border-color: transparent;
+  background: transparent;
 }
 
 .thinking-toggle {
@@ -815,13 +823,13 @@ input:focus-visible {
   transition: color 0.3s ease;
 }
 .thinking-shell[data-thinking='true'] .thinking-toggle {
-  color: #cfa25a;
+  color: var(--color-thinking);
 }
 .thinking-toggle:hover {
   color: var(--color-text-secondary);
 }
 .thinking-shell[data-thinking='true'] .thinking-toggle:hover {
-  color: color-mix(in oklab, #cfa25a 80%, white);
+  color: color-mix(in oklab, var(--color-thinking) 80%, white);
 }
 
 .thinking-body-text {
@@ -832,17 +840,44 @@ input:focus-visible {
     border-color 0.3s ease;
 }
 .thinking-shell[data-thinking='true'] .thinking-body-text {
-  border-top-color: color-mix(in oklab, #cfa25a 14%, transparent);
+  border-top-color: color-mix(in oklab, var(--color-thinking) 14%, transparent);
 }
 
 /* Progress lives in the header as three quiet dots. There is deliberately no
  * full-width progress rule: in a tool-only reply it was indistinguishable from
  * the separate timeline divider and looked like the missing panel itself. */
+
+/* The live "Thinking" label shimmers: a bright band sweeps through dimmed
+ * thinking-amber on a loop. Pure text gradient, so it follows every theme,
+ * and it freezes to a flat colour under reduced-motion rather than strobing. */
+.thinking-shimmer {
+  background: linear-gradient(
+    90deg,
+    color-mix(in oklab, var(--color-thinking) 55%, var(--color-text-muted)) 20%,
+    color-mix(in oklab, var(--color-thinking) 65%, white) 50%,
+    color-mix(in oklab, var(--color-thinking) 55%, var(--color-text-muted)) 80%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: thinking-shimmer 1.5s linear infinite;
+}
+@keyframes thinking-shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
 @media (prefers-reduced-motion: reduce) {
   .thinking-shell,
   .thinking-toggle,
   .thinking-body-text {
     transition: none;
+  }
+  .thinking-shimmer {
+    animation: none;
+    background: none;
+    color: var(--color-thinking);
   }
 }
 

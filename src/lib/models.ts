@@ -3,17 +3,22 @@
  *
  * Kept free of Node-only APIs so Settings and the composer can import it.
  * Resolution of keys and base URLs lives in `providers.ts`.
+ *
+ * Custom OpenRouter models (added in Settings → Model) are NOT in this file:
+ * they live in the browser's localStorage, ride each chat request, and are
+ * merged with this catalog by `resolveModelInfo`. Anything that must work
+ * for customs (resolution, pricing, vision) takes the merged info — never
+ * `getModel` alone.
  */
 
 import {
   DEFAULT_LOCAL_API_MODEL,
   DEFAULT_LOCAL_BASE_URL,
 } from "@/lib/local-engine-shared";
-import type { OxHost } from "@/lib/ox-host";
 
 export { DEFAULT_LOCAL_API_MODEL, DEFAULT_LOCAL_BASE_URL };
 
-export type ProviderId = "deepseek" | "opencode" | "openrouter" | "local";
+export type ProviderId = "deepseek" | "openrouter" | "local";
 
 export type ThinkingStyle = "deepseek" | "openai" | "qwen";
 
@@ -59,21 +64,20 @@ export interface ModelInfo {
    * How screenshots reach this model.
    *
    * DeepSeek's hosted Chat Completions API is text-only, so images go
-   * through a vision helper. Ox Alpha and Qwen 3.8 27B are native VLMs.
+   * through a vision helper. GLM 5.3 Flash and Qwen 3.8 27B are native VLMs.
    */
   vision: VisionMode;
   /** Native video input (MP4). Independent of `vision`. */
   video: boolean;
   /**
-   * Ox Alpha only: no per-call tool ceilings. The model can read a whole
-   * file, a whole page, and as many paths as it asks for in one call.
-       * (GLM 5.3 Flash briefly carried open limits because it is the same
-       * model Ox Alpha previewed — but uncapped reads are exactly what fed
-       * 401k-char results into the transcript and re-bloated the body, and
-       * the runtime gate was Ox-only anyway. It runs capped like every other
-       * paid model.)
-       */
-     openToolLimits: boolean;
+   * No per-call tool ceilings: the model can read a whole file, a whole
+   * page, and as many paths as it asks for in one call.
+   *
+   * No catalog model opts in — uncapped reads fed 401k-char results into
+   * the transcript and re-bloated every later round. Custom OpenRouter
+   * models may still enable it in Settings, with the warning shown there.
+   */
+  openToolLimits: boolean;
   /**
    * Ceiling on generated tokens for ONE round, in tokens.
    *
@@ -85,12 +89,154 @@ export interface ModelInfo {
    * half is unparseable, so the whole batch lands as nothing.
    */
   maxOutputTokens: number;
-  /**
-   * OpenCode-provider models only: pin the model to one host, ignoring the
-   * Ox Alpha host button. `x-preview-f-free` follows the button; the free
-   * DeepSeek lane exists only on Zen.
-   */
-  fixedHost?: OxHost;
+}
+
+/**
+ * A user-added OpenRouter model.
+ *
+ * Stored in the browser (Settings → Model), sent with every chat request,
+ * and merged with the catalog on the server. Validation lives in
+ * `sanitizeCustomModelDef` — the server never trusts these fields raw.
+ */
+export interface CustomModelDef {
+  /** `custom:<slug>`, e.g. `custom:anthropic/claude-opus-4-6`. Stable. */
+  id: string;
+  /** Display name, e.g. `Claude Opus 4.6`. */
+  label: string;
+  /** OpenRouter slug for the wire, e.g. `anthropic/claude-opus-4-6`. */
+  apiModel: string;
+  description?: string;
+  /** Native VLMs get image_url parts; anything else gets helper descriptions. */
+  vision: VisionMode;
+  /** Native MP4 input. Off unless the model is known to take video. */
+  video: boolean;
+  /** Per-round output ceiling, in tokens. */
+  maxOutputTokens: number;
+  /** Context window, in tokens. Display only (from Verify, or typed). */
+  contextLength?: number;
+  /** USD per 1M tokens. Absent means cost is unknown, not free. */
+  inputPrice?: number;
+  outputPrice?: number;
+  /** Opt into uncapped per-call tool reads. Off by default — see ModelInfo. */
+  openLimits?: boolean;
+}
+
+export const CUSTOM_ID_PREFIX = "custom:";
+
+/** True for ids shaped like `custom:<openrouter-slug>`. */
+export function isCustomModelId(id: string | null | undefined): boolean {
+  return typeof id === "string" && id.startsWith(CUSTOM_ID_PREFIX);
+}
+
+/** OpenRouter slugs look like `vendor/model-name` with an optional `:free`-style suffix. */
+const SLUG_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]{1,126}[A-Za-z0-9]$|^[A-Za-z0-9]{1,128}$/;
+
+/**
+ * Validate a custom model definition from the client or localStorage.
+ *
+ * Returns null when the definition is unusable (no wire id). Everything
+ * else is clamped to sane ranges so a hostile or stale payload cannot
+ * produce a 65M-token ceiling or a negative price.
+ */
+export function sanitizeCustomModelDef(
+  input: unknown
+): CustomModelDef | null {
+  if (!input || typeof input !== "object") return null;
+  const raw = input as Record<string, unknown>;
+  const apiModel =
+    typeof raw.apiModel === "string" ? raw.apiModel.trim() : "";
+  if (!apiModel || apiModel.length > 128 || !SLUG_PATTERN.test(apiModel)) {
+    return null;
+  }
+  const label =
+    typeof raw.label === "string" && raw.label.trim()
+      ? raw.label.trim().slice(0, 60)
+      : apiModel;
+  const vision =
+    raw.vision === "native" || raw.vision === "none" ? raw.vision : "helper";
+  const maxOutput =
+    typeof raw.maxOutputTokens === "number" &&
+    Number.isFinite(raw.maxOutputTokens)
+      ? Math.max(1_000, Math.min(1_000_000, Math.floor(raw.maxOutputTokens)))
+      : PAID_MAX_OUTPUT_TOKENS;
+  const contextLength =
+    typeof raw.contextLength === "number" &&
+    Number.isFinite(raw.contextLength) &&
+    raw.contextLength > 0
+      ? Math.min(100_000_000, Math.floor(raw.contextLength))
+      : undefined;
+  const price = (v: unknown): number | undefined =>
+    typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 10_000
+      ? v
+      : undefined;
+  const description =
+    typeof raw.description === "string" && raw.description.trim()
+      ? raw.description.trim().slice(0, 300)
+      : undefined;
+  return {
+    id: `${CUSTOM_ID_PREFIX}${apiModel}`,
+    label,
+    apiModel,
+    ...(description ? { description } : {}),
+    vision,
+    video: raw.video === true,
+    maxOutputTokens: maxOutput,
+    ...(contextLength ? { contextLength } : {}),
+    ...(price(raw.inputPrice) !== undefined
+      ? { inputPrice: price(raw.inputPrice) as number }
+      : {}),
+    ...(price(raw.outputPrice) !== undefined
+      ? { outputPrice: price(raw.outputPrice) as number }
+      : {}),
+    ...(raw.openLimits === true ? { openLimits: true } : {}),
+  };
+}
+
+/** Human context/pricing line for a custom model, e.g. `200K ctx · $3/$15 per 1M`. */
+export function customSpecs(def: CustomModelDef): string {
+  const bits: string[] = [];
+  if (def.contextLength) {
+    const ctx = def.contextLength;
+    bits.push(
+      ctx >= 1_000_000
+        ? `${+(ctx / 1_000_000).toFixed(2)}M ctx`
+        : `${Math.round(ctx / 1000)}K ctx`
+    );
+  }
+  if (def.inputPrice !== undefined || def.outputPrice !== undefined) {
+    const fmt = (v: number | undefined) =>
+      v === undefined ? "?" : v === 0 ? "$0" : `$${v}`;
+    bits.push(`${fmt(def.inputPrice)}/${fmt(def.outputPrice)} per 1M`);
+  }
+  bits.push("custom");
+  return bits.join(" · ");
+}
+
+/** A custom definition as the rest of the app expects a model to look. */
+export function customToModelInfo(def: CustomModelDef): ModelInfo {
+  return {
+    id: def.id,
+    apiModel: def.apiModel,
+    provider: "openrouter",
+    label: def.label,
+    shortLabel: def.label.length > 22 ? `${def.label.slice(0, 21)}…` : def.label,
+    description:
+      def.description ??
+      `Custom OpenRouter model (${def.apiModel}). Pricing and vision come from Settings — Verify fills them in.`,
+    specs: customSpecs(def),
+    resumeBlurb: "Custom OpenRouter",
+    settingsSubtitle: `OpenRouter · ${def.apiModel}`,
+    mapsLowToHigh: false,
+    // Customs are main models, never side-call helpers: the helper must be
+    // a known-cheap lane (Flash on DeepSeek, 0731-free on OpenRouter), and a
+    // custom's price is user-typed rather than verified.
+    helper: false,
+    peakHours: false,
+    vision: def.vision,
+    video: def.video,
+    openToolLimits: def.openLimits === true,
+    maxOutputTokens: def.maxOutputTokens,
+  };
 }
 
 /**
@@ -117,6 +263,9 @@ export const GLM_MAX_OUTPUT_TOKENS = 131_072;
 export const DEFAULT_MODEL_ID = "glm-5.3-flash";
 
 export const QWEN_38_27B_ID = "qwen-3.8-27b";
+
+/** The free OpenRouter lane customs and GLM fall back to for side calls. */
+export const FREE_OPENROUTER_MODEL_ID = "deepseek-v4-flash-0731-free";
 
 export const LOCAL_HOST_PRESETS = [
   {
@@ -149,16 +298,6 @@ export const PROVIDER_INFO: Record<ProviderId, ProviderInfo> = {
     keyBlurb: "Required for V4 Pro and V4 Flash.",
     thinkingStyle: "deepseek",
   },
-  opencode: {
-    id: "opencode",
-    name: "OpenCode",
-    authUrl: "https://opencode.ai/auth",
-    authLabel: "opencode.ai/auth",
-    keyPlaceholder: "sk-zen-...",
-    keyBlurb:
-      "A Zen API key from OpenCode. Required for Ox Alpha — the same OpenAI-compatible Chat Completions API DeepSeek uses.",
-    thinkingStyle: "openai",
-  },
   openrouter: {
     id: "openrouter",
     name: "OpenRouter",
@@ -166,7 +305,7 @@ export const PROVIDER_INFO: Record<ProviderId, ProviderInfo> = {
     authLabel: "openrouter.ai/settings/keys",
     keyPlaceholder: "sk-or-v1-...",
     keyBlurb:
-      "An OpenRouter API key. Required for GLM 5.3 Flash — and for Ox Alpha when its host is set to OpenRouter.",
+      "One key covers every OpenRouter model: GLM 5.3 Flash, DeepSeek V4 Flash 0731 (free), and anything custom you add.",
     thinkingStyle: "openai",
   },
   local: {
@@ -185,9 +324,7 @@ export const PROVIDER_INFO: Record<ProviderId, ProviderInfo> = {
  * App-level catalog.
  *
  * `id` is what Settings, localStorage and saved replies store.
- * `apiModel` is what goes on the wire — OpenCode serves Ox Alpha as
- * `x-preview-f-free` (see opencode.ai/docs/zen). Local Qwen defaults to
- * the in-app sidecar; a custom host can still override the wire id.
+ * `apiModel` is what goes on the wire.
  */
 export const MODELS: ModelInfo[] = [
   {
@@ -197,24 +334,22 @@ export const MODELS: ModelInfo[] = [
     label: "GLM 5.3 Flash",
     shortLabel: "GLM 5.3 Flash",
     description:
-      "Z.ai's agent model — the model that ran as the Ox Alpha stealth preview, now official on OpenRouter. 1M context, native images and video, built for long agent tasks. This app's default.",
-    specs: "1M context · 128K max output · image + video · open tools",
-    resumeBlurb: "Ox Alpha, now official",
+      "Z.ai's agent model. 1M context, native images and video, built for long agent tasks. This app's default.",
+    specs: "1M context · 128K max output · image + video",
+    resumeBlurb: "Fast agent default",
     settingsSubtitle: "OpenRouter · 1M context · fast",
     mapsLowToHigh: false,
     helper: false,
     peakHours: false,
     vision: "native",
     video: true,
-          // Capped: the runtime gate is Ox-only, and uncapped 401k reads are
-          // what re-fed fat fresh results into the transcript on the default
-          // model — the exact fat-wire disease this repo just cured for old
-          // ones.
-          openToolLimits: false,
-          maxOutputTokens: GLM_MAX_OUTPUT_TOKENS,
-        },
-        {
-          id: "deepseek-v4-pro",
+    // Capped: uncapped 401k reads re-fed fat fresh results into the
+    // transcript on the default model — the exact fat-wire disease.
+    openToolLimits: false,
+    maxOutputTokens: GLM_MAX_OUTPUT_TOKENS,
+  },
+  {
+    id: "deepseek-v4-pro",
     apiModel: "deepseek-v4-pro",
     provider: "deepseek",
     label: "DeepSeek V4 Pro",
@@ -250,17 +385,16 @@ export const MODELS: ModelInfo[] = [
     maxOutputTokens: PAID_MAX_OUTPUT_TOKENS,
   },
   {
-    id: "deepseek-v4-flash-free",
-    apiModel: "deepseek-v4-flash-free",
-    provider: "opencode",
-    fixedHost: "zen",
-    label: "DeepSeek V4 Flash Free",
-    shortLabel: "V4 Flash Free",
+    id: FREE_OPENROUTER_MODEL_ID,
+    apiModel: "deepseek/deepseek-v4-flash-0731:free",
+    provider: "openrouter",
+    label: "DeepSeek V4 Flash 0731 Free",
+    shortLabel: "0731 Free",
     description:
-      "Free preview of DeepSeek V4 Flash on OpenCode Zen. No balance needed — but the quota is low, it is a limited-time offer, and it can end without notice.",
-    specs: "1M context · 384K max output · free preview",
-    resumeBlurb: "Free on Zen",
-    settingsSubtitle: "OpenCode Zen · free preview",
+      "DeepSeek's GA revision of V4 Flash (Jul 31, 2026) on OpenRouter's free tier. 13B active params for coding, reasoning and agent work. Free — but it is a shared pool, so evenings can be slow.",
+    specs: "1M context · free · tools + reasoning",
+    resumeBlurb: "Free on OpenRouter",
+    settingsSubtitle: "OpenRouter · free",
     mapsLowToHigh: false,
     helper: true,
     peakHours: false,
@@ -269,26 +403,6 @@ export const MODELS: ModelInfo[] = [
     openToolLimits: false,
     maxOutputTokens: FREE_MAX_OUTPUT_TOKENS,
   },
-  {
-    id: "ox-alpha",
-    apiModel: "x-preview-f-free",
-    provider: "opencode",
-    label: "Ox Alpha",
-    shortLabel: "Ox Alpha",
-    description:
-      "Stealth reasoning model. 1M context, native image and video. Served by OpenCode Zen or OpenRouter — pick the host in Settings.",
-    specs: "1M context · 128K max output · image + video · open tools · free preview",
-    resumeBlurb: "Free on Zen or OpenRouter",
-    settingsSubtitle: "Zen or OpenRouter · 1M context · free",
-    mapsLowToHigh: false,
-    helper: true,
-    peakHours: false,
-    vision: "native",
-    video: true,
-    openToolLimits: true,
-    maxOutputTokens: FREE_MAX_OUTPUT_TOKENS,
-  },
-
   {
     id: QWEN_38_27B_ID,
     apiModel: DEFAULT_LOCAL_API_MODEL,
@@ -321,7 +435,7 @@ export function modelNeedsVisionHelper(id: string | null | undefined): boolean {
   return getModel(id).vision === "helper";
 }
 
-/** Native video input (MP4). DeepSeek cannot; Ox, GLM and Qwen can. */
+/** Native video input (MP4). DeepSeek cannot; GLM and Qwen can. */
 export function modelSeesVideo(id: string | null | undefined): boolean {
   return getModel(id).video;
 }
@@ -342,6 +456,26 @@ export function getModel(id: string | null | undefined): ModelInfo {
   return MODELS.find((m) => m.id === id) ?? MODELS[0];
 }
 
+/**
+ * Catalog first, then the user's customs, then the default.
+ *
+ * Server paths that accept custom models must use this (or the already
+ * resolved `target.model`), never `getModel` — `getModel` cannot see
+ * customs and silently returns GLM for them.
+ */
+export function resolveModelInfo(
+  id: string | null | undefined,
+  customs?: CustomModelDef[] | null
+): ModelInfo {
+  const catalog = MODELS.find((m) => m.id === id);
+  if (catalog) return catalog;
+  if (customs && id) {
+    const def = customs.find((c) => c.id === id);
+    if (def) return customToModelInfo(def);
+  }
+  return MODELS[0];
+}
+
 export function getProviderInfo(id: ProviderId): ProviderInfo {
   return PROVIDER_INFO[id];
 }
@@ -350,20 +484,27 @@ export function isKnownModel(id: string | null | undefined): boolean {
   return Boolean(id && MODELS.some((m) => m.id === id));
 }
 
+export function isKnownModelOrCustom(
+  id: string | null | undefined,
+  customs?: CustomModelDef[] | null
+): boolean {
+  if (!id) return false;
+  if (MODELS.some((m) => m.id === id)) return true;
+  return Boolean(customs?.some((c) => c.id === id));
+}
+
 /** True when the selected model has whatever it needs to send. */
 export function hasKeyForModel(
   modelId: string | null | undefined,
   keys: {
     deepseekKey?: string;
-    opencodeKey?: string;
     openrouterKey?: string;
-    /** Which Ox Alpha front door is selected. */
-    oxHost?: string;
     /** Local models need a host, not a cloud key. */
     localBaseUrl?: string;
-  }
+  },
+  customs?: CustomModelDef[] | null
 ): boolean {
-  const model = getModel(modelId);
+  const model = resolveModelInfo(modelId, customs);
   const provider = model.provider;
   if (provider === "local") {
     // A default host is always assumed. The send fails later if nothing is
@@ -372,14 +513,6 @@ export function hasKeyForModel(
   }
   if (provider === "openrouter") {
     return Boolean(keys.openrouterKey && keys.openrouterKey.trim());
-  }
-  if (provider === "opencode") {
-    // A fixedHost model lives on one front door no matter what the Ox
-    // button says; everything else follows the button.
-    const host =
-      model.fixedHost ?? (keys.oxHost === "openrouter" ? "openrouter" : "zen");
-    const raw = host === "openrouter" ? keys.openrouterKey : keys.opencodeKey;
-    return Boolean(raw && raw.trim());
   }
   return Boolean(keys.deepseekKey && keys.deepseekKey.trim());
 }

@@ -184,7 +184,7 @@ export function SearchBudget({ searchProfile, onSearchProfileChange }: Props) {
                       <span className="text-text-secondary">{p.label}</span>
                       <span
                         className={
-                          p.exhausted ? "text-[#cf6a5a]" : "text-text-muted"
+                          p.exhausted ? "text-danger" : "text-text-muted"
                         }
                       >
                         {p.exhausted
@@ -195,7 +195,7 @@ export function SearchBudget({ searchProfile, onSearchProfileChange }: Props) {
                     <div className="mt-1 h-1 overflow-hidden rounded-full bg-bg-secondary">
                       <div
                         className={`h-full rounded-full transition-[width] ${
-                          p.exhausted ? "bg-[#cf6a5a]" : "bg-accent"
+                          p.exhausted ? "bg-danger" : "bg-accent"
                         }`}
                         style={{ width: `${used}%` }}
                       />

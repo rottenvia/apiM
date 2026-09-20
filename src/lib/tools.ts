@@ -1687,14 +1687,15 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
 ];
 
 /**
- * Tool list for this model. Ox Alpha gets the same tools with the
- * per-call ceilings removed from the descriptions, so it does not
- * self-limit to 60 files.
+ * Tool list for this model. An open-ceiling model (a custom with the
+ * option on) gets the same tools with the per-call ceilings removed
+ * from the descriptions, so it does not self-limit to 60 files.
  */
 export function workspaceToolsFor(
-  modelId?: string | null
+  modelId?: string | null,
+  openLimits?: boolean
 ): ToolDefinition[] {
-  if (!modelHasOpenToolLimits(modelId)) return WORKSPACE_TOOLS;
+  if (!modelHasOpenToolLimits(modelId, openLimits)) return WORKSPACE_TOOLS;
   return WORKSPACE_TOOLS.map((tool) => {
     const name = tool.function.name;
     if (name === "read_file") {
@@ -2147,10 +2148,15 @@ export function numberLines(text: string, firstLine: number): string {
  */
 export interface ToolContext {
   /**
-   * Catalog model id. Ox Alpha lifts per-call tool ceilings; everyone
-   * else keeps the defaults. Absent means the default (capped) set.
+   * Model id. Customs (`custom:…`) are not in the catalog, so their flags
+   * ride alongside explicitly: `openLimits` lifts the per-call tool
+   * ceilings, `modelNativeVision` decides whether screenshots go to the
+   * model as pixels or through OCR. Absent means the default capped/tool
+   * behaviour for catalog ids.
    */
   modelId?: string | null;
+  openLimits?: boolean;
+  modelNativeVision?: boolean;
   /** Vision provider key. Absent means view_image uses free local OCR. */
   visionKey?: string;
   visionModel?: string;
@@ -2160,7 +2166,7 @@ export interface ToolContext {
   exaKey?: string;
   /** Needed by the search planner, which uses a cheap model to pick queries. */
   deepseekKey?: string;
-  /** Overrides DeepSeek Flash when the user is on OpenCode / Ox Alpha. */
+  /** Overrides DeepSeek Flash when the user has no DeepSeek key. */
   planner?: SearchPlanner;
   searchProfile?: string;
   /** Explicit Stop signal; expensive static/decompiler work must release promptly. */
@@ -2173,13 +2179,26 @@ export interface ToolContext {
   fileMemory?: RunFileMemory;
 }
 
+/**
+ * Pixels or OCR? Catalog ids resolve through the catalog; customs carry
+ * the flag explicitly because `modelVision` falls back to the catalog
+ * default (native) for ids it has never seen.
+ */
+function contextSeesNative(context: ToolContext): boolean {
+  if (context.modelNativeVision !== undefined) return context.modelNativeVision;
+  return modelVision(context.modelId) === "native";
+}
+
 export async function runTool(
   workspaceId: string,
   name: string,
   args: Record<string, unknown>,
   context: ToolContext = {}
 ): Promise<ToolResult> {
-  const limits: ToolLimits = toolLimitsFor(context.modelId);
+  const limits: ToolLimits = toolLimitsFor(
+    context.modelId,
+    context.openLimits
+  );
   const mem = context.fileMemory;
   try {
     // Tools that can mutate files outside of the writers invalidate the
@@ -2755,7 +2774,7 @@ export async function runTool(
          * attaches it to the next turn. OCR stays for the models that need
          * it.
          */
-        if (modelVision(context.modelId) === "native") {
+        if (contextSeesNative(context)) {
           return {
             ok: true,
             content:
@@ -3396,7 +3415,7 @@ export async function runTool(
         // A model that can see gets the pixels in the same round. Making it
         // call view_image afterwards costs a round and, on a long UI night,
         // that round is the difference between two iterations and one.
-        if (modelVision(context.modelId) === "native") {
+        if (contextSeesNative(context)) {
           try {
             const shown = await readImageAsDataUrl(workspaceId, relative);
             return {

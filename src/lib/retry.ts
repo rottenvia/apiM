@@ -69,6 +69,11 @@ export interface UpstreamNotice {
   waitedMs?: number;
   /** Approximate JSON body size of the completion request. */
   inputChars?: number;
+  /**
+   * Where those chars live, largest first — e.g. plugins, history, media.
+   * The banner names the biggest one inline; the tooltip lists them all.
+   */
+  breakdown?: { label: string; chars: number }[];
 }
 
 /** Hide a healthy first try until it has actually been sitting there. */
@@ -82,12 +87,12 @@ export const DEFAULT_RETRY = {
 } as const;
 
 /**
- * OpenCode Zen (Ox Alpha) 503s several times a day.
+ * OpenRouter's shared pool 503s several times a day.
  *
  * Three tries is not enough for an outage that lasts a minute, and their
  * body often just says "retrying" — which we must not show as a final error.
  */
-export const OPENCODE_RETRY = {
+export const OPENROUTER_RETRY = {
   attempts: 5,
   baseDelayMs: 1_200,
   maxDelayMs: 10_000,
@@ -244,13 +249,25 @@ function tenths(ms: number): string {
   return `${Math.round(Math.max(0, ms) / 100) / 10}`;
 }
 
-  function sizeNote(inputChars?: number): string {
+  /**
+   * A fat body without a cause is a mystery the user cannot act on — "540k
+   * in a small chat" reads as a bug until the banner says "(plugins 310k)".
+   * The biggest contributor rides inline once the body passes 100k; the
+   * full list is the tooltip.
+   */
+  function sizeNote(inputChars?: number, breakdown?: { label: string; chars: number }[]): string {
     if (typeof inputChars !== "number" || inputChars < 8_000) return "";
-    if (inputChars >= 1e9)
-      return ` · ${(inputChars / 1e9).toFixed(1)}B chars in`;
-    if (inputChars >= 1e6)
-      return ` · ${(inputChars / 1e6).toFixed(0)}M chars in`;
-    return ` · ${(inputChars / 1000).toFixed(0)}k chars in`;
+    const size =
+      inputChars >= 1e9
+        ? `${(inputChars / 1e9).toFixed(1)}B`
+        : inputChars >= 1e6
+          ? `${(inputChars / 1e6).toFixed(0)}M`
+          : `${(inputChars / 1000).toFixed(0)}k`;
+    const top =
+      breakdown && breakdown.length > 0 && inputChars >= 100_000
+        ? ` (${breakdown[0].label} ${(breakdown[0].chars / 1000).toFixed(0)}k)`
+        : "";
+    return ` · ${size} chars in${top}`;
   }
 
 /**
@@ -276,7 +293,7 @@ export function formatUpstreamNotice(
   }
 
   const waited = info.waitedMs ?? Math.max(0, nowMs - receivedAt);
-  const size = sizeNote(info.inputChars);
+  const size = sizeNote(info.inputChars, info.breakdown);
   if (waited < HIDE_ATTEMPT_BEFORE_MS && !info.reason) {
     return `Calling ${host} — try ${info.attempt} of ${info.attempts}${size}`;
   }

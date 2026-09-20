@@ -129,9 +129,9 @@ export function CodeBlock({ children }: { children?: ReactNode }) {
             openArtifact();
           }
         }}
-        className="group my-3 flex w-full cursor-pointer items-center gap-3 rounded-xl border border-[#2c2924] bg-[#141210] px-3 py-2.5 text-left transition-colors duration-150 hover:border-[#403c34] hover:bg-[#201e1b]"
+        className="group my-3 flex w-full cursor-pointer items-center gap-3 rounded-xl border border-border bg-bg-secondary px-3 py-2.5 text-left transition-colors duration-150 hover:border-border-light hover:bg-bg-tertiary"
       >
-        <span className="flex h-9 w-9 flex-none items-center justify-center rounded-lg bg-[#2a2723] text-[#d97f5d]">
+        <span className="flex h-9 w-9 flex-none items-center justify-center rounded-lg bg-bg-elevated text-accent-light">
           <svg
             width="16"
             height="16"
@@ -150,10 +150,10 @@ export function CodeBlock({ children }: { children?: ReactNode }) {
         </span>
 
         <span className="flex min-w-0 flex-1 flex-col">
-          <span className="truncate text-sm font-medium text-[#ede9e2]">
+          <span className="truncate text-sm font-medium text-text-primary">
             {title}
           </span>
-          <span className="text-[11px] text-[#6d685d]">
+          <span className="text-[11px] text-text-muted">
             {language ?? "text"} · {lineCount} lines · click to open
           </span>
         </span>
@@ -162,7 +162,7 @@ export function CodeBlock({ children }: { children?: ReactNode }) {
           onClick={handleCopy}
           title={copied ? "Copied" : "Copy code"}
           aria-label="Copy code"
-          className="flex h-8 w-8 flex-none items-center justify-center rounded-lg text-[#6d685d] transition-colors hover:bg-[#33302a] hover:text-[#ede9e2]"
+          className="flex h-8 w-8 flex-none items-center justify-center rounded-lg text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
         >
           {copied ? (
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#7ba478" strokeWidth={2} aria-hidden="true">
@@ -181,23 +181,23 @@ export function CodeBlock({ children }: { children?: ReactNode }) {
 
   // Short snippets stay inline — a card would be more friction than the code.
   return (
-    <div className="group my-3 overflow-hidden rounded-xl border border-[#2c2924] bg-[#141210]">
-      <div className="flex items-center justify-between gap-3 border-b border-[#2c2924] bg-[#201e1b] py-1.5 pl-3.5 pr-1.5">
-        <span className="font-mono text-[11px] uppercase tracking-wider text-[#6d685d]">
+    <div className="group my-3 overflow-hidden rounded-xl border border-border bg-bg-secondary">
+      <div className="flex items-center justify-between gap-3 border-b border-border bg-bg-tertiary py-1.5 pl-3.5 pr-1.5">
+        <span className="font-mono text-[11px] uppercase tracking-wider text-text-muted">
           {language ?? "code"}
         </span>
         <button
           onClick={handleCopy}
           title={copied ? "Copied" : "Copy code"}
           aria-label="Copy code"
-          className="flex h-7 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium text-[#a29d92] opacity-0 transition-all duration-150 hover:bg-[#33302a] hover:text-[#ede9e2] focus-visible:opacity-100 group-hover:opacity-100"
+          className="flex h-7 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium text-text-secondary opacity-0 transition-all duration-150 hover:bg-bg-hover hover:text-text-primary focus-visible:opacity-100 group-hover:opacity-100"
         >
           {copied ? (
             <>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#7ba478" strokeWidth={2} aria-hidden="true">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M20 6L9 17l-5-5" />
               </svg>
-              <span className="text-[#7ba478]">Copied</span>
+              <span className="text-success">Copied</span>
             </>
           ) : (
             <>
