@@ -452,7 +452,8 @@ check(
   // rather than snapping in, which the transition check above covers.
   "the resting state is visible but quiet",
   /\.thinking-shell\s*\{[^}]*border:\s*1px solid var\(--color-border\)/s.test(css) &&
-    /\.thinking-shell\[data-thinking='true'\]\s*\{[^}]*#cfa25a/s.test(css),
+    /\.thinking-shell\[data-thinking='true'\]\s*\{[^}]*var\(--color-thinking\)/s.test(css) &&
+    /--color-thinking:\s*#cfa25a/.test(css),
   "a finished panel still needs an outline, or its text looks out of place"
 );
 check(

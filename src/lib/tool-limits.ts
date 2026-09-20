@@ -2,13 +2,14 @@
  * Per-model tool ceilings.
  *
  * Default numbers exist so a runaway call cannot dump a whole project into
- * one DeepSeek round. Ox Alpha is opted out: the user asked for full
- * capabilities on that model only — read as much as it wants, no per-call
- * batch cap. Safety rails (path sandbox, private LAN, command approval)
- * are unchanged.
+ * one round. A model can opt out into the open ceilings — read as much as
+ * it wants, no per-call batch cap — which no catalog model does (uncapped
+ * 401k reads re-bloated the transcript), but a custom OpenRouter model may
+ * in Settings. Safety rails (path sandbox, private LAN, command approval)
+ * are unchanged either way.
  */
 
-import { getModel } from "@/lib/models";
+import { MODELS } from "@/lib/models";
 
 export const DEFAULT_READ_FILES = 60;
 export const DEFAULT_WRITE_FILES = 30;
@@ -125,18 +126,35 @@ export const OPEN_TOOL_LIMITS: ToolLimits = {
   open: true,
 };
 
-/** Ox Alpha only. DeepSeek and Qwen keep the default ceilings. */
+/**
+ * Strict: an unknown id (a custom model, a stale saved id) is capped.
+ *
+ * This used to resolve through `getModel`, which falls back to the catalog
+ * default for anything it does not recognise — so every custom model would
+ * silently inherit GLM's ceilings. Customs pass their own flag explicitly
+ * via `openOverride` instead.
+ */
 export function modelHasOpenToolLimits(
-  id: string | null | undefined
+  id: string | null | undefined,
+  openOverride?: boolean
 ): boolean {
-  return getModel(id).openToolLimits === true;
+  if (openOverride !== undefined) return openOverride;
+  return MODELS.find((m) => m.id === id)?.openToolLimits === true;
 }
 
 /** Round guard for this model. */
-export function agentRoundsFor(id: string | null | undefined): number {
-  return toolLimitsFor(id).agentRounds;
+export function agentRoundsFor(
+  id: string | null | undefined,
+  openOverride?: boolean
+): number {
+  return toolLimitsFor(id, openOverride).agentRounds;
 }
 
-export function toolLimitsFor(id: string | null | undefined): ToolLimits {
-  return modelHasOpenToolLimits(id) ? OPEN_TOOL_LIMITS : DEFAULT_TOOL_LIMITS;
+export function toolLimitsFor(
+  id: string | null | undefined,
+  openOverride?: boolean
+): ToolLimits {
+  return modelHasOpenToolLimits(id, openOverride)
+    ? OPEN_TOOL_LIMITS
+    : DEFAULT_TOOL_LIMITS;
 }

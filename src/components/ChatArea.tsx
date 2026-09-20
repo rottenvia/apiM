@@ -45,6 +45,7 @@ import { ThinkingEffortSelector } from "@/components/ThinkingEffortSelector";
 import { BtwDock } from "@/components/BtwDock";
 import type { BtwEntry } from "@/components/BtwDock";
 import { ModelSelector } from "@/components/ModelSelector";
+import type { CustomModelDef } from "@/lib/models";
 import { WebSearchToggle } from "@/components/WebSearchToggle";
 import { WorkspaceBar } from "@/components/WorkspaceBar";
 import { WorkspaceDock } from "@/components/WorkspaceDock";
@@ -88,11 +89,14 @@ interface ChatAreaProps {
   onDismissBtw?: () => void;
   /** Set while a transient upstream failure is being retried. */
   retryNotice?: string | null;
+  /** Where the in-flight request's bytes live — the banner's tooltip. */
+  retryBreakdown?: { label: string; chars: number }[] | null;
   onStop: () => void;
   hasKeys: boolean;
   /** Which provider key is missing for the selected model. */
   missingKeyLabel?: string;
   model: string;
+  customModels: CustomModelDef[];
   thinkingEffort: string;
   webSearchMode: "off" | "auto" | "always";
   visionKey: string;
@@ -169,15 +173,15 @@ function StatusRow({
   return (
     <div className="flex justify-start px-1 py-2">
       <div className="flex items-center gap-2.5">
-        <span className="text-[#c96442]">
+        <span className="text-accent">
           <Dots size={5} />
         </span>
         {showStage && (
-          <span className="animate-thinking text-xs text-[#a29d92]">
+          <span className="animate-thinking text-xs text-text-secondary">
             {STAGE_LABELS[stage ?? "thinking"]}…
           </span>
         )}
-        <span className="text-[11px] leading-4 tabular-nums text-[#8a857a]">
+        <span className="text-[11px] leading-4 tabular-nums text-text-muted">
           {showStage ? "· " : ""}
           {seconds}s elapsed
           {hasVideo
@@ -201,10 +205,12 @@ export function ChatArea({
   onAskBtw,
   onDismissBtw,
   retryNotice,
+  retryBreakdown,
   onStop,
   hasKeys,
   missingKeyLabel = "DeepSeek",
   model,
+  customModels,
   thinkingEffort,
   webSearchMode,
   visionKey,
@@ -1517,7 +1523,7 @@ export function ChatArea({
                   hasVideo={videoWaitRef.current}
                 />
               )}
-              {retryNotice && <RetryBanner text={retryNotice} />}
+              {retryNotice && <RetryBanner text={retryNotice} breakdown={retryBreakdown} />}
 
               <div ref={messagesEndRef} />
             </div>
@@ -1699,7 +1705,7 @@ export function ChatArea({
                 is easy to miss while reading the reply above. */}
             {canResumeLast &&
               RESUME_WORDS.has(input.trim().toLowerCase()) && (
-                <div className="flex items-center gap-1.5 px-4 pb-1 text-[11px] text-[#cfa25a]">
+                <div className="flex items-center gap-1.5 px-4 pb-1 text-[11px] text-warning">
                   <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                     <path d="M8 5v14l11-7z" />
                   </svg>
@@ -1708,7 +1714,7 @@ export function ChatArea({
               )}
 
             {isBtw && (
-              <div className="flex items-center gap-1.5 px-4 pb-1 text-[11px] text-[#6ba3a0]">
+              <div className="flex items-center gap-1.5 px-4 pb-1 text-[11px] text-search">
                 <span className="btw-pulse" aria-hidden="true" />
                 Passes it to the running task — nothing stops
               </div>
@@ -1763,7 +1769,12 @@ export function ChatArea({
                   selector was still in the DOM but unreachable — a control
                   that vanished with no scrollbar to find it by. */}
               <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
-                <ModelSelector value={model} onChange={onSetModel} />
+                <ModelSelector
+                  value={model}
+                  customs={customModels}
+                  onChange={onSetModel}
+                  onOpenSettings={onOpenSettings}
+                />
 
                 <ThinkingEffortSelector
                   value={thinkingEffort}
@@ -2194,10 +2205,31 @@ const STAGE_LABELS: Record<StatusStage, string> = {
  *  Starts at the dots' left edge (the outer px-1): the old pl-[31px] pushed
  *  the line right of the dots it belongs to, and the wait read as two
  *  misaligned columns instead of one stack. */
-function RetryBanner({ text }: { text: string }) {
+function RetryBanner({
+  text,
+  breakdown,
+}: {
+  text: string;
+  breakdown?: { label: string; chars: number }[] | null;
+}) {
+  // The banner names the biggest contributor inline; hovering lists them all.
+  const title =
+    breakdown && breakdown.length > 0
+      ? `Request body: ${breakdown
+          .map(
+            (p) =>
+              `${p.label} ${
+                p.chars >= 1000 ? `${(p.chars / 1000).toFixed(0)}k` : `${p.chars}`
+              }`
+          )
+          .join(" · ")}`
+      : undefined;
   return (
     <div className="flex justify-start px-1 pb-2">
-      <span className="text-[11px] leading-4 tabular-nums text-[#cfa25a]">
+      <span
+        title={title}
+        className="cursor-default text-[11px] leading-4 tabular-nums text-warning"
+      >
         {text}
       </span>
     </div>

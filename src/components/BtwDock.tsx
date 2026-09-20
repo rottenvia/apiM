@@ -56,11 +56,11 @@ export function BtwDock({
   return (
     <div className="btw-dock px-3 pb-1.5 sm:px-4" data-open="false">
       <div className="mx-auto w-full max-w-3xl">
-        <div className="overflow-hidden rounded-xl border border-[#6ba3a0]/25 bg-[#6ba3a0]/[0.06]">
+        <div className="overflow-hidden rounded-xl border border-search/25 bg-search/[0.06]">
           <div className="flex items-center gap-2 px-3 py-2">
             <span
               aria-hidden="true"
-              className="flex-none rounded-lg bg-[#6ba3a0]/15 px-1.5 py-0.5 text-[11px] font-semibold tracking-wide text-[#6ba3a0]"
+              className="flex-none rounded-lg bg-search/15 px-1.5 py-0.5 text-[11px] font-semibold tracking-wide text-search"
             >
               btw
             </span>
@@ -78,10 +78,10 @@ export function BtwDock({
             <span
               className={`flex-none text-[11px] ${
                 entry.error
-                  ? "text-[#cf6a5f]"
+                  ? "text-danger"
                   : entry.status === "accepted"
-                    ? "text-[#6ba3a0]"
-                    : "text-[#6ba3a0]/70"
+                    ? "text-search"
+                    : "text-search/70"
               }`}
             >
               {status}
@@ -100,7 +100,7 @@ export function BtwDock({
               onClick={onDismiss}
               title={entry.status === "sending" ? "Cancel this note" : "Dismiss"}
               aria-label={entry.status === "sending" ? "Cancel this note" : "Dismiss"}
-              className="flex-none rounded-lg p-1 text-text-muted transition-colors hover:bg-[#6ba3a0]/10 hover:text-[#6ba3a0]"
+              className="flex-none rounded-lg p-1 text-text-muted transition-colors hover:bg-search/10 hover:text-search"
             >
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.4} aria-hidden="true">
                 <path strokeLinecap="round" d="M6 6l12 12M18 6L6 18" />
@@ -111,7 +111,7 @@ export function BtwDock({
           {/* One line of context under the collapsed row, always visible:
               a note is easy to confuse with a message, so the dock says
               plainly what happened to it. */}
-          <div className="border-t border-[#6ba3a0]/12 px-3 py-1.5">
+          <div className="border-t border-search/12 px-3 py-1.5">
             <p className="text-[11px] leading-4 text-text-muted">
               {entry.error
                 ? entry.error

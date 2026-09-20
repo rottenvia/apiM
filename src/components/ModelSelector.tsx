@@ -5,18 +5,31 @@ import {
   getDeepSeekPeriod,
   formatCountdown,
 } from "@/lib/deepseek-hours";
-import { MODELS, getModel } from "@/lib/models";
+import {
+  MODELS,
+  customSpecs,
+  customToModelInfo,
+  resolveModelInfo,
+} from "@/lib/models";
+import type { CustomModelDef } from "@/lib/models";
 
 interface ModelSelectorProps {
   value: string;
+  customs: CustomModelDef[];
   onChange: (value: string) => void;
+  onOpenSettings: () => void;
 }
 
-export function ModelSelector({ value, onChange }: ModelSelectorProps) {
+export function ModelSelector({
+  value,
+  customs,
+  onChange,
+  onOpenSettings,
+}: ModelSelectorProps) {
   const [isOpen, setIsOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
-  const current = getModel(value);
+  const current = resolveModelInfo(value, customs);
   const showPeakHours = current.peakHours;
 
   // DeepSeek peak/off-peak indicator. Off-peak (16:30-00:30 Beijing time,
@@ -112,7 +125,7 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
                   Model
                 </p>
                 <p className="mt-0.5 text-[11px] leading-4 text-text-muted">
-                  DeepSeek, OpenCode, or a local Qwen
+                  DeepSeek, OpenRouter, yours, or a local Qwen
                 </p>
               </div>
               <button
@@ -135,7 +148,7 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
               </button>
             </div>
 
-            {/* Peak/off-peak is DeepSeek-only. Ox Alpha is free on OpenCode. */}
+            {/* Peak/off-peak is DeepSeek-only. The 0731 lane is free on OpenRouter. */}
             {showPeakHours && (
             <div className="border-b border-border px-4 py-2.5">
               <div className="flex items-center gap-2">
@@ -226,6 +239,82 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
                   </button>
                 );
               })}
+              {customs.length > 0 && (
+                <>
+                  <p className="px-3 pb-1 pt-2 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
+                    Your models
+                  </p>
+                  {customs.map((def) => {
+                    const info = customToModelInfo(def);
+                    const selected = value === def.id;
+                    return (
+                      <button
+                        key={def.id}
+                        role="option"
+                        aria-selected={selected}
+                        data-active={selected}
+                        className="option-item"
+                        onClick={() => {
+                          onChange(def.id);
+                          setIsOpen(false);
+                        }}
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center justify-between gap-2">
+                            <span
+                              className={`truncate text-[13px] font-medium leading-5 ${
+                                selected
+                                  ? "text-accent-light"
+                                  : "text-text-primary"
+                              }`}
+                            >
+                              {def.label}
+                            </span>
+                            {selected && (
+                              <svg
+                                className="h-4 w-4 flex-none text-accent"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth={2.2}
+                              >
+                                <path
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                  d="M5 13l4 4L19 7"
+                                />
+                              </svg>
+                            )}
+                          </div>
+                          <p className="mt-0.5 truncate font-mono text-[11px] leading-4 text-text-secondary">
+                            {def.apiModel}
+                          </p>
+                          <p className="mt-1 text-[11px] leading-4 text-text-muted">
+                            OpenRouter · {customSpecs(def)}
+                            {info.vision === "native" ? " · vision" : ""}
+                          </p>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </>
+              )}
+              <button
+                className="option-item"
+                onClick={() => {
+                  setIsOpen(false);
+                  onOpenSettings();
+                }}
+              >
+                <div className="min-w-0 flex-1">
+                  <span className="text-[13px] font-medium leading-5 text-accent-light">
+                    ＋ Add any OpenRouter model…
+                  </span>
+                  <p className="mt-0.5 text-xs leading-5 text-text-secondary">
+                    Paste an id in Settings → Model and it lands here.
+                  </p>
+                </div>
+              </button>
             </div>
           </div>
         </div>

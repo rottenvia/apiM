@@ -27,7 +27,7 @@ function highlight(text: string, needle: string) {
     parts.push(
       <mark
         key={`${at}-${parts.length}`}
-        className="rounded-[3px] bg-[#c96442]/25 px-0.5 text-[#ede9e2]"
+        className="rounded-[3px] bg-accent/25 px-0.5 text-text-primary"
       >
         {text.slice(at, at + target.length)}
       </mark>
@@ -156,8 +156,8 @@ export function SearchModal({
         aria-modal="true"
       >
         {/* Input */}
-        <div className="flex flex-none items-center gap-2.5 border-b border-[#2c2924] px-3.5 py-3">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true" className="flex-none text-[#6d685d]">
+        <div className="flex flex-none items-center gap-2.5 border-b border-border px-3.5 py-3">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true" className="flex-none text-text-muted">
             <circle cx="11" cy="11" r="8" />
             <path strokeLinecap="round" d="M21 21l-4.35-4.35" />
           </svg>
@@ -166,12 +166,12 @@ export function SearchModal({
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search your chats…"
-            className="min-w-0 flex-1 bg-transparent text-[15px] text-[#ede9e2] placeholder-[#6d685d] outline-none"
+            className="min-w-0 flex-1 bg-transparent text-[15px] text-text-primary placeholder-text-muted outline-none"
           />
           {loading && (
-            <span className="flex-none text-[11px] text-[#6d685d]">…</span>
+            <span className="flex-none text-[11px] text-text-muted">…</span>
           )}
-          <kbd className="flex-none rounded border border-[#2c2924] px-1.5 py-0.5 font-mono text-[11px] text-[#6d685d]">
+          <kbd className="flex-none rounded border border-border px-1.5 py-0.5 font-mono text-[11px] text-text-muted">
             Esc
           </kbd>
         </div>
@@ -179,11 +179,11 @@ export function SearchModal({
         {/* Results */}
         <div className="max-h-[52vh] overflow-y-auto p-1.5 [overscroll-behavior:contain]">
           {query.trim().length < 2 ? (
-            <p className="px-3 py-8 text-center text-[13px] text-[#6d685d]">
+            <p className="px-3 py-8 text-center text-[13px] text-text-muted">
               Type at least 2 characters to search titles and messages
             </p>
           ) : hits.length === 0 && !loading ? (
-            <p className="px-3 py-8 text-center text-[13px] text-[#6d685d]">
+            <p className="px-3 py-8 text-center text-[13px] text-text-muted">
               No matches for “{query.trim()}”
             </p>
           ) : (
@@ -193,13 +193,13 @@ export function SearchModal({
                 onClick={() => choose(hit.conversationId)}
                 onMouseEnter={() => setActive(i)}
                 data-active={i === active}
-                className="w-full rounded-xl px-3 py-2.5 text-left transition-colors data-[active=true]:bg-[#2a2723]"
+                className="w-full rounded-xl px-3 py-2.5 text-left transition-colors data-[active=true]:bg-bg-elevated"
               >
                 <div className="flex items-baseline justify-between gap-3">
-                  <span className="min-w-0 flex-1 truncate text-sm font-medium text-[#ede9e2]">
+                  <span className="min-w-0 flex-1 truncate text-sm font-medium text-text-primary">
                     {highlight(hit.title, query.trim())}
                   </span>
-                  <span className="flex-none text-[11px] text-[#6d685d]">
+                  <span className="flex-none text-[11px] text-text-muted">
                     {hit.archived && "archived · "}
                     {timeAgo(hit.updatedAt)}
                   </span>
@@ -208,9 +208,9 @@ export function SearchModal({
                 {hit.snippets.map((s, j) => (
                   <p
                     key={j}
-                    className="mt-1 line-clamp-2 text-[12px] leading-snug text-[#a29d92]"
+                    className="mt-1 line-clamp-2 text-[12px] leading-snug text-text-secondary"
                   >
-                    <span className="mr-1 text-[11px] uppercase tracking-wide text-[#6d685d]">
+                    <span className="mr-1 text-[11px] uppercase tracking-wide text-text-muted">
                       {s.role === "user" ? "you" : "ai"}
                     </span>
                     {highlight(s.text, query.trim())}
@@ -218,7 +218,7 @@ export function SearchModal({
                 ))}
 
                 {hit.matchCount > hit.snippets.length && (
-                  <p className="mt-1 text-[11px] text-[#6d685d]">
+                  <p className="mt-1 text-[11px] text-text-muted">
                     +{hit.matchCount - hit.snippets.length} more matches
                   </p>
                 )}
@@ -228,7 +228,7 @@ export function SearchModal({
         </div>
 
         {hits.length > 0 && (
-          <div className="flex flex-none items-center gap-3 border-t border-[#2c2924] px-3.5 py-2 text-[11px] text-[#6d685d]">
+          <div className="flex flex-none items-center gap-3 border-t border-border px-3.5 py-2 text-[11px] text-text-muted">
             <span>↑↓ navigate</span>
             <span>↵ open</span>
             <span className="ml-auto">
