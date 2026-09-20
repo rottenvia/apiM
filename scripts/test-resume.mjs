@@ -259,7 +259,7 @@ check(
   "resume does not resend the reply as browser-supplied history",
   /Conversation history is intentionally NOT sent/.test(page) &&
     !/conversationHistory:\s*historyForApi/.test(page) &&
-    /loadScopedConversationHistory\(convId/.test(route),
+    /(loadScopedConversationHistory|loadHistoryForRequest)\(convId/.test(route),
   "the server rebuilds context from the addressed conversation only"
 );
 
