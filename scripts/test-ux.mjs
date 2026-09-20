@@ -598,6 +598,14 @@ check(
   "the old editor sized rows from the draft only, collapsing a 3-line message"
 );
 
+check(
+  "the live Thinking label ticks seconds through a stalled stream",
+  /function ThinkingClock/.test(bubble) &&
+    /isThinkingPhase \? \(/.test(bubble) &&
+    /<ThinkingClock \/>/.test(bubble),
+  "the status row unmounts at the first token — this is the stall signal after that"
+);
+
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
 );

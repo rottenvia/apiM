@@ -260,7 +260,7 @@ check(
 );
 check(
   "a hit continues the same transcript, it does not rebuild",
-  /content: reviveInstruction\(premature\)/.test(route) &&
+  /content: reviveInstruction\(premature, roundRanWithoutTools\)/.test(route) &&
     /autoRevives < MAX_AUTO_REVIVES/.test(route) &&
     /continue;/.test(route),
   "Resume already knows how to replay; this just fires it"
@@ -292,6 +292,117 @@ check(
       route.indexOf('send({ type: "status", stage: "working" });') &&
     /call ask_user NOW[\s\S]{0,500}continue;/.test(route),
   "it used to push a message and then break, so the model never saw it"
+);
+
+console.log("\n5. Narrated intent without action is a stop, not an answer");
+
+for (const [shape, detail] of [
+  ["Let me read main.cpp to see the current state and make the necessary edits.", "no 'now', verb outside the old list"],
+  ["ok, let me make three edits now.", "'make' was never a trigger verb"],
+  ["I will start by checking the decoder for the z escape.", "adverb + gerund"],
+  ["I need to fix the parser first before anything else works.", "'need to' form"],
+  ["The file is in place. I must verify the build before continuing.", "'must' form"],
+]) {
+  check(
+    `intent shape revives: "${shape.slice(0, 42)}…"`,
+    R.detectPrematureStop({ ...base, roundContent: shape }) === "dangling_next",
+    detail
+  );
+}
+check(
+  "intent outranks the unfinished plan",
+  R.detectPrematureStop({
+    ...base,
+    planComplete: false,
+    roundContent: "Let me read the next file.",
+  }) === "dangling_next",
+  "'your plan has steps left' tells the model nothing it doesn't know"
+);
+check(
+  "intent fires on a planned run before the first tool call",
+  R.detectPrematureStop({
+    ...base,
+    toolRounds: 0,
+    toolsUsed: [],
+    planComplete: false,
+    roundContent: "Let me read main.cpp first.",
+  }) === "dangling_next",
+  "the plan is the task context that makes narration a stall"
+);
+check(
+  "intent without tools or plan is left alone",
+  R.detectPrematureStop({
+    ...base,
+    toolRounds: 0,
+    toolsUsed: [],
+    roundContent: "Let me check the reference for you.",
+  }) === null,
+  "'let me check…' is just how a chat answer begins"
+);
+for (const [shape, why] of [
+  ["Let me explain how this works in detail.", "presentation verb"],
+  ["Let me know if you want any changes.", "'let me know'"],
+  ["Let me make sure I understand the requirements.", "'make sure' idiom"],
+  ["I have to stop here for now.", "a stop declaration, not intent"],
+]) {
+  check(
+    `lookalike left alone: "${shape.slice(0, 40)}…"`,
+    R.detectPrematureStop({ ...base, roundContent: shape }) !== "dangling_next",
+    why
+  );
+}
+
+console.log("\n6. The shove names the failure, and blames the harness when due");
+
+const dangle = R.reviveInstruction("dangling_next");
+check(
+  "the dangling shove orders a tool call, not more words",
+  /call the tool/.test(dangle) && /Do not narrate/.test(dangle),
+  "'continue from where you left off' read as approval of the narration"
+);
+check(
+  "the dangling shove still forbids redo",
+  /continue from exactly/.test(dangle) && /no redo/.test(dangle)
+);
+const degraded = R.reviveInstruction("dangling_next", true);
+check(
+  "a tool-less round is named as harness-caused",
+  /ran without tools/.test(degraded) && /offered again/.test(degraded),
+  "blaming the model for a stripped round teaches it to narrate harder"
+);
+check(
+  "the plain shove is unchanged without the flag",
+  !/ran without tools/.test(R.reviveInstruction("limit_language")),
+  "one default argument, zero behavior change for old callers"
+);
+check(
+  "the stop notice names the narration stall",
+  /describing its next action/.test(R.prematureStopNotice("dangling_next"))
+);
+
+console.log("\n7. Degraded rounds are tracked into the stop notice");
+
+check(
+  "a tool-less recovery sets the round flag and counts it",
+  /roundRanWithoutTools = !\("tools" in retryBody\);/.test(route) &&
+    /roundRanWithoutTools = true;/.test(route) &&
+    /degradedRoundsThisRun \+= 1;/.test(route),
+  "fold recoveries keep tools — only stripped ones count"
+);
+check(
+  "tool-less recoveries are logged per round",
+  /continuing without tools/.test(route) &&
+    /continuing smaller and without tools/.test(route)
+);
+check(
+  "the stop notice carries the degraded-round count",
+  /ran without tools after rejections/.test(route),
+  "finished runs stay quiet — only stalled ones explain"
+);
+check(
+  "the plan nudge names narrated idleness",
+  /describesImminentAction\(roundContent/.test(route) &&
+    /described the next action instead of doing it/.test(route)
 );
 
 console.log(
