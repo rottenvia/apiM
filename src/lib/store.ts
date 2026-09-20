@@ -58,6 +58,16 @@ export interface StoredMessage {
    */
   contextChars?: number | null;
   contextBreakdown?: { label: string; chars: number }[] | null;
+  /**
+   * How the reply ended: the final round's finish_reason plus what the
+   * continuation pools spent getting there. Absent on replies saved before
+   * this existed.
+   */
+  ending?: {
+    finish: string | null;
+    continuedOutput: number;
+    continuedConnection: number;
+  } | null;
   createdAt: string;
   /** True while the reply is still streaming. If the process dies or the tab
    *  closes mid-answer the flag stays set, which is how the UI knows to offer

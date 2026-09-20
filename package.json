@@ -42,6 +42,7 @@
     "test:history-summary": "tsx scripts/test-history-summary.mjs",
     "test:stall": "tsx scripts/test-stall.mjs",
     "test:grounding": "tsx scripts/test-grounding.mjs",
+    "test:ending": "tsx scripts/test-ending.mjs",
     "test:conversation-search": "tsx scripts/test-conversation-search.mjs",
     "test:compact": "tsx scripts/test-compact.mjs",
     "test:lessons": "tsx scripts/test-lessons.mjs",

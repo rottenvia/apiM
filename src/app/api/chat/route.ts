@@ -517,6 +517,12 @@ type StreamEvent =
       contextChars?: number;
       /** Where those bytes lived, largest first. */
       contextBreakdown?: { label: string; chars: number }[];
+      /** How the reply ended: final finish_reason plus continuations spent. */
+      ending: {
+        finish: string | null;
+        continuedOutput: number;
+        continuedConnection: number;
+      };
       model: string;
       /**
        * How long the model spent reasoning, first trace token to last,
@@ -1962,6 +1968,13 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          * runaway loop remains finite.
          */
         let continuations = 0;
+        /*
+         * How the reply ended, for the footer receipt. The final round's
+         * finish_reason plus what the continuation pools spent — so "2k
+         * chars and stopping" answers itself: `stop` with zero continuations
+         * means the model ended it, anything else names the cutter.
+         */
+        let lastFinishReason: string | null = null;
         /**
          * Set when the next round is a "carry on from where you stopped"
          * prose continuation, so that round de-duplicates any text the model
@@ -3485,6 +3498,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             (!roundFinishReason ||
               !/^(stop|tool_calls|content_filter)$/i.test(roundFinishReason));
           const truncated = hardTruncated || streamCut;
+          lastFinishReason = roundFinishReason || null;
 
           /*
            * Qwen (and sometimes others) can spend the entire output budget
@@ -5131,6 +5145,11 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             contextBreakdown: lastSizeParts.length
               ? lastSizeParts.slice(0, 6)
               : null,
+            ending: {
+              finish: lastFinishReason,
+              continuedOutput: continuations,
+              continuedConnection: streamCuts,
+            },
             toolEvents: toolEvents.length ? toolEvents : null,
             timeline: timeline.length ? timeline : null,
             createdAt: new Date().toISOString(),
@@ -5272,6 +5291,11 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           contextBreakdown: lastSizeParts.length
             ? lastSizeParts.slice(0, 6)
             : undefined,
+          ending: {
+            finish: lastFinishReason,
+            continuedOutput: continuations,
+            continuedConnection: streamCuts,
+          },
           model,
           incomplete: unfinished,
           canResume: unfinished,
