@@ -14,6 +14,7 @@
 
 import { PLUGIN_DIRECTIVES_MARKER } from "@/lib/plugins";
 import { PLAN_MARKER } from "@/lib/plan";
+import { HISTORY_SUMMARY_MARKER } from "@/lib/history-summary";
 
 export interface RequestSizePart {
   label: string;
@@ -68,6 +69,8 @@ export function breakdownRequestMessages(
       else if (text.startsWith("Workspace changes since"))
         add(parts, "tree updates", text.length);
       else if (text.startsWith(PLAN_MARKER)) add(parts, "plan", text.length);
+      else if (text.startsWith(HISTORY_SUMMARY_MARKER))
+        add(parts, "summary", text.length);
       else add(parts, "instructions", text.length);
       return;
     }

@@ -8,6 +8,7 @@ import {
 import { stopAll } from "@/lib/processes";
 import { forgetWorkspace } from "@/lib/approvals";
 import { deleteAllSnapshots } from "@/lib/snapshots";
+import type { StoredHistorySummary } from "@/lib/history-summary";
 import type { StoredAttachment } from "@/lib/multimodal";
 
 /**
@@ -145,6 +146,12 @@ export interface StoredConversation {
    * wrong order on a resume.
    */
   btwNotes?: BtwNote[];
+  /**
+   * Rolling summary of turns older than the verbatim window (see
+   * lib/history-summary.ts). Absent until the backlog first passes the
+   * refresh trigger; from then on the cursor only moves forward.
+   */
+  historySummary?: StoredHistorySummary;
 }
 
 /** Summary shape returned to the sidebar (messages omitted). */
@@ -913,6 +920,30 @@ export async function updateConversation(
 
   await writeConversation(conv);
   return conv;
+}
+
+/**
+ * Persist a refreshed history summary, guarding against a lost update.
+ *
+ * Two requests on one conversation can summarise concurrently; both read
+ * the same cursor, both write. The loser must not rewind the winner's
+ * cursor, so the write lands only when the stored cursor still matches the
+ * one the refresh was computed from. False means "someone else won" — the
+ * caller keeps its fresher text in memory for this request and the next
+ * request converges on the stored one.
+ */
+export async function saveHistorySummary(
+  id: string,
+  expectedUpToId: string | null,
+  next: StoredHistorySummary
+): Promise<boolean> {
+  const conv = await getConversation(id);
+  if (!conv) return false;
+  if ((conv.historySummary?.upToId ?? null) !== expectedUpToId) return false;
+  conv.historySummary = next;
+  conv.updatedAt = new Date().toISOString();
+  await writeConversation(conv);
+  return true;
 }
 
 export async function deleteConversation(id: string): Promise<boolean> {
