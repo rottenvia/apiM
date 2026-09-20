@@ -177,7 +177,12 @@ import {
   budgetStopMessage,
   maxTokensFor,
 } from "@/lib/budget";
-import { cacheSplit, estimateCost, getDeepSeekPeriod } from "@/lib/pricing";
+import {
+  cacheSplit,
+  estimateCost,
+  getDeepSeekPeriod,
+  type UsageLike,
+} from "@/lib/pricing";
 import { createContinuationDedup } from "@/lib/continuation-dedup";
 import { listCustomPlugins } from "@/lib/plugin-store";
 import {
@@ -460,7 +465,7 @@ type StreamEvent =
   | { type: "question_resolved"; id: string; answered: boolean }
   | {
       type: "usage";
-      usage: Record<string, number>;
+      usage: UsageLike;
       model: string;
       /** Peak/off-peak period the running cost was computed at. */
       period?: "peak" | "offpeak";
@@ -522,6 +527,7 @@ type StreamEvent =
         finish: string | null;
         continuedOutput: number;
         continuedConnection: number;
+        thinkOnlyStalls: number;
       };
       model: string;
       /**
@@ -1983,12 +1989,16 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          */
         let proseContinuationPending = false;
         /**
-         * A think-only output-limit cut: one nudge to act, then stop. Fresh
+         * A think-only output-limit cut: two shoves to act, then stop. Fresh
          * budget on Resume for the same reason — but forceNoThinking below
          * still carries, so a model that burned the whole ceiling on
          * thinking is NOT told it may think again.
          */
         let thinkNudges = 0;
+        /** Think-only strikes observed this run, recovered or not. */
+        let thinkOnlyStalls = 0;
+        /** The ceiling trip was thinking eating the budget, not a long answer. */
+        let thinkCeiling = false;
         /** After a think-only cut, the next call must not think again. */
         let forceNoThinking =
           (resumed?.thinkNudges ?? 0) > 0 ||
@@ -2143,6 +2153,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           total_tokens: 0,
           prompt_cache_hit_tokens: 0,
           prompt_cache_miss_tokens: 0,
+          completion_tokens_details: { reasoning_tokens: 0 },
         };
         /**
          * Last tool round whose full transcript was persisted.
@@ -3215,6 +3226,18 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 const split = cacheSplit(u as Parameters<typeof cacheSplit>[0]);
                 totalUsage.prompt_cache_hit_tokens += split.hit;
                 totalUsage.prompt_cache_miss_tokens += split.miss;
+                /*
+                 * Reasoning is billed as output, and on high effort it dwarfs
+                 * the answer — a $1 ESP script is mostly thinking. Summed per
+                 * round like the cache split so the footer can show the share
+                 * instead of a total that looks impossible.
+                 */
+                const reasoningDetails = chunk.usage as {
+                  completion_tokens_details?: { reasoning_tokens?: number };
+                } | null;
+                totalUsage.completion_tokens_details.reasoning_tokens +=
+                  reasoningDetails?.completion_tokens_details
+                    ?.reasoning_tokens ?? 0;
                 // Charge the running total for this round, at the real
                 // cache-split rates, so the limit is enforced against what is
                 // actually being billed rather than a token count.
@@ -3367,19 +3390,24 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             (!roundFinishReason || firstTokenTimedOut)
           ) {
             emptyStreamRetries += 1;
+            // A fixed 1.2s re-fired inside the same outage window twice. The
+            // waits now grow — a blink rides out, a real outage still fails
+            // after ~5.5s instead of hanging the run on false hope.
+            const emptyRetryDelayMs =
+              emptyStreamRetries === 1 ? 1_500 : 4_000;
             send({
               type: "retrying",
               phase: "backoff",
               attempt: emptyStreamRetries,
               attempts: emptyRetryBudget,
-              delayMs: 1_200,
+              delayMs: emptyRetryDelayMs,
               reason: firstTokenTimedOut ? "no first token" : "empty reply",
               host: target.providerName,
               inputChars,
               breakdown: sizeParts,
             });
             try {
-              await sleep(1_200, runSignal);
+              await sleep(emptyRetryDelayMs, runSignal);
             } catch (error) {
               if (error instanceof Error && error.name === "AbortError") {
                 close();
@@ -3506,7 +3534,12 @@ Ask before you build the wrong thing. If a choice would change what you produce 
            * mid-sentence cut asked it to "continue" eight more times — each
            * one another full think. The UI sat on Thinking forever.
            *
-           * One shove to act. If it thinks through the budget again, stop.
+           * Two shoves to act, then stop. The first shove used to be the
+           * last word: thinking was "disabled" by sending no disable signal
+           * at all on OpenRouter lanes, so the model thought through the
+           * budget a second time and the run stopped mid-task. The disable
+           * is real now (`reasoning: { effort: "none" }`), and a second,
+           * blunter shove stands between one dead think and a dead run.
            */
           const thinkOnlyCut =
             truncated &&
@@ -3514,30 +3547,45 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             roundReasoning.length >= 80 &&
             (roundContent?.trim().length ?? 0) < 40;
           if (thinkOnlyCut) {
+            thinkOnlyStalls += 1;
+            /*
+             * The dead think is trimmed, not replayed. It produced no
+             * content and no tool call, so resending it buys nothing and
+             * costs the whole think again on every recovery turn — on a
+             * paid lane that is the most expensive sentence never read. A
+             * tombstone keeps the transcript shape valid and tells the
+             * model exactly what happened. (Safe to paraphrase: there are
+             * no tool calls on this turn, so no verbatim-replay rule binds.)
+             */
             transcript.push({
               role: "assistant",
               content: roundContent || null,
-              reasoning_content: roundReasoning || null,
+              reasoning_content:
+                `[thinking produced no output — ${roundReasoning.length} chars trimmed]`,
             });
-            if (thinkNudges < 1) {
+            if (thinkNudges < 2) {
               thinkNudges += 1;
               forceNoThinking = true;
               transcript.push({
                 role: "user",
                 content:
-                  "You used the whole output budget on thinking and produced " +
-                  "no answer and no tool call. Stop reasoning. Call a tool " +
-                  "or write the reply now. Do not think more.",
+                  thinkNudges === 1
+                    ? "You used the whole output budget on thinking and produced " +
+                      "no answer and no tool call. Stop reasoning. Call a tool " +
+                      "or write the reply now. Do not think more."
+                    : "Still no answer and no tool call. Do not think. Write " +
+                      "the reply or call a tool NOW, briefly.",
               });
               send({
                 type: "continuing",
                 reason: "thinking_budget",
-                n: 1,
-                of: 1,
+                n: thinkNudges,
+                of: 2,
               });
               continue;
             }
             hitOutputCeiling = true;
+            thinkCeiling = true;
             break;
           }
 
@@ -5149,6 +5197,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               finish: lastFinishReason,
               continuedOutput: continuations,
               continuedConnection: streamCuts,
+              thinkOnlyStalls,
             },
             toolEvents: toolEvents.length ? toolEvents : null,
             timeline: timeline.length ? timeline : null,
@@ -5295,6 +5344,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             finish: lastFinishReason,
             continuedOutput: continuations,
             continuedConnection: streamCuts,
+            thinkOnlyStalls,
           },
           model,
           incomplete: unfinished,
@@ -5303,7 +5353,9 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             const base = stoppedPrematurely
               ? prematureStopNotice(stoppedPrematurely)
               : hitOutputCeiling
-                ? "The answer hit the output limit before it finished"
+                ? thinkCeiling
+                  ? "It thought through the whole output budget three times without writing anything — Resume continues with thinking switched off"
+                  : "The answer hit the output limit before it finished"
                 : connectionCutsExhausted
                   ? "The connection kept dropping before the answer finished"
                   : undefined;

@@ -23,7 +23,12 @@ import type { Message, MessageAttachment } from "@/app/page";
 import { ImageLightbox } from "@/components/ImageLightbox";
 import { CompareVersions } from "@/components/CompareVersions";
 import { buildSearchRegex } from "@/lib/chat-search";
-import { estimateCost, formatCost, formatDuration } from "@/lib/pricing";
+import {
+  estimateCost,
+  formatCost,
+  formatDuration,
+  reasoningTokens,
+} from "@/lib/pricing";
 import { CodeBlock } from "@/components/CodeBlock";
 import { PlanPanel } from "@/components/PlanPanel";
 import type { PlanView } from "@/components/PlanPanel";
@@ -590,13 +595,12 @@ function MessageBubbleImpl({
   /**
    * Does the panel have anything real to show right now?
    *
-   * This gates the BODY, not the mount. The shell mounts through the silent
-   * gap — streaming, thinking requested, no reasoning text yet — as a bare
-   * shimmering "Thinking" with no frame, and warms into the full box when the
-   * first token lands. The label never re-mounts: the loader IS the header,
-   * so "loading text transforms into box" is literally one node changing
-   * state. ChatArea's status row keeps the elapsed heartbeat meanwhile; the
-   * panel is the thought, the row is the run.
+   * This gates the MOUNT, not just the body. The shell used to mount
+   * through the silent gap — streaming, thinking requested, no reasoning
+   * text yet — as a bare shimmering "Thinking", while ChatArea's status
+   * row kept its own clock below: two voices, two timers, one wait. Now
+   * the status row speaks alone until the first reasoning token lands,
+   * and the panel mounts once it has something to show.
    */
   const panelHasContent = Boolean(
     message.reasoningNotice ||
@@ -671,6 +675,15 @@ function MessageBubbleImpl({
   const modelCost = useMemo(
     () => estimateCost(message.usage, message.model ?? ""),
     [message.usage, message.model]
+  );
+  /*
+   * How much of the output was thinking. Billed at the output rate, and on
+   * high effort it dwarfs the answer — the line that explains a $1 reply
+   * for a short answer. Zero/absent on lanes that do not report the split.
+   */
+  const thinkingTokens = useMemo(
+    () => reasoningTokens(message.usage),
+    [message.usage]
   );
 
   /*
@@ -1160,6 +1173,9 @@ function MessageBubbleImpl({
                       message.usage
                         ? [
                             `${(message.usage.prompt_tokens ?? 0).toLocaleString()} in · ${(message.usage.completion_tokens ?? 0).toLocaleString()} out`,
+                            thinkingTokens > 0
+                              ? `${thinkingTokens.toLocaleString()} of the output was thinking, billed at the output rate`
+                              : null,
                             message.usage.prompt_cache_hit_tokens
                               ? `${message.usage.prompt_cache_hit_tokens.toLocaleString()} of the input was cached, billed at 1/120th the rate`
                               : null,
@@ -1238,7 +1254,8 @@ function MessageBubbleImpl({
                 {message.ending &&
                 (message.ending.finish ||
                   message.ending.continuedOutput > 0 ||
-                  message.ending.continuedConnection > 0) ? (
+                  message.ending.continuedConnection > 0 ||
+                  message.ending.thinkOnlyStalls >= 2) ? (
                   <span
                     className="text-[11px] text-text-muted"
                     /*
@@ -1251,7 +1268,10 @@ function MessageBubbleImpl({
                     title={
                       `Final finish_reason: ${message.ending.finish ?? "none (stream ended mid-content)"}` +
                       `\nOutput-limit continuations: ${message.ending.continuedOutput}` +
-                      `\nConnection-cut continuations: ${message.ending.continuedConnection}`
+                      `\nConnection-cut continuations: ${message.ending.continuedConnection}` +
+                      (message.ending.thinkOnlyStalls > 0
+                        ? `\nThink-only stalls: ${message.ending.thinkOnlyStalls} (thinking ate the whole output budget without producing anything; thinking was then switched off)`
+                        : "")
                     }
                   >
                     · {message.ending.finish ?? "cut"}
@@ -1259,6 +1279,9 @@ function MessageBubbleImpl({
                       message.ending.continuedConnection >
                     0
                       ? ` +${message.ending.continuedOutput + message.ending.continuedConnection} cont`
+                      : ""}
+                    {message.ending.thinkOnlyStalls >= 2
+                      ? ` · thought ${message.ending.thinkOnlyStalls}×, empty`
                       : ""}
                   </span>
                 ) : null}
@@ -1330,7 +1353,7 @@ function MessageBubbleImpl({
               is coming. "none" means the model was told not to think, and
               then there is correctly nothing to show.
             */}
-            {hasThinking && (
+            {hasThinking && !thinkLoading && (
               <div className="thinking-panel">
                 <div
                   data-thinking={isThinkingPhase}
@@ -1526,6 +1549,11 @@ function MessageBubbleImpl({
                         Everything it did is saved — the files it wrote, what it
                         read, and its reasoning. Resuming carries on from there
                         and only pays for what is left.
+                      </p>
+                    ) : message.isError ? (
+                      <p className="mt-0.5 text-[12px] leading-relaxed text-text-secondary">
+                        Nothing arrived, so there is nothing to resume — Try
+                        again re-sends the turn.
                       </p>
                     ) : (
                       <p className="mt-0.5 text-[12px] leading-relaxed text-text-secondary">
