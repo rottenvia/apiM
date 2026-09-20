@@ -117,6 +117,10 @@ export interface Message {
   model?: string;
   /** Wall-clock time the reply took. */
   durationMs?: number;
+  /** Chars in the final upstream request — the context this reply cost. */
+  contextChars?: number;
+  /** Where those bytes lived, largest first. */
+  contextBreakdown?: { label: string; chars: number }[];
   /** How many search rounds ran, and why the loop stopped. */
   searchRounds?: number;
   searchStopReason?: string;
@@ -227,6 +231,7 @@ type StreamEvent =
       attempts: number;
       delayMs: number;
       reason: string;
+      detail?: string;
       host?: string;
       inputChars?: number;
       breakdown?: { label: string; chars: number }[];
@@ -300,6 +305,8 @@ type StreamEvent =
       usage: unknown;
       durationMs: number;
       reasoningMs?: number;
+      contextChars?: number;
+      contextBreakdown?: { label: string; chars: number }[];
       model: string;
       incomplete?: boolean;
       canResume?: boolean;
@@ -425,6 +432,8 @@ export default function Home() {
   const [retryBreakdown, setRetryBreakdownState] = useState<
     { label: string; chars: number }[] | null
   >(null);
+  // The provider's own message behind a rejection-driven retry.
+  const [retryDetail, setRetryDetailState] = useState<string | null>(null);
 
   /** Copy a session's UI state into the mirrored React states. */
   const mirrorSession = useCallback((s: ChatSession) => {
@@ -434,6 +443,7 @@ export default function Home() {
     setStatusStageState(s.stage);
     setRetryNoticeState(s.retryNotice);
     setRetryBreakdownState(s.liveRetry?.breakdown ?? null);
+    setRetryDetailState(s.liveRetry?.detail ?? null);
   }, []);
 
   /**
@@ -489,8 +499,10 @@ export default function Home() {
         if (patch.stage !== undefined) setStatusStageState(s.stage);
         if (patch.retryNotice !== undefined)
           setRetryNoticeState(s.retryNotice);
-        if (patch.liveRetry !== undefined)
+        if (patch.liveRetry !== undefined) {
           setRetryBreakdownState(s.liveRetry?.breakdown ?? null);
+          setRetryDetailState(s.liveRetry?.detail ?? null);
+        }
       }
       setSessionsVersion((v) => v + 1);
     },
@@ -1332,6 +1344,10 @@ export default function Home() {
           usage: (m.usage as Record<string, number> | null) ?? null,
           model: m.model as string | undefined,
           durationMs: m.durationMs as number | undefined,
+          contextChars: m.contextChars as number | undefined,
+          contextBreakdown: Array.isArray(m.contextBreakdown)
+            ? (m.contextBreakdown as { label: string; chars: number }[])
+            : undefined,
           createdAt: m.createdAt as string | undefined,
           incomplete: m.incomplete === true,
           // The server sends a flag, never the saved transcript itself: it
@@ -1940,6 +1956,7 @@ export default function Home() {
                   attempts: evt.attempts,
                   delayMs: evt.delayMs,
                   reason: evt.reason,
+                  detail: evt.detail,
                   host: evt.host,
                   inputChars: evt.inputChars,
                   breakdown: evt.breakdown,
@@ -2333,6 +2350,8 @@ export default function Home() {
                   model: evt.model,
                   durationMs: evt.durationMs,
                   reasoningMs: evt.reasoningMs,
+                  contextChars: evt.contextChars,
+                  contextBreakdown: evt.contextBreakdown,
                   // A limit-stop must land as Resume on the SAME bubble.
                   // Ignoring these flags made every `done` look finished, so
                   // the next send opened a new thinking box from scratch.
@@ -3079,6 +3098,7 @@ export default function Home() {
         onDismissBtw={dismissBtw}
         retryNotice={retryNotice}
         retryBreakdown={retryBreakdown}
+        retryDetail={retryDetail}
         onStop={stopGeneration}
         hasKeys={hasKeys}
         missingKeyLabel={

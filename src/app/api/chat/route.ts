@@ -64,6 +64,7 @@ import {
   salvageToolArguments,
   salvagePartialFile,
   serializeForApi,
+  foldOldestHistory,
 } from "@/lib/transcript";
 import type { TranscriptMessage } from "@/lib/transcript";
 import { pruneTranscript } from "@/lib/prune";
@@ -98,6 +99,7 @@ import {
   fetchUntilHeaders,
   fetchWithRetry,
   isTimeoutFailure,
+  isSizeRejection,
   OPENROUTER_RETRY,
   readWithTimeout,
   SERVER_SIDE_STATUS,
@@ -161,6 +163,7 @@ import {
 } from "@/lib/providers";
 import {
   breakdownRequestMessages,
+  describeHistoryTurns,
   formatBreakdown,
 } from "@/lib/request-size";
 import {
@@ -366,6 +369,8 @@ type StreamEvent =
       attempts: number;
       delayMs: number;
       reason: string;
+      /** The provider's own rejection message, when the retry answers one. */
+      detail?: string;
       host?: string;
       inputChars?: number;
       /** Where the request bytes live, largest first (see lib/request-size). */
@@ -466,6 +471,10 @@ type StreamEvent =
       usage: unknown;
       /** Wall-clock milliseconds from request start to final token. */
       durationMs: number;
+      /** Chars in the final upstream request — the context this reply cost. */
+      contextChars?: number;
+      /** Where those bytes lived, largest first. */
+      contextBreakdown?: { label: string; chars: number }[];
       model: string;
       /**
        * How long the model spent reasoning, first trace token to last,
@@ -520,14 +529,24 @@ type StreamEvent =
  * Everything else — thinking fields, stream options, message text — stays
  * exactly as it was.
  */
-function sanitizeOpenRouterRequestBody(body: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = { ...body };
-  delete out.tools;
-  delete out.tool_choice;
+/**
+ * Wire-copy ceiling for a size-driven retry.
+ *
+ * A body the provider rejected for size is folded to about half of the
+ * observed failure point (~690k chars) — far enough below it to pass a
+ * limit sitting anywhere near there, while keeping the live question and
+ * the recent work intact. Only the retry takes this path; healthy rounds
+ * are never capped.
+ */
+const FOLD_RETRY_TARGET_CHARS = 350_000;
 
-  const messages = out.messages;
-  if (Array.isArray(messages)) {
-    out.messages = messages.map((m) => {
+/** Replace image/video parts with a one-line pointer. Shared by both retry paths. */
+function stripMediaParts(
+  messages: unknown
+): { messages: unknown; stripped: boolean } {
+  if (!Array.isArray(messages)) return { messages, stripped: false };
+  let stripped = false;
+  const out = messages.map((m) => {
       if (
         typeof m !== "object" ||
         m === null ||
@@ -554,10 +573,19 @@ function sanitizeOpenRouterRequestBody(body: Record<string, unknown>): Record<st
         }
       );
       if (!droppedMedia) return m;
+      stripped = true;
       return { ...(m as Record<string, unknown>), content };
     });
-  }
+  return { messages: out, stripped };
+}
 
+function sanitizeOpenRouterRequestBody(
+  body: Record<string, unknown>
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...body };
+  delete out.tools;
+  delete out.tool_choice;
+  out.messages = stripMediaParts(out.messages).messages;
   return out;
 }
 
@@ -1742,6 +1770,10 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         // stops calling tools, the user presses Stop, or a spending limit
         // (if one is set) fires.
         let round = 0;
+        // The FINAL round's request size, reported on `done` — the context
+        // the reply as a whole cost. Updated per round; last write wins.
+        let lastInputChars = 0;
+        let lastSizeParts: { label: string; chars: number }[] = [];
         // Carried across Resume so the ask-early nudge and plan checks still
         // see how long this reply has already been working.
         let toolRounds = resumed?.toolRounds ?? 0;
@@ -2314,11 +2346,22 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             dsRequestBody.messages,
             dsRequestBody.tools ? JSON.stringify(dsRequestBody.tools).length : 0
           );
+          lastInputChars = inputChars;
+          lastSizeParts = sizeParts;
           if (inputChars >= 100_000) {
             console.log(
               `[chat] ${target.model.id} round ${round}: ` +
                 formatBreakdown(inputChars, sizeParts)
             );
+            // When history is the mass, name the fat turns — a 479k bucket
+            // is still a mystery until you see whether one pasted wall or
+            // twenty chatty replies hold it.
+            const historyPart = sizeParts.find((part) => part.label === "history");
+            if (historyPart && historyPart.chars >= 100_000) {
+              for (const row of describeHistoryTurns(dsRequestBody.messages)) {
+                console.log(`[chat] ${target.model.id} round ${round} hist: ${row}`);
+              }
+            }
           }
           // One check for the whole request: a round carrying a video dies
           // differently from a text round — minutes of prefill silence, then
@@ -2426,19 +2469,17 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           /*
            * OpenRouter: one more chance with a body the gateway will actually take.
            *
-           * A 400 "Invalid API parameter" is a REJECTION OF THE REQUEST
-           * SHAPE, not of the content — retrying it identically fails
-           * identically, which is why the retry policy treats 400 as fatal.
-           * The shapes the gateway has rejected in the wild are the tool path
-           * (their adapter for the free model flaps several times a week —
-           * while it is down, every request that offers tools fails while
-           * plain chat works) and oversized or foreign media payloads (the
-           * "invalid zstd request body" variant of the same 1210). So: if
-           * the rejection looks like a shape problem,
-           * retry ONCE with the sanitized body — no tools, no media pixels.
-           * The round degrades to prose at worst; the model can still emit
-           * tool calls learned from the history and we execute those. Either
-           * way the task survives instead of a hard stop mid-run.
+           * A 400 is two different failures wearing one status. SHAPE
+           * ("Invalid API parameter", a flapping tool adapter, foreign
+           * media) wants the tools and pixels stripped — retrying it
+           * identically fails identically, which is why the retry policy
+           * treats 400 as fatal. SIZE ("maximum context length", a 413) is
+           * the opposite: stripping the tools keeps every one of the
+           * offending chars and fails identically WITH a defanged agent,
+           * so the retry folds the oldest history instead and keeps the
+           * tools — they are kilobytes, the history is the mass. The
+           * provider's own message picks the path; the banner shows it so
+           * the retry is never a mystery again.
            */
           if (!dsResponse.ok && target.providerId === "openrouter") {
             earlyErrText = await dsResponse.text().catch(() => "");
@@ -2452,21 +2493,60 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             })();
             if (
               dsResponse.status === 400 ||
+              dsResponse.status === 413 ||
+              dsResponse.status === 422 ||
               (dsResponse.status >= 500 && /endpoint is unavailable/i.test(rejectedDetail))
             ) {
-              const sanitized = sanitizeOpenRouterRequestBody(dsRequestBody);
-              if (JSON.stringify(sanitized) !== JSON.stringify(dsRequestBody)) {
-                const sanitizedChars = JSON.stringify(sanitized).length;
+              const sizeDriven = isSizeRejection(dsResponse.status, rejectedDetail);
+              let retryBody: Record<string, unknown> | null = null;
+              let retryReason = "";
+              if (sizeDriven && Array.isArray(dsRequestBody.messages)) {
+                // Fold oldest history, keep the agent whole. Media rides the
+                // same retry (it is mass too) but the tools stay: without
+                // them the round degrades to prose and the task stalls.
+                const folded = foldOldestHistory(
+                  dsRequestBody.messages as Record<string, unknown>[],
+                  FOLD_RETRY_TARGET_CHARS
+                );
+                const media = stripMediaParts(folded.messages);
+                if (folded.stats.dropped > 0 || media.stripped) {
+                  retryBody = { ...dsRequestBody, messages: media.messages };
+                  retryReason =
+                    `payload too large — retrying with ${folded.stats.dropped} ` +
+                    `older turn${folded.stats.dropped === 1 ? "" : "s"} folded, tools kept`;
+                }
+                // Nothing foldable (a short run rejected for shape after
+                // all): fall through to the tool-stripping path below rather
+                // than failing without a second try.
+              }
+              if (!retryBody) {
+                const sanitized = sanitizeOpenRouterRequestBody(dsRequestBody);
+                if (JSON.stringify(sanitized) !== JSON.stringify(dsRequestBody)) {
+                  retryBody = sanitized;
+                  retryReason =
+                    "host rejected the payload — retrying without tools and media";
+                }
+              }
+              if (retryBody) {
+                const retryJson = JSON.stringify(retryBody);
+                const sanitizedChars = retryJson.length;
+                const retryToolsChars = retryBody.tools
+                  ? JSON.stringify(retryBody.tools).length
+                  : 0;
                 send({
                   type: "retrying",
                   phase: "attempt",
                   attempt: attempt.attempts + 1,
                   attempts: (retryAttempts ?? attempt.attempts) + 1,
                   delayMs: 0,
-                  reason: "host rejected the payload — retrying without tools and media",
+                  reason: retryReason,
+                  detail: rejectedDetail.slice(0, 200) || undefined,
                   host: target.providerName,
                   inputChars: sanitizedChars,
-                  breakdown: breakdownRequestMessages(sanitized.messages, 0),
+                  breakdown: breakdownRequestMessages(
+                    retryBody.messages,
+                    retryToolsChars
+                  ),
                 });
                 try {
                   const second = await fetchUntilHeaders(
@@ -2474,7 +2554,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                       fetch(`${target.baseUrl}/chat/completions`, {
                         method: "POST",
                         headers: completionHeaders(target),
-                        body: JSON.stringify(sanitized),
+                        body: retryJson,
                         signal,
                       }),
                     attemptTimeoutMs(target, sanitizedChars),
@@ -4639,6 +4719,10 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             model,
             durationMs: Date.now() - startedAt,
             reasoningMs: currentReasoningMs() || null,
+            contextChars: lastInputChars || null,
+            contextBreakdown: lastSizeParts.length
+              ? lastSizeParts.slice(0, 6)
+              : null,
             toolEvents: toolEvents.length ? toolEvents : null,
             timeline: timeline.length ? timeline : null,
             createdAt: new Date().toISOString(),
@@ -4776,6 +4860,10 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           usage: totalUsage.total_tokens ? { ...totalUsage } : usage,
           durationMs: Date.now() - startedAt,
           reasoningMs: currentReasoningMs() || undefined,
+          contextChars: lastInputChars || undefined,
+          contextBreakdown: lastSizeParts.length
+            ? lastSizeParts.slice(0, 6)
+            : undefined,
           model,
           incomplete: unfinished,
           canResume: unfinished,

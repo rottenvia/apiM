@@ -29,7 +29,7 @@ const read = (p) => readFileSync(path.join(ROOT, p), "utf8");
 
 const C = await load("src/lib/compact.ts");
 const { toolCallsAreBalanced } = await load("src/lib/prune.ts");
-const { serializeForApi } = await load("src/lib/transcript.ts");
+const { serializeForApi, foldOldestHistory } = await load("src/lib/transcript.ts");
 const route = read("src/app/api/chat/route.ts");
 
 const COLOR = process.stdout.isTTY && !process.env.NO_COLOR;
@@ -279,6 +279,93 @@ check(
     return out.stats.rounds > 0 && toolCallsAreBalanced(out.messages);
   })(),
   "approaching the context window still folds, but keeps structure valid"
+);
+
+console.log("\n7. A size rejection folds oldest history and keeps the agent whole");
+
+const foldBuild = () => {
+  const msgs = [{ role: "system", content: "pinned directives" }];
+  for (let i = 0; i < 10; i += 1) {
+    msgs.push({ role: "user", content: `old question ${i} ` + "x".repeat(20_000) });
+    msgs.push({ role: "assistant", content: `old answer ${i} ` + "y".repeat(20_000) });
+  }
+  // A tool round mid-history: calls and reply must survive the fold.
+  msgs.splice(
+    11,
+    0,
+    { role: "assistant", content: "", tool_calls: [{ id: "c1", type: "function", function: { name: "read", arguments: "{}" } }] },
+    { role: "tool", tool_call_id: "c1", content: "file text" }
+  );
+  msgs.push({ role: "user", content: "the live question" });
+  return msgs;
+};
+check(
+  "a body already under target passes through untouched",
+  (() => {
+    const small = [
+      { role: "system", content: "s" },
+      { role: "user", content: "q" },
+    ];
+    const out = foldOldestHistory(small, 350_000);
+    return out.stats.dropped === 0 && out.messages === small;
+  })(),
+  "healthy rounds never lose a word — only the retry folds"
+);
+check(
+  "an over-target body folds to about the target",
+  (() => {
+    const out = foldOldestHistory(foldBuild(), 350_000);
+    const chars = JSON.stringify(out.messages).length;
+    return out.stats.dropped > 0 && chars <= 350_000 * 1.1;
+  })(),
+  "the retry lands at half the observed failure point, not just under it"
+);
+check(
+  "the fold drops the oldest plain turns first",
+  (() => {
+    const out = foldOldestHistory(foldBuild(), 350_000);
+    const text = JSON.stringify(out.messages);
+    return (
+      !text.includes("old question 0") &&
+      text.includes("old question 9") &&
+      out.stats.charsSaved > 40_000
+    );
+  })(),
+  "recency is preserved — the live context survives, the archive goes"
+);
+check(
+  "the live question and everything after it survive",
+  (() => {
+    const out = foldOldestHistory(foldBuild(), 350_000);
+    return JSON.stringify(out.messages).includes("the live question");
+  })(),
+  "folding the turn being answered would send a body with no question"
+);
+check(
+  "tool rounds and system turns are never folded away",
+  (() => {
+    const out = foldOldestHistory(foldBuild(), 60_000);
+    const text = JSON.stringify(out.messages);
+    return (
+      text.includes("pinned directives") &&
+      text.includes('"c1"') &&
+      text.includes("file text")
+    );
+  })(),
+  "broken tool-call pairing would 400 the retry it was meant to save"
+);
+check(
+  "the fold leaves a marker saying what was omitted",
+  (() => {
+    const out = foldOldestHistory(foldBuild(), 350_000);
+    const text = JSON.stringify(out.messages);
+    return (
+      out.stats.dropped > 0 &&
+      /older history turns omitted/.test(text) &&
+      /be re-sent/.test(text)
+    );
+  })(),
+  "the model must know the archive is gone, not hallucinate it"
 );
 
 console.log(

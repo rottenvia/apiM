@@ -36,6 +36,7 @@ const models = await load("src/lib/models.ts");
 const providers = await load("src/lib/providers.ts");
 const pricing = await load("src/lib/pricing.ts");
 const budget = await load("src/lib/budget.ts");
+const requestSize = await load("src/lib/request-size.ts");
 
 const route = read("src/app/api/chat/route.ts");
 const page = read("src/app/page.tsx");
@@ -809,7 +810,54 @@ check(
 check(
   "the retry banner is its own row so it can vanish without remounting Thinking",
   /function RetryBanner/.test(read("src/components/ChatArea.tsx")) &&
-    /retryNotice && <RetryBanner/.test(read("src/components/ChatArea.tsx"))
+    /retryNotice && \(\s*<RetryBanner/.test(read("src/components/ChatArea.tsx"))
+);
+check(
+  "a size rejection folds history and keeps the tools",
+  /foldOldestHistory\(/.test(route) &&
+    /tools kept/.test(route) &&
+    /isSizeRejection\(/.test(route),
+  "stripping tools keeps every offending char and fails identically with a defanged agent"
+);
+check(
+  "a shape rejection still strips tools and media",
+  /retrying without tools and media/.test(route) &&
+    /sanitizeOpenRouterRequestBody/.test(route)
+);
+check(
+  "the retry event carries the provider's own message",
+  /detail: rejectedDetail/.test(route) &&
+    /Provider said/.test(read("src/components/ChatArea.tsx")),
+  "the banner must show WHY the retry exists, not just that one is running"
+);
+check(
+  "a fat body logs which history turns hold the mass",
+  /describeHistoryTurns/.test(route) && /round \${round} hist/.test(route),
+  "a 479k 'history' bucket is still a mystery until the fat turns are named"
+);
+check(
+  "history forensics name the biggest turns with their opening words",
+  (() => {
+    const rows = requestSize.describeHistoryTurns([
+      { role: "system", content: "directives" },
+      { role: "user", content: `a small question` },
+      { role: "assistant", content: "wall of pasted logs " + "z".repeat(50_000) },
+      { role: "user", content: "the live question" },
+    ]);
+    return (
+      rows.length === 2 &&
+      rows[0].startsWith("asst 50k") &&
+      rows[0].includes("wall of pasted logs") &&
+      !rows.join("\n").includes("the live question")
+    );
+  })(),
+  "the log line must point at the fat archived turn, never the live one"
+);
+check(
+  "the reply reports the context it cost",
+  /contextChars: lastInputChars/.test(route) &&
+    /k ctx/.test(read("src/components/MessageBubble.tsx")),
+  "every reply carries its own receipt — no more mystery 691k requests"
 );
 
 console.log("\n10. Any OpenRouter model can be added as a custom");
