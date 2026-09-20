@@ -256,6 +256,11 @@ export function isRetryableStatus(status: number): boolean {
  * instead keeps every one of the offending chars and fails identically
  * with a defanged agent. The provider's own message is the only signal
  * that tells them apart, so it is matched, not guessed.
+ *
+ * Size words match as WHOLE words: validation errors cite locations like
+ * `messages[28].tool_calls[0]`, where a bare "too" fires inside "tool" and
+ * routes a shape error down the fold path. Same for a Windows path near
+ * "context" (a path, not a window) and adverb lookalikes like "largely".
  */
 export function isSizeRejection(status: number, detail: string): boolean {
   if (status === 413) return true;
@@ -264,7 +269,7 @@ export function isSizeRejection(status: number, detail: string): boolean {
   // normalize so one pattern reads both.
   const words = detail.replace(/_/g, " ");
   return (
-    /too large|too long|maximum|exceeds?|context.{0,20}(length|limit|size|window)|input.{0,20}(tokens?|length|long)|tokens?.{0,20}(limit|exceed|maximum)|request.{0,20}(too|large|entity|limit)|payload|content.{0,20}(too|large|length)|message.{0,20}(too|large)/i.test(
+    /\btoo large\b|\btoo long\b|\bmaximum\b|exceeds?|context.{0,20}(length|\blimits?\b|size|window(?!s))|input.{0,20}(tokens?|length|\blong(er|est)?\b)|tokens?.{0,20}(\blimits?\b|exceed|\bmaximum\b)|request.{0,20}(\btoo\b|\blarg(e|er|est)\b|\bentity\b|\blimits?\b)|payload|content.{0,20}(\btoo\b|\blarg(e|er|est)\b|length)|message.{0,20}(\btoo\b|\blarg(e|er|est)\b)/i.test(
       words
     )
   );

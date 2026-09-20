@@ -241,9 +241,27 @@ export function pruneTranscript(
         const calls = m.tool_calls.map((call) => {
           const args = call.function.arguments;
           if (args.length <= MAX_VERBATIM_ARGS_CHARS) return call;
-          const trimmed =
-            args.slice(0, MAX_VERBATIM_ARGS_CHARS) +
-            "\n…[arguments trimmed from history — this call already ran; its paired result records what it did]";
+          /*
+           * A valid JSON object — never truncated JSON plus prose.
+           *
+           * The old stub glued "\n…[arguments trimmed…]" onto cut-off JSON,
+           * which does not parse, and the OpenRouter gateway validates every
+           * tool call's arguments strictly: one stubbed write_file deep in
+           * history 400s the whole body ("control character found while
+           * parsing a string"). DeepSeek tolerates the garbage, which is why
+           * it stayed invisible until Nemotron. The head keeps the call
+           * identifiable (path/command lead the args); the surrogate guard
+           * keeps the cut from splitting an astral character in two.
+           */
+          let head = args.slice(0, 400);
+          const last = head.charCodeAt(head.length - 1);
+          if (last >= 0xd800 && last <= 0xdbff) head = head.slice(0, -1);
+          const trimmed = JSON.stringify({
+            _trimmed: true,
+            _note:
+              "arguments trimmed from history — this call already ran; its paired result records what it did",
+            _head: head,
+          });
           touched = true;
           charsSaved += args.length - trimmed.length;
           return {
