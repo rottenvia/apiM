@@ -242,6 +242,33 @@ function formatThoughtTime(ms: number): string {
   return `${minutes}m ${String(total % 60).padStart(2, "0")}s`;
 }
 
+/**
+ * Ticking seconds beside the live "Thinking" label.
+ *
+ * The status row's clock unmounts at the first token, so a reasoning stream
+ * that stalls mid-thought used to sit frozen with no liveness signal at
+ * all — "stuck at thinking, don't know why". This mounts fresh on each
+ * thinking phase, so it reads as the CURRENT stall, not the run total:
+ * tokens moving means alive, clock ticking over frozen text means stalled.
+ * No synchronous setState — the interval callback is the only writer, so
+ * the mount never trips the set-state-in-effect rule.
+ */
+function ThinkingClock() {
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setSeconds((s) => s + 1), 1000);
+    return () => clearInterval(t);
+  }, []);
+  return (
+    <span
+      className="tabular-nums"
+      title="Wall-clock in this thinking phase — if the text below is frozen while this ticks, the stream has stalled"
+    >
+      {` · ${seconds}s`}
+    </span>
+  );
+}
+
 interface MessageBubbleProps {
   message: Message;
   /** Only the newest reply offers regenerate, to avoid rewriting history. */
@@ -1324,9 +1351,12 @@ function MessageBubbleImpl({
                           : undefined
                       }
                     >
-                      {isThinkingPhase
-                        ? "Thinking"
-                        : thoughtMs > 0
+                      {isThinkingPhase ? (
+                        <>
+                          Thinking
+                          <ThinkingClock />
+                        </>
+                      ) : thoughtMs > 0
                           ? `Thought for ${formatThoughtTime(thoughtMs)}`
                           : "Thinking"}
                     </span>
