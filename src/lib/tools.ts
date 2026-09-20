@@ -78,6 +78,11 @@ import {
 } from "@/lib/testing";
 import { runCommand } from "@/lib/runner";
 import { RunFileMemory } from "@/lib/run-memory";
+import { getConversation } from "@/lib/store";
+import {
+  CONVERSATION_SEARCH_DEFAULT_LIMIT,
+  searchStoredMessages,
+} from "@/lib/conversation-search";
 import { detectBuild, BuildError } from "@/lib/build";
 import {
   digestBuild,
@@ -1684,6 +1689,43 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "search_conversation",
+      description:
+        "Search the FULL stored text of THIS conversation for exact earlier " +
+        "wording. Only the newest turns stay in your context — older ones " +
+        "survive only as a summary, which keeps meaning but drops verbatim " +
+        "commands, paths, errors, and pasted snippets. Call this when the " +
+        "user asks what was said, decided, or pasted before, or when you " +
+        "need an exact string from an older turn. Searches this chat only, " +
+        "never other chats. Whole-word matching by default; set whole_word " +
+        "false for substring matching.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description:
+              "Words to find, e.g. 'pnpm', 'out of memory', 'docker-compose.yml'.",
+          },
+          whole_word: {
+            type: "boolean",
+            description:
+              "Match whole words only (default true, so 'calc' skips " +
+              "'calculator'). Set false to match inside words.",
+          },
+          limit: {
+            type: "number",
+            description:
+              "How many matching turns to return, 1-10 (default 5).",
+          },
+        },
+        required: ["query"],
+      },
+    },
+  },
 ];
 
 /**
@@ -2177,6 +2219,12 @@ export interface ToolContext {
    * instead of a costly read round-trip. See lib/run-memory.ts.
    */
   fileMemory?: RunFileMemory;
+  /**
+   * Current conversation id. Only search_conversation uses it, and only to
+   * read that one chat's stored transcript — the tool cannot address any
+   * other conversation, which is what keeps recall from becoming a leak.
+   */
+  conversationId?: string;
 }
 
 /**
@@ -4713,6 +4761,64 @@ export async function runTool(
               ? `Wrote ${written.length} files`
               : `Wrote ${written.length}, ${failed.length} failed`,
           changedPath: written[0],
+        };
+      }
+
+      case "search_conversation": {
+        const query = typeof args.query === "string" ? args.query.trim() : "";
+        if (!query) {
+          return {
+            ok: false,
+            content: "Error: a search query is required.",
+            summary: "Empty search query",
+          };
+        }
+        // No scope, no search: without a conversation id this tool cannot
+        // prove which chat it is reading, so it reads none.
+        if (!context.conversationId) {
+          return {
+            ok: false,
+            content: "Error: no conversation scope for this search.",
+            summary: "No conversation scope",
+          };
+        }
+        const conv = await getConversation(context.conversationId);
+        const found = searchStoredMessages(conv?.messages ?? [], query, {
+          wholeWord:
+            typeof args.whole_word === "boolean" ? args.whole_word : true,
+          limit:
+            typeof args.limit === "number"
+              ? args.limit
+              : CONVERSATION_SEARCH_DEFAULT_LIMIT,
+        });
+        if (found.totalMatches === 0) {
+          return {
+            ok: true,
+            content:
+              `No matches for "${found.query}" in this conversation ` +
+              `(${found.turnsSearched} turns searched). Try fewer words, ` +
+              `a distinctive fragment, or whole_word false.`,
+            summary: `Conversation search: no matches for "${found.query}"`,
+          };
+        }
+        const lines = found.hits.map(
+          (h) =>
+            `Turn ${h.turnIndex} of ${found.turnsSearched} (${h.role}, ` +
+            `${h.matchesInTurn} match${h.matchesInTurn === 1 ? "" : "es"}):\n${h.excerpt}`
+        );
+        return {
+          ok: true,
+          content:
+            `"${found.query}" matches ${found.totalMatches} time` +
+            `${found.totalMatches === 1 ? "" : "s"} in this conversation ` +
+            `(this chat only):\n\n${lines.join("\n\n")}` +
+            (found.truncated
+              ? `\n\n…more turns matched than shown; narrow the query.`
+              : ""),
+          summary:
+            `Conversation search: ${found.totalMatches} match` +
+            `${found.totalMatches === 1 ? "" : "es"} in ` +
+            `${found.hits.length} turn${found.hits.length === 1 ? "" : "s"}`,
         };
       }
 

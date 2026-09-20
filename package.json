@@ -40,6 +40,7 @@
     "test:revive": "tsx scripts/test-revive.mjs",
     "test:breaker": "tsx scripts/test-breaker.mjs",
     "test:history-summary": "tsx scripts/test-history-summary.mjs",
+    "test:conversation-search": "tsx scripts/test-conversation-search.mjs",
     "test:compact": "tsx scripts/test-compact.mjs",
     "test:lessons": "tsx scripts/test-lessons.mjs",
     "test:hardening": "tsx scripts/test-hardening.mjs",
