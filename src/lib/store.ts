@@ -51,6 +51,12 @@ export interface StoredMessage {
   durationMs?: number | null;
   /** How long the model spent reasoning, first trace token to last. */
   reasoningMs?: number | null;
+  /**
+   * Chars in the final upstream request — the context this reply cost.
+   * With the breakdown: where the bytes lived, largest first.
+   */
+  contextChars?: number | null;
+  contextBreakdown?: { label: string; chars: number }[] | null;
   createdAt: string;
   /** True while the reply is still streaming. If the process dies or the tab
    *  closes mid-answer the flag stays set, which is how the UI knows to offer

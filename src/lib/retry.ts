@@ -65,6 +65,8 @@ export interface UpstreamNotice {
   attempts: number;
   delayMs?: number;
   reason?: string;
+  /** The provider's own message behind a rejection-driven retry. */
+  detail?: string;
   host?: string;
   waitedMs?: number;
   /** Approximate JSON body size of the completion request. */
@@ -243,6 +245,26 @@ export function isTransientNetworkError(error: unknown): boolean {
 export function isRetryableStatus(status: number): boolean {
   if (FATAL_STATUS.has(status)) return false;
   return RETRYABLE_STATUS.has(status) || status >= 500;
+}
+
+/**
+ * Was this rejection about the body's SIZE rather than its shape?
+ *
+ * A 400 is either. Shape ("Invalid API parameter", a flapping tool
+ * adapter) wants the tools stripped; size ("maximum context length",
+ * "too large", a 413) wants the history folded — stripping the tools
+ * instead keeps every one of the offending chars and fails identically
+ * with a defanged agent. The provider's own message is the only signal
+ * that tells them apart, so it is matched, not guessed.
+ */
+export function isSizeRejection(status: number, detail: string): boolean {
+  if (status === 413) return true;
+  if (status !== 400 && status !== 422) return false;
+  return (
+    /too large|too long|maximum|exceeds?|context.{0,20}(length|limit|size|window)|input.{0,20}(tokens?|length)|tokens?.{0,20}(limit|exceed|maximum)|request.{0,20}(too|large|entity|limit)|payload|content.{0,20}(too|large|length)|message.{0,20}(too|large)/i.test(
+      detail
+    )
+  );
 }
 
 function tenths(ms: number): string {

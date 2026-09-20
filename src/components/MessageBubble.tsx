@@ -1179,6 +1179,34 @@ function MessageBubbleImpl({
                     {formatDuration(message.durationMs)}
                   </span>
                 ) : null}
+
+                {message.contextChars ? (
+                  <span
+                    className="inline-flex items-center gap-1 text-[11px] text-text-muted"
+                    title={
+                      message.contextBreakdown &&
+                      message.contextBreakdown.length > 0
+                        ? `Context sent with the final request:\n${message.contextBreakdown
+                            .map(
+                              (part) =>
+                                `${part.label} ${
+                                  part.chars >= 1000
+                                    ? `${(part.chars / 1000).toFixed(0)}k`
+                                    : `${part.chars}`
+                                }`
+                            )
+                            .join("\n")}`
+                        : "Context sent with the final request"
+                    }
+                  >
+                    <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} aria-hidden="true">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h10" />
+                    </svg>
+                    {message.contextChars >= 1000
+                      ? `~${(message.contextChars / 1000).toFixed(0)}k ctx`
+                      : `${message.contextChars} ctx`}
+                  </span>
+                ) : null}
               </div>
             )}
 
@@ -1887,6 +1915,8 @@ export const MessageBubble = memo(MessageBubbleImpl, (prev, next) => {
     a.attachments === b.attachments &&
     a.usage === b.usage &&
     a.durationMs === b.durationMs &&
+    a.contextChars === b.contextChars &&
+    a.contextBreakdown === b.contextBreakdown &&
     a.previousVersions === b.previousVersions &&
     // New array identity on every tool frame, so this is what makes the
     // "Writing app.py" lines appear as they happen.

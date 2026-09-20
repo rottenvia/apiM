@@ -91,6 +91,8 @@ interface ChatAreaProps {
   retryNotice?: string | null;
   /** Where the in-flight request's bytes live — the banner's tooltip. */
   retryBreakdown?: { label: string; chars: number }[] | null;
+  /** The provider's own message behind a rejection-driven retry. */
+  retryDetail?: string | null;
   onStop: () => void;
   hasKeys: boolean;
   /** Which provider key is missing for the selected model. */
@@ -206,6 +208,7 @@ export function ChatArea({
   onDismissBtw,
   retryNotice,
   retryBreakdown,
+  retryDetail,
   onStop,
   hasKeys,
   missingKeyLabel = "DeepSeek",
@@ -1523,7 +1526,13 @@ export function ChatArea({
                   hasVideo={videoWaitRef.current}
                 />
               )}
-              {retryNotice && <RetryBanner text={retryNotice} breakdown={retryBreakdown} />}
+              {retryNotice && (
+                <RetryBanner
+                  text={retryNotice}
+                  breakdown={retryBreakdown}
+                  detail={retryDetail}
+                />
+              )}
 
               <div ref={messagesEndRef} />
             </div>
@@ -2208,12 +2217,15 @@ const STAGE_LABELS: Record<StatusStage, string> = {
 function RetryBanner({
   text,
   breakdown,
+  detail,
 }: {
   text: string;
   breakdown?: { label: string; chars: number }[] | null;
+  detail?: string | null;
 }) {
-  // The banner names the biggest contributor inline; hovering lists them all.
-  const title =
+  // The banner names the biggest contributor inline; hovering lists them
+  // all, plus the provider's own message when the retry answers one.
+  const body =
     breakdown && breakdown.length > 0
       ? `Request body: ${breakdown
           .map(
@@ -2223,7 +2235,11 @@ function RetryBanner({
               }`
           )
           .join(" · ")}`
-      : undefined;
+      : null;
+  const title =
+    body && detail
+      ? `${body}\nProvider said: ${detail}`
+      : (body ?? (detail ? `Provider said: ${detail}` : undefined));
   return (
     <div className="flex justify-start px-1 pb-2">
       <span

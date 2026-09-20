@@ -134,6 +134,67 @@ function sorted(parts: Map<string, number>): RequestSizePart[] {
     .sort((a, b) => b.chars - a.chars);
 }
 
+/**
+ * One line per history turn, oldest first: role, size, and the opening words.
+ *
+ * The `history` bucket answers "how much" but a 479k history is still a
+ * mystery until you see WHICH turns hold it — one 400k user paste reads
+ * very differently from twenty chatty replies. Logged beside the breakdown
+ * when history dominates, so the terminal names the fat turns directly.
+ */
+export function describeHistoryTurns(
+  messages: unknown,
+  limit = 8
+): string[] {
+  if (!Array.isArray(messages)) return [];
+  let lastUser = -1;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const m = messages[i] as { role?: unknown } | null;
+    if (m && typeof m === "object" && m.role === "user") {
+      lastUser = i;
+      break;
+    }
+  }
+  const rows: { role: string; chars: number; head: string }[] = [];
+  messages.forEach((entry, i) => {
+    if (!entry || typeof entry !== "object") return;
+    const m = entry as { role?: unknown; content?: unknown };
+    const isHistoryUser = m.role === "user" && i !== lastUser;
+    const isHistoryAssistant =
+      m.role === "assistant" && typeof m.content === "string";
+    if (!isHistoryUser && !isHistoryAssistant) return;
+    const text =
+      typeof m.content === "string"
+        ? m.content
+        : Array.isArray(m.content)
+          ? m.content
+              .filter(
+                (p): p is { type: string; text: string } =>
+                  Boolean(p) &&
+                  typeof p === "object" &&
+                  (p as { type?: unknown }).type === "text" &&
+                  typeof (p as { text?: unknown }).text === "string"
+              )
+              .map((p) => p.text)
+              .join("\n")
+          : "";
+    if (!text) return;
+    const head =
+      text.replace(/\s+/g, " ").trim().slice(0, 60) || "(no text)";
+    rows.push({
+      role: m.role === "user" ? "user" : "asst",
+      chars: text.length,
+      head,
+    });
+  });
+  rows.sort((a, b) => b.chars - a.chars);
+  const k = (n: number) =>
+    n >= 1000 ? `${(n / 1000).toFixed(0)}k` : `${n}`;
+  return rows
+    .slice(0, limit)
+    .map((r) => `${r.role} ${k(r.chars)} "${r.head}${r.head.length >= 60 ? "…" : ""}"`);
+}
+
 /** `612k chars (plugins 310k · history 120k)` — the server log line. */
 export function formatBreakdown(
   totalChars: number,
