@@ -39,6 +39,7 @@
     "test:resume": "tsx scripts/test-resume.mjs",
     "test:revive": "tsx scripts/test-revive.mjs",
     "test:breaker": "tsx scripts/test-breaker.mjs",
+    "test:history-summary": "tsx scripts/test-history-summary.mjs",
     "test:compact": "tsx scripts/test-compact.mjs",
     "test:lessons": "tsx scripts/test-lessons.mjs",
     "test:hardening": "tsx scripts/test-hardening.mjs",
