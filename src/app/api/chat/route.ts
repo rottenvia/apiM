@@ -122,6 +122,12 @@ import {
   loopTripUserNote,
   loopWarningText,
 } from "@/lib/loop-breaker";
+import {
+  StallTracker,
+  stallTripMarker,
+  stallTripUserNote,
+  stallWarningText,
+} from "@/lib/stall";
 import { extractReasoningDelta } from "@/lib/reasoning-stream";
 import { loadHistoryForRequest } from "@/lib/chat-history";
 import {
@@ -1558,13 +1564,15 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         const toolsUsedThisRun: string[] = [];
 
         /*
-         * Loop-breaker state: one tracker per reply. One tool call failing
-         * three times with identical arguments warns the model at two and
-         * halts the run at three — see lib/loop-breaker.ts for why strikes
-         * are per call rather than consecutive.
+         * Halt state: one tracker per reply for each subsystem. The breaker
+         * counts identical failures per call; the stall tracker counts calls
+         * that add nothing new. Either can halt the run — runHalted is the
+         * shared "stop after this call" flag, and stoppedPrematurely names
+         * which subsystem fired so the notice and Resume agree.
          */
         const loopBreaker = new LoopBreaker();
-        let breakerTripped = false;
+        const stallTracker = new StallTracker();
+        let runHalted = false;
 
         const setFileTree = (text: string) => {
           currentFileTree = text;
@@ -4695,6 +4703,10 @@ Ask before you build the wrong thing. If a choice would change what you produce 
              * (it ran — the client should show it) and breaks out at the end
              * of the calls loop instead of here.
              */
+            // Pristine result text for the stall tracker: both subsystems
+            // append their markers to result.content below, and the
+            // new-information hash must compare tool output, not markers.
+            const pristineResult = result.content;
             const loop = loopBreaker.observe(
               call.function.name,
               parsed.ok ? parsed.value : call.function.arguments,
@@ -4714,7 +4726,35 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               send({ type: "content", delta: tripNote });
               appendTimelineText(tripNote);
               stoppedPrematurely = "loop_breaker";
-              breakerTripped = true;
+              runHalted = true;
+            }
+            /*
+             * No-progress check, same site and same channel as the breaker:
+             * the warning must be IN the tool message the model reads next.
+             * Skipped when the breaker already tripped this call — one halt,
+             * one note.
+             */
+            if (!runHalted) {
+              const stall = stallTracker.observe(
+                call.function.name,
+                parsed.ok ? parsed.value : call.function.arguments,
+                result.ok,
+                pristineResult
+              );
+              if (stall.warn) {
+                result.content += stallWarningText(stall.stallCalls);
+              }
+              if (stall.trip) {
+                result.content += stallTripMarker();
+                const stallNote =
+                  (assistantContent.trim() ? "\n\n" : "") +
+                  stallTripUserNote(stallTracker.recentActions());
+                assistantContent += stallNote;
+                send({ type: "content", delta: stallNote });
+                appendTimelineText(stallNote);
+                stoppedPrematurely = "no_progress";
+                runHalted = true;
+              }
             }
 
             transcript.push({
@@ -4834,7 +4874,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 usd: result.search.estimatedUsd,
               });
             }
-            if (breakerTripped) break;
+            if (runHalted) break;
           }
 
           // The next round must see the workspace as it is now, not as it was
@@ -4877,7 +4917,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             transcript.push({ role: "system", content: formatPlan(plan) });
           }
 
-          if (breakerTripped) break;
+          if (runHalted) break;
           if (stopped()) break;
         }
 

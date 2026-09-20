@@ -185,7 +185,8 @@ check(
 );
 check(
   "trip breaks out of both the calls loop and the rounds loop",
-  (route.match(/if \(breakerTripped\) break;/g) ?? []).length === 2
+  // Shared flag: the stall tracker halts through the same exits.
+  (route.match(/if \(runHalted\) break;/g) ?? []).length === 2
 );
 check(
   "revive names the loop_breaker stop",

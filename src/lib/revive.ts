@@ -25,7 +25,8 @@ export type PrematureStopReason =
   | "provider_abort"
   | "round_cap"
   | "thinking_cut"
-  | "loop_breaker";
+  | "loop_breaker"
+  | "no_progress";
 
 export interface PrematureStopInput {
   /** The whole reply so far, including earlier rounds. */
@@ -280,6 +281,9 @@ export function prematureStopNotice(reason: PrematureStopReason): string {
   }
   if (reason === "loop_breaker") {
     return "The same tool call failed three times with identical arguments — Resume to steer it another way";
+  }
+  if (reason === "no_progress") {
+    return "The run stalled: tool calls kept coming but nothing advanced — Resume to steer it another way";
   }
   if (reason === "dangling_next") {
     return "The model kept describing its next action instead of doing it";
