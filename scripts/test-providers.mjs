@@ -815,6 +815,23 @@ check(
       "sticky routing keeps every round on the endpoint holding the warm cache"
     );
 check(
+  "every round reports its fired request size",
+  /type: "request_size";/.test(route) &&
+    /type: "request_size",\s*round,\s*inputChars,/.test(route),
+  "a 600k 'new message' must arrive with its cause attached, not as a mystery"
+);
+check(
+  "the fire-time size line is quiet for small chats and clears with the run",
+  /case "request_size":/.test(page) &&
+    /info\.inputChars >= 100_000/.test(page) &&
+    (page.match(/liveRequestSize: null/g) ?? []).length >= 5 &&
+    /requestSize && <RequestSizeLine/.test(read("src/components/ChatArea.tsx")) &&
+    /big context, first token may take a while/.test(
+      read("src/components/ChatArea.tsx")
+    ),
+  "one muted line while heavy rounds run; the ctx chip keeps the record"
+);
+check(
   "the live retry label uses the real attempt total",
   /visibleUpstreamNotice/.test(page) && !/attempts - 1/.test(page)
 );
