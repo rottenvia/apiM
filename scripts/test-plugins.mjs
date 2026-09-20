@@ -207,10 +207,11 @@ check(
   "Direct Mode reads the start of the first system message most reliably"
 );
 check(
-  "and repeats the block at the end so workspace prose cannot outrank it",
-  pinned[0].content.endsWith(pinBlock) &&
-    pinned[0].content.indexOf(workspace) <
-      pinned[0].content.lastIndexOf(P.PLUGIN_DIRECTIVES_MARKER)
+  "and does NOT repeat the block at the end — one copy, not three",
+  !pinned[0].content.endsWith(pinBlock) &&
+    pinned[0].content.indexOf(pinBlock) ===
+      pinned[0].content.lastIndexOf(pinBlock),
+  "start + end + tail was 3x the block on every request: 300k on a 100k config"
 );
 check(
   "re-pinning is idempotent",

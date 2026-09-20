@@ -318,13 +318,17 @@ export const PLUGIN_DIRECTIVES_MARKER =
 /**
  * Keep standing orders on the first system message.
  *
- * DeepSeek obeys a later system message. Ox (Zen or OpenRouter) often
- * treats only the first one as binding and ignores the tail copy after a
+ * DeepSeek obeys a later system message. OpenRouter's free lanes often
+ * treat only the first one as binding and ignore the tail copy after a
  * few rounds — which is how Direct Mode "suddenly" started refusing.
  *
- * The block is written at both ends of that first message: the start is
- * what Ox actually reads, the end still outranks the workspace prose that
- * sits in the middle. Re-pinning is idempotent so it can run every round.
+ * The block is written at the START of that first message only, never both
+ * ends. It used to be both ends plus the tail copy — three copies of the
+ * same 100k-char block on every request, measured. The end copy's theory
+ * ("outranks the workspace prose in the middle") never held: the tree and
+ * plan ride as separate tail messages, not inside this one, so there is no
+ * middle prose to outrank — only base instructions the block already
+ * outranks by position. Re-pinning is idempotent so it can run every round.
  */
 export function pinPluginDirectivesOnFirstSystem(
   messages: { role: string; content?: unknown }[],
@@ -338,7 +342,7 @@ export function pinPluginDirectivesOnFirstSystem(
   body = body.replace(/^\s+|\s+$/g, "").replace(/\n{3,}/g, "\n\n");
 
   first.content = body
-    ? `${pluginDirectives}\n\n${body}\n\n${pluginDirectives}`
+    ? `${pluginDirectives}\n\n${body}`
     : pluginDirectives;
 }
 

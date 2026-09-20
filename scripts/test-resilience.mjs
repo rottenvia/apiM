@@ -51,6 +51,33 @@ check(
 );
 check("a 400 does not — a malformed request stays malformed", !R.isRetryableStatus(400));
 
+// A 400 is two failures in one status: shape (strip tools) vs size (fold
+// history). The provider's own message picks the retry path.
+check(
+  "a 400 naming tools is shape, not size",
+  !R.isSizeRejection(
+    400,
+    "Invalid request: Invalid API parameter: tools. Use tool_choice instead."
+  )
+);
+check(
+  "a 400 naming the context window is size",
+  R.isSizeRejection(
+    400,
+    "This model's maximum context length is 32768 tokens, however you requested 98000 tokens."
+  )
+);
+check(
+  "a 413 is size whatever it says",
+  R.isSizeRejection(413, "Payload Too Large") &&
+    R.isSizeRejection(413, "")
+);
+check(
+  "a 5xx is never size-driven, even with size words",
+  !R.isSizeRejection(500, "Request too large to process") &&
+    !R.isSizeRejection(502, "No endpoints found for the request")
+);
+
 check(
   "a dropped connection is transient",
   R.isTransientNetworkError(Object.assign(new Error("socket hang up"), { name: "TypeError" }))

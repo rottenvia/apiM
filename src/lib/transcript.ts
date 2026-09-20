@@ -678,3 +678,111 @@ export function rebuildTranscript(
 
   return out;
 }
+
+/**
+ * Fold the oldest plain history turns until the wire copy fits.
+ *
+ * Prune and compact shrink tool rounds; nothing ever shrank plain user and
+ * assistant TEXT. A long conversation replays its last twenty stored turns
+ * verbatim on every request — measured at 479k chars of "history" on a
+ * 691k body — and when the provider rejects that body for size, the retry
+ * used to strip the agent's tools while keeping every one of those chars,
+ * failing identically with a defanged agent. Backwards: the tools are
+ * kilobytes, the history is the mass.
+ *
+ * This drops oldest-first PLAIN turns only (user text, assistant prose
+ * without tool calls) until the messages fit `targetChars`. Never dropped:
+ * system messages, tool calls and their replies (the call/reply pairing is
+ * what keeps the request a legal 200 rather than a 400), and the newest
+ * user turn plus everything after it — the live question and the recent
+ * work stay intact no matter what. One marker records the fold so the
+ * model knows older turns exist rather than never having happened.
+ *
+ * Operates on the serialized wire shape (plain JSON), like the sanitize
+ * path that calls it. Returns a new array.
+ */
+export interface FoldHistoryStats {
+  /** Plain turns dropped. */
+  dropped: number;
+  /** Characters removed from the wire copy. */
+  charsSaved: number;
+}
+
+export function foldOldestHistory(
+  messages: Record<string, unknown>[],
+  targetChars: number
+): { messages: Record<string, unknown>[]; stats: FoldHistoryStats } {
+  const empty: FoldHistoryStats = { dropped: 0, charsSaved: 0 };
+  const sizes = messages.map((m) => {
+    try {
+      return JSON.stringify(m).length;
+    } catch {
+      return 0;
+    }
+  });
+  const total = sizes.reduce((a, b) => a + b, 0);
+  if (total <= targetChars) return { messages, stats: empty };
+
+  // The newest user turn anchors the protected tail: it is the live
+  // question (or the resume brief), and everything after it is the recent
+  // work answering it.
+  let lastUser = -1;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i]?.role === "user") {
+      lastUser = i;
+      break;
+    }
+  }
+
+  const droppable = (i: number): boolean => {
+    if (i >= lastUser) return false;
+    const m = messages[i];
+    if (!m || typeof m !== "object") return false;
+    if (m.role === "user") return true;
+    if (m.role !== "assistant") return false;
+    // A tool-calling turn and its replies are one legal unit — dropping
+    // half of it is the exact shape of a 400.
+    if (Array.isArray(m.tool_calls) && m.tool_calls.length > 0) return false;
+    return true;
+  };
+
+  let remaining = total;
+  const drop = new Set<number>();
+  for (let i = 0; i < messages.length && remaining > targetChars; i += 1) {
+    if (!droppable(i)) continue;
+    drop.add(i);
+    remaining -= sizes[i];
+  }
+  if (drop.size === 0) return { messages, stats: empty };
+
+  const marker =
+    `[${drop.size} older history turn${drop.size === 1 ? "" : "s"} omitted ` +
+    `from this retry to fit the provider's request limit — the newest turns ` +
+    `are kept in full. If something you need was in them, ask and it will ` +
+    `be re-sent.]`;
+  const out: Record<string, unknown>[] = [];
+  let marked = false;
+  for (let i = 0; i < messages.length; i += 1) {
+    if (drop.has(i)) {
+      if (!marked) {
+        marked = true;
+        out.push({ role: "system", content: marker });
+      }
+      continue;
+    }
+    out.push(messages[i]);
+  }
+
+  let after = 0;
+  for (const m of out) {
+    try {
+      after += JSON.stringify(m).length;
+    } catch {
+      /* unmeasurable counts as zero */
+    }
+  }
+  return {
+    messages: out,
+    stats: { dropped: drop.size, charsSaved: Math.max(0, total - after) },
+  };
+}
