@@ -3,32 +3,38 @@
  *
  * The failure mode this stops: the model sends the same tool call with the
  * same arguments, it fails, and the model sends it again unchanged — three,
- * ten, fifty times, once per round, until the round cap. Each failed round
- * makes the next one worse, because the failure is appended to context: the
- * model re-reads its own miss and pattern-matches onto it instead of
- * adapting. A weak model does not escape this on its own; it narrates
+ * ten, fifty times, until the round cap. Each failed round makes the next
+ * one worse, because the failure is appended to context: the model re-reads
+ * its own miss and pattern-matches onto it instead of adapting. A weak
+ * model does not escape this on its own; it narrates
  * ("Right, I'm mid-edit...") and retries.
  *
- * The rule is deliberately narrow — CONSECUTIVE identical failures, nothing
- * else:
+ * Strikes are counted PER CALL, not consecutively. The real loop interleaves
+ * other work — read the file, retry the identical edit, read it again,
+ * retry again — so "three in a row" would never fire on the exact failure
+ * it exists to stop. Other calls neither clear nor advance a call's
+ * strikes; only that call succeeding clears them (state changed — a later
+ * failure is a new episode, not the same stuckness).
  *
- *   - any success resets the count (it worked — not stuck),
- *   - any different call resets it (the model IS adapting),
+ * The rule stays narrow on purpose:
+ *
+ *   - a call succeeding clears its own strikes;
+ *   - a changed argument is a different call (the model IS adapting);
  *   - success repeats are never counted: polling a process or re-reading a
  *     file after other work is legitimate, and breaking on it would punish
  *     normal behaviour.
  *
- * Second identical failure warns the model inside the tool result it is
- * already reading. Third identical failure trips: the run halts, the user
- * gets a note naming the call and its error, and Resume carries steering
- * instead of a fourth identical attempt. Deterministic and model-
- * independent — it works the same on a frontier model and a free one.
+ * Second strike warns the model inside the tool result it is already
+ * reading. Third strike trips: the run halts, the user gets a note naming
+ * the call and its error, and Resume carries steering instead of a fourth
+ * identical attempt. Deterministic and model-independent — it works the
+ * same on a frontier model and a free one.
  */
 
-/** Identical failures in a row before the model gets warned. */
+/** Identical failures before the model gets warned. */
 export const LOOP_WARN_REPEATS = 2;
 
-/** Identical failures in a row before the run halts. */
+/** Identical failures before the run halts. */
 export const LOOP_TRIP_REPEATS = 3;
 
 /**
@@ -65,63 +71,61 @@ function stable(value: unknown): string {
 }
 
 export interface LoopObservation {
-  /** Consecutive identical failures including this one. */
+  /** Strikes against this call including this observation. */
   repeats: number;
   /** True exactly on the warning strike — nudge the model now. */
   warn: boolean;
-  /** True on the trip strike and stays true while identical failures continue. */
+  /** True on the trip strike and stays true while the strikes continue. */
   trip: boolean;
 }
 
 /**
- * Per-run consecutive-failure tracker. One instance per reply; a Resume
- * starts a fresh one, which is correct — the user steers, the model retries,
- * and it gets a full three strikes on the new approach.
+ * Per-run strike tracker. One instance per reply; a Resume starts a fresh
+ * one, which is correct — the user steers, the model retries, and it gets
+ * a full three strikes on the new approach.
  */
 export class LoopBreaker {
-  private lastFingerprint: string | null = null;
-  private repeats = 0;
+  private strikes = new Map<string, number>();
 
   observe(name: string, args: unknown, ok: boolean): LoopObservation {
     const fingerprint = fingerprintToolCall(name, args);
-    if (ok || fingerprint !== this.lastFingerprint) {
-      this.lastFingerprint = ok ? null : fingerprint;
-      this.repeats = ok ? 0 : 1;
-      return { repeats: this.repeats, warn: false, trip: false };
+    if (ok) {
+      this.strikes.delete(fingerprint);
+      return { repeats: 0, warn: false, trip: false };
     }
-    this.repeats += 1;
+    const repeats = (this.strikes.get(fingerprint) ?? 0) + 1;
+    this.strikes.set(fingerprint, repeats);
     return {
-      repeats: this.repeats,
-      warn: this.repeats === LOOP_WARN_REPEATS,
-      trip: this.repeats >= LOOP_TRIP_REPEATS,
+      repeats,
+      warn: repeats === LOOP_WARN_REPEATS,
+      trip: repeats >= LOOP_TRIP_REPEATS,
     };
   }
 
   reset(): void {
-    this.lastFingerprint = null;
-    this.repeats = 0;
+    this.strikes.clear();
   }
 }
 
 /**
- * Nudge appended to the tool result carrying the second identical failure —
- * the text the model is guaranteed to read next. Names the consequence so a
+ * Nudge appended to the tool result carrying the second strike — the text
+ * the model is guaranteed to read next. Names the consequence so a
  * literal-minded model does not treat it as advice.
  */
 export function loopWarningText(toolName: string): string {
   return (
     `\n\n[Harness: this exact \`${toolName}\` call has now failed twice ` +
-    `in a row with identical arguments. Do NOT send it a third time ` +
-    `unchanged — a third identical failure stops the run. Read the error, ` +
-    `change the approach (inspect the file first, use a different anchor, ` +
-    `or ask the user), then act.]`
+    `with identical arguments. Do NOT send it again unchanged — a third ` +
+    `identical failure stops the run. Read the error, change the approach ` +
+    `(inspect the file first, use a different anchor, or ask the user), ` +
+    `then act.]`
   );
 }
 
 /**
- * Marker appended to the tool result carrying the third identical failure.
- * The run ends here, so this is for the saved transcript: on Resume the
- * model sees WHY the run stopped at the exact point it did.
+ * Marker appended to the tool result carrying the third strike. The run
+ * ends here, so this is for the saved transcript: on Resume the model sees
+ * WHY the run stopped at the exact point it did.
  */
 export function loopTripMarker(toolName: string): string {
   return (
@@ -142,7 +146,7 @@ export function loopTripUserNote(toolName: string, lastError: string): string {
       : lastError.trim();
   return (
     `Stopped by the loop breaker: \`${toolName}\` failed three times ` +
-    `running with identical arguments` +
+    `with identical arguments` +
     (trimmed ? ` (last error: ${trimmed})` : ``) +
     `. The run was halted instead of burning more rounds — say what to ` +
     `try differently and Resume to carry on.`
