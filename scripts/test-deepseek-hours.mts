@@ -3,6 +3,8 @@
  * Run: npx tsx scripts/test-deepseek-hours.mjs
  */
 import assert from "node:assert";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import {
   getDeepSeekPeriod,
   formatCountdown,
@@ -68,6 +70,30 @@ check("countdown 0 -> now", formatCountdown(0) === "now");
 check("countdown 45 -> 45m", formatCountdown(45) === "45m");
 check("countdown 90 -> 1h 30m", formatCountdown(90) === "1h 30m");
 check("countdown 60 -> 1h", formatCountdown(60) === "1h");
+
+// The tooltip embeds the live time, which differs between SSR and
+// hydration (and the locale format can differ too). Computing it in the
+// useState initializer rendered a server/client mismatch React reports as
+// a hydration error — so the period must start null and fill in on mount,
+// with a static placeholder holding the layout meanwhile.
+const selector = readFileSync(
+  path.resolve(import.meta.dirname, "../src/components/ModelSelector.tsx"),
+  "utf8"
+);
+check(
+  "period state does not compute live time during render",
+  !/useState\(\(\) => getDeepSeekPeriod\(\)\)/.test(selector)
+);
+check(
+  "period fills in once on the client",
+  /const tick = \(\) => setPeriod\(getDeepSeekPeriod\(\)\)/.test(selector) &&
+    /setTimeout\(tick, 0\)/.test(selector) &&
+    /setInterval\(tick, 60_000\)/.test(selector)
+);
+check(
+  "a static placeholder holds the dot before mount",
+  selector.includes('title="DeepSeek peak/off-peak indicator"')
+);
 
 if (failures) {
   console.error(`\n${failures} check(s) failed`);
