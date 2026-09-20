@@ -23,16 +23,27 @@ import { warmRoutes } from "@/lib/warmup";
 import {
   DEFAULT_LOCAL_API_MODEL,
   DEFAULT_LOCAL_BASE_URL,
-  getModel,
+  DEFAULT_MODEL_ID,
+  FREE_OPENROUTER_MODEL_ID,
   hasKeyForModel,
+  resolveModelInfo,
+  sanitizeCustomModelDef,
 } from "@/lib/models";
+import type { CustomModelDef } from "@/lib/models";
+import {
+  applyThemeById,
+  CUSTOM_THEME_ID,
+  DEFAULT_THEME_ID,
+  getTheme,
+  sanitizeSeeds,
+} from "@/lib/themes";
+import type { CustomThemeSeeds } from "@/lib/themes";
 import { replyCanContinue } from "@/lib/resume-target";
 import {
   shouldAutoResumeOnTimeout,
   visibleUpstreamNotice,
   type UpstreamNotice,
 } from "@/lib/retry";
-import { oxHostInfo, type OxHost } from "@/lib/ox-host";
 
 export interface Message {
   id: string;
@@ -70,6 +81,8 @@ export interface Message {
    * text arrives only if the panel is opened.
    */
   reasoningLength?: number;
+  /** How long the model spent reasoning, in ms — the "Thought for 12s" label. */
+  reasoningMs?: number;
   /** Reply was cut short (tab closed / connection dropped) and can be retried. */
   incomplete?: boolean;
   /**
@@ -216,6 +229,7 @@ type StreamEvent =
       reason: string;
       host?: string;
       inputChars?: number;
+      breakdown?: { label: string; chars: number }[];
     }
   | { type: "continuing"; reason: string; n: number; of: number }
   | { type: "context_pruned"; collapsed: number; tokensSaved: number }
@@ -285,6 +299,7 @@ type StreamEvent =
       persisted: boolean;
       usage: unknown;
       durationMs: number;
+      reasoningMs?: number;
       model: string;
       incomplete?: boolean;
       canResume?: boolean;
@@ -406,6 +421,10 @@ export default function Home() {
   );
   // A persistent run notice ("spending limit…", "connection dropped…").
   const [retryNotice, setRetryNoticeState] = useState<string | null>(null);
+  // Where the in-flight request's bytes live — the retry banner's tooltip.
+  const [retryBreakdown, setRetryBreakdownState] = useState<
+    { label: string; chars: number }[] | null
+  >(null);
 
   /** Copy a session's UI state into the mirrored React states. */
   const mirrorSession = useCallback((s: ChatSession) => {
@@ -414,6 +433,7 @@ export default function Home() {
     setIsLoadingState(s.loading);
     setStatusStageState(s.stage);
     setRetryNoticeState(s.retryNotice);
+    setRetryBreakdownState(s.liveRetry?.breakdown ?? null);
   }, []);
 
   /**
@@ -469,6 +489,8 @@ export default function Home() {
         if (patch.stage !== undefined) setStatusStageState(s.stage);
         if (patch.retryNotice !== undefined)
           setRetryNoticeState(s.retryNotice);
+        if (patch.liveRetry !== undefined)
+          setRetryBreakdownState(s.liveRetry?.breakdown ?? null);
       }
       setSessionsVersion((v) => v + 1);
     },
@@ -602,9 +624,16 @@ export default function Home() {
 
   // Settings
   const [deepseekKey, setDeepseekKey] = useState("");
-  const [opencodeKey, setOpencodeKey] = useState("");
   const [openrouterKey, setOpenrouterKey] = useState("");
-  const [oxHost, setOxHost] = useState<OxHost>("zen");
+  /**
+   * The user's own OpenRouter models. Sanitized on load, on add (Settings
+   * only adds Verify-shaped entries) and again on the server per request.
+   */
+  const [customModels, setCustomModels] = useState<CustomModelDef[]>([]);
+  const [themeId, setThemeId] = useState<string>(DEFAULT_THEME_ID);
+  const [customTheme, setCustomTheme] = useState<CustomThemeSeeds>(() =>
+    sanitizeSeeds(null)
+  );
   const [localBaseUrl, setLocalBaseUrl] = useState(DEFAULT_LOCAL_BASE_URL);
   const [localApiKey, setLocalApiKey] = useState("");
   const [localApiModel, setLocalApiModel] = useState(DEFAULT_LOCAL_API_MODEL);
@@ -695,13 +724,20 @@ export default function Home() {
    */
   const [budgetUsd, setBudgetUsd] = useState<number | null>(null);
 
-  const hasKeys = hasKeyForModel(model, {
-    deepseekKey,
-    opencodeKey,
-    openrouterKey,
-    oxHost,
-    localBaseUrl,
-  });
+  const hasKeys = hasKeyForModel(
+    model,
+    {
+      deepseekKey,
+      openrouterKey,
+      localBaseUrl,
+    },
+    customModels
+  );
+  // Catalog or custom — labels, provider and key gating all read this.
+  const activeModelInfo = useMemo(
+    () => resolveModelInfo(model, customModels),
+    [model, customModels]
+  );
   const initialLoadDone = useRef(false);
   /** Current workspace id, readable from callbacks without re-creating them. */
   const workspaceIdRef = useRef<string | null>(workspaceId);
@@ -878,11 +914,23 @@ export default function Home() {
           try {
             const s = JSON.parse(saved);
             if (s.deepseekKey) setDeepseekKey(s.deepseekKey);
-            if (s.opencodeKey) setOpencodeKey(s.opencodeKey);
             if (s.openrouterKey) setOpenrouterKey(s.openrouterKey);
-            if (s.oxHost === "zen" || s.oxHost === "openrouter") {
-              setOxHost(s.oxHost);
+            if (Array.isArray(s.customModels)) {
+              const clean: CustomModelDef[] = [];
+              for (const entry of s.customModels) {
+                const def = sanitizeCustomModelDef(entry);
+                if (def) clean.push(def);
+              }
+              // Stored ids predate the slug rules; re-slug without renaming.
+              setCustomModels(clean);
             }
+            if (
+              typeof s.themeId === "string" &&
+              (s.themeId === CUSTOM_THEME_ID || getTheme(s.themeId).id === s.themeId)
+            ) {
+              setThemeId(s.themeId);
+            }
+            if (s.customTheme) setCustomTheme(sanitizeSeeds(s.customTheme));
             if (typeof s.localBaseUrl === "string" && s.localBaseUrl.trim()) {
               setLocalBaseUrl(s.localBaseUrl);
             }
@@ -898,7 +946,23 @@ export default function Home() {
             if (s.exaEnabled === false) setExaEnabled(false);
             if (s.visionKey) setVisionKey(s.visionKey);
             if (s.visionModel) setVisionModel(s.visionModel);
-            if (s.model) setModel(s.model);
+            // Retired ids land on the lane that replaced them: both free
+            // lanes merged into the dated 0731 id. A dangling custom id (a
+            // deleted model, a hand-edited blob) falls back to the default
+            // rather than displaying a model that no longer exists.
+            if (s.model === "ox-alpha" || s.model === "deepseek-v4-flash-free") {
+              setModel(FREE_OPENROUTER_MODEL_ID);
+            } else if (typeof s.model === "string" && s.model) {
+              const dangling =
+                s.model.startsWith("custom:") &&
+                !(
+                  Array.isArray(s.customModels) &&
+                  s.customModels.some(
+                    (c: unknown) => sanitizeCustomModelDef(c)?.id === s.model
+                  )
+                );
+              setModel(dangling ? DEFAULT_MODEL_ID : s.model);
+            }
             if (s.thinkingEffort) setThinkingEffort(s.thinkingEffort);
             if (s.enabledPlugins) setEnabledPlugins(s.enabledPlugins);
             if (s.webSearchMode) setWebSearchMode(s.webSearchMode);
@@ -937,9 +1001,10 @@ export default function Home() {
         "nexusai-settings",
         JSON.stringify({
           deepseekKey,
-          opencodeKey,
           openrouterKey,
-          oxHost,
+          customModels,
+          themeId,
+          customTheme,
           localBaseUrl,
           localApiKey,
           localApiModel,
@@ -964,9 +1029,10 @@ export default function Home() {
     }
   }, [
     deepseekKey,
-    opencodeKey,
     openrouterKey,
-    oxHost,
+    customModels,
+    themeId,
+    customTheme,
     localBaseUrl,
     localApiKey,
     localApiModel,
@@ -987,6 +1053,12 @@ export default function Home() {
     deleteDelay,
     budgetUsd,
   ]);
+
+  // The palette is CSS vars on :root, so switching is instant and every
+  // component follows — including bubbles rendered before the change.
+  useEffect(() => {
+    applyThemeById(themeId, customTheme);
+  }, [themeId, customTheme]);
 
   /** Sends the user's Run / Skip answer back to the waiting request. */
   const decideCommand = useCallback(
@@ -1244,6 +1316,7 @@ export default function Home() {
           // Sent as a length, not text — the body is fetched when the panel
           // is opened. See api/conversations/[id]/reasoning.
           reasoningLength: m.reasoningLength as number | undefined,
+          reasoningMs: m.reasoningMs as number | undefined,
           thinkingEffort: m.thinkingEffort as string | undefined,
           webSearchUsed: m.webSearchUsed as boolean | undefined,
           searchResults: parseSearchResults(m.searchResults),
@@ -1732,9 +1805,8 @@ export default function Home() {
             attachments: options?.attachments,
             conversationId: requestConversationId,
             deepseekApiKey: deepseekKey,
-            opencodeApiKey: opencodeKey,
             openrouterApiKey: openrouterKey,
-            oxHost,
+            customModels,
             localBaseUrl,
             localApiKey,
             localApiModel,
@@ -1849,7 +1921,7 @@ export default function Home() {
               case "status":
                 setStatusStage(runConvId ?? requestConversationId, evt.stage);
                 // Do not clear retryNotice here. The route sends "thinking"
-                // before it even calls Ox, so wiping the notice hid the hang.
+                // before it even calls the provider, so wiping the notice hid the hang.
                 break;
 
               case "retrying":
@@ -1865,13 +1937,14 @@ export default function Home() {
                   reason: evt.reason,
                   host: evt.host,
                   inputChars: evt.inputChars,
+                  breakdown: evt.breakdown,
                   receivedAt: Date.now(),
                 });
                 break;
 
               case "continuing":
                 // Either the answer was too long for one response, or the
-                // model stopped mid-task (Ox does this on its own limits).
+                // model stopped mid-task (free lanes do this on their own limits).
                 // Said plainly, because otherwise a long pause mid-file
                 // looks like the app has hung.
                 setRetryNotice(runConvId ?? requestConversationId,
@@ -2254,6 +2327,7 @@ export default function Home() {
                   usage,
                   model: evt.model,
                   durationMs: evt.durationMs,
+                  reasoningMs: evt.reasoningMs,
                   // A limit-stop must land as Resume on the SAME bubble.
                   // Ignoring these flags made every `done` look finished, so
                   // the next send opened a new thinking box from scratch.
@@ -2324,7 +2398,7 @@ export default function Home() {
                     autoResume: evt.autoResume,
                     hadWork,
                     used,
-                    local: getModel(activeModel).provider === "local",
+                    local: resolveModelInfo(activeModel, customModels).provider === "local",
                   })
                 ) {
                   // Keep the bubble streaming. Marking it incomplete here is
@@ -2469,9 +2543,8 @@ export default function Home() {
       hasKeys,
       workspaceId,
       deepseekKey,
-      opencodeKey,
       openrouterKey,
-      oxHost,
+      customModels,
       localBaseUrl,
       localApiKey,
       localApiModel,
@@ -2536,13 +2609,13 @@ export default function Home() {
   // mapped is the "100% memory after I stopped using it" report.
   useEffect(() => {
     if (!settingsHydrated) return;
-    if (getModel(model).provider === "local") return;
+    if (activeModelInfo.provider === "local") return;
     void fetch("/api/local", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action: "stop" }),
     }).catch(() => {});
-  }, [model, settingsHydrated]);
+  }, [activeModelInfo, settingsHydrated]);
 
   /**
    * Stop, meaning stop.
@@ -2973,10 +3046,10 @@ export default function Home() {
           !online ? (
             <div className="px-4 pb-1.5 sm:px-6">
               <div className="mx-auto w-full max-w-3xl">
-                <div className="flex items-center gap-2.5 rounded-xl border border-[#cfa25a]/30 bg-[#cfa25a]/[0.07] px-3 py-2">
-                  <span className="h-2 w-2 flex-none rounded-full bg-[#cfa25a]" />
+                <div className="flex items-center gap-2.5 rounded-xl border border-warning/30 bg-warning/[0.07] px-3 py-2">
+                  <span className="h-2 w-2 flex-none rounded-full bg-warning" />
                   <span className="text-[12px] leading-relaxed text-text-secondary">
-                    <span className="font-medium text-[#cfa25a]">No connection.</span>{" "}
+                    <span className="font-medium text-warning">No connection.</span>{" "}
                     Anything already running keeps going on the server — it
                     will be here when you reconnect.
                   </span>
@@ -3000,18 +3073,18 @@ export default function Home() {
         onAskBtw={sendBtwNote}
         onDismissBtw={dismissBtw}
         retryNotice={retryNotice}
+        retryBreakdown={retryBreakdown}
         onStop={stopGeneration}
         hasKeys={hasKeys}
         missingKeyLabel={
-          getModel(model).provider === "opencode"
-            ? oxHostInfo(getModel(model).fixedHost ?? oxHost).label
-            : getModel(model).provider === "openrouter"
-              ? "OpenRouter"
-              : getModel(model).provider === "local"
-                ? "local server"
-                : "DeepSeek"
+          activeModelInfo.provider === "openrouter"
+            ? "OpenRouter"
+            : activeModelInfo.provider === "local"
+              ? "local server"
+              : "DeepSeek"
         }
         model={model}
+        customModels={customModels}
         thinkingEffort={thinkingEffort}
         webSearchMode={webSearchMode}
         visionKey={visionKey}
@@ -3061,10 +3134,13 @@ export default function Home() {
       {showSettings && (
         <SettingsModal
           deepseekKey={deepseekKey}
-          opencodeKey={opencodeKey}
           openrouterKey={openrouterKey}
-          oxHost={oxHost}
-          onOxHostChange={setOxHost}
+          customModels={customModels}
+          onCustomModelsChange={setCustomModels}
+          themeId={themeId}
+          onThemeChange={setThemeId}
+          customTheme={customTheme}
+          onCustomThemeChange={setCustomTheme}
           localBaseUrl={localBaseUrl}
           localApiKey={localApiKey}
           localApiModel={localApiModel}
@@ -3085,19 +3161,12 @@ export default function Home() {
           onLocalBaseUrlChange={setLocalBaseUrl}
           onLocalApiKeyChange={setLocalApiKey}
           onLocalApiModelChange={setLocalApiModel}
-          onOpencodeKeyChange={(key) => {
-            setOpencodeKey(key);
-            // A user who only connected OpenCode should land on Ox Alpha
-            // rather than a DeepSeek model they cannot call.
-            if (key.trim() && !deepseekKey && getModel(model).provider === "deepseek") {
-              setModel("ox-alpha");
-            }
-          }}
           onOpenrouterKeyChange={(key) => {
             setOpenrouterKey(key);
-            if (key.trim() && !deepseekKey && getModel(model).provider === "deepseek") {
-              setModel("ox-alpha");
-              setOxHost("openrouter");
+            // A user who only connected OpenRouter should land on the free
+            // lane rather than a DeepSeek model they cannot call.
+            if (key.trim() && !deepseekKey && activeModelInfo.provider === "deepseek") {
+              setModel(FREE_OPENROUTER_MODEL_ID);
             }
           }}
           onTavilyKeyChange={setTavilyKey}

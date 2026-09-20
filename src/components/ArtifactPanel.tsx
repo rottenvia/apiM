@@ -120,23 +120,23 @@ export function ArtifactPanel({
       />
 
       <aside
-        className={`relative flex h-full w-full flex-col border-l border-[#403c34] bg-[#141210] shadow-[-24px_0_60px_rgba(0,0,0,0.45)] transition-transform duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] sm:w-[min(860px,100%)] ${
+        className={`relative flex h-full w-full flex-col border-l border-border-light bg-bg-secondary shadow-[-24px_0_60px_rgba(0,0,0,0.45)] transition-transform duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] sm:w-[min(860px,100%)] ${
           visible ? "translate-x-0" : "translate-x-full"
         }`}
       >
         {/* Header */}
-        <header className="flex flex-none items-center justify-between gap-3 border-b border-[#2c2924] px-3 py-2.5">
+        <header className="flex flex-none items-center justify-between gap-3 border-b border-border px-3 py-2.5">
           <div className="flex min-w-0 items-center gap-2.5">
-            <span className="flex h-8 w-8 flex-none items-center justify-center rounded-lg bg-[#2a2723] text-[#d97f5d]">
+            <span className="flex h-8 w-8 flex-none items-center justify-center rounded-lg bg-bg-elevated text-accent-light">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} aria-hidden="true">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M8 9l-3 3 3 3m8-6l3 3-3 3M13.5 6l-3 12" />
               </svg>
             </span>
             <div className="min-w-0">
-              <p className="truncate text-sm font-semibold text-[#ede9e2]">
+              <p className="truncate text-sm font-semibold text-text-primary">
                 {artifact.title}
               </p>
-              <p className="text-[11px] text-[#6d685d]">
+              <p className="text-[11px] text-text-muted">
                 {artifact.language ?? "text"} · {lineCount} lines
               </p>
             </div>
@@ -145,14 +145,14 @@ export function ArtifactPanel({
           <div className="flex flex-none items-center gap-1.5">
             <button
               onClick={handleCopy}
-              className="flex h-8 items-center gap-1.5 rounded-lg border border-[#2c2924] px-2.5 text-xs font-medium text-[#a29d92] transition-colors hover:border-[#403c34] hover:bg-[#33302a] hover:text-[#ede9e2]"
+              className="flex h-8 items-center gap-1.5 rounded-lg border border-border px-2.5 text-xs font-medium text-text-secondary transition-colors hover:border-border-light hover:bg-bg-hover hover:text-text-primary"
             >
               {copied ? (
                 <>
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#7ba478" strokeWidth={2} aria-hidden="true">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M20 6L9 17l-5-5" />
                   </svg>
-                  <span className="text-[#7ba478]">Copied</span>
+                  <span className="text-success">Copied</span>
                 </>
               ) : (
                 <>
@@ -169,7 +169,7 @@ export function ArtifactPanel({
               onClick={handleDownload}
               title="Download"
               aria-label="Download"
-              className="flex h-8 w-8 items-center justify-center rounded-lg text-[#a29d92] transition-colors hover:bg-[#33302a] hover:text-[#ede9e2]"
+              className="flex h-8 w-8 items-center justify-center rounded-lg text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
             >
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} aria-hidden="true">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v12m0 0l-4-4m4 4l4-4M4 19h16" />
@@ -181,7 +181,7 @@ export function ArtifactPanel({
               onClick={handleClose}
               title="Close (Esc)"
               aria-label="Close"
-              className="flex h-8 w-8 items-center justify-center rounded-lg text-[#a29d92] transition-colors hover:bg-[#cf6a5f]/15 hover:text-[#cf6a5f]"
+              className="flex h-8 w-8 items-center justify-center rounded-lg text-text-secondary transition-colors hover:bg-danger/15 hover:text-danger"
             >
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
@@ -191,7 +191,7 @@ export function ArtifactPanel({
         </header>
 
         {/* Code */}
-        <pre className="m-0 min-h-0 flex-1 overflow-auto bg-[#141210] px-4 py-3.5 font-mono text-[13px] leading-relaxed text-[#ede9e2] [overscroll-behavior:contain] [tab-size:2]">
+        <pre className="m-0 min-h-0 flex-1 overflow-auto bg-bg-secondary px-4 py-3.5 font-mono text-[13px] leading-relaxed text-text-primary [overscroll-behavior:contain] [tab-size:2]">
           <code>{artifact.code}</code>
         </pre>
       </aside>

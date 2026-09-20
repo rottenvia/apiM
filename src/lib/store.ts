@@ -49,6 +49,8 @@ export interface StoredMessage {
   model?: string | null;
   /** Wall-clock time the reply took. */
   durationMs?: number | null;
+  /** How long the model spent reasoning, first trace token to last. */
+  reasoningMs?: number | null;
   createdAt: string;
   /** True while the reply is still streaming. If the process dies or the tab
    *  closes mid-answer the flag stays set, which is how the UI knows to offer
