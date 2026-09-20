@@ -102,6 +102,7 @@ async function chat(appPort, payload) {
     headers: { "Content-Type": "application/json" },
     signal: AbortSignal.timeout(60_000),
     body: JSON.stringify({
+      model: "deepseek-v4-flash",
       deepseekApiKey: "sk-mock",
       thinkingEffort: "high",
       webSearchMode: "off",
