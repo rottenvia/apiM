@@ -732,8 +732,14 @@ check(
   "the panel still appears before its text has loaded",
   /const reasoningChars = reasoningLen \|\| message\.reasoningLength \|\| 0/.test(
     read("src/components/MessageBubble.tsx")
-  ) && /\{hasThinking && \(/.test(read("src/components/MessageBubble.tsx")),
-  "otherwise a stored reply would look as though it never reasoned"
+  ) &&
+    /\{hasThinking && !thinkLoading && \(/.test(
+      read("src/components/MessageBubble.tsx")
+    ) &&
+    /const thinkLoading = isThinkingPhase && !panelHasContent;/.test(
+      read("src/components/MessageBubble.tsx")
+    ),
+  "otherwise a stored reply would look as though it never reasoned — thinkLoading needs a live phase, so stored replies always mount"
 );
 /*
  * And before the FIRST token, which is a different moment.
