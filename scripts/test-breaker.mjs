@@ -4,14 +4,15 @@
  * Run:  npm run test:breaker
  *
  * The failure mode: the model sends the same tool call with identical
- * arguments, it fails, and the model sends it again unchanged — once per
- * round until the round cap, each failure re-read and pattern-matched onto.
- * Observed on a free long-context model stuck re-sending one edit_file call.
+ * arguments, it fails, and the model sends it again unchanged — until the
+ * round cap, each failure re-read and pattern-matched onto. Observed on a
+ * free long-context model stuck re-sending one edit_file call with reads
+ * interleaved between the retries.
  *
- * The rule: CONSECUTIVE identical failures warn the model at two and halt
- * the run at three. Any success or any different call resets — the model is
- * adapting, not stuck. Success repeats are never counted (polling is
- * legitimate).
+ * The rule: strikes are PER CALL. One call failing twice warns, three times
+ * halts — interleaved work neither clears nor advances the count, because
+ * the real loop reads between retries. Only that call succeeding clears
+ * its strikes. Success repeats are never counted (polling is legitimate).
  */
 import path from "node:path";
 import { readFileSync } from "node:fs";
@@ -88,12 +89,37 @@ check("a success resets the count", (() => {
   const seq = run([[false], [false], [true], [false]]);
   return seq[3].repeats === 1 && !seq[3].warn && !seq[3].trip;
 })());
-check("a different call resets the count", (() => {
+check("different calls keep separate strike counts", (() => {
   const b = new LB.LoopBreaker();
   b.observe("edit_file", ARGS, false);
   b.observe("edit_file", ARGS, false);
   const o = b.observe("read_file", { path: "main.cpp" }, false);
   return o.repeats === 1 && !o.warn && !o.trip;
+})());
+check("interleaved work does not clear strikes — the real loop trips", (() => {
+  const b = new LB.LoopBreaker();
+  b.observe("edit_file", ARGS, false);
+  b.observe("read_file", { path: "main.cpp" }, true);
+  const w = b.observe("edit_file", ARGS, false);
+  b.observe("read_file", { path: "main.cpp" }, true);
+  const t = b.observe("edit_file", ARGS, false);
+  return w.warn && !w.trip && t.trip && t.repeats === 3;
+})());
+check("that same call succeeding clears only its own strikes", (() => {
+  const b = new LB.LoopBreaker();
+  b.observe("edit_file", ARGS, false);
+  b.observe("read_file", { path: "x" }, false);
+  b.observe("edit_file", ARGS, true);
+  const e = b.observe("edit_file", ARGS, false);
+  const r = b.observe("read_file", { path: "x" }, false);
+  return e.repeats === 1 && !e.warn && r.repeats === 2 && r.warn;
+})());
+check("many distinct failures never warn or trip", (() => {
+  const b = new LB.LoopBreaker();
+  const out = ["a", "b", "c", "d"].map((n) =>
+    b.observe(n, { q: n }, false)
+  );
+  return out.every((o) => o.repeats === 1 && !o.warn && !o.trip);
 })());
 check("changed arguments reset the count", (() => {
   const b = new LB.LoopBreaker();

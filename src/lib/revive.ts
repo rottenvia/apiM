@@ -279,7 +279,7 @@ export function prematureStopNotice(reason: PrematureStopReason): string {
     return "The reply used every tool round it was allowed — Resume to carry on";
   }
   if (reason === "loop_breaker") {
-    return "The same tool call failed three times running — Resume to steer it another way";
+    return "The same tool call failed three times with identical arguments — Resume to steer it another way";
   }
   if (reason === "dangling_next") {
     return "The model kept describing its next action instead of doing it";
