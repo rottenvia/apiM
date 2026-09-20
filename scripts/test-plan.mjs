@@ -556,6 +556,7 @@ if (!mockUp || !appUp) {
     signal: AbortSignal.timeout(120_000),
     body: JSON.stringify({
       message: "do the thing",
+      model: "deepseek-v4-flash",
       deepseekApiKey: "sk-mock",
       workspaceEnabled: true,
       workspaceId: "plantest",

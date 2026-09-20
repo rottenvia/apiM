@@ -154,7 +154,7 @@ check(
 );
 check(
   "the request asks for the model's ceiling, still wrapped by the spending cap",
-  /max_tokens: maxTokensFor\(\s*budget,\s*model,[\s\S]{0,400}?maxOutputTokensFor\(model\)/.test(route)
+  /max_tokens: maxTokensFor\(\s*budget,\s*model,[\s\S]{0,400}?target\.model\.maxOutputTokens/.test(route)
 );
 check(
   "the old provider-keyed constants are gone from the route",
@@ -175,12 +175,12 @@ check(
 );
 check(
   "open-ceiling models get room for a long agent task",
-  limits.agentRoundsFor("glm-5.3-flash") === 256 &&
-    limits.agentRoundsFor("ox-alpha") === 256
+  limits.agentRoundsFor("glm-5.3-flash", true) === 256 &&
+    limits.agentRoundsFor("glm-5.3-flash") === 64
 );
 check(
   "the route takes the guard from the model",
-  /MAX_AGENT_ROUNDS = agentRoundsFor\(model\)/.test(route)
+  /MAX_AGENT_ROUNDS = agentRoundsFor\(model[^)]*\)/.test(route)
 );
 check(
   "hitting it is reported as the round cap, not as a provider abort",
@@ -384,7 +384,7 @@ check(
   /glob/i.test(JSON.stringify(schema))
 );
 const readOne = tools
-  .workspaceToolsFor("glm-5.3-flash")
+  .workspaceToolsFor("glm-5.3-flash", true)
   .find((t) => t.function.name === "read_file");
 check(
   "…and read_file tells it not to walk a file in slices",

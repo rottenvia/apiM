@@ -136,6 +136,7 @@ async function runScenario(scenario, appPort, mockPort) {
     signal: AbortSignal.timeout(120_000),
     body: JSON.stringify({
       message: `Build a greet module with a test (${scenario})`,
+      model: "deepseek-v4-flash",
       deepseekApiKey: "sk-mock",
       workspaceEnabled: true,
       workspaceId,

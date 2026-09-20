@@ -1,12 +1,16 @@
 /**
- * A second LLM provider — OpenCode Zen serving Ox Alpha.
+ * The three providers: DeepSeek, OpenRouter, and local.
  *
  * Run:  npm run test:providers
  *
- * DeepSeek used to be the only Chat Completions host. Ox Alpha is a stealth
- * model on OpenCode Zen (`x-preview-f-free` at opencode.ai/zen/v1). The
- * agent loop stays identical; only the URL, key and on-the-wire model id
+ * DeepSeek used to be the only Chat Completions host. OpenRouter is the
+ * second (GLM 5.3 Flash, the free DeepSeek 0731 lane, and any custom model
+ * the user adds); a local OpenAI-compatible host serves Qwen. The agent
+ * loop stays identical — only the URL, key and on-the-wire model id
  * change. Plugin directive priority is left alone.
+ *
+ * (Ox Alpha / OpenCode Zen was removed 2026-09: the trial lane is the
+ * free 0731 model on OpenRouter now.)
  */
 import path from "node:path";
 import { readFileSync } from "node:fs";
@@ -51,20 +55,26 @@ console.log("1. The catalog");
     models.DEFAULT_MODEL_ID === "glm-5.3-flash" && models.MODELS[0].id === "glm-5.3-flash",
     models.DEFAULT_MODEL_ID
   );
-const ox = models.MODELS.find((m) => m.id === "ox-alpha");
-check("Ox Alpha is listed", Boolean(ox));
 check(
-  "Ox Alpha is served by OpenCode",
-  ox?.provider === "opencode",
-  ox?.provider
+  "Ox Alpha is gone from the catalog",
+  !models.MODELS.some((m) => m.id === "ox-alpha")
+);
+const free0731 = models.MODELS.find(
+  (m) => m.id === "deepseek-v4-flash-0731-free"
+);
+check("DeepSeek V4 Flash 0731 Free is listed", Boolean(free0731));
+check(
+  "the free lane rides OpenRouter, not a Zen host",
+  free0731?.provider === "openrouter",
+  free0731?.provider
 );
 check(
-  "the wire id is the official Zen model",
-  ox?.apiModel === "x-preview-f-free",
-  "opencode.ai/docs/zen lists Ox Alpha Free as x-preview-f-free"
+  "the wire id is the official :free slug",
+  free0731?.apiModel === "deepseek/deepseek-v4-flash-0731:free",
+  "openrouter.ai/deepseek lists the free lane as deepseek-v4-flash-0731:free"
 );
 check(
-  "unknown ids fall back to the default DeepSeek model",
+  "unknown ids fall back to the default model",
   models.getModel("nope").id === models.DEFAULT_MODEL_ID
 );
 
@@ -79,27 +89,36 @@ check(
   ds.ok && ds.target.baseUrl.includes("api.deepseek.com")
 );
 
-const noDs = providers.resolveChatTarget("deepseek-v4-pro", { opencodeApiKey: "sk-zen" });
+const noDs = providers.resolveChatTarget("deepseek-v4-pro", { openrouterApiKey: "sk-or" });
 check("DeepSeek refuses without its own key", !noDs.ok);
 
-const oxOk = providers.resolveChatTarget("ox-alpha", { opencodeApiKey: "sk-zen-1" });
-check("Ox Alpha resolves with an OpenCode key", oxOk.ok);
+const glmOk = providers.resolveChatTarget("glm-5.3-flash", { openrouterApiKey: "sk-or-v1-test" });
+check("GLM resolves with an OpenRouter key", glmOk.ok);
 check(
-  "and sends x-preview-f-free on the wire",
-  oxOk.ok && oxOk.target.apiModel === "x-preview-f-free"
+  "and sends z-ai/glm-5.3-flash on the wire",
+  glmOk.ok && glmOk.target.apiModel === "z-ai/glm-5.3-flash"
 );
 check(
-  "and hits OpenCode Zen",
-  oxOk.ok && oxOk.target.baseUrl.includes("opencode.ai/zen/v1"),
-  oxOk.ok ? oxOk.target.baseUrl : ""
+  "and hits openrouter.ai",
+  glmOk.ok && glmOk.target.baseUrl.includes("openrouter.ai/api/v1"),
+  glmOk.ok ? glmOk.target.baseUrl : ""
 );
 
-const noOx = providers.resolveChatTarget("ox-alpha", { deepseekApiKey: "sk-ds" });
-check("Ox Alpha refuses a DeepSeek-only setup", !noOx.ok);
+const freeOk = providers.resolveChatTarget("deepseek-v4-flash-0731-free", {
+  openrouterApiKey: "sk-or-v1-test",
+});
+check("the 0731 free lane resolves with an OpenRouter key", freeOk.ok);
+check(
+  "and sends the :free slug on the wire",
+  freeOk.ok && freeOk.target.apiModel === "deepseek/deepseek-v4-flash-0731:free"
+);
+
+const noOr = providers.resolveChatTarget("glm-5.3-flash", { deepseekApiKey: "sk-ds" });
+check("GLM refuses a DeepSeek-only setup", !noOr.ok);
 
 const helperDs = providers.resolveHelperTarget({
   deepseekApiKey: "sk-ds",
-  opencodeApiKey: "sk-zen",
+  openrouterApiKey: "sk-or",
 });
 check(
   "the helper prefers Flash when a DeepSeek key exists",
@@ -107,42 +126,23 @@ check(
   "existing DeepSeek setups keep the same cheap planning path"
 );
 
-const helperOx = providers.resolveHelperTarget({ opencodeApiKey: "sk-zen" });
+const helperFree = providers.resolveHelperTarget({ openrouterApiKey: "sk-or" });
 check(
-  "the helper falls back to Ox Alpha without DeepSeek",
-  helperOx?.model.id === "ox-alpha"
-);
-
-// The helper follows the main model's provider. An Ox conversation judges on
-// Ox (free in preview) — a DeepSeek key with an empty balance must not
-// hijack the web judge and make every judge call fail.
-const helperOxMain = providers.resolveHelperTarget(
-  { deepseekApiKey: "sk-ds", opencodeApiKey: "sk-zen" },
-  "ox-alpha"
-);
-check(
-  "an Ox main model gets the Ox helper even when a DeepSeek key exists",
-  helperOxMain?.model.id === "ox-alpha" &&
-    helperOxMain?.providerId === "opencode",
+  "the helper falls back to the 0731 free lane without DeepSeek",
+  helperFree?.model.id === "deepseek-v4-flash-0731-free" &&
+    helperFree?.providerId === "openrouter",
   "the free judge never depends on a paid balance"
 );
 
-const helperOxNoKey = providers.resolveHelperTarget(
-  { deepseekApiKey: "sk-ds" },
-  "ox-alpha"
-);
+// The helper no longer follows the main model: it is always the cheapest
+// known lane (Flash on DeepSeek, 0731-free on OpenRouter), and the caller
+// drops it when it equals the main model. A second argument would be dead.
 check(
-  "an Ox main with no Ox key gets no helper rather than a wrong one",
-  helperOxNoKey === null,
-  "judging an Ox conversation with a different provider is a worse failure"
-);
-
-check(
-  "a DeepSeek main model still judges on Flash",
-  providers.resolveHelperTarget(
-    { deepseekApiKey: "sk-ds", opencodeApiKey: "sk-zen" },
-    "deepseek-v4-pro"
-  )?.model.id === "deepseek-v4-flash",
+  "DeepSeek still wins when both keys exist",
+  providers.resolveHelperTarget({
+    deepseekApiKey: "sk-ds",
+    openrouterApiKey: "sk-or",
+  })?.model.id === "deepseek-v4-flash",
   "the key paying for the reply stays the cheap side-call planner"
 );
 
@@ -163,29 +163,29 @@ check("and no effort", dsOff.reasoning_effort === undefined);
 const ocBody = {};
 providers.applyThinking(ocBody, "openai", true, "max");
 check(
-  "OpenCode thinking-on does NOT send DeepSeek's thinking object",
+  "OpenRouter thinking-on does NOT send DeepSeek's thinking object",
   ocBody.thinking === undefined,
   "that field 400s on OpenAI-compatible hosts"
 );
-check("OpenCode thinking-on sends reasoning_effort", ocBody.reasoning_effort === "max");
+check("OpenRouter thinking-on sends reasoning_effort", ocBody.reasoning_effort === "max");
 
 const ocOff = {};
 providers.applyThinking(ocOff, "openai", false, "none");
-check("OpenCode thinking-off sends neither field", ocOff.thinking === undefined && ocOff.reasoning_effort === undefined);
+check("OpenRouter thinking-off sends neither field", ocOff.thinking === undefined && ocOff.reasoning_effort === undefined);
 
 console.log("\n4. Pricing");
 
-check("Ox Alpha is in the rate table", Boolean(pricing.MODEL_RATES["ox-alpha"]));
+check("the 0731 free lane is in the rate table", Boolean(pricing.MODEL_RATES["deepseek-v4-flash-0731-free"]));
 check(
-  "the preview is free",
+  "the free lane is free",
   pricing.estimateCost(
     { prompt_tokens: 10_000, completion_tokens: 2_000, prompt_cache_miss_tokens: 10_000 },
-    "ox-alpha"
+    "deepseek-v4-flash-0731-free"
   ) === 0
 );
 check(
   "a free model does not divide-by-zero the budget cap",
-  budget.maxTokensFor(budget.createBudget(0.1), "ox-alpha", 65_536) === 65_536
+  budget.maxTokensFor(budget.createBudget(0.1), "deepseek-v4-flash-0731-free", 65_536) === 65_536
 );
 check(
   "DeepSeek Pro rates are unchanged",
@@ -194,9 +194,9 @@ check(
 
 console.log("\n5. The chat route actually uses the resolver");
 
-check("the route accepts an OpenCode key", /opencodeApiKey/.test(route));
+check("the route accepts an OpenRouter key", /openrouterApiKey/.test(route));
 check("it no longer requires a DeepSeek key for every request", !/Message and DeepSeek API key are required/.test(route));
-check("it resolves the target before opening the stream", /resolveChatTarget\(model, creds\)/.test(route));
+check("it resolves the target before opening the stream", /resolveChatTarget\(model, creds, customs\)/.test(route));
 check(
   "the fetch uses the resolved host",
   /target\.baseUrl/.test(route) && /completionHeaders\(target\)/.test(route)
@@ -215,15 +215,19 @@ check(
 
 console.log("\n6. The UI offers both providers");
 
-check("Settings has an OpenCode key field", /OpenCode API Key/.test(settings));
-check("Settings offers Ox Alpha as a model", /onModelChange\("ox-alpha"\)/.test(settings));
+check("Settings has a DeepSeek key field", /DeepSeek API Key/.test(settings));
+check("Settings has an OpenRouter key field", /OpenRouter API Key/.test(settings));
+check(
+  "Settings renders the model grid from the catalog, including customs",
+  /onModelChange\(m\.id\)/.test(settings) && /onModelChange\(c\.id\)/.test(settings)
+);
 check("the composer selector lists the catalog", /from "@\/lib\/models"/.test(selector));
-check("the page persists the OpenCode key", /opencodeKey/.test(page));
-check("the page sends the OpenCode key with the chat request", /opencodeApiKey: opencodeKey/.test(page));
+check("the page persists the OpenRouter key", /openrouterKey/.test(page));
+check("the page sends the OpenRouter key with the chat request", /openrouterApiKey: openrouterKey/.test(page));
 check(
   "Low effort is only remapped on V4 Pro",
   /const isPro = model === "deepseek-v4-pro"/.test(effort),
-  "Ox Alpha must not inherit Pro's silent low→high mapping"
+  "no other model inherits Pro's silent low→high mapping"
 );
 
 console.log("\n7. Local Qwen 3.8 27B");
@@ -750,9 +754,9 @@ check(
   /Spec optimizations/.test(localUi) && /parseUserFlags/.test(sharedSrc)
 );
 
-console.log("\n9. A 503 from Ox / OpenCode is their outage, not the user's key");
+console.log("\n9. A 503 from OpenRouter is their outage, not the user's key");
 
-const busy = providers.providerHttpError(503, "OpenCode", "retrying");
+const busy = providers.providerHttpError(503, "OpenRouter", "retrying");
 check(
   "a 503 does not echo the upstream word retrying as a final error",
   !/retrying/i.test(busy),
@@ -766,23 +770,23 @@ check(
 check(
   "a 503 with a useful detail is kept",
   /capacity exceeded/.test(
-    providers.providerHttpError(503, "OpenCode", "capacity exceeded in us-west")
+    providers.providerHttpError(503, "OpenRouter", "capacity exceeded in us-west")
   )
 );
 check(
   "a rejected key is still a 401, never a 503",
-  /API key was rejected/.test(providers.providerHttpError(401, "OpenCode", ""))
+  /API key was rejected/.test(providers.providerHttpError(401, "OpenRouter", ""))
 );
 check(
-  "a Zen 429 names the shared free pool, not the user's key",
-  /shared pool/.test(providers.providerHttpError(429, "OpenCode Zen", "")) &&
-    /not your key/.test(providers.providerHttpError(429, "OpenCode Zen", "")),
+  "a shared-pool 429 names the free pool, not the user's key",
+  /shared pool/.test(providers.providerHttpError(429, "OpenRouter", "")) &&
+    /not your key/.test(providers.providerHttpError(429, "OpenRouter", "")),
   "mornings are quiet; evenings look like the key is broken"
 );
   check(
-    "the chat route gives OpenCode extra attempts",
-    /OPENCODE_RETRY/.test(route) && /emptyStreamRetries/.test(route),
-    "Zen 503s last longer than three tries, and 200+empty is the other failure mode"
+    "the chat route gives OpenRouter extra attempts",
+    /OPENROUTER_RETRY/.test(route) && /emptyStreamRetries/.test(route),
+    "shared-pool 503s last longer than three tries, and 200+empty is the other failure mode"
   );
   check(
     "a video round skips doomed empty-stream retries",
@@ -808,82 +812,69 @@ check(
     /retryNotice && <RetryBanner/.test(read("src/components/ChatArea.tsx"))
 );
 
-console.log("\n10. OpenRouter is a second Ox Alpha host, not a second model");
+console.log("\n10. Any OpenRouter model can be added as a custom");
 
-const oxHost = await load("src/lib/ox-host.ts");
-check("there is still only one Ox Alpha catalog entry", models.MODELS.filter((m) => m.id === "ox-alpha").length === 1);
-check("Zen wire id is x-preview-f-free", oxHost.OX_HOSTS.zen.apiModel === "x-preview-f-free");
-check("OpenRouter wire id is stealth/ox-alpha", oxHost.OX_HOSTS.openrouter.apiModel === "stealth/ox-alpha");
-
-const viaOr = providers.resolveChatTarget("ox-alpha", {
-  oxHost: "openrouter",
-  openrouterApiKey: "sk-or-v1-test",
-});
-check("Ox Alpha on OpenRouter resolves", viaOr.ok);
-check(
-  "and hits openrouter.ai",
-  viaOr.ok && viaOr.target.baseUrl.includes("openrouter.ai/api/v1"),
-  viaOr.ok ? viaOr.target.baseUrl : ""
+const customs = [
+  {
+    id: "custom:anthropic/claude-opus-4-6",
+    label: "Claude Opus 4.6",
+    apiModel: "anthropic/claude-opus-4-6",
+    vision: "helper",
+    video: false,
+    maxOutputTokens: 32000,
+  },
+];
+const customInfo = models.resolveModelInfo(
+  "custom:anthropic/claude-opus-4-6",
+  customs
 );
 check(
-  "and sends stealth/ox-alpha on the wire",
-  viaOr.ok && viaOr.target.apiModel === "stealth/ox-alpha"
+  "a custom resolves to its own entry",
+  customInfo.id === "custom:anthropic/claude-opus-4-6"
 );
 check(
-  "and stays provider opencode so pinning/retry/tools are reused",
-  viaOr.ok && viaOr.target.providerId === "opencode"
+  "and always rides OpenRouter",
+  customInfo.provider === "openrouter"
+);
+const customTarget = providers.resolveChatTarget(
+  "custom:anthropic/claude-opus-4-6",
+  { openrouterApiKey: "sk-or-v1-test" },
+  customs
+);
+check("a custom resolves with the OpenRouter key", customTarget.ok);
+check(
+  "and sends the typed slug on the wire",
+  customTarget.ok && customTarget.target.apiModel === "anthropic/claude-opus-4-6"
 );
 check(
-  "OpenRouter asks for a referer header",
-  viaOr.ok && providers.completionHeaders(viaOr.target)["HTTP-Referer"]
+  "and is refused without the OpenRouter key",
+  !providers.resolveChatTarget(
+    "custom:anthropic/claude-opus-4-6",
+    { deepseekApiKey: "sk-ds" },
+    customs
+  ).ok
 );
 check(
-  "an Ox attempt times out in 45s, not 280s",
-  viaOr.ok && providers.attemptTimeoutMs(viaOr.target) === 45_000
+  "the helper never rides a custom",
+  providers.resolveHelperTarget({ openrouterApiKey: "sk-or" }, customs)
+    ?.model.id === "deepseek-v4-flash-0731-free",
+  "a side call must ride a known-cheap lane, not a user-typed price"
 );
 check(
-  "a huge Ox body gets more header time, capped at 90s",
-  viaOr.ok &&
-    providers.attemptTimeoutMs(viaOr.target, 400_000) === 90_000
+  "an unknown custom id falls back to the default model, never a crash",
+  models.resolveModelInfo("custom:nope", customs).id === models.DEFAULT_MODEL_ID
 );
 check(
-  "Zen still works when the host is left default",
-  providers.resolveChatTarget("ox-alpha", { opencodeApiKey: "sk-zen-1" }).ok
+  "Settings renders the custom-model manager",
+  /CustomModelsManager/.test(settings)
 );
 check(
-  "OpenRouter without its key is refused",
-  !providers.resolveChatTarget("ox-alpha", { oxHost: "openrouter", opencodeApiKey: "sk-zen-1" }).ok
+  "Verify checks the id against OpenRouter's /models",
+  read("src/app/api/openrouter/verify/route.ts").includes("/models")
 );
 check(
-  "the helper can use the OpenRouter key when that host is selected",
-  providers.resolveHelperTarget({
-    oxHost: "openrouter",
-    openrouterApiKey: "sk-or-1",
-  })?.oxHost === "openrouter"
-);
-check(
-  "the helper does not silently hop to the other Ox host",
-  providers.resolveHelperTarget({
-    oxHost: "zen",
-    openrouterApiKey: "sk-or-1",
-  }) === null,
-  "the user picks Zen vs OpenRouter by hand"
-);
-check("Settings has an OpenRouter key field", /OpenRouter API Key/.test(settings));
-check(
-  "Settings has Zen / OpenRouter host buttons",
-  settings.includes("onOxHostChange(id)")
-);
-check("the page persists the OpenRouter key and host", /openrouterKey/.test(page) && /oxHost/.test(page));
-check("the page sends both Ox fields with the chat request", /openrouterApiKey: openrouterKey/.test(page) && /oxHost/.test(page));
-check(
-  "plugin pinning still runs for the shared Ox provider",
-  route.includes('target.providerId === "opencode"') && /MAXIMUM PRIORITY/.test(plugins)
-);
-check(
-  "there is a Settings test that hits GET /models",
-  settings.includes("/api/ox/test") &&
-    read("src/app/api/ox/test/route.ts").includes("/models")
+  "the picker lists customs with the catalog",
+  /Your models/.test(selector)
 );
 check(
   "the live banner is driven by visibleUpstreamNotice, not a late 8s hint",
@@ -898,38 +889,33 @@ check(
 check(
   "a 200 with no first token is retried instead of hanging the route",
   /readWithTimeout/.test(route) &&
-    /OX_FIRST_TOKEN_MS/.test(route) &&
+    /OPENROUTER_FIRST_TOKEN_MS/.test(route) &&
     /no first token/.test(route)
 );
-check(
-  "the route never auto-fails over to the other Ox host",
-  !/order: OxHost\[\]/.test(read("src/lib/providers.ts")) &&
-    /Only the host the user picked/.test(read("src/lib/providers.ts"))
-);
 
-console.log("\n11. The Ox Alpha trial ended: GLM 5.3 Flash (OpenRouter) and the free Zen Flash");
+console.log("\n11. GLM 5.3 Flash (OpenRouter) and the free 0731 lane");
 
 const glm = models.MODELS.find((m) => m.id === "glm-5.3-flash");
-const free = models.MODELS.find((m) => m.id === "deepseek-v4-flash-free");
+const free = models.MODELS.find((m) => m.id === "deepseek-v4-flash-0731-free");
 check("GLM 5.3 Flash is in the catalog", Boolean(glm));
 check(
   "its wire id is the official OpenRouter slug",
   glm?.apiModel === "z-ai/glm-5.3-flash",
   "openrouter.ai/z-ai/glm-5.3-flash"
 );
-check("it is its own provider (openrouter), not a second Ox entry", glm?.provider === "openrouter");
+check("it rides its own provider (openrouter)", glm?.provider === "openrouter");
 check(
-  "it runs capped like every paid model — uncapped 401k reads fed fat fresh results into the transcript",
+  "it runs capped like every catalog model — uncapped 401k reads fed fat fresh results into the transcript",
     glm?.openToolLimits === false
   );
-check("it is a native VLM like Ox", glm?.vision === "native");
-check("DeepSeek V4 Flash Free is in the catalog", Boolean(free));
-check("the free lane rides the opencode (Zen) provider", free?.provider === "opencode");
+check("it is a native VLM", glm?.vision === "native");
+check("DeepSeek V4 Flash 0731 Free is in the catalog", Boolean(free));
+check("the free lane rides the openrouter provider", free?.provider === "openrouter");
 check(
-  "the free lane is pinned to Zen — it does not exist on OpenRouter",
-  free?.fixedHost === "zen" && free?.apiModel === "deepseek-v4-flash-free"
+  "the free lane sends the official :free slug on the wire",
+  free?.apiModel === "deepseek/deepseek-v4-flash-0731:free"
 );
-check("Ox Alpha is untouched by the new entries", models.MODELS.filter((m) => m.id === "ox-alpha").length === 1);
+check("Ox Alpha is gone from the catalog", !models.MODELS.some((m) => m.id === "ox-alpha"));
 
 const glmResolved = providers.resolveChatTarget("glm-5.3-flash", {
   openrouterApiKey: "sk-or-v1-test",
@@ -950,46 +936,37 @@ check(
 );
 check(
   "GLM is refused without the OpenRouter key",
-  !providers.resolveChatTarget("glm-5.3-flash", { opencodeApiKey: "sk-zen-1" }).ok
+  !providers.resolveChatTarget("glm-5.3-flash", { deepseekApiKey: "sk-ds" }).ok
 );
 
-const freeResolved = providers.resolveChatTarget("deepseek-v4-flash-free", {
-  opencodeApiKey: "sk-zen-1",
+const freeResolved = providers.resolveChatTarget("deepseek-v4-flash-0731-free", {
+  openrouterApiKey: "sk-or-v1-test",
 });
-check("the free Flash resolves with a Zen key", freeResolved.ok);
+check("the free lane resolves with an OpenRouter key", freeResolved.ok);
 check(
-  "and hits opencode.ai/zen",
-  freeResolved.ok && freeResolved.target.baseUrl.includes("opencode.ai/zen/v1"),
+  "and hits openrouter.ai",
+  freeResolved.ok && freeResolved.target.baseUrl.includes("openrouter.ai/api/v1"),
   freeResolved.ok ? freeResolved.target.baseUrl : ""
 );
 check(
-  "and sends deepseek-v4-flash-free on the wire, not the Ox id",
-  freeResolved.ok && freeResolved.target.apiModel === "deepseek-v4-flash-free"
+  "and sends the :free slug on the wire",
+  freeResolved.ok && freeResolved.target.apiModel === "deepseek/deepseek-v4-flash-0731:free"
 );
 check(
-  "the Zen pin wins even when the Ox button points at OpenRouter",
-  providers.resolveChatTarget("deepseek-v4-flash-free", {
-    oxHost: "openrouter",
-    opencodeApiKey: "sk-zen-1",
-    openrouterApiKey: "sk-or-v1-test",
-  }).target.apiModel === "deepseek-v4-flash-free"
-);
-check(
-  "the free Flash is refused with only an OpenRouter key",
-  !providers.resolveChatTarget("deepseek-v4-flash-free", {
-    oxHost: "openrouter",
-    openrouterApiKey: "sk-or-v1-test",
+  "the free lane is refused with only a DeepSeek key",
+  !providers.resolveChatTarget("deepseek-v4-flash-0731-free", {
+    deepseekApiKey: "sk-ds",
   }).ok
 );
 check(
   "the client key check agrees: GLM wants the OpenRouter key",
   models.hasKeyForModel("glm-5.3-flash", { openrouterKey: "sk-or-v1" }) &&
-    !models.hasKeyForModel("glm-5.3-flash", { opencodeKey: "sk-zen-1" })
+    !models.hasKeyForModel("glm-5.3-flash", { deepseekKey: "sk-ds" })
 );
 check(
-  "and the free Flash wants the Zen key regardless of the Ox button",
-  models.hasKeyForModel("deepseek-v4-flash-free", { opencodeKey: "sk-zen-1", oxHost: "openrouter" }) &&
-    !models.hasKeyForModel("deepseek-v4-flash-free", { openrouterKey: "sk-or-v1", oxHost: "openrouter" })
+  "and the free lane wants the OpenRouter key too",
+  models.hasKeyForModel("deepseek-v4-flash-0731-free", { openrouterKey: "sk-or-v1" }) &&
+    !models.hasKeyForModel("deepseek-v4-flash-0731-free", { deepseekKey: "sk-ds" })
 );
 
 check(
@@ -998,7 +975,7 @@ check(
     pricing.MODEL_RATES["glm-5.3-flash"]?.output === 0.5,
   "the 50% discount ends 2026-09-09; the cap must never undercount"
 );
-check("the free Flash costs nothing in the rate table", pricing.MODEL_RATES["deepseek-v4-flash-free"]?.input === 0 && pricing.MODEL_RATES["deepseek-v4-flash-free"]?.output === 0);
+check("the free lane costs nothing in the rate table", pricing.MODEL_RATES["deepseek-v4-flash-0731-free"]?.input === 0 && pricing.MODEL_RATES["deepseek-v4-flash-0731-free"]?.output === 0);
 check(
     "GLM replies are billed, so the cost chip can show real money",
     (() => {
@@ -1026,13 +1003,13 @@ check(
     0.15
 );
 check(
-  "the route's resilience gates cover the new provider, not just Ox",
+  "the route's resilience gates cover OpenRouter",
   (route.match(/target\.providerId === "openrouter"/g) ?? []).length >= 9,
   "pin/retry/empty-stream paths apply to OpenRouter too"
 );
 check(
-  "Settings says one key covers both OpenRouter models",
-  /z-ai\/glm-5\.3-flash/.test(settings)
+  "Settings says one key covers every OpenRouter model",
+  /One key covers every OpenRouter model/.test(settings)
 );
 
 console.log(

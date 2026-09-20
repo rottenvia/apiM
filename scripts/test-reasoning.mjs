@@ -217,7 +217,7 @@ check(
 );
 check(
   "an empty LIVE value distinguishes waiting for data from actual reasoning",
-  /isThinkingPhase \? \([\s\S]{0,160}thinking-loading[^>]*>[\s\S]{0,80}Waiting for reasoning text…/.test(
+  /isThinkingPhase \? \([\s\S]{0,160}thinking-shimmer[^>]*>[\s\S]{0,80}Waiting for reasoning text…/.test(
     bubble
   )
 );
@@ -251,7 +251,7 @@ check(
 );
 check(
   "Loading is shown only while stored reasoning is genuinely pending",
-  /showThinking \? \([\s\S]{0,80}thinking-loading[^>]*>Loading…/.test(bubble)
+  /showThinking \? \([\s\S]{0,80}thinking-shimmer[^>]*>Loading…/.test(bubble)
 );
 
 console.log("\n6. The reported completed-high state renders a panel");
