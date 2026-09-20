@@ -325,6 +325,18 @@ type StreamEvent =
       stage: "deciding" | "searching" | "thinking" | "writing" | "working";
     }
   | {
+      /**
+       * A round's request just went out — its size and where the bytes
+       * live. The client shows it once the body passes 100k, so a 600k
+       * "new message" arrives with its cause attached instead of as a
+       * mystery, and the wait that follows it reads as expected.
+       */
+      type: "request_size";
+      round: number;
+      inputChars: number;
+      breakdown: { label: string; chars: number }[];
+    }
+  | {
       type: "meta";
       conversationId: string | null;
       /** Id of the reply being generated, so Stop can name it. */
@@ -2358,6 +2370,15 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           );
           lastInputChars = inputChars;
           lastSizeParts = sizeParts;
+          // Fire-time receipt, every round: the client decides the 100k
+          // display threshold, so a run that grows into (or shrinks out of)
+          // heaviness never shows a stale figure.
+          send({
+            type: "request_size",
+            round,
+            inputChars,
+            breakdown: sizeParts.slice(0, 6),
+          });
           if (inputChars >= 100_000) {
             console.log(
               `[chat] ${target.model.id} round ${round}: ` +

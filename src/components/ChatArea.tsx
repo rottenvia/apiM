@@ -93,6 +93,12 @@ interface ChatAreaProps {
   retryBreakdown?: { label: string; chars: number }[] | null;
   /** The provider's own message behind a rejection-driven retry. */
   retryDetail?: string | null;
+  /** Latest fired request's size, while its round runs (heavy rounds only). */
+  requestSize?: {
+    round: number;
+    inputChars: number;
+    breakdown: { label: string; chars: number }[];
+  } | null;
   onStop: () => void;
   hasKeys: boolean;
   /** Which provider key is missing for the selected model. */
@@ -209,6 +215,7 @@ export function ChatArea({
   retryNotice,
   retryBreakdown,
   retryDetail,
+  requestSize,
   onStop,
   hasKeys,
   missingKeyLabel = "DeepSeek",
@@ -1533,6 +1540,7 @@ export function ChatArea({
                   detail={retryDetail}
                 />
               )}
+              {requestSize && <RequestSizeLine info={requestSize} />}
 
               <div ref={messagesEndRef} />
             </div>
@@ -2247,6 +2255,49 @@ function RetryBanner({
         className="cursor-default text-[11px] leading-4 tabular-nums text-warning"
       >
         {text}
+      </span>
+    </div>
+  );
+}
+
+/**
+ * Fire-time receipt for a heavy round: "Request 3 · 612k in (history 479k)".
+ *
+ * Deliberately NOT the warning color — a big request is information, not a
+ * failure. It answers "600k from nothing?" at fire time instead of after
+ * the reply, and the big-context hint sets the wait expectation up front:
+ * a stalled-looking prefill on 700k is normal, not a hang. Hovering lists
+ * every bucket. Vanishes with the run; the reply's ctx chip keeps the
+ * permanent record.
+ */
+function RequestSizeLine({
+  info,
+}: {
+  info: {
+    round: number;
+    inputChars: number;
+    breakdown: { label: string; chars: number }[];
+  };
+}) {
+  const k = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(0)}k` : `${n}`);
+  const total = `${k(info.inputChars)} in`;
+  const top = info.breakdown.slice(0, 2);
+  const title =
+    `Request ${info.round} body: ` +
+    info.breakdown.map((part) => `${part.label} ${k(part.chars)}`).join(" · ") +
+    (info.inputChars >= 400_000
+      ? "\nBig context — the first token can take a while"
+      : "");
+  return (
+    <div className="flex justify-start px-1 pb-2">
+      <span
+        title={title}
+        className="cursor-default text-[11px] leading-4 tabular-nums text-text-muted"
+      >
+        {`Request ${info.round} · ${total}`}
+        {top.length > 0 &&
+          ` (${top.map((part) => `${part.label} ${k(part.chars)}`).join(" · ")})`}
+        {info.inputChars >= 400_000 ? " — big context, first token may take a while" : ""}
       </span>
     </div>
   );
