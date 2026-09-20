@@ -138,6 +138,18 @@ check(
   "unknown stays on the strip-tools path — and the cascade below covers a wrong guess"
 );
 check(
+  "an unknown model id never retries — no reshape can fix the routing",
+  R.isUnknownModelRejection(
+    "nvidia/nemotron-3-ultra-550b-a558:free is not a valid model ID"
+  ) && R.isUnknownModelRejection("Model not found")
+);
+check(
+  "size and shape verdicts are not unknown-model verdicts",
+  !R.isUnknownModelRejection(
+    "This model's maximum context length is 131072 tokens."
+  ) && !R.isUnknownModelRejection("Invalid API parameter: tools.")
+);
+check(
   "extraction caps a runaway body and passes plain text through",
   R.extractRejectionDetail("boom: " + "x".repeat(500)).length === 300 &&
     R.extractRejectionDetail("plain gateway text").startsWith("plain gateway")
