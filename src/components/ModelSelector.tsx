@@ -34,10 +34,25 @@ export function ModelSelector({
 
   // DeepSeek peak/off-peak indicator. Off-peak (16:30-00:30 Beijing time,
   // UTC+8) gives roughly half-price cache tokens; it updates every minute.
-  const [period, setPeriod] = useState(() => getDeepSeekPeriod());
+  //
+  // Deliberately null on the first render: the label embeds the current
+  // time, which differs between the server render and hydration (and the
+  // locale format can differ too) — computing it in useState initialised
+  // the mismatch React reports as a hydration error. The placeholder dot
+  // below keeps the layout stable until the client fills in the real value.
+  const [period, setPeriod] = useState<ReturnType<
+    typeof getDeepSeekPeriod
+  > | null>(null);
   useEffect(() => {
-    const t = setInterval(() => setPeriod(getDeepSeekPeriod()), 60_000);
-    return () => clearInterval(t);
+    // No synchronous setState (see ThinkingClock): the callbacks are the
+    // only writers, so the mount never trips the set-state-in-effect rule.
+    const tick = () => setPeriod(getDeepSeekPeriod());
+    const immediate = setTimeout(tick, 0);
+    const t = setInterval(tick, 60_000);
+    return () => {
+      clearTimeout(immediate);
+      clearInterval(t);
+    };
   }, []);
 
   // Close on outside click
@@ -90,19 +105,26 @@ export function ModelSelector({
           />
         </svg>
         <span>{current.shortLabel}</span>
-        {showPeakHours && (
-        <span
-          aria-hidden
-          title={
-            period.period === "offpeak"
-              ? `DeepSeek off-peak (discount) — ends ${period.nextChangeAtLocal} your time (${period.nextChangeAtBeijing}), in ${formatCountdown(period.nextChangeInMinutes)}`
-              : `DeepSeek peak pricing — off-peak starts ${period.nextChangeAtLocal} your time (${period.nextChangeAtBeijing}), in ${formatCountdown(period.nextChangeInMinutes)}`
-          }
-          className={`ml-0.5 h-1.5 w-1.5 rounded-full ${
-            period.period === "offpeak" ? "bg-emerald-400" : "bg-amber-400"
-          }`}
-        />
-        )}
+        {showPeakHours &&
+          (period ? (
+          <span
+            aria-hidden
+            title={
+              period.period === "offpeak"
+                ? `DeepSeek off-peak (discount) — ends ${period.nextChangeAtLocal} your time (${period.nextChangeAtBeijing}), in ${formatCountdown(period.nextChangeInMinutes)}`
+                : `DeepSeek peak pricing — off-peak starts ${period.nextChangeAtLocal} your time (${period.nextChangeAtBeijing}), in ${formatCountdown(period.nextChangeInMinutes)}`
+            }
+            className={`ml-0.5 h-1.5 w-1.5 rounded-full ${
+              period.period === "offpeak" ? "bg-emerald-400" : "bg-amber-400"
+            }`}
+          />
+          ) : (
+          <span
+            aria-hidden
+            title="DeepSeek peak/off-peak indicator"
+            className="ml-0.5 h-1.5 w-1.5 rounded-full bg-border"
+          />
+          ))}
         <svg
           style={{ width: 11, height: 11 }}
           className={`opacity-60 transition-transform duration-150 ${isOpen ? "rotate-180" : ""}`}
@@ -149,7 +171,8 @@ export function ModelSelector({
             </div>
 
             {/* Peak/off-peak is DeepSeek-only. The Nemotron lane is free on OpenRouter. */}
-            {showPeakHours && (
+            {/* Gated on period: the menu only opens on click (post-hydration), so this is always set by then. */}
+            {showPeakHours && period && (
             <div className="border-b border-border px-4 py-2.5">
               <div className="flex items-center gap-2">
                 <span
