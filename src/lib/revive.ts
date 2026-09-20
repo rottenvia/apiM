@@ -165,9 +165,21 @@ export function detectPrematureStop(
     }
   }
 
+  /*
+   * The provider aborted the round: an error-like finish is never a
+   * deliberate ending, tools or not. The old toolRounds guard left
+   * clean-chat provider failures (finish "error" with a sentence or
+   * nothing) to fall through as a deliberate stop — the run ended
+   * "complete" with one sentence and no banner, no Resume. That is the
+   * "it stops the moment it decides to write" report.
+   *
+   * A content filter keeps the old guard: it is a verdict, not a
+   * failure, and re-asking burns full-context requests to re-prove it.
+   */
   if (
-    input.toolRounds >= 1 &&
-    PROVIDER_ABORT.test(input.finishReason ?? "")
+    PROVIDER_ABORT.test(input.finishReason ?? "") &&
+    (input.toolRounds >= 1 ||
+      !/^content[_-]?filter$/i.test(input.finishReason ?? ""))
   ) {
     return "provider_abort";
   }
@@ -287,6 +299,9 @@ export function prematureStopNotice(reason: PrematureStopReason): string {
   }
   if (reason === "dangling_next") {
     return "The model kept describing its next action instead of doing it";
+  }
+  if (reason === "provider_abort") {
+    return "The provider ended the round before the task was finished — Resume to carry on";
   }
   return "The model stopped mid-task before it finished";
 }

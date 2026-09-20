@@ -122,6 +122,43 @@ check(
     roundContent: "Working on the last file.",
   }) === "provider_abort"
 );
+check(
+  "a provider error on a clean chat is unfinished",
+  R.detectPrematureStop({
+    ...base,
+    toolRounds: 0,
+    toolsUsed: [],
+    content:
+      "I'll write this in Luau (Roblox's Lua variant) with a nice UI library.",
+    roundContent: "",
+    finishReason: "error",
+  }) === "provider_abort",
+  "finish error is never a deliberate ending — this was saved as complete with one sentence"
+);
+check(
+  "an empty provider error on a clean chat is unfinished",
+  R.detectPrematureStop({
+    ...base,
+    toolRounds: 0,
+    toolsUsed: [],
+    content: "",
+    roundContent: "",
+    finishReason: "error",
+  }) === "provider_abort",
+  "no content, no tools, named error: retry, not a blank complete reply"
+);
+check(
+  "a content filter on a clean chat is still left alone",
+  R.detectPrematureStop({
+    ...base,
+    toolRounds: 0,
+    toolsUsed: [],
+    content: "",
+    roundContent: "",
+    finishReason: "content_filter",
+  }) === null,
+  "a filter is a verdict, not a failure — re-asking burns requests to re-prove it"
+);
 
 console.log("\n2. What must be left alone");
 
@@ -378,6 +415,11 @@ check(
 check(
   "the stop notice names the narration stall",
   /describing its next action/.test(R.prematureStopNotice("dangling_next"))
+);
+check(
+  "the exhausted-abort notice names the provider, not the model",
+  R.prematureStopNotice("provider_abort") ===
+    "The provider ended the round before the task was finished — Resume to carry on"
 );
 
 console.log("\n7. Degraded rounds are tracked into the stop notice");
