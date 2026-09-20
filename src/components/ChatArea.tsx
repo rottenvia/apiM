@@ -176,8 +176,13 @@ function StatusRow({
     const t = setInterval(() => setSeconds((s) => s + 1), 1000);
     return () => clearInterval(t);
   }, []);
+  /*
+   * px-4, not px-1: the wait lines sit under the assistant bubble, whose
+   * content starts at px-4. Anything less leaves them hanging left of the
+   * thinking panel they describe.
+   */
   return (
-    <div className="flex justify-start px-1 py-2">
+    <div className="flex justify-start px-4 py-2">
       <div className="flex items-center gap-2">
         <span aria-hidden="true" className="text-[13px] leading-5 text-accent">
           ✻
@@ -2304,7 +2309,7 @@ function RetryBanner({
   // all, plus the provider's own message when the retry answers one.
   const title = retryTooltip(breakdown, detail);
   return (
-    <div className="flex justify-start px-1 pb-2">
+    <div className="flex justify-start px-4 pb-2">
       <span
         title={title}
         className="cursor-default text-[11px] leading-4 tabular-nums text-warning"
@@ -2344,7 +2349,7 @@ function RequestSizeLine({
       ? "\nBig context — the first token can take a while"
       : "");
   return (
-    <div className="flex justify-start px-1 pb-2">
+    <div className="flex justify-start px-4 pb-2">
       <span
         title={title}
         className="cursor-default text-[11px] leading-4 tabular-nums text-text-muted"

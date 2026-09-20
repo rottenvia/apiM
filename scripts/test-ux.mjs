@@ -566,6 +566,12 @@ check(
   "the status line speaks alone in the silent gap — two voices with two clocks was the mess"
 );
 check(
+  "the wait lines start at the assistant bubble's content edge",
+  (chatArea.match(/<div className="flex justify-start px-4 p[by]-2">/g) ?? [])
+    .length === 3,
+  "status row, retry banner and request line all px-4 like the bubble — px-1 left them hanging left of the thinking panel"
+);
+check(
   "the retry banner survives only for mid-run retries",
   /\{retryNotice && streamingHasOutput && \(/.test(chatArea),
   "pre-output the retry morphs the status word; the banner would be the second voice again"
