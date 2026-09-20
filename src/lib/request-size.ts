@@ -15,6 +15,7 @@
 import { PLUGIN_DIRECTIVES_MARKER } from "@/lib/plugins";
 import { PLAN_MARKER } from "@/lib/plan";
 import { HISTORY_SUMMARY_MARKER } from "@/lib/history-summary";
+import { GOAL_PIN_MARKER } from "@/lib/goal-pin";
 
 export interface RequestSizePart {
   label: string;
@@ -71,6 +72,8 @@ export function breakdownRequestMessages(
       else if (text.startsWith(PLAN_MARKER)) add(parts, "plan", text.length);
       else if (text.startsWith(HISTORY_SUMMARY_MARKER))
         add(parts, "summary", text.length);
+      else if (text.startsWith(GOAL_PIN_MARKER))
+        add(parts, "goal", text.length);
       else add(parts, "instructions", text.length);
       return;
     }

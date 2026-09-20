@@ -42,7 +42,16 @@ import {
   reopenBlockedSteps,
   looksLikeRefusalBlocker,
   checkAnswerClaims,
+  PLAN_NUDGE_MARKER,
+  PLAN_STALE_AFTER_TOOL_ROUNDS,
+  stepClaimedComplete,
+  buildStalePlanNudge,
 } from "@/lib/plan";
+import {
+  GOAL_PIN_MARKER,
+  renderGoalPin,
+  resolveRunGoal,
+} from "@/lib/goal-pin";
 import type { Plan } from "@/lib/plan";
 import { BROWSER_POLICY_PROMPT, NO_BROWSER_PROMPT } from "@/lib/browser-policy";
 import { browserAvailable } from "@/lib/browser-playwright";
@@ -983,6 +992,14 @@ export async function POST(req: NextRequest) {
           console.error("Could not load scoped conversation history:", e);
         }
 
+        // Newest pre-run user turn: on a Resume or regenerate the run's own
+        // text is filler ("continue"), so the goal pin falls back to this —
+        // the original request.
+        const historyLastUser =
+          scopedHistory
+            .filter((m) => m.role === "user" && (m.content || "").trim())
+            .at(-1)?.content.trim() ?? null;
+
         /*
          * Pick up an unfinished reply.
          *
@@ -1495,6 +1512,14 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          */
         let plan: Plan | null = null;
         /*
+         * Grounding state. lastPlanUpdateToolRound nulls to "no plan this
+         * run yet" — the pin site treats it as compliant, so only a live,
+         * neglected plan is ever nudged. lastSteeringText feeds the goal
+         * pin: a mid-run redirect becomes the pinned goal next round.
+         */
+        let lastPlanUpdateToolRound: number | null = null;
+        let lastSteeringText: string | null = null;
+        /*
          * A leftover unfinished plan from a previous message must not lock
          * make_plan. Mid-run shrink-to-escape stays refused; the first
          * make_plan of a NEW user message (not Resume) may replace it.
@@ -1504,6 +1529,9 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           const saved = await readPlan(workspace);
           if (saved && !planIsComplete(saved)) {
             plan = saved;
+            // Seed optimistic: the saved plan was current when its reply
+            // ended, so this run counts staleness from here, not from zero.
+            lastPlanUpdateToolRound = resumed?.toolRounds ?? 0;
             allowFirstPlanShrink = !resumeMessageId;
             /*
              * A blocked step left over from the previous reply must NOT
@@ -2188,6 +2216,11 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             const midRunNotes = await drainBtwNotes(convId);
             for (const note of midRunNotes) {
               const noteId = uuidv4();
+              // Newest steering wins the goal pin: a mid-run redirect
+              // becomes what the run is answering from the next round on.
+              if ((note.text || "").trim()) {
+                lastSteeringText = note.text.trim();
+              }
               // Same builder a normal message's attachments go through:
               // native-vision models get the pixels, blind models the
               // description blocks, and a dropped binary's "saved at <path>"
@@ -4242,6 +4275,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 );
                 allowFirstPlanShrink = false;
                 replanCount += 1;
+                lastPlanUpdateToolRound = toolRounds;
                 // Saved immediately, not at the end of the run: Stop, a
                 // crash, or a closed tab must not lose it.
                 await writePlan(workspace, plan);
@@ -4354,6 +4388,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   // The full updated plan is re-pinned as a system message at
                   // the end of this same round; echoing it here as well made
                   // every round carry two copies of the growing plan.
+                  lastPlanUpdateToolRound = toolRounds;
                   result = {
                     ok: true,
                     content: "Plan updated; the pinned copy above reflects it.",
@@ -4915,6 +4950,57 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               }
             }
             transcript.push({ role: "system", content: formatPlan(plan) });
+          }
+
+          /*
+           * Current-goal pin: restated at the tail every round so a long run
+           * cannot resurrect an older task from history or the summary.
+           * Refreshed like the plan (remove by marker, push fresh) so it
+           * costs once and keeps the prefix cache-stable. Skipped while the
+           * run has no goal-shaped text at all.
+           */
+          for (let i = transcript.length - 1; i >= 0; i--) {
+            const m = transcript[i];
+            if (
+              m.role === "system" &&
+              typeof m.content === "string" &&
+              (m.content.startsWith(GOAL_PIN_MARKER) ||
+                m.content.startsWith(PLAN_NUDGE_MARKER))
+            ) {
+              transcript.splice(i, 1);
+            }
+          }
+          const runGoal = resolveRunGoal({
+            userText,
+            historyLastUser,
+            steeringText: lastSteeringText,
+          });
+          if (runGoal) {
+            transcript.push({ role: "system", content: renderGoalPin(runGoal) });
+          }
+
+          /*
+           * Plan-compliance nudge: a plan the model never updates is a plan
+           * the run has diverged from — doing step 2 while believing step
+           * 4. Fires on staleness, or immediately when the round's prose
+           * claims a finished step the plan does not show; lifts the moment
+           * the model updates or finishes the plan.
+           */
+          if (plan && !planIsComplete(plan)) {
+            const roundsSincePlanUpdate =
+              lastPlanUpdateToolRound === null
+                ? 0
+                : toolRounds - lastPlanUpdateToolRound;
+            const claimed = stepClaimedComplete(roundContent);
+            if (
+              roundsSincePlanUpdate >= PLAN_STALE_AFTER_TOOL_ROUNDS ||
+              claimed
+            ) {
+              transcript.push({
+                role: "system",
+                content: buildStalePlanNudge(roundsSincePlanUpdate, claimed),
+              });
+            }
           }
 
           if (runHalted) break;
