@@ -183,7 +183,13 @@ check("OpenRouter thinking-on sends reasoning_effort", ocBody.reasoning_effort =
 
 const ocOff = {};
 providers.applyThinking(ocOff, "openai", false, "none");
-check("OpenRouter thinking-off sends neither field", ocOff.thinking === undefined && ocOff.reasoning_effort === undefined);
+check(
+  "OpenRouter thinking-off sends the documented disable",
+  ocOff.reasoning?.effort === "none" &&
+    ocOff.thinking === undefined &&
+    ocOff.reasoning_effort === undefined,
+  "sending nothing left GLM/Nemotron thinking by provider default"
+);
 
 console.log("\n4. Pricing");
 
@@ -836,9 +842,13 @@ check(
   /visibleUpstreamNotice/.test(page) && !/attempts - 1/.test(page)
 );
 check(
-  "the retry banner is its own row so it can vanish without remounting Thinking",
+  "the retry banner renders only mid-run — pre-output the retry morphs the status word",
   /function RetryBanner/.test(read("src/components/ChatArea.tsx")) &&
-    /retryNotice && \(\s*<RetryBanner/.test(read("src/components/ChatArea.tsx"))
+    /retryNotice && streamingHasOutput && \(\s*<RetryBanner/.test(
+      read("src/components/ChatArea.tsx")
+    ) &&
+    /retryText \?\? `\$\{STAGE_LABELS/.test(read("src/components/ChatArea.tsx")),
+  "two stacked voices with two clocks was the mess; one line speaks until output lands"
 );
 check(
   "a size rejection folds history and keeps the tools",

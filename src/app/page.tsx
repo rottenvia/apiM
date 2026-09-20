@@ -30,6 +30,7 @@ import {
   sanitizeCustomModelDef,
 } from "@/lib/models";
 import type { CustomModelDef } from "@/lib/models";
+import type { UsageLike } from "@/lib/pricing";
 import {
   applyThemeById,
   CUSTOM_THEME_ID,
@@ -112,7 +113,7 @@ export interface Message {
    */
   isNote?: boolean;
   /** Full token usage, for cost estimation. */
-  usage?: Record<string, number> | null;
+  usage?: UsageLike | null;
   /** Model that produced the reply, needed to price it. */
   model?: string;
   /** Wall-clock time the reply took. */
@@ -126,6 +127,7 @@ export interface Message {
     finish: string | null;
     continuedOutput: number;
     continuedConnection: number;
+    thinkOnlyStalls: number;
   };
   /** How many search rounds ran, and why the loop stopped. */
   searchRounds?: number;
@@ -291,7 +293,7 @@ type StreamEvent =
       context: string;
     }
   | { type: "question_resolved"; id: string; answered: boolean }
-  | { type: "usage"; usage: Record<string, number>; model: string }
+  | { type: "usage"; usage: UsageLike; model: string }
   | {
       type: "tool_result";
       id: string;
@@ -323,6 +325,7 @@ type StreamEvent =
         finish: string | null;
         continuedOutput: number;
         continuedConnection: number;
+        thinkOnlyStalls: number;
       };
       model: string;
       incomplete?: boolean;
@@ -1335,6 +1338,10 @@ export default function Home() {
   /** Cache of loaded conversations, so switching back is instant. */
   const conversationCache = useRef(new Map<string, Message[]>());
   const loadSeq = useRef(0);
+  /** Aborts the in-flight chat load when another chat is clicked. */
+  const loadAbortRef = useRef<AbortController | null>(null);
+  /** Chat id currently loading from disk — the skeleton shows for it. */
+  const [loadingConv, setLoadingConv] = useState<string | null>(null);
 
   const loadConversation = useCallback(
     async (id: string) => {
@@ -1351,6 +1358,14 @@ export default function Home() {
       // once a newer one starts, so rapidly switching chats can't leave the
       // wrong transcript on screen.
       const seq = ++loadSeq.current;
+      // A fast clicker used to pile up full-transcript downloads and parses
+      // with no cancellation — each one froze the tab in turn. The newest
+      // click kills the previous load; the sequence number still guards the
+      // race the abort cannot (an already-arrived response).
+      loadAbortRef.current?.abort();
+      const loadController = new AbortController();
+      loadAbortRef.current = loadController;
+      setLoadingConv(id);
       workspaceIdRef.current = id;
       setCurrentConvId(id);
 
@@ -1369,13 +1384,40 @@ export default function Home() {
       }
 
       try {
-        const res = await fetch(`/api/conversations/${id}`);
+        const res = await fetch(`/api/conversations/${id}`, {
+          signal: loadController.signal,
+        });
         if (!res.ok || seq !== loadSeq.current) return;
 
       const data = (await res.json()) as { messages?: unknown };
       if (seq !== loadSeq.current) return;
 
       const list = Array.isArray(data.messages) ? data.messages : [];
+      /*
+       * Structural equality for the re-parse. Every load builds fresh
+       * object identities, so `===` on tool/timeline/plan state is always
+       * false and the "skip the swap" optimization below never fired on
+       * agent chats — every click re-rendered the whole transcript. Event
+       * history is append-only, so id sequences are enough; plans are
+       * small enough to stringify.
+       */
+      const sameIds = (a?: { id: string }[], b?: { id: string }[]) =>
+        a === b ||
+        (a?.length === b?.length &&
+          (a ?? []).every((e, i) => e.id === b?.[i]?.id));
+      const sameTimeline = (
+        a?: TimelineEntry[],
+        b?: TimelineEntry[]
+      ): boolean =>
+        a === b ||
+        (a?.length === b?.length &&
+          (a ?? []).every((e, i) => {
+            const o = b?.[i];
+            if (o === undefined || e.kind !== o.kind) return false;
+            return e.kind === "tool"
+              ? e.id === (o as { id: string }).id
+              : e.text === (o as { text: string }).text;
+          }));
       const parsed: Message[] = list.map((raw) => {
         const m = raw as Record<string, unknown>;
         return {
@@ -1394,7 +1436,7 @@ export default function Home() {
             ? (m.searchQueries as string[])
             : undefined,
           tokenCount: m.tokenCount as number | undefined,
-          usage: (m.usage as Record<string, number> | null) ?? null,
+          usage: (m.usage as UsageLike | null) ?? null,
           model: m.model as string | undefined,
           durationMs: m.durationMs as number | undefined,
           contextChars: m.contextChars as number | undefined,
@@ -1462,9 +1504,11 @@ export default function Home() {
                   o.content === m.content &&
                   o.reasoningContent === m.reasoningContent &&
                   o.role === m.role &&
-                  o.toolEvents === m.toolEvents &&
-                  o.timeline === m.timeline &&
-                  o.plan === m.plan &&
+                  sameIds(o.toolEvents, m.toolEvents) &&
+                  sameTimeline(o.timeline, m.timeline) &&
+                  (o.plan === m.plan ||
+                    JSON.stringify(o.plan ?? null) ===
+                      JSON.stringify(m.plan ?? null)) &&
                   o.incomplete === m.incomplete &&
                   o.isNote === m.isNote
                 );
@@ -1476,6 +1520,11 @@ export default function Home() {
         }
       } catch {
         /* ignore — the cached/session copy stays on screen */
+      } finally {
+        // Only clear our own load: a newer click already owns the skeleton.
+        if (seq === loadSeq.current) {
+          setLoadingConv((prev) => (prev === id ? null : prev));
+        }
       }
     },
     [activateSession, writeMessages]
@@ -1485,6 +1534,8 @@ export default function Home() {
     // Starting a new chat does not cancel other chats' streams; they keep
     // running in their own sessions and saving to their own conversations.
     btwAbortRef.current?.abort();
+    loadAbortRef.current?.abort();
+    setLoadingConv(null);
     loadSeq.current += 1;
     const nextId = uuidv4();
     workspaceIdRef.current = nextId;
@@ -2394,7 +2445,7 @@ export default function Home() {
                 break;
 
               case "done": {
-                const usage = evt.usage as Record<string, number> | null;
+                const usage = evt.usage as UsageLike | null;
                 const diagnostic = evt.reasoningDiagnostic;
                 const reasoningNotice =
                   diagnostic.expected && diagnostic.chars === 0
@@ -2500,7 +2551,15 @@ export default function Home() {
                 finish(
                   hadWork
                     ? { incomplete: true, canResume: true, errorNotice: evt.error }
-                    : { content: `⚠️ ${evt.error}`, isError: true }
+                    : {
+                        content: `⚠️ ${evt.error}`,
+                        isError: true,
+                        // The interrupted banner (with its Try again button)
+                        // only renders for incomplete replies. Without this
+                        // an outage error was a dead end: the run died and
+                        // the only recovery was retyping the message.
+                        incomplete: true,
+                      }
                 );
                 break;
               }
@@ -3129,6 +3188,7 @@ export default function Home() {
       <ChatArea
         messages={messages}
         isLoading={isLoading}
+        conversationLoading={loadingConv !== null && messages.length === 0}
         statusStage={statusStage}
         canResumeLast={Boolean(lastResumable)}
         onResumeLast={(note) => {

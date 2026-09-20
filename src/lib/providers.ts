@@ -316,6 +316,14 @@ export function qwenReasoningEffort(effort: string): "low" | "medium" | "xhigh" 
  * `reasoning_effort` of `xhigh` | `medium` | `low`. `preserve_thinking`
  * keeps prior-round thoughts in the transcript. The sidecar is started
  * with `--reasoning-format deepseek` so think tokens stay out of content.
+ *
+ * The OpenRouter branch used to send NOTHING when thinking was off — no
+ * disable signal at all — so GLM and Nemotron kept thinking by provider
+ * default: the think-only shove ("Do not think more") could not work, the
+ * model thought through the budget a second time, and the run stopped
+ * mid-task. OpenRouter documents `reasoning: { effort: "none" }` as the
+ * disable, so off now sends exactly that. Only `mandatory`-reasoning
+ * models reject it, and none of the built-ins are.
  */
 export function applyThinking(
   body: Record<string, unknown>,
@@ -350,6 +358,7 @@ export function applyThinking(
   }
 
   if (thinkingEnabled) body.reasoning_effort = level;
+  else body.reasoning = { effort: "none" };
 }
 
 /** User-facing error for a failed Chat Completions call. */

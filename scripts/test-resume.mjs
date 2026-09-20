@@ -381,8 +381,18 @@ check(
 );
 check(
   "a reply with nothing in it still shows a plain error",
-  /: \{ content: `⚠️ \$\{evt\.error\}`, isError: true \}/.test(page),
-  "an empty failure should not pretend to be resumable"
+  /content: `⚠️ \$\{evt\.error\}`,\s*isError: true,/.test(page),
+  "the outage text stays exactly that — no pretending work exists"
+);
+check(
+  "that empty failure offers Try again without pretending to be resumable",
+  /content: `⚠️ \$\{evt\.error\}`,\s*isError: true,[\s\S]{0,700}?incomplete: true,/.test(
+    page
+  ) &&
+    !/: \{\s*content: `⚠️ \$\{evt\.error\}`[\s\S]{0,700}?canResume: true/.test(
+      page
+    ),
+  "incomplete without canResume renders Try again, never Resume"
 );
 check(
   "the banner shows why it stopped",

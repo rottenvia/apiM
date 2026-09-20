@@ -259,8 +259,9 @@ check(
     bubble
   ) &&
     /const hasThinking = reasoningChars > 0 \|\| thinkingRequested;/.test(bubble) &&
-    /\{hasThinking && \(/.test(bubble),
-  "a completed high-effort reply with no returned trace must still have a box"
+    /\{hasThinking && !thinkLoading && \(/.test(bubble) &&
+    /const thinkLoading = isThinkingPhase && !panelHasContent;/.test(bubble),
+  "a completed high-effort reply with no returned trace must still have a box — thinkLoading needs a live phase, so done replies always mount"
 );
 check(
   "an effort of none still shows nothing",
@@ -549,14 +550,25 @@ console.log("\n11. one status row while waiting; edit never drops the question")
  * stranded, so the model re-answered already-solved material.
  */
 check(
-  "the status row exists as a module-level component with its own clock",
+  "the status line is one mark, one word, one clock",
   chatArea.indexOf("function StatusRow(") !== -1 &&
     chatArea.indexOf("function StatusRow(") <
       chatArea.indexOf("export function ChatArea({") &&
     /const t = setInterval\(\(\) => setSeconds/.test(chatArea) &&
-    /<Dots size=\{5\} \/>/.test(chatArea) &&
-    /STAGE_LABELS\[stage \?\? "thinking"\]/.test(chatArea),
-  "module level keeps the interval identity stable across status-stage re-renders"
+    /STAGE_LABELS\[stage \?\? "thinking"\]/.test(chatArea) &&
+    !/<Dots size=/.test(chatArea) &&
+    /retryText \?\? `\$\{STAGE_LABELS/.test(chatArea),
+  "module level keeps the interval identity stable; a retry morphs the word in place instead of stacking a row"
+);
+check(
+  "the thinking panel stays unmounted until reasoning lands",
+  /\{hasThinking && !thinkLoading && \(/.test(bubble),
+  "the status line speaks alone in the silent gap — two voices with two clocks was the mess"
+);
+check(
+  "the retry banner survives only for mid-run retries",
+  /\{retryNotice && streamingHasOutput && \(/.test(chatArea),
+  "pre-output the retry morphs the status word; the banner would be the second voice again"
 );
 check(
   "video sends announce what the provider is doing",
@@ -596,6 +608,40 @@ check(
   /rows=\{Math\.max\(/.test(bubble) &&
     /message\.content\.split\("\\n"\)\.length \+ 1/.test(bubble),
   "the old editor sized rows from the draft only, collapsing a 3-line message"
+);
+
+console.log("\n12. switching chats cancels, shows a skeleton, and skips identical swaps");
+
+/*
+ * Reported: big chats load with nothing on screen, and fast-clicking
+ * several chats piles up full-transcript downloads with no cancellation —
+ * each one freezing the tab in turn. The newest click now kills the
+ * previous load, an empty screen shows placeholder bubbles meanwhile, and
+ * the skip-identical-swap check compares structure instead of object
+ * identity (a re-parse builds fresh identities, so `===` never fired on
+ * agent chats and every click re-rendered the whole transcript).
+ */
+check(
+  "clicking another chat aborts the in-flight load",
+  (page.match(/loadAbortRef\.current\?\.abort\(\);/g) ?? []).length === 2 &&
+    /signal: loadController\.signal,/.test(page),
+  "switching chats and starting a new one both kill the queued load — without it, each queued parse froze the tab in turn"
+);
+check(
+  "a loading chat shows placeholder bubbles, not a vacuum",
+  /function ConversationSkeleton\(\)/.test(chatArea) &&
+    /conversationLoading \? \(/.test(chatArea) &&
+    /conversationLoading=\{loadingConv !== null && messages\.length === 0\}/.test(
+      page
+    ),
+  "cached transcripts paint instantly, so the skeleton only ever covers real waits"
+);
+check(
+  "the skip-identical-swap check compares structure, not identity",
+  /sameIds\(o\.toolEvents, m\.toolEvents\)/.test(page) &&
+    /sameTimeline\(o\.timeline, m\.timeline\)/.test(page) &&
+    !/o\.toolEvents === m\.toolEvents/.test(page),
+  "event history is append-only, so id sequences are enough"
 );
 
 check(

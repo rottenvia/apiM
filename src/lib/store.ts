@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { slugify, uniqueSlug } from "@/lib/slug";
+import type { UsageLike } from "@/lib/pricing";
 import {
   renameWorkspaceFolder,
   setWorkspaceFolderName,
@@ -45,7 +46,7 @@ export interface StoredMessage {
   pluginsUsed?: string[] | null;
   tokenCount?: number | null;
   /** Full usage breakdown, for cost estimation. */
-  usage?: Record<string, number> | null;
+  usage?: UsageLike | null;
   /** Model that produced this reply, needed to price it. */
   model?: string | null;
   /** Wall-clock time the reply took. */
@@ -67,6 +68,7 @@ export interface StoredMessage {
     finish: string | null;
     continuedOutput: number;
     continuedConnection: number;
+    thinkOnlyStalls: number;
   } | null;
   createdAt: string;
   /** True while the reply is still streaming. If the process dies or the tab

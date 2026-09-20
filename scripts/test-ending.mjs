@@ -48,7 +48,7 @@ check(
 );
 check(
   "done frame carries finish plus both continuation pools",
-  /ending: \{\s*finish: lastFinishReason,\s*continuedOutput: continuations,\s*continuedConnection: streamCuts,\s*\},/.test(
+  /ending: \{\s*finish: lastFinishReason,\s*continuedOutput: continuations,\s*continuedConnection: streamCuts,\s*thinkOnlyStalls,\s*\},/.test(
     route
   )
 );
@@ -64,7 +64,7 @@ check(
 // --- store + client plumb it through ---
 check(
   "StoredMessage types the ending",
-  /ending\?: \{\s*finish: string \| null;\s*continuedOutput: number;\s*continuedConnection: number;\s*\} \| null;/.test(
+  /ending\?: \{\s*finish: string \| null;\s*continuedOutput: number;\s*continuedConnection: number;\s*thinkOnlyStalls: number;\s*\} \| null;/.test(
     storeSrc
   )
 );
