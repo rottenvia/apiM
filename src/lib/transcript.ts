@@ -103,6 +103,142 @@ export function foldSystemMessagesToFront(
  * resume. Stripping it for those hosts also stops resending ~9k tokens of
  * chain-of-thought per round on a free pool.
  */
+function tryParseJson(text: string): { ok: true; value: unknown } | { ok: false } {
+  try {
+    return { ok: true, value: JSON.parse(text) };
+  } catch {
+    return { ok: false };
+  }
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Escape raw control chars living INSIDE string literals.
+ *
+ * JSON allows whitespace between tokens, so a blanket replace would corrupt
+ * legal pretty-printing (`{\n  "a": 1\n}` is valid). This walks the text
+ * tracking string state instead and only touches U+0000-U+001F found between
+ * quotes. Unbalanced quotes decline the repair — a confused fix must not
+ * make things worse; the marker below is the honest fallback.
+ */
+function escapeControlsInStrings(text: string): string {
+  let inString = false;
+  let escaped = false;
+  let changed = false;
+  let out = "";
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        out += ch;
+        continue;
+      }
+      if (ch === "\\") {
+        escaped = true;
+        out += ch;
+        continue;
+      }
+      if (ch === '"') {
+        inString = false;
+        out += ch;
+        continue;
+      }
+      const code = ch.charCodeAt(0);
+      if (code < 0x20) {
+        changed = true;
+        if (ch === "\n") out += "\\n";
+        else if (ch === "\r") out += "\\r";
+        else if (ch === "\t") out += "\\t";
+        else if (ch === "\b") out += "\\b";
+        else if (ch === "\f") out += "\\f";
+        else out += "\\u" + code.toString(16).padStart(4, "0");
+        continue;
+      }
+      out += ch;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    out += ch;
+  }
+  if (inString || escaped) return text;
+  return changed ? out : text;
+}
+
+function unparseableArgsMarker(raw: string): string {
+  let head = raw.slice(0, 500);
+  if (head) {
+    const last = head.charCodeAt(head.length - 1);
+    if (last >= 0xd800 && last <= 0xdbff) head = head.slice(0, -1);
+  }
+  return JSON.stringify({
+    _unparseable: true,
+    _note:
+      "original arguments were not valid JSON; replaced to satisfy API validation",
+    _raw: head,
+  });
+}
+
+/**
+ * Guarantee `function.arguments` survives strict API validation.
+ *
+ * Arguments used to ride the wire verbatim — exactly as the model emitted
+ * them, or as the pruner stubbed them. The OpenRouter gateway validates
+ * every historic call's arguments and 400s the whole body for one raw
+ * control char ("control character found while parsing a string"), and no
+ * retry can help: the poisoned turn is a tool turn, so the fold protects
+ * it and the strip leaves history untouched. Resume replays the same
+ * poison and loops forever.
+ *
+ * So the wire copy is repaired, in escalating order:
+ *  1. already a JSON object → returned VERBATIM (working flows cannot
+ *     tell this exists);
+ *  2. otherwise raw control chars inside string literals are escaped and
+ *     re-tried (pretty-printed string content — the observed failure);
+ *  3. empty/blank → "{}" (a no-arg call);
+ *  4. valid JSON but not an object → wrapped as {"_value": ...}, since
+ *     validation demands an object string;
+ *  5. still unparseable → a marker object naming the loss, because an
+ *     honest placeholder passes validation and a corrupt string never does.
+ *
+ * Stored transcripts keep the original: execution already used it, and the
+ * recorded tool result stands as what happened. Only the wire copy is
+ * repaired, every time it is sent — which is also what unsticks a run
+ * poisoned before this existed.
+ */
+export function hardenToolCallArguments(args: unknown): string {
+  if (typeof args !== "string") {
+    // A rebuilt transcript can hold anything (resumeState is unknown[]):
+    // stringify objects, treat nullish as a no-arg call.
+    if (args === null || args === undefined) return "{}";
+    try {
+      const encoded = JSON.stringify(args);
+      if (typeof encoded === "string" && encoded) {
+        return hardenToolCallArguments(encoded);
+      }
+    } catch {
+      /* unstringifiable: marker below */
+    }
+    return unparseableArgsMarker("");
+  }
+  if (!args.trim()) return "{}";
+  const first = tryParseJson(args);
+  if (first.ok) {
+    if (isJsonObject(first.value)) return args;
+    return JSON.stringify({ _value: first.value });
+  }
+  const escaped = escapeControlsInStrings(args);
+  const second = escaped === args ? first : tryParseJson(escaped);
+  if (second.ok) {
+    if (isJsonObject(second.value)) return escaped;
+    return JSON.stringify({ _value: second.value });
+  }
+  return unparseableArgsMarker(args);
+}
+
 export function serializeForApi(
   messages: TranscriptMessage[],
   options: { includeReasoning?: boolean } = {}
@@ -124,7 +260,15 @@ export function serializeForApi(
         out.tool_calls = m.tool_calls.map((c) => ({
           id: c.id,
           type: "function" as const,
-          function: { name: c.function.name, arguments: c.function.arguments },
+          function: {
+            name: c.function.name,
+            // Repaired, never verbatim: the gateway validates every historic
+            // call's arguments, and one raw control char 400s the whole body.
+            // The poison survives every retry — tool turns are fold-protected
+            // and the strip leaves history alone — so validity is enforced
+            // here, at the single choke point every request passes through.
+            arguments: hardenToolCallArguments(c.function.arguments),
+          },
         }));
         if (includeReasoning && m.reasoning_content)
           out.reasoning_content = m.reasoning_content;
