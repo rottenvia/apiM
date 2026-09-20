@@ -199,6 +199,12 @@ function parseSearchResults(
 type StreamEvent =
   | { type: "status"; stage: StatusStage }
   | {
+      type: "request_size";
+      round: number;
+      inputChars: number;
+      breakdown: { label: string; chars: number }[];
+    }
+  | {
       type: "meta";
       conversationId: string | null;
       messageId: string;
@@ -363,6 +369,12 @@ type ChatSession = {
   retryNotice: string | null;
   /** Transient retry/backoff, ticked by the 200ms clock while visible. */
   liveRetry: (UpstreamNotice & { receivedAt: number }) | null;
+  /** Latest fired request's size, while its round is still running. */
+  liveRequestSize: {
+    round: number;
+    inputChars: number;
+    breakdown: { label: string; chars: number }[];
+  } | null;
   /** Server-side id of the in-flight reply, for the stop endpoint. */
   runMessageId: string | null;
   /** Set by Stop / new-chat: a pending auto-resume must not fire. */
@@ -411,6 +423,7 @@ export default function Home() {
         stage: null,
         retryNotice: null,
         liveRetry: null,
+        liveRequestSize: null,
         runMessageId: null,
         cancelResume: false,
       };
@@ -434,6 +447,12 @@ export default function Home() {
   >(null);
   // The provider's own message behind a rejection-driven retry.
   const [retryDetail, setRetryDetailState] = useState<string | null>(null);
+  // Fire-time request size for the active run's latest round, if heavy.
+  const [requestSize, setRequestSizeState] = useState<{
+    round: number;
+    inputChars: number;
+    breakdown: { label: string; chars: number }[];
+  } | null>(null);
 
   /** Copy a session's UI state into the mirrored React states. */
   const mirrorSession = useCallback((s: ChatSession) => {
@@ -444,6 +463,7 @@ export default function Home() {
     setRetryNoticeState(s.retryNotice);
     setRetryBreakdownState(s.liveRetry?.breakdown ?? null);
     setRetryDetailState(s.liveRetry?.detail ?? null);
+    setRequestSizeState(s.liveRequestSize);
   }, []);
 
   /**
@@ -503,6 +523,8 @@ export default function Home() {
           setRetryBreakdownState(s.liveRetry?.breakdown ?? null);
           setRetryDetailState(s.liveRetry?.detail ?? null);
         }
+        if (patch.liveRequestSize !== undefined)
+          setRequestSizeState(s.liveRequestSize);
       }
       setSessionsVersion((v) => v + 1);
     },
@@ -533,6 +555,26 @@ export default function Home() {
       patchSession(id, {
         liveRetry: info,
         retryNotice: info ? visibleUpstreamNotice(info, Date.now()) : null,
+      });
+    },
+    [patchSession]
+  );
+  /**
+   * Fire-time request size; shown once the body passes 100k. Small chats
+   * stay quiet, and a run that shrinks back under the line clears it.
+   */
+  const setLiveRequestSize = useCallback(
+    (
+      id: string | null | undefined,
+      info: {
+        round: number;
+        inputChars: number;
+        breakdown: { label: string; chars: number }[];
+      } | null
+    ) => {
+      patchSession(id, {
+        liveRequestSize:
+          info && info.inputChars >= 100_000 ? info : null,
       });
     },
     [patchSession]
@@ -1945,6 +1987,14 @@ export default function Home() {
                 // before it even calls the provider, so wiping the notice hid the hang.
                 break;
 
+              case "request_size":
+                setLiveRequestSize(runConvId ?? requestConversationId, {
+                  round: evt.round,
+                  inputChars: evt.inputChars,
+                  breakdown: evt.breakdown,
+                });
+                break;
+
               case "retrying":
                 if (evt.phase === "clear") {
                   setLiveRetry(runConvId ?? requestConversationId, null);
@@ -2514,6 +2564,7 @@ export default function Home() {
             loading: false,
             stage: null,
             liveRetry: null,
+            liveRequestSize: null,
             runMessageId: null,
           });
         }
@@ -2545,6 +2596,7 @@ export default function Home() {
                   loading: false,
                   stage: null,
                   liveRetry: null,
+                  liveRequestSize: null,
                 });
                 return;
               }
@@ -2595,6 +2647,7 @@ export default function Home() {
       setIsLoading,
       setStatusStage,
       setLiveRetry,
+      setLiveRequestSize,
       setRetryNotice,
       migrateSession,
       activateSession,
@@ -2695,6 +2748,7 @@ export default function Home() {
       loading: false,
       stage: null,
       liveRetry: null,
+      liveRequestSize: null,
       runMessageId: null,
     });
     writeMessages(
@@ -2805,6 +2859,7 @@ export default function Home() {
           loading: false,
           stage: null,
           liveRetry: null,
+          liveRequestSize: null,
           runMessageId: null,
         });
       }
@@ -3099,6 +3154,7 @@ export default function Home() {
         retryNotice={retryNotice}
         retryBreakdown={retryBreakdown}
         retryDetail={retryDetail}
+        requestSize={requestSize}
         onStop={stopGeneration}
         hasKeys={hasKeys}
         missingKeyLabel={
