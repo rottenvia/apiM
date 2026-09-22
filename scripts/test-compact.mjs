@@ -368,6 +368,112 @@ check(
   "the model must know the archive is gone, not hallucinate it"
 );
 
+console.log("\n8. Identical re-reads fold to a pointer");
+
+/* A wide loop carries every copy of every re-read on every request. The
+ * dedup pass keeps one copy (the latest, verbatim) and points the older
+ * ones at it — before the threshold check, so the bloat never trips the
+ * folding valve that would eat the evidence and force more re-reads. */
+const dupRound = (id, content) => [
+  {
+    role: "assistant",
+    content: "",
+    tool_calls: [
+      {
+        id,
+        type: "function",
+        function: {
+          name: "read_file",
+          arguments: JSON.stringify({ path: "src/a.ts" }),
+        },
+      },
+    ],
+  },
+  { role: "tool", tool_call_id: id, content },
+];
+{
+  const big = "x".repeat(500);
+  const t = [
+    { role: "system", content: "s" },
+    { role: "user", content: "u" },
+    ...dupRound("c1", big),
+    ...dupRound("c2", big),
+    ...dupRound("c3", big),
+  ];
+  const out = C.dedupeIdenticalResults(t);
+  const tools = out.messages.filter((m) => m.role === "tool");
+  check(
+    "two older copies fold, the latest survives verbatim",
+    out.dupsFolded === 2 &&
+      tools.length === 3 &&
+      tools[2].content === big &&
+      tools[0].content.includes("latest copy is below") &&
+      tools[1].content.includes("latest copy is below"),
+    `${out.dupsFolded} folded, ${out.charsSaved} chars saved`
+  );
+  check(
+    "the input transcript is never modified",
+    t[3].content === big && t[5].content === big,
+    "the caller keeps the pristine version"
+  );
+  check(
+    "folding keeps tool calls and replies paired",
+    toolCallsAreBalanced(out.messages),
+    "pointers replace replies in place — nothing removed"
+  );
+}
+{
+  // Same call, DIFFERENT bytes: new information, never folded.
+  const t = [
+    { role: "system", content: "s" },
+    { role: "user", content: "u" },
+    ...dupRound("c1", "y".repeat(500)),
+    ...dupRound("c2", "z".repeat(500)),
+  ];
+  const out = C.dedupeIdenticalResults(t);
+  check(
+    "same call with different bytes is left alone",
+    out.dupsFolded === 0 && out.messages === t,
+    "each new span is genuinely new information"
+  );
+}
+{
+  // Identical but tiny: the pointer would cost more than the copy.
+  const t = [
+    { role: "system", content: "s" },
+    { role: "user", content: "u" },
+    ...dupRound("c1", "small"),
+    ...dupRound("c2", "small"),
+  ];
+  const out = C.dedupeIdenticalResults(t);
+  check(
+    "small results are left alone",
+    out.dupsFolded === 0 && out.messages === t
+  );
+}
+{
+  // Integration: below-threshold transcripts still shed their dupes, and
+  // the savings ride in charsSaved even when no round folds.
+  const big = "w".repeat(2000);
+  const t = [
+    { role: "system", content: "s" },
+    { role: "user", content: "u" },
+    ...dupRound("c1", big),
+    ...dupRound("c2", big),
+    ...dupRound("c3", big),
+    ...dupRound("c4", big),
+  ];
+  const out = C.compactTranscript(t);
+  check(
+    "compaction folds dupes before the threshold check",
+    out.stats.rounds === 0 &&
+      out.stats.charsSaved > 0 &&
+      out.messages.filter((m) => m.role === "tool").length === 4 &&
+      toolCallsAreBalanced(out.messages),
+    `${out.stats.charsSaved} chars saved with zero rounds folded`
+  );
+}
+
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
 );
