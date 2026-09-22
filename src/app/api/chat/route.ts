@@ -132,6 +132,9 @@ import {
   loopWarningText,
 } from "@/lib/loop-breaker";
 import {
+  rereadTripMarker,
+  rereadTripUserNote,
+  rereadWarningText,
   StallTracker,
   stallTripMarker,
   stallTripUserNote,
@@ -4838,14 +4841,34 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 result.ok,
                 pristineResult
               );
-              if (stall.warn) {
+              /*
+               * Two meters, one channel. The cumulative warning wins ties:
+               * when both fire on one call, "stop re-fetching, bank
+               * findings, act" names the true disease, while the
+               * consecutive "fetch something NEW" is how a wide loop
+               * evades the consecutive meter.
+               */
+              if (stall.repeatWarn) {
+                result.content += rereadWarningText(
+                  stall.repeatTotal,
+                  stall.topRepeatTarget
+                );
+              } else if (stall.warn) {
                 result.content += stallWarningText(stall.stallCalls);
               }
-              if (stall.trip) {
-                result.content += stallTripMarker();
+              if (stall.repeatTrip || stall.trip) {
+                result.content += stall.repeatTrip
+                  ? rereadTripMarker(stall.repeatTotal)
+                  : stallTripMarker();
                 const stallNote =
                   (assistantContent.trim() ? "\n\n" : "") +
-                  stallTripUserNote(stallTracker.recentActions());
+                  (stall.repeatTrip
+                    ? rereadTripUserNote(
+                        stall.repeatTotal,
+                        stall.topRepeatTarget,
+                        stallTracker.recentActions()
+                      )
+                    : stallTripUserNote(stallTracker.recentActions()));
                 assistantContent += stallNote;
                 send({ type: "content", delta: stallNote });
                 appendTimelineText(stallNote);

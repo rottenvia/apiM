@@ -26,6 +26,17 @@
  * down. Warn at four, halt at six. Per CALL, not per round: one model
  * decision can spend several calls, and each is billed.
  *
+ * The consecutive counter above catches the NARROW loop — the same thing
+ * six times in a row. The real money fire is the WIDE loop: thirty rounds
+ * cycling the same files (models, providers, manager, selector, verify,
+ * route, repeat), every call slightly novel so the counter keeps
+ * resetting, nothing landing for thousands of tokens. A second meter
+ * therefore counts byte-identical re-fetches CUMULATIVELY — novelty does
+ * not reset it, only the world changing does. Warn at eight, halt at
+ * twelve. Watching tools (read_process, list_processes, wait_for_output)
+ * are exempt: a quiet wait is legitimate, and polling that yields nothing
+ * already counts down the consecutive meter.
+ *
  * Deterministic and model-independent, like the breaker. A Resume starts a
  * fresh tracker — the user steers, the model retries, and it gets a full
  * six on the new approach.
@@ -38,6 +49,23 @@ export const STALL_WARN_CALLS = 4;
 
 /** Stall calls before the run halts. */
 export const STALL_TRIP_CALLS = 6;
+
+/** Cumulative identical re-fetches before the model gets warned. */
+export const REPEAT_WARN_TOTAL = 8;
+
+/** Cumulative identical re-fetches before the run halts. */
+export const REPEAT_TRIP_TOTAL = 12;
+
+/**
+ * Watching tools never feed the cumulative meter: re-polling a quiet
+ * process is waiting, not spinning, and each identical poll already
+ * counts down the consecutive meter above.
+ */
+const REPEAT_EXEMPT = new Set([
+  "read_process",
+  "list_processes",
+  "wait_for_output",
+]);
 
 /**
  * Tools whose success changes the world, so the next read is fresh even
@@ -82,6 +110,29 @@ function hashText(text: string): number {
   return hash;
 }
 
+/** "read_file(src/x.ts)" — what the trip note quotes for a repeated call. */
+function targetOf(name: string, args: unknown): string {
+  let value: unknown = args;
+  if (typeof value === "string") {
+    try {
+      value = JSON.parse(value) as unknown;
+    } catch {
+      return name;
+    }
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return name;
+  const record = value as Record<string, unknown>;
+  const path =
+    record.path ?? record.paths ?? record.query ?? record.command ?? record.symbol;
+  const target =
+    typeof path === "string"
+      ? path
+      : Array.isArray(path)
+        ? path.slice(0, 2).join(", ")
+        : "";
+  return target ? `${name}(${target})` : name;
+}
+
 export interface StallObservation {
   /** True when this call added something new. */
   progress: boolean;
@@ -91,6 +142,14 @@ export interface StallObservation {
   warn: boolean;
   /** True on the trip call and stays true while stalling continues. */
   trip: boolean;
+  /** Cumulative identical re-fetches with nothing landing between them. */
+  repeatTotal: number;
+  /** True exactly when the cumulative meter hits its warning mark. */
+  repeatWarn: boolean;
+  /** True once the cumulative meter reaches its trip mark. */
+  repeatTrip: boolean;
+  /** Most-repeated call so far, for the warning and trip notes. */
+  topRepeatTarget: string | null;
 }
 
 /** Per-run no-progress tracker. One instance per reply. */
@@ -99,6 +158,15 @@ export class StallTracker {
   private seen = new Map<string, number>();
   private stalls = 0;
   private recent: string[] = [];
+  /**
+   * Cumulative identical re-fetches. Novelty does NOT reset this — only
+   * the world changing does — which is what makes it catch the wide loop
+   * the consecutive counter above cannot see.
+   */
+  private repeatTotal = 0;
+  /** Per-call identical-repeat counts, for the most-repeated quote. */
+  private repeatCounts = new Map<string, number>();
+  private repeatTargets = new Map<string, string>();
 
   observe(
     name: string,
@@ -109,29 +177,73 @@ export class StallTracker {
     this.recent.push(name);
     if (this.recent.length > RECENT_KEPT) this.recent.shift();
 
-    if (!ok) return this.stalled();
+    if (!ok) return this.stalled(false);
     // A user's answer unblocks the run — that is forward motion.
     if (name === "ask_user" || WORLD_CHANGING.has(name)) {
       this.seen.clear();
       this.stalls = 0;
-      return { progress: true, stallCalls: 0, warn: false, trip: false };
+      this.repeatTotal = 0;
+      this.repeatCounts.clear();
+      this.repeatTargets.clear();
+      return this.fresh(true);
     }
-    if (BOOKKEEPING.has(name)) return this.stalled();
+    if (BOOKKEEPING.has(name)) return this.stalled(false);
     const fingerprint = fingerprintToolCall(name, args);
     const hash = hashText(content ?? "");
-    if (this.seen.get(fingerprint) === hash) return this.stalled();
+    if (this.seen.get(fingerprint) === hash) {
+      if (!REPEAT_EXEMPT.has(name)) {
+        this.repeatTotal += 1;
+        this.repeatCounts.set(
+          fingerprint,
+          (this.repeatCounts.get(fingerprint) ?? 0) + 1
+        );
+        if (!this.repeatTargets.has(fingerprint)) {
+          this.repeatTargets.set(fingerprint, targetOf(name, args));
+        }
+      }
+      return this.stalled(true);
+    }
     this.seen.set(fingerprint, hash);
     this.stalls = 0;
-    return { progress: true, stallCalls: 0, warn: false, trip: false };
+    return this.fresh(true);
   }
 
-  private stalled(): StallObservation {
+  private fresh(progress: boolean): StallObservation {
+    return {
+      progress,
+      stallCalls: this.stalls,
+      warn: false,
+      trip: false,
+      repeatTotal: this.repeatTotal,
+      repeatWarn: false,
+      repeatTrip: this.repeatTotal >= REPEAT_TRIP_TOTAL,
+      topRepeatTarget: this.topTarget(),
+    };
+  }
+
+  private topTarget(): string | null {
+    let best: string | null = null;
+    let bestCount = 0;
+    for (const [fingerprint, count] of this.repeatCounts) {
+      if (count > bestCount) {
+        bestCount = count;
+        best = this.repeatTargets.get(fingerprint) ?? null;
+      }
+    }
+    return best;
+  }
+
+  private stalled(countedRepeat: boolean): StallObservation {
     this.stalls += 1;
     return {
       progress: false,
       stallCalls: this.stalls,
       warn: this.stalls === STALL_WARN_CALLS,
       trip: this.stalls >= STALL_TRIP_CALLS,
+      repeatTotal: this.repeatTotal,
+      repeatWarn: countedRepeat && this.repeatTotal === REPEAT_WARN_TOTAL,
+      repeatTrip: this.repeatTotal >= REPEAT_TRIP_TOTAL,
+      topRepeatTarget: this.topTarget(),
     };
   }
 
@@ -144,6 +256,9 @@ export class StallTracker {
     this.seen.clear();
     this.stalls = 0;
     this.recent = [];
+    this.repeatTotal = 0;
+    this.repeatCounts.clear();
+    this.repeatTargets.clear();
   }
 }
 
@@ -160,6 +275,62 @@ export function stallWarningText(stallCalls: number): string {
     `context. Stop re-reading: fetch something NEW (different files, run ` +
     `the code, search the web), or state what is missing and ask the user. ` +
     `${left} more unchanged call${left === 1 ? "" : "s"} stop${left === 1 ? "s" : ""} the run.]`
+  );
+}
+
+/**
+ * Nudge appended to the tool result carrying the cumulative warning call.
+ *
+ * Deliberately the OPPOSITE advice from the consecutive warning below it:
+ * that one says "fetch something NEW", which is exactly how a wide loop
+ * evades the consecutive meter. Here the disease is re-fetching, so the
+ * prescription is to use what is already in context — and to bank durable
+ * facts with note_finding, the one record compaction cannot eat.
+ */
+export function rereadWarningText(total: number, target: string | null): string {
+  const left = REPEAT_TRIP_TOTAL - total;
+  return (
+    `\n\n[Harness: ${total} tool calls re-fetched byte-identical text with ` +
+    `nothing written, run, or answered since` +
+    (target ? ` — most-repeated: ${target}` : "") +
+    `. The text is already in context; fetching it again teaches nothing ` +
+    `and every round re-bills the whole transcript. Bank durable facts ` +
+    `with note_finding so compaction cannot eat them, then ACT on what ` +
+    `you have: edit, run, or state what is missing and ask the user. ` +
+    `${left} more identical re-fetch${left === 1 ? "" : "es"} stop${left === 1 ? "s" : ""} the run.]`
+  );
+}
+
+/**
+ * Marker appended to the tool result carrying the cumulative trip call.
+ * Separate from the consecutive marker below because the count differs —
+ * quoting 6 for a 12-call trip would lie in the saved transcript.
+ */
+export function rereadTripMarker(total: number): string {
+  return (
+    `\n\n[Harness: the run was stopped after ${total} identical ` +
+    `re-fetches with nothing written, run, or answered. On Resume, bank ` +
+    `findings first, then act — the details are in the reply text.]`
+  );
+}
+
+/**
+ * User-facing note for a cumulative halt. Mirrors the consecutive note's
+ * shape (verdict, evidence, cost, recovery) so both halts read as one
+ * feature with two triggers.
+ */
+export function rereadTripUserNote(
+  total: number,
+  target: string | null,
+  recent: string[]
+): string {
+  return (
+    `Stalled and halted: ${total} tool calls re-fetched identical text ` +
+    `without writing, running, or asking anything` +
+    (target ? ` (most: ${target})` : ``) +
+    (recent.length ? ` (last actions: ${compressActions(recent)})` : ``) +
+    `. The run was stopped instead of burning more rounds — say what to ` +
+    `try differently and Resume to carry on.`
   );
 }
 
