@@ -226,6 +226,103 @@ check(
   R.prematureStopNotice("no_progress").includes("stalled")
 );
 
+// ------------------------------------------------------------------
+// The wide loop: the same files re-fetched round after round, every call
+// slightly novel, nothing landing. The consecutive meter resets on each
+// novelty and never fires; the cumulative meter is what catches it.
+{
+  const t = new S.StallTracker();
+  const files = ["a.ts", "b.ts", "c.ts", "d.ts", "e.ts", "f.ts"];
+  const firsts = files.map((f) =>
+    t.observe("read_file", { path: f }, true, `contents of ${f}`)
+  );
+  check(
+    "first reads are always free",
+    firsts.every((o) => o.progress && o.repeatTotal === 0),
+    "legitimate research never feeds the cumulative meter"
+  );
+  let warnedAt = -1;
+  let trippedAt = -1;
+  let n = 0;
+  for (let round = 0; round < 3; round++) {
+    for (const f of files) {
+      n += 1;
+      const o = t.observe("read_file", { path: f }, true, `contents of ${f}`);
+      if (o.repeatWarn) warnedAt = n;
+      if (o.repeatTrip && trippedAt < 0) trippedAt = n;
+    }
+  }
+  check(
+    "wide-loop cycling warns at eight identical re-fetches",
+    warnedAt === S.REPEAT_WARN_TOTAL,
+    `warned at re-fetch ${warnedAt}`
+  );
+  check(
+    "wide-loop cycling trips at twelve",
+    trippedAt === S.REPEAT_TRIP_TOTAL,
+    `tripped at re-fetch ${trippedAt}`
+  );
+}
+{
+  const t = new S.StallTracker();
+  t.observe("read_file", { path: "a.ts" }, true, "AAA");
+  t.observe("read_file", { path: "a.ts" }, true, "AAA");
+  t.observe("read_file", { path: "b.ts" }, true, "BBB");
+  const o = t.observe("read_file", { path: "a.ts" }, true, "AAA");
+  check(
+    "novelty does not reset the cumulative meter",
+    o.repeatTotal === 2 && o.stallCalls === 1,
+    "the consecutive meter resets, the cumulative one must not"
+  );
+}
+{
+  const t = new S.StallTracker();
+  t.observe("read_file", { path: "a.ts" }, true, "AAA");
+  t.observe("read_file", { path: "a.ts" }, true, "AAA");
+  t.observe("write_file", { path: "a.ts" }, true, "wrote 3 bytes");
+  const o = t.observe("read_file", { path: "a.ts" }, true, "AAA-changed");
+  check(
+    "a write resets the cumulative meter",
+    o.progress && o.repeatTotal === 0,
+    "the world changed — the next read is fresh information"
+  );
+}
+{
+  const watchers = ["read_process", "list_processes", "wait_for_output"];
+  const frees = watchers.map((name) => {
+    const t = new S.StallTracker();
+    t.observe(name, { id: "p1" }, true, "quiet");
+    return t.observe(name, { id: "p1" }, true, "quiet");
+  });
+  check(
+    "quiet polling never feeds the cumulative meter",
+    frees.every((o) => o.repeatTotal === 0 && !o.repeatTrip),
+    "watching a process is waiting, not spinning"
+  );
+}
+check(
+  "cumulative warning names the fix, not the evasion",
+  S.rereadWarningText(8, "read_file(a.ts)").includes("note_finding") &&
+    !S.rereadWarningText(8, "x").toLowerCase().includes("something new"),
+  '"fetch something NEW" is how a wide loop dodges the other meter'
+);
+check(
+  "cumulative trip note names the count and the worst call",
+  S.rereadTripUserNote(12, "read_file(a.ts)", ["read_file"]).includes("12") &&
+    S.rereadTripUserNote(12, "read_file(a.ts)", ["read_file"]).includes(
+      "read_file(a.ts)"
+    )
+);
+check(
+  "route wires the cumulative halt",
+  /stall\.repeatTrip/.test(route) && /rereadTripMarker\(/.test(route),
+  "reuses the no_progress stop — Resume works unchanged"
+);
+check(
+  "cumulative warning wins ties in the route",
+  /if \(stall\.repeatWarn\)/.test(route)
+);
+
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
 );
