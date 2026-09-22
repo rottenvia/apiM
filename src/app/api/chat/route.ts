@@ -18,7 +18,7 @@ import {
   buildPluginDirectives,
   pinPluginDirectivesOnFirstSystem,
 } from "@/lib/plugins";
-import { workspaceToolsFor, runTool } from "@/lib/tools";
+import { workspaceToolsFor, runTool, WORK_LOOP_PROMPT } from "@/lib/tools";
 import { RunFileMemory } from "@/lib/run-memory";
 import { agentRoundsFor, modelHasOpenToolLimits } from "@/lib/tool-limits";
 import type { ToolResult } from "@/lib/tools";
@@ -1248,7 +1248,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   `git diff before committing, commit through run_command after approval, and call ` +
                   `github_push only when the committed work is ready. Never merge or force-push.`
                 : ""
-            }${hasBrowser ? BROWSER_POLICY_PROMPT : NO_BROWSER_PROMPT}`
+            }${hasBrowser ? BROWSER_POLICY_PROMPT : NO_BROWSER_PROMPT}${WORK_LOOP_PROMPT}`
           : "";
 
         /*

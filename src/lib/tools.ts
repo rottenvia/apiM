@@ -795,7 +795,12 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
             items: {
               type: "object",
               properties: {
-                path: { type: "string" },
+                path: {
+                  type: "string",
+                  description:
+                    "File to change, e.g. 'src/app.py'. Every edit " +
+                    "carries its own path — there is no top-level path.",
+                },
                 old_text: {
                   type: "string",
                   description:
@@ -824,7 +829,10 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
                   type: "number",
                   description: "Line mode: last line to replace, inclusive.",
                 },
-                new_text: { type: "string" },
+                new_text: {
+                  type: "string",
+                  description: "Replacement text for this edit.",
+                },
               },
               required: ["path", "new_text"],
             },
@@ -1451,8 +1459,16 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
             items: {
               type: "object",
               properties: {
-                path: { type: "string" },
-                content: { type: "string" },
+                path: {
+                  type: "string",
+                  description:
+                    "File to create, relative to the workspace root, " +
+                    "e.g. 'src/app.py'.",
+                },
+                content: {
+                  type: "string",
+                  description: "Complete contents of this file.",
+                },
               },
               required: ["path", "content"],
             },
@@ -1729,6 +1745,36 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
 ];
 
 /**
+ * The work loop, pinned last in the workspace instructions.
+ *
+ * The workspace prose above this already says all of it — batch, verify,
+ * bank findings — and a weak model still looped thirty rounds of re-reads
+ * that ended nowhere. Length was not the cure; the plugin work proved that
+ * short plus LAST wins obedience, so the loop is restated here as four
+ * numbered rules at the position of most weight. Each rule carries the
+ * number that makes it checkable: context 25-30 (inside every ceiling),
+ * the second identical read wasted, the watched-it-work bar for done, and
+ * the third identical failure — which matches LOOP_TRIP_REPEATS, the
+ * strike that halts the run. Deliberately variant-neutral: no claim here
+ * contradicts either the capped or the open-ceiling schemas.
+ */
+export const WORK_LOOP_PROMPT =
+  "\n\nHOW TO WORK — the loop every task follows:\n" +
+  "1. SEARCH before you open. search_files with context 25-30 returns " +
+  "whole functions with the match, and read_files takes globs and reads " +
+  "the batch at once. One file per call runs out of rounds with the task " +
+  "half done.\n" +
+  "2. ACT on what you hold. Edit, write, run. Re-reading an unchanged " +
+  "file teaches nothing — its text is already in context — so a second " +
+  "identical read is a wasted round.\n" +
+  "3. VERIFY before you claim. Run it, build it, test it, and read the " +
+  "output. A step is done only when you watched it work.\n" +
+  "4. STUCK means change approach, not retry. A call that fails twice " +
+  "the same way fails a third time: read the error, fix the arguments, " +
+  "try another tool — or ask the user. Never emit the same failing " +
+  "call three times.";
+
+/**
  * Tool list for this model. An open-ceiling model (a custom with the
  * option on) gets the same tools with the per-call ceilings removed
  * from the descriptions, so it does not self-limit to 60 files.
@@ -1787,8 +1833,16 @@ export function workspaceToolsFor(
                 items: {
                   type: "object",
                   properties: {
-                    path: { type: "string" },
-                    content: { type: "string" },
+                    path: {
+                      type: "string",
+                      description:
+                        "File to create, relative to the workspace root, " +
+                        "e.g. 'src/app.py'.",
+                    },
+                    content: {
+                      type: "string",
+                      description: "Complete contents of this file.",
+                    },
                   },
                   required: ["path", "content"],
                 },
@@ -1814,12 +1868,20 @@ export function workspaceToolsFor(
                 items: {
                   type: "object",
                   properties: {
-                    path: { type: "string" },
+                    path: {
+                      type: "string",
+                      description:
+                        "File to change, e.g. 'src/app.py'. Every edit " +
+                        "carries its own path — there is no top-level path.",
+                    },
                     old_text: {
                       type: "string",
                       description: "Exact text to replace, copied verbatim.",
                     },
-                    new_text: { type: "string" },
+                    new_text: {
+                      type: "string",
+                      description: "Replacement text for this edit.",
+                    },
                   },
                   required: ["path", "old_text", "new_text"],
                 },
