@@ -463,6 +463,18 @@ check(
   /reasoningLen \|\| message\.reasoningLength/.test(bubble),
   "an old chat sends only the length and fetches the body on demand"
 );
+check(
+  "the live label ticks thinking tokens, the finished one shows tok/s",
+  /formatThinkTokens\(reasoningChars \/ 4\)/.test(bubble) &&
+    /tok\/s/.test(bubble) &&
+    /thinkingTokens \/ \(thoughtMs \/ 1000\)/.test(bubble),
+  "billed tokens over the first-to-last-token span — generation speed, not network"
+);
+check(
+  "the thinking panel follows new text without measuring layout",
+  bubble.includes("el.scrollTop = Number.MAX_SAFE_INTEGER"),
+  "same write-only trick as the chat pane — no forced layout per frame"
+);
 
 console.log("\n9. scrolling up while it types yanks me back");
 
@@ -481,8 +493,9 @@ check(
   "that walks ancestors and yanks the view back to the caret"
 );
 check(
-  "it writes this pane's scrollTop instead",
-  chatArea.includes("el.scrollTop = el.scrollHeight")
+  "it writes this pane's scrollTop instead — without measuring",
+  chatArea.includes("el.scrollTop = Number.MAX_SAFE_INTEGER"),
+  "reading scrollHeight would force a full-transcript layout on every flush"
 );
 check(
   "a wheel upward unpins immediately",

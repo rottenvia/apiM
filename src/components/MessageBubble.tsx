@@ -249,6 +249,15 @@ function formatThoughtTime(ms: number): string {
 }
 
 /**
+ * "12.4k" / "860" — thinking volume in the header. Live it is estimated from
+ * characters (~4 per token); finished it is the billed reasoning count.
+ */
+function formatThinkTokens(n: number): string {
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return `${Math.max(0, Math.round(n))}`;
+}
+
+/**
  * Ticking seconds beside the live "Thinking" label.
  *
  * The status row's clock unmounts at the first token, so a reasoning stream
@@ -639,7 +648,9 @@ function MessageBubbleImpl({
     const el = thinkingRef.current;
     if (!el) return;
     ignoreThinkScroll.current = true;
-    el.scrollTop = el.scrollHeight;
+    // Write-only (see stickToBottom): no scrollHeight read, no forced layout
+    // on every reasoning frame.
+    el.scrollTop = Number.MAX_SAFE_INTEGER;
     requestAnimationFrame(() => {
       ignoreThinkScroll.current = false;
     });
@@ -689,6 +700,15 @@ function MessageBubbleImpl({
     () => reasoningTokens(message.usage),
     [message.usage]
   );
+  /*
+   * True model speed: billed reasoning tokens over the first-to-last-token
+   * span, so it measures generation rather than network. When thinking feels
+   * slow this number says whether the lane is slow or the essay is just long.
+   */
+  const thinkRate =
+    thoughtMs > 0 && thinkingTokens > 0
+      ? ` · ${formatThinkTokens(thinkingTokens / (thoughtMs / 1000))} tok/s`
+      : "";
 
   /*
    * One number, because one number is what was spent.
@@ -1402,11 +1422,14 @@ function MessageBubbleImpl({
                     >
                       <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
                     </svg>
-                    {/* Live the label shimmers; finished it states how long the
-                        model thought ("Thought for 12s"). The old "Thought for
-                        40.9k characters" confused a length for a duration and
-                        read as an error — the character count survives only as
-                        the collapsed row's tooltip, for the curious. */}
+                    {/* Live the label shimmers with a ticking token count, so a
+                        long think reads as progress rather than a hang;
+                        finished it states how long the model thought plus the
+                        true generation rate ("Thought for 3m 20s · 71 tok/s").
+                        The old "Thought for 40.9k characters" confused a length
+                        for a duration and read as an error — the character
+                        count survives only as the collapsed row's tooltip, for
+                        the curious. */}
                     <span
                       className={`truncate ${isThinkingPhase ? "thinking-shimmer" : ""}`}
                       title={
@@ -1419,9 +1442,12 @@ function MessageBubbleImpl({
                         <>
                           Thinking
                           <ThinkingClock />
+                          {reasoningChars > 0 && (
+                            <> · {formatThinkTokens(reasoningChars / 4)}</>
+                          )}
                         </>
                       ) : thoughtMs > 0
-                          ? `Thought for ${formatThoughtTime(thoughtMs)}`
+                          ? `Thought for ${formatThoughtTime(thoughtMs)}${thinkRate}`
                           : "Thinking"}
                     </span>
                     {isThinkingPhase && <Dots size={3} />}
