@@ -428,9 +428,18 @@ check(
   /isNote: m\.note === true/.test(page)
 );
 check(
-  "the transcript renders a note as a compact chip, not a task bubble",
-  /message\.isNote/.test(read("src/components/MessageBubble.tsx")) &&
-    /passed while the task was running/.test(read("src/components/MessageBubble.tsx"))
+  "the transcript renders a note as a slim event row, never a bubble",
+  /if \(isNote\) \{/.test(read("src/components/MessageBubble.tsx")) &&
+    /justify-center/.test(read("src/components/MessageBubble.tsx")) &&
+    /passed while the task was running/.test(read("src/components/MessageBubble.tsx")) &&
+    !/isUser && !isNote/.test(read("src/components/MessageBubble.tsx")),
+  "old notes are one quiet centered line — chip, caption, text"
+);
+check(
+  "a long note truncates with a click to expand",
+  /noteExpanded/.test(read("src/components/MessageBubble.tsx")) &&
+    /show less/.test(read("src/components/MessageBubble.tsx")),
+  "the record stays one click away, not a wall of text"
 );
 check(
   "the dock says where the note is, not what the answer was",
