@@ -135,8 +135,8 @@ check(
   )
 );
 check(
-  "route derives the history fallback from pre-run user turns",
-  /\.filter\(\(m\) => m\.role === "user" && \(m\.content \|\| ""\)\.trim\(\)\)/.test(route)
+  "route derives the history fallback from pre-run user turns, skipping notes",
+  /\.filter\(\s*\(m\) =>\s*m\.role === "user" &&\s*m\.note !== true/.test(route)
 );
 check(
   "compliance resets on both plan writes and seeds on load",

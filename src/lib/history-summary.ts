@@ -140,7 +140,9 @@ function attachmentMarker(a: StoredAttachment): string {
 
 function renderDigestTurn(m: ScopedHistoryMessage): string {
   const who = m.role === "user" ? "USER" : "ASSISTANT";
-  const note = m.note === true ? " [mid-task note]" : "";
+  // No [mid-task note] tag: by the time a turn reaches the digest its run
+  // is over, and a live-framed correction would nag the summary forever.
+  // The summarizer's "state, not story" rule washes solved steering out.
   let text = m.content ?? "";
   if (text.length > SUMMARY_TURN_MAX_CHARS) {
     text =
@@ -148,7 +150,7 @@ function renderDigestTurn(m: ScopedHistoryMessage): string {
       `\n…[turn truncated, ${text.length - SUMMARY_TURN_MAX_CHARS} more chars]…`;
   }
   const media = (m.attachments ?? []).map(attachmentMarker).join(" ");
-  return `${who}${note}: ${text}${media ? `\nShared: ${media}` : ""}`;
+  return `${who}: ${text}${media ? `\nShared: ${media}` : ""}`;
 }
 
 export interface SummaryDigest {
