@@ -9,6 +9,7 @@
  */
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { readFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
@@ -125,6 +126,25 @@ check(
   "formatFindingsForPrompt's intro carries the retire recipe",
   block.includes("status 'disproved'") && block.includes("DONE and shipped"),
   "the model must know the exact retirement call"
+);
+
+// 4c. Relevance-scoped silent use: a finding the current request does not
+// need must never be dragged into the reply ("per my findings …").
+check(
+  "the prompt block scopes findings to the relevant ones, silently",
+  block.includes("RELEVANT to the current request") &&
+    block.includes("never mention, cite, or act on it"),
+  "irrelevant findings are background, not reply material"
+);
+const routeSrc = readFileSync(
+  path.join(ROOT, "src/app/api/chat/route.ts"),
+  "utf8"
+);
+check(
+  "the system prompt keeps unneeded findings out of the reply",
+  routeSrc.includes("use the ones relevant to this turn") &&
+    routeSrc.includes("stay out of your reply entirely"),
+  "mention a finding only when it changed the course"
 );
 
 // 5. replaceFindings swaps a stale block in place (used on resume).

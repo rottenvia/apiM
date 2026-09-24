@@ -244,7 +244,7 @@ export function formatFindingsForPrompt(store: FindingsStore): string {
   }
   return (
     `\n\n${FINDINGS_MARKER_OPEN}\n` +
-    "Findings already established in this workspace (your own prior conclusions — use them, do not re-derive them; if one is wrong, correct it with note_finding; when the work a finding describes is DONE and shipped, retire it — note_finding with that id, status 'disproved', and claim 'done — shipped in <commit/fix>' — so finished items stop riding every prompt):\n\n" +
+    "Findings already established in this workspace (your own prior conclusions — use the ones RELEVANT to the current request, do not re-derive them; a finding this request does not need is background: never mention, cite, or act on it, leave it out of your reply entirely; if one is wrong, correct it with note_finding; when the work a finding describes is DONE and shipped, retire it — note_finding with that id, status 'disproved', and claim 'done — shipped in <commit/fix>' — so finished items stop riding every prompt):\n\n" +
     lines.join("\n") +
     `\n${FINDINGS_MARKER_CLOSE}\n`
   );
