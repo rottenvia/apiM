@@ -535,6 +535,8 @@ function MessageBubbleImpl({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [copied, setCopied] = useState(false);
+  /** A long steering note truncates to one quiet line; this expands it. */
+  const [noteExpanded, setNoteExpanded] = useState(false);
   const thinkingRef = useRef<HTMLDivElement>(null);
   /** Scroll target for the plan pill in the meta row. */
   const planRef = useRef<HTMLDivElement>(null);
@@ -543,8 +545,9 @@ function MessageBubbleImpl({
    * A mid-run steering note ("btw …" sent while a reply was running).
    *
    * It is a real user message in the conversation — the model acted on it —
-   * but it was handed into a task that was already running, so a full bubble
-   * would misread it as a fresh task. It renders as a compact teal chip.
+   * but it was handed into a task that was already running, so it renders
+   * as a slim centered event row (see the early return below), never as a
+   * message bubble: a wall of old note bubbles buries the real conversation.
    */
   const isNote = isUser && message.isNote === true;
 
@@ -773,6 +776,81 @@ function MessageBubbleImpl({
       };
     }, [message.content, message.isStreaming]);
 
+  /*
+   * A steering note is a record, not a message: one quiet centered line —
+   * chip, caption, text — instead of a right-aligned bubble. Long notes
+   * truncate with a click to expand; attachments ride as tiny name chips
+   * with the same lightbox behind them.
+   */
+  if (isNote) {
+    const text = message.content ?? "";
+    const long = text.length > 140;
+    const shown =
+      noteExpanded || !long ? text : text.slice(0, 140).trimEnd() + "…";
+    return (
+      <div
+        ref={bubbleRootRef}
+        className="animate-fade-in flex justify-center px-4"
+      >
+        <div className="flex min-w-0 max-w-[90%] flex-wrap items-baseline justify-center gap-x-2 gap-y-0.5 text-center">
+          <span className="rounded-lg bg-search/20 px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-search">
+            note
+          </span>
+          <span className="text-[11px] text-text-muted">
+            passed while the task was running
+          </span>
+          <button
+            type="button"
+            onClick={() => long && setNoteExpanded((v) => !v)}
+            title={long ? (noteExpanded ? "Collapse" : "Expand") : undefined}
+            className={`min-w-0 text-xs leading-5 text-text-secondary ${long ? "cursor-pointer hover:text-text-primary" : "cursor-default"}`}
+          >
+            <span className="whitespace-pre-wrap break-words">{shown}</span>
+            {long && (
+              <span className="ml-1 text-[11px] text-text-muted">
+                {noteExpanded ? "show less" : "more"}
+              </span>
+            )}
+          </button>
+          {(message.attachments ?? []).map((file, i) => {
+            const peekable =
+              (file.kind === "image" || file.kind === "video") &&
+              (file.dataUrl || file.frames?.length);
+            const chip = (
+              <span className="inline-flex items-center gap-1 rounded-lg border border-border bg-bg-secondary/60 px-1.5 py-0.5 text-[11px] text-text-secondary">
+                {file.name}
+              </span>
+            );
+            return peekable ? (
+              <button
+                key={i}
+                type="button"
+                onClick={() => setPreviewImage(file)}
+                title={`${file.name} — click to enlarge`}
+                className="transition-transform hover:scale-[1.03]"
+              >
+                {chip}
+              </button>
+            ) : (
+              <span key={i}>{chip}</span>
+            );
+          })}
+        </div>
+
+        {previewImage?.dataUrl && (
+          <ImageLightbox
+            src={previewImage.dataUrl}
+            name={previewImage.name}
+            description={previewImage.description}
+            source={previewImage.descriptionSource}
+            kind={previewImage.kind === "video" ? "video" : "image"}
+            onClose={() => setPreviewImage(null)}
+          />
+        )}
+      </div>
+    );
+  }
+
   return (
     <div
       ref={bubbleRootRef}
@@ -780,91 +858,13 @@ function MessageBubbleImpl({
     >
       <div
         className={`max-w-[85%] md:max-w-[75%] ${
-          isNote
-            ? "rounded-xl border border-search/30 bg-search/[0.08] px-3.5 py-2.5"
-            : isUser
-              ? "rounded-2xl bg-bg-elevated px-4 py-2.5"
-              : "bg-transparent px-4"
+          isUser
+            ? "rounded-2xl bg-bg-elevated px-4 py-2.5"
+            : "bg-transparent px-4"
         }`}
       >
-        {/* Mid-run steering note: a compact chip, not a task bubble. It is
-            information the user passed to a task that was already running, so
-            it reads as an aside to the task, not a new instruction to you. */}
-        {isNote && (
-          <div className="space-y-1">
-            <div className="flex items-center gap-1.5">
-              <span className="rounded-lg bg-search/20 px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-search">
-                note
-              </span>
-              <span className="text-[11px] text-text-muted">
-                passed while the task was running
-              </span>
-            </div>
-
-            {/* Attachments that rode along with the note: a dropped
-                screenshot, a binary, a video as a frame strip. Same shapes
-                as a user bubble — thumbnails where the pixels are on hand
-                (a reload brings them; a live chip may carry names only),
-                name chips otherwise. */}
-            {message.attachments && message.attachments.length > 0 && (
-              <div className="flex flex-wrap gap-1.5">
-                {message.attachments.map((file, i) =>
-                  (file.kind === "image" || file.kind === "video") &&
-                  (file.dataUrl || file.frames?.length) ? (
-                    <button
-                      key={i}
-                      onClick={() => setPreviewImage(file)}
-                      title={`${file.name} — click to enlarge`}
-                      className="overflow-hidden rounded-lg border border-border transition-transform hover:scale-[1.03]"
-                    >
-                      {file.kind === "video" && file.dataUrl ? (
-                        <video
-                          src={file.dataUrl}
-                          muted
-                          playsInline
-                          preload="metadata"
-                          className="h-24 w-auto max-w-[12rem] object-cover"
-                        />
-                      ) : file.kind === "video" && file.frames?.length ? (
-                        /* eslint-disable-next-line @next/next/no-img-element */
-                        <img
-                          src={file.frames[0].dataUrl}
-                          alt={file.name}
-                          className="h-24 w-auto max-w-[12rem] object-cover"
-                        />
-                      ) : (
-                        /* eslint-disable-next-line @next/next/no-img-element */
-                        <img
-                          src={file.dataUrl}
-                          alt={file.name}
-                          className="h-24 w-auto max-w-[12rem] object-cover"
-                        />
-                      )}
-                    </button>
-                  ) : (
-                    <span
-                      key={i}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-bg-secondary/60 px-2 py-1 text-xs text-text-secondary"
-                    >
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} aria-hidden="true">
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z" />
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M14 2v6h6" />
-                      </svg>
-                      {file.name}
-                    </span>
-                  )
-                )}
-              </div>
-            )}
-
-            <div className="whitespace-pre-wrap break-words text-[13px] leading-6 text-text-secondary">
-              {message.content}
-            </div>
-          </div>
-        )}
-
         {/* User message */}
-        {isUser && !isNote && (
+        {isUser && (
           <div className="space-y-2">
             {message.attachments && message.attachments.length > 0 && (
               <div className="flex flex-wrap gap-1.5">

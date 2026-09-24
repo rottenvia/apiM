@@ -126,7 +126,7 @@ export default function PreviewBtw() {
         <p className="text-[13px] leading-relaxed text-text-secondary">
           A note added while a long task runs. It reaches the task at its next
           thinking step, changes nothing that was running, and stays in the
-          transcript as a compact chip. Click a dock&apos;s ✕ to dismiss it;
+          transcript as one quiet line. Click a dock&apos;s ✕ to dismiss it;
           the task itself never sees a dismiss.
         </p>
       </div>
@@ -139,7 +139,7 @@ export default function PreviewBtw() {
               In the transcript
             </h2>
             <span className="text-[12px] text-text-muted">
-              A chip, not a bubble — information handed to a running task, not a new one.
+              One quiet line, not a bubble — information handed to a running task, not a new one.
             </span>
           </div>
           <div className="space-y-4 rounded-2xl border border-border bg-bg-secondary/40 p-4">
