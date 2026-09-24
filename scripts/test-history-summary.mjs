@@ -136,7 +136,7 @@ check("a lone giant turn is truncated, never skipped", (() => {
     dg.text.includes("truncated")
   );
 })());
-check("digest marks attachments and mid-task notes", (() => {
+check("digest marks attachments while notes digest as plain turns", (() => {
   const dg = HS.buildSummaryDigest([
     msg("a", "see this", "user", {
       note: true,
@@ -146,7 +146,8 @@ check("digest marks attachments and mid-task notes", (() => {
     }),
   ]);
   return (
-    dg.text.includes("[mid-task note]") &&
+    !dg.text.includes("[mid-task note]") &&
+    dg.text.includes("see this") &&
     dg.text.includes('[image err.png: "red stack trace"]')
   );
 })());

@@ -5,8 +5,8 @@
  *
  * While a reply is in flight, "btw it's a dead DLL, don't touch it" must
  * reach the running agent at its next thinking step, with nothing that was
- * running interrupted, and it must stay in the conversation afterwards so it
- * keeps steering later turns. Every check below guards one of those
+ * running interrupted, and it must stay in the conversation afterwards as a
+ * record — while steering ONLY the run it landed in. Every check below guards one of those
  * properties:
  *
  *   1. the note physically reaches the transcript of the running task
@@ -234,9 +234,9 @@ await appendMessages(CONV, "btw test", [
 const history = await loadScopedConversationHistory(CONV);
 const historyNote = history.find((m) => m.content === "it's a dead DLL, don't touch it");
 check(
-  "a persisted note is replayed with its note flag",
+  "a persisted note keeps its flag in loaded history",
   historyNote?.note === true,
-  "without the flag the next run reads it as plain history"
+  "the flag now serves filters (the goal-pin fallback skips notes) — replay itself is plain"
 );
 
 // A note for a conversation that does not exist is a 404, not a ghost chat.
@@ -595,6 +595,39 @@ check(
 check(
   "the dock says when a note skipped a waiting approval",
   /skipped \$\{entry\.skippedApprovals\}/.test(dock)
+);
+
+console.log("\n8. A solved note stops steering new turns");
+check(
+  "the transcript build no longer re-labels history notes",
+  !/\.\.\.\(msg\.note === true/.test(routeSrc),
+  "the nag: every new request re-read a solved correction as a live order"
+);
+check(
+  "the drain still pushes live notes with the flag",
+  (routeSrc.match(/note: true,/g) ?? []).length === 2,
+  "transcript push + persisted record — the running run is unaffected"
+);
+check(
+  "the goal-pin fallback skips notes",
+  /m\.note !== true/.test(routeSrc),
+  "a stale 'reset me' must never become the pinned goal"
+);
+{
+  const { buildSummaryDigest } = await import("@/lib/history-summary");
+  const digest = buildSummaryDigest([
+    { id: "d1", role: "user", content: "reset me", note: true },
+  ]);
+  check(
+    "the summary digest drops the live tag",
+    !digest.text.includes("[mid-task note]") && digest.text.includes("reset me"),
+    "archive wording — 'state, not story' washes the rest out"
+  );
+}
+check(
+  "resume still replays the saved transcript, flags intact",
+  /compactTranscript\(resumed\.messages\)/.test(routeSrc),
+  "same-run liveness is preserved — only NEW turns archive notes"
 );
 
 // Clean up the scratch data root.

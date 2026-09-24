@@ -22,8 +22,10 @@ export const runtime = "nodejs";
  *
  * — which the model reads as live steering at its next step, while nothing
  * that was running (a tool call, a decompile, a stream) is interrupted. The
- * note is also persisted as an ordinary user message, so it keeps steering
- * every later turn of the conversation, not just the round it landed in.
+ * note is also persisted as an ordinary user message, so the record — and a
+ * resume of this run — keeps it. Later turns replay it as plain archive
+ * history instead: steering belongs to the run it steered, and a solved
+ * correction must not nag every new request.
  *
  * No model call happens here: the note costs the next round a few dozen
  * tokens (plus the attachment bytes the composer already inlined) and
