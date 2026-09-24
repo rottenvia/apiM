@@ -1065,7 +1065,11 @@ export function ChatArea({
     const el = scrollRef.current;
     if (!el || !pinnedRef.current) return;
     ignoreScroll.current = true;
-    el.scrollTop = el.scrollHeight;
+    // Write-only: reading scrollHeight here would force a synchronous layout
+    // of the entire transcript on every stream flush (up to 60 a second),
+    // which is exactly the growing jank on long replies. Assigning past the
+    // maximum clamps to the bottom with no measurement at all.
+    el.scrollTop = Number.MAX_SAFE_INTEGER;
     requestAnimationFrame(() => {
       ignoreScroll.current = false;
     });
