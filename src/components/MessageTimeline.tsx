@@ -1,5 +1,6 @@
 "use client";
 
+import { memo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ToolActivity } from "@/components/ToolActivity";
@@ -17,34 +18,44 @@ export type { TimelineEntry } from "@/lib/timeline";
  * loses that pairing — which is the only part worth reading when a reply
  * touched six files.
  */
-export function MessageTimeline({
-  timeline,
-  toolEvents,
+/**
+ * Shallow tool-list equality for row memoisation.
+ *
+ * buildTimelineRows pushes the toolEvents elements themselves (not copies)
+ * into rows, so a completed row's tools keep their identity across stream
+ * frames while the parent rebuilds the row objects every time.
+ */
+function sameTools(a: ToolEvent[], b: ToolEvent[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+const TimelineRow = memo(function TimelineRow({
+  text,
+  tools,
+  first,
+  plain,
   onOpenFile,
   markdownComponents,
 }: {
-  timeline: TimelineEntry[];
-  toolEvents: ToolEvent[];
+  text: string;
+  tools: ToolEvent[];
+  /** First row: no separator rule above it. */
+  first: boolean;
+  /**
+   * Render narration as plain text, no markdown parse. While the reply is
+   * streaming every frame grows the trailing row; parsing the whole row's
+   * markdown per frame is what made a fast model feel slow (a 20KB reply
+   * costs ~36ms per full re-parse, every 16ms frame). Formatting snaps in
+   * once, when the stream ends.
+   */
+  plain?: boolean;
   onOpenFile?: (path: string) => void;
   markdownComponents?: React.ComponentProps<typeof ReactMarkdown>["components"];
 }) {
-  const rows = buildTimelineRows(timeline, toolEvents);
-
-  if (rows.length === 0) return null;
-
-  return (
-    /*
-     * No ornamental rule above the first action.
-     *
-     * In the reported tool-only reply the screen was: effort/tokens, one
-     * full-width line, then `fetch_url`. With the reasoning panel absent, that
-     * line looked exactly like a collapsed/broken thinking box. Rows after the
-     * first still separate themselves below; the first needs no page break.
-     */
-    <div className="flex flex-col">
-      {rows.map((row, i) => {
-        const hasText = row.text.trim().length > 0;
-        const hasTools = row.tools.length > 0;
+        const hasText = text.trim().length > 0;
+        const hasTools = tools.length > 0;
         if (!hasText && !hasTools) return null;
 
         // A table is isolated, not split beside the tool column. Squeezed
@@ -52,11 +63,10 @@ export function MessageTimeline({
         // with the vertical divider running alongside its cells, which reads
         // as the rule cutting straight through the table. Full width gives
         // the table the whole line; the row's tools stack below it.
-        const split = hasText && hasTools && !textHasTable(row.text);
+        const split = hasText && hasTools && !textHasTable(text);
 
         return (
           <div
-            key={i}
             className={`grid gap-y-2 ${
               // Only split when there is something on both sides. A row that
               // is only prose uses the full width, so ordinary paragraphs
@@ -74,7 +84,7 @@ export function MessageTimeline({
                * the layout looked like disconnected columns rather than a
                * sequence of steps.
                */
-            } ${i > 0 ? "mt-4 border-t border-border/60 pt-4" : ""}`}
+            } ${!first ? "mt-4 border-t border-border/60 pt-4" : ""}`}
           >
             {hasText && (
               <div
@@ -86,12 +96,16 @@ export function MessageTimeline({
                   split ? "md:pr-6" : ""
                 }`}
               >
-                <ReactMarkdown
-                  remarkPlugins={[remarkGfm]}
-                  components={markdownComponents}
-                >
-                  {row.text}
-                </ReactMarkdown>
+                {plain ? (
+                  <div className="whitespace-pre-wrap">{text}</div>
+                ) : (
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm]}
+                    components={markdownComponents}
+                  >
+                    {text}
+                  </ReactMarkdown>
+                )}
               </div>
             )}
 
@@ -109,12 +123,59 @@ export function MessageTimeline({
 
             {hasTools && (
               <div className={`min-w-0 ${split ? "md:pl-6" : ""}`}>
-                <ToolActivity events={row.tools} onOpenFile={onOpenFile} />
+                <ToolActivity events={tools} onOpenFile={onOpenFile} />
               </div>
             )}
           </div>
         );
-      })}
+}, (prev, next) =>
+  prev.text === next.text &&
+  prev.first === next.first &&
+  prev.plain === next.plain &&
+  prev.onOpenFile === next.onOpenFile &&
+  prev.markdownComponents === next.markdownComponents &&
+  sameTools(prev.tools, next.tools)
+);
+
+export function MessageTimeline({
+  timeline,
+  toolEvents,
+  onOpenFile,
+  markdownComponents,
+  plain,
+}: {
+  timeline: TimelineEntry[];
+  toolEvents: ToolEvent[];
+  onOpenFile?: (path: string) => void;
+  markdownComponents?: React.ComponentProps<typeof ReactMarkdown>["components"];
+  /** Narration renders as plain text while the reply streams (see TimelineRow). */
+  plain?: boolean;
+}) {
+  const rows = buildTimelineRows(timeline, toolEvents);
+
+  if (rows.length === 0) return null;
+
+  return (
+    /*
+     * No ornamental rule above the first action.
+     *
+     * In the reported tool-only reply the screen was: effort/tokens, one
+     * full-width line, then `fetch_url`. With the reasoning panel absent, that
+     * line looked exactly like a collapsed/broken thinking box. Rows after the
+     * first still separate themselves below; the first needs no page break.
+     */
+    <div className="flex flex-col">
+      {rows.map((row, i) => (
+        <TimelineRow
+          key={i}
+          text={row.text}
+          tools={row.tools}
+          first={i === 0}
+          plain={plain}
+          onOpenFile={onOpenFile}
+          markdownComponents={markdownComponents}
+        />
+      ))}
     </div>
   );
 }

@@ -19,6 +19,10 @@ const messageTimeline = readFileSync(
   path.join(ROOT, "src/components/MessageTimeline.tsx"),
   "utf8"
 );
+const messageBubble = readFileSync(
+  path.join(ROOT, "src/components/MessageBubble.tsx"),
+  "utf8"
+);
 
 const COLOR = process.stdout.isTTY && !process.env.NO_COLOR;
 const g = (s) => (COLOR ? `\x1b[32m${s}\x1b[0m` : s);
@@ -117,10 +121,21 @@ check("plain prose is not mistaken for a table",
   textHasTable("Here is the plan.\n- first\n- second") === false &&
     textHasTable("") === false);
 check("a row with a table is never split beside the tool column",
-  /const split = hasText && hasTools && !textHasTable\(row\.text\);/.test(
+  /const split = hasText && hasTools && !textHasTable\(text\);/.test(
     messageTimeline
   ),
   "squeezed into the left column the vertical divider reads as cutting through the table");
+
+console.log("\n7. Streaming never re-parses finished rows");
+check("rows are memoised on text plus tool identity",
+  /memo\(function TimelineRow/.test(messageTimeline) &&
+    /sameTools\(prev\.tools, next\.tools\)/.test(messageTimeline),
+  "a completed row's tools keep their identity across stream frames");
+check("narration streams as plain text, formats on done",
+  /plain \? \(/.test(messageTimeline) &&
+    /whitespace-pre-wrap/.test(messageTimeline) &&
+    /plain=\{message\.isStreaming\}/.test(messageBubble),
+  "parsing every row per frame is what made a fast model feel slow");
 
 console.log("\n" + (fail === 0 ? g(`All ${pass} checks passed.`) : r(`${fail} of ${pass + fail} failed.`)) + "\n");
 process.exit(fail === 0 ? 0 : 1);
