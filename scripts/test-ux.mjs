@@ -40,6 +40,7 @@ const check = (label, ok, detail = "") => {
 const bubble = await read("src/components/MessageBubble.tsx");
 const chatArea = await read("src/components/ChatArea.tsx");
 const route = await read("src/app/api/chat/route.ts");
+const toolActivity = await read("src/components/ToolActivity.tsx");
 
 console.log("\napiM — the reported interface problems\n");
 
@@ -434,8 +435,8 @@ check(
 check(
   "the empty live box says it is waiting for text, not duplicate Thinking",
   /Waiting for reasoning text…/.test(bubble) &&
-    /flushTimer = setTimeout\(flush, 50\)/.test(page),
-  "the header owns Thinking; the body should become real text within the fallback window"
+    /const STREAM_FLUSH_MIN_MS = 100;/.test(page),
+  "the header owns Thinking; the body becomes real text within one 100ms flush"
 );
 check(
   "a ref, so active-phase tracking schedules no extra render",
@@ -524,7 +525,8 @@ check(
 check(
   "markdown is parsed by a memoised body keyed on content and query",
   /const MarkdownBody = memo\(/.test(bubble) &&
-    /<MarkdownBody content=\{displayContent\} regex=\{searchRegex\}/.test(bubble),
+    /<MarkdownBody content=\{liveContent\} regex=\{searchRegex\}/.test(bubble) &&
+    /useDeferredValue\(displayContent\)/.test(bubble),
   "unrelated re-renders can no longer re-parse the markdown"
 );
 check(
@@ -652,11 +654,20 @@ check(
 
 console.log("\n12b. a fast model must feel fast while it types");
 check(
-  "a streaming bubble renders plain text until the stream ends",
-  /\(index < deferredCount \|\| msg\.isStreaming\) && !bubbleSearchQuery/.test(
-    chatArea
-  ),
-  "a full markdown re-parse per frame is O(n-squared) — formatting snaps in once, on done"
+  "a streaming bubble renders deferred markdown, never plain walls",
+  /const liveContent = message\.isStreaming \? deferredContent : displayContent;/.test(
+    bubble
+  ) &&
+    /const deferred = index < deferredCount && !bubbleSearchQuery;/.test(
+      chatArea
+    ),
+  "formatting follows the text a few frames behind instead of blocking it"
+);
+check(
+  "tool rows memoise their arg parsing on the args string",
+  /memo\(function ToolRow/.test(toolActivity) &&
+    /useMemo\(\(\) => argContent\(args\), \[args\]\)/.test(toolActivity),
+  "a write's args hold the whole file body — parsing that per frame per tool is the heavy feel"
 );
 check(
   "the live Thinking label ticks seconds through a stalled stream",

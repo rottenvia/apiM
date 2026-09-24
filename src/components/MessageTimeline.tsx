@@ -1,6 +1,6 @@
 "use client";
 
-import { memo } from "react";
+import { memo, useDeferredValue } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ToolActivity } from "@/components/ToolActivity";
@@ -18,6 +18,20 @@ export type { TimelineEntry } from "@/lib/timeline";
  * loses that pairing — which is the only part worth reading when a reply
  * touched six files.
  */
+const RowMarkdown = memo(function RowMarkdown({
+  text,
+  components,
+}: {
+  text: string;
+  components?: React.ComponentProps<typeof ReactMarkdown>["components"];
+}) {
+  return (
+    <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+      {text}
+    </ReactMarkdown>
+  );
+});
+
 /**
  * Shallow tool-list equality for row memoisation.
  *
@@ -35,7 +49,7 @@ const TimelineRow = memo(function TimelineRow({
   text,
   tools,
   first,
-  plain,
+  live,
   onOpenFile,
   markdownComponents,
 }: {
@@ -44,17 +58,20 @@ const TimelineRow = memo(function TimelineRow({
   /** First row: no separator rule above it. */
   first: boolean;
   /**
-   * Render narration as plain text, no markdown parse. While the reply is
-   * streaming every frame grows the trailing row; parsing the whole row's
-   * markdown per frame is what made a fast model feel slow (a 20KB reply
-   * costs ~36ms per full re-parse, every 16ms frame). Formatting snaps in
-   * once, when the stream ends.
+   * The reply is still streaming. Narration renders from a deferred copy of
+   * the text: every frame grows the trailing row, and parsing the whole
+   * row's markdown per frame is what made a fast model feel slow (a 20KB
+   * reply costs ~36ms per full re-parse, every frame). The deferred value
+   * lets React skip the re-parse on busy frames, so formatting stays live
+   * but never saturates the thread; finished rows (stable text) are exact.
    */
-  plain?: boolean;
+  live?: boolean;
   onOpenFile?: (path: string) => void;
   markdownComponents?: React.ComponentProps<typeof ReactMarkdown>["components"];
 }) {
-        const hasText = text.trim().length > 0;
+        const deferredText = useDeferredValue(text);
+        const shown = live ? deferredText : text;
+        const hasText = shown.trim().length > 0;
         const hasTools = tools.length > 0;
         if (!hasText && !hasTools) return null;
 
@@ -63,7 +80,7 @@ const TimelineRow = memo(function TimelineRow({
         // with the vertical divider running alongside its cells, which reads
         // as the rule cutting straight through the table. Full width gives
         // the table the whole line; the row's tools stack below it.
-        const split = hasText && hasTools && !textHasTable(text);
+        const split = hasText && hasTools && !textHasTable(shown);
 
         return (
           <div
@@ -96,16 +113,7 @@ const TimelineRow = memo(function TimelineRow({
                   split ? "md:pr-6" : ""
                 }`}
               >
-                {plain ? (
-                  <div className="whitespace-pre-wrap">{text}</div>
-                ) : (
-                  <ReactMarkdown
-                    remarkPlugins={[remarkGfm]}
-                    components={markdownComponents}
-                  >
-                    {text}
-                  </ReactMarkdown>
-                )}
+                <RowMarkdown text={shown} components={markdownComponents} />
               </div>
             )}
 
@@ -131,7 +139,7 @@ const TimelineRow = memo(function TimelineRow({
 }, (prev, next) =>
   prev.text === next.text &&
   prev.first === next.first &&
-  prev.plain === next.plain &&
+  prev.live === next.live &&
   prev.onOpenFile === next.onOpenFile &&
   prev.markdownComponents === next.markdownComponents &&
   sameTools(prev.tools, next.tools)
@@ -142,14 +150,14 @@ export function MessageTimeline({
   toolEvents,
   onOpenFile,
   markdownComponents,
-  plain,
+  live,
 }: {
   timeline: TimelineEntry[];
   toolEvents: ToolEvent[];
   onOpenFile?: (path: string) => void;
   markdownComponents?: React.ComponentProps<typeof ReactMarkdown>["components"];
-  /** Narration renders as plain text while the reply streams (see TimelineRow). */
-  plain?: boolean;
+  /** The reply is still streaming — rows render deferred markdown (see TimelineRow). */
+  live?: boolean;
 }) {
   const rows = buildTimelineRows(timeline, toolEvents);
 
@@ -171,7 +179,7 @@ export function MessageTimeline({
           text={row.text}
           tools={row.tools}
           first={i === 0}
-          plain={plain}
+          live={live}
           onOpenFile={onOpenFile}
           markdownComponents={markdownComponents}
         />

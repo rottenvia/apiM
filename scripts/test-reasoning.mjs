@@ -223,7 +223,8 @@ check(
 );
 check(
   "reasoning has a timer fallback when animation frames are throttled",
-  /flushTimer = setTimeout\(flush, 50\)/.test(page) &&
+  /flushTimer = setTimeout\(\(\) => \{/.test(page) &&
+    /frame = requestAnimationFrame\(flush\);/.test(page) &&
     /clearTimeout\(flushTimer\)/.test(page),
   "requestAnimationFrame alone can pause indefinitely in a background or throttled tab"
 );
