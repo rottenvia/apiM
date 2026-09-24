@@ -367,6 +367,11 @@ check(
   "this is the sentence that prevents the confident half-finished answer"
 );
 check("evidence is shown alongside the step", /verified: browse returned/.test(text));
+check(
+  "and names finish as the way the run ends",
+  /The run ends when you call finish/.test(text),
+  "the exit is taught while steps remain, not only at the end"
+);
 
 const finished = plan.updatePlan(p1, [
   { id: 2, state: "done", verified: "parser.py written" },
@@ -375,8 +380,11 @@ const finished = plan.updatePlan(p1, [
 progress = plan.planProgress(finished);
 check("a finished plan reports complete", progress.complete === true);
 check(
-  "and says to stop",
-  /Summarise what you built and stop/.test(plan.formatPlan(finished))
+  "and points at finish, not a trailing summary",
+  /Call finish with what you built and how you verified it/.test(
+    plan.formatPlan(finished)
+  ),
+  "the explicit door out of the loop"
 );
 
 const blocked = plan.updatePlan(p1, [
@@ -391,10 +399,42 @@ console.log("\n4. Wiring");
 const names = WORKSPACE_TOOLS.map((t) => t.function.name);
 check("make_plan is offered", names.includes("make_plan"));
 check("update_plan is offered", names.includes("update_plan"));
+check("finish is offered", names.includes("finish"));
+{
+  const finishDef = WORKSPACE_TOOLS.find((t) => t.function.name === "finish").function;
+  check(
+    "finish demands what and how-verified",
+    finishDef.parameters.required.includes("result") &&
+      finishDef.parameters.required.includes("verified"),
+    "a receipt, not a wave"
+  );
+  check(
+    "finish warns that open steps bounce the first call",
+    /bounced/.test(finishDef.description),
+    "the mirror is disclosed before it fires"
+  );
+}
 
 const { readFile } = await import("node:fs/promises");
 const route = (await readFile(path.join(ROOT, "src/app/api/chat/route.ts"), "utf8")).replace(/\r\n/g, "\n");
 const toolsSrc = await readFile(path.join(ROOT, "src/lib/tools.ts"), "utf8");
+check(
+  "the route bounces a finish with open steps, once",
+  /call.function.name === "finish"/.test(route) &&
+    /finishArmed/.test(route) &&
+    /declare done anyway/.test(route),
+  "the mirror, not a cage"
+);
+check(
+  "a finish claim is cross-checked against tools that ran",
+  /checkEvidence\(\s*fVerified,\s*toolsUsedThisRun\s*\)/.test(route),
+  "acknowledgment with teeth: no phantom checks"
+);
+check(
+  "an accepted finish ends the run cleanly with its summary",
+  /Finished\. The run ends here/.test(route) && /Verified: /.test(route),
+  "no premature flag — finishing is the clean exit"
+);
 check(
   "the make_plan tool says to explore first, not call it first",
   /Do NOT call this first: explore first/.test(toolsSrc)

@@ -15,6 +15,7 @@ export interface ToolEvent {
 }
 
 const VERBS: Record<string, { running: string; done: string }> = {
+  finish: { running: "Finishing", done: "Finished" },
   write_file: { running: "Writing", done: "Created" },
   edit_file: { running: "Editing", done: "Edited" },
   read_file: { running: "Reading", done: "Read" },

@@ -548,6 +548,41 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "finish",
+      description:
+        "Declare the task done and end the run. Call this when the work " +
+        "is complete and verified — every plan step done, or no plan " +
+        "needed and the result in hand. The run ends here: no more tool " +
+        "calls after this, and your result text becomes the closing " +
+        "summary. Say WHAT was built and HOW you verified it; a verified " +
+        "claim naming a check no tool performed is bounced. If the plan " +
+        "still has open steps, the first call is bounced with the list — " +
+        "call again to finish anyway. For plain answers that needed no " +
+        "tools, just answer; finish is for task work.",
+      parameters: {
+        type: "object",
+        properties: {
+          result: {
+            type: "string",
+            description:
+              "What was built, fixed, or found — the closing summary, in " +
+              "your own words.",
+          },
+          verified: {
+            type: "string",
+            description:
+              "How each claim above was checked: what you ran, read, or " +
+              "opened, and what it showed. Must not claim a check no tool " +
+              "performed.",
+          },
+        },
+        required: ["result", "verified"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "start_process",
       description:
         "Start something that keeps running — a dev server, a watcher, a " +
@@ -1772,7 +1807,10 @@ export const WORK_LOOP_PROMPT =
   "4. STUCK means change approach, not retry. A call that fails twice " +
   "the same way fails a third time: read the error, fix the arguments, " +
   "try another tool — or ask the user. Never emit the same failing " +
-  "call three times.";
+  "call three times.\n" +
+  "5. FINISH explicitly. When the work is done and verified, call " +
+  "finish with what you built and how you verified it — do not just " +
+  "stop calling tools and trail off.";
 
 /**
  * Tool list for this model. An open-ceiling model (a custom with the

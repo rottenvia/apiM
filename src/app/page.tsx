@@ -912,20 +912,31 @@ export default function Home() {
           // attachment metadata (pixels, image descriptions).
           body: JSON.stringify({
             conversationId: currentConvId,
+            // Lets a "don't run it" note skip a pending approval in the
+            // right scope instead of landing after the user clicked.
+            workspaceId,
             note: text,
             wireText,
             attachments,
           }),
         });
 
-        const data = (await res.json()) as { queued?: boolean; error?: string };
+        const data = (await res.json()) as {
+          queued?: boolean;
+          error?: string;
+          skippedApprovals?: number;
+        };
         if (controller.signal.aborted) return;
 
         const queued = res.ok && !data.error;
+        const skipped =
+          typeof data.skippedApprovals === "number" && data.skippedApprovals > 0
+            ? data.skippedApprovals
+            : undefined;
         setBtwEntry((prev) =>
           prev && prev.id === id
             ? res.ok
-              ? { ...prev, status: "queued" }
+              ? { ...prev, status: "queued", skippedApprovals: skipped }
               : { ...prev, status: "queued", error: data.error ?? `HTTP ${res.status}` }
             : prev
         );
@@ -947,7 +958,7 @@ export default function Home() {
         );
       }
     },
-    [currentConvId]
+    [currentConvId, workspaceId]
   );
   /** Latest messages + sender, so stable callbacks can read them. */
   const messagesRef = useRef<Message[]>([]);

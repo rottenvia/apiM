@@ -63,7 +63,10 @@ const {
   drainBtwNotes,
   getConversation,
 } = await import("@/lib/store");
-const { serializeForApi, MID_RUN_NOTE_LABEL } = await import("@/lib/transcript");
+const { serializeForApi, MID_RUN_NOTE_LABEL, MID_RUN_NOTE_ABSORB } = await import(
+  "@/lib/transcript"
+);
+const approvals = await import("@/lib/approvals");
 const { loadScopedConversationHistory } = await import("@/lib/chat-history");
 
 const CONV = "btw-conv-1";
@@ -135,8 +138,15 @@ const wire = serializeForApi([
 ]);
 check(
   "the model sees the mid-run label on the wire",
-  wire[1].content === `[${MID_RUN_NOTE_LABEL} it's a dead DLL, don't touch it]`,
+  wire[1].content ===
+    `[${MID_RUN_NOTE_LABEL} it's a dead DLL, don't touch it]\n${MID_RUN_NOTE_ABSORB}`,
   `serializes as: ${wire[1].content}`
+);
+check(
+  "the note tells the model to absorb, not investigate",
+  /Facts in it are given/.test(wire[1].content) &&
+    /do not restart, re-read, or investigate/.test(wire[1].content),
+  "a given pid is used, not re-derived with tools"
 );
 check(
   "an ordinary user message is left untouched",
@@ -157,7 +167,8 @@ const wireParts = serializeForApi([
 ]);
 check(
   "a note with a screenshot keeps the label on its text part",
-  wireParts[0].content[0].text === `[${MID_RUN_NOTE_LABEL} look at the crash]`
+  wireParts[0].content[0].text ===
+    `[${MID_RUN_NOTE_LABEL} look at the crash]\n${MID_RUN_NOTE_ABSORB}`
 );
 check(
   "…and the pixels go out intact",
@@ -373,10 +384,12 @@ const sendBtwNote = page.slice(
   page.indexOf("/** Latest messages + sender")
 );
 check(
-  "the client posts the note trio — no keys",
-  /conversationId: currentConvId,[\s\S]{0,80}note: text,[\s\S]{0,80}wireText,[\s\S]{0,80}attachments/.test(
+  "the client posts the note trio plus scope — no keys",
+  /conversationId: currentConvId,[\s\S]{0,400}note: text,[\s\S]{0,80}wireText,[\s\S]{0,80}attachments/.test(
     sendBtwNote
-  ) && !/ApiKey|opencodeKey|openrouterKey|localApi/.test(sendBtwNote),
+  ) &&
+    /workspaceId/.test(sendBtwNote) &&
+    !/ApiKey|opencodeKey|openrouterKey|localApi/.test(sendBtwNote),
   "wireText + attachments are the same pair a normal send posts"
 );
 check(
@@ -510,6 +523,78 @@ check(
 check(
   "reduced motion is respected",
   /prefers-reduced-motion[\s\S]*?\.btw-dock/.test(css)
+);
+
+console.log("\n7. A stop-worded note skips the waiting approval");
+check(
+  "a don't-execute note with news attached matches",
+  approvals.isStopNote("dont execute this now, i rejoined so theres new pid"),
+  "the reported case: stop the stale call, keep the pid update"
+);
+for (const t of ["Don't run it", "please stop", "cancel", "skip that"]) {
+  check(`"${t}" matches`, approvals.isStopNote(t));
+}
+for (const t of [
+  "don't forget to run the tests",
+  "run it twice to be sure",
+  "the run stopped by itself",
+  "I stopped the server yesterday",
+]) {
+  check(`"${t}" does not match`, !approvals.isStopNote(t));
+}
+{
+  const waiter = approvals.requestApproval({
+    id: "btw-appr-1",
+    workspaceId: "btw-ws",
+    command: "run_command",
+    args: ["python", "old_pid_script.py"],
+    reason: "stale pid",
+  });
+  const other = approvals.requestApproval({
+    id: "btw-appr-2",
+    workspaceId: "other-ws",
+    command: "run_command",
+    args: ["x"],
+    reason: "",
+  });
+  const skipped = approvals.skipPendingForWorkspace(
+    "btw-ws",
+    "don't execute this now, new pid 1234"
+  );
+  const decision = await waiter;
+  check("the waiting approval is skipped", skipped === 1);
+  check(
+    "the decline credits the note",
+    decision.approved === false && /new pid 1234/.test(decision.reason),
+    decision.reason
+  );
+  check(
+    "other workspaces are untouched",
+    approvals.pendingCount() === 1,
+    "narrow window, narrow blast radius"
+  );
+  approvals.decide("btw-appr-2", { approved: false, reason: "cleanup" });
+  await other;
+  check("nothing is left pending", approvals.pendingCount() === 0);
+}
+check(
+  "the btw route auto-skips on stop notes",
+  /isStopNote\(note\)/.test(api) &&
+    /skipPendingForWorkspace\(workspaceScope, note\)/.test(api),
+  "queued AND acted on — not queued instead of acted on"
+);
+check(
+  "the route reports how many it skipped",
+  /skippedApprovals/.test(api)
+);
+check(
+  "the client sends the workspace scope with the note",
+  /workspaceId,\s*\n\s*note: text,/.test(page),
+  "the skip must land in the right conversation"
+);
+check(
+  "the dock says when a note skipped a waiting approval",
+  /skipped \$\{entry\.skippedApprovals\}/.test(dock)
 );
 
 // Clean up the scratch data root.
