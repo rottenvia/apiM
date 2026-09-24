@@ -2216,16 +2216,13 @@ const MessageList = memo(function MessageList({
             ? searchQuery
             : undefined;
         // Bubbles older than the hydrated window render as instant plain text
-        // and upgrade to full markdown in idle slices. A bubble that is still
-        // streaming does the same: every frame grows its content, and parsing
-        // the whole reply's markdown per frame is O(n-squared) — a 20KB reply
-        // costs ~36ms per re-parse inside a 16ms frame, which is exactly "a
-        // fast model feels slow". Full markdown parses once, when the stream
-        // ends. A bubble with a search hit always renders full markdown —
-        // the find bar's highlight runs inside the markdown pipeline, so
-        // plain text cannot carry it.
-        const deferred =
-          (index < deferredCount || msg.isStreaming) && !bubbleSearchQuery;
+        // and upgrade to full markdown in idle slices. A bubble with a search
+        // hit always renders full markdown — the find bar's highlight runs
+        // inside the markdown pipeline, so plain text cannot carry it. (A
+        // streaming bubble renders deferred markdown instead — see
+        // liveContent in the bubble — so formatting stays live while the
+        // parse skips busy frames.)
+        const deferred = index < deferredCount && !bubbleSearchQuery;
         return (
           /*
            * Do not stop the loader at MessageList. Historical messages only
