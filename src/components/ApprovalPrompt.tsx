@@ -52,7 +52,7 @@ export function ApprovalPrompt({
         </span>
         <div className="min-w-0 flex-1">
           <p className="text-[13px] font-medium leading-5 text-text-primary">
-            Run this command?
+            {pending.command === "mcp" ? "Call this MCP tool?" : "Run this command?"}
           </p>
           {pending.reason && (
             <p className="mt-0.5 text-[12px] leading-4 text-text-muted">
@@ -63,7 +63,9 @@ export function ApprovalPrompt({
       </div>
 
       <pre className="mx-3 mt-2 overflow-x-auto rounded-lg border border-border bg-bg-primary px-2.5 py-2 font-mono text-[12px] text-text-secondary">
-        <span className="select-none text-text-muted">$ </span>
+        {pending.command !== "mcp" && (
+          <span className="select-none text-text-muted">$ </span>
+        )}
         {pending.display}
       </pre>
 

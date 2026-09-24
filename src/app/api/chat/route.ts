@@ -19,6 +19,8 @@ import {
   pinPluginDirectivesOnFirstSystem,
 } from "@/lib/plugins";
 import { workspaceToolsFor, runTool, WORK_LOOP_PROMPT } from "@/lib/tools";
+import { callMcpTool, parseMcpToolName, MCP_TOOL_PREFIX } from "@/lib/mcp";
+import { getMcpServer, mcpToolsForModel } from "@/lib/mcp-store";
 import { RunFileMemory } from "@/lib/run-memory";
 import { agentRoundsFor, modelHasOpenToolLimits } from "@/lib/tool-limits";
 import type { ToolResult } from "@/lib/tools";
@@ -2501,6 +2503,21 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               }
               return true;
             });
+            /*
+             * MCP servers contribute their tools best-effort: a server that
+             * is down or slow is skipped, never allowed to break the reply.
+             * The list is cached server-side, so this costs nothing per
+             * round once warm.
+             */
+            try {
+              const mcpTools = await mcpToolsForModel();
+              const existing = dsRequestBody.tools;
+              if (mcpTools.length > 0 && Array.isArray(existing)) {
+                dsRequestBody.tools = [...existing, ...mcpTools];
+              }
+            } catch (error) {
+              console.error("MCP tools unavailable this round:", error);
+            }
             dsRequestBody.tool_choice = "auto";
           }
 
@@ -4767,6 +4784,98 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   };
                 }
               }
+              }
+            } else if (call.function.name.startsWith(MCP_TOOL_PREFIX)) {
+              /*
+               * A bridged MCP tool: mcp__<serverId>__<tool>. Approval first,
+               * exactly like run_command — a remote tool can execute code
+               * on the user's machine (that is what the Potassium bridge
+               * is for), so it is never silent. Remembering keys on the
+               * exact call, so a repeated read_console poll can be allowed
+               * once rather than once per round.
+               */
+              const bridged = parseMcpToolName(call.function.name);
+              const mcpServer =
+                bridged !== null ? await getMcpServer(bridged.serverId) : null;
+              if (bridged === null || mcpServer === null || !mcpServer.enabled) {
+                result = {
+                  ok: false,
+                  content:
+                    "That MCP tool is not available: its server is unknown, " +
+                    "disabled, or was removed. Do not call it again — say " +
+                    "what you were trying to do instead.",
+                  summary: "MCP tool unavailable",
+                };
+              } else {
+                const mcpArgs = JSON.stringify(
+                  parsed.value,
+                  Object.keys(parsed.value).sort()
+                );
+                const mcpDisplay =
+                  `${mcpServer.name} · ${bridged.tool}` +
+                  (mcpArgs.length > 2
+                    ? `(${mcpArgs.slice(0, 120)}${mcpArgs.length > 120 ? "…" : ""})`
+                    : "");
+                const mcpPreApproved =
+                  autoRunCommands ||
+                  isRemembered(
+                    workspace,
+                    `mcp:${mcpServer.id}:${bridged.tool}`,
+                    [mcpArgs]
+                  );
+                let mcpApproved = true;
+                let mcpDeclineReason = "";
+                if (!mcpPreApproved) {
+                  send({
+                    type: "approval_request",
+                    id: call.id,
+                    command: "mcp",
+                    args: [mcpServer.name, bridged.tool, mcpArgs],
+                    display: mcpDisplay,
+                    reason: "",
+                  });
+                  const mcpDecision = await requestApproval(
+                    {
+                      id: call.id,
+                      workspaceId: workspace,
+                      command: "mcp",
+                      args: [mcpServer.name, bridged.tool, mcpArgs],
+                      reason: "",
+                    },
+                    AbortSignal.any([req.signal, runSignal])
+                  );
+                  mcpApproved = mcpDecision.approved;
+                  if (!mcpDecision.approved)
+                    mcpDeclineReason = mcpDecision.reason;
+                  send({
+                    type: "approval_resolved",
+                    id: call.id,
+                    approved: mcpApproved,
+                  });
+                }
+                if (!mcpApproved) {
+                  result = {
+                    ok: false,
+                    content:
+                      `The MCP call was not run. ${mcpDeclineReason} ` +
+                      `Do not retry it — explain what you were trying to do, ` +
+                      `or suggest a different approach.`,
+                    summary: `Skipped: ${mcpDisplay}`,
+                  };
+                } else {
+                  const mcpResult = await callMcpTool(
+                    mcpServer.url,
+                    mcpServer.token,
+                    bridged.tool,
+                    parsed.value,
+                    { signal: runSignal }
+                  );
+                  result = {
+                    ok: mcpResult.ok,
+                    content: mcpResult.content,
+                    summary: mcpResult.summary,
+                  };
+                }
               }
             } else if (prefetched.has(call.id)) {
               // Already in flight since the top of the round.
