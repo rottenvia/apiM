@@ -5,6 +5,7 @@ import {
   isValidElement,
   memo,
   useCallback,
+  useDeferredValue,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -775,6 +776,18 @@ function MessageBubbleImpl({
         pendingLines: Math.max(0, block.split("\n").length - 1),
       };
     }, [message.content, message.isStreaming]);
+
+  /*
+   * Live formatting that cannot saturate the thread. While the reply
+   * streams every frame grows the content, and parsing the whole reply's
+   * markdown per frame is O(n-squared) — a 20KB reply costs ~36ms per
+   * re-parse inside a 16ms frame. The deferred value lets React skip the
+   * MarkdownBody re-render on busy frames (its memo holds on the unchanged
+   * string), so formatting follows the text a few frames behind instead of
+   * blocking it; the finished reply renders the exact text.
+   */
+  const deferredContent = useDeferredValue(displayContent);
+  const liveContent = message.isStreaming ? deferredContent : displayContent;
 
   /*
    * A steering note is a record, not a message: one quiet centered line —
@@ -1753,10 +1766,10 @@ function MessageBubbleImpl({
                 toolEvents={message.toolEvents ?? []}
                 onOpenFile={onOpenWorkspaceFile}
                 markdownComponents={markdownComponents}
-                // Plain while streaming: parsing every row's markdown per
-                // frame is what made a fast model feel slow. One full parse
-                // lands when the stream ends.
-                plain={message.isStreaming}
+                // Deferred while streaming: rows parse narration from a
+                // lagging copy, so formatting stays live without a full
+                // re-parse on every frame.
+                live={message.isStreaming}
               />
             )}
 
@@ -1773,7 +1786,7 @@ function MessageBubbleImpl({
                       : "text-text-primary"
                 }`}
               >
-                <MarkdownBody content={displayContent} regex={searchRegex} plain={deferred} />
+                <MarkdownBody content={liveContent} regex={searchRegex} plain={deferred} />
                 {message.isStreaming && displayContent && !hasPendingCode && (
                   <span className="stream-caret" aria-hidden="true" />
                 )}

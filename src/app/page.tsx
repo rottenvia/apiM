@@ -1853,12 +1853,18 @@ export default function Home() {
       // re-keyed to the real id in migrateSession when a draft chat is saved.
       if (runConvId) abortRefs.current.set(runConvId, controller);
 
-      // Batch deltas into one state update per animation frame. Without this a
-      // fast stream triggers hundreds of re-renders a second and the UI janks.
+      // Batch deltas into one state update at most every 100ms. Without a
+      // floor a fast stream triggers dozens of re-renders a second, and each
+      // one reconciles the whole transcript, re-lays-out the chat for scroll
+      // follow, and repaints — that per-frame bill, not the model, is what
+      // made the app feel heavy while it generated. 100ms chunks still read
+      // as live typing; the eye cannot follow faster anyway.
+      const STREAM_FLUSH_MIN_MS = 100;
       let pendingContent = "";
       let pendingReasoning = "";
       let frame: number | null = null;
       let flushTimer: ReturnType<typeof setTimeout> | null = null;
+      let lastFlushAt = 0;
 
       const flush = () => {
         // Whichever scheduler won cancels the other. requestAnimationFrame can
@@ -1868,6 +1874,7 @@ export default function Home() {
         if (flushTimer !== null) clearTimeout(flushTimer);
         frame = null;
         flushTimer = null;
+        lastFlushAt = Date.now();
         if (!pendingContent && !pendingReasoning) return;
         const c = pendingContent;
         const r = pendingReasoning;
@@ -1905,11 +1912,16 @@ export default function Home() {
         );
       };
       const scheduleFlush = () => {
-        if (frame === null) frame = requestAnimationFrame(flush);
-        // Frames may be delayed indefinitely when Chromium throttles the tab.
-        // Fifty milliseconds still batches a fast stream while making the
-        // first reasoning text visibly replace the placeholder immediately.
-        if (flushTimer === null) flushTimer = setTimeout(flush, 50);
+        if (frame !== null || flushTimer !== null) return;
+        const wait = STREAM_FLUSH_MIN_MS - (Date.now() - lastFlushAt);
+        if (wait <= 0) {
+          frame = requestAnimationFrame(flush);
+        } else {
+          flushTimer = setTimeout(() => {
+            flushTimer = null;
+            frame = requestAnimationFrame(flush);
+          }, wait);
+        }
       };
 
       /** Set when a tool changed the workspace, so the list can refresh. */

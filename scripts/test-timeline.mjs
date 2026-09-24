@@ -121,7 +121,7 @@ check("plain prose is not mistaken for a table",
   textHasTable("Here is the plan.\n- first\n- second") === false &&
     textHasTable("") === false);
 check("a row with a table is never split beside the tool column",
-  /const split = hasText && hasTools && !textHasTable\(text\);/.test(
+  /const split = hasText && hasTools && !textHasTable\(shown\);/.test(
     messageTimeline
   ),
   "squeezed into the left column the vertical divider reads as cutting through the table");
@@ -131,11 +131,12 @@ check("rows are memoised on text plus tool identity",
   /memo\(function TimelineRow/.test(messageTimeline) &&
     /sameTools\(prev\.tools, next\.tools\)/.test(messageTimeline),
   "a completed row's tools keep their identity across stream frames");
-check("narration streams as plain text, formats on done",
-  /plain \? \(/.test(messageTimeline) &&
-    /whitespace-pre-wrap/.test(messageTimeline) &&
-    /plain=\{message\.isStreaming\}/.test(messageBubble),
-  "parsing every row per frame is what made a fast model feel slow");
+check("rows render deferred markdown while live, exact text on done",
+  /useDeferredValue\(text\)/.test(messageTimeline) &&
+    /const shown = live \? deferredText : text;/.test(messageTimeline) &&
+    /RowMarkdown text=\{shown\}/.test(messageTimeline) &&
+    /live=\{message\.isStreaming\}/.test(messageBubble),
+  "formatting stays live but the parse skips busy frames");
 
 console.log("\n" + (fail === 0 ? g(`All ${pass} checks passed.`) : r(`${fail} of ${pass + fail} failed.`)) + "\n");
 process.exit(fail === 0 ? 0 : 1);

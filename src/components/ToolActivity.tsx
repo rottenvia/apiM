@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { mcpDisplayName, MCP_TOOL_PREFIX } from "@/lib/mcp";
 
 /** One tool the model ran, as shown in the transcript. */
@@ -131,31 +131,18 @@ function Icon({ name, ok }: { name: string; ok?: boolean }) {
  * the useful information is which file changed. Clicking one shows what was
  * actually written.
  */
-export function ToolActivity({
-  events,
+const ToolRow = memo(function ToolRow({
+  event,
   onOpenFile,
+  isOpen,
+  onToggle,
 }: {
-  events: ToolEvent[];
+  event: ToolEvent;
   /** Opens the workspace panel at this file. */
   onOpenFile?: (path: string) => void;
+  isOpen: boolean;
+  onToggle: (id: string) => void;
 }) {
-  const [openId, setOpenId] = useState<string | null>(null);
-
-  // Collapse whatever is open as soon as another tool starts. An expanded
-  // panel from a finished step is stale detail competing with the live one,
-  // and left alone they accumulate until the reply is unreadable.
-  const runningCount = events.filter((e) => e.ok === undefined).length;
-  const lastRunning = useRef(runningCount);
-  useEffect(() => {
-    if (runningCount > lastRunning.current) setOpenId(null);
-    lastRunning.current = runningCount;
-  }, [runningCount]);
-
-  if (!events.length) return null;
-
-  return (
-    <div className="mb-2.5 flex flex-col gap-1">
-      {events.map((event) => {
         const verbs = VERBS[event.name] ?? {
           running: event.name.startsWith(MCP_TOOL_PREFIX)
             ? mcpDisplayName(event.name)
@@ -166,21 +153,25 @@ export function ToolActivity({
         };
         const running = event.ok === undefined;
         const failed = event.ok === false;
-        const filePath = event.changedPath ?? argPath(event.args);
-        const body = argContent(event.args);
+        // Parsed once per args value, not once per stream frame. A write's
+        // args hold the whole file body; re-parsing that for every tool on
+        // every frame is what made long agent runs feel heavy.
+        const args = event.args;
+        const filePath = useMemo(
+          () => event.changedPath ?? argPath(args),
+          [event.changedPath, args]
+        );
+        const body = useMemo(() => argContent(args), [args]);
         const expandable = Boolean(body) && !running;
         // Reads don't change anything, so offering "Open" there is noise.
         const changed =
           event.name !== "read_file" && event.name !== "list_files";
-        const isOpen = openId === event.id;
 
         return (
           <div key={event.id} className="flex flex-col">
             <button
               type="button"
-              onClick={() =>
-                expandable && setOpenId(isOpen ? null : event.id)
-              }
+              onClick={() => expandable && onToggle(event.id)}
               disabled={!expandable}
               aria-expanded={expandable ? isOpen : undefined}
               className={`group flex w-fit max-w-full items-center gap-2 rounded-lg border px-2.5 py-1.5 text-left text-[13px] transition-colors ${
@@ -291,7 +282,64 @@ export function ToolActivity({
             )}
           </div>
         );
-      })}
+}, (prev, next) =>
+  // Event objects keep their identity once the call settles (only the array
+  // is replaced), so a finished row never re-renders for later frames. The
+  // running call's args stream in as new objects, which is what keeps its
+  // own row — and only its row — live.
+  prev.event === next.event &&
+  prev.onOpenFile === next.onOpenFile &&
+  prev.isOpen === next.isOpen &&
+  prev.onToggle === next.onToggle
+);
+
+/**
+ * The list of file operations that ran during one reply.
+ *
+ * Collapsed to a single line each, because the raw JSON arguments are noise —
+ * the useful information is which file changed. Clicking one shows what was
+ * actually written.
+ */
+export function ToolActivity({
+  events,
+  onOpenFile,
+}: {
+  events: ToolEvent[];
+  /** Opens the workspace panel at this file. */
+  onOpenFile?: (path: string) => void;
+}) {
+  const [openId, setOpenId] = useState<string | null>(null);
+
+  // Collapse whatever is open as soon as another tool starts. An expanded
+  // panel from a finished step is stale detail competing with the live one,
+  // and left alone they accumulate until the reply is unreadable.
+  const runningCount = events.filter((e) => e.ok === undefined).length;
+  const lastRunning = useRef(runningCount);
+  useEffect(() => {
+    if (runningCount > lastRunning.current) setOpenId(null);
+    lastRunning.current = runningCount;
+  }, [runningCount]);
+
+  // Stable identity, or the row memo below never holds and every frame
+  // re-renders every row.
+  const onToggle = useCallback(
+    (id: string) => setOpenId((cur) => (cur === id ? null : id)),
+    []
+  );
+
+  if (!events.length) return null;
+
+  return (
+    <div className="mb-2.5 flex flex-col gap-1">
+      {events.map((event) => (
+        <ToolRow
+          key={event.id}
+          event={event}
+          onOpenFile={onOpenFile}
+          isOpen={openId === event.id}
+          onToggle={onToggle}
+        />
+      ))}
     </div>
   );
 }
