@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { mcpDisplayName, MCP_TOOL_PREFIX } from "@/lib/mcp";
 
 /** One tool the model ran, as shown in the transcript. */
 export interface ToolEvent {
@@ -62,7 +63,17 @@ function argContent(args: string): string | null {
       return [parsed.command, ...quoted].join(" ");
     }
 
-    return parsed.content ?? parsed.new_text ?? parsed.replacement ?? parsed.query ?? null;
+    return (
+      parsed.content ??
+      parsed.new_text ??
+      parsed.replacement ??
+      // MCP console calls (execute_script and friends) carry their payload
+      // under these keys — without them a remote call is never expandable.
+      (parsed as { code?: string }).code ??
+      (parsed as { script?: string }).script ??
+      parsed.query ??
+      null
+    );
   } catch {
     return null;
   }
@@ -145,8 +156,12 @@ export function ToolActivity({
     <div className="mb-2.5 flex flex-col gap-1">
       {events.map((event) => {
         const verbs = VERBS[event.name] ?? {
-          running: event.name,
-          done: event.name,
+          running: event.name.startsWith(MCP_TOOL_PREFIX)
+            ? mcpDisplayName(event.name)
+            : event.name,
+          done: event.name.startsWith(MCP_TOOL_PREFIX)
+            ? mcpDisplayName(event.name)
+            : event.name,
         };
         const running = event.ok === undefined;
         const failed = event.ok === false;

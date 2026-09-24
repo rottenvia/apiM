@@ -10,6 +10,7 @@ import { SettingsModal } from "@/components/SettingsModal";
 import { PluginsModal } from "@/components/PluginsModal";
 import { ArtifactProvider } from "@/components/ArtifactContext";
 import { SearchModal } from "@/components/SearchModal";
+import { McpConsole } from "@/components/McpConsole";
 import { WorkspacePanel } from "@/components/WorkspacePanel";
 import { WorkspaceSidePanel } from "@/components/WorkspaceSidePanel";
 import type { WorkspaceFileInfo } from "@/components/WorkspaceBar";
@@ -653,6 +654,7 @@ export default function Home() {
   }, [sessionsVersion]);
 
   const [showSettings, setShowSettings] = useState(false);
+  const [showMcp, setShowMcp] = useState(false);
   const [showPlugins, setShowPlugins] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -3180,6 +3182,7 @@ export default function Home() {
         onRename={renameConversation}
         onArchive={archiveConversation}
         onOpenSettings={() => setShowSettings(true)}
+        onOpenMcp={() => setShowMcp(true)}
         runningIds={runningIds}
         deleteDelay={deleteDelay}
       />
@@ -3346,6 +3349,8 @@ export default function Home() {
           onClose={() => setShowSearch(false)}
         />
       )}
+
+      {showMcp && <McpConsole onClose={() => setShowMcp(false)} />}
 
       {renameError && (
         <div
