@@ -1753,6 +1753,10 @@ function MessageBubbleImpl({
                 toolEvents={message.toolEvents ?? []}
                 onOpenFile={onOpenWorkspaceFile}
                 markdownComponents={markdownComponents}
+                // Plain while streaming: parsing every row's markdown per
+                // frame is what made a fast model feel slow. One full parse
+                // lands when the stream ends.
+                plain={message.isStreaming}
               />
             )}
 

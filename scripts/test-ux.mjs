@@ -650,6 +650,14 @@ check(
   "event history is append-only, so id sequences are enough"
 );
 
+console.log("\n12b. a fast model must feel fast while it types");
+check(
+  "a streaming bubble renders plain text until the stream ends",
+  /\(index < deferredCount \|\| msg\.isStreaming\) && !bubbleSearchQuery/.test(
+    chatArea
+  ),
+  "a full markdown re-parse per frame is O(n-squared) — formatting snaps in once, on done"
+);
 check(
   "the live Thinking label ticks seconds through a stalled stream",
   /function ThinkingClock/.test(bubble) &&
