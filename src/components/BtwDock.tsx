@@ -34,6 +34,8 @@ export interface BtwEntry {
   attachmentNames?: string[];
   /** Set instead of a status when it failed. */
   error?: string;
+  /** Approvals a stop-worded note skipped while they were waiting. */
+  skippedApprovals?: number;
 }
 
 export function BtwDock({
@@ -51,7 +53,10 @@ export function BtwDock({
       ? "passing it to the running task…"
       : entry.status === "accepted"
         ? `read by the task at step ${entry.round ?? "?"}`
-        : "passed — the task folds it in at its next thinking step";
+        : entry.skippedApprovals
+          ? `passed — skipped ${entry.skippedApprovals} waiting approval` +
+            `${entry.skippedApprovals === 1 ? "" : "s"}`
+          : "passed — the task folds it in at its next thinking step";
 
   return (
     <div className="btw-dock px-3 pb-1.5 sm:px-4" data-open="false">

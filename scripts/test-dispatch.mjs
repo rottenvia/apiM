@@ -876,6 +876,7 @@ const CANNOT = new Map([
   ["make_plan", "handled in the chat route; its logic is called directly above"],
   ["update_plan", "handled in the chat route; its logic is called directly above"],
   ["ask_user", "blocks for a human; covered by mocks in plan and autonomy"],
+  ["finish", "handled in the chat route; bounced/accepted there per plan state, covered by test-plan"],
   ["fetch_url", "needs the internet; failure path checked above"],
   ["web_search", "needs the internet and a key"],
   ["browse", "needs a real browser; covered by test-browser against a driver"],

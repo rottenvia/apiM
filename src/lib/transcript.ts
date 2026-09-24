@@ -38,6 +38,22 @@ export interface ToolCall {
  */
 export const MID_RUN_NOTE_LABEL = "While I was working, the user added:";
 
+/**
+ * How a mid-run note is absorbed — the second half of the framing.
+ *
+ * The label says WHEN the user spoke; without more, a weak model reads the
+ * note as a fresh task and goes to investigate it — told "there's a new
+ * pid 1234", it spends tools listing processes to find a pid it was given.
+ * The absorb line says what the note IS: a live update to the current
+ * task whose facts are given, to be applied in place while the loop keeps
+ * running — no restart, no re-read, no verification errand.
+ */
+export const MID_RUN_NOTE_ABSORB =
+  "Live steering for the CURRENT task, not a new task. Facts in it are " +
+  "given — use them as stated rather than re-deriving them with tools. " +
+  "Adjust and continue from where you are; do not restart, re-read, or " +
+  "investigate the note itself.";
+
 export type TranscriptMessage =
   | { role: "system"; content: string }
   /**
@@ -299,18 +315,23 @@ export function serializeForApi(
       if (typeof m.content === "string") {
         return {
           role: "user",
-          content: `[${MID_RUN_NOTE_LABEL} ${m.content}]`,
+          content:
+            `[${MID_RUN_NOTE_LABEL} ${m.content}]\n${MID_RUN_NOTE_ABSORB}`,
         };
       }
       const parts = m.content.map((p) => ({ ...p }));
       const firstTextIdx = parts.findIndex((p) => p.type === "text");
       const firstText = firstTextIdx === -1 ? null : parts[firstTextIdx];
       if (!firstText || firstText.type !== "text") {
-        parts.unshift({ type: "text", text: MID_RUN_NOTE_LABEL });
+        parts.unshift({
+          type: "text",
+          text: `${MID_RUN_NOTE_LABEL}\n${MID_RUN_NOTE_ABSORB}`,
+        });
       } else {
         parts[firstTextIdx] = {
           type: "text",
-          text: `[${MID_RUN_NOTE_LABEL} ${firstText.text}]`,
+          text:
+            `[${MID_RUN_NOTE_LABEL} ${firstText.text}]\n${MID_RUN_NOTE_ABSORB}`,
         };
       }
       return { role: "user", content: parts };

@@ -129,6 +129,46 @@ export function pendingCount(): number {
   return pending.size;
 }
 
+/**
+ * A mid-run note that means "don't run what's waiting".
+ *
+ * Matches only when the note OPENS with an explicit stop phrase — "dont
+ * execute this now, I rejoined so there's new pid" skips the pending
+ * approval and the rest of the note still lands next round as steering.
+ * "Don't forget to run the tests" does not match: the verb after don't
+ * must be a doing verb, and a bare "stop" must stand at the start. The
+ * window is narrow by construction — this only ever fires while an
+ * approval is actually pending — so a false positive costs one skipped
+ * prompt, not a run.
+ */
+const STOP_NOTE =
+  /^\s*(please\s+)?(don't|dont|do not)\s+(run|execute|do|send|push|commit|merge|apply)\b|^\s*(please\s+)?(stop|cancel|abort|skip(\s+(that|this|it))?)\b/i;
+
+export function isStopNote(text: string): boolean {
+  return STOP_NOTE.test(text);
+}
+
+/**
+ * Decline every approval waiting for this workspace, crediting the note.
+ * Returns how many were skipped. The agent loop sees an ordinary decline
+ * and carries on — the note itself still lands next round, so "don't run
+ * it, use pid 1234 instead" both stops the stale call and steers the run.
+ */
+export function skipPendingForWorkspace(
+  workspaceId: string,
+  note: string
+): number {
+  const reason = `Skipped per your note: "${note.trim().slice(0, 200)}"`;
+  let skipped = 0;
+  for (const entry of pending.values()) {
+    if (entry.workspaceId !== workspaceId) continue;
+    skipped += 1;
+    // resolve() unregisters itself, exactly like decide().
+    entry.resolve({ approved: false, reason });
+  }
+  return skipped;
+}
+
 /* ------------------------------------------------------------------------
    Questions from the model.
 

@@ -198,6 +198,12 @@ check(
   "the recipe and the halt agree on the number"
 );
 check(
+  "the loop ends by finishing explicitly, not trailing off",
+  /FINISH explicitly/.test(WORK_LOOP_PROMPT) &&
+    /call finish with what you built/.test(WORK_LOOP_PROMPT),
+  "self-acknowledgment is the exit — no cap needed"
+);
+check(
   "the route pins the loop last in the workspace instructions",
   /\$\{WORK_LOOP_PROMPT\}`/.test(route),
   "short plus last wins obedience — the plugin lesson"

@@ -1618,6 +1618,12 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         const loopBreaker = new LoopBreaker();
         const stallTracker = new StallTracker();
         let runHalted = false;
+        /*
+         * A finish with open plan steps is bounced once, with the list —
+         * the mirror, not a cage. finishArmed remembers the bounce so the
+         * second call is always honoured, whatever is still open.
+         */
+        let finishArmed = false;
 
         const setFileTree = (text: string) => {
           currentFileTree = text;
@@ -4485,6 +4491,95 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                     summary: "Could not update plan",
                   };
                 }
+                }
+              }
+            } else if (call.function.name === "finish") {
+              /*
+               * Self-acknowledgment, verified — the explicit door out of the
+               * loop. The model declares done with a receipt (what + how
+               * verified); the harness checks the receipt rather than
+               * trusting it, then ends the run WITHOUT a premature flag —
+               * finishing is the clean exit, not a halt. Three bounces,
+               * each answerable, none a trap:
+               *
+               *   empty receipt  -> say what and how, then finish again;
+               *   claimed check no tool performed -> run it or correct the
+               *     claim (the same cross-check update_plan applies);
+               *   open plan steps -> bounced once with the list; a second
+               *     finish is honoured regardless (finishArmed).
+               *
+               * No-plan task work finishes on the first call. The result
+               * text becomes the closing summary so the reply cannot end
+               * on an empty tool round.
+               */
+              const fArgs = parsed.value as {
+                result?: unknown;
+                verified?: unknown;
+              };
+              const fResult =
+                typeof fArgs.result === "string" ? fArgs.result.trim() : "";
+              const fVerified =
+                typeof fArgs.verified === "string"
+                  ? fArgs.verified.trim()
+                  : "";
+              if (!fResult || !fVerified) {
+                result = {
+                  ok: false,
+                  content:
+                    "finish needs both: 'result' (what was built, fixed, " +
+                    "or found) and 'verified' (how you checked it — what " +
+                    "you ran, read, or opened, and what it showed). Say " +
+                    "both, then finish again.",
+                  summary: "finish missing result/verified",
+                };
+              } else {
+                const finishEvidenceIssue = checkEvidence(
+                  fVerified,
+                  toolsUsedThisRun
+                );
+                const finishProgress = plan ? planProgress(plan) : null;
+                const finishOpen =
+                  plan && finishProgress && !finishProgress.complete
+                    ? plan.steps.filter((s) => s.state !== "done")
+                    : [];
+                if (finishEvidenceIssue) {
+                  result = {
+                    ok: false,
+                    content:
+                      finishEvidenceIssue +
+                      " Run the check or correct the claim, then finish again.",
+                    summary: "finish claim not evidenced",
+                  };
+                } else if (finishOpen.length > 0 && !finishArmed) {
+                  finishArmed = true;
+                  const openList = finishOpen
+                    .map((s) => `${s.id}. ${s.text} [${s.state}]`)
+                    .join("; ");
+                  result = {
+                    ok: true,
+                    content:
+                      `Not finished yet: ${finishOpen.length} plan step` +
+                      `${finishOpen.length === 1 ? "" : "s"} still open: ` +
+                      `${openList}. Complete them and finish again — or ` +
+                      `call finish once more, unchanged, to declare done anyway.`,
+                    summary: "finish bounced: steps open",
+                  };
+                } else {
+                  const closing =
+                    (assistantContent.trim() ? "\n\n" : "") +
+                    fResult +
+                    "\n\nVerified: " +
+                    fVerified;
+                  assistantContent += closing;
+                  send({ type: "content", delta: closing });
+                  appendTimelineText(closing);
+                  result = {
+                    ok: true,
+                    content:
+                      "Finished. The run ends here — no more tool calls.",
+                    summary: "Finished",
+                  };
+                  runHalted = true;
                 }
               }
             } else if (call.function.name === "ask_user") {

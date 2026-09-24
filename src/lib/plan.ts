@@ -886,13 +886,15 @@ export function formatPlan(plan: Plan): string {
   lines.push("");
   if (progress.complete) {
     lines.push(
-      "Every step is done and verified. Summarise what you built and stop."
+      "Every step is done and verified. Call finish with what you built " +
+        "and how you verified it."
     );
   } else if (progress.next) {
     lines.push(
       `Not finished. Next: ${progress.next.id}. ${progress.next.text}`,
       "Do not write a closing summary while steps remain — either continue, " +
-        "or mark what is blocking you and say so plainly."
+        "or mark what is blocking you and say so plainly. The run ends " +
+        "when you call finish."
     );
   }
 

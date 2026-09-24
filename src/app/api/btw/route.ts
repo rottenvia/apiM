@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { appendBtwNote } from "@/lib/store";
+import { isStopNote, skipPendingForWorkspace } from "@/lib/approvals";
 import type { StoredAttachment } from "@/lib/multimodal";
 
 export const dynamic = "force-dynamic";
@@ -39,6 +40,8 @@ const MAX_ATTACHMENTS = 10;
 
 interface Incoming {
   conversationId?: unknown;
+  /** Present when the chat runs in a non-default workspace. */
+  workspaceId?: unknown;
   note?: unknown;
   /** Model-facing text: note plus inlined file blocks (composer output). */
   wireText?: unknown;
@@ -142,5 +145,21 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  return NextResponse.json({ queued: true });
+  /*
+   * A note that opens with "don't run it" while an approval is waiting
+   * skips that approval NOW, rather than landing next round after the
+   * user already clicked. The note itself still queues — "don't execute
+   * this now, there's a new pid" both stops the stale call and steers
+   * the run — and when nothing is pending the match costs nothing.
+   */
+  let skippedApprovals = 0;
+  if (isStopNote(note)) {
+    const workspaceScope =
+      typeof body.workspaceId === "string" && body.workspaceId.trim()
+        ? body.workspaceId.trim()
+        : conversationId;
+    skippedApprovals = skipPendingForWorkspace(workspaceScope, note);
+  }
+
+  return NextResponse.json({ queued: true, skippedApprovals });
 }
