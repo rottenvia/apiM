@@ -11,7 +11,12 @@ export interface ScopedChatMessage {
   role: "user" | "assistant";
   content: string;
   attachments?: StoredAttachment[] | null;
-  /** Mid-run steering note (see StoredMessage.note); replayed with its label. */
+  /**
+   * Mid-run steering note (see StoredMessage.note). Carried so the goal-pin
+   * fallback can skip notes — replay itself is deliberately plain (see the
+   * transcript build in the chat route): a solved correction must not read
+   * as a live order on a later turn.
+   */
   note?: boolean;
 }
 
@@ -49,9 +54,10 @@ export async function loadScopedConversationHistory(
       role: entry.role as "user" | "assistant",
       content: entry.content,
       attachments: entry.attachments ?? null,
-      // Without this a steering note would replay on the next run as plain
-      // history — the model would lose the "the user said this mid-task"
-      // framing that is the whole point of the label.
+      // The flag rides along so later filters can tell steering from
+      // requests (the goal-pin fallback skips notes). It does NOT re-label
+      // the note on replay: the transcript build drops it, so an old note
+      // reads as archive history, not a live order.
       ...(entry.note === true ? { note: true } : {}),
     }));
   if (options.dropLastUser && history.at(-1)?.role === "user") history.pop();

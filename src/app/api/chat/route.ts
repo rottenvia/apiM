@@ -1009,12 +1009,19 @@ export async function POST(req: NextRequest) {
           console.error("Could not load scoped conversation history:", e);
         }
 
-        // Newest pre-run user turn: on a Resume or regenerate the run's own
-        // text is filler ("continue"), so the goal pin falls back to this —
-        // the original request.
+        // Newest pre-run user turn, skipping steering notes: on a Resume
+        // or regenerate the run's own text is filler ("continue"), so the
+        // goal pin falls back to this — the original request. A note is
+        // never the fallback — pinning "reset me" as the goal of a later
+        // run would re-execute a solved correction unasked.
         const historyLastUser =
           scopedHistory
-            .filter((m) => m.role === "user" && (m.content || "").trim())
+            .filter(
+              (m) =>
+                m.role === "user" &&
+                m.note !== true &&
+                (m.content || "").trim()
+            )
             .at(-1)?.content.trim() ?? null;
 
         /*
@@ -1437,13 +1444,16 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             window ? { mediaWindow: window } : undefined
           );
           if (!userHasContent(built)) continue;
-          transcript.push({
-            role: "user",
-            content: built,
-            // Re-label a saved steering note on replay, so a later run reads
-            // it as "the user said this mid-task" rather than plain history.
-            ...(msg.note === true ? { note: true } : {}),
-          });
+          /*
+           * A saved steering note replays as PLAIN history here, deliberately
+           * without its mid-run label. The note steered the run it landed in
+           * (and that run's resume, which replays the saved transcript, not
+           * this path) — but a later turn re-labeling it would read a solved
+           * correction as a live order on every new request. The record
+           * stays: the transcript still shows what the user said and when.
+           * What expires is the standing-order framing.
+           */
+          transcript.push({ role: "user", content: built });
         }
         transcript.push({
           role: "user",
@@ -2243,9 +2253,11 @@ Ask before you build the wrong thing. If a choice would change what you produce 
            * interrupted: the previous round finished, and tools it started
            * keep running; the note simply joins the transcript here.
            *
-           * Each note is also persisted as an ordinary user message, so it
-           * keeps steering every later turn (and a resume, whose transcript
-           * already contains it) instead of vanishing when this reply ends.
+           * Each note is also persisted as an ordinary user message, so the
+           * record survives the reply — and a resume of THIS run keeps it
+           * live, since resume replays the saved transcript. Later turns
+           * replay it as plain archive history instead: a solved correction
+           * must not steer every new request.
            */
           try {
             const midRunNotes = await drainBtwNotes(convId);
