@@ -316,6 +316,8 @@ export interface SidecarMachinePlan {
   vramMB: number;
   /** Transformer layers in the GGUF, 0 when unknown. */
   layers: number;
+  /** Free system RAM in GB, 0 when unknown. The CPU layers live there. */
+  ramFreeGB?: number;
 }
 
 /**
@@ -371,18 +373,24 @@ export function formatGpuPlan(
 ): string | null {
   if (!plan || plan.vramMB <= 0 || plan.layers <= 0) return null;
   const vram = `${Math.round(plan.vramMB / 1024)} GB`;
+  // The CPU layers + their KV are plain RAM: a box this tight is one Chrome
+  // tab from swapping, and swapped layers read as "GPU burns, nothing comes".
+  const ram =
+    typeof plan.ramFreeGB === "number" && plan.ramFreeGB > 0 && plan.ramFreeGB < 4
+      ? ` Only ${plan.ramFreeGB.toFixed(1)} GB RAM free — close other apps or the CPU layers will swap.`
+      : "";
   if (plan.ngl >= 99 || plan.ngl >= plan.layers) {
-    return `Offload plan: all ${plan.layers} layers on the GPU (${vram} VRAM).`;
+    return `Offload plan: all ${plan.layers} layers on the GPU (${vram} VRAM).${ram}`;
   }
   if (plan.ngl <= 0) {
     return (
       `Offload plan: CPU only — the 27B does not fit in ${vram} of VRAM. ` +
-      `It still answers, roughly 10x slower than on a bigger card.`
+      `It still answers, roughly 10x slower than on a bigger card.${ram}`
     );
   }
   return (
     `Offload plan: ${plan.ngl}/${plan.layers} layers on the GPU ` +
-    `(${vram} card — the rest runs on CPU).`
+    `(${vram} card — the rest runs on CPU).${ram}`
   );
 }
 

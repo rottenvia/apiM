@@ -733,13 +733,13 @@ check(
   /const reasoningChars = reasoningLen \|\| message\.reasoningLength \|\| 0/.test(
     read("src/components/MessageBubble.tsx")
   ) &&
-    /\{hasThinking && !thinkLoading && \(/.test(
+    /\{hasThinking && \(\s*\n\s*<div className="thinking-panel">/.test(
       read("src/components/MessageBubble.tsx")
     ) &&
     /const thinkLoading = isThinkingPhase && !panelHasContent;/.test(
       read("src/components/MessageBubble.tsx")
     ),
-  "otherwise a stored reply would look as though it never reasoned — thinkLoading needs a live phase, so stored replies always mount"
+  "otherwise a stored reply would look as though it never reasoned — the mount no longer depends on the live phase at all"
 );
 /*
  * And before the FIRST token, which is a different moment.

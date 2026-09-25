@@ -1289,13 +1289,29 @@ export async function planSidecarMachine(
       return 4;
     }
   })();
-  const idle: SidecarMachinePlan = { ngl: 99, threads: cpus, vramMB: 0, layers: 0 };
+  const ramFreeGB = (() => {
+    try {
+      const free = os.freemem();
+      return Number.isFinite(free) && free > 0
+        ? free / 1024 / 1024 / 1024
+        : 0;
+    } catch {
+      return 0;
+    }
+  })();
+  const idle: SidecarMachinePlan = {
+    ngl: 99,
+    threads: cpus,
+    vramMB: 0,
+    layers: 0,
+    ramFreeGB,
+  };
   const gpu = queryNvidiaGpu();
   if (!gpu || spec.build === "cpu") return idle;
   const key = `${spec.build ?? "auto"}:${await fileSize(gguf)}:${mmproj ? await fileSize(mmproj) : 0}`;
   const now = Date.now();
   if (planCache && planCache.key === key && now - planCache.at < 120_000) {
-    return { ...planCache.plan, threads: cpus };
+    return { ...planCache.plan, threads: cpus, ramFreeGB };
   }
   const info = await readGgufModelInfo(gguf);
   const plan: SidecarMachinePlan = info
@@ -1311,6 +1327,7 @@ export async function planSidecarMachine(
         threads: cpus,
         vramMB: gpu.vramMB,
         layers: info.blockCount,
+        ramFreeGB,
       }
     : idle;
   planCache = { at: now, key, plan };
@@ -1340,8 +1357,15 @@ async function spawnSidecar(
   await fs.mkdir(localEngineRoot(), { recursive: true });
   await fs.writeFile(engineLogPath(), "", "utf8");
 
+  // First line of every launch: the exact flags this start got. The status
+  // panel shows the log tail, so one screenshot answers "-ngl what?" without
+  // asking the user to find anything.
+  const launchArgv = sidecarArgs(gguf, mmproj, spec, machine);
+  await fs
+    .appendFile(engineLogPath(), `[apiM] spawn: ${launchArgv.join(" ")}\n`, "utf8")
+    .catch(() => {});
   try {
-    child = spawn(server, sidecarArgs(gguf, mmproj, spec, machine), {
+    child = spawn(server, launchArgv, {
       cwd: path.dirname(server),
       detached: process.platform !== "win32",
       stdio: ["ignore", "ignore", "pipe"],
@@ -1414,7 +1438,11 @@ async function spawnSidecar(
         };
       }
       await fs.writeFile(engineLogPath(), "", "utf8");
-      child = spawn(server, sidecarArgs(gguf, mmproj, fixed, machine), {
+      const retryArgv = sidecarArgs(gguf, mmproj, fixed, machine);
+      await fs
+        .appendFile(engineLogPath(), `[apiM] spawn: ${retryArgv.join(" ")}\n`, "utf8")
+        .catch(() => {});
+      child = spawn(server, retryArgv, {
         cwd: path.dirname(server),
         detached: process.platform !== "win32",
         stdio: ["ignore", "ignore", "pipe"],

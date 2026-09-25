@@ -152,12 +152,14 @@ interface ChatAreaProps {
 
 /**
  * The single status line for the silent wait between sending and the first
- * token: one mark, one word, one clock. The thinking panel stays unmounted
- * until the first reasoning token lands, so this row is the only voice in
- * the wait — and a retry morphs the word in place instead of stacking a
- * second row beneath it. Own clock at module level so the interval identity
- * is stable across ChatArea re-renders (status-stage updates would otherwise
- * remount a nested component and reset the count).
+ * token: one mark, one word, one clock. The thinking panel mounts its
+ * shimmer header inside the bubble during the wait, so this row is the only
+ * VISIBLE clock — the panel's own clock counts invisibly and is revealed
+ * when text lands, which is when this row unmounts. A retry morphs the
+ * word in place instead of stacking a second row beneath it. Own clock at
+ * module level so the interval identity is stable across ChatArea
+ * re-renders (status-stage updates would otherwise remount a nested
+ * component and reset the count).
  */
 function StatusRow({
   stage,

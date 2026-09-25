@@ -217,6 +217,24 @@ check(
   ),
   "otherwise the pill is invisible during the run, when it matters most"
 );
+check(
+  "the thinking panel mounts before the first reasoning token",
+  /\{hasThinking && \(\s*\n\s*<div className="thinking-panel">/.test(bubble) &&
+    !/hasThinking && !thinkLoading/.test(bubble),
+  "a minutes-long prefill showed no thinking voice at all"
+);
+check(
+  "one visible timer during the silent gap",
+  /thinkLoading \? "invisible" : undefined/.test(bubble) &&
+    /<span className=\{thinkLoading \? "invisible" : undefined\}>\s*\n\s*<ThinkingClock \/>/.test(bubble),
+  "the panel clock counts invisibly and is revealed when the status row unmounts"
+);
+check(
+  "the plan sits directly under the thinking, above the tool rows",
+  bubble.indexOf('className="thinking-panel"') < bubble.indexOf("<PlanPanel") &&
+    bubble.indexOf("<PlanPanel") < bubble.indexOf("<ToolActivity"),
+  "tool rows between them pushed the thinking far from the plan"
+);
 
 // ------------------------------------- 5. asking before spending a fortune
 
@@ -260,9 +278,9 @@ check(
     bubble
   ) &&
     /const hasThinking = reasoningChars > 0 \|\| thinkingRequested;/.test(bubble) &&
-    /\{hasThinking && !thinkLoading && \(/.test(bubble) &&
+    /\{hasThinking && \(\s*\n\s*<div className="thinking-panel">/.test(bubble) &&
     /const thinkLoading = isThinkingPhase && !panelHasContent;/.test(bubble),
-  "a completed high-effort reply with no returned trace must still have a box — thinkLoading needs a live phase, so done replies always mount"
+  "a completed high-effort reply with no returned trace must still have a box — the mount no longer depends on the live phase at all"
 );
 check(
   "an effort of none still shows nothing",
@@ -576,9 +594,10 @@ check(
   "module level keeps the interval identity stable; a retry morphs the word in place instead of stacking a row"
 );
 check(
-  "the thinking panel stays unmounted until reasoning lands",
-  /\{hasThinking && !thinkLoading && \(/.test(bubble),
-  "the status line speaks alone in the silent gap — two voices with two clocks was the mess"
+  "the thinking panel lends its shimmer, not a second clock, to the wait",
+  /\{hasThinking && \(\s*\n\s*<div className="thinking-panel">/.test(bubble) &&
+    /thinkLoading \? "invisible" : undefined/.test(bubble),
+  "hiding the whole panel read as 'no thinking showing'; two visible clocks was the old mess"
 );
 check(
   "the wait lines start at the assistant bubble's content edge",
