@@ -120,6 +120,11 @@ export interface EngineStatus {
    * line the app threw away.
    */
   gpu?: EngineGpuState;
+  /**
+   * What this machine can run (fitted GPU layers, VRAM, threads), computed
+   * from nvidia-smi and the GGUF header. Null until the weights are on disk.
+   */
+  gpuPlan?: SidecarMachinePlan | null;
 }
 
 const ALLOWED_HOSTS = new Set([
@@ -196,17 +201,26 @@ export function pickLlamaAsset(
     gpu: EngineGpu;
     /** User override from Settings. "auto" (or absent) detects. */
     build?: EngineBuild;
+    /**
+     * Which CUDA major the installed card needs. "12" is the default and
+     * stays on the 12.x build; "13" is for Blackwell and newer (sm_120+),
+     * whose architecture did not exist when the 12.x toolkit shipped — a
+     * 12.x-built ggml-cuda has no kernels for it and fails to initialise,
+     * which used to mean a silent CPU run on brand-new cards.
+     */
+    cuda?: "12" | "13";
   }
 ): string | null {
   const names = assets.filter((n) => typeof n === "string" && n.length > 0);
   const has = (re: RegExp) => names.find((n) => re.test(n)) ?? null;
   const { platform, arch, gpu } = opts;
   const build = opts.build ?? "auto";
+  const cudaMajor = opts.cuda === "13" ? "13" : "12";
   const x64 = arch === "x64" || arch === "x86_64";
   const arm = arch === "arm64" || arch === "aarch64";
 
   const cudaWin = () =>
-    has(/llama-b\d+-bin-win-cuda-12\.4-x64\.zip$/) ??
+    has(new RegExp(`llama-b\\d+-bin-win-cuda-${cudaMajor}\\.\\d+-x64\\.zip$`)) ??
     has(/llama-b\d+-bin-win-cuda-\d+\.\d+-x64\.zip$/);
   const vulkanWin = () => has(/llama-b\d+-bin-win-vulkan-x64\.zip$/);
   const cpuWin = () => has(/llama-b\d+-bin-win-cpu-x64\.zip$/);
@@ -274,6 +288,102 @@ export function pickCudartAsset(
 /** Whether a chosen build asset needs the separate cudart archive. */
 export function needsCudart(mainAsset: string | null): boolean {
   return Boolean(mainAsset && /win-cuda-\d/.test(mainAsset));
+}
+
+/**
+ * Which CUDA major a card needs, from its nvidia-smi compute capability.
+ *
+ * CUDA 12.x toolkits predate Blackwell (sm 12.0): a 12.x-built ggml-cuda
+ * carries no kernels or PTX for it and fails to initialise, which used to
+ * strand RTX 50-series cards on the CPU even with the runtime installed.
+ * Anything sm 12.0+ takes the 13.x build; everything else (and "unknown")
+ * stays on 12.x, which is what the 12.4 build in this release targets.
+ */
+export function cudaMajorForComputeCap(cap: string | null): "12" | "13" {
+  const major = cap ? Number.parseInt(cap.trim().split(".")[0] ?? "", 10) : NaN;
+  return Number.isFinite(major) && major >= 12 ? "13" : "12";
+}
+
+/**
+ * What the machine can actually run, computed at start from nvidia-smi and
+ * the GGUF header — not from guesses. `ngl` 99 keeps its old meaning ("offload
+ * everything"); anything lower is a partial offload that fits the card.
+ */
+export interface SidecarMachinePlan {
+  ngl: number;
+  threads: number;
+  /** Total VRAM of the first NVIDIA GPU in MB, 0 when unknown. */
+  vramMB: number;
+  /** Transformer layers in the GGUF, 0 when unknown. */
+  layers: number;
+}
+
+/**
+ * How many layers fit on the card.
+ *
+ * A 27B at an 82K window needs ~17 GB of weights plus ~11 GB of q8_0 KV —
+ * full offload wants a ~32 GB card. Passing -ngl 99 on a smaller card does
+ * not partially offload; the CUDA malloc fails and the sidecar dies, so a
+ * 12 GB card used to mean "the engine never comes up". The fitted count
+ * keeps every layer's weights AND its KV shard on the device it runs on,
+ * with headroom for the OS/driver, compute buffers, and the vision tower.
+ * Unknown model shape (blockCount 0) keeps the old behaviour: 99.
+ */
+export function planGpuLayers(input: {
+  vramMB: number;
+  ggufBytes: number;
+  blockCount: number;
+  /** Full-model KV cache bytes per token at the sidecar's cache type. */
+  kvBytesPerToken: number;
+  ctxTokens: number;
+  mmprojBytes?: number;
+}): number {
+  const { vramMB, ggufBytes, blockCount, kvBytesPerToken, ctxTokens } = input;
+  if (
+    !Number.isFinite(vramMB) ||
+    vramMB <= 0 ||
+    !Number.isFinite(blockCount) ||
+    blockCount <= 0
+  ) {
+    return 99;
+  }
+  const mmproj = Number.isFinite(input.mmprojBytes) ? (input.mmprojBytes as number) : 0;
+  // No KV shape, no plan: fitting weights alone would over-count and OOM
+  // exactly like the old 99, only with a confident-looking wrong number.
+  if (!Number.isFinite(kvBytesPerToken) || kvBytesPerToken <= 0) return 99;
+  const perLayer =
+    ggufBytes / blockCount + (kvBytesPerToken * ctxTokens) / blockCount;
+  if (!Number.isFinite(perLayer) || perLayer <= 0) return 99;
+  const reserve =
+    2 * 1024 * 1024 * 1024 + // OS, desktop, driver on a Windows box
+    1 * 1024 * 1024 * 1024 + // compute buffers / graphs
+    Math.max(0, mmproj); // vision tower when the projector is installed
+  const avail = vramMB * 1024 * 1024 - reserve;
+  if (avail <= 0) return 0;
+  const fits = Math.floor(avail / perLayer);
+  if (fits >= blockCount) return 99;
+  return Math.max(0, fits);
+}
+
+/** One human line for the panel, or null when there is no plan to show. */
+export function formatGpuPlan(
+  plan: SidecarMachinePlan | null | undefined
+): string | null {
+  if (!plan || plan.vramMB <= 0 || plan.layers <= 0) return null;
+  const vram = `${Math.round(plan.vramMB / 1024)} GB`;
+  if (plan.ngl >= 99 || plan.ngl >= plan.layers) {
+    return `Offload plan: all ${plan.layers} layers on the GPU (${vram} VRAM).`;
+  }
+  if (plan.ngl <= 0) {
+    return (
+      `Offload plan: CPU only — the 27B does not fit in ${vram} of VRAM. ` +
+      `It still answers, roughly 10x slower than on a bigger card.`
+    );
+  }
+  return (
+    `Offload plan: ${plan.ngl}/${plan.layers} layers on the GPU ` +
+    `(${vram} card — the rest runs on CPU).`
+  );
 }
 
 /**
@@ -369,22 +479,44 @@ export function parseUserFlags(
   return { ok: true, tokens: parts };
 }
 
-export function sidecarLaunchId(spec: SidecarSpecState = defaultSpecState()): string {
+export function sidecarLaunchId(
+  spec: SidecarSpecState = defaultSpecState(),
+  machine?: { ngl?: number; threads?: number }
+): string {
   const enabled = [...spec.enabled].sort().join("+");
   const extra = spec.extra.join(" ");
-  return `c${SIDECAR_CTX}-q8-${enabled}-${extra}`;
+  const plan =
+    machine && (machine.ngl !== undefined || machine.threads !== undefined)
+      ? `-ngl${machine.ngl ?? 99}-t${machine.threads ?? "?"}`
+      : "";
+  return `c${SIDECAR_CTX}-q8-${enabled}-${extra}${plan}`;
 }
 
 /** Kept so older callers still compile. Prefer sidecarLaunchId. */
 export const SIDECAR_LAUNCH = sidecarLaunchId();
 
-/** Args for the sidecar. Host is loopback-only on purpose. */
+/**
+ * Args for the sidecar. Host is loopback-only on purpose.
+ *
+ * `machine` carries what this PC can do (fitted GPU layers, CPU threads).
+ * Absent it the old static flags are emitted, so existing callers are
+ * unaffected.
+ */
 export function sidecarArgs(
   ggufPath: string,
   mmprojPath?: string | null,
-  spec: SidecarSpecState = defaultSpecState()
+  spec: SidecarSpecState = defaultSpecState(),
+  machine?: { ngl?: number; threads?: number }
 ): string[] {
   const enabled = new Set(spec.enabled);
+  const ngl =
+    machine && Number.isFinite(machine.ngl)
+      ? Math.max(0, Math.min(99, Math.floor(machine.ngl as number)))
+      : 99;
+  const threads =
+    machine && Number.isFinite(machine.threads)
+      ? Math.max(1, Math.floor(machine.threads as number))
+      : 0;
   const args = [
     "-m",
     ggufPath,
@@ -400,7 +532,7 @@ export function sidecarArgs(
     "-c",
     String(SIDECAR_CTX),
     "-ngl",
-    "99",
+    String(ngl),
     // q8_0 KV is ~half of f16. 80K at f16 would add several GB on a machine
     // that already committed ~17 GB of weights.
     "--cache-type-k",
@@ -414,7 +546,17 @@ export function sidecarArgs(
     "256",
     "--parallel",
     "1",
+    // A thinking 27B on CPU can go minutes between tokens; the default
+    // server timeout would kill the stream mid-answer. Loopback only, so a
+    // long timeout costs nothing.
+    "--timeout",
+    "3600",
   ];
+  // Explicit thread counts: the default is build-dependent, and on a CPU or
+  // hybrid run the thread pool is the whole performance story.
+  if (threads > 0) {
+    args.push("--threads", String(threads), "--threads-batch", String(threads));
+  }
   for (const preset of SPEC_PRESETS) {
     if (enabled.has(preset.id)) args.push(...preset.args);
   }
