@@ -80,3 +80,12 @@ tools/capa-rules/
 
 # Output of `npm run report`, meant to be attached rather than committed.
 report.txt
+
+# PRISM-UI (Roblox Luau library): local toolchain checkouts and binaries.
+# The Luau language sources + the luau-run binary are build tooling, not the
+# deliverable; the shippable code is prism-ui/src + prism-ui/dist.
+/prism-ui/tools/luau-src/
+/prism-ui/tools/luau-run
+/prism-ui/tools/*.zip
+# ...except the shippable single-file bundle (negates root dist/ rule).
+!/prism-ui/dist/

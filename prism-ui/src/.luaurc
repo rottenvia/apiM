@@ -1,0 +1,28 @@
+{
+  "languageMode": "strict",
+  "lint": {
+    "*": true,
+    "LocalShadow": false
+  },
+  "globals": [
+    "game",
+    "gethui",
+    "setclipboard",
+    "writefile",
+    "readfile",
+    "isfile",
+    "makefolder",
+    "Instance",
+    "UDim",
+    "UDim2",
+    "Vector2",
+    "Color3",
+    "ColorSequence",
+    "ColorSequenceKeypoint",
+    "NumberSequence",
+    "NumberSequenceKeypoint",
+    "Enum",
+    "TweenInfo",
+    "task"
+  ]
+}
