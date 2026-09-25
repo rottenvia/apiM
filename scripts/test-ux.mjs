@@ -221,7 +221,7 @@ check(
   "the thinking panel mounts before the first reasoning token",
   /\{hasThinking && \(\s*\n\s*<div className="thinking-panel">/.test(bubble) &&
     !/hasThinking && !thinkLoading/.test(bubble),
-  "a minutes-long prefill showed no thinking voice at all"
+  "the mount stays (hidden) through the gap so the clock counts invisibly — the status row carries the visible voice"
 );
 check(
   "one visible timer during the silent gap",
@@ -594,10 +594,20 @@ check(
   "module level keeps the interval identity stable; a retry morphs the word in place instead of stacking a row"
 );
 check(
-  "the thinking panel lends its shimmer, not a second clock, to the wait",
+  "one Thinking during the silent gap — the bubble loader hides under the status row",
   /\{hasThinking && \(\s*\n\s*<div className="thinking-panel">/.test(bubble) &&
+    /const thinkHidden = thinkLoading && !message\.content\.trim\(\);/.test(
+      bubble
+    ) &&
+    /thinkHidden \? "hidden" : ""/.test(bubble) &&
     /thinkLoading \? "invisible" : undefined/.test(bubble),
-  "hiding the whole panel read as 'no thinking showing'; two visible clocks was the old mess"
+  "the shell stays mounted so its clock keeps counting; the row below is the only visible voice until the first token"
+);
+check(
+  "whitespace-only deltas do not unmount the status row",
+  /m\.content\.trim\(\)\.length > 0/.test(chatArea) &&
+    /m\.reasoningContent\.trim\(\)\.length > 0/.test(chatArea),
+  "the bubble shows nothing until real text lands — unmounting early would leave the gap voiceless"
 );
 check(
   "the wait lines start at the assistant bubble's content edge",
