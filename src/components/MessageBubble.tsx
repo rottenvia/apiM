@@ -610,12 +610,12 @@ function MessageBubbleImpl({
    *
    * This gates the CLOCK and the BODY, not the mount. The shell mounts
    * through the silent gap — streaming, thinking requested, no reasoning
-   * text yet — as a bare shimmering "Thinking", so a minutes-long prefill
-   * shows the thinking voice instead of nothing at all. The status row
-   * below owns the only VISIBLE clock during the gap; the panel's clock
-   * keeps counting invisibly and is revealed the moment text lands, which
-   * is also when the status row unmounts — one visible timer at all times,
-   * reading the whole phase, with no layout shift at the handoff.
+   * text yet — but hides while the status row below covers the wait (see
+   * thinkHidden): the row already says "Thinking" with the visible clock,
+   * and the shimmer header above it stacked a second "Thinking" over it.
+   * The panel's clock keeps counting invisibly and is revealed the moment
+   * text lands, which is also when the status row unmounts — one visible
+   * timer at all times, reading the whole phase.
    */
   const panelHasContent = Boolean(
     message.reasoningNotice ||
@@ -625,6 +625,16 @@ function MessageBubbleImpl({
 
   /** Live, but the first reasoning token has not landed yet: header only. */
   const thinkLoading = isThinkingPhase && !panelHasContent;
+  /**
+   * The covered gap: live, and nothing on screen yet — no reasoning text,
+   * no notice, no prose. The status row below is the thinking voice here,
+   * so the shell hides (staying mounted: its clock keeps counting and is
+   * revealed reading the whole phase when text lands, the same frame the
+   * row unmounts). Once prose streams the row is gone and the header stays
+   * visible: it is the only voice left, and the frame still warms in
+   * around it without shifting a pixel.
+   */
+  const thinkHidden = thinkLoading && !message.content.trim();
   /** The body stays shut through the silent gap — an open frame around
    * nothing was the empty outline this replaced. */
   const thinkBodyOpen = showThinking && !thinkLoading;
@@ -1394,13 +1404,17 @@ function MessageBubbleImpl({
                   data-thinking={isThinkingPhase}
                   data-open={thinkBodyOpen}
                   data-loading={thinkLoading}
-                  className="thinking-shell overflow-hidden rounded-lg"
+                  className={`thinking-shell overflow-hidden rounded-lg ${thinkHidden ? "hidden" : ""}`}
                 >
-                {/* The loader IS the header. Before the first reasoning token
-                    the shell is frameless — just a shimmering "Thinking" — and
-                    when text lands the same node gains its border, background
-                    and body over one 0.3s ease. Nothing spawns; the waiting
-                    state warms into the box. The row geometry never changes
+                {/* The loader IS the header — once prose streams. Before the
+                    first reasoning token the shell is frameless — just a
+                    shimmering "Thinking" — and when text lands the same node
+                    gains its border, background and body over one 0.3s ease.
+                    Nothing spawns; the waiting state warms into the box.
+                    Through the covered gap (no prose yet) the whole shell
+                    hides and the status row below carries the wait alone —
+                    one Thinking, not two stacked (see thinkHidden).
+                    The row geometry never changes
                     (same padding, chevron kept mounted but hidden, Follow
                     kept mounted but hidden), so the transform cannot shift a
                     pixel sideways. */}
