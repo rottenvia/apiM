@@ -1298,9 +1298,15 @@ export function ChatArea({
   // Show the standalone indicator until the assistant bubble actually has
   // something to display. Previously an empty streaming bubble was created
   // instantly, which suppressed the indicator and left a silent gap between
-  // sending and the first token.
+  // sending and the first token. Whitespace-only deltas do not count: the
+  // thinking panel stays hidden until real text lands, so unmounting here
+  // would leave the gap with no voice at all.
   const streamingHasOutput = messages.some(
-    (m) => m.isStreaming && (m.content || m.reasoningContent)
+    (m) =>
+      m.isStreaming &&
+      (m.content.trim().length > 0 ||
+        (typeof m.reasoningContent === "string" &&
+          m.reasoningContent.trim().length > 0))
   );
 
   // One shared column width for the messages and the composer, and it widens

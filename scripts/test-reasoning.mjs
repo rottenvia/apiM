@@ -302,7 +302,26 @@ const liveHtml = renderToStaticMarkup(
 check(
   "a live high-effort reply renders the box open with its text inside",
   liveHtml.includes('data-open="true"') &&
-    liveHtml.includes("Working through the request.")
+    liveHtml.includes("Working through the request.") &&
+    !liveHtml.includes("rounded-lg hidden")
+);
+const gapHtml = renderToStaticMarkup(
+  createElement(MessageBubble, {
+    message: {
+      id: "live-gap",
+      clientRenderKey: "stable-live-gap",
+      role: "assistant",
+      content: "",
+      reasoningContent: "",
+      thinkingEffort: "high",
+      isStreaming: true,
+    },
+  })
+);
+check(
+  "a live reply with no text yet hides the shell — the status row owns the wait",
+  gapHtml.includes("thinking-shell") && gapHtml.includes("rounded-lg hidden"),
+  "mounted but hidden: the clock keeps counting while the row below is the only Thinking on screen"
 );
 check(
   "the CSS cannot squash that rendered shell when entrance motion is disabled",
