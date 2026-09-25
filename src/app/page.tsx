@@ -248,6 +248,7 @@ type StreamEvent =
       reason: string;
       detail?: string;
       host?: string;
+      providerId?: string;
       inputChars?: number;
       breakdown?: { label: string; chars: number }[];
     }
@@ -2096,6 +2097,7 @@ export default function Home() {
                   reason: evt.reason,
                   detail: evt.detail,
                   host: evt.host,
+                  providerId: evt.providerId,
                   inputChars: evt.inputChars,
                   breakdown: evt.breakdown,
                   receivedAt: Date.now(),

@@ -608,12 +608,14 @@ function MessageBubbleImpl({
   /**
    * Does the panel have anything real to show right now?
    *
-   * This gates the MOUNT, not just the body. The shell used to mount
+   * This gates the CLOCK and the BODY, not the mount. The shell mounts
    * through the silent gap — streaming, thinking requested, no reasoning
-   * text yet — as a bare shimmering "Thinking", while ChatArea's status
-   * row kept its own clock below: two voices, two timers, one wait. Now
-   * the status row speaks alone until the first reasoning token lands,
-   * and the panel mounts once it has something to show.
+   * text yet — as a bare shimmering "Thinking", so a minutes-long prefill
+   * shows the thinking voice instead of nothing at all. The status row
+   * below owns the only VISIBLE clock during the gap; the panel's clock
+   * keeps counting invisibly and is revealed the moment text lands, which
+   * is also when the status row unmounts — one visible timer at all times,
+   * reading the whole phase, with no layout shift at the handoff.
    */
   const panelHasContent = Boolean(
     message.reasoningNotice ||
@@ -621,7 +623,7 @@ function MessageBubbleImpl({
         message.reasoningContent.trim().length > 0)
   );
 
-  /** Live, but the first reasoning token has not landed yet: loader, no box. */
+  /** Live, but the first reasoning token has not landed yet: header only. */
   const thinkLoading = isThinkingPhase && !panelHasContent;
   /** The body stays shut through the silent gap — an open frame around
    * nothing was the empty outline this replaced. */
@@ -1386,7 +1388,7 @@ function MessageBubbleImpl({
               is coming. "none" means the model was told not to think, and
               then there is correctly nothing to show.
             */}
-            {hasThinking && !thinkLoading && (
+            {hasThinking && (
               <div className="thinking-panel">
                 <div
                   data-thinking={isThinkingPhase}
@@ -1441,7 +1443,13 @@ function MessageBubbleImpl({
                       {isThinkingPhase ? (
                         <>
                           Thinking
-                          <ThinkingClock />
+                          {/* Counting invisibly through the silent gap: the
+                              status row owns the visible clock until the
+                              first token, then this one is revealed already
+                              showing the whole phase — one timer, no shift. */}
+                          <span className={thinkLoading ? "invisible" : undefined}>
+                            <ThinkingClock />
+                          </span>
                           {reasoningChars > 0 && (
                             <> · {formatThinkTokens(reasoningChars / 4)}</>
                           )}
@@ -1552,6 +1560,21 @@ function MessageBubbleImpl({
                   </div>
                 </div>
               </div>
+              </div>
+            )}
+
+            {/* The plan sits directly under the thinking: the two are the
+                frame the rest of the message is read inside, and a tool run
+                between them pushed the thinking far from the plan it was
+                reasoning about. Still above the reply, so it is seen rather
+                than found. */}
+            {message.plan && (
+              <div ref={planRef}>
+                <PlanPanel
+                  plan={message.plan}
+                  onUnblock={onUnblockPlan}
+                  onClear={onClearPlan}
+                />
               </div>
             )}
 
@@ -1765,19 +1788,6 @@ function MessageBubbleImpl({
                   </span>
                 </div>
               )}
-
-            {/* The plan sits above the reply: it is the frame the rest of the
-                message is read inside, and burying it under the prose would
-                make it something you find rather than something you see. */}
-            {message.plan && (
-              <div ref={planRef}>
-                <PlanPanel
-                  plan={message.plan}
-                  onUnblock={onUnblockPlan}
-                  onClear={onClearPlan}
-                />
-              </div>
-            )}
 
             {message.pendingCommand && onDecideCommand && (
               <ApprovalPrompt

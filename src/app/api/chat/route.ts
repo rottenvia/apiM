@@ -424,6 +424,7 @@ type StreamEvent =
       /** The provider's own rejection message, when the retry answers one. */
       detail?: string;
       host?: string;
+      providerId?: string;
       inputChars?: number;
       /** Where the request bytes live, largest first (see lib/request-size). */
       breakdown?: { label: string; chars: number }[];
@@ -2619,6 +2620,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   delayMs: 0,
                   reason: "",
                   host: target.providerName,
+                  providerId: target.providerId,
                   inputChars,
                   breakdown: sizeParts,
                 });
@@ -2632,6 +2634,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   delayMs,
                   reason,
                   host: target.providerName,
+                  providerId: target.providerId,
                   inputChars,
                   breakdown: sizeParts,
                 });
@@ -2782,6 +2785,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   reason: retryReason,
                   detail: rejectedDetail.slice(0, 200) || undefined,
                   host: target.providerName,
+                  providerId: target.providerId,
                   inputChars: sanitizedChars,
                   breakdown: breakdownRequestMessages(
                     retryBody.messages,
@@ -2873,6 +2877,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                             "still rejected — retrying once more, smaller and without tools",
                           detail: secondDetail.slice(0, 200) || undefined,
                           host: target.providerName,
+                          providerId: target.providerId,
                           inputChars: composedChars,
                           breakdown: breakdownRequestMessages(
                             composed.messages,
@@ -3018,6 +3023,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   delayMs: Math.round(backoffMs),
                   reason: "service busy",
                   host: target.providerName,
+                  providerId: target.providerId,
                   inputChars,
                   breakdown: sizeParts,
                 });
@@ -3089,6 +3095,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               delayMs: 0,
               reason: "",
               host: target.providerName,
+              providerId: target.providerId,
             });
           };
 
@@ -3441,6 +3448,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               delayMs: emptyRetryDelayMs,
               reason: firstTokenTimedOut ? "no first token" : "empty reply",
               host: target.providerName,
+              providerId: target.providerId,
               inputChars,
               breakdown: sizeParts,
             });

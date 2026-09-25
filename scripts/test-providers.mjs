@@ -684,6 +684,43 @@ check(
     shared.formatGpuPlan(null) === null &&
     /formatGpuPlan\(status\.gpuPlan\)/.test(localUi)
 );
+check(
+  "the engine log opens with the exact spawn flags",
+  /\[apiM\] spawn:/.test(engineSrc) &&
+    /appendFile\(engineLogPath\(\), `\[apiM\] spawn:/.test(engineSrc),
+  "one screenshot of the log answers '-ngl what?' without asking the user"
+);
+check(
+  "tight RAM is named in the offload plan",
+  (
+    shared.formatGpuPlan({
+      ngl: 19,
+      threads: 16,
+      vramMB: 12288,
+      layers: 64,
+      ramFreeGB: 2.2,
+    }) ?? ""
+  ).includes("swap") &&
+    !(
+      shared.formatGpuPlan({
+        ngl: 99,
+        threads: 16,
+        vramMB: 24576,
+        layers: 64,
+        ramFreeGB: 9,
+      }) ?? ""
+    ).includes("swap"),
+  "swapped CPU layers read as 'GPU burns, nothing comes'"
+);
+check(
+  "the route tags retrying notices with the provider id",
+  /providerId: target\.providerId,/.test(route)
+);
+check(
+  "the client carries the provider id to the banner",
+  /providerId: evt\.providerId/.test(page),
+  "the banner's local-prefill note keys off it"
+);
 
 check(
   "there is no CUDA ubuntu asset, so cuda on Linux lands on Vulkan",

@@ -68,6 +68,8 @@ export interface UpstreamNotice {
   /** The provider's own message behind a rejection-driven retry. */
   detail?: string;
   host?: string;
+  /** Resolved provider id ("local", "deepseek", "openrouter"). */
+  providerId?: string;
   waitedMs?: number;
   /** Approximate JSON body size of the completion request. */
   inputChars?: number;
@@ -355,8 +357,8 @@ function tenths(ms: number): string {
   /**
    * A fat body without a cause is a mystery the user cannot act on — "540k
    * in a small chat" reads as a bug until the banner says "(plugins 310k)".
-   * The biggest contributor rides inline once the body passes 100k; the
-   * full list is the tooltip.
+   * The biggest contributor rides inline once the body passes 25k (a local
+   * prefill waits on far less than 100k); the full list is the tooltip.
    */
   function sizeNote(inputChars?: number, breakdown?: { label: string; chars: number }[]): string {
     if (typeof inputChars !== "number" || inputChars < 8_000) return "";
@@ -367,7 +369,7 @@ function tenths(ms: number): string {
           ? `${(inputChars / 1e6).toFixed(0)}M`
           : `${(inputChars / 1000).toFixed(0)}k`;
     const top =
-      breakdown && breakdown.length > 0 && inputChars >= 100_000
+      breakdown && breakdown.length > 0 && inputChars >= 25_000
         ? ` (${breakdown[0].label} ${(breakdown[0].chars / 1000).toFixed(0)}k)`
         : "";
     return ` · ${size} chars in${top}`;
@@ -397,14 +399,22 @@ export function formatUpstreamNotice(
 
   const waited = info.waitedMs ?? Math.max(0, nowMs - receivedAt);
   const size = sizeNote(info.inputChars, info.breakdown);
+  // A local sidecar prefills the whole prompt before its first token: tens
+  // of seconds on a warm slot, minutes on a cold start with a fat prompt —
+  // and the GPU burns the whole time, which reads as "stuck at 97%". Name
+  // the wait so it reads as work in progress instead of a hang.
+  const prefill =
+    info.providerId === "local" && (info.inputChars ?? 0) >= 20_000
+      ? " · prefilling — first token takes minutes on a cold start"
+      : "";
   if (waited < HIDE_ATTEMPT_BEFORE_MS && !info.reason) {
-    return `Calling ${host} — try ${info.attempt} of ${info.attempts}${size}`;
+    return `Calling ${host} — try ${info.attempt} of ${info.attempts}${size}${prefill}`;
   }
   const why = info.reason?.trim();
   const prefix = why ? `${why} — waiting on ${host}` : `Waiting on ${host}`;
   // No elapsed timer here: the status row owns the clock, and a second
   // ticking count read as two clocks disagreeing about the same wait.
-  return `${prefix} — try ${info.attempt} of ${info.attempts}${size}`;
+  return `${prefix} — try ${info.attempt} of ${info.attempts}${size}${prefill}`;
 }
 
 /**
