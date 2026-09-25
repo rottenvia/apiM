@@ -8,11 +8,13 @@
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createWriteStream, readFileSync, rmSync, promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
 import {
   assertAllowedDownloadUrl,
+  cudaMajorForComputeCap,
   DEFAULT_LOCAL_API_MODEL,
   DEFAULT_LOCAL_BASE_URL,
   downloadPercent,
@@ -34,6 +36,7 @@ import {
   pickLlamaAsset,
   pickCudartAsset,
   needsCudart,
+  planGpuLayers,
   sidecarArgs,
   sidecarLaunchId,
   SIDECAR_CTX,
@@ -43,6 +46,7 @@ import {
   type EngineGpu,
   type EngineGpuState,
   type EngineStatus,
+  type SidecarMachinePlan,
   type SidecarSpecState,
 } from "@/lib/local-engine-shared";
 
@@ -135,6 +139,47 @@ export function detectGpu(): EngineGpu {
   return "none";
 }
 
+export interface NvidiaGpuInfo {
+  /** Total VRAM of the first GPU in MB. */
+  vramMB: number;
+  /** Compute capability, e.g. "8.9". */
+  computeCap: string;
+}
+
+/**
+ * One nvidia-smi call for VRAM and compute capability.
+ *
+ * Null when there is no NVIDIA driver (AMD/Intel Macs, CPU boxes), so every
+ * caller must have a non-NVIDIA path. Single-GPU assumption: a second card
+ * is ignored, like the sidecar's own default device choice.
+ */
+export function queryNvidiaGpu(): NvidiaGpuInfo | null {
+  try {
+    const probe = spawnSync(
+      "nvidia-smi",
+      ["--query-gpu=memory.total,compute_cap", "--format=csv,noheader,nounits"],
+      { timeout: 3_000, windowsHide: true, encoding: "utf8" }
+    );
+    if (probe.status !== 0) return null;
+    const first = String(probe.stdout || "")
+      .split("\n")
+      .map((l) => l.trim())
+      .find((l) => l.length > 0);
+    if (!first) return null;
+    const [mem, cap] = first.split(",").map((s) => s.trim());
+    const vramMB = Number.parseInt(mem ?? "", 10);
+    if (!Number.isFinite(vramMB) || vramMB <= 0) return null;
+    return { vramMB, computeCap: cap ?? "" };
+  } catch {
+    return null;
+  }
+}
+
+/** Which CUDA major the installed card needs ("12" unless Blackwell/newer). */
+export function detectCudaMajor(): "12" | "13" {
+  return cudaMajorForComputeCap(queryNvidiaGpu()?.computeCap ?? null);
+}
+
 export async function engineStatus(): Promise<EngineStatus> {
   await maybeUnloadIdle();
   const bytes = await fileSize(ggufPath());
@@ -164,6 +209,9 @@ export async function engineStatus(): Promise<EngineStatus> {
     hint: engineHint(flags),
     spec,
     gpu: await buildGpuState(running),
+    gpuPlan: ggufReady
+      ? await planSidecarMachine(ggufPath(), mmprojReady ? mmprojPath() : null, spec)
+      : null,
   };
 }
 
@@ -382,7 +430,17 @@ export async function downloadEngine(
 ): Promise<void> {
   const emit = (evt: EngineDownloadEvent) => onEvent(evt);
 
-  if (!(await fileSize(ggufPath()) >= GGUF_BYTES)) {
+  // A running sidecar locks llama-server and its DLLs on Windows: replacing
+  // the build or installing the CUDA runtime under it fails with EPERM, and
+  // the copy errors used to be swallowed — Download "succeeded" and Start
+  // still refused. Stop first so the files are actually replaceable.
+  emit({ type: "status", message: "Stopping Qwen so its files can be replaced…" });
+  stopEngine();
+  await waitUntilStopped(15_000);
+
+  // Same 98% bar as Settings and Start: requiring the exact catalog bytes
+  // re-downloaded all 17 GB every time the size differed by a hair.
+  if (!ggufLooksComplete(await fileSize(ggufPath()))) {
     emit({ type: "status", message: "Downloading Qwen 3.8 27B onto this PC…" });
     await downloadToFile(
       GGUF_URL,
@@ -428,6 +486,7 @@ export async function downloadEngine(
     arch: process.arch,
     gpu: detectGpu(),
     build: spec.build,
+    cuda: detectCudaMajor(),
   });
   const asset = assets.find((a) => a.name === wanted);
   if (!asset) {
@@ -469,6 +528,16 @@ export async function downloadEngine(
   const cudartAsset = cudartName
     ? assets.find((a) => a.name === cudartName)
     : null;
+  // No companion runtime in this release: Download must fail HERE naming the
+  // escape. Skipping silently used to "succeed" and Start then refused with
+  // "click Download again" — an infinite loop with no way out.
+  if (needsCudart(asset.name) && !cudartAsset) {
+    throw new Error(
+      `The ${LLAMA_CPP_RELEASE} release ships no CUDA runtime archive for ` +
+        `${asset.name}, so the CUDA build cannot work. Select Vulkan in ` +
+        `Engine backend and click Download again.`
+    );
+  }
   const needCudart =
     Boolean(cudartAsset) &&
     (needMain || !(await cudartPresent(await findServerBinary())));
@@ -553,7 +622,12 @@ export async function downloadEngine(
 async function cudartPresent(server: string | null): Promise<boolean> {
   if (!server || process.platform !== "win32") return false;
   const dir = path.dirname(server);
-  for (const dll of ["cublasLt64_12.dll", "cublasLt64_13.dll", "cudart64_12.dll"]) {
+  for (const dll of [
+    "cublasLt64_12.dll",
+    "cublasLt64_13.dll",
+    "cudart64_12.dll",
+    "cudart64_13.dll",
+  ]) {
     try {
       await fs.access(path.join(dir, dll));
       return true;
@@ -562,6 +636,30 @@ async function cudartPresent(server: string | null): Promise<boolean> {
     }
   }
   return false;
+}
+
+/**
+ * Which runtime DLLs the CUDA build expects beside the server but cannot
+ * find. The names follow the CUDA major of the installed build (12 vs 13),
+ * so the Start refusal can name the exact files instead of waving at
+ * "the runtime". Deliberately NOT platform-gated — the caller only runs it
+ * on Windows, and the pure fs check stays unit-testable anywhere.
+ */
+export async function missingCudartDlls(
+  serverDir: string,
+  mainAsset: string | null
+): Promise<string[]> {
+  const major = /win-cuda-13\./.test(mainAsset ?? "") ? "13" : "12";
+  const want = [`cudart64_${major}.dll`, `cublas64_${major}.dll`, `cublasLt64_${major}.dll`];
+  const missing: string[] = [];
+  for (const dll of want) {
+    try {
+      await fs.access(path.join(serverDir, dll));
+    } catch {
+      missing.push(dll);
+    }
+  }
+  return missing;
 }
 
 /**
@@ -652,13 +750,38 @@ async function installCudart(
       }
     };
     await collect(staging, 0);
+    if (dlls.length === 0) {
+      throw new Error(
+        "The CUDA runtime archive held no DLLs — the download may be corrupt. " +
+          "Delete it from the engine cache and click Download again."
+      );
+    }
+    // Copy errors used to be swallowed, so a locked or unwritable file
+    // "succeeded" and Start still refused afterwards. Name the failure.
+    const failures: string[] = [];
     for (const dll of dlls) {
       const target = path.join(serverDir, path.basename(dll));
-      await fs.copyFile(dll, target).catch(() => {});
+      try {
+        await fs.copyFile(dll, target);
+      } catch (err) {
+        failures.push(
+          `${path.basename(dll)} (${err instanceof Error ? err.message : "copy failed"})`
+        );
+      }
+    }
+    if (failures.length > 0) {
+      const shown = failures.slice(0, 3).join("; ");
+      throw new Error(
+        `Could not install the CUDA runtime beside llama-server: ${shown}` +
+          (failures.length > 3 ? ` (+${failures.length - 3} more)` : "") +
+          ". If llama-server is running, Unload it first, then Download again."
+      );
     }
     if (!(await cudartPresent(server))) {
       throw new Error(
-        "The CUDA runtime extracted but its DLLs were not found in it."
+        "The CUDA runtime copied but its DLLs are still not visible beside " +
+          "llama-server — an antivirus or a permissions problem may be eating " +
+          "them. Check the engine folder, then Download again."
       );
     }
   } finally {
@@ -1016,11 +1139,190 @@ async function launchMatches(id: string): Promise<boolean> {
   }
 }
 
+export interface GgufModelInfo {
+  blockCount: number;
+  /** Full-model KV cache bytes per token at q8_0. */
+  kvBytesPerToken: number;
+}
+
+/**
+ * Layer count and KV shape from the GGUF header — no mmap, no weights.
+ *
+ * The shape keys sit in the first kilobytes, but the same section also
+ * carries the tokenizer tables (a Qwen3 vocab is ~152K strings, several
+ * MB), so the window is 8 MB and parsing stops the moment all five values
+ * are in hand. Null on anything unexpected (short file, unknown layout):
+ * callers fall back to the old static flags rather than planning from
+ * guesses.
+ */
+export async function readGgufModelInfo(
+  gguf: string
+): Promise<GgufModelInfo | null> {
+  let head: Buffer;
+  try {
+    const fd = await fs.open(gguf, "r");
+    try {
+      head = Buffer.alloc(8 * 1024 * 1024);
+      const { bytesRead } = await fd.read(head, 0, head.length, 0);
+      head = head.subarray(0, bytesRead);
+    } finally {
+      await fd.close().catch(() => {});
+    }
+  } catch {
+    return null;
+  }
+  try {
+    let off = 0;
+    const need = (n: number): boolean => off + n <= head.length;
+    if (!need(4 + 4 + 8 + 8)) return null;
+    if (head.subarray(off, off + 4).toString("ascii") !== "GGUF") return null;
+    off += 4; // magic
+    off += 4; // version
+    const tensorCount = Number(head.readBigUInt64LE(off));
+    off += 8;
+    const kvCount = Number(head.readBigUInt64LE(off));
+    off += 8;
+    if (!Number.isFinite(kvCount) || kvCount < 0 || kvCount > 10_000) return null;
+
+    const str = (): string | null => {
+      if (!need(8)) return null;
+      const len = Number(head.readBigUInt64LE(off));
+      off += 8;
+      if (!Number.isFinite(len) || len < 0 || !need(len)) return null;
+      const s = head.subarray(off, off + len).toString("utf8");
+      off += len;
+      return s;
+    };
+    // Value sizes by GGUF type id (8 = string, 9 = array handled by caller).
+    const VALUE_SIZES: Record<number, number> = {
+      0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8,
+    };
+    const skipValue = (type: number): boolean => {
+      if (type === 8) return str() !== null;
+      if (type === 9) {
+        if (!need(4 + 8)) return false;
+        const elem = head.readUInt32LE(off);
+        off += 4;
+        const len = Number(head.readBigUInt64LE(off));
+        off += 8;
+        // A Qwen3 token table is ~152K entries; anything past this is garbage.
+        if (!Number.isFinite(len) || len < 0 || len > 300_000) return false;
+        if (elem === 8) {
+          for (let i = 0; i < len; i++) if (str() === null) return false;
+          return true;
+        }
+        const size = VALUE_SIZES[elem];
+        if (size === undefined || !need(size * len)) return false;
+        off += size * len;
+        return true;
+      }
+      const size = VALUE_SIZES[type];
+      if (size === undefined || !need(size)) return false;
+      // Only u32 values are ever read back; the rest just advance.
+      off += size;
+      return true;
+    };
+
+    const numbers = new Map<string, number>();
+    let arch: string | null = null;
+    const haveAll = (): boolean =>
+      arch !== null &&
+      (numbers.get(`${arch}.block_count`) ?? 0) > 0 &&
+      (numbers.get(`${arch}.embedding_length`) ?? 0) > 0 &&
+      (numbers.get(`${arch}.attention.head_count`) ?? 0) > 0 &&
+      (numbers.get(`${arch}.attention.head_count_kv`) ?? 0) > 0;
+    for (let i = 0; i < kvCount; i++) {
+      const key = str();
+      if (key === null || !need(4)) return null;
+      const type = head.readUInt32LE(off);
+      off += 4;
+      if (type === 4 && need(4)) {
+        const value = head.readUInt32LE(off);
+        off += 4;
+        numbers.set(key, value);
+      } else if (key === "general.architecture" && type === 8) {
+        arch = str();
+        if (arch === null) return null;
+      } else if (!skipValue(type)) {
+        return null;
+      }
+      // The shape keys come before the multi-MB tokenizer tables: stop as
+      // soon as they are all in hand instead of walking vocabularies.
+      if (haveAll()) break;
+    }
+    void tensorCount;
+    if (!arch || !haveAll()) return null;
+    const blockCount = numbers.get(`${arch}.block_count`) ?? 0;
+    const emb = numbers.get(`${arch}.embedding_length`) ?? 0;
+    const heads = numbers.get(`${arch}.attention.head_count`) ?? 0;
+    const kvHeads = numbers.get(`${arch}.attention.head_count_kv`) ?? 0;
+    if (emb % heads !== 0) return null;
+    // q8_0: one byte per K and per V element.
+    const kvBytesPerToken = blockCount * kvHeads * (emb / heads) * 2;
+    return { blockCount, kvBytesPerToken };
+  } catch {
+    return null;
+  }
+}
+
+let planCache: { at: number; key: string; plan: SidecarMachinePlan } | null =
+  null;
+
+/**
+ * What this machine can run: fitted GPU layers plus CPU threads.
+ *
+ * NVIDIA only for the layer fit (it is the only card with a VRAM query);
+ * threads apply everywhere. Cached briefly: status polls this every few
+ * seconds. On anything unknown the plan is the old static behaviour
+ * (ngl 99), never a guess that could OOM a card.
+ */
+export async function planSidecarMachine(
+  gguf: string,
+  mmproj: string | null,
+  spec: SidecarSpecState
+): Promise<SidecarMachinePlan> {
+  const cpus = (() => {
+    try {
+      const n = os.cpus().length;
+      return Number.isFinite(n) && n > 0 ? n : 4;
+    } catch {
+      return 4;
+    }
+  })();
+  const idle: SidecarMachinePlan = { ngl: 99, threads: cpus, vramMB: 0, layers: 0 };
+  const gpu = queryNvidiaGpu();
+  if (!gpu || spec.build === "cpu") return idle;
+  const key = `${spec.build ?? "auto"}:${await fileSize(gguf)}:${mmproj ? await fileSize(mmproj) : 0}`;
+  const now = Date.now();
+  if (planCache && planCache.key === key && now - planCache.at < 120_000) {
+    return { ...planCache.plan, threads: cpus };
+  }
+  const info = await readGgufModelInfo(gguf);
+  const plan: SidecarMachinePlan = info
+    ? {
+        ngl: planGpuLayers({
+          vramMB: gpu.vramMB,
+          ggufBytes: await fileSize(gguf),
+          blockCount: info.blockCount,
+          kvBytesPerToken: info.kvBytesPerToken,
+          ctxTokens: SIDECAR_CTX,
+          mmprojBytes: mmproj ? await fileSize(mmproj) : 0,
+        }),
+        threads: cpus,
+        vramMB: gpu.vramMB,
+        layers: info.blockCount,
+      }
+    : idle;
+  planCache = { at: now, key, plan };
+  return plan;
+}
+
 async function spawnSidecar(
   server: string,
   gguf: string,
   mmproj: string | undefined,
-  spec: SidecarSpecState
+  spec: SidecarSpecState,
+  machine: SidecarMachinePlan
 ): Promise<{ ok: boolean; error?: string }> {
   stopEngine();
   await waitUntilStopped(10_000);
@@ -1039,7 +1341,7 @@ async function spawnSidecar(
   await fs.writeFile(engineLogPath(), "", "utf8");
 
   try {
-    child = spawn(server, sidecarArgs(gguf, mmproj, spec), {
+    child = spawn(server, sidecarArgs(gguf, mmproj, spec, machine), {
       cwd: path.dirname(server),
       detached: process.platform !== "win32",
       stdio: ["ignore", "ignore", "pipe"],
@@ -1084,6 +1386,10 @@ async function spawnSidecar(
   child.unref();
 
   let up = await waitForHealth(180_000);
+  // The retry below re-spawns with flash off: the stamp must describe what
+  // is actually running, or the next Start sees a mismatch and pays for a
+  // full 27B reload bounce.
+  let launchedSpec = spec;
 
   if (!up && spec.enabled.includes("flash")) {
     // Flash attention can refuse a GPU the other flags were fine on. Retry
@@ -1096,6 +1402,7 @@ async function spawnSidecar(
         enabled: spec.enabled.filter((id) => id !== "flash"),
       };
       await writeSpecState(fixed);
+      launchedSpec = fixed;
       logStream.end();
       stopEngine();
       await waitUntilStopped(10_000);
@@ -1107,7 +1414,7 @@ async function spawnSidecar(
         };
       }
       await fs.writeFile(engineLogPath(), "", "utf8");
-      child = spawn(server, sidecarArgs(gguf, mmproj, fixed), {
+      child = spawn(server, sidecarArgs(gguf, mmproj, fixed, machine), {
         cwd: path.dirname(server),
         detached: process.platform !== "win32",
         stdio: ["ignore", "ignore", "pipe"],
@@ -1157,7 +1464,7 @@ async function spawnSidecar(
         `An old llama-server is still answering. End llama-server in Task Manager and click Restart.`,
     };
   }
-  await writeLaunchStamp(sidecarLaunchId(spec));
+  await writeLaunchStamp(sidecarLaunchId(launchedSpec, machine));
   await touchSidecarUsed();
   return { ok: true };
 }
@@ -1178,7 +1485,12 @@ export async function startEngine(): Promise<{ ok: boolean; error?: string }> {
     await writeSpecState(first);
   }
   const spec = await readSpecState();
-  const wanted = sidecarLaunchId(spec);
+  const gguf = ggufPath();
+  const projector = mmprojPath();
+  const mmprojForPlan =
+    (await fileSize(projector)) >= MMPROJ_MIN_BYTES ? projector : null;
+  const machine = await planSidecarMachine(gguf, mmprojForPlan, spec);
+  const wanted = sidecarLaunchId(spec, machine);
 
   if (await isEngineListening()) {
     const ctx = await readSidecarCtx();
@@ -1192,7 +1504,6 @@ export async function startEngine(): Promise<{ ok: boolean; error?: string }> {
     await waitUntilStopped(10_000);
   }
 
-  const gguf = ggufPath();
   if (!ggufLooksComplete(await fileSize(gguf))) {
     return {
       ok: false,
@@ -1264,22 +1575,28 @@ export async function startEngine(): Promise<{ ok: boolean; error?: string }> {
       };
     }
     if (onCudaBuild && !(await cudartPresent(server ?? null))) {
+      const missing =
+        server != null
+          ? await missingCudartDlls(path.dirname(server), installed)
+          : [];
+      const names =
+        missing.length > 0
+          ? ` — missing beside llama-server: ${missing.join(", ")}`
+          : "";
       return {
         ok: false,
         error:
           "The CUDA engine is installed but its runtime libraries (cudart / " +
-          "cuBLAS) are missing, so ggml-cuda cannot load and the engine falls " +
-          "back to CPU. Open Settings and click Download again — it now also " +
+          `cuBLAS) are missing${names}, so ggml-cuda cannot load and the ` +
+          "engine falls back to CPU. Open Settings and click Download — it " +
           "fetches the ~390 MB CUDA runtime archive and installs the DLLs " +
-          "beside llama-server.",
+          "beside llama-server. If Download just ran, a running " +
+          "llama-server may have locked them — Unload, Download, then Start.",
       };
     }
   }
 
-  const projector = mmprojPath();
-  const mmproj =
-    (await fileSize(projector)) >= MMPROJ_MIN_BYTES ? projector : undefined;
-  return spawnSidecar(server, gguf, mmproj, spec);
+  return spawnSidecar(server, gguf, mmprojForPlan ?? undefined, spec, machine);
 }
 
 /** Persist spec flags and bounce the sidecar so they take effect. */
