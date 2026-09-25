@@ -196,6 +196,7 @@ import {
   completionHeaders,
   OPENROUTER_FIRST_TOKEN_MS,
   openrouterProviderFor,
+  openrouterReasoningMandatory,
   providerHttpError,
   providerTimedOut,
   providerUnreachable,
@@ -2068,6 +2069,14 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          * saturated pool eventually surfaces, rather than looping forever.
          */
         let rateLimitRetries = 0;
+        /**
+         * The endpoint refused `reasoning: { effort: "none" }` ("reasoning is
+         * mandatory") at least once this run. A static pin covers verified
+         * endpoints; this covers the rest — and from here on every round
+         * clamps the disable to minimal effort instead of burning another
+         * free 400 to re-learn it.
+         */
+        let keepReasoningOn = false;
         /** Set when the reply stopped because it ran out of room. */
         let hitOutputCeiling = false;
         /**
@@ -2502,7 +2511,17 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             dsRequestBody,
             target.thinkingStyle,
             thinkingEnabled && !forceNoThinking,
-            forceNoThinking ? "none" : resolvedEffort
+            forceNoThinking ? "none" : resolvedEffort,
+            // Mandatory-reasoning endpoints 400 on the disable (the budget
+            // shove and prose continuations kept dying on the fp4 pin), so
+            // the off signal clamps to minimal effort there instead.
+            target.providerId === "openrouter"
+              ? {
+                  reasoningMandatory:
+                    openrouterReasoningMandatory(target.model.id) ||
+                    keepReasoningOn,
+                }
+              : undefined
           );
 
           if (workspaceEnabled) {
@@ -2740,7 +2759,29 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               const sizeDriven = isSizeRejection(dsResponse.status, rejectedDetail);
               let retryBody: Record<string, unknown> | null = null;
               let retryReason = "";
-              if (sizeDriven && Array.isArray(dsRequestBody.messages)) {
+              // MANDATORY reasoning ("Reasoning is mandatory for this
+              // endpoint and cannot be disabled"): the disable field itself
+              // is the offense, so neither folding nor tool-stripping can
+              // help — retrying either fails identically WITH a defanged
+              // agent. Lift the disable to minimal effort, keep everything
+              // else byte-identical, and remember it for the rest of the run.
+              // Checked first: a mandatory 400 on a fat body must not fold.
+              const disableSent =
+                (
+                  dsRequestBody.reasoning as { effort?: unknown } | undefined
+                )?.effort === "none";
+              if (
+                dsResponse.status === 400 &&
+                /reasoning is mandatory/i.test(rejectedDetail) &&
+                disableSent
+              ) {
+                keepReasoningOn = true;
+                retryBody = { ...dsRequestBody };
+                delete retryBody.reasoning;
+                retryBody.reasoning_effort = "low";
+                retryReason =
+                  "endpoint requires reasoning — retrying with minimal thinking instead of none";
+              } else if (sizeDriven && Array.isArray(dsRequestBody.messages)) {
                 // Fold oldest history, keep the agent whole. Media rides the
                 // same retry (it is mass too) but the tools stay: without
                 // them the round degrades to prose and the task stalls.
@@ -2874,10 +2915,19 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                         dsRequestBody.messages as Record<string, unknown>[],
                         FOLD_RETRY_TARGET_CHARS
                       );
-                      const composed = sanitizeOpenRouterRequestBody({
+                      // The composed retry refolds the ORIGINAL body — without
+                      // this the lifted disable would sneak back in and the
+                      // third attempt would 400 on mandatory reasoning again.
+                      const composedBase: Record<string, unknown> = {
                         ...dsRequestBody,
                         messages: refolded.messages,
-                      });
+                      };
+                      if (keepReasoningOn) {
+                        delete composedBase.reasoning;
+                        composedBase.reasoning_effort = "low";
+                      }
+                      const composed =
+                        sanitizeOpenRouterRequestBody(composedBase);
                       const composedJson = JSON.stringify(composed);
                       if (composedJson !== retryJson) {
                         const composedChars = composedJson.length;

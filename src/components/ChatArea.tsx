@@ -1559,7 +1559,15 @@ export function ChatArea({
             />
             )}
 
-            <div className="space-y-6">
+            {/* The covered wait stacks tight: effort pill, status row and
+                request line merge into one compact block instead of three
+                airy rows. The relaxed rhythm returns with the first token —
+                this only ever applies while the status row owns the wait. */}
+            <div
+              className={
+                isLoading && !streamingHasOutput ? "space-y-1" : "space-y-6"
+              }
+            >
               <MessageList
                 messages={messages}
                 onRegenerate={onRegenerate}

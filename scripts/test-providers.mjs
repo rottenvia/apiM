@@ -191,6 +191,25 @@ check(
   "sending nothing left GLM/Nemotron thinking by provider default"
 );
 
+const ocMandatory = {};
+providers.applyThinking(ocMandatory, "openai", false, "none", {
+  reasoningMandatory: true,
+});
+check(
+  "OpenRouter thinking-off on a mandatory endpoint clamps to minimal effort",
+  ocMandatory.reasoning === undefined &&
+    ocMandatory.reasoning_effort === "low",
+  "the disable 400s on inference-net/fp4 — low keeps the round legal"
+);
+check(
+  "GLM's pinned endpoint is marked mandatory, unverified pins are not",
+  providers.openrouterReasoningMandatory("glm-5.3-flash") === true &&
+    providers.openrouterReasoningMandatory("deepseek-v4.1-flash") === false &&
+    providers.openrouterReasoningMandatory("nvidia-nemotron-3-ultra-free") ===
+      false,
+  "only verified pins — an unproven entry would force think tokens on an explicit off"
+);
+
 console.log("\n4. Pricing");
 
 check("the Nemotron free lane is in the rate table", Boolean(pricing.MODEL_RATES["nvidia-nemotron-3-ultra-free"]));
@@ -1173,6 +1192,23 @@ check(
     /composedJson !== retryJson/.test(route) &&
     /stillTooBig/.test(route),
   "a double fault (oversized AND tool-shy) defeats either transform alone"
+);
+check(
+  "a mandatory-reasoning 400 lifts the disable instead of folding or stripping",
+  /\/reasoning is mandatory\/i\.test\(rejectedDetail\)/.test(route) &&
+    /delete retryBody\.reasoning;/.test(route) &&
+    /retryBody\.reasoning_effort = "low";/.test(route) &&
+    /retrying with minimal thinking instead of none/.test(route),
+  "folding keeps the offending field and fails identically with a defanged agent"
+);
+check(
+  "the clamp is learned for the run and survives the composed retry",
+  /let keepReasoningOn = false;/.test(route) &&
+    /openrouterReasoningMandatory\(target\.model\.id\) \|\|[\s\S]{0,40}keepReasoningOn/.test(
+      route
+    ) &&
+    /delete composedBase\.reasoning;/.test(route),
+  "otherwise every later shove round burns another 400 to re-learn it"
 );
 check(
   "the retry event carries the provider's own message",

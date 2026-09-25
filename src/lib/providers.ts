@@ -298,6 +298,26 @@ export function openrouterProviderFor(
   return tag ? { only: [tag], allow_fallbacks: false } : null;
 }
 
+/**
+ * Catalog models whose pinned OpenRouter endpoint mandates reasoning.
+ *
+ * inference-net/fp4 400s on `reasoning: { effort: "none" }` ("Reasoning is
+ * mandatory for this endpoint and cannot be disabled"), so the thinking-off
+ * signal must never be sent on this lane — minimal effort instead. Only
+ * verified pins belong here: an unproven entry would force thinking (and
+ * think tokens) on a user who explicitly switched it off. Unknown endpoints
+ * are covered by the route's mandatory-reasoning rejection retry, which
+ * learns the same clamp for the rest of the run after one free 400.
+ */
+const OPENROUTER_MANDATORY_REASONING: ReadonlySet<string> = new Set([
+  "glm-5.3-flash",
+]);
+
+/** True when the catalog model's pinned endpoint rejects the reasoning disable. */
+export function openrouterReasoningMandatory(modelId: string): boolean {
+  return OPENROUTER_MANDATORY_REASONING.has(modelId);
+}
+
 /** Headers for a Chat Completions POST. OpenRouter asks for a referer. */
 export function completionHeaders(target: ResolvedTarget): Record<string, string> {
   const headers: Record<string, string> = {
@@ -351,14 +371,17 @@ export function qwenReasoningEffort(effort: string): "low" | "medium" | "xhigh" 
  * default: the think-only shove ("Do not think more") could not work, the
  * model thought through the budget a second time, and the run stopped
  * mid-task. OpenRouter documents `reasoning: { effort: "none" }` as the
- * disable, so off now sends exactly that. Only `mandatory`-reasoning
- * models reject it, and none of the built-ins are.
+ * disable, so off now sends exactly that — except on mandatory-reasoning
+ * pins (see OPENROUTER_MANDATORY_REASONING), which 400 on the disable and
+ * get minimal effort instead. Unknown endpoints learn the same clamp from
+ * the route's rejection retry after one free 400.
  */
 export function applyThinking(
   body: Record<string, unknown>,
   style: ThinkingStyle,
   thinkingEnabled: boolean,
-  effort: string
+  effort: string,
+  opts?: { reasoningMandatory?: boolean }
 ): void {
   const level = VALID_EFFORTS.has(effort) ? effort : "high";
 
@@ -387,6 +410,10 @@ export function applyThinking(
   }
 
   if (thinkingEnabled) body.reasoning_effort = level;
+  // A mandatory-reasoning endpoint 400s on the disable — minimal effort
+  // keeps the round legal while honoring the intent (stop the giant think,
+  // answer now). The budget shove and prose continuations rely on this.
+  else if (opts?.reasoningMandatory) body.reasoning_effort = "low";
   else body.reasoning = { effort: "none" };
 }
 
