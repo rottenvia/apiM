@@ -535,6 +535,155 @@ check(
     /cudartPresent\(/.test(engineSrc) &&
     /\.dll/i.test(engineSrc)
 );
+// ---------------- CUDA that actually lands on the card, and fits on it ---
+//
+// The cudart preflight stranded users in a "click Download again" loop: the
+// failure modes (locked files, a release without the companion archive, the
+// wrong CUDA major for the card, VRAM the 27B cannot fit) each needed their
+// own honest error or automatic fix.
+
+const WIN_CUDA_BOTH = [
+  "llama-b10566-bin-win-cuda-12.4-x64.zip",
+  "llama-b10566-bin-win-cuda-13.3-x64.zip",
+  ...WIN_ASSETS,
+];
+check(
+  "Blackwell and newer (sm 12+) take the 13.x CUDA build",
+  shared.cudaMajorForComputeCap("12.0") === "13" &&
+    shared.cudaMajorForComputeCap("10.0") === "12" &&
+    shared.cudaMajorForComputeCap("8.9") === "12" &&
+    shared.cudaMajorForComputeCap(null) === "12" &&
+    shared.pickLlamaAsset(WIN_CUDA_BOTH, {
+      platform: "win32",
+      arch: "x64",
+      gpu: "nvidia",
+      cuda: "13",
+    }) === "llama-b10566-bin-win-cuda-13.3-x64.zip",
+  "a 12.x-built ggml-cuda has no kernels for sm_120 and silently ran CPU"
+);
+check(
+  "12.x stays the default when no card info is available",
+  shared.pickLlamaAsset(WIN_CUDA_BOTH, {
+    platform: "win32",
+    arch: "x64",
+    gpu: "nvidia",
+  }) === "llama-b10566-bin-win-cuda-12.4-x64.zip"
+);
+check(
+  "Download stops the sidecar before replacing its files",
+  /Stopping Qwen so its files can be replaced/.test(engineSrc) &&
+    /stopEngine\(\);\s*\n\s*await waitUntilStopped\(15_000\)/.test(engineSrc),
+  "a running server locks its DLLs on Windows and the copies used to fail silently"
+);
+check(
+  "a CUDA build with no companion runtime fails Download with an escape",
+  /ships no CUDA runtime archive/.test(engineSrc) &&
+    /Select Vulkan in/.test(engineSrc),
+  "skipping silently looped: Start kept saying 'click Download again'"
+);
+check(
+  "the cudart installer names the DLL it could not write",
+  /Could not install the CUDA runtime beside llama-server/.test(engineSrc) &&
+    /failures\.push/.test(engineSrc)
+);
+check(
+  "Download skips a 98%-complete GGUF like Status does",
+  /ggufLooksComplete\(await fileSize\(ggufPath\(\)\)\)/.test(engineSrc),
+  "the exact-bytes check re-downloaded all 17 GB every time"
+);
+check(
+  "the Start refusal names the missing DLLs and the lock suspect",
+  /missingCudartDlls\(path\.dirname\(server\), installed\)/.test(engineSrc) &&
+    /may have locked them/.test(engineSrc)
+);
+check(
+  "the sidecar raises the server timeout for slow streams",
+  args.includes("--timeout") && args[args.indexOf("--timeout") + 1] === "3600",
+  "a thinking 27B on CPU can go minutes between tokens"
+);
+const machineArgs = shared.sidecarArgs(
+  "/tmp/qwen.gguf",
+  null,
+  shared.defaultSpecState(),
+  { ngl: 40, threads: 16 }
+);
+check(
+  "GPU layers and threads follow the machine plan",
+  machineArgs.includes("-ngl") &&
+    machineArgs[machineArgs.indexOf("-ngl") + 1] === "40" &&
+    machineArgs[machineArgs.indexOf("--threads") + 1] === "16" &&
+    machineArgs[machineArgs.indexOf("--threads-batch") + 1] === "16"
+);
+check(
+  "no machine plan keeps the old static flags",
+  args[args.indexOf("-ngl") + 1] === "99" && !args.includes("--threads")
+);
+check(
+  "the launch stamp includes the machine plan",
+  (() => {
+    const spec = shared.defaultSpecState();
+    const a = shared.sidecarLaunchId(spec, { ngl: 40, threads: 16 });
+    const b = shared.sidecarLaunchId(spec, { ngl: 40, threads: 16 });
+    const c = shared.sidecarLaunchId(spec);
+    return a === b && a !== c && a.includes("-ngl40-t16");
+  })()
+);
+check(
+  "a flash retry stamps what is actually running",
+  /launchedSpec = fixed/.test(engineSrc) &&
+    /sidecarLaunchId\(launchedSpec, machine\)/.test(engineSrc),
+  "stamping the pre-retry spec bought a full 27B reload on the next Start"
+);
+const PLAN_27B = {
+  ggufBytes: shared.GGUF_BYTES,
+  blockCount: 64,
+  kvBytesPerToken: 131_072,
+  ctxTokens: shared.SIDECAR_CTX,
+  mmprojBytes: shared.MMPROJ_BYTES,
+};
+// weights/layer ~278 MB, KV/layer at 82K ~164 MB; reserves are 3 GB plus
+// the ~0.9 GB projector.
+check(
+  "a 32 GB card offloads everything",
+  shared.planGpuLayers({ ...PLAN_27B, vramMB: 32 * 1024 }) === 99
+);
+const midVram = shared.planGpuLayers({ ...PLAN_27B, vramMB: 24 * 1024 });
+check(
+  "a 24 GB card gets a partial offload, not an OOM death",
+  midVram > 30 && midVram < 64,
+  `ngl ${midVram}`
+);
+const smallVram = shared.planGpuLayers({ ...PLAN_27B, vramMB: 12 * 1024 });
+check(
+  "a 12 GB card still runs what fits",
+  smallVram > 5 && smallVram < midVram,
+  `ngl ${smallVram}`
+);
+check(
+  "a card with no room left runs CPU instead of dying",
+  shared.planGpuLayers({ ...PLAN_27B, vramMB: 2 * 1024 }) === 0
+);
+check(
+  "unknown VRAM or model shape keeps the old full-offload attempt",
+  shared.planGpuLayers({ ...PLAN_27B, vramMB: 0 }) === 99 &&
+    shared.planGpuLayers({ ...PLAN_27B, blockCount: 0 }) === 99 &&
+    shared.planGpuLayers({ ...PLAN_27B, kvBytesPerToken: 0 }) === 99
+);
+check(
+  "the panel shows the offload plan in words",
+  shared.formatGpuPlan({ ngl: 99, threads: 16, vramMB: 24576, layers: 64 }) ===
+    "Offload plan: all 64 layers on the GPU (24 GB VRAM)." &&
+    (
+      shared.formatGpuPlan({
+        ngl: 40,
+        threads: 16,
+        vramMB: 12288,
+        layers: 64,
+      }) ?? ""
+    ).includes("40/64") &&
+    shared.formatGpuPlan(null) === null &&
+    /formatGpuPlan\(status\.gpuPlan\)/.test(localUi)
+);
 
 check(
   "there is no CUDA ubuntu asset, so cuda on Linux lands on Vulkan",
@@ -557,6 +706,93 @@ check(
 );
 
 const engineLib = await load("src/lib/local-engine.ts");
+// Live: the GGUF header reader and the missing-DLL reporter run for real.
+const { mkdtempSync, writeFileSync: writeTmp } = await import("node:fs");
+const { tmpdir } = await import("node:os");
+const ggufTmp = mkdtempSync(path.join(tmpdir(), "gguf-"));
+const ggufU64 = (n) => {
+  const b = Buffer.alloc(8);
+  b.writeBigUInt64LE(BigInt(n));
+  return b;
+};
+const ggufStr = (s) =>
+  Buffer.concat([ggufU64(Buffer.byteLength(s)), Buffer.from(s, "utf8")]);
+const ggufU32 = (n) => {
+  const b = Buffer.alloc(4);
+  b.writeUInt32LE(n);
+  return b;
+};
+const kvU32 = (key, val) =>
+  Buffer.concat([ggufStr(key), ggufU32(4), ggufU32(val)]);
+const kvString = (key, val) =>
+  Buffer.concat([ggufStr(key), ggufU32(8), ggufStr(val)]);
+// A Qwen3-size token table BEFORE the shape keys: the reader must walk a
+// ~152K-entry string array without choking or running past its window.
+const vocabEntries = [];
+for (let i = 0; i < 152_000; i++) vocabEntries.push(ggufStr("t"));
+const kvTokens = Buffer.concat([
+  ggufStr("tokenizer.ggml.tokens"),
+  ggufU32(9),
+  ggufU32(8),
+  ggufU64(vocabEntries.length),
+  ...vocabEntries,
+]);
+writeTmp(
+  path.join(ggufTmp, "model.gguf"),
+  Buffer.concat([
+    Buffer.from("GGUF", "ascii"),
+    ggufU32(3),
+    ggufU64(0),
+    ggufU64(6),
+    kvTokens,
+    kvString("general.architecture", "qwen3"),
+    kvU32("qwen3.block_count", 64),
+    kvU32("qwen3.embedding_length", 5120),
+    kvU32("qwen3.attention.head_count", 64),
+    kvU32("qwen3.attention.head_count_kv", 8),
+  ])
+);
+writeTmp(path.join(ggufTmp, "junk.gguf"), Buffer.from("not a gguf file"));
+const realInfo = await engineLib.readGgufModelInfo(
+  path.join(ggufTmp, "model.gguf")
+);
+check(
+  "the header reader reports layers and KV bytes per token",
+  realInfo?.blockCount === 64 && realInfo?.kvBytesPerToken === 64 * 8 * 80 * 2,
+  `kv ${realInfo?.kvBytesPerToken} B/token, past a 152K token table`
+);
+check(
+  "a garbage file yields no model info, not a crash",
+  (await engineLib.readGgufModelInfo(path.join(ggufTmp, "junk.gguf"))) ===
+    null &&
+    (await engineLib.readGgufModelInfo(path.join(ggufTmp, "nope.gguf"))) ===
+      null
+);
+const dllDir = mkdtempSync(path.join(tmpdir(), "dlls-"));
+const missing12 = await engineLib.missingCudartDlls(
+  dllDir,
+  "llama-b10566-bin-win-cuda-12.4-x64.zip"
+);
+writeTmp(path.join(dllDir, "cudart64_12.dll"), "x");
+writeTmp(path.join(dllDir, "cublas64_12.dll"), "x");
+writeTmp(path.join(dllDir, "cublasLt64_12.dll"), "x");
+check(
+  "the missing-DLL report follows the build's CUDA major",
+  missing12.length === 3 &&
+    missing12.includes("cudart64_12.dll") &&
+    (
+      await engineLib.missingCudartDlls(
+        dllDir,
+        "llama-b10566-bin-win-cuda-12.4-x64.zip"
+      )
+    ).length === 0 &&
+    (
+      await engineLib.missingCudartDlls(
+        dllDir,
+        "llama-b10566-bin-win-cuda-13.3-x64.zip"
+      )
+    ).includes("cublasLt64_13.dll")
+);
 check(
   "the offload line settles it: GPU in use",
   (() => {
