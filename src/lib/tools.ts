@@ -78,6 +78,11 @@ import {
 } from "@/lib/testing";
 import { runCommand } from "@/lib/runner";
 import { RunFileMemory } from "@/lib/run-memory";
+import { getConversation } from "@/lib/store";
+import {
+  CONVERSATION_SEARCH_DEFAULT_LIMIT,
+  searchStoredMessages,
+} from "@/lib/conversation-search";
 import { detectBuild, BuildError } from "@/lib/build";
 import {
   digestBuild,
@@ -543,6 +548,41 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "finish",
+      description:
+        "Declare the task done and end the run. Call this when the work " +
+        "is complete and verified — every plan step done, or no plan " +
+        "needed and the result in hand. The run ends here: no more tool " +
+        "calls after this, and your result text becomes the closing " +
+        "summary. Say WHAT was built and HOW you verified it; a verified " +
+        "claim naming a check no tool performed is bounced. If the plan " +
+        "still has open steps, the first call is bounced with the list — " +
+        "call again to finish anyway. For plain answers that needed no " +
+        "tools, just answer; finish is for task work.",
+      parameters: {
+        type: "object",
+        properties: {
+          result: {
+            type: "string",
+            description:
+              "What was built, fixed, or found — the closing summary, in " +
+              "your own words.",
+          },
+          verified: {
+            type: "string",
+            description:
+              "How each claim above was checked: what you ran, read, or " +
+              "opened, and what it showed. Must not claim a check no tool " +
+              "performed.",
+          },
+        },
+        required: ["result", "verified"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "start_process",
       description:
         "Start something that keeps running — a dev server, a watcher, a " +
@@ -790,7 +830,12 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
             items: {
               type: "object",
               properties: {
-                path: { type: "string" },
+                path: {
+                  type: "string",
+                  description:
+                    "File to change, e.g. 'src/app.py'. Every edit " +
+                    "carries its own path — there is no top-level path.",
+                },
                 old_text: {
                   type: "string",
                   description:
@@ -819,7 +864,10 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
                   type: "number",
                   description: "Line mode: last line to replace, inclusive.",
                 },
-                new_text: { type: "string" },
+                new_text: {
+                  type: "string",
+                  description: "Replacement text for this edit.",
+                },
               },
               required: ["path", "new_text"],
             },
@@ -1446,8 +1494,16 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
             items: {
               type: "object",
               properties: {
-                path: { type: "string" },
-                content: { type: "string" },
+                path: {
+                  type: "string",
+                  description:
+                    "File to create, relative to the workspace root, " +
+                    "e.g. 'src/app.py'.",
+                },
+                content: {
+                  type: "string",
+                  description: "Complete contents of this file.",
+                },
               },
               required: ["path", "content"],
             },
@@ -1684,17 +1740,88 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "search_conversation",
+      description:
+        "Search the FULL stored text of THIS conversation for exact earlier " +
+        "wording. Only the newest turns stay in your context — older ones " +
+        "survive only as a summary, which keeps meaning but drops verbatim " +
+        "commands, paths, errors, and pasted snippets. Call this when the " +
+        "user asks what was said, decided, or pasted before, or when you " +
+        "need an exact string from an older turn. Searches this chat only, " +
+        "never other chats. Whole-word matching by default; set whole_word " +
+        "false for substring matching.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description:
+              "Words to find, e.g. 'pnpm', 'out of memory', 'docker-compose.yml'.",
+          },
+          whole_word: {
+            type: "boolean",
+            description:
+              "Match whole words only (default true, so 'calc' skips " +
+              "'calculator'). Set false to match inside words.",
+          },
+          limit: {
+            type: "number",
+            description:
+              "How many matching turns to return, 1-10 (default 5).",
+          },
+        },
+        required: ["query"],
+      },
+    },
+  },
 ];
 
 /**
- * Tool list for this model. Ox Alpha gets the same tools with the
- * per-call ceilings removed from the descriptions, so it does not
- * self-limit to 60 files.
+ * The work loop, pinned last in the workspace instructions.
+ *
+ * The workspace prose above this already says all of it — batch, verify,
+ * bank findings — and a weak model still looped thirty rounds of re-reads
+ * that ended nowhere. Length was not the cure; the plugin work proved that
+ * short plus LAST wins obedience, so the loop is restated here as four
+ * numbered rules at the position of most weight. Each rule carries the
+ * number that makes it checkable: context 25-30 (inside every ceiling),
+ * the second identical read wasted, the watched-it-work bar for done, and
+ * the third identical failure — which matches LOOP_TRIP_REPEATS, the
+ * strike that halts the run. Deliberately variant-neutral: no claim here
+ * contradicts either the capped or the open-ceiling schemas.
+ */
+export const WORK_LOOP_PROMPT =
+  "\n\nHOW TO WORK — the loop every task follows:\n" +
+  "1. SEARCH before you open. search_files with context 25-30 returns " +
+  "whole functions with the match, and read_files takes globs and reads " +
+  "the batch at once. One file per call runs out of rounds with the task " +
+  "half done.\n" +
+  "2. ACT on what you hold. Edit, write, run. Re-reading an unchanged " +
+  "file teaches nothing — its text is already in context — so a second " +
+  "identical read is a wasted round.\n" +
+  "3. VERIFY before you claim. Run it, build it, test it, and read the " +
+  "output. A step is done only when you watched it work.\n" +
+  "4. STUCK means change approach, not retry. A call that fails twice " +
+  "the same way fails a third time: read the error, fix the arguments, " +
+  "try another tool — or ask the user. Never emit the same failing " +
+  "call three times.\n" +
+  "5. FINISH explicitly. When the work is done and verified, call " +
+  "finish with what you built and how you verified it — do not just " +
+  "stop calling tools and trail off.";
+
+/**
+ * Tool list for this model. An open-ceiling model (a custom with the
+ * option on) gets the same tools with the per-call ceilings removed
+ * from the descriptions, so it does not self-limit to 60 files.
  */
 export function workspaceToolsFor(
-  modelId?: string | null
+  modelId?: string | null,
+  openLimits?: boolean
 ): ToolDefinition[] {
-  if (!modelHasOpenToolLimits(modelId)) return WORKSPACE_TOOLS;
+  if (!modelHasOpenToolLimits(modelId, openLimits)) return WORKSPACE_TOOLS;
   return WORKSPACE_TOOLS.map((tool) => {
     const name = tool.function.name;
     if (name === "read_file") {
@@ -1744,8 +1871,16 @@ export function workspaceToolsFor(
                 items: {
                   type: "object",
                   properties: {
-                    path: { type: "string" },
-                    content: { type: "string" },
+                    path: {
+                      type: "string",
+                      description:
+                        "File to create, relative to the workspace root, " +
+                        "e.g. 'src/app.py'.",
+                    },
+                    content: {
+                      type: "string",
+                      description: "Complete contents of this file.",
+                    },
                   },
                   required: ["path", "content"],
                 },
@@ -1771,12 +1906,20 @@ export function workspaceToolsFor(
                 items: {
                   type: "object",
                   properties: {
-                    path: { type: "string" },
+                    path: {
+                      type: "string",
+                      description:
+                        "File to change, e.g. 'src/app.py'. Every edit " +
+                        "carries its own path — there is no top-level path.",
+                    },
                     old_text: {
                       type: "string",
                       description: "Exact text to replace, copied verbatim.",
                     },
-                    new_text: { type: "string" },
+                    new_text: {
+                      type: "string",
+                      description: "Replacement text for this edit.",
+                    },
                   },
                   required: ["path", "old_text", "new_text"],
                 },
@@ -2147,10 +2290,15 @@ export function numberLines(text: string, firstLine: number): string {
  */
 export interface ToolContext {
   /**
-   * Catalog model id. Ox Alpha lifts per-call tool ceilings; everyone
-   * else keeps the defaults. Absent means the default (capped) set.
+   * Model id. Customs (`custom:…`) are not in the catalog, so their flags
+   * ride alongside explicitly: `openLimits` lifts the per-call tool
+   * ceilings, `modelNativeVision` decides whether screenshots go to the
+   * model as pixels or through OCR. Absent means the default capped/tool
+   * behaviour for catalog ids.
    */
   modelId?: string | null;
+  openLimits?: boolean;
+  modelNativeVision?: boolean;
   /** Vision provider key. Absent means view_image uses free local OCR. */
   visionKey?: string;
   visionModel?: string;
@@ -2160,7 +2308,7 @@ export interface ToolContext {
   exaKey?: string;
   /** Needed by the search planner, which uses a cheap model to pick queries. */
   deepseekKey?: string;
-  /** Overrides DeepSeek Flash when the user is on OpenCode / Ox Alpha. */
+  /** Overrides DeepSeek Flash when the user has no DeepSeek key. */
   planner?: SearchPlanner;
   searchProfile?: string;
   /** Explicit Stop signal; expensive static/decompiler work must release promptly. */
@@ -2171,6 +2319,22 @@ export interface ToolContext {
    * instead of a costly read round-trip. See lib/run-memory.ts.
    */
   fileMemory?: RunFileMemory;
+  /**
+   * Current conversation id. Only search_conversation uses it, and only to
+   * read that one chat's stored transcript — the tool cannot address any
+   * other conversation, which is what keeps recall from becoming a leak.
+   */
+  conversationId?: string;
+}
+
+/**
+ * Pixels or OCR? Catalog ids resolve through the catalog; customs carry
+ * the flag explicitly because `modelVision` falls back to the catalog
+ * default (native) for ids it has never seen.
+ */
+function contextSeesNative(context: ToolContext): boolean {
+  if (context.modelNativeVision !== undefined) return context.modelNativeVision;
+  return modelVision(context.modelId) === "native";
 }
 
 export async function runTool(
@@ -2179,7 +2343,10 @@ export async function runTool(
   args: Record<string, unknown>,
   context: ToolContext = {}
 ): Promise<ToolResult> {
-  const limits: ToolLimits = toolLimitsFor(context.modelId);
+  const limits: ToolLimits = toolLimitsFor(
+    context.modelId,
+    context.openLimits
+  );
   const mem = context.fileMemory;
   try {
     // Tools that can mutate files outside of the writers invalidate the
@@ -2755,7 +2922,7 @@ export async function runTool(
          * attaches it to the next turn. OCR stays for the models that need
          * it.
          */
-        if (modelVision(context.modelId) === "native") {
+        if (contextSeesNative(context)) {
           return {
             ok: true,
             content:
@@ -3396,7 +3563,7 @@ export async function runTool(
         // A model that can see gets the pixels in the same round. Making it
         // call view_image afterwards costs a round and, on a long UI night,
         // that round is the difference between two iterations and one.
-        if (modelVision(context.modelId) === "native") {
+        if (contextSeesNative(context)) {
           try {
             const shown = await readImageAsDataUrl(workspaceId, relative);
             return {
@@ -4694,6 +4861,64 @@ export async function runTool(
               ? `Wrote ${written.length} files`
               : `Wrote ${written.length}, ${failed.length} failed`,
           changedPath: written[0],
+        };
+      }
+
+      case "search_conversation": {
+        const query = typeof args.query === "string" ? args.query.trim() : "";
+        if (!query) {
+          return {
+            ok: false,
+            content: "Error: a search query is required.",
+            summary: "Empty search query",
+          };
+        }
+        // No scope, no search: without a conversation id this tool cannot
+        // prove which chat it is reading, so it reads none.
+        if (!context.conversationId) {
+          return {
+            ok: false,
+            content: "Error: no conversation scope for this search.",
+            summary: "No conversation scope",
+          };
+        }
+        const conv = await getConversation(context.conversationId);
+        const found = searchStoredMessages(conv?.messages ?? [], query, {
+          wholeWord:
+            typeof args.whole_word === "boolean" ? args.whole_word : true,
+          limit:
+            typeof args.limit === "number"
+              ? args.limit
+              : CONVERSATION_SEARCH_DEFAULT_LIMIT,
+        });
+        if (found.totalMatches === 0) {
+          return {
+            ok: true,
+            content:
+              `No matches for "${found.query}" in this conversation ` +
+              `(${found.turnsSearched} turns searched). Try fewer words, ` +
+              `a distinctive fragment, or whole_word false.`,
+            summary: `Conversation search: no matches for "${found.query}"`,
+          };
+        }
+        const lines = found.hits.map(
+          (h) =>
+            `Turn ${h.turnIndex} of ${found.turnsSearched} (${h.role}, ` +
+            `${h.matchesInTurn} match${h.matchesInTurn === 1 ? "" : "es"}):\n${h.excerpt}`
+        );
+        return {
+          ok: true,
+          content:
+            `"${found.query}" matches ${found.totalMatches} time` +
+            `${found.totalMatches === 1 ? "" : "s"} in this conversation ` +
+            `(this chat only):\n\n${lines.join("\n\n")}` +
+            (found.truncated
+              ? `\n\n…more turns matched than shown; narrow the query.`
+              : ""),
+          summary:
+            `Conversation search: ${found.totalMatches} match` +
+            `${found.totalMatches === 1 ? "" : "es"} in ` +
+            `${found.hits.length} turn${found.hits.length === 1 ? "" : "s"}`,
         };
       }
 

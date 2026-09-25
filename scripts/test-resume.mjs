@@ -259,7 +259,7 @@ check(
   "resume does not resend the reply as browser-supplied history",
   /Conversation history is intentionally NOT sent/.test(page) &&
     !/conversationHistory:\s*historyForApi/.test(page) &&
-    /loadScopedConversationHistory\(convId/.test(route),
+    /(loadScopedConversationHistory|loadHistoryForRequest)\(convId/.test(route),
   "the server rebuilds context from the addressed conversation only"
 );
 
@@ -381,8 +381,18 @@ check(
 );
 check(
   "a reply with nothing in it still shows a plain error",
-  /: \{ content: `⚠️ \$\{evt\.error\}`, isError: true \}/.test(page),
-  "an empty failure should not pretend to be resumable"
+  /content: `⚠️ \$\{evt\.error\}`,\s*isError: true,/.test(page),
+  "the outage text stays exactly that — no pretending work exists"
+);
+check(
+  "that empty failure offers Try again without pretending to be resumable",
+  /content: `⚠️ \$\{evt\.error\}`,\s*isError: true,[\s\S]{0,700}?incomplete: true,/.test(
+    page
+  ) &&
+    !/: \{\s*content: `⚠️ \$\{evt\.error\}`[\s\S]{0,700}?canResume: true/.test(
+      page
+    ),
+  "incomplete without canResume renders Try again, never Resume"
 );
 check(
   "the banner shows why it stopped",
@@ -401,7 +411,7 @@ console.log("\n3d. Resuming is findable");
  */
 check(
   "Resume is a full-width primary button, not a pill",
-  /flex flex-1 items-center justify-center[^"]*bg-\[#cfa25a\]/.test(bubble),
+  /flex flex-1 items-center justify-center[^"]*bg-warning/.test(bubble),
   "it sat at text-[11px] in a corner and was never found"
 );
 check(
@@ -416,7 +426,7 @@ check(
 );
 check(
   "starting over is de-emphasised when resuming is possible",
-  /message\.canResume\s*\?\s*"flex-none text-\[#cfa25a\]/.test(bubble),
+  /message\.canResume\s*\?\s*"flex-none text-warning/.test(bubble),
   "it buys the same work twice"
 );
 check(
@@ -680,7 +690,7 @@ check(
 );
 check(
   "a mid-task drop on Ox auto-resumes; Stop and rate limits still do not",
-  /local: getModel\(activeModel\)\.provider === "local"/.test(page) &&
+  /local: resolveModelInfo\(activeModel, customModels\)\.provider === "local"/.test(page) &&
     !/autoResume: timedOut && target\.providerId === "local"/.test(route) &&
     /autoResume: Boolean\([\s\S]{0,40}assistantContent/.test(route),
   "the client heuristic stays local-only; Ox gets its resume from the route's failure-class flag"
@@ -708,7 +718,7 @@ check(
 );
 check(
   "the agent loop has a hard round cap",
-  /MAX_AGENT_ROUNDS = agentRoundsFor\(model\)/.test(route) &&
+  /MAX_AGENT_ROUNDS = agentRoundsFor\(model[^)]*\)/.test(route) &&
     /round > MAX_AGENT_ROUNDS/.test(route),
   "per model now — a guard against a runaway loop, not a work budget"
 );

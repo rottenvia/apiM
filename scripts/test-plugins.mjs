@@ -170,16 +170,16 @@ check(
   /entry\.content === pluginDirectives[\s\S]{0,80}transcript\.splice/.test(
     routeAssembly
   ),
-  "a first system that STARTS with the marker is the Ox pin and must stay"
+  "a first system that STARTS with the marker is the OpenRouter pin and must stay"
 );
 check(
-  "Ox pins the same standing orders onto the first system message",
-  /providerId === "opencode"/.test(routeAssembly) &&
+  "OpenRouter pins the same standing orders onto the first system message",
+  /providerId === "openrouter"/.test(routeAssembly) &&
     /pinPluginDirectivesOnFirstSystem/.test(routeAssembly),
-  "OpenCode often ignores a later system message after a few rounds"
+  "Direct Mode leans on the first system message and can fade a later priority one"
 );
 check(
-  "Ox re-pins every agent round, not only at request start",
+  "the pin re-applies every agent round, not only at request start",
   /appendPluginDirectives\(\);[\s\S]{0,400}pinPluginDirectivesOnFirstSystem/.test(
     routeAssembly
   )
@@ -193,7 +193,7 @@ check(
   )
 );
 
-console.log("\n3b. The Ox first-system pin");
+console.log("\n3b. The OpenRouter first-system pin");
 
 const pinBlock = P.buildPluginDirectives(withEnabled("god-mode"));
 const workspace = "You have a workspace. Ask before you build the wrong thing.";
@@ -204,13 +204,14 @@ check(
   pinned[0].content.startsWith(P.PLUGIN_DIRECTIVES_MARKER) &&
     pinned[0].content.indexOf("MAXIMUM PRIORITY") <
       pinned[0].content.indexOf(workspace),
-  "Ox reads the start of the first system message most reliably"
+  "Direct Mode reads the start of the first system message most reliably"
 );
 check(
-  "and repeats the block at the end so workspace prose cannot outrank it",
-  pinned[0].content.endsWith(pinBlock) &&
-    pinned[0].content.indexOf(workspace) <
-      pinned[0].content.lastIndexOf(P.PLUGIN_DIRECTIVES_MARKER)
+  "and does NOT repeat the block at the end — one copy, not three",
+  !pinned[0].content.endsWith(pinBlock) &&
+    pinned[0].content.indexOf(pinBlock) ===
+      pinned[0].content.lastIndexOf(pinBlock),
+  "start + end + tail was 3x the block on every request: 300k on a 100k config"
 );
 check(
   "re-pinning is idempotent",

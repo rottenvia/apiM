@@ -65,10 +65,19 @@ export interface UpstreamNotice {
   attempts: number;
   delayMs?: number;
   reason?: string;
+  /** The provider's own message behind a rejection-driven retry. */
+  detail?: string;
   host?: string;
+  /** Resolved provider id ("local", "deepseek", "openrouter"). */
+  providerId?: string;
   waitedMs?: number;
   /** Approximate JSON body size of the completion request. */
   inputChars?: number;
+  /**
+   * Where those chars live, largest first — e.g. plugins, history, media.
+   * The banner names the biggest one inline; the tooltip lists them all.
+   */
+  breakdown?: { label: string; chars: number }[];
 }
 
 /** Hide a healthy first try until it has actually been sitting there. */
@@ -82,12 +91,12 @@ export const DEFAULT_RETRY = {
 } as const;
 
 /**
- * OpenCode Zen (Ox Alpha) 503s several times a day.
+ * OpenRouter's shared pool 503s several times a day.
  *
  * Three tries is not enough for an outage that lasts a minute, and their
  * body often just says "retrying" — which we must not show as a final error.
  */
-export const OPENCODE_RETRY = {
+export const OPENROUTER_RETRY = {
   attempts: 5,
   baseDelayMs: 1_200,
   maxDelayMs: 10_000,
@@ -240,17 +249,130 @@ export function isRetryableStatus(status: number): boolean {
   return RETRYABLE_STATUS.has(status) || status >= 500;
 }
 
+/**
+ * Was this rejection about the body's SIZE rather than its shape?
+ *
+ * A 400 is either. Shape ("Invalid API parameter", a flapping tool
+ * adapter) wants the tools stripped; size ("maximum context length",
+ * "too large", a 413) wants the history folded — stripping the tools
+ * instead keeps every one of the offending chars and fails identically
+ * with a defanged agent. The provider's own message is the only signal
+ * that tells them apart, so it is matched, not guessed.
+ *
+ * Size words match as WHOLE words: validation errors cite locations like
+ * `messages[28].tool_calls[0]`, where a bare "too" fires inside "tool" and
+ * routes a shape error down the fold path. Same for a Windows path near
+ * "context" (a path, not a window) and adverb lookalikes like "largely".
+ */
+export function isSizeRejection(status: number, detail: string): boolean {
+  if (status === 413) return true;
+  if (status !== 400 && status !== 422) return false;
+  // Codes arrive in snake_case (`input_too_long`), messages in prose —
+  // normalize so one pattern reads both.
+  const words = detail.replace(/_/g, " ");
+  return (
+    /\btoo large\b|\btoo long\b|\bmaximum\b|exceeds?|context.{0,20}(length|\blimits?\b|size|window(?!s))|input.{0,20}(tokens?|length|\blong(er|est)?\b)|tokens?.{0,20}(\blimits?\b|exceed|\bmaximum\b)|request.{0,20}(\btoo\b|\blarg(e|er|est)\b|\bentity\b|\blimits?\b)|payload|content.{0,20}(\btoo\b|\blarg(e|er|est)\b|length)|message.{0,20}(\btoo\b|\blarg(e|er|est)\b)/i.test(
+      words
+    )
+  );
+}
+
+/**
+ * True when the rejection names the MODEL, not the body.
+ *
+ * "X is not a valid model ID" will never pass no matter how the body is
+ * reshaped — the fold/strip/cascade retries would burn two more huge
+ * requests to learn nothing. Fail fast so the error names the bad ID
+ * instead of the retries that couldn't save it.
+ */
+export function isUnknownModelRejection(detail: string): boolean {
+  return /not a valid model|invalid model|model not found|unknown model/i.test(
+    detail
+  );
+}
+
+/**
+ * The provider's real rejection message, unwrapped.
+ *
+ * OpenRouter wraps a provider failure in its own envelope, and the outer
+ * `error.message` is sometimes all gateway ("Provider returned error")
+ * with the actual cause — the limit named, the parameter rejected —
+ * nested one level down in `error.metadata.raw` as a JSON string. The
+ * size-vs-shape verdict reads this string, so a missed unwrap doesn't
+ * just hide the message: it sends the retry down the wrong path, and a
+ * 697k body retried whole fails exactly the way it just did.
+ *
+ * `error.code`/`error.type` ride along too: some providers name the
+ * fault in the code (`context_length_exceeded`) while the message stays
+ * terse. Whatever survives is capped — this lands in banners and logs.
+ */
+export function extractRejectionDetail(errText: string, cap = 300): string {
+  const clip = (value: string): string => value.slice(0, cap);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(errText);
+  } catch {
+    return clip(errText);
+  }
+  const root = (parsed ?? {}) as Record<string, unknown>;
+  const err = (root.error ?? {}) as Record<string, unknown>;
+  const message = String(err.message ?? root.message ?? "");
+  const codes = [err.code, err.type].filter(
+    (v): v is string => typeof v === "string" && v.length > 0
+  );
+  const generic =
+    !message ||
+    /provider returned error|an error occurred|internal error|something went wrong|request failed/i.test(
+      message
+    );
+  if (generic) {
+    const meta = (err.metadata ?? {}) as Record<string, unknown>;
+    const raw = meta.raw;
+    if (typeof raw === "string" && raw) {
+      try {
+        const nested = JSON.parse(raw) as Record<string, unknown>;
+        const nestedErr = (nested.error ?? {}) as Record<string, unknown>;
+        const nestedCodes = [nestedErr.code, nestedErr.type].filter(
+          (v): v is string => typeof v === "string" && v.length > 0
+        );
+        const nestedMessage = String(
+          nestedErr.message ?? nested.message ?? ""
+        );
+        if (nestedMessage) {
+          return clip([...nestedCodes, nestedMessage].join(" · "));
+        }
+      } catch {
+        return clip(raw);
+      }
+    }
+  }
+  const detail = [...codes, message].filter(Boolean).join(" · ");
+  return clip(detail || errText);
+}
+
 function tenths(ms: number): string {
   return `${Math.round(Math.max(0, ms) / 100) / 10}`;
 }
 
-  function sizeNote(inputChars?: number): string {
+  /**
+   * A fat body without a cause is a mystery the user cannot act on — "540k
+   * in a small chat" reads as a bug until the banner says "(plugins 310k)".
+   * The biggest contributor rides inline once the body passes 25k (a local
+   * prefill waits on far less than 100k); the full list is the tooltip.
+   */
+  function sizeNote(inputChars?: number, breakdown?: { label: string; chars: number }[]): string {
     if (typeof inputChars !== "number" || inputChars < 8_000) return "";
-    if (inputChars >= 1e9)
-      return ` · ${(inputChars / 1e9).toFixed(1)}B chars in`;
-    if (inputChars >= 1e6)
-      return ` · ${(inputChars / 1e6).toFixed(0)}M chars in`;
-    return ` · ${(inputChars / 1000).toFixed(0)}k chars in`;
+    const size =
+      inputChars >= 1e9
+        ? `${(inputChars / 1e9).toFixed(1)}B`
+        : inputChars >= 1e6
+          ? `${(inputChars / 1e6).toFixed(0)}M`
+          : `${(inputChars / 1000).toFixed(0)}k`;
+    const top =
+      breakdown && breakdown.length > 0 && inputChars >= 25_000
+        ? ` (${breakdown[0].label} ${(breakdown[0].chars / 1000).toFixed(0)}k)`
+        : "";
+    return ` · ${size} chars in${top}`;
   }
 
 /**
@@ -276,15 +398,23 @@ export function formatUpstreamNotice(
   }
 
   const waited = info.waitedMs ?? Math.max(0, nowMs - receivedAt);
-  const size = sizeNote(info.inputChars);
+  const size = sizeNote(info.inputChars, info.breakdown);
+  // A local sidecar prefills the whole prompt before its first token: tens
+  // of seconds on a warm slot, minutes on a cold start with a fat prompt —
+  // and the GPU burns the whole time, which reads as "stuck at 97%". Name
+  // the wait so it reads as work in progress instead of a hang.
+  const prefill =
+    info.providerId === "local" && (info.inputChars ?? 0) >= 20_000
+      ? " · prefilling — first token takes minutes on a cold start"
+      : "";
   if (waited < HIDE_ATTEMPT_BEFORE_MS && !info.reason) {
-    return `Calling ${host} — try ${info.attempt} of ${info.attempts}${size}`;
+    return `Calling ${host} — try ${info.attempt} of ${info.attempts}${size}${prefill}`;
   }
   const why = info.reason?.trim();
   const prefix = why ? `${why} — waiting on ${host}` : `Waiting on ${host}`;
   // No elapsed timer here: the status row owns the clock, and a second
   // ticking count read as two clocks disagreeing about the same wait.
-  return `${prefix} — try ${info.attempt} of ${info.attempts}${size}`;
+  return `${prefix} — try ${info.attempt} of ${info.attempts}${size}${prefill}`;
 }
 
 /**

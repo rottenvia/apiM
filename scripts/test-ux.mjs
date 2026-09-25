@@ -40,6 +40,7 @@ const check = (label, ok, detail = "") => {
 const bubble = await read("src/components/MessageBubble.tsx");
 const chatArea = await read("src/components/ChatArea.tsx");
 const route = await read("src/app/api/chat/route.ts");
+const toolActivity = await read("src/components/ToolActivity.tsx");
 
 console.log("\napiM — the reported interface problems\n");
 
@@ -216,6 +217,24 @@ check(
   ),
   "otherwise the pill is invisible during the run, when it matters most"
 );
+check(
+  "the thinking panel mounts before the first reasoning token",
+  /\{hasThinking && \(\s*\n\s*<div className="thinking-panel">/.test(bubble) &&
+    !/hasThinking && !thinkLoading/.test(bubble),
+  "the mount stays (hidden) through the gap so the clock counts invisibly — the status row carries the visible voice"
+);
+check(
+  "one visible timer during the silent gap",
+  /thinkLoading \? "invisible" : undefined/.test(bubble) &&
+    /<span className=\{thinkLoading \? "invisible" : undefined\}>\s*\n\s*<ThinkingClock \/>/.test(bubble),
+  "the panel clock counts invisibly and is revealed when the status row unmounts"
+);
+check(
+  "the plan sits directly under the thinking, above the tool rows",
+  bubble.indexOf('className="thinking-panel"') < bubble.indexOf("<PlanPanel") &&
+    bubble.indexOf("<PlanPanel") < bubble.indexOf("<ToolActivity"),
+  "tool rows between them pushed the thinking far from the plan"
+);
 
 // ------------------------------------- 5. asking before spending a fortune
 
@@ -259,8 +278,9 @@ check(
     bubble
   ) &&
     /const hasThinking = reasoningChars > 0 \|\| thinkingRequested;/.test(bubble) &&
-    /\{hasThinking && \(/.test(bubble),
-  "a completed high-effort reply with no returned trace must still have a box"
+    /\{hasThinking && \(\s*\n\s*<div className="thinking-panel">/.test(bubble) &&
+    /const thinkLoading = isThinkingPhase && !panelHasContent;/.test(bubble),
+  "a completed high-effort reply with no returned trace must still have a box — the mount no longer depends on the live phase at all"
 );
 check(
   "an effort of none still shows nothing",
@@ -421,7 +441,7 @@ check(
 );
 check(
   "the open shell is explicitly styled as a surface",
-  /data-open=\{showThinking\}/.test(bubble) &&
+  /data-open=\{thinkBodyOpen\}/.test(bubble) &&
     /\.thinking-shell\[data-open='true'\]/.test(css),
   "expanded reasoning must read as a box, not text between hairlines"
 );
@@ -433,8 +453,8 @@ check(
 check(
   "the empty live box says it is waiting for text, not duplicate Thinking",
   /Waiting for reasoning text…/.test(bubble) &&
-    /flushTimer = setTimeout\(flush, 50\)/.test(page),
-  "the header owns Thinking; the body should become real text within the fallback window"
+    /const STREAM_FLUSH_MIN_MS = 100;/.test(page),
+  "the header owns Thinking; the body becomes real text within one 100ms flush"
 );
 check(
   "a ref, so active-phase tracking schedules no extra render",
@@ -461,6 +481,18 @@ check(
   /reasoningLen \|\| message\.reasoningLength/.test(bubble),
   "an old chat sends only the length and fetches the body on demand"
 );
+check(
+  "the live label ticks thinking tokens, the finished one shows tok/s",
+  /formatThinkTokens\(reasoningChars \/ 4\)/.test(bubble) &&
+    /tok\/s/.test(bubble) &&
+    /thinkingTokens \/ \(thoughtMs \/ 1000\)/.test(bubble),
+  "billed tokens over the first-to-last-token span — generation speed, not network"
+);
+check(
+  "the thinking panel follows new text without measuring layout",
+  bubble.includes("el.scrollTop = Number.MAX_SAFE_INTEGER"),
+  "same write-only trick as the chat pane — no forced layout per frame"
+);
 
 console.log("\n9. scrolling up while it types yanks me back");
 
@@ -479,8 +511,9 @@ check(
   "that walks ancestors and yanks the view back to the caret"
 );
 check(
-  "it writes this pane's scrollTop instead",
-  chatArea.includes("el.scrollTop = el.scrollHeight")
+  "it writes this pane's scrollTop instead — without measuring",
+  chatArea.includes("el.scrollTop = Number.MAX_SAFE_INTEGER"),
+  "reading scrollHeight would force a full-transcript layout on every flush"
 );
 check(
   "a wheel upward unpins immediately",
@@ -523,7 +556,8 @@ check(
 check(
   "markdown is parsed by a memoised body keyed on content and query",
   /const MarkdownBody = memo\(/.test(bubble) &&
-    /<MarkdownBody content=\{displayContent\} regex=\{searchRegex\}/.test(bubble),
+    /<MarkdownBody content=\{liveContent\} regex=\{searchRegex\}/.test(bubble) &&
+    /useDeferredValue\(displayContent\)/.test(bubble),
   "unrelated re-renders can no longer re-parse the markdown"
 );
 check(
@@ -549,14 +583,49 @@ console.log("\n11. one status row while waiting; edit never drops the question")
  * stranded, so the model re-answered already-solved material.
  */
 check(
-  "the status row exists as a module-level component with its own clock",
+  "the status line is one mark, one word, one clock",
   chatArea.indexOf("function StatusRow(") !== -1 &&
     chatArea.indexOf("function StatusRow(") <
       chatArea.indexOf("export function ChatArea({") &&
     /const t = setInterval\(\(\) => setSeconds/.test(chatArea) &&
-    /<Dots size=\{5\} \/>/.test(chatArea) &&
-    /STAGE_LABELS\[stage \?\? "thinking"\]/.test(chatArea),
-  "module level keeps the interval identity stable across status-stage re-renders"
+    /STAGE_LABELS\[stage \?\? "thinking"\]/.test(chatArea) &&
+    !/<Dots size=/.test(chatArea) &&
+    /retryText \?\? `\$\{STAGE_LABELS/.test(chatArea),
+  "module level keeps the interval identity stable; a retry morphs the word in place instead of stacking a row"
+);
+check(
+  "one Thinking during the silent gap — the bubble loader hides under the status row",
+  /\{hasThinking && \(\s*\n\s*<div className="thinking-panel">/.test(bubble) &&
+    /const thinkHidden = thinkLoading && !message\.content\.trim\(\);/.test(
+      bubble
+    ) &&
+    /thinkHidden \? "hidden" : ""/.test(bubble) &&
+    /thinkLoading \? "invisible" : undefined/.test(bubble),
+  "the shell stays mounted so its clock keeps counting; the row below is the only visible voice until the first token"
+);
+check(
+  "the covered wait stacks tight — pill, status row, request line merge",
+  /isLoading && !streamingHasOutput \? "space-y-1" : "space-y-6"/.test(
+    chatArea
+  ),
+  "three airy rows read as misplaced lines; the relaxed rhythm returns with the first token"
+);
+check(
+  "whitespace-only deltas do not unmount the status row",
+  /m\.content\.trim\(\)\.length > 0/.test(chatArea) &&
+    /m\.reasoningContent\.trim\(\)\.length > 0/.test(chatArea),
+  "the bubble shows nothing until real text lands — unmounting early would leave the gap voiceless"
+);
+check(
+  "the wait lines start at the assistant bubble's content edge",
+  (chatArea.match(/<div className="flex justify-start px-4 p[by]-2">/g) ?? [])
+    .length === 3,
+  "status row, retry banner and request line all px-4 like the bubble — px-1 left them hanging left of the thinking panel"
+);
+check(
+  "the retry banner survives only for mid-run retries",
+  /\{retryNotice && streamingHasOutput && \(/.test(chatArea),
+  "pre-output the retry morphs the status word; the banner would be the second voice again"
 );
 check(
   "video sends announce what the provider is doing",
@@ -571,7 +640,7 @@ check(
 );
   check(
     "the retry banner starts at the dots' left edge, one column for the whole wait",
-    /<span className="text-\[11px\] leading-4 tabular-nums text-\[#cfa25a\]">/.test(chatArea),
+    /<span[^>]{0,80}text-\[11px\] leading-4 tabular-nums text-warning"/.test(chatArea),
     "the old indent sat right of the dots; the banner shares their left edge now — pinned on the span markup itself so prose can never fake it"
   );
   check(
@@ -596,6 +665,65 @@ check(
   /rows=\{Math\.max\(/.test(bubble) &&
     /message\.content\.split\("\\n"\)\.length \+ 1/.test(bubble),
   "the old editor sized rows from the draft only, collapsing a 3-line message"
+);
+
+console.log("\n12. switching chats cancels, shows a skeleton, and skips identical swaps");
+
+/*
+ * Reported: big chats load with nothing on screen, and fast-clicking
+ * several chats piles up full-transcript downloads with no cancellation —
+ * each one freezing the tab in turn. The newest click now kills the
+ * previous load, an empty screen shows placeholder bubbles meanwhile, and
+ * the skip-identical-swap check compares structure instead of object
+ * identity (a re-parse builds fresh identities, so `===` never fired on
+ * agent chats and every click re-rendered the whole transcript).
+ */
+check(
+  "clicking another chat aborts the in-flight load",
+  (page.match(/loadAbortRef\.current\?\.abort\(\);/g) ?? []).length === 2 &&
+    /signal: loadController\.signal,/.test(page),
+  "switching chats and starting a new one both kill the queued load — without it, each queued parse froze the tab in turn"
+);
+check(
+  "a loading chat shows placeholder bubbles, not a vacuum",
+  /function ConversationSkeleton\(\)/.test(chatArea) &&
+    /conversationLoading \? \(/.test(chatArea) &&
+    /conversationLoading=\{loadingConv !== null && messages\.length === 0\}/.test(
+      page
+    ),
+  "cached transcripts paint instantly, so the skeleton only ever covers real waits"
+);
+check(
+  "the skip-identical-swap check compares structure, not identity",
+  /sameIds\(o\.toolEvents, m\.toolEvents\)/.test(page) &&
+    /sameTimeline\(o\.timeline, m\.timeline\)/.test(page) &&
+    !/o\.toolEvents === m\.toolEvents/.test(page),
+  "event history is append-only, so id sequences are enough"
+);
+
+console.log("\n12b. a fast model must feel fast while it types");
+check(
+  "a streaming bubble renders deferred markdown, never plain walls",
+  /const liveContent = message\.isStreaming \? deferredContent : displayContent;/.test(
+    bubble
+  ) &&
+    /const deferred = index < deferredCount && !bubbleSearchQuery;/.test(
+      chatArea
+    ),
+  "formatting follows the text a few frames behind instead of blocking it"
+);
+check(
+  "tool rows memoise their arg parsing on the args string",
+  /memo\(function ToolRow/.test(toolActivity) &&
+    /useMemo\(\(\) => argContent\(args\), \[args\]\)/.test(toolActivity),
+  "a write's args hold the whole file body — parsing that per frame per tool is the heavy feel"
+);
+check(
+  "the live Thinking label ticks seconds through a stalled stream",
+  /function ThinkingClock/.test(bubble) &&
+    /isThinkingPhase \? \(/.test(bubble) &&
+    /<ThinkingClock \/>/.test(bubble),
+  "the status row unmounts at the first token — this is the stall signal after that"
 );
 
 console.log(

@@ -10,17 +10,25 @@ import {
 import { SearchBudget } from "@/components/SearchBudget";
 import { BUDGET_PRESETS } from "@/lib/budget";
 import { DiagnosticsPanel } from "@/components/DiagnosticsPanel";
+import { McpServersSettings } from "@/components/McpServersSettings";
 import { LocalModelRuntime } from "@/components/LocalModelRuntime";
 import {
   DEFAULT_LOCAL_API_MODEL,
   DEFAULT_LOCAL_BASE_URL,
   LOCAL_HOST_PRESETS,
+  MODELS,
   QWEN_38_27B_ID,
-  getModel,
-  modelNeedsVisionHelper,
-  modelSeesVideo,
+  customSpecs,
+  resolveModelInfo,
 } from "@/lib/models";
-import { OX_HOSTS, type OxHost } from "@/lib/ox-host";
+import type { CustomModelDef } from "@/lib/models";
+import { ratesFor } from "@/lib/pricing";
+import {
+  CUSTOM_THEME_ID,
+  THEMES,
+} from "@/lib/themes";
+import type { CustomThemeSeeds } from "@/lib/themes";
+import { CustomModelsManager } from "@/components/CustomModelsManager";
 
 /**
  * Settings, grouped.
@@ -31,7 +39,7 @@ import { OX_HOSTS, type OxHost } from "@/lib/ox-host";
  * settings an obvious home, which is the part that keeps this from needing
  * another rebuild later — adding one is a line in this array.
  */
-type TabId = "keys" | "model" | "search" | "reports" | "misc";
+type TabId = "keys" | "model" | "theme" | "search" | "reports" | "misc" | "mcp";
 
 const GROUPS: {
   id: TabId;
@@ -60,6 +68,19 @@ const GROUPS: {
     ),
   },
   {
+    id: "theme",
+    label: "Theme",
+    blurb: "The app's colours, MonkeyType-style",
+    icon: (
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} aria-hidden="true">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M12 3a9 9 0 100 18c1.5 0 2-.9 2-2 0-1.4 1-2.2 2.4-2.2H18a4 4 0 004-4c0-4.97-4.5-9-10-9z" />
+        <circle cx="7.5" cy="11.5" r="1.3" fill="currentColor" stroke="none" />
+        <circle cx="10.5" cy="7.5" r="1.3" fill="currentColor" stroke="none" />
+        <circle cx="15" cy="7.5" r="1.3" fill="currentColor" stroke="none" />
+      </svg>
+    ),
+  },
+  {
     id: "search",
     label: "Web search",
     blurb: "How much to spend looking things up",
@@ -83,6 +104,16 @@ const GROUPS: {
     ),
   },
   {
+    id: "mcp",
+    label: "MCP servers",
+    blurb: "Remote tools the AI may call, with permission",
+    icon: (
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} aria-hidden="true">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M8 9l-4 3 4 3m8-6l4 3-4 3M13 5l-2 14" />
+      </svg>
+    ),
+  },
+  {
     id: "misc",
     label: "Safety",
     blurb: "Guards on the actions that touch your machine",
@@ -96,10 +127,13 @@ const GROUPS: {
 
 interface SettingsModalProps {
   deepseekKey: string;
-  opencodeKey: string;
   openrouterKey: string;
-  oxHost: OxHost;
-  onOxHostChange: (host: OxHost) => void;
+  customModels: CustomModelDef[];
+  onCustomModelsChange: (next: CustomModelDef[]) => void;
+  themeId: string;
+  onThemeChange: (id: string) => void;
+  customTheme: CustomThemeSeeds;
+  onCustomThemeChange: (seeds: CustomThemeSeeds) => void;
   localBaseUrl: string;
   localApiKey: string;
   localApiModel: string;
@@ -115,7 +149,6 @@ interface SettingsModalProps {
   model: string;
   defaultEffort: string;
   onDeepseekKeyChange: (key: string) => void;
-  onOpencodeKeyChange: (key: string) => void;
   onOpenrouterKeyChange: (key: string) => void;
   onLocalBaseUrlChange: (url: string) => void;
   onLocalApiKeyChange: (key: string) => void;
@@ -146,6 +179,29 @@ interface SettingsModalProps {
  * key you will want back next month. Reported directly — "maybe that tavily
  * is ruining that all" — and switching it off is a one-click way to find out.
  */
+/**
+ * One-line card sub for a catalog model. The catalog's own subtitle carries
+ * the specs; the only computed bit is the Free tag, read from live pricing
+ * rather than hardcoded — the grid below renders the same MODELS the
+ * picker does.
+ */
+function catalogCardSub(id: string): string {
+  const info = MODELS.find((m) => m.id === id);
+  if (!info) return "";
+  const rates = ratesFor(id);
+  const free =
+    rates !== null && rates.input === 0 && rates.output === 0;
+  const tag =
+    free && info.provider !== "local" && !/free/i.test(info.settingsSubtitle)
+      ? " · Free"
+      : "";
+  return `${info.settingsSubtitle}${tag}`;
+}
+
+function customCardSub(def: CustomModelDef): string {
+  return `OpenRouter · ${customSpecs(def)}`;
+}
+
 function ProviderToggle({
   on,
   onChange,
@@ -193,69 +249,16 @@ function ProviderToggle({
   );
 }
 
-function OxProbeButton({ host, apiKey }: { host: OxHost; apiKey: string }) {
-  const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
-  const info = OX_HOSTS[host];
-
-  const run = async () => {
-    setBusy(true);
-    setResult(null);
-    try {
-      const res = await fetch("/api/ox/test", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ host, apiKey }),
-      });
-      const data = (await res.json()) as {
-        ok?: boolean;
-        error?: string;
-        detail?: string;
-        ms?: number;
-      };
-      const text = data.ok
-        ? data.detail ?? `${info.label} is up.`
-        : data.error ?? `Couldn't test ${info.label}.`;
-      setResult({
-        ok: Boolean(data.ok),
-        text: data.ms ? `${text} (${data.ms}ms)` : text,
-      });
-    } catch {
-      setResult({ ok: false, text: "Couldn't reach this app's test route." });
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="mt-2">
-      <button
-        type="button"
-        onClick={() => void run()}
-        disabled={busy || !apiKey.trim()}
-        className="rounded-lg border border-border px-2.5 py-1 text-[11px] font-medium text-text-secondary transition-colors hover:bg-bg-hover disabled:opacity-40"
-      >
-        {busy ? "Testing…" : `Test ${info.shortLabel}`}
-      </button>
-      {result && (
-        <p
-          className={`mt-1.5 text-[11px] leading-4 ${
-            result.ok ? "text-success" : "text-danger"
-          }`}
-        >
-          {result.text}
-        </p>
-      )}
-    </div>
-  );
-}
 
 export function SettingsModal({
   deepseekKey,
-  opencodeKey,
   openrouterKey,
-  oxHost,
-  onOxHostChange,
+  customModels,
+  onCustomModelsChange,
+  themeId,
+  onThemeChange,
+  customTheme,
+  onCustomThemeChange,
   localBaseUrl,
   localApiKey,
   localApiModel,
@@ -271,7 +274,6 @@ export function SettingsModal({
   model,
   defaultEffort,
   onDeepseekKeyChange,
-  onOpencodeKeyChange,
   onOpenrouterKeyChange,
   onLocalBaseUrlChange,
   onLocalApiKeyChange,
@@ -295,9 +297,10 @@ export function SettingsModal({
 }: SettingsModalProps) {
   const [tab, setTab] = useState<TabId>("keys");
   const active = GROUPS.find((g) => g.id === tab) ?? GROUPS[0];
+  // Catalog or custom — the vision copy below reads this, never the catalog.
+  const currentModel = resolveModelInfo(model, customModels);
 
   const [showDsKey, setShowDsKey] = useState(false);
-  const [showOcKey, setShowOcKey] = useState(false);
   const [showOrKey, setShowOrKey] = useState(false);
   const [showLocalKey, setShowLocalKey] = useState(false);
   const [showTvKey, setShowTvKey] = useState(false);
@@ -431,95 +434,13 @@ export function SettingsModal({
                 )}
               </div>
 
-              {/* Ox Alpha — one model, two hosts */}
+              {/* OpenRouter — one key for every OpenRouter model */}
               <div>
-                <label className="block text-sm font-semibold text-text-primary mb-1.5">
-                  Ox Alpha host
-                </label>
-                <p className="text-xs text-text-secondary mb-2">
-                  Same Ox Alpha model. Direct Mode stays MAXIMUM PRIORITY on
-                  both. Test only hits GET /models — a green Test and a hung
-                  chat means their inference is backed up, not a bad key.
-                  Switch hosts yourself; this app will not fail over for you.
-                </p>
-                <div className="mb-3 grid grid-cols-2 gap-1.5">
-                  {(["zen", "openrouter"] as const).map((id) => (
-                    <button
-                      key={id}
-                      type="button"
-                      onClick={() => onOxHostChange(id)}
-                      className={`rounded-xl border px-3 py-2 text-left text-[12px] font-medium transition-all ${
-                        oxHost === id
-                          ? "border-accent/30 bg-accent/15 text-accent-light"
-                          : "border-border bg-bg-tertiary text-text-secondary hover:border-border-light"
-                      }`}
-                    >
-                      <span className="block">{OX_HOSTS[id].shortLabel}</span>
-                      <span className="mt-0.5 block font-mono text-[11px] opacity-70">
-                        {OX_HOSTS[id].apiModel}
-                      </span>
-                    </button>
-                  ))}
-                </div>
-                <label className="block text-sm font-semibold text-text-primary mb-1.5">
-                  OpenCode API Key
-                  <span className="ml-1 text-xs font-normal text-text-muted">
-                    (for Ox Alpha)
-                  </span>
-                </label>
-                <p className="text-xs text-text-secondary mb-2">
-                  Get a Zen key from{" "}
-                  <a
-                    href="https://opencode.ai/auth"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-accent-light underline underline-offset-2"
-                  >
-                    opencode.ai/auth
-                  </a>
-                  . Same Chat Completions API as DeepSeek — model id{" "}
-                  <code className="rounded bg-bg-tertiary px-1 py-0.5 text-[11px]">
-                    x-preview-f-free
-                  </code>
-                  . Free during the stealth preview.
-                </p>
-                <div className="relative">
-                  <input
-                    type={showOcKey ? "text" : "password"}
-                    value={opencodeKey}
-                    onChange={(e) => onOpencodeKeyChange(e.target.value)}
-                    placeholder="sk-zen-..."
-                    className="w-full px-4 py-2.5 rounded-xl bg-bg-tertiary border border-border text-sm text-text-primary placeholder-text-muted outline-none focus:border-accent/50 focus:ring-1 focus:ring-accent/25 transition-all"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowOcKey(!showOcKey)}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-text-muted hover:text-text-secondary transition-colors"
-                  >
-                    {showOcKey ? (
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
-                      </svg>
-                    ) : (
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                      </svg>
-                    )}
-                  </button>
-                </div>
-                {opencodeKey && (
-                  <div className="flex items-center gap-1.5 mt-1.5">
-                    <div className="w-1.5 h-1.5 rounded-full bg-success" />
-                    <span className="text-xs text-success">Key saved</span>
-                  </div>
-                )}
-                {oxHost === "zen" && <OxProbeButton host="zen" apiKey={opencodeKey} />}
 
-                <label className="mt-4 block text-sm font-semibold text-text-primary mb-1.5">
+                <label className="block text-sm font-semibold text-text-primary mb-1.5">
                   OpenRouter API Key
                   <span className="ml-1 text-xs font-normal text-text-muted">
-                    (GLM 5.3 Flash · Ox Alpha)
+                    (GLM 5.3 Flash · free lane · your models)
                   </span>
                 </label>
                 <p className="text-xs text-text-secondary mb-2">
@@ -532,15 +453,9 @@ export function SettingsModal({
                   >
                     openrouter.ai/settings/keys
                   </a>
-                  . One key covers both: GLM 5.3 Flash sends wire id{" "}
-                  <code className="rounded bg-bg-tertiary px-1 py-0.5 text-[11px]">
-                    z-ai/glm-5.3-flash
-                  </code>
-                  , Ox Alpha uses{" "}
-                  <code className="rounded bg-bg-tertiary px-1 py-0.5 text-[11px]">
-                    stealth/ox-alpha
-                  </code>
-                  .
+                  . One key covers every OpenRouter model: the built-ins and
+                  anything you add under the Model tab. Verifying a model also
+                  checks this key is valid.
                 </p>
                 <div className="relative">
                   <input
@@ -572,9 +487,6 @@ export function SettingsModal({
                     <div className="w-1.5 h-1.5 rounded-full bg-success" />
                     <span className="text-xs text-success">Key saved</span>
                   </div>
-                )}
-                {oxHost === "openrouter" && (
-                  <OxProbeButton host="openrouter" apiKey={openrouterKey} />
                 )}
               </div>
 
@@ -813,15 +725,15 @@ export function SettingsModal({
                 <label className="block text-sm font-semibold text-text-primary mb-1.5">
                   Vision API Key
                   <span className="ml-1 text-xs font-normal text-text-muted">
-                    {modelNeedsVisionHelper(model)
+                    {currentModel.vision === "helper"
                       ? "(optional — OCR is free)"
                       : "(DeepSeek only)"}
                   </span>
                 </label>
                 <p className="text-xs text-text-secondary mb-2">
-                  {modelNeedsVisionHelper(model) ? (
+                  {currentModel.vision === "helper" ? (
                     <>
-                      {getModel(model).label} can&apos;t see images. Screenshots
+                      {currentModel.label} can&apos;t see images. Screenshots
                       are scraped locally with free OCR — no OpenAI key or
                       funds needed. Add a key below only if you want a full
                       visual description (layout, highlighted controls) instead
@@ -839,8 +751,8 @@ export function SettingsModal({
                     </>
                   ) : (
                     <>
-                      {getModel(model).label} sees images
-                      {modelSeesVideo(model) ? " and video" : ""} itself — no
+                      {currentModel.label} sees images
+                      {currentModel.video ? " and video" : ""} itself — no
                       vision provider is used while it is selected. A key here
                       is only needed if you switch to DeepSeek.
                     </>
@@ -904,64 +816,44 @@ export function SettingsModal({
 
             {tab === "model" && (
               <>
-              {/* Model Selection */}
+              {/* Model Selection — the catalog plus your own OpenRouter models */}
               <div>
                 <label className="block text-sm font-semibold text-text-primary mb-2">
                   Model
                 </label>
                 <div className="grid grid-cols-2 gap-2">
-                  <button
-                    onClick={() => onModelChange("deepseek-v4-pro")}
-                    className={`px-4 py-3 rounded-xl text-sm font-medium transition-all duration-150 ${
-                      model === "deepseek-v4-pro"
-                        ? "bg-accent/15 text-accent-light border border-accent/30"
-                        : "bg-bg-tertiary text-text-secondary border border-border hover:border-border-light"
-                    }`}
-                  >
-                    <span className="block font-semibold">V4 Pro</span>
-                    <span className="text-[11px] opacity-70">
-                      49B params • Frontier
-                    </span>
-                  </button>
-                  <button
-                    onClick={() => onModelChange("deepseek-v4-flash")}
-                    className={`px-4 py-3 rounded-xl text-sm font-medium transition-all duration-150 ${
-                      model === "deepseek-v4-flash"
-                        ? "bg-accent/15 text-accent-light border border-accent/30"
-                        : "bg-bg-tertiary text-text-secondary border border-border hover:border-border-light"
-                    }`}
-                  >
-                    <span className="block font-semibold">V4 Flash</span>
-                    <span className="text-[11px] opacity-70">
-                      13B params • Fast
-                    </span>
-                  </button>
-                  <button
-                    onClick={() => onModelChange("ox-alpha")}
-                    className={`col-span-2 px-4 py-3 rounded-xl text-sm font-medium transition-all duration-150 ${
-                      model === "ox-alpha"
-                        ? "bg-accent/15 text-accent-light border border-accent/30"
-                        : "bg-bg-tertiary text-text-secondary border border-border hover:border-border-light"
-                    }`}
-                  >
-                    <span className="block font-semibold">Ox Alpha</span>
-                    <span className="text-[11px] opacity-70">
-                      Zen or OpenRouter • 1M context • free preview
-                    </span>
-                  </button>
-                  <button
-                    onClick={() => onModelChange(QWEN_38_27B_ID)}
-                    className={`col-span-2 px-4 py-3 rounded-xl text-sm font-medium transition-all duration-150 ${
-                      model === QWEN_38_27B_ID
-                        ? "bg-accent/15 text-accent-light border border-accent/30"
-                        : "bg-bg-tertiary text-text-secondary border border-border hover:border-border-light"
-                    }`}
-                  >
-                    <span className="block font-semibold">Qwen 3.8 27B</span>
-                    <span className="text-[11px] opacity-70">
-                      On this PC · 80K window · thinking
-                    </span>
-                  </button>
+                  {MODELS.map((m) => (
+                    <button
+                      key={m.id}
+                      onClick={() => onModelChange(m.id)}
+                      className={`px-4 py-3 rounded-xl text-sm font-medium transition-all duration-150 text-left ${
+                        model === m.id
+                          ? "bg-accent/15 text-accent-light border border-accent/30"
+                          : "bg-bg-tertiary text-text-secondary border border-border hover:border-border-light"
+                      }`}
+                    >
+                      <span className="block font-semibold">{m.label}</span>
+                      <span className="text-[11px] opacity-70">
+                        {catalogCardSub(m.id)}
+                      </span>
+                    </button>
+                  ))}
+                  {customModels.map((c) => (
+                    <button
+                      key={c.id}
+                      onClick={() => onModelChange(c.id)}
+                      className={`px-4 py-3 rounded-xl text-sm font-medium transition-all duration-150 text-left ${
+                        model === c.id
+                          ? "bg-accent/15 text-accent-light border border-accent/30"
+                          : "bg-bg-tertiary text-text-secondary border border-border hover:border-border-light"
+                      }`}
+                    >
+                      <span className="block truncate font-semibold">{c.label}</span>
+                      <span className="block truncate text-[11px] opacity-70">
+                        {customCardSub(c)}
+                      </span>
+                    </button>
+                  ))}
                 </div>
                 {model === QWEN_38_27B_ID && (
                   <div className="mt-2">
@@ -973,6 +865,14 @@ export function SettingsModal({
                   </div>
                 )}
               </div>
+
+              <CustomModelsManager
+                customs={customModels}
+                onChange={onCustomModelsChange}
+                openrouterKey={openrouterKey}
+                model={model}
+                onModelChange={onModelChange}
+              />
 
               {/* Default Thinking Effort */}
               <div>
@@ -1051,6 +951,130 @@ export function SettingsModal({
               </>
             )}
 
+            {tab === "theme" && (
+              <>
+              <div>
+                <label className="block text-sm font-semibold text-text-primary mb-2">
+                  Theme
+                </label>
+                <p className="mb-2.5 text-[12px] leading-relaxed text-text-secondary">
+                  Applies instantly — every bubble, panel and button follows.
+                </p>
+                <div className="grid grid-cols-2 gap-2">
+                  {THEMES.map((t) => {
+                    const selected = themeId === t.id;
+                    return (
+                      <button
+                        key={t.id}
+                        onClick={() => onThemeChange(t.id)}
+                        className={`flex items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left transition-all duration-150 ${
+                          selected
+                            ? "border-accent/30 bg-accent/15"
+                            : "border-border bg-bg-tertiary hover:border-border-light"
+                        }`}
+                      >
+                        <span
+                          aria-hidden="true"
+                          className="flex h-7 w-7 flex-none items-center justify-center gap-[3px] rounded-lg border border-black/20"
+                          style={{ backgroundColor: t.bg }}
+                        >
+                          <span
+                            className="h-2.5 w-2.5 rounded-full"
+                            style={{ backgroundColor: t.accent }}
+                          />
+                          <span
+                            className="h-2.5 w-2.5 rounded-full"
+                            style={{ backgroundColor: t.text }}
+                          />
+                        </span>
+                        <span
+                          className={`min-w-0 truncate text-[13px] font-medium ${
+                            selected ? "text-accent-light" : "text-text-primary"
+                          }`}
+                        >
+                          {t.name}
+                        </span>
+                      </button>
+                    );
+                  })}
+                  <button
+                    onClick={() => onThemeChange(CUSTOM_THEME_ID)}
+                    className={`flex items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left transition-all duration-150 ${
+                      themeId === CUSTOM_THEME_ID
+                        ? "border-accent/30 bg-accent/15"
+                        : "border-border bg-bg-tertiary hover:border-border-light"
+                    }`}
+                  >
+                    <span
+                      aria-hidden="true"
+                      className="flex h-7 w-7 flex-none items-center justify-center rounded-lg border border-black/20"
+                      style={{ backgroundColor: customTheme.bg }}
+                    >
+                      <span
+                        className="h-2.5 w-2.5 rounded-full"
+                        style={{ backgroundColor: customTheme.accent }}
+                      />
+                    </span>
+                    <span
+                      className={`min-w-0 truncate text-[13px] font-medium ${
+                        themeId === CUSTOM_THEME_ID
+                          ? "text-accent-light"
+                          : "text-text-primary"
+                      }`}
+                    >
+                      Custom
+                    </span>
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-semibold text-text-primary mb-2">
+                  Custom colours
+                </label>
+                <p className="mb-2.5 text-[12px] leading-relaxed text-text-secondary">
+                  Four colours; the rest of the palette is derived from them.
+                  {themeId !== CUSTOM_THEME_ID
+                    ? " Pick them here, then select Custom above to wear them."
+                    : " You are wearing them now — every change is live."}
+                </p>
+                <div className="grid grid-cols-2 gap-2">
+                  {(
+                    [
+                      ["bg", "Background"],
+                      ["surface", "Panels"],
+                      ["text", "Text"],
+                      ["accent", "Accent"],
+                    ] as const
+                  ).map(([key, label]) => (
+                    <label
+                      key={key}
+                      className="flex cursor-pointer items-center gap-2.5 rounded-xl border border-border bg-bg-tertiary px-3 py-2"
+                    >
+                      <input
+                        type="color"
+                        value={customTheme[key]}
+                        onChange={(e) =>
+                          onCustomThemeChange({ ...customTheme, [key]: e.target.value })
+                        }
+                        className="h-7 w-9 flex-none cursor-pointer rounded-lg border border-border bg-transparent p-0.5"
+                        aria-label={label}
+                      />
+                      <span className="min-w-0">
+                        <span className="block text-[12px] font-medium text-text-primary">
+                          {label}
+                        </span>
+                        <span className="block font-mono text-[11px] uppercase text-text-muted">
+                          {customTheme[key]}
+                        </span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+              </>
+            )}
+
             {tab === "search" && (
               <>
               {/* Search cost */}
@@ -1063,6 +1087,8 @@ export function SettingsModal({
             )}
 
             {tab === "reports" && <DiagnosticsPanel />}
+
+            {tab === "mcp" && <McpServersSettings />}
 
             {tab === "misc" && (
               <>
@@ -1175,8 +1201,8 @@ export function SettingsModal({
                 {/* Shown only when it's on: a warning nobody has agreed to yet is
                     just noise, but one describing your current state is not. */}
                 {autoRunCommands && (
-                  <div className="mt-2.5 flex items-start gap-2 rounded-xl border border-[#cfa25a]/30 bg-[#cfa25a]/[0.07] px-3 py-2.5">
-                    <span className="mt-0.5 flex-none text-[#cfa25a]">
+                  <div className="mt-2.5 flex items-start gap-2 rounded-xl border border-warning/30 bg-warning/[0.07] px-3 py-2.5">
+                    <span className="mt-0.5 flex-none text-warning">
                       <svg
                         width="14"
                         height="14"

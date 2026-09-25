@@ -38,6 +38,22 @@ export interface ToolCall {
  */
 export const MID_RUN_NOTE_LABEL = "While I was working, the user added:";
 
+/**
+ * How a mid-run note is absorbed — the second half of the framing.
+ *
+ * The label says WHEN the user spoke; without more, a weak model reads the
+ * note as a fresh task and goes to investigate it — told "there's a new
+ * pid 1234", it spends tools listing processes to find a pid it was given.
+ * The absorb line says what the note IS: a live update to the current
+ * task whose facts are given, to be applied in place while the loop keeps
+ * running — no restart, no re-read, no verification errand.
+ */
+export const MID_RUN_NOTE_ABSORB =
+  "Live steering for the CURRENT task, not a new task. Facts in it are " +
+  "given — use them as stated rather than re-deriving them with tools. " +
+  "Adjust and continue from where you are; do not restart, re-read, or " +
+  "investigate the note itself.";
+
 export type TranscriptMessage =
   | { role: "system"; content: string }
   /**
@@ -96,13 +112,149 @@ export function foldSystemMessagesToFront(
  *
  * `includeReasoning` exists for hosts that are NOT DeepSeek. `reasoning_content`
  * is a DeepSeek wire field: DeepSeek 400s when a tool-calling turn omits it,
- * but OpenCode Zen validates its Chat Completions schema strictly and the
- * Ox Alpha catalog says the field is not required there
- * (`requiresReasoningContentOnAssistantMessages: No`) — replaying it is what
- * turns a 20-round agent run into a 400 "[1210] Invalid API parameter" on
- * every subsequent round and every resume. Stripping it for those hosts also
- * stops resending ~9k tokens of chain-of-thought per round on a free pool.
+ * but OpenRouter validates Chat Completions strictly and the GLM catalog
+ * does not require the field there (`requiresReasoningContentOnAssistant-
+ * Messages: No`) — replaying it is what turns a 20-round agent run into a
+ * 400 "[1210] Invalid API parameter" on every subsequent round and every
+ * resume. Stripping it for those hosts also stops resending ~9k tokens of
+ * chain-of-thought per round on a free pool.
  */
+function tryParseJson(text: string): { ok: true; value: unknown } | { ok: false } {
+  try {
+    return { ok: true, value: JSON.parse(text) };
+  } catch {
+    return { ok: false };
+  }
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Escape raw control chars living INSIDE string literals.
+ *
+ * JSON allows whitespace between tokens, so a blanket replace would corrupt
+ * legal pretty-printing (`{\n  "a": 1\n}` is valid). This walks the text
+ * tracking string state instead and only touches U+0000-U+001F found between
+ * quotes. Unbalanced quotes decline the repair — a confused fix must not
+ * make things worse; the marker below is the honest fallback.
+ */
+function escapeControlsInStrings(text: string): string {
+  let inString = false;
+  let escaped = false;
+  let changed = false;
+  let out = "";
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        out += ch;
+        continue;
+      }
+      if (ch === "\\") {
+        escaped = true;
+        out += ch;
+        continue;
+      }
+      if (ch === '"') {
+        inString = false;
+        out += ch;
+        continue;
+      }
+      const code = ch.charCodeAt(0);
+      if (code < 0x20) {
+        changed = true;
+        if (ch === "\n") out += "\\n";
+        else if (ch === "\r") out += "\\r";
+        else if (ch === "\t") out += "\\t";
+        else if (ch === "\b") out += "\\b";
+        else if (ch === "\f") out += "\\f";
+        else out += "\\u" + code.toString(16).padStart(4, "0");
+        continue;
+      }
+      out += ch;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    out += ch;
+  }
+  if (inString || escaped) return text;
+  return changed ? out : text;
+}
+
+function unparseableArgsMarker(raw: string): string {
+  let head = raw.slice(0, 500);
+  if (head) {
+    const last = head.charCodeAt(head.length - 1);
+    if (last >= 0xd800 && last <= 0xdbff) head = head.slice(0, -1);
+  }
+  return JSON.stringify({
+    _unparseable: true,
+    _note:
+      "original arguments were not valid JSON; replaced to satisfy API validation",
+    _raw: head,
+  });
+}
+
+/**
+ * Guarantee `function.arguments` survives strict API validation.
+ *
+ * Arguments used to ride the wire verbatim — exactly as the model emitted
+ * them, or as the pruner stubbed them. The OpenRouter gateway validates
+ * every historic call's arguments and 400s the whole body for one raw
+ * control char ("control character found while parsing a string"), and no
+ * retry can help: the poisoned turn is a tool turn, so the fold protects
+ * it and the strip leaves history untouched. Resume replays the same
+ * poison and loops forever.
+ *
+ * So the wire copy is repaired, in escalating order:
+ *  1. already a JSON object → returned VERBATIM (working flows cannot
+ *     tell this exists);
+ *  2. otherwise raw control chars inside string literals are escaped and
+ *     re-tried (pretty-printed string content — the observed failure);
+ *  3. empty/blank → "{}" (a no-arg call);
+ *  4. valid JSON but not an object → wrapped as {"_value": ...}, since
+ *     validation demands an object string;
+ *  5. still unparseable → a marker object naming the loss, because an
+ *     honest placeholder passes validation and a corrupt string never does.
+ *
+ * Stored transcripts keep the original: execution already used it, and the
+ * recorded tool result stands as what happened. Only the wire copy is
+ * repaired, every time it is sent — which is also what unsticks a run
+ * poisoned before this existed.
+ */
+export function hardenToolCallArguments(args: unknown): string {
+  if (typeof args !== "string") {
+    // A rebuilt transcript can hold anything (resumeState is unknown[]):
+    // stringify objects, treat nullish as a no-arg call.
+    if (args === null || args === undefined) return "{}";
+    try {
+      const encoded = JSON.stringify(args);
+      if (typeof encoded === "string" && encoded) {
+        return hardenToolCallArguments(encoded);
+      }
+    } catch {
+      /* unstringifiable: marker below */
+    }
+    return unparseableArgsMarker("");
+  }
+  if (!args.trim()) return "{}";
+  const first = tryParseJson(args);
+  if (first.ok) {
+    if (isJsonObject(first.value)) return args;
+    return JSON.stringify({ _value: first.value });
+  }
+  const escaped = escapeControlsInStrings(args);
+  const second = escaped === args ? first : tryParseJson(escaped);
+  if (second.ok) {
+    if (isJsonObject(second.value)) return escaped;
+    return JSON.stringify({ _value: second.value });
+  }
+  return unparseableArgsMarker(args);
+}
+
 export function serializeForApi(
   messages: TranscriptMessage[],
   options: { includeReasoning?: boolean } = {}
@@ -117,7 +269,23 @@ export function serializeForApi(
       // Only replay reasoning for turns that actually called a tool. The API
       // ignores it otherwise, and sending it everywhere wastes tokens.
       if (m.tool_calls?.length) {
-        out.tool_calls = m.tool_calls;
+        // Deep copy: the caller compacts the serialised body (tool-call
+        // args are stubbed once their results have landed). Sharing the
+        // stored objects would let that compaction eat the transcript the
+        // resume path replays — permanently.
+        out.tool_calls = m.tool_calls.map((c) => ({
+          id: c.id,
+          type: "function" as const,
+          function: {
+            name: c.function.name,
+            // Repaired, never verbatim: the gateway validates every historic
+            // call's arguments, and one raw control char 400s the whole body.
+            // The poison survives every retry — tool turns are fold-protected
+            // and the strip leaves history alone — so validity is enforced
+            // here, at the single choke point every request passes through.
+            arguments: hardenToolCallArguments(c.function.arguments),
+          },
+        }));
         if (includeReasoning && m.reasoning_content)
           out.reasoning_content = m.reasoning_content;
         // A tool-calling turn legitimately has no prose.
@@ -147,21 +315,42 @@ export function serializeForApi(
       if (typeof m.content === "string") {
         return {
           role: "user",
-          content: `[${MID_RUN_NOTE_LABEL} ${m.content}]`,
+          content:
+            `[${MID_RUN_NOTE_LABEL} ${m.content}]\n${MID_RUN_NOTE_ABSORB}`,
         };
       }
       const parts = m.content.map((p) => ({ ...p }));
       const firstTextIdx = parts.findIndex((p) => p.type === "text");
       const firstText = firstTextIdx === -1 ? null : parts[firstTextIdx];
       if (!firstText || firstText.type !== "text") {
-        parts.unshift({ type: "text", text: MID_RUN_NOTE_LABEL });
+        parts.unshift({
+          type: "text",
+          text: `${MID_RUN_NOTE_LABEL}\n${MID_RUN_NOTE_ABSORB}`,
+        });
       } else {
         parts[firstTextIdx] = {
           type: "text",
-          text: `[${MID_RUN_NOTE_LABEL} ${firstText.text}]`,
+          text:
+            `[${MID_RUN_NOTE_LABEL} ${firstText.text}]\n${MID_RUN_NOTE_ABSORB}`,
         };
       }
       return { role: "user", content: parts };
+    }
+
+    // Same aliasing rule as tool_calls above: a part array is cloned so the
+    // caller can drop media parts (the re-send guard) without rewriting the
+    // transcript. Strings are immutable and pass through untouched.
+    if (m.role === "user" && Array.isArray(m.content)) {
+      return {
+        role: m.role,
+        content: m.content.map((p) => {
+          if (p.type === "image_url")
+            return { type: p.type, image_url: { ...p.image_url } };
+          if (p.type === "video_url")
+            return { type: p.type, video_url: { ...p.video_url } };
+          return { ...p };
+        }),
+      };
     }
 
     return { role: m.role, content: m.content };
@@ -653,4 +842,112 @@ export function rebuildTranscript(
   }
 
   return out;
+}
+
+/**
+ * Fold the oldest plain history turns until the wire copy fits.
+ *
+ * Prune and compact shrink tool rounds; nothing ever shrank plain user and
+ * assistant TEXT. A long conversation replays its last twenty stored turns
+ * verbatim on every request — measured at 479k chars of "history" on a
+ * 691k body — and when the provider rejects that body for size, the retry
+ * used to strip the agent's tools while keeping every one of those chars,
+ * failing identically with a defanged agent. Backwards: the tools are
+ * kilobytes, the history is the mass.
+ *
+ * This drops oldest-first PLAIN turns only (user text, assistant prose
+ * without tool calls) until the messages fit `targetChars`. Never dropped:
+ * system messages, tool calls and their replies (the call/reply pairing is
+ * what keeps the request a legal 200 rather than a 400), and the newest
+ * user turn plus everything after it — the live question and the recent
+ * work stay intact no matter what. One marker records the fold so the
+ * model knows older turns exist rather than never having happened.
+ *
+ * Operates on the serialized wire shape (plain JSON), like the sanitize
+ * path that calls it. Returns a new array.
+ */
+export interface FoldHistoryStats {
+  /** Plain turns dropped. */
+  dropped: number;
+  /** Characters removed from the wire copy. */
+  charsSaved: number;
+}
+
+export function foldOldestHistory(
+  messages: Record<string, unknown>[],
+  targetChars: number
+): { messages: Record<string, unknown>[]; stats: FoldHistoryStats } {
+  const empty: FoldHistoryStats = { dropped: 0, charsSaved: 0 };
+  const sizes = messages.map((m) => {
+    try {
+      return JSON.stringify(m).length;
+    } catch {
+      return 0;
+    }
+  });
+  const total = sizes.reduce((a, b) => a + b, 0);
+  if (total <= targetChars) return { messages, stats: empty };
+
+  // The newest user turn anchors the protected tail: it is the live
+  // question (or the resume brief), and everything after it is the recent
+  // work answering it.
+  let lastUser = -1;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i]?.role === "user") {
+      lastUser = i;
+      break;
+    }
+  }
+
+  const droppable = (i: number): boolean => {
+    if (i >= lastUser) return false;
+    const m = messages[i];
+    if (!m || typeof m !== "object") return false;
+    if (m.role === "user") return true;
+    if (m.role !== "assistant") return false;
+    // A tool-calling turn and its replies are one legal unit — dropping
+    // half of it is the exact shape of a 400.
+    if (Array.isArray(m.tool_calls) && m.tool_calls.length > 0) return false;
+    return true;
+  };
+
+  let remaining = total;
+  const drop = new Set<number>();
+  for (let i = 0; i < messages.length && remaining > targetChars; i += 1) {
+    if (!droppable(i)) continue;
+    drop.add(i);
+    remaining -= sizes[i];
+  }
+  if (drop.size === 0) return { messages, stats: empty };
+
+  const marker =
+    `[${drop.size} older history turn${drop.size === 1 ? "" : "s"} omitted ` +
+    `from this retry to fit the provider's request limit — the newest turns ` +
+    `are kept in full. If something you need was in them, ask and it will ` +
+    `be re-sent.]`;
+  const out: Record<string, unknown>[] = [];
+  let marked = false;
+  for (let i = 0; i < messages.length; i += 1) {
+    if (drop.has(i)) {
+      if (!marked) {
+        marked = true;
+        out.push({ role: "system", content: marker });
+      }
+      continue;
+    }
+    out.push(messages[i]);
+  }
+
+  let after = 0;
+  for (const m of out) {
+    try {
+      after += JSON.stringify(m).length;
+    } catch {
+      /* unmeasurable counts as zero */
+    }
+  }
+  return {
+    messages: out,
+    stats: { dropped: drop.size, charsSaved: Math.max(0, total - after) },
+  };
 }

@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { slugify, uniqueSlug } from "@/lib/slug";
+import type { UsageLike } from "@/lib/pricing";
 import {
   renameWorkspaceFolder,
   setWorkspaceFolderName,
@@ -8,6 +9,7 @@ import {
 import { stopAll } from "@/lib/processes";
 import { forgetWorkspace } from "@/lib/approvals";
 import { deleteAllSnapshots } from "@/lib/snapshots";
+import type { StoredHistorySummary } from "@/lib/history-summary";
 import type { StoredAttachment } from "@/lib/multimodal";
 
 /**
@@ -44,11 +46,30 @@ export interface StoredMessage {
   pluginsUsed?: string[] | null;
   tokenCount?: number | null;
   /** Full usage breakdown, for cost estimation. */
-  usage?: Record<string, number> | null;
+  usage?: UsageLike | null;
   /** Model that produced this reply, needed to price it. */
   model?: string | null;
   /** Wall-clock time the reply took. */
   durationMs?: number | null;
+  /** How long the model spent reasoning, first trace token to last. */
+  reasoningMs?: number | null;
+  /**
+   * Chars in the final upstream request — the context this reply cost.
+   * With the breakdown: where the bytes lived, largest first.
+   */
+  contextChars?: number | null;
+  contextBreakdown?: { label: string; chars: number }[] | null;
+  /**
+   * How the reply ended: the final round's finish_reason plus what the
+   * continuation pools spent getting there. Absent on replies saved before
+   * this existed.
+   */
+  ending?: {
+    finish: string | null;
+    continuedOutput: number;
+    continuedConnection: number;
+    thinkOnlyStalls: number;
+  } | null;
   createdAt: string;
   /** True while the reply is still streaming. If the process dies or the tab
    *  closes mid-answer the flag stays set, which is how the UI knows to offer
@@ -137,6 +158,12 @@ export interface StoredConversation {
    * wrong order on a resume.
    */
   btwNotes?: BtwNote[];
+  /**
+   * Rolling summary of turns older than the verbatim window (see
+   * lib/history-summary.ts). Absent until the backlog first passes the
+   * refresh trigger; from then on the cursor only moves forward.
+   */
+  historySummary?: StoredHistorySummary;
 }
 
 /** Summary shape returned to the sidebar (messages omitted). */
@@ -905,6 +932,30 @@ export async function updateConversation(
 
   await writeConversation(conv);
   return conv;
+}
+
+/**
+ * Persist a refreshed history summary, guarding against a lost update.
+ *
+ * Two requests on one conversation can summarise concurrently; both read
+ * the same cursor, both write. The loser must not rewind the winner's
+ * cursor, so the write lands only when the stored cursor still matches the
+ * one the refresh was computed from. False means "someone else won" — the
+ * caller keeps its fresher text in memory for this request and the next
+ * request converges on the stored one.
+ */
+export async function saveHistorySummary(
+  id: string,
+  expectedUpToId: string | null,
+  next: StoredHistorySummary
+): Promise<boolean> {
+  const conv = await getConversation(id);
+  if (!conv) return false;
+  if ((conv.historySummary?.upToId ?? null) !== expectedUpToId) return false;
+  conv.historySummary = next;
+  conv.updatedAt = new Date().toISOString();
+  await writeConversation(conv);
+  return true;
 }
 
 export async function deleteConversation(id: string): Promise<boolean> {

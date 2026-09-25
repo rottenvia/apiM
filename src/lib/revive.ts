@@ -24,7 +24,9 @@ export type PrematureStopReason =
   | "dangling_next"
   | "provider_abort"
   | "round_cap"
-  | "thinking_cut";
+  | "thinking_cut"
+  | "loop_breaker"
+  | "no_progress";
 
 export interface PrematureStopInput {
   /** The whole reply so far, including earlier rounds. */
@@ -64,8 +66,24 @@ const SOFT_STOP_LANGUAGE =
 const COMPLETION =
   /\b(?:all (?:done|finished)|task is complete|everything (?:is |looks )?(?:done|working|finished)|here(?:'s| is) what I (?:changed|did|built|fixed)|verified (?:it |that )?(?:works|passed))\b/i;
 
+/**
+ * Prose promising imminent action, followed by a stop with no tool call.
+ *
+ * The original three branches only caught "now" + a short verb list, so the
+ * loop's most common shapes — "let me read main.cpp", "let me make three
+ * edits", "I'll start by checking the decoder", all without "now" — sailed
+ * through and the user hand-pumped "continue" forever, three narrations per
+ * pump (one plan nudge, two revives, all generic). Closed verb list on
+ * purpose: presentation verbs (explain, show, tell) and idioms ("let me
+ * know", "make sure") must never read as intent, or ordinary answers revive.
+ */
 const DANGLING_NEXT =
-  /\b(?:I(?:'ll| will) (?:now )?(?:write|edit|fix|run|test|implement|create|continue with|keep going)|next I(?:'ll| will)|let me now (?:write|edit|fix|run|implement))\b/i;
+  /\b(?:I(?:'ll| will) (?:now |first )?(?:write|edit|fix|run|test|implement|create|continue with|keep going)|next I(?:'ll| will)|let me now (?:write|edit|fix|run|implement)|(?:let me|I(?:'ll| will| need to| have to| must))(?: (?:now|first|just|quickly|start by|begin by))? (?:read(?:ing)?|check(?:ing)?|look(?:ing)?(?: at| through| into)?|inspect(?:ing)?|examin(?:e|ing)|make(?! (?:sure|sense|certain)\b| a notes?\b)|taking? a look|updat(?:e|ing)|add(?:ing)?|remov(?:e|ing)|delet(?:e|ing)|refactor(?:ing)?|rewrit(?:e|ing)|renam(?:e|ing)|mov(?:e|ing)|search(?:ing)?|verif(?:y|ying)|writ(?:e|ing)|edit(?:ing)?|fix(?:ing)?|run(?:ning)?|test(?:ing)?|implement(?:ing)?|creat(?:e|ing)|start(?:ing)?|continu(?:e|ing)|try(?:ing)?|appl(?:y|ying)|build(?:ing)?|compil(?:e|ing)|open(?:ing)?|load(?:ing)?))\b/i;
+
+/** Does this prose promise imminent action ("let me read…", "I'll fix…")? */
+export function describesImminentAction(text: string): boolean {
+  return DANGLING_NEXT.test(tailOf(text ?? ""));
+}
 
 const PROVIDER_ABORT =
   /^(?:content_filter|content-filter|model_error|error|timeout|max_tokens)$/i;
@@ -147,11 +165,36 @@ export function detectPrematureStop(
     }
   }
 
+  /*
+   * The provider aborted the round: an error-like finish is never a
+   * deliberate ending, tools or not. The old toolRounds guard left
+   * clean-chat provider failures (finish "error" with a sentence or
+   * nothing) to fall through as a deliberate stop — the run ended
+   * "complete" with one sentence and no banner, no Resume. That is the
+   * "it stops the moment it decides to write" report.
+   *
+   * A content filter keeps the old guard: it is a verdict, not a
+   * failure, and re-asking burns full-context requests to re-prove it.
+   */
   if (
-    input.toolRounds >= 1 &&
-    PROVIDER_ABORT.test(input.finishReason ?? "")
+    PROVIDER_ABORT.test(input.finishReason ?? "") &&
+    (input.toolRounds >= 1 ||
+      !/^content[_-]?filter$/i.test(input.finishReason ?? ""))
   ) {
     return "provider_abort";
+  }
+
+  // Narrated intent outranks the unfinished plan: "your plan has steps left"
+  // tells the model nothing it doesn't know, while "you described the next
+  // action instead of doing it" names the failure. Fires on a planned run
+  // even before the first tool call — but never on plan-less chat, where
+  // "let me check…" is just how an answer begins.
+  if (
+    !COMPLETION.test(tail) &&
+    (input.toolRounds >= 1 || input.planComplete === false) &&
+    DANGLING_NEXT.test(tail)
+  ) {
+    return "dangling_next";
   }
 
   if (input.planComplete === false && !input.planBlocked) {
@@ -184,10 +227,6 @@ export function detectPrematureStop(
 
   if (round.length < 40 && !COMPLETION.test(full)) return "empty_after_work";
 
-  if (DANGLING_NEXT.test(tail) && !COMPLETION.test(tail)) {
-    return "dangling_next";
-  }
-
   if (endsMidSentence(round || tail) && !COMPLETION.test(tail)) {
     return "mid_sentence";
   }
@@ -196,7 +235,27 @@ export function detectPrematureStop(
 }
 
 /** One short shove. Repeating the whole brief would invite a rewrite. */
-export function reviveInstruction(reason: PrematureStopReason): string {
+export function reviveInstruction(
+  reason: PrematureStopReason,
+  hadNoTools = false
+): string {
+  // A stop on a tool-less round is harness-caused, not defiance: the request
+  // was rejected and retried stripped, so no call was possible. Say so, or
+  // the shove reads as blame for something the model couldn't do — and the
+  // model "fixes" it by narrating harder.
+  const stripped =
+    "The last round ran without tools (the request was rejected and retried stripped), " +
+    "so nothing could be called then. Tools are offered again on the next round. ";
+  if (reason === "dangling_next") {
+    return (
+      (hadNoTools ? stripped : "") +
+      `You described the next action and then stopped instead of doing it. ` +
+      `Do not narrate, plan aloud, or repeat what you just said — call the tool ` +
+      `in this response. Everything above is still valid: continue from exactly ` +
+      `where you left off, no redo. If something is genuinely blocked, mark it ` +
+      `blocked and tell the user why.`
+    );
+  }
   const why =
     reason === "limit_language"
       ? "you said you had to stop (a limit, or asking the user to say continue)"
@@ -206,13 +265,12 @@ export function reviveInstruction(reason: PrematureStopReason): string {
           ? "you stopped mid-sentence"
           : reason === "unfinished_plan"
             ? "your plan still has unfinished steps"
-            : reason === "dangling_next"
-              ? "you described the next action and then stopped instead of doing it"
-              : reason === "round_cap"
-                ? "this reply used every tool round it was allowed; work in bigger batches from here (read_files / edit_files / write_files in one call each) instead of one file per call"
-                : "the provider ended the round before the task was finished";
+            : reason === "round_cap"
+              ? "this reply used every tool round it was allowed; work in bigger batches from here (read_files / edit_files / write_files in one call each) instead of one file per call"
+              : "the provider ended the round before the task was finished";
 
   return (
+    (hadNoTools ? stripped : "") +
     `You stopped before the task was finished — ${why}. ` +
     `This is not a new request. Everything above is still valid: do not ` +
     `redo work that already landed, do not rewrite files that are already ` +
@@ -232,6 +290,18 @@ export function prematureStopNotice(reason: PrematureStopReason): string {
   }
   if (reason === "round_cap") {
     return "The reply used every tool round it was allowed — Resume to carry on";
+  }
+  if (reason === "loop_breaker") {
+    return "The same tool call failed three times with identical arguments — Resume to steer it another way";
+  }
+  if (reason === "no_progress") {
+    return "The run stalled: tool calls kept coming but nothing advanced — Resume to steer it another way";
+  }
+  if (reason === "dangling_next") {
+    return "The model kept describing its next action instead of doing it";
+  }
+  if (reason === "provider_abort") {
+    return "The provider ended the round before the task was finished — Resume to carry on";
   }
   return "The model stopped mid-task before it finished";
 }

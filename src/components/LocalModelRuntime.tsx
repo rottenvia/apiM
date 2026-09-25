@@ -10,6 +10,7 @@ import {
   SPEC_PRESETS,
   defaultSpecState,
   formatBytes,
+  formatGpuPlan,
   type EngineBuild,
   type EngineDownloadEvent,
   type EngineStatus,
@@ -45,6 +46,7 @@ function emptyStatus(): EngineStatus {
       note: "Checking this PC…",
       logTail: [],
     },
+    gpuPlan: null,
   };
 }
 
@@ -318,7 +320,7 @@ export function LocalModelRuntime({
             ready && !windowTooSmall
               ? "bg-success"
               : busy || windowTooSmall
-                ? "bg-[#cfa25a]"
+                ? "bg-warning"
                 : "bg-text-muted"
           }`}
           aria-hidden="true"
@@ -362,6 +364,12 @@ export function LocalModelRuntime({
             :{" "}
           </span>
           {status.gpu.note}
+        </p>
+      )}
+
+      {status.gpuPlan && formatGpuPlan(status.gpuPlan) && (
+        <p className="mt-1 text-[11px] leading-4 text-text-muted">
+          {formatGpuPlan(status.gpuPlan)}
         </p>
       )}
 

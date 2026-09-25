@@ -18,6 +18,7 @@ interface SidebarProps {
   onArchive: (id: string, archived: boolean) => void;
   onImported: () => void;
   onOpenSettings: () => void;
+  onOpenMcp: () => void;
   /** How long the delete button stays locked, in seconds. */
   deleteDelay: number;
   /**
@@ -46,6 +47,7 @@ export function Sidebar({
   onArchive,
   onImported,
   onOpenSettings,
+  onOpenMcp,
   deleteDelay,
   runningIds,
 }: SidebarProps) {
@@ -315,7 +317,7 @@ export function Sidebar({
                     return next;
                   });
                 }}
-                className="h-4 w-4 flex-none accent-[#c96442]"
+                className="h-4 w-4 flex-none accent-accent"
               />
               <span className="truncate">
                 {selectedHere.length > 0
@@ -420,7 +422,7 @@ export function Sidebar({
                         onClick={(e) => e.stopPropagation()}
                         tabIndex={-1}
                         aria-hidden="true"
-                        className="relative z-10 h-4 w-4 flex-none accent-[#c96442]"
+                        className="relative z-10 h-4 w-4 flex-none accent-accent"
                       />
                     )}
                     <span
@@ -439,8 +441,8 @@ export function Sidebar({
                         title="This chat is still working"
                         className="relative z-10 ml-1 flex h-2 w-2 flex-none items-center justify-center"
                       >
-                        <span className="absolute h-2 w-2 animate-ping rounded-full bg-[#c96442]/50" />
-                        <span className="h-1.5 w-1.5 rounded-full bg-[#c96442]" />
+                        <span className="absolute h-2 w-2 animate-ping rounded-full bg-accent/50" />
+                        <span className="h-1.5 w-1.5 rounded-full bg-accent" />
                       </span>
                     )}
                   </>
@@ -596,6 +598,16 @@ export function Sidebar({
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 15V3m0 12l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" />
             </svg>
             Import chats
+          </button>
+          <button
+            onClick={onOpenMcp}
+            title="Call an MCP server's tools by hand"
+            className="flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-sm text-text-secondary transition-colors duration-150 hover:bg-bg-tertiary hover:text-text-primary"
+          >
+            <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5} aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M8 9l-4 3 4 3m8-6l4 3-4 3M13 5l-2 14" />
+            </svg>
+            MCP console
           </button>
           <button
             onClick={onOpenSettings}

@@ -886,13 +886,15 @@ export function formatPlan(plan: Plan): string {
   lines.push("");
   if (progress.complete) {
     lines.push(
-      "Every step is done and verified. Summarise what you built and stop."
+      "Every step is done and verified. Call finish with what you built " +
+        "and how you verified it."
     );
   } else if (progress.next) {
     lines.push(
       `Not finished. Next: ${progress.next.id}. ${progress.next.text}`,
       "Do not write a closing summary while steps remain — either continue, " +
-        "or mark what is blocking you and say so plainly."
+        "or mark what is blocking you and say so plainly. The run ends " +
+        "when you call finish."
     );
   }
 
@@ -1001,6 +1003,64 @@ export function planHasBlocked(plan: Plan): boolean {
  * real), verified steps keep their evidence — only the block is lifted.
  * Returns the same object when there is nothing to clear.
  */
+/**
+ * First line of the plan-compliance nudge, refreshed at the transcript tail
+ * while the plan goes stale (removed again once the model updates).
+ */
+export const PLAN_NUDGE_MARKER = "[Harness: plan update overdue]";
+
+/**
+ * Tool rounds without an update_plan call before the plan is called stale.
+ *
+ * Updating every round would be noise; never updating is how a run does
+ * step 2 for the sixth time while believing it is on step 4. Six tool
+ * rounds is enough rope for any honest stretch of work.
+ */
+export const PLAN_STALE_AFTER_TOOL_ROUNDS = 6;
+
+/**
+ * Assistant prose claiming a step finished ("step 2 is done").
+ *
+ * The mind game this answers: narrating "Step 2's core fix is verified"
+ * while the plan still shows step 2 todo — and acting on the narration
+ * instead of the plan. A claim forces the nudge immediately rather than
+ * waiting out the staleness count, because acting on an unrecorded claim
+ * is exactly how the run and the plan diverge.
+ */
+const STEP_CLAIM =
+  /\bsteps?\s*\d+[^.\n]{0,60}\b(done|complete|completed|finished|verified|implemented|fixed)\b/i;
+
+/** Negations that turn a claim-shaped sentence into its opposite. */
+const CLAIM_NEGATION = /\b(not|n't|never|no longer|isn't|aren't|wasn't|weren't)\b/i;
+
+export function stepClaimedComplete(roundText: string): boolean {
+  const match = STEP_CLAIM.exec(roundText ?? "");
+  if (!match) return false;
+  return !CLAIM_NEGATION.test(match[0]);
+}
+
+/**
+ * The nudge. Names the count, demands the tool call (prose does not
+ * count), and — when the model just claimed a finish in words — tells it
+ * to record the claim with evidence or retract it.
+ */
+export function buildStalePlanNudge(
+  roundsSinceUpdate: number,
+  claimed: boolean
+): string {
+  return (
+    `${PLAN_NUDGE_MARKER}\n` +
+    `${roundsSinceUpdate} tool rounds since your last update_plan call, ` +
+    `and the plan is going stale while you work. Call update_plan NOW ` +
+    `with verified states before your next tool call — prose claims ` +
+    `("step 2 done") do not count, only update_plan counts.` +
+    (claimed
+      ? ` You just claimed a finished step in prose; record it with ` +
+        `evidence via update_plan, or retract it.`
+      : "")
+  );
+}
+
 export function reopenBlockedSteps(plan: Plan): Plan {
   if (!planHasBlocked(plan)) return plan;
   return {

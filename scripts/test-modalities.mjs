@@ -49,23 +49,30 @@ console.log("1. Catalog capabilities");
 
 const pro = models.MODELS.find((m) => m.id === "deepseek-v4-pro");
 const flash = models.MODELS.find((m) => m.id === "deepseek-v4-flash");
-const ox = models.MODELS.find((m) => m.id === "ox-alpha");
+const glm = models.MODELS.find((m) => m.id === "glm-5.3-flash");
+const freeNemotron = models.MODELS.find((m) => m.id === "nvidia-nemotron-3-ultra-free");
 const qwen = models.MODELS.find((m) => m.id === "qwen-3.8-27b");
 
 check("DeepSeek Pro uses the vision helper", pro?.vision === "helper" && pro?.video === false);
 check("DeepSeek Flash uses the vision helper", flash?.vision === "helper" && flash?.video === false);
-check("Ox Alpha is a native VLM with video", ox?.vision === "native" && ox?.video === true);
+check("GLM 5.3 Flash is a native VLM with video", glm?.vision === "native" && glm?.video === true);
 check("Qwen 3.8 27B is a native VLM with video", qwen?.vision === "native" && qwen?.video === true);
 
 check("Pro needs the helper", models.modelNeedsVisionHelper("deepseek-v4-pro"));
 check("Flash needs the helper", models.modelNeedsVisionHelper("deepseek-v4-flash"));
-check("Ox does not need the helper", models.modelNeedsVisionHelper("ox-alpha") === false);
+check("GLM does not need the helper", models.modelNeedsVisionHelper("glm-5.3-flash") === false);
 check("Qwen does not need the helper", models.modelNeedsVisionHelper("qwen-3.8-27b") === false);
 
-    check("Ox can watch video", models.modelSeesVideo("ox-alpha"));
+    check("the Nemotron free lane cannot watch video", models.modelSeesVideo("nvidia-nemotron-3-ultra-free") === false);
     check("Qwen can watch video", models.modelSeesVideo("qwen-3.8-27b"));
     check("GLM can watch video", models.modelSeesVideo("glm-5.3-flash"));
 check("Pro cannot watch video", models.modelSeesVideo("deepseek-v4-pro") === false);
+check(
+  "V4.1 Flash is a native VLM without video",
+  models.MODELS.find((m) => m.id === "deepseek-v4.1-flash")?.vision === "native" &&
+    models.modelSeesVideo("deepseek-v4.1-flash") === false &&
+    models.modelNeedsVisionHelper("deepseek-v4.1-flash") === false
+);
 check("all catalog models can receive images somehow", models.MODELS.every((m) => models.modelSeesImages(m.id)));
 
 console.log("\n2. Wire format");
@@ -227,7 +234,7 @@ check(
 );
 check(
   "Settings no longer claims every model is DeepSeek-blind",
-  /modelNeedsVisionHelper\(model\)/.test(settings) &&
+  /currentModel\.vision === "helper"/.test(settings) &&
     !/DeepSeek can&apos;t read images, so attached screenshots are\s+described by an OpenAI vision model first\./.test(
       settings
     )
@@ -299,11 +306,14 @@ check(
     !/No vision key is configured, so images cannot be viewed/.test(toolsSrc)
 );
 
-console.log("\n9. Ox Alpha has open per-call tool limits; DeepSeek and Qwen stay capped");
+console.log("\n9. Open tool limits are a custom-model opt-in; the catalog stays capped");
 
 const limits = await load("src/lib/tool-limits.ts");
 
-check("only Ox Alpha opts into open tool limits", ox?.openToolLimits === true);
+check(
+  "no catalog model opts into open tool limits",
+  models.MODELS.every((m) => m.openToolLimits === false)
+);
 check("DeepSeek Pro stays capped", pro?.openToolLimits === false);
 check("DeepSeek Flash stays capped", flash?.openToolLimits === false);
 check("Qwen 3.8 27B stays capped", qwen?.openToolLimits === false);
@@ -311,7 +321,14 @@ check(
   "every catalog model declares the flag",
   models.MODELS.every((m) => typeof m.openToolLimits === "boolean")
 );
-check("modelHasOpenToolLimits is Ox-only", limits.modelHasOpenToolLimits("ox-alpha"));
+check(
+  "modelHasOpenToolLimits honors the custom override",
+  limits.modelHasOpenToolLimits("custom:anything", true) === true
+);
+check(
+  "without the override a custom stays capped",
+  limits.modelHasOpenToolLimits("custom:anything") === false
+);
 check(
   "DeepSeek Pro is not open",
   limits.modelHasOpenToolLimits("deepseek-v4-pro") === false
@@ -326,7 +343,7 @@ check(
 );
 
 const defaultLimits = limits.toolLimitsFor("deepseek-v4-pro");
-const oxLimits = limits.toolLimitsFor("ox-alpha");
+const openLimits = limits.toolLimitsFor("deepseek-v4-pro", true);
 const qwenLimits = limits.toolLimitsFor("qwen-3.8-27b");
 check(
   "default ceilings are unchanged",
@@ -340,15 +357,19 @@ check(
     defaultLimits.open === false
 );
 check(
-  "Ox ceilings are high enough that a real project is not cut",
-  oxLimits.open === true &&
-    oxLimits.readFiles >= 10_000 &&
-    oxLimits.writeFiles >= 10_000 &&
-    oxLimits.batchEdits >= 10_000 &&
-    oxLimits.readChars >= 8_000_000 &&
-    oxLimits.searchHits >= 10_000 &&
-    oxLimits.fetchChars >= 4_000_000 &&
-    oxLimits.docChars >= 8_000_000
+  "the open ceilings are high enough that a real project is not cut",
+  openLimits.open === true &&
+    openLimits.readFiles >= 10_000 &&
+    openLimits.writeFiles >= 10_000 &&
+    openLimits.batchEdits >= 10_000 &&
+    openLimits.readChars >= 8_000_000 &&
+    openLimits.searchHits >= 10_000 &&
+    openLimits.fetchChars >= 4_000_000 &&
+    openLimits.docChars >= 8_000_000
+);
+check(
+  "the override is per-call, not sticky",
+  limits.toolLimitsFor("deepseek-v4-pro").open === false
 );
 check(
   "Qwen still uses the default ceilings",
@@ -356,30 +377,29 @@ check(
     qwenLimits.readChars === defaultLimits.readChars &&
     qwenLimits.open === false
 );
-check("Ox specs advertise open tools", /open tools/.test(ox?.specs ?? ""));
 
 // Isolate workspace/tools under a temp data root. Those modules snapshot
 // APIM_DATA_ROOT at import time, so this has to happen before they load.
 const { mkdtemp, rm } = await import("node:fs/promises");
 const os = await import("node:os");
-const tmpData = await mkdtemp(path.join(os.tmpdir(), "apim-ox-limits-"));
+const tmpData = await mkdtemp(path.join(os.tmpdir(), "apim-open-limits-"));
 process.env.APIM_DATA_ROOT = tmpData;
 
 const toolsMod = await load("src/lib/tools.ts");
 const isolatedWs = await load("src/lib/workspace.ts");
 const defaultTools = toolsMod.workspaceToolsFor("deepseek-v4-pro");
-const oxTools = toolsMod.workspaceToolsFor("ox-alpha");
+const unlockedTools = toolsMod.workspaceToolsFor("deepseek-v4-pro", true);
 const qwenTools = toolsMod.workspaceToolsFor("qwen-3.8-27b");
 const readFilesDefault = defaultTools.find((t) => t.function.name === "read_files");
-const readFilesOx = oxTools.find((t) => t.function.name === "read_files");
+const readFilesOpen = unlockedTools.find((t) => t.function.name === "read_files");
 check(
   "DeepSeek still sees the 60-file cap in the schema",
   /up to 60/.test(JSON.stringify(readFilesDefault))
 );
 check(
-  "Ox is not told to stop at 60 files",
-  /No per-call cap/.test(JSON.stringify(readFilesOx)) &&
-    !/up to 60/.test(JSON.stringify(readFilesOx))
+  "an open-limits model is not told to stop at 60 files",
+  /No per-call cap/.test(JSON.stringify(readFilesOpen)) &&
+    !/up to 60/.test(JSON.stringify(readFilesOpen))
 );
 check(
   "Qwen gets the same capped schema as DeepSeek",
@@ -393,18 +413,18 @@ check(
 
 check(
   "the chat route builds the tool list per model",
-  /workspaceToolsFor\(model\)/.test(route) && !/WORKSPACE_TOOLS\.filter/.test(route)
+  /workspaceToolsFor\(\s*model,[\s\S]{0,60}target\.model\.openToolLimits/.test(route) && !/WORKSPACE_TOOLS\.filter/.test(route)
 );
 check(
   "every runTool call carries the model id",
   (route.match(/modelId: model/g) ?? []).length >= 3
 );
 check(
-  "Ox can view_image without a vision key",
-  /Boolean\(visionApiKey\) \|\| modelHasOpenToolLimits\(model\)/.test(route)
+  "an open-limits model can view_image without a vision key",
+  /Boolean\(visionApiKey\) \|\| modelHasOpenToolLimits\(model,[^)]*\)/.test(route)
 );
 check(
-  "the workspace prompt tells Ox the ceilings are off",
+  "the workspace prompt tells open models the ceilings are off",
   /This model has no per-call tool ceilings/.test(route)
 );
 check(
@@ -420,18 +440,18 @@ check(
   !/tesseract|from "@\/lib\/ocr"|from '@\/lib\/ocr'/.test(read("src/lib/vision.ts"))
 );
 
-const liveWs = "ox-open-limits";
+const liveWs = "custom-open-limits";
 const oversized = `${"x".repeat(401_000)}TAIL-MARKER`;
 await isolatedWs.writeFile(liveWs, "big.txt", oversized);
 
 const defaultRead = await toolsMod.runTool(liveWs, "read_file", {
   path: "big.txt",
 });
-const oxRead = await toolsMod.runTool(
+const openRead = await toolsMod.runTool(
   liveWs,
   "read_file",
   { path: "big.txt" },
-  { modelId: "ox-alpha" }
+  { modelId: "custom:big", openLimits: true }
 );
 const qwenRead = await toolsMod.runTool(
   liveWs,
@@ -446,10 +466,10 @@ check(
     !defaultRead.content.includes("TAIL-MARKER")
 );
 check(
-  "Ox Alpha reads the whole 401k file",
-  oxRead.ok &&
-    oxRead.content.includes("TAIL-MARKER") &&
-    !/truncated/.test(oxRead.content)
+  "an open-limits custom reads the whole 401k file",
+  openRead.ok &&
+    openRead.content.includes("TAIL-MARKER") &&
+    !/truncated/.test(openRead.content)
 );
 check(
   "Qwen is still truncated at the default ceiling",
@@ -462,11 +482,11 @@ const overflow = Array.from({ length: 63 }, (_, i) => `missing-${i}.txt`);
 const defaultBatch = await toolsMod.runTool(liveWs, "read_files", {
   paths: overflow,
 });
-const oxBatch = await toolsMod.runTool(
+const openBatch = await toolsMod.runTool(
   liveWs,
   "read_files",
   { paths: overflow },
-  { modelId: "ox-alpha" }
+  { modelId: "custom:big", openLimits: true }
 );
 const flashBatch = await toolsMod.runTool(
   liveWs,
@@ -479,8 +499,8 @@ check(
   /NOT READ/.test(defaultBatch.content) && /missing-60\.txt/.test(defaultBatch.content)
 );
 check(
-  "Ox Alpha read_files keeps all 63 paths",
-  !/NOT READ/.test(oxBatch.content) && /missing-62\.txt/.test(oxBatch.content)
+  "an open-limits custom read_files keeps all 63 paths",
+  !/NOT READ/.test(openBatch.content) && /missing-62\.txt/.test(openBatch.content)
 );
 check(
   "DeepSeek Flash still drops paths past 60",

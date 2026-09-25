@@ -7,6 +7,7 @@ import {
   availableTitle,
   getConversation,
   drainBtwNotes,
+  saveHistorySummary,
 } from "@/lib/store";
 import type { StoredMessage } from "@/lib/store";
 import { autoThinkingEffort } from "@/lib/smart-search";
@@ -17,7 +18,9 @@ import {
   buildPluginDirectives,
   pinPluginDirectivesOnFirstSystem,
 } from "@/lib/plugins";
-import { workspaceToolsFor, runTool } from "@/lib/tools";
+import { workspaceToolsFor, runTool, WORK_LOOP_PROMPT } from "@/lib/tools";
+import { callMcpTool, parseMcpToolName, MCP_TOOL_PREFIX } from "@/lib/mcp";
+import { getMcpServer, mcpToolsForModel } from "@/lib/mcp-store";
 import { RunFileMemory } from "@/lib/run-memory";
 import { agentRoundsFor, modelHasOpenToolLimits } from "@/lib/tool-limits";
 import type { ToolResult } from "@/lib/tools";
@@ -41,7 +44,16 @@ import {
   reopenBlockedSteps,
   looksLikeRefusalBlocker,
   checkAnswerClaims,
+  PLAN_NUDGE_MARKER,
+  PLAN_STALE_AFTER_TOOL_ROUNDS,
+  stepClaimedComplete,
+  buildStalePlanNudge,
 } from "@/lib/plan";
+import {
+  GOAL_PIN_MARKER,
+  renderGoalPin,
+  resolveRunGoal,
+} from "@/lib/goal-pin";
 import type { Plan } from "@/lib/plan";
 import { BROWSER_POLICY_PROMPT, NO_BROWSER_PROMPT } from "@/lib/browser-policy";
 import { browserAvailable } from "@/lib/browser-playwright";
@@ -64,6 +76,7 @@ import {
   salvageToolArguments,
   salvagePartialFile,
   serializeForApi,
+  foldOldestHistory,
 } from "@/lib/transcript";
 import type { TranscriptMessage } from "@/lib/transcript";
 import { pruneTranscript } from "@/lib/prune";
@@ -95,23 +108,47 @@ import {
 } from "@/lib/rebuild-resume";
 import type { RebuiltResume } from "@/lib/rebuild-resume";
 import {
+  extractRejectionDetail,
   fetchUntilHeaders,
   fetchWithRetry,
   isTimeoutFailure,
-  OPENCODE_RETRY,
+  isSizeRejection,
+  isUnknownModelRejection,
+  OPENROUTER_RETRY,
   readWithTimeout,
   SERVER_SIDE_STATUS,
   sleep,
 } from "@/lib/retry";
 import {
   MAX_AUTO_REVIVES,
+  describesImminentAction,
   detectPrematureStop,
   prematureStopNotice,
   reviveInstruction,
 } from "@/lib/revive";
 import type { PrematureStopReason } from "@/lib/revive";
+import {
+  LoopBreaker,
+  loopTripMarker,
+  loopTripUserNote,
+  loopWarningText,
+} from "@/lib/loop-breaker";
+import {
+  rereadTripMarker,
+  rereadTripUserNote,
+  rereadWarningText,
+  StallTracker,
+  stallTripMarker,
+  stallTripUserNote,
+  stallWarningText,
+} from "@/lib/stall";
 import { extractReasoningDelta } from "@/lib/reasoning-stream";
-import { loadScopedConversationHistory } from "@/lib/chat-history";
+import { loadHistoryForRequest } from "@/lib/chat-history";
+import {
+  renderHistorySummary,
+  runHistorySummary,
+  shouldRefreshHistorySummary,
+} from "@/lib/history-summary";
 import type { ScopedChatMessage } from "@/lib/chat-history";
 import {
   buildUserContent,
@@ -121,10 +158,9 @@ import {
 import type { StoredAttachment } from "@/lib/multimodal";
 import {
   DEFAULT_MODEL_ID,
-  getModel,
-  maxOutputTokensFor,
-  modelVision,
+  sanitizeCustomModelDef,
 } from "@/lib/models";
+import type { CustomModelDef } from "@/lib/models";
 
 /**
  * Marks a user turn that exists only to carry a tool's image.
@@ -146,20 +182,32 @@ import {
   budgetStopMessage,
   maxTokensFor,
 } from "@/lib/budget";
-import { cacheSplit, estimateCost, getDeepSeekPeriod } from "@/lib/pricing";
+import {
+  cacheSplit,
+  estimateCost,
+  getDeepSeekPeriod,
+  type UsageLike,
+} from "@/lib/pricing";
 import { createContinuationDedup } from "@/lib/continuation-dedup";
 import { listCustomPlugins } from "@/lib/plugin-store";
 import {
   applyThinking,
   attemptTimeoutMs,
   completionHeaders,
+  OPENROUTER_FIRST_TOKEN_MS,
+  openrouterProviderFor,
+  openrouterReasoningMandatory,
   providerHttpError,
   providerTimedOut,
   providerUnreachable,
   resolveChatTarget,
   resolveHelperTarget,
 } from "@/lib/providers";
-import { OX_FIRST_TOKEN_MS, isOxProvider } from "@/lib/ox-host";
+import {
+  breakdownRequestMessages,
+  describeHistoryTurns,
+  formatBreakdown,
+} from "@/lib/request-size";
 import {
   ensureEngineRunning,
   isManagedEngineUrl,
@@ -231,12 +279,16 @@ interface ChatRequestBody {
   attachments?: StoredAttachment[];
   conversationId?: string | null;
   deepseekApiKey?: string;
-  /** OpenCode Zen key — required when Ox Alpha is on the Zen host. */
-  opencodeApiKey?: string;
-  /** OpenRouter key — required when Ox Alpha is on the OpenRouter host. */
+  /**
+   * OpenRouter key — serves GLM, the free Nemotron lane and custom models.
+   * Customs ride this key by construction; there is no second key for them.
+   */
   openrouterApiKey?: string;
-  /** `zen` or `openrouter`. Defaults to Zen. */
-  oxHost?: string;
+  /**
+   * The user's own OpenRouter models, as added in Settings. Re-sanitized
+   * here — the client copy is convenience, this copy is authority.
+   */
+  customModels?: CustomModelDef[];
   /** Local OpenAI-compatible host (in-app sidecar or a custom one). */
   localBaseUrl?: string;
   localApiKey?: string;
@@ -312,6 +364,18 @@ type StreamEvent =
       stage: "deciding" | "searching" | "thinking" | "writing" | "working";
     }
   | {
+      /**
+       * A round's request just went out — its size and where the bytes
+       * live. The client shows it once the body passes 100k, so a 600k
+       * "new message" arrives with its cause attached instead of as a
+       * mystery, and the wait that follows it reads as expected.
+       */
+      type: "request_size";
+      round: number;
+      inputChars: number;
+      breakdown: { label: string; chars: number }[];
+    }
+  | {
       type: "meta";
       conversationId: string | null;
       /** Id of the reply being generated, so Stop can name it. */
@@ -359,8 +423,13 @@ type StreamEvent =
       attempts: number;
       delayMs: number;
       reason: string;
+      /** The provider's own rejection message, when the retry answers one. */
+      detail?: string;
       host?: string;
+      providerId?: string;
       inputChars?: number;
+      /** Where the request bytes live, largest first (see lib/request-size). */
+      breakdown?: { label: string; chars: number }[];
     }
   | {
       /** Old tool output was collapsed to keep a long run affordable. */
@@ -404,7 +473,7 @@ type StreamEvent =
   | { type: "question_resolved"; id: string; answered: boolean }
   | {
       type: "usage";
-      usage: Record<string, number>;
+      usage: UsageLike;
       model: string;
       /** Peak/off-peak period the running cost was computed at. */
       period?: "peak" | "offpeak";
@@ -457,7 +526,25 @@ type StreamEvent =
       usage: unknown;
       /** Wall-clock milliseconds from request start to final token. */
       durationMs: number;
+      /** Chars in the final upstream request — the context this reply cost. */
+      contextChars?: number;
+      /** Where those bytes lived, largest first. */
+      contextBreakdown?: { label: string; chars: number }[];
+      /** How the reply ended: final finish_reason plus continuations spent. */
+      ending: {
+        finish: string | null;
+        continuedOutput: number;
+        continuedConnection: number;
+        thinkOnlyStalls: number;
+      };
       model: string;
+      /**
+       * How long the model spent reasoning, first trace token to last,
+       * across every round (and carried across Resume). The thinking
+       * panel's "Thought for 12s" — measured server-side, where the
+       * tokens actually arrive, so network jitter never inflates it.
+       */
+      reasoningMs?: number;
       /**
        * True when the reply stopped unfinished and Resume should keep the
        * same transcript (output ceiling, budget, or an inner-limit abort).
@@ -491,12 +578,12 @@ type StreamEvent =
  * The least-shaped version of a Chat Completions body: no tools, no tool
  * choice, and no image/video parts (replaced by a text note).
  *
- * The Ox Alpha free model's tool path has been flapping on the OpenCode
- * gateway (anomalyco/opencode #44300, #44382 — "Endpoint is unavailable" /
- * network_error on ANY request that offers tools, while the identical
- * request without them streams fine). It is their adapter, not our key, but
- * while it is down a workspace turn — which always offers tools — fails
- * 100% and looks "50/50" as their side recovers and breaks again.
+ * The free DeepSeek lane's tool path flaps on the OpenRouter gateway
+ * several times a week — "Endpoint is unavailable" / network_error on ANY
+ * request that offers tools, while the identical request without them
+ * streams fine. It is their adapter, not our key, but while it is down a
+ * workspace turn — which always offers tools — fails 100% and looks
+ * "50/50" as their side recovers and breaks again.
  *
  * This is the fallback body for ONE retry after such a rejection: the round
  * degrades to prose (the model can still emit tool calls learned from the
@@ -504,14 +591,24 @@ type StreamEvent =
  * Everything else — thinking fields, stream options, message text — stays
  * exactly as it was.
  */
-function sanitizeOxRequestBody(body: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = { ...body };
-  delete out.tools;
-  delete out.tool_choice;
+/**
+ * Wire-copy ceiling for a size-driven retry.
+ *
+ * A body the provider rejected for size is folded to about half of the
+ * observed failure point (~690k chars) — far enough below it to pass a
+ * limit sitting anywhere near there, while keeping the live question and
+ * the recent work intact. Only the retry takes this path; healthy rounds
+ * are never capped.
+ */
+const FOLD_RETRY_TARGET_CHARS = 350_000;
 
-  const messages = out.messages;
-  if (Array.isArray(messages)) {
-    out.messages = messages.map((m) => {
+/** Replace image/video parts with a one-line pointer. Shared by both retry paths. */
+function stripMediaParts(
+  messages: unknown
+): { messages: unknown; stripped: boolean } {
+  if (!Array.isArray(messages)) return { messages, stripped: false };
+  let stripped = false;
+  const out = messages.map((m) => {
       if (
         typeof m !== "object" ||
         m === null ||
@@ -538,10 +635,19 @@ function sanitizeOxRequestBody(body: Record<string, unknown>): Record<string, un
         }
       );
       if (!droppedMedia) return m;
+      stripped = true;
       return { ...(m as Record<string, unknown>), content };
     });
-  }
+  return { messages: out, stripped };
+}
 
+function sanitizeOpenRouterRequestBody(
+  body: Record<string, unknown>
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...body };
+  delete out.tools;
+  delete out.tool_choice;
+  out.messages = stripMediaParts(out.messages).messages;
   return out;
 }
 
@@ -564,9 +670,8 @@ export async function POST(req: NextRequest) {
     message,
     conversationId,
     deepseekApiKey,
-    opencodeApiKey,
     openrouterApiKey,
-    oxHost,
+    customModels = [],
     localBaseUrl,
     localApiKey,
     localApiModel,
@@ -601,14 +706,21 @@ export async function POST(req: NextRequest) {
 
   const creds = {
     deepseekApiKey,
-    opencodeApiKey,
     openrouterApiKey,
-    oxHost,
     localBaseUrl,
     localApiKey,
     localApiModel,
   };
-  const resolved = resolveChatTarget(model, creds);
+  // The client copy is convenience; only entries that survive the server
+  // sanitizer can be resolved, priced or costed below.
+  const customs: CustomModelDef[] = [];
+  if (Array.isArray(customModels)) {
+    for (const entry of customModels) {
+      const clean = sanitizeCustomModelDef(entry);
+      if (clean) customs.push(clean);
+    }
+  }
+  const resolved = resolveChatTarget(model, creds, customs);
   if (!resolved.ok) {
     return NextResponse.json({ error: resolved.error }, { status: 400 });
   }
@@ -634,15 +746,15 @@ export async function POST(req: NextRequest) {
       );
     }
   }
-  // The helper follows the main model's provider: an Ox conversation judges
-  // on Ox (free in preview, never balance-starved), a DeepSeek conversation
-  // on Flash. Passing `model` is what keeps a dead DeepSeek key from
-  // hijacking the web judge of a free Ox run.
-  // Search planning is a tiny JSON side call. It may only ride a genuinely
-  // cheaper/free helper target (DeepSeek Flash or Ox preview); resolving to
-  // the main GLM/OpenRouter model made an agent search perform extra paid
-  // GLM calls that were never part of the reply's usage total.
-  const helperTarget = resolveHelperTarget(creds, model);
+  // The helper is always a known-cheap lane, never the main model and never
+  // a custom: search planning and refine are tiny JSON side calls, and
+  // resolving them to the main GLM/OpenRouter model once made an agent
+  // search perform extra paid calls that were never part of the reply's
+  // usage total. Flash when a DeepSeek key exists (the key already paying
+  // for the reply keeps the side calls cheap), else the free Nemotron lane.
+  // The caller drops the helper when it equals the main model — a Flash
+  // conversation judges on Flash already, a Nemotron-free one on itself.
+  const helperTarget = resolveHelperTarget(creds, customs);
   const helperIsCheap =
     helperTarget !== null && helperTarget.model.id !== target.model.id;
   const helper = helperIsCheap ? helperTarget : null;
@@ -838,13 +950,82 @@ export async function POST(req: NextRequest) {
          * id has no stored history, and an existing id can only read itself.
          */
         let scopedHistory: ScopedChatMessage[] = [];
+        let historySummaryText: string | null = null;
         try {
-          scopedHistory = await loadScopedConversationHistory(convId, {
+          /*
+           * Rolling history: newest turns ride verbatim, older ones ride as
+           * a stored summary the cheap helper keeps current. The refresh
+           * runs here — before the transcript is built — so this request
+           * already benefits; it only fires once the uncovered backlog
+           * passes the trigger, and a miss just stretches the window until
+           * the next request retries. Runs on resume too: persisting a
+           * fresher summary is still useful even though the resumed
+           * transcript (rebuilt from save, never from history) ignores it.
+           */
+          const full = await loadHistoryForRequest(convId, {
             dropLastUser: Boolean(regenerateFromId || resumeMessageId),
           });
+          scopedHistory = full.verbatim;
+          let summary = full.stored;
+          const lastPending = full.pending.at(-1);
+          if (
+            lastPending &&
+            shouldRefreshHistorySummary(full.pending) &&
+            helper
+          ) {
+            const fresh = await runHistorySummary(
+              summary?.text ?? null,
+              full.pending,
+              {
+                apiKey: helper.apiKey,
+                baseUrl: helper.baseUrl,
+                model: helper.apiModel,
+                thinkingStyle: helper.thinkingStyle,
+              },
+              runSignal
+            );
+            if (fresh) {
+              summary = {
+                text: fresh.text,
+                upToId: lastPending.id,
+                droppedTurns:
+                  (summary?.droppedTurns ?? 0) + fresh.droppedTurns,
+                updatedAt: new Date().toISOString(),
+              };
+              // False means a concurrent request summarised first — its
+              // cursor wins the write, ours still applies to this request.
+              await saveHistorySummary(
+                convId,
+                full.stored?.upToId ?? null,
+                summary
+              );
+              if (fresh.usage) {
+                console.info(
+                  `History summary refreshed (${full.pending.length} turns): ` +
+                    `${fresh.usage.prompt_tokens} in / ${fresh.usage.completion_tokens} out`
+                );
+              }
+            }
+          }
+          historySummaryText = summary ? renderHistorySummary(summary) : null;
         } catch (e) {
           console.error("Could not load scoped conversation history:", e);
         }
+
+        // Newest pre-run user turn, skipping steering notes: on a Resume
+        // or regenerate the run's own text is filler ("continue"), so the
+        // goal pin falls back to this — the original request. A note is
+        // never the fallback — pinning "reset me" as the goal of a later
+        // run would re-execute a solved correction unasked.
+        const historyLastUser =
+          scopedHistory
+            .filter(
+              (m) =>
+                m.role === "user" &&
+                m.note !== true &&
+                (m.content || "").trim()
+            )
+            .at(-1)?.content.trim() ?? null;
 
         /*
          * Pick up an unfinished reply.
@@ -864,6 +1045,7 @@ export async function POST(req: NextRequest) {
         } | null = null;
         let resumedContent = "";
         let resumedReasoning = "";
+        let resumedReasoningMs = 0;
         let resumedToolEvents: NonNullable<StoredMessage["toolEvents"]> = [];
         let resumedTimeline: NonNullable<StoredMessage["timeline"]> = [];
         /** Set when the transcript was reconstructed rather than replayed. */
@@ -916,6 +1098,8 @@ export async function POST(req: NextRequest) {
               // rather than replacing it with only the new part.
               resumedContent = prior.content ?? "";
               resumedReasoning = prior.reasoningContent ?? "";
+              resumedReasoningMs =
+                typeof prior.reasoningMs === "number" ? prior.reasoningMs : 0;
               // The actions and the narration that went with them, so the
               // finished reply reads as one continuous piece of work rather
               // than starting abruptly at the point it was interrupted.
@@ -1056,15 +1240,15 @@ export async function POST(req: NextRequest) {
 
         const workspaceInstruction = workspaceEnabled
           ? `\n\nYou have a workspace on the user's machine and tools to work in it. Prefer creating real files over printing code in chat: the user wants working files, not snippets to copy. List or read before editing so your replacements match exactly.${
-              modelHasOpenToolLimits(model)
+              modelHasOpenToolLimits(model, target.model.openToolLimits)
                 ? " This model has no per-call tool ceilings: read_file returns the whole file, read_files / write_files / edit_files accept as many items as you send, search_files returns every match, and fetch_url returns the full page. Work in batches, not one item per call. Reading ten files is ONE read_files call — its paths accept globs, so \"src/lib/*.ts\" reads that whole directory at once — and changing ten files is ONE edit_files call. A round is a round whether it carries one job or thirty, and a reply that spends them one file at a time runs out of rounds with the task half done."
                 : ""
-            }\n\nYou can also run code with run_command. After writing something runnable, run it and check the output rather than assuming it works. If it fails, read the error, fix the file, and run it again. Each command needs the user's approval, so keep them few and purposeful, and say briefly why in the reason field. There is no shell. run_command waits for the program to finish, so use it only for things that exit — scripts, tests, installs. You can install packages: pip install and npm install both work and go into this workspace, not the user's system, so install what you need rather than rewriting code to avoid a dependency. For anything that keeps running, such as a dev server or a watcher, use start_process instead: it returns straight away, and you can read its output with read_process and stop it with stop_process. Always stop what you started once you are done with it. For anything that takes more than two or three actions, first read the files and explore enough to understand the task, then call make_plan: write down what finished looks like and the steps to get there, including how you will CHECK each one. The plan is not a first-move ritual — a plan made before you know what you are building is noise. It is also not a contract: when work teaches you something the plan did not know — a dead approach, a wrong assumption, a simpler path, a requirement you now understand better — call make_plan again immediately to replace it with the real path. On a long task your own reasoning from twenty rounds ago is gone, so without a written plan you will forget requirements from the first message and stop early because the work so far looks finished. When you work something out that a later turn would need - why an approach is dead, what a function actually does, which build or file is correct and why, an offset or value you verified, a command's exact error and what fixed it - call note_finding IMMEDIATELY, before continuing. Those findings are listed to you every turn and survive compaction, so you never have to re-read a file or re-run a command to remember it. Treat the findings list as your working memory: at the START of every turn, before doing anything, read the active findings and use them. When you find a finding is wrong or superseded, call note_finding with status='disproved' and the corrected claim so the list stays accurate and does not fill with stale notes. Do not record trivialities; one specific, evidence-backed line per finding. Keep it current with update_plan — a step is only done when you can say how you verified it.
+            }\n\nYou can also run code with run_command. After writing something runnable, run it and check the output rather than assuming it works. If it fails, read the error, fix the file, and run it again. Each command needs the user's approval, so keep them few and purposeful, and say briefly why in the reason field. There is no shell. run_command waits for the program to finish, so use it only for things that exit — scripts, tests, installs. You can install packages: pip install and npm install both work and go into this workspace, not the user's system, so install what you need rather than rewriting code to avoid a dependency. For anything that keeps running, such as a dev server or a watcher, use start_process instead: it returns straight away, and you can read its output with read_process and stop it with stop_process. Always stop what you started once you are done with it. For anything that takes more than two or three actions, first read the files and explore enough to understand the task, then call make_plan: write down what finished looks like and the steps to get there, including how you will CHECK each one. The plan is not a first-move ritual — a plan made before you know what you are building is noise. It is also not a contract: when work teaches you something the plan did not know — a dead approach, a wrong assumption, a simpler path, a requirement you now understand better — call make_plan again immediately to replace it with the real path. On a long task your own reasoning from twenty rounds ago is gone, so without a written plan you will forget requirements from the first message and stop early because the work so far looks finished. When you work something out that a later turn would need - why an approach is dead, what a function actually does, which build or file is correct and why, an offset or value you verified, a command's exact error and what fixed it - call note_finding IMMEDIATELY, before continuing. Those findings are listed to you every turn and survive compaction, so you never have to re-read a file or re-run a command to remember it. Treat the findings list as your working memory: at the START of every turn, before doing anything, read the active findings and use the ones relevant to this turn. Findings the current request does not need stay out of your reply entirely — no citing them, no 'per my findings', no acting on them; mention a finding only when it changed your course in a way the user needs to understand. When you find a finding is wrong or superseded, call note_finding with status='disproved' and the corrected claim so the list stays accurate and does not fill with stale notes. Do not record trivialities; one specific, evidence-backed line per finding. Keep it current with update_plan — a step is only done when you can say how you verified it.
 
 Work to the end. Do not hand back a half-finished task with a summary that reads as if it is complete: if something cannot be done, say so plainly and say why. Check your own work before claiming it works — run the tests, call the endpoint, open the page. To compile or build anything, call build_project instead of typing msbuild/cmake/dotnet/cargo yourself: it finds the installed Visual Studio/MSBuild/compiler automatically (including vswhere), restores packages, builds Release x64 by default, and hands you the compiler errors so you can fix them and rebuild.
 
 Ask before you build the wrong thing. If a choice would change what you produce and you cannot settle it by reading a file or looking it up, call ask_user — one question up front is far cheaper than twenty rounds of work in the wrong direction, and the user would rather be asked than handed something they have to throw away. Ask early, while the work is cheap to redo, not after you have committed to an approach. Offer concrete options with a sensible default so it is one click. Do not ask about things you can find out yourself, and do not ask the same thing twice. When you are done, briefly say what you changed and whether it ran.\n\nUse search_files to find where something lives rather than opening files one at a time, and read_files when you already know you need several — each separate call costs a whole round.\n\nYou can also look at the live web. When a task depends on what is actually on a page — its markup, its data, its exact wording — fetch it rather than reasoning from memory. Before writing anything that targets a site, such as a content script, a userscript or a scraper, call inspect_page on the real URL and use the ids and classes it returns. Never invent a selector you have not seen: a plausible-looking one that does not exist produces code that runs and does nothing, which is worse than admitting you need to look. Use fetch_url to read a page, fetch_url with raw for its HTML, and download_file to save something from a URL straight into the workspace. ${webSearchMode !== "off" && canSearch ? "When you hit something you do not know — an unfamiliar error, a library's current API — call web_search rather than guessing, because a wrong assumption compounds over every round after it. One web_search costs several model calls of its own, so make the query specific and read what comes back before searching again." : "There is no web_search tool available in this reply — the Web toggle is off or no Tavily/Exa key is set in Settings. fetch_url still works if you already know the URL. When you genuinely do not know something and cannot look it up, say so instead of guessing, and name what you would have searched for."}\n\nIf an edit turns out to be wrong, undo_file puts that file back exactly as it was; reverting is safer than patching your own mistake. restore_snapshot rolls the whole workspace back to a restore point, which is a much larger step — list_snapshots first, and say what you are undoing before you do it. read_document opens PDF, Word, Excel, PowerPoint, EPUB and ODT files, which read_file cannot. inspect_binary statically reads Windows EXEs/DLLs without executing them. Select only the layers the request needs: analyses:["decompile"] to test Ghidra/ILSpy, ["strings"] for a strings dump, ["entropy"], ["carve"], ["dependencies"], or ["capa"] for those individual jobs, and ["all"] only when the user asks to check everything. Omitted analyses means a cheap summary, not everything. After download_file of a large DLL, start with summary/strings and then decompile only the functions you name in focus_terms for THAT file — enable a specific analyzer such as Decompiler Parameter ID via enable_analyzers if you need it. Do not dump the whole binary and do not rely on a default hook list. Ghidra leftover after a closed or refreshed tab has no inspect UI: call list_processes and stop_process id=leftover to kill it. Decompiling is expensive and its artifacts persist on disk; the system message lists every executable already analyzed in this workspace with its hash and artifact paths - if the binary you need is already there, read those artifacts with read_file instead of running inspect_binary again, and never re-decompile the same hash unless the user asks you to. The moment you reach a conclusion about a binary - which one works, what is flawed, where the good build is, what a hook actually does - call note_binary so that verdict survives Stop and compaction instead of being paid for twice. write_files creates several files in one call, which is worth using whenever you are scaffolding.\n\nBatch the changes that belong together. move_file renames in one step instead of read-write-delete. edit_files applies several replacements at once, across one file or many. replace_in_files changes the same text everywhere it appears, which is what you want for renaming a function or an import path — doing that file by file costs a round each. When a string might occur somewhere you did not intend, run it with preview first and read the list before committing.${
-              visionApiKey || modelHasOpenToolLimits(model)
+              visionApiKey || modelHasOpenToolLimits(model, target.model.openToolLimits)
                 ? " You can also view_image to look at a screenshot or mockup saved in the workspace."
                 : ""
             }${
@@ -1076,7 +1260,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   `git diff before committing, commit through run_command after approval, and call ` +
                   `github_push only when the committed work is ready. Never merge or force-push.`
                 : ""
-            }${hasBrowser ? BROWSER_POLICY_PROMPT : NO_BROWSER_PROMPT}`
+            }${hasBrowser ? BROWSER_POLICY_PROMPT : NO_BROWSER_PROMPT}${WORK_LOOP_PROMPT}`
           : "";
 
         /*
@@ -1167,17 +1351,17 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         ];
 
         /*
-         * Ox / OpenCode often treats only the first system message as binding
-         * and ignores a later "priority" one after a few rounds. Pin the
+         * OpenRouter's free lanes often treat only the first system message
+         * as binding and ignore a later "priority" one after a few rounds. Pin the
          * same standing orders onto that first message — start and end —
          * so Direct Mode cannot fade. DeepSeek still gets the tail-only
          * copy (cache prefix).
          */
-        if (target.providerId === "opencode" || target.providerId === "openrouter") {
+        if (target.providerId === "openrouter") {
           pinPluginDirectivesOnFirstSystem(transcript, pluginDirectives);
         }
 
-        const vision = getModel(model).vision;
+        const vision = target.model.vision;
 
         /*
          * Which history turns still replay their pixels in full.
@@ -1185,7 +1369,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          * Every past user turn used to re-send its full base64 image/video on
          * EVERY request: up to twenty messages, 8MB images and 32MB clips —
          * one clip alone made a ~43MB body on every round, which is the
-         * "invalid zstd request body" 1210 the Zen gateway returns, and on
+         * "invalid zstd request body" 1210 the OpenRouter gateway returns, and on
          * the free pool the image tokens were re-billed every turn. What the
          * model saw is already reflected in its own earlier turns, so image
          * pixels stay full for the newest two media-bearing turns and become
@@ -1243,6 +1427,12 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               })()
             : () => null;
 
+        // Older turns, compressed: the summary rides as its own system
+        // message ahead of the verbatim window, with its own request-size
+        // bucket so the receipt line shows the compaction working.
+        if (historySummaryText) {
+          transcript.push({ role: "system", content: historySummaryText });
+        }
         for (const msg of scopedHistory) {
           if (msg.role === "assistant") {
             if (!msg.content?.trim()) continue;
@@ -1257,13 +1447,16 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             window ? { mediaWindow: window } : undefined
           );
           if (!userHasContent(built)) continue;
-          transcript.push({
-            role: "user",
-            content: built,
-            // Re-label a saved steering note on replay, so a later run reads
-            // it as "the user said this mid-task" rather than plain history.
-            ...(msg.note === true ? { note: true } : {}),
-          });
+          /*
+           * A saved steering note replays as PLAIN history here, deliberately
+           * without its mid-run label. The note steered the run it landed in
+           * (and that run's resume, which replays the saved transcript, not
+           * this path) — but a later turn re-labeling it would read a solved
+           * correction as a live order on every new request. The record
+           * stays: the transcript still shows what the user said and when.
+           * What expires is the standing-order framing.
+           */
+          transcript.push({ role: "user", content: built });
         }
         transcript.push({
           role: "user",
@@ -1282,7 +1475,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          */
         const appendPluginDirectives = () => {
           // Only the dedicated tail copy moves. The first system message may
-          // START with the same marker (Ox pin) and must not be deleted.
+          // START with the same marker (OpenRouter pin) and must not be deleted.
           for (let i = transcript.length - 1; i >= 0; i--) {
             const entry = transcript[i];
             if (
@@ -1349,6 +1542,14 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          */
         let plan: Plan | null = null;
         /*
+         * Grounding state. lastPlanUpdateToolRound nulls to "no plan this
+         * run yet" — the pin site treats it as compliant, so only a live,
+         * neglected plan is ever nudged. lastSteeringText feeds the goal
+         * pin: a mid-run redirect becomes the pinned goal next round.
+         */
+        let lastPlanUpdateToolRound: number | null = null;
+        let lastSteeringText: string | null = null;
+        /*
          * A leftover unfinished plan from a previous message must not lock
          * make_plan. Mid-run shrink-to-escape stays refused; the first
          * make_plan of a NEW user message (not Resume) may replace it.
@@ -1358,6 +1559,9 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           const saved = await readPlan(workspace);
           if (saved && !planIsComplete(saved)) {
             plan = saved;
+            // Seed optimistic: the saved plan was current when its reply
+            // ended, so this run counts staleness from here, not from zero.
+            lastPlanUpdateToolRound = resumed?.toolRounds ?? 0;
             allowFirstPlanShrink = !resumeMessageId;
             /*
              * A blocked step left over from the previous reply must NOT
@@ -1416,6 +1620,23 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          * keeping them would make this grow without bound on a long task.
          */
         const toolsUsedThisRun: string[] = [];
+
+        /*
+         * Halt state: one tracker per reply for each subsystem. The breaker
+         * counts identical failures per call; the stall tracker counts calls
+         * that add nothing new. Either can halt the run — runHalted is the
+         * shared "stop after this call" flag, and stoppedPrematurely names
+         * which subsystem fired so the notice and Resume agree.
+         */
+        const loopBreaker = new LoopBreaker();
+        const stallTracker = new StallTracker();
+        let runHalted = false;
+        /*
+         * A finish with open plan steps is bounced once, with the list —
+         * the mirror, not a cage. finishArmed remembers the bounce so the
+         * second call is always honoured, whatever is still open.
+         */
+        let finishArmed = false;
 
         const setFileTree = (text: string) => {
           currentFileTree = text;
@@ -1702,7 +1923,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           await refreshFileTree();
         }
 
-        if (target.providerId === "opencode" || target.providerId === "openrouter") {
+        if (target.providerId === "openrouter") {
           pinPluginDirectivesOnFirstSystem(transcript, pluginDirectives);
         }
 
@@ -1717,6 +1938,10 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         // stops calling tools, the user presses Stop, or a spending limit
         // (if one is set) fires.
         let round = 0;
+        // The FINAL round's request size, reported on `done` — the context
+        // the reply as a whole cost. Updated per round; last write wins.
+        let lastInputChars = 0;
+        let lastSizeParts: { label: string; chars: number }[] = [];
         // Carried across Resume so the ask-early nudge and plan checks still
         // see how long this reply has already been working.
         let toolRounds = resumed?.toolRounds ?? 0;
@@ -1758,7 +1983,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          * blames the provider. Open-ceiling models (1M window, free or
          * cheap) get a much higher guard; everyone else keeps 64.
          */
-        const MAX_AGENT_ROUNDS = agentRoundsFor(model);
+        const MAX_AGENT_ROUNDS = agentRoundsFor(model, target.model.openToolLimits);
         /*
          * Output-limit continuation budgets start FRESH on every request —
          * including a Resume.
@@ -1773,20 +1998,31 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          * runaway loop remains finite.
          */
         let continuations = 0;
+        /*
+         * How the reply ended, for the footer receipt. The final round's
+         * finish_reason plus what the continuation pools spent — so "2k
+         * chars and stopping" answers itself: `stop` with zero continuations
+         * means the model ended it, anything else names the cutter.
+         */
+        let lastFinishReason: string | null = null;
         /**
          * Set when the next round is a "carry on from where you stopped"
          * prose continuation, so that round de-duplicates any text the model
-         * incorrectly echoes back instead of continuing (GLM/Ox restart the
+         * incorrectly echoes back instead of continuing (GLM and the free lanes restart the
          * sentence). Consumed by the round that requested it.
          */
         let proseContinuationPending = false;
         /**
-         * A think-only output-limit cut: one nudge to act, then stop. Fresh
+         * A think-only output-limit cut: two shoves to act, then stop. Fresh
          * budget on Resume for the same reason — but forceNoThinking below
          * still carries, so a model that burned the whole ceiling on
          * thinking is NOT told it may think again.
          */
         let thinkNudges = 0;
+        /** Think-only strikes observed this run, recovered or not. */
+        let thinkOnlyStalls = 0;
+        /** The ceiling trip was thinking eating the budget, not a long answer. */
+        let thinkCeiling = false;
         /** After a think-only cut, the next call must not think again. */
         let forceNoThinking =
           (resumed?.thinkNudges ?? 0) > 0 ||
@@ -1797,6 +2033,10 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          * Resume: an explicit continue is the user asking us to try again.
          */
         let autoRevives = 0;
+        // Rounds that completed via a tool-less retry. Owed to the user in
+        // the stop notice — "stopped mid-task" alone hides that some rounds
+        // could not act at all.
+        let degradedRoundsThisRun = 0;
         /**
          * Times a dropped connection cut the answer mid-content. Separate
          * from MAX_CONTINUATIONS so provider flakiness cannot spend the
@@ -1805,8 +2045,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          */
         let streamCuts = 0;
         /**
-         * Times we re-issued an OpenCode call that came back HTTP 200 with
-         * an empty SSE body. Zen does this during the same outages as 503;
+         * Times we re-issued an OpenRouter call that came back HTTP 200 with
+         * an empty SSE body. The shared pool does this during the same outages as 503;
          * built-in retries only fire on a bad status, so without this the
          * user sees "retrying" then a blank reply.
          */
@@ -1829,6 +2069,14 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          * saturated pool eventually surfaces, rather than looping forever.
          */
         let rateLimitRetries = 0;
+        /**
+         * The endpoint refused `reasoning: { effort: "none" }` ("reasoning is
+         * mandatory") at least once this run. A static pin covers verified
+         * endpoints; this covers the rest — and from here on every round
+         * clamps the disable to minimal effort instead of burning another
+         * free 400 to re-learn it.
+         */
+        let keepReasoningOn = false;
         /** Set when the reply stopped because it ran out of room. */
         let hitOutputCeiling = false;
         /**
@@ -1859,6 +2107,15 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         // message grows rather than being overwritten by only the new half.
         let assistantContent = resumedContent;
         let reasoningContent = resumedReasoning;
+        // First/last reasoning token of THIS request. A resume adds its own
+        // span onto `resumedReasoningMs` above rather than resetting it.
+        let firstReasoningAt = 0;
+        let lastReasoningAt = 0;
+        const currentReasoningMs = () =>
+          resumedReasoningMs +
+          (firstReasoningAt && lastReasoningAt
+            ? Math.max(0, lastReasoningAt - firstReasoningAt)
+            : 0);
         // Diagnostics contain field NAMES and counts only, never private text.
         // They tell us whether the provider omitted reasoning or used an
         // alternate compatible field that the parser normalized.
@@ -1928,6 +2185,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           total_tokens: 0,
           prompt_cache_hit_tokens: 0,
           prompt_cache_miss_tokens: 0,
+          completion_tokens_details: { reasoning_tokens: 0 },
         };
         /**
          * Last tool round whose full transcript was persisted.
@@ -1949,6 +2207,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             role: "assistant",
             content: assistantContent,
             reasoningContent: reasoningContent || null,
+            reasoningMs: currentReasoningMs() || null,
             thinkingEffort: resolvedEffort,
             model,
             tokenCount: totalUsage.total_tokens || null,
@@ -1969,9 +2228,9 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         while (true) {
           round += 1;
           appendPluginDirectives();
-          // Ox ignores the tail copy after a few rounds. Re-pin every
+          // The free lanes ignore the tail copy after a few rounds. Re-pin every
           // round so a long agent loop cannot fade Direct Mode.
-          if (target.providerId === "opencode" || target.providerId === "openrouter") {
+          if (target.providerId === "openrouter") {
             pinPluginDirectivesOnFirstSystem(transcript, pluginDirectives);
           }
 
@@ -2005,14 +2264,21 @@ Ask before you build the wrong thing. If a choice would change what you produce 
            * interrupted: the previous round finished, and tools it started
            * keep running; the note simply joins the transcript here.
            *
-           * Each note is also persisted as an ordinary user message, so it
-           * keeps steering every later turn (and a resume, whose transcript
-           * already contains it) instead of vanishing when this reply ends.
+           * Each note is also persisted as an ordinary user message, so the
+           * record survives the reply — and a resume of THIS run keeps it
+           * live, since resume replays the saved transcript. Later turns
+           * replay it as plain archive history instead: a solved correction
+           * must not steer every new request.
            */
           try {
             const midRunNotes = await drainBtwNotes(convId);
             for (const note of midRunNotes) {
               const noteId = uuidv4();
+              // Newest steering wins the goal pin: a mid-run redirect
+              // becomes what the run is answering from the next round on.
+              if ((note.text || "").trim()) {
+                lastSteeringText = note.text.trim();
+              }
               // Same builder a normal message's attachments go through:
               // native-vision models get the pixels, blind models the
               // description blocks, and a dropped binary's "saved at <path>"
@@ -2067,6 +2333,9 @@ Ask before you build the wrong thing. If a choice would change what you produce 
 
           const toolAcc = new ToolCallAccumulator();
           let roundContent = "";
+          // True when the response being processed came from a retry that
+          // stripped the tools. A stop on such a round is harness-caused.
+          let roundRanWithoutTools = false;
           let roundReasoning = "";
           const roundDeltaFields = new Set<string>();
           /** "stop" if the model finished, "length" if it ran out of room. */
@@ -2076,7 +2345,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
            * Continuation de-duplication.
            *
            * When a reply is cut mid-sentence we ask the model to "carry
-           * straight on from the last character". GLM and Ox often ignore
+           * straight on from the last character". GLM and the free lanes often ignore
            * that and restart the sentence instead — so the new stream's
            * beginning is a copy of text already streamed and saved, and the
            * two got concatenated into one garbled line ("The chain is closed —
@@ -2144,8 +2413,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             });
           }
           // Compact returns a new array. Re-pin the copy that actually
-          // goes on the wire so Ox cannot lose MAXIMUM PRIORITY.
-          if (target.providerId === "opencode" || target.providerId === "openrouter") {
+          // goes on the wire so the free lanes cannot lose MAXIMUM PRIORITY.
+          if (target.providerId === "openrouter") {
             pinPluginDirectivesOnFirstSystem(
               compacted.messages,
               pluginDirectives
@@ -2154,7 +2423,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
 
           // Qwen's jinja template only accepts a system message at index 0.
           // File-tree / plan / plugin tails stay in `transcript` (and so in
-          // resume state) so DeepSeek/Ox keep their cache-friendly layout.
+          // resume state) so DeepSeek/OpenRouter keep their cache-friendly layout.
           // The sidecar window is 80K, not 1M — fit the wire copy so a
           // workspace turn cannot 400 with "exceeds the available context".
           const foldedForQwen =
@@ -2170,17 +2439,17 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               : foldedForQwen;
 
           const dsRequestBody: Record<string, unknown> = {
-            // On the wire this may differ from the app id (Ox Alpha is
-            // `x-preview-f-free` on OpenCode Zen). Saved usage still uses
+            // On the wire this may differ from the app id (a custom model
+            // is its OpenRouter slug, e.g. `x/y:free`). Saved usage still uses
             // the app id so pricing looks it up correctly.
             model: target.apiModel,
             // DeepSeek REQUIRES the verbatim reasoning on tool-calling
-            // turns; the OpenCode Zen gateway validates its schema strictly
-            // and the Ox catalog marks the field as not required — sending
+            // turns; the OpenRouter gateway validates its schema strictly
+            // and the GLM catalog marks the field as not required — sending
             // it is a 400 "[1210] Invalid API parameter" once any tool round
             // is in the transcript (and every resume replays those rounds).
             messages: serializeForApi(wireMessages, {
-              includeReasoning: !isOxProvider(target.providerId),
+              includeReasoning: target.providerId !== "openrouter",
             }),
             stream: true,
             stream_options: { include_usage: true },
@@ -2204,7 +2473,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               // hosted model uses its own documented output window.
               target.thinkingStyle === "qwen"
                 ? SIDECAR_MAX_OUTPUT
-                : maxOutputTokensFor(model)
+                : target.model.maxOutputTokens,
+              customs
             ),
           };
 
@@ -2224,11 +2494,34 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             dsRequestBody.session_id = `conv-${convId}`;
           }
 
+          /*
+           * Pinned cheapest endpoint per catalog model. Without this
+           * OpenRouter auto-routes every request, so identical rounds bill
+           * at whatever provider the gateway picks — the spend wanders and
+           * the rate table cannot match it. `only` + no fallbacks keeps
+           * every token on the researched price; unpinned models (free
+           * lane, customs) keep automatic routing.
+           */
+          if (target.providerId === "openrouter") {
+            const pinned = openrouterProviderFor(target.model.id);
+            if (pinned) dsRequestBody.provider = pinned;
+          }
+
           applyThinking(
             dsRequestBody,
             target.thinkingStyle,
             thinkingEnabled && !forceNoThinking,
-            forceNoThinking ? "none" : resolvedEffort
+            forceNoThinking ? "none" : resolvedEffort,
+            // Mandatory-reasoning endpoints 400 on the disable (the budget
+            // shove and prose continuations kept dying on the fp4 pin), so
+            // the off signal clamps to minimal effort there instead.
+            target.providerId === "openrouter"
+              ? {
+                  reasoningMandatory:
+                    openrouterReasoningMandatory(target.model.id) ||
+                    keepReasoningOn,
+                }
+              : undefined
           );
 
           if (workspaceEnabled) {
@@ -2237,13 +2530,16 @@ Ask before you build the wrong thing. If a choice would change what you produce 
              *
              * A model given a tool it has no key for will call it, get an
              * error, apologise, and try something worse — a wasted round and
-             * a worse answer. view_image needs a vision key except on Ox
-             * Alpha, which can use free local OCR; web_search needs a
+             * a worse answer. view_image needs a vision key except on an
+             * open-ceiling model, which can use free local OCR; web_search needs a
              * Tavily or Exa key.
              */
-            dsRequestBody.tools = workspaceToolsFor(model).filter((t) => {
+            dsRequestBody.tools = workspaceToolsFor(
+              model,
+              target.model.openToolLimits
+            ).filter((t) => {
               if (t.function.name === "view_image") {
-                return Boolean(visionApiKey) || modelHasOpenToolLimits(model);
+                return Boolean(visionApiKey) || modelHasOpenToolLimits(model, target.model.openToolLimits);
               }
               if (t.function.name === "web_search")
                 // Off = the tool does not exist for the agent. On = offered
@@ -2259,6 +2555,21 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               }
               return true;
             });
+            /*
+             * MCP servers contribute their tools best-effort: a server that
+             * is down or slow is skipped, never allowed to break the reply.
+             * The list is cached server-side, so this costs nothing per
+             * round once warm.
+             */
+            try {
+              const mcpTools = await mcpToolsForModel();
+              const existing = dsRequestBody.tools;
+              if (mcpTools.length > 0 && Array.isArray(existing)) {
+                dsRequestBody.tools = [...existing, ...mcpTools];
+              }
+            } catch (error) {
+              console.error("MCP tools unavailable this round:", error);
+            }
             dsRequestBody.tool_choice = "auto";
           }
 
@@ -2266,6 +2577,41 @@ Ask before you build the wrong thing. If a choice would change what you produce 
 
           const bodyJson = JSON.stringify(dsRequestBody);
           const inputChars = bodyJson.length;
+          /*
+           * Forensics for the retry banner: attribute every byte to a bucket
+           * so "612k chars in" arrives with its cause attached. The log line
+           * only fires on fat bodies — a small chat stays quiet.
+           */
+          const sizeParts = breakdownRequestMessages(
+            dsRequestBody.messages,
+            dsRequestBody.tools ? JSON.stringify(dsRequestBody.tools).length : 0
+          );
+          lastInputChars = inputChars;
+          lastSizeParts = sizeParts;
+          // Fire-time receipt, every round: the client decides the 100k
+          // display threshold, so a run that grows into (or shrinks out of)
+          // heaviness never shows a stale figure.
+          send({
+            type: "request_size",
+            round,
+            inputChars,
+            breakdown: sizeParts.slice(0, 6),
+          });
+          if (inputChars >= 100_000) {
+            console.log(
+              `[chat] ${target.model.id} round ${round}: ` +
+                formatBreakdown(inputChars, sizeParts)
+            );
+            // When history is the mass, name the fat turns — a 479k bucket
+            // is still a mystery until you see whether one pasted wall or
+            // twenty chatty replies hold it.
+            const historyPart = sizeParts.find((part) => part.label === "history");
+            if (historyPart && historyPart.chars >= 100_000) {
+              for (const row of describeHistoryTurns(dsRequestBody.messages)) {
+                console.log(`[chat] ${target.model.id} round ${round} hist: ${row}`);
+              }
+            }
+          }
           // One check for the whole request: a round carrying a video dies
           // differently from a text round — minutes of prefill silence, then
           // an empty stream — and its retry budget below is sized for that.
@@ -2273,8 +2619,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           // on the data URL itself.)
           const roundHasVideo = bodyJson.includes('"video_url"');
           const retryAttempts =
-            target.providerId === "opencode" || target.providerId === "openrouter"
-              ? OPENCODE_RETRY.attempts
+            target.providerId === "openrouter"
+              ? OPENROUTER_RETRY.attempts
               : undefined;
 
           // ---------------- Call DeepSeek ----------------
@@ -2296,7 +2642,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 runSignal
               ),
             {
-              ...((target.providerId === "opencode" || target.providerId === "openrouter") ? OPENCODE_RETRY : {}),
+              ...((target.providerId === "openrouter") ? OPENROUTER_RETRY : {}),
               signal: runSignal,
               onAttempt: ({ attempt: n, attempts }) => {
                 send({
@@ -2307,7 +2653,9 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   delayMs: 0,
                   reason: "",
                   host: target.providerName,
+                  providerId: target.providerId,
                   inputChars,
+                  breakdown: sizeParts,
                 });
               },
               onRetry: ({ attempt: n, attempts, delayMs, reason }) => {
@@ -2319,7 +2667,9 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   delayMs,
                   reason,
                   host: target.providerName,
+                  providerId: target.providerId,
                   inputChars,
+                  breakdown: sizeParts,
                 });
               },
             }
@@ -2368,48 +2718,134 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           let earlyErrText = "";
 
           /*
-           * Ox: one more chance with a body the gateway will actually take.
+           * OpenRouter: one more chance with a body the gateway will actually take.
            *
-           * A 400 "Invalid API parameter" is a REJECTION OF THE REQUEST
-           * SHAPE, not of the content — retrying it identically fails
-           * identically, which is why the retry policy treats 400 as fatal.
-           * The shapes only Ox has rejected in the wild are the tool path
-           * (their adapter for the free model flaps: anomalyco/opencode
-           * #44300, #44382 — while it is down, every request that offers
-           * tools fails while plain chat works) and oversized or foreign
-           * media payloads (the "invalid zstd request body" variant of the
-           * same 1210). So: if the rejection looks like a shape problem,
-           * retry ONCE with the sanitized body — no tools, no media pixels.
-           * The round degrades to prose at worst; the model can still emit
-           * tool calls learned from the history and we execute those. Either
-           * way the task survives instead of a hard stop mid-run.
+           * A 400 is two different failures wearing one status. SHAPE
+           * ("Invalid API parameter", a flapping tool adapter, foreign
+           * media) wants the tools and pixels stripped — retrying it
+           * identically fails identically, which is why the retry policy
+           * treats 400 as fatal. SIZE ("maximum context length", a 413) is
+           * the opposite: stripping the tools keeps every one of the
+           * offending chars and fails identically WITH a defanged agent,
+           * so the retry folds the oldest history instead and keeps the
+           * tools — they are kilobytes, the history is the mass. The
+           * provider's own message picks the path; the banner shows it so
+           * the retry is never a mystery again.
            */
-          if (!dsResponse.ok && (target.providerId === "opencode" || target.providerId === "openrouter")) {
+          if (!dsResponse.ok && target.providerId === "openrouter") {
             earlyErrText = await dsResponse.text().catch(() => "");
-            const rejectedDetail = (() => {
-              try {
-                const parsed = JSON.parse(earlyErrText);
-                return String(parsed?.error?.message ?? parsed?.message ?? "");
-              } catch {
-                return earlyErrText.slice(0, 300);
-              }
-            })();
+            // Unwrapped, not just read: the gateway sometimes buries the
+            // real cause in metadata.raw, and the size-vs-shape verdict
+            // below is only as good as this string.
+            const rejectedDetail = extractRejectionDetail(earlyErrText);
+            // The model ID itself is unknown: no body reshape can fix that,
+            // so skip every retry and let the final error name the bad ID.
+            // (Observed as a 400 "X is not a valid model ID" that burned a
+            // 697k strip retry and a 313k composed retry to learn nothing.)
+            const modelUnknown = isUnknownModelRejection(rejectedDetail);
+            if (modelUnknown) {
+              console.log(
+                `[chat] ${target.model.id} round ${round}: not retrying — ${rejectedDetail.slice(0, 160)}`
+              );
+            }
             if (
-              dsResponse.status === 400 ||
-              (dsResponse.status >= 500 && /endpoint is unavailable/i.test(rejectedDetail))
+              !modelUnknown &&
+              (dsResponse.status === 400 ||
+                dsResponse.status === 413 ||
+                dsResponse.status === 422 ||
+                (dsResponse.status >= 500 &&
+                  /endpoint is unavailable/i.test(rejectedDetail)))
             ) {
-              const sanitized = sanitizeOxRequestBody(dsRequestBody);
-              if (JSON.stringify(sanitized) !== JSON.stringify(dsRequestBody)) {
-                const sanitizedChars = JSON.stringify(sanitized).length;
+              const sizeDriven = isSizeRejection(dsResponse.status, rejectedDetail);
+              let retryBody: Record<string, unknown> | null = null;
+              let retryReason = "";
+              // MANDATORY reasoning ("Reasoning is mandatory for this
+              // endpoint and cannot be disabled"): the disable field itself
+              // is the offense, so neither folding nor tool-stripping can
+              // help — retrying either fails identically WITH a defanged
+              // agent. Lift the disable to minimal effort, keep everything
+              // else byte-identical, and remember it for the rest of the run.
+              // Checked first: a mandatory 400 on a fat body must not fold.
+              const disableSent =
+                (
+                  dsRequestBody.reasoning as { effort?: unknown } | undefined
+                )?.effort === "none";
+              if (
+                dsResponse.status === 400 &&
+                /reasoning is mandatory/i.test(rejectedDetail) &&
+                disableSent
+              ) {
+                keepReasoningOn = true;
+                retryBody = { ...dsRequestBody };
+                delete retryBody.reasoning;
+                retryBody.reasoning_effort = "low";
+                retryReason =
+                  "endpoint requires reasoning — retrying with minimal thinking instead of none";
+              } else if (sizeDriven && Array.isArray(dsRequestBody.messages)) {
+                // Fold oldest history, keep the agent whole. Media rides the
+                // same retry (it is mass too) but the tools stay: without
+                // them the round degrades to prose and the task stalls.
+                const folded = foldOldestHistory(
+                  dsRequestBody.messages as Record<string, unknown>[],
+                  FOLD_RETRY_TARGET_CHARS
+                );
+                const media = stripMediaParts(folded.messages);
+                if (folded.stats.dropped > 0 || media.stripped) {
+                  retryBody = { ...dsRequestBody, messages: media.messages };
+                  retryReason =
+                    `payload too large — retrying with ${folded.stats.dropped} ` +
+                    `older turn${folded.stats.dropped === 1 ? "" : "s"} folded, tools kept`;
+                }
+                // Nothing foldable (a short run rejected for shape after
+                // all): fall through to the tool-stripping path below rather
+                // than failing without a second try.
+              }
+              if (!retryBody) {
+                const sanitized = sanitizeOpenRouterRequestBody(dsRequestBody);
+                if (JSON.stringify(sanitized) !== JSON.stringify(dsRequestBody)) {
+                  retryBody = sanitized;
+                  retryReason =
+                    "host rejected the payload — retrying without tools and media";
+                } else if (Array.isArray(dsRequestBody.messages)) {
+                  // A shape verdict with nothing to strip — a plain chat the
+                  // gateway refused anyway. The diagnosis may be wrong (a
+                  // generic wrapper names nothing), and a 697k body is guilty
+                  // until proven innocent: fold once rather than failing
+                  // without a second try.
+                  const folded = foldOldestHistory(
+                    dsRequestBody.messages as Record<string, unknown>[],
+                    FOLD_RETRY_TARGET_CHARS
+                  );
+                  const media = stripMediaParts(folded.messages);
+                  if (folded.stats.dropped > 0 || media.stripped) {
+                    retryBody = { ...dsRequestBody, messages: media.messages };
+                    retryReason =
+                      `host rejected the payload — retrying with ${folded.stats.dropped} ` +
+                      `older turn${folded.stats.dropped === 1 ? "" : "s"} folded`;
+                  }
+                }
+              }
+              if (retryBody) {
+                const retryJson = JSON.stringify(retryBody);
+                const sanitizedChars = retryJson.length;
+                const retryToolsChars = retryBody.tools
+                  ? JSON.stringify(retryBody.tools).length
+                  : 0;
                 send({
                   type: "retrying",
                   phase: "attempt",
                   attempt: attempt.attempts + 1,
                   attempts: (retryAttempts ?? attempt.attempts) + 1,
                   delayMs: 0,
-                  reason: "host rejected the payload — retrying without tools and media",
+                  reason: retryReason,
+                  detail: rejectedDetail.slice(0, 200) || undefined,
                   host: target.providerName,
+                  providerId: target.providerId,
                   inputChars: sanitizedChars,
+                  breakdown: breakdownRequestMessages(
+                    retryBody.messages,
+                    retryToolsChars
+                  ),
                 });
                 try {
                   const second = await fetchUntilHeaders(
@@ -2417,7 +2853,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                       fetch(`${target.baseUrl}/chat/completions`, {
                         method: "POST",
                         headers: completionHeaders(target),
-                        body: JSON.stringify(sanitized),
+                        body: retryJson,
                         signal,
                       }),
                     attemptTimeoutMs(target, sanitizedChars),
@@ -2426,21 +2862,136 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   if (second.ok && second.body) {
                     recordAsync({
                       kind: "api_error",
-                      subject: "ox_shape_rejection",
-                      detail: `Recovered on sanitized retry after HTTP ${dsResponse.status}: ${rejectedDetail.slice(0, 160)}`,
+                      subject: "openrouter_rejection_recovery",
+                      detail: `Recovered on rejection retry after HTTP ${dsResponse.status}: ${retryReason} — ${rejectedDetail.slice(0, 160)}`,
                       context: { status: dsResponse.status },
                     });
+                    // A tool-less recovery changes what the model COULD do
+                    // this round: narration after it is harness-caused, not
+                    // defiance. The revive shove and the stop notice read this.
+                    roundRanWithoutTools = !("tools" in retryBody);
+                    if (roundRanWithoutTools) {
+                      degradedRoundsThisRun += 1;
+                      console.log(
+                        `[chat] ${target.model.id} round ${round}: continuing without tools — ` +
+                          `HTTP ${dsResponse.status} rejected the request (${rejectedDetail.slice(0, 120)})`
+                      );
+                    }
                     dsResponse = second;
                   } else {
                     const t2 = await second.text().catch(() => "");
+                    const secondDetail = extractRejectionDetail(t2);
                     console.error(
-                      "Ox sanitized retry failed:",
+                      "OpenRouter rejection retry failed:",
                       second.status,
                       t2.slice(0, 300)
                     );
+                    /*
+                     * The targeted retry just proved one transform
+                     * insufficient — a double fault (oversized AND tool-shy)
+                     * or a misread first error. Compose both transforms once:
+                     * fold the history AND strip tools and media. Each retry
+                     * differs materially from the last, so this terminates;
+                     * the one exception is a fold that still came back too
+                     * large, where stripping kilobytes of tools cannot help
+                     * and the honest outcome is the error below.
+                     */
+                    const retry1HadTools = "tools" in retryBody;
+                    const secondIsRejection =
+                      second.status === 400 ||
+                      second.status === 413 ||
+                      second.status === 422 ||
+                      (second.status >= 500 &&
+                        /endpoint is unavailable/i.test(secondDetail));
+                    const stillTooBig =
+                      retry1HadTools &&
+                      isSizeRejection(second.status, secondDetail);
+                    if (
+                      secondIsRejection &&
+                      !stillTooBig &&
+                      Array.isArray(dsRequestBody.messages)
+                    ) {
+                      const refolded = foldOldestHistory(
+                        dsRequestBody.messages as Record<string, unknown>[],
+                        FOLD_RETRY_TARGET_CHARS
+                      );
+                      // The composed retry refolds the ORIGINAL body — without
+                      // this the lifted disable would sneak back in and the
+                      // third attempt would 400 on mandatory reasoning again.
+                      const composedBase: Record<string, unknown> = {
+                        ...dsRequestBody,
+                        messages: refolded.messages,
+                      };
+                      if (keepReasoningOn) {
+                        delete composedBase.reasoning;
+                        composedBase.reasoning_effort = "low";
+                      }
+                      const composed =
+                        sanitizeOpenRouterRequestBody(composedBase);
+                      const composedJson = JSON.stringify(composed);
+                      if (composedJson !== retryJson) {
+                        const composedChars = composedJson.length;
+                        send({
+                          type: "retrying",
+                          phase: "attempt",
+                          attempt: attempt.attempts + 2,
+                          attempts: (retryAttempts ?? attempt.attempts) + 2,
+                          delayMs: 0,
+                          reason:
+                            "still rejected — retrying once more, smaller and without tools",
+                          detail: secondDetail.slice(0, 200) || undefined,
+                          host: target.providerName,
+                          providerId: target.providerId,
+                          inputChars: composedChars,
+                          breakdown: breakdownRequestMessages(
+                            composed.messages,
+                            0
+                          ),
+                        });
+                        try {
+                          const third = await fetchUntilHeaders(
+                            (signal) =>
+                              fetch(`${target.baseUrl}/chat/completions`, {
+                                method: "POST",
+                                headers: completionHeaders(target),
+                                body: composedJson,
+                                signal,
+                              }),
+                            attemptTimeoutMs(target, composedChars),
+                            runSignal
+                          );
+                          if (third.ok && third.body) {
+                            recordAsync({
+                              kind: "api_error",
+                              subject: "openrouter_rejection_recovery",
+                              detail:
+                                `Recovered on composed retry after HTTP ${dsResponse.status} ` +
+                                `then ${second.status}: ${secondDetail.slice(0, 160)}`,
+                              context: { status: second.status },
+                            });
+                            roundRanWithoutTools = true;
+                            degradedRoundsThisRun += 1;
+                            console.log(
+                              `[chat] ${target.model.id} round ${round}: continuing smaller and without tools — ` +
+                                `HTTP ${second.status} rejected the targeted retry (${secondDetail.slice(0, 120)})`
+                            );
+                            dsResponse = third;
+                          } else {
+                            const t3 = await third.text().catch(() => "");
+                            console.error(
+                              "OpenRouter composed retry failed:",
+                              third.status,
+                              t3.slice(0, 300)
+                            );
+                          }
+                        } catch (e) {
+                          console.error("OpenRouter composed retry threw:", e);
+                        }
+                      }
+                    }
                   }
                 } catch (e) {
-                  console.error("Ox sanitized retry threw:", e);
+                  console.error("OpenRouter rejection retry threw:", e);
                 }
               }
             }
@@ -2450,13 +3001,10 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             const errText = earlyErrText || (await dsResponse.text().catch(() => ""));
             console.error("DeepSeek error:", dsResponse.status, errText);
 
-            let detail = "";
-            try {
-              const parsed = JSON.parse(errText);
-              detail = parsed?.error?.message ?? parsed?.message ?? "";
-            } catch {
-              detail = errText.slice(0, 200);
-            }
+            // Same unwrapping as the retry verdict: the final error names
+            // the real cause (including a nested provider message), not the
+            // gateway's wrapper.
+            const detail = extractRejectionDetail(errText, 200);
 
             /*
              * Keep the work before giving up.
@@ -2483,6 +3031,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   role: "assistant",
                   content: assistantContent,
                   reasoningContent: reasoningContent || null,
+                  reasoningMs: currentReasoningMs() || null,
                   thinkingEffort: resolvedEffort,
                   model,
                   tokenCount: totalUsage.total_tokens || null,
@@ -2538,7 +3087,9 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   delayMs: Math.round(backoffMs),
                   reason: "service busy",
                   host: target.providerName,
+                  providerId: target.providerId,
                   inputChars,
+                  breakdown: sizeParts,
                 });
                 await dsResponse.body?.cancel().catch(() => {});
                 try {
@@ -2577,7 +3128,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           const reader = dsResponse.body.getReader();
           const decoder = new TextDecoder();
           let buffer = "";
-          const watchFirstToken = isOxProvider(target.providerId);
+          const watchFirstToken = target.providerId === "openrouter";
           const streamStarted = Date.now();
           let gotUpstreamSignal = false;
           let firstTokenTimedOut = false;
@@ -2608,6 +3159,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               delayMs: 0,
               reason: "",
               host: target.providerName,
+              providerId: target.providerId,
             });
           };
 
@@ -2689,13 +3241,13 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               return;
             }
 
-            // Before the first signal: Ox gets its short overall budget
-            // (OX_FIRST_TOKEN_MS). After: every individual read gets the idle
+            // Before the first signal: OpenRouter gets its short overall budget
+            // (OPENROUTER_FIRST_TOKEN_MS). After: every individual read gets the idle
             // budget, so a stream that falls silent mid-reply — five minutes
             // with zero bytes — is a dead connection, not a deep think.
             const beforeFirst = watchFirstToken && !gotUpstreamSignal;
             const readMs = beforeFirst
-              ? Math.max(1, OX_FIRST_TOKEN_MS - (Date.now() - streamStarted))
+              ? Math.max(1, OPENROUTER_FIRST_TOKEN_MS - (Date.now() - streamStarted))
               : STREAM_IDLE_MS;
             const chunkRead = await readWithTimeout(
               reader,
@@ -2783,10 +3335,22 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 const split = cacheSplit(u as Parameters<typeof cacheSplit>[0]);
                 totalUsage.prompt_cache_hit_tokens += split.hit;
                 totalUsage.prompt_cache_miss_tokens += split.miss;
+                /*
+                 * Reasoning is billed as output, and on high effort it dwarfs
+                 * the answer — a $1 ESP script is mostly thinking. Summed per
+                 * round like the cache split so the footer can show the share
+                 * instead of a total that looks impossible.
+                 */
+                const reasoningDetails = chunk.usage as {
+                  completion_tokens_details?: { reasoning_tokens?: number };
+                } | null;
+                totalUsage.completion_tokens_details.reasoning_tokens +=
+                  reasoningDetails?.completion_tokens_details
+                    ?.reasoning_tokens ?? 0;
                 // Charge the running total for this round, at the real
                 // cache-split rates, so the limit is enforced against what is
                 // actually being billed rather than a token count.
-                lastRoundCost = chargeRound(budget, u, model);
+                lastRoundCost = chargeRound(budget, u, model, undefined, customs);
 
                 const period = getDeepSeekPeriod().period;
                 send({
@@ -2797,7 +3361,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   // Recompute from the summed split so the live figure always
                   // uses the period active right now, proving cache-hit/miss,
                   // output and reasoning are all included in the number.
-                  spentUsd: estimateCost(totalUsage, model, period) ?? budget.spentUsd,
+                  spentUsd: estimateCost(totalUsage, model, period, customs) ?? budget.spentUsd,
                   limitUsd: budget.limitUsd ?? undefined,
                 });
               }
@@ -2842,6 +3406,9 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 reasoningContent += reasoningDelta.text;
                 roundReasoning += reasoningDelta.text;
                 sawWork = true;
+                const reasoningNow = Date.now();
+                if (!firstReasoningAt) firstReasoningAt = reasoningNow;
+                lastReasoningAt = reasoningNow;
                 markUpstream();
                 send({ type: "reasoning", delta: reasoningDelta.text });
                 void checkpoint();
@@ -2907,7 +3474,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           }
 
           /*
-           * OpenCode Zen sometimes returns HTTP 200 with an empty SSE body
+           * The shared OpenRouter pool sometimes returns HTTP 200 with an empty SSE body
            * during the same outages as 503. fetchWithRetry treats 200 as
            * success, so without this the user sees a blank reply after
            * "retrying". Only retry a stream that never even named a
@@ -2923,7 +3490,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           const videoPrefillChoke =
             roundHasVideo && Date.now() - streamStarted >= VIDEO_RETRY_FAST_MS;
           if (
-            (target.providerId === "opencode" || target.providerId === "openrouter") &&
+            target.providerId === "openrouter" &&
             !videoPrefillChoke &&
             emptyStreamRetries < emptyRetryBudget &&
             !roundContent &&
@@ -2932,18 +3499,25 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             (!roundFinishReason || firstTokenTimedOut)
           ) {
             emptyStreamRetries += 1;
+            // A fixed 1.2s re-fired inside the same outage window twice. The
+            // waits now grow — a blink rides out, a real outage still fails
+            // after ~5.5s instead of hanging the run on false hope.
+            const emptyRetryDelayMs =
+              emptyStreamRetries === 1 ? 1_500 : 4_000;
             send({
               type: "retrying",
               phase: "backoff",
               attempt: emptyStreamRetries,
               attempts: emptyRetryBudget,
-              delayMs: 1_200,
+              delayMs: emptyRetryDelayMs,
               reason: firstTokenTimedOut ? "no first token" : "empty reply",
               host: target.providerName,
+              providerId: target.providerId,
               inputChars,
+              breakdown: sizeParts,
             });
             try {
-              await sleep(1_200, runSignal);
+              await sleep(emptyRetryDelayMs, runSignal);
             } catch (error) {
               if (error instanceof Error && error.name === "AbortError") {
                 close();
@@ -2965,7 +3539,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
            * it stays resumable.
            */
           if (
-            (target.providerId === "opencode" || target.providerId === "openrouter") &&
+            target.providerId === "openrouter" &&
             (emptyStreamRetries >= emptyRetryBudget || videoPrefillChoke) &&
             !roundContent &&
             !roundReasoning &&
@@ -2990,7 +3564,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 : `${target.providerName} returned an empty response after ` +
                   `${emptyStreamRetries + 1} attempt(s). The host is overloaded ` +
                   `or down right now — this is their pool, not your key. Wait a ` +
-                  `minute and try again, or switch the Ox host in Settings.`,
+                  `minute and try again, or switch to a DeepSeek model in Settings.`,
               // Their pool is down — a server-side failure. Work from
               // earlier rounds is checkpointed, so the client continues it;
               // the re-post rides the retry backoff, and the cap stops a
@@ -3044,7 +3618,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
            * A stream that ended without the model finishing it.
            *
            * The other half of "cut off": the shared free pool drops
-           * connections mid-generation under load — OpenCode Zen sends
+           * connections mid-generation under load — the gateway sends
            * `finish_reason: "network_error"`, and during outages the body can
            * simply end with NO finish_reason. Neither is a completion, but
            * only `length` was matched before, so a dropped stream fell into
@@ -3062,6 +3636,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             (!roundFinishReason ||
               !/^(stop|tool_calls|content_filter)$/i.test(roundFinishReason));
           const truncated = hardTruncated || streamCut;
+          lastFinishReason = roundFinishReason || null;
 
           /*
            * Qwen (and sometimes others) can spend the entire output budget
@@ -3069,7 +3644,12 @@ Ask before you build the wrong thing. If a choice would change what you produce 
            * mid-sentence cut asked it to "continue" eight more times — each
            * one another full think. The UI sat on Thinking forever.
            *
-           * One shove to act. If it thinks through the budget again, stop.
+           * Two shoves to act, then stop. The first shove used to be the
+           * last word: thinking was "disabled" by sending no disable signal
+           * at all on OpenRouter lanes, so the model thought through the
+           * budget a second time and the run stopped mid-task. The disable
+           * is real now (`reasoning: { effort: "none" }`), and a second,
+           * blunter shove stands between one dead think and a dead run.
            */
           const thinkOnlyCut =
             truncated &&
@@ -3077,30 +3657,45 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             roundReasoning.length >= 80 &&
             (roundContent?.trim().length ?? 0) < 40;
           if (thinkOnlyCut) {
+            thinkOnlyStalls += 1;
+            /*
+             * The dead think is trimmed, not replayed. It produced no
+             * content and no tool call, so resending it buys nothing and
+             * costs the whole think again on every recovery turn — on a
+             * paid lane that is the most expensive sentence never read. A
+             * tombstone keeps the transcript shape valid and tells the
+             * model exactly what happened. (Safe to paraphrase: there are
+             * no tool calls on this turn, so no verbatim-replay rule binds.)
+             */
             transcript.push({
               role: "assistant",
               content: roundContent || null,
-              reasoning_content: roundReasoning || null,
+              reasoning_content:
+                `[thinking produced no output — ${roundReasoning.length} chars trimmed]`,
             });
-            if (thinkNudges < 1) {
+            if (thinkNudges < 2) {
               thinkNudges += 1;
               forceNoThinking = true;
               transcript.push({
                 role: "user",
                 content:
-                  "You used the whole output budget on thinking and produced " +
-                  "no answer and no tool call. Stop reasoning. Call a tool " +
-                  "or write the reply now. Do not think more.",
+                  thinkNudges === 1
+                    ? "You used the whole output budget on thinking and produced " +
+                      "no answer and no tool call. Stop reasoning. Call a tool " +
+                      "or write the reply now. Do not think more."
+                    : "Still no answer and no tool call. Do not think. Write " +
+                      "the reply or call a tool NOW, briefly.",
               });
               send({
                 type: "continuing",
                 reason: "thinking_budget",
-                n: 1,
-                of: 1,
+                n: thinkNudges,
+                of: 2,
               });
               continue;
             }
             hitOutputCeiling = true;
+            thinkCeiling = true;
             break;
           }
 
@@ -3365,6 +3960,10 @@ Ask before you build the wrong thing. If a choice would change what you produce 
 
               if (!progress.complete && !stuck && progress.next) {
                 nudgedIncomplete = true;
+                // A generic "carry on" after narrated intent just buys another
+                // narration: the model reads it as approval of what it said.
+                // Name the failure — describe-versus-do — so the shove lands.
+                const narratedIdle = describesImminentAction(roundContent ?? "");
                 transcript.push({
                   role: "user",
                   content:
@@ -3374,7 +3973,12 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                     `Either carry on with it, or if it genuinely cannot be ` +
                     `done, mark that step blocked with update_plan and tell ` +
                     `the user what is in the way. Do not present unfinished ` +
-                    `work as complete.`,
+                    `work as complete.` +
+                    (narratedIdle
+                      ? `\n\nYou just described the next action instead of doing it. ` +
+                        `Do not narrate, plan aloud, or repeat what you already said — ` +
+                        `call the tool in this response.`
+                      : ""),
                 });
                 send({ type: "status", stage: "working" });
                 continue;
@@ -3383,7 +3987,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
 
             /*
              * The model stopped without a tool call, and it does not look
-             * finished. Ox in particular will halt on an inner limit the
+             * finished. The free lanes in particular will halt on an inner limit the
              * app never set, or write "say continue" and wait. Resume
              * already exists for that — this fires it automatically,
              * from the same transcript, a couple of times at most.
@@ -3413,7 +4017,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               autoRevives += 1;
               transcript.push({
                 role: "user",
-                content: reviveInstruction(premature),
+                content: reviveInstruction(premature, roundRanWithoutTools),
               });
               send({
                 type: "continuing",
@@ -3528,6 +4132,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 call.id,
                 runTool(workspace, call.function.name, parsedArgs.value, {
                   modelId: model,
+                  openLimits: target.model.openToolLimits,
+                  modelNativeVision: target.model.vision === "native",
                   visionKey: visionApiKey,
                   visionModel,
                   searchKey: tavilyApiKey,
@@ -3636,6 +4242,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   salvaged.value,
                   {
                     modelId: model,
+                    openLimits: target.model.openToolLimits,
+                    modelNativeVision: target.model.vision === "native",
                     visionKey: visionApiKey,
                     visionModel,
                     searchKey: tavilyApiKey,
@@ -3670,6 +4278,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                     },
                     {
                       modelId: model,
+                      openLimits: target.model.openToolLimits,
+                      modelNativeVision: target.model.vision === "native",
                       visionKey: visionApiKey,
                       visionModel,
                       searchKey: tavilyApiKey,
@@ -3726,6 +4336,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                     prefixValue,
                     {
                       modelId: model,
+                      openLimits: target.model.openToolLimits,
+                      modelNativeVision: target.model.vision === "native",
                       visionKey: visionApiKey,
                       visionModel,
                       searchKey: tavilyApiKey,
@@ -3835,6 +4447,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 );
                 allowFirstPlanShrink = false;
                 replanCount += 1;
+                lastPlanUpdateToolRound = toolRounds;
                 // Saved immediately, not at the end of the run: Stop, a
                 // crash, or a closed tab must not lose it.
                 await writePlan(workspace, plan);
@@ -3947,6 +4560,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   // The full updated plan is re-pinned as a system message at
                   // the end of this same round; echoing it here as well made
                   // every round carry two copies of the growing plan.
+                  lastPlanUpdateToolRound = toolRounds;
                   result = {
                     ok: true,
                     content: "Plan updated; the pinned copy above reflects it.",
@@ -3961,6 +4575,95 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                     summary: "Could not update plan",
                   };
                 }
+                }
+              }
+            } else if (call.function.name === "finish") {
+              /*
+               * Self-acknowledgment, verified — the explicit door out of the
+               * loop. The model declares done with a receipt (what + how
+               * verified); the harness checks the receipt rather than
+               * trusting it, then ends the run WITHOUT a premature flag —
+               * finishing is the clean exit, not a halt. Three bounces,
+               * each answerable, none a trap:
+               *
+               *   empty receipt  -> say what and how, then finish again;
+               *   claimed check no tool performed -> run it or correct the
+               *     claim (the same cross-check update_plan applies);
+               *   open plan steps -> bounced once with the list; a second
+               *     finish is honoured regardless (finishArmed).
+               *
+               * No-plan task work finishes on the first call. The result
+               * text becomes the closing summary so the reply cannot end
+               * on an empty tool round.
+               */
+              const fArgs = parsed.value as {
+                result?: unknown;
+                verified?: unknown;
+              };
+              const fResult =
+                typeof fArgs.result === "string" ? fArgs.result.trim() : "";
+              const fVerified =
+                typeof fArgs.verified === "string"
+                  ? fArgs.verified.trim()
+                  : "";
+              if (!fResult || !fVerified) {
+                result = {
+                  ok: false,
+                  content:
+                    "finish needs both: 'result' (what was built, fixed, " +
+                    "or found) and 'verified' (how you checked it — what " +
+                    "you ran, read, or opened, and what it showed). Say " +
+                    "both, then finish again.",
+                  summary: "finish missing result/verified",
+                };
+              } else {
+                const finishEvidenceIssue = checkEvidence(
+                  fVerified,
+                  toolsUsedThisRun
+                );
+                const finishProgress = plan ? planProgress(plan) : null;
+                const finishOpen =
+                  plan && finishProgress && !finishProgress.complete
+                    ? plan.steps.filter((s) => s.state !== "done")
+                    : [];
+                if (finishEvidenceIssue) {
+                  result = {
+                    ok: false,
+                    content:
+                      finishEvidenceIssue +
+                      " Run the check or correct the claim, then finish again.",
+                    summary: "finish claim not evidenced",
+                  };
+                } else if (finishOpen.length > 0 && !finishArmed) {
+                  finishArmed = true;
+                  const openList = finishOpen
+                    .map((s) => `${s.id}. ${s.text} [${s.state}]`)
+                    .join("; ");
+                  result = {
+                    ok: true,
+                    content:
+                      `Not finished yet: ${finishOpen.length} plan step` +
+                      `${finishOpen.length === 1 ? "" : "s"} still open: ` +
+                      `${openList}. Complete them and finish again — or ` +
+                      `call finish once more, unchanged, to declare done anyway.`,
+                    summary: "finish bounced: steps open",
+                  };
+                } else {
+                  const closing =
+                    (assistantContent.trim() ? "\n\n" : "") +
+                    fResult +
+                    "\n\nVerified: " +
+                    fVerified;
+                  assistantContent += closing;
+                  send({ type: "content", delta: closing });
+                  appendTimelineText(closing);
+                  result = {
+                    ok: true,
+                    content:
+                      "Finished. The run ends here — no more tool calls.",
+                    summary: "Finished",
+                  };
+                  runHalted = true;
                 }
               }
             } else if (call.function.name === "ask_user") {
@@ -4226,6 +4929,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                     parsed.value,
                     {
                       modelId: model,
+                      openLimits: target.model.openToolLimits,
+                      modelNativeVision: target.model.vision === "native",
                       visionKey: visionApiKey,
                       visionModel,
                       searchKey: tavilyApiKey,
@@ -4259,6 +4964,98 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 }
               }
               }
+            } else if (call.function.name.startsWith(MCP_TOOL_PREFIX)) {
+              /*
+               * A bridged MCP tool: mcp__<serverId>__<tool>. Approval first,
+               * exactly like run_command — a remote tool can execute code
+               * on the user's machine (that is what the Potassium bridge
+               * is for), so it is never silent. Remembering keys on the
+               * exact call, so a repeated read_console poll can be allowed
+               * once rather than once per round.
+               */
+              const bridged = parseMcpToolName(call.function.name);
+              const mcpServer =
+                bridged !== null ? await getMcpServer(bridged.serverId) : null;
+              if (bridged === null || mcpServer === null || !mcpServer.enabled) {
+                result = {
+                  ok: false,
+                  content:
+                    "That MCP tool is not available: its server is unknown, " +
+                    "disabled, or was removed. Do not call it again — say " +
+                    "what you were trying to do instead.",
+                  summary: "MCP tool unavailable",
+                };
+              } else {
+                const mcpArgs = JSON.stringify(
+                  parsed.value,
+                  Object.keys(parsed.value).sort()
+                );
+                const mcpDisplay =
+                  `${mcpServer.name} · ${bridged.tool}` +
+                  (mcpArgs.length > 2
+                    ? `(${mcpArgs.slice(0, 120)}${mcpArgs.length > 120 ? "…" : ""})`
+                    : "");
+                const mcpPreApproved =
+                  autoRunCommands ||
+                  isRemembered(
+                    workspace,
+                    `mcp:${mcpServer.id}:${bridged.tool}`,
+                    [mcpArgs]
+                  );
+                let mcpApproved = true;
+                let mcpDeclineReason = "";
+                if (!mcpPreApproved) {
+                  send({
+                    type: "approval_request",
+                    id: call.id,
+                    command: "mcp",
+                    args: [mcpServer.name, bridged.tool, mcpArgs],
+                    display: mcpDisplay,
+                    reason: "",
+                  });
+                  const mcpDecision = await requestApproval(
+                    {
+                      id: call.id,
+                      workspaceId: workspace,
+                      command: "mcp",
+                      args: [mcpServer.name, bridged.tool, mcpArgs],
+                      reason: "",
+                    },
+                    AbortSignal.any([req.signal, runSignal])
+                  );
+                  mcpApproved = mcpDecision.approved;
+                  if (!mcpDecision.approved)
+                    mcpDeclineReason = mcpDecision.reason;
+                  send({
+                    type: "approval_resolved",
+                    id: call.id,
+                    approved: mcpApproved,
+                  });
+                }
+                if (!mcpApproved) {
+                  result = {
+                    ok: false,
+                    content:
+                      `The MCP call was not run. ${mcpDeclineReason} ` +
+                      `Do not retry it — explain what you were trying to do, ` +
+                      `or suggest a different approach.`,
+                    summary: `Skipped: ${mcpDisplay}`,
+                  };
+                } else {
+                  const mcpResult = await callMcpTool(
+                    mcpServer.url,
+                    mcpServer.token,
+                    bridged.tool,
+                    parsed.value,
+                    { signal: runSignal }
+                  );
+                  result = {
+                    ok: mcpResult.ok,
+                    content: mcpResult.content,
+                    summary: mcpResult.summary,
+                  };
+                }
+              }
             } else if (prefetched.has(call.id)) {
               // Already in flight since the top of the round.
               result = await prefetched.get(call.id)!;
@@ -4269,6 +5066,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 parsed.value,
                 {
                   modelId: model,
+                  openLimits: target.model.openToolLimits,
+                  modelNativeVision: target.model.vision === "native",
                   visionKey: visionApiKey,
                   visionModel,
                   searchKey: tavilyApiKey,
@@ -4278,8 +5077,92 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   fileMemory,
                   searchProfile,
                   signal: runSignal,
+                  conversationId: convId,
                 }
               );
+            }
+
+            /*
+             * Circuit breaker, checked before the result enters the
+             * transcript: the warning must be IN the tool message the model
+             * reads next, not beside it. Strikes are per call, so reads (or
+             * anything else) interleaved between identical failures do not
+             * clear them. A trip still records this result normally below
+             * (it ran — the client should show it) and breaks out at the end
+             * of the calls loop instead of here.
+             */
+            // Pristine result text for the stall tracker: both subsystems
+            // append their markers to result.content below, and the
+            // new-information hash must compare tool output, not markers.
+            const pristineResult = result.content;
+            const loop = loopBreaker.observe(
+              call.function.name,
+              parsed.ok ? parsed.value : call.function.arguments,
+              result.ok
+            );
+            if (loop.warn) {
+              result.content += loopWarningText(call.function.name);
+            }
+            if (loop.trip) {
+              const lastError =
+                result.summary || result.content.slice(0, 300);
+              result.content += loopTripMarker(call.function.name);
+              const tripNote =
+                (assistantContent.trim() ? "\n\n" : "") +
+                loopTripUserNote(call.function.name, lastError);
+              assistantContent += tripNote;
+              send({ type: "content", delta: tripNote });
+              appendTimelineText(tripNote);
+              stoppedPrematurely = "loop_breaker";
+              runHalted = true;
+            }
+            /*
+             * No-progress check, same site and same channel as the breaker:
+             * the warning must be IN the tool message the model reads next.
+             * Skipped when the breaker already tripped this call — one halt,
+             * one note.
+             */
+            if (!runHalted) {
+              const stall = stallTracker.observe(
+                call.function.name,
+                parsed.ok ? parsed.value : call.function.arguments,
+                result.ok,
+                pristineResult
+              );
+              /*
+               * Two meters, one channel. The cumulative warning wins ties:
+               * when both fire on one call, "stop re-fetching, bank
+               * findings, act" names the true disease, while the
+               * consecutive "fetch something NEW" is how a wide loop
+               * evades the consecutive meter.
+               */
+              if (stall.repeatWarn) {
+                result.content += rereadWarningText(
+                  stall.repeatTotal,
+                  stall.topRepeatTarget
+                );
+              } else if (stall.warn) {
+                result.content += stallWarningText(stall.stallCalls);
+              }
+              if (stall.repeatTrip || stall.trip) {
+                result.content += stall.repeatTrip
+                  ? rereadTripMarker(stall.repeatTotal)
+                  : stallTripMarker();
+                const stallNote =
+                  (assistantContent.trim() ? "\n\n" : "") +
+                  (stall.repeatTrip
+                    ? rereadTripUserNote(
+                        stall.repeatTotal,
+                        stall.topRepeatTarget,
+                        stallTracker.recentActions()
+                      )
+                    : stallTripUserNote(stallTracker.recentActions()));
+                assistantContent += stallNote;
+                send({ type: "content", delta: stallNote });
+                appendTimelineText(stallNote);
+                stoppedPrematurely = "no_progress";
+                runHalted = true;
+              }
             }
 
             transcript.push({
@@ -4303,7 +5186,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
              * older ones collapse to one line naming the file, which is
              * enough to refer back to.
              */
-            if (result.image && modelVision(model) === "native") {
+            if (result.image && target.model.vision === "native") {
               for (const message of transcript) {
                 if (
                   message.role === "user" &&
@@ -4399,6 +5282,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 usd: result.search.estimatedUsd,
               });
             }
+            if (runHalted) break;
           }
 
           // The next round must see the workspace as it is now, not as it was
@@ -4441,6 +5325,58 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             transcript.push({ role: "system", content: formatPlan(plan) });
           }
 
+          /*
+           * Current-goal pin: restated at the tail every round so a long run
+           * cannot resurrect an older task from history or the summary.
+           * Refreshed like the plan (remove by marker, push fresh) so it
+           * costs once and keeps the prefix cache-stable. Skipped while the
+           * run has no goal-shaped text at all.
+           */
+          for (let i = transcript.length - 1; i >= 0; i--) {
+            const m = transcript[i];
+            if (
+              m.role === "system" &&
+              typeof m.content === "string" &&
+              (m.content.startsWith(GOAL_PIN_MARKER) ||
+                m.content.startsWith(PLAN_NUDGE_MARKER))
+            ) {
+              transcript.splice(i, 1);
+            }
+          }
+          const runGoal = resolveRunGoal({
+            userText,
+            historyLastUser,
+            steeringText: lastSteeringText,
+          });
+          if (runGoal) {
+            transcript.push({ role: "system", content: renderGoalPin(runGoal) });
+          }
+
+          /*
+           * Plan-compliance nudge: a plan the model never updates is a plan
+           * the run has diverged from — doing step 2 while believing step
+           * 4. Fires on staleness, or immediately when the round's prose
+           * claims a finished step the plan does not show; lifts the moment
+           * the model updates or finishes the plan.
+           */
+          if (plan && !planIsComplete(plan)) {
+            const roundsSincePlanUpdate =
+              lastPlanUpdateToolRound === null
+                ? 0
+                : toolRounds - lastPlanUpdateToolRound;
+            const claimed = stepClaimedComplete(roundContent);
+            if (
+              roundsSincePlanUpdate >= PLAN_STALE_AFTER_TOOL_ROUNDS ||
+              claimed
+            ) {
+              transcript.push({
+                role: "system",
+                content: buildStalePlanNudge(roundsSincePlanUpdate, claimed),
+              });
+            }
+          }
+
+          if (runHalted) break;
           if (stopped()) break;
         }
 
@@ -4563,6 +5499,17 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             usage: totalUsage.total_tokens ? { ...totalUsage } : null,
             model,
             durationMs: Date.now() - startedAt,
+            reasoningMs: currentReasoningMs() || null,
+            contextChars: lastInputChars || null,
+            contextBreakdown: lastSizeParts.length
+              ? lastSizeParts.slice(0, 6)
+              : null,
+            ending: {
+              finish: lastFinishReason,
+              continuedOutput: continuations,
+              continuedConnection: streamCuts,
+              thinkOnlyStalls,
+            },
             toolEvents: toolEvents.length ? toolEvents : null,
             timeline: timeline.length ? timeline : null,
             createdAt: new Date().toISOString(),
@@ -4576,7 +5523,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             // would throw away everything it just paid for, which is the
             // opposite of what a spending limit is for.
             //
-            // An inner-limit abort (Ox stopping mid-thought) used to fall
+            // An inner-limit abort (a free lane stopping mid-thought) used to fall
             // through as a normal done. Resume vanished; the next send
             // opened a new thinking box and rebuilt from scratch.
             incomplete: unfinished,
@@ -4699,16 +5646,36 @@ Ask before you build the wrong thing. If a choice would change what you produce 
            */
           usage: totalUsage.total_tokens ? { ...totalUsage } : usage,
           durationMs: Date.now() - startedAt,
+          reasoningMs: currentReasoningMs() || undefined,
+          contextChars: lastInputChars || undefined,
+          contextBreakdown: lastSizeParts.length
+            ? lastSizeParts.slice(0, 6)
+            : undefined,
+          ending: {
+            finish: lastFinishReason,
+            continuedOutput: continuations,
+            continuedConnection: streamCuts,
+            thinkOnlyStalls,
+          },
           model,
           incomplete: unfinished,
           canResume: unfinished,
-          stopReason: stoppedPrematurely
-            ? prematureStopNotice(stoppedPrematurely)
-            : hitOutputCeiling
-              ? "The answer hit the output limit before it finished"
-              : connectionCutsExhausted
-                ? "The connection kept dropping before the answer finished"
-                : undefined,
+          stopReason: (() => {
+            const base = stoppedPrematurely
+              ? prematureStopNotice(stoppedPrematurely)
+              : hitOutputCeiling
+                ? thinkCeiling
+                  ? "It thought through the whole output budget three times without writing anything — Resume continues with thinking switched off"
+                  : "The answer hit the output limit before it finished"
+                : connectionCutsExhausted
+                  ? "The connection kept dropping before the answer finished"
+                  : undefined;
+            if (!base || degradedRoundsThisRun === 0) return base;
+            return (
+              `${base} — ${degradedRoundsThisRun} round` +
+              `${degradedRoundsThisRun === 1 ? "" : "s"} ran without tools after rejections`
+            );
+          })(),
           reasoningDiagnostic: {
             expected: thinkingEnabled,
             chars: reasoningContent.length,

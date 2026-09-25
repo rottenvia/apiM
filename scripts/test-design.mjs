@@ -380,7 +380,7 @@ check(
 check(
   "the first tool row has no ornamental page-break line",
   !/h-px w-full[^"]*bg-border/.test(timeline) &&
-    /i > 0 \? "mt-4 border-t/.test(timeline),
+    /!first \? "mt-4 border-t/.test(timeline),
   "the reported screenshot showed that line as the only thing where thinking belonged"
 );
 
@@ -452,7 +452,8 @@ check(
   // rather than snapping in, which the transition check above covers.
   "the resting state is visible but quiet",
   /\.thinking-shell\s*\{[^}]*border:\s*1px solid var\(--color-border\)/s.test(css) &&
-    /\.thinking-shell\[data-thinking='true'\]\s*\{[^}]*#cfa25a/s.test(css),
+    /\.thinking-shell\[data-thinking='true'\]\s*\{[^}]*var\(--color-thinking\)/s.test(css) &&
+    /--color-thinking:\s*#cfa25a/.test(css),
   "a finished panel still needs an outline, or its text looks out of place"
 );
 check(

@@ -9,6 +9,7 @@
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { rm } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 /*
@@ -28,6 +29,13 @@ const { buildWorkspaceContext } = await import(
 );
 const { runTool } = await import(pathToFileURL(path.join(ROOT, "src/lib/tools.ts")).href);
 const { WORKSPACE_TOOLS } = await import(pathToFileURL(path.join(ROOT, "src/lib/tools.ts")).href);
+const { workspaceToolsFor, WORK_LOOP_PROMPT } = await import(
+  pathToFileURL(path.join(ROOT, "src/lib/tools.ts")).href
+);
+const { LOOP_TRIP_REPEATS } = await import(
+  pathToFileURL(path.join(ROOT, "src/lib/loop-breaker.ts")).href
+);
+const route = readFileSync(path.join(ROOT, "src/app/api/chat/route.ts"), "utf8");
 
 const COLOR = process.stdout.isTTY && !process.env.NO_COLOR;
 const g = (s) => (COLOR ? `\x1b[32m${s}\x1b[0m` : s);
@@ -141,6 +149,65 @@ console.log("\n7. Search can't escape the workspace");
 await ws.writeFile("agenttest-other", "secret.txt", "PRIVATE DATA\n");
 res = await runTool(WS, "search_files", { query: "PRIVATE" });
 check("another workspace is not searched", res.content.includes("No matches"));
+
+console.log("\n8. Batch tools describe every field the model must fill");
+const capped = WORKSPACE_TOOLS;
+const open = workspaceToolsFor(null, true);
+const itemsOf = (tools, name, key) =>
+  tools.find((t) => t.function.name === name).function.parameters.properties[key]
+    .items.properties;
+for (const [label, tools] of [["capped", capped], ["open-ceiling", open]]) {
+  const editItems = itemsOf(tools, "edit_files", "edits");
+  check(
+    `edit_files (${label}) tells every edit to carry its own path`,
+    /own path/.test(editItems.path.description ?? "") &&
+      /no top-level path/.test(editItems.path.description ?? ""),
+    "the volley that failed three times omitted paths entirely"
+  );
+  check(
+    `edit_files (${label}) tells what new_text is`,
+    typeof editItems.new_text.description === "string" &&
+      editItems.new_text.description.length > 0
+  );
+  const writeItems = itemsOf(tools, "write_files", "files");
+  check(
+    `write_files (${label}) describes path and content`,
+    /relative to the workspace root/.test(writeItems.path.description ?? "") &&
+      typeof writeItems.content.description === "string" &&
+      writeItems.content.description.length > 0
+  );
+}
+
+console.log("\n9. The work loop is pinned last, where it carries weight");
+check(
+  "the loop names search-first batching",
+  /search_files with context 25-30/.test(WORK_LOOP_PROMPT) &&
+    /read_files takes globs/.test(WORK_LOOP_PROMPT)
+);
+check(
+  "the loop forbids re-reading what it holds",
+  /Re-reading an unchanged file teaches nothing/.test(WORK_LOOP_PROMPT)
+);
+check(
+  "the loop bars claiming without verifying",
+  /watched it work/.test(WORK_LOOP_PROMPT)
+);
+check(
+  "the loop's third strike matches the breaker's trip",
+  /three times/.test(WORK_LOOP_PROMPT) && LOOP_TRIP_REPEATS === 3,
+  "the recipe and the halt agree on the number"
+);
+check(
+  "the loop ends by finishing explicitly, not trailing off",
+  /FINISH explicitly/.test(WORK_LOOP_PROMPT) &&
+    /call finish with what you built/.test(WORK_LOOP_PROMPT),
+  "self-acknowledgment is the exit — no cap needed"
+);
+check(
+  "the route pins the loop last in the workspace instructions",
+  /\$\{WORK_LOOP_PROMPT\}`/.test(route),
+  "short plus last wins obedience — the plugin lesson"
+);
 
 console.log("\n" + (fail === 0 ? g(`All ${pass} checks passed.`) : r(`${fail} of ${pass + fail} failed.`)) + "\n");
 process.exit(fail === 0 ? 0 : 1);

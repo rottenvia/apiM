@@ -1,32 +1,27 @@
 /**
  * Resolve which LLM endpoint a request should hit.
  *
- * DeepSeek used to be the only provider. Ox Alpha is served by OpenCode Zen
- * at the same Chat Completions shape (`/chat/completions`), so the rest of
- * the agent loop stays identical — only the URL, key and on-the-wire model
- * id change. Local Qwen 3.8 27B is the same loop again, pointed at the
- * in-app sidecar on this machine (or a custom OpenAI-compatible host).
+ * Three front doors, one Chat Completions shape: DeepSeek's own API, the
+ * OpenRouter gateway (GLM 5.3 Flash, the free Nemotron lane, and any
+ * custom model the user added), and a local OpenAI-compatible host for the
+ * on-device Qwen sidecar. The rest of the agent loop stays identical — only
+ * the URL, key and on-the-wire model id change.
  */
 
 import {
   DEFAULT_LOCAL_API_MODEL,
   DEFAULT_LOCAL_BASE_URL,
   DEFAULT_MODEL_ID,
+  FREE_OPENROUTER_MODEL_ID,
   MODELS,
   getModel,
   getProviderInfo,
+  resolveModelInfo,
+  type CustomModelDef,
   type ModelInfo,
   type ProviderId,
   type ThinkingStyle,
 } from "@/lib/models";
-import {
-  OX_ATTEMPT_TIMEOUT_MS,
-  OX_HOSTS,
-  isOxProvider,
-  oxHostInfo,
-  parseOxHost,
-  type OxHost,
-} from "@/lib/ox-host";
 
 export {
   DEFAULT_LOCAL_API_MODEL,
@@ -42,11 +37,8 @@ export {
 
 export interface ChatCredentials {
   deepseekApiKey?: string | null;
-  opencodeApiKey?: string | null;
-  /** OpenRouter key — used when Ox Alpha's host is set to OpenRouter. */
+  /** OpenRouter key — serves GLM, the free Nemotron lane, and customs. */
   openrouterApiKey?: string | null;
-  /** Which Ox Alpha front door to hit. Defaults to OpenCode Zen. */
-  oxHost?: OxHost | string | null;
   /** OpenAI-compatible host, e.g. http://127.0.0.1:18765/v1 */
   localBaseUrl?: string | null;
   /** Optional. The in-app sidecar ignores it; some custom hosts require one. */
@@ -64,8 +56,6 @@ export interface ResolvedTarget {
   baseUrl: string;
   /** Value of the Chat Completions `model` field. */
   apiModel: string;
-  /** Set when this target is Ox Alpha, so the route can pick headers/timeout. */
-  oxHost?: OxHost;
 }
 
 export interface ResolveFailure {
@@ -80,10 +70,27 @@ export interface ResolveSuccess {
 
 const DEFAULT_BASE: Record<ProviderId, string> = {
   deepseek: "https://api.deepseek.com",
-  opencode: "https://opencode.ai/zen/v1",
   openrouter: "https://openrouter.ai/api/v1",
   local: DEFAULT_LOCAL_BASE_URL,
 };
+
+/**
+ * Per-attempt hang cap for HTTP headers on the shared pool.
+ *
+ * 20s was killing real replies: workspace is always on, so the POST
+ * body is huge and the upload alone can eat the budget. 45s still fails
+ * a silent 503 quickly; Stop aborts the wait either way.
+ */
+export const OPENROUTER_ATTEMPT_TIMEOUT_MS = 45_000;
+
+/**
+ * After a 200, how long we wait for the first token / tool / finish.
+ *
+ * Test never exercises this. A 200 with an empty or stalled SSE body is
+ * how "green key check, chat never loads, no error" actually happens.
+ * Prefill on a workspace prompt needs more than 15s.
+ */
+export const OPENROUTER_FIRST_TOKEN_MS = 45_000;
 
 /** Strip a trailing slash so `${base}/chat/completions` never doubles. */
 function cleanBase(url: string): string {
@@ -107,7 +114,7 @@ export function normalizeOpenAiBase(url: string): string {
   return u;
 }
 
-export function providerBaseUrl(id: ProviderId, host?: OxHost): string {
+export function providerBaseUrl(id: ProviderId): string {
   if (id === "deepseek") {
     return cleanBase(process.env.DEEPSEEK_BASE_URL ?? DEFAULT_BASE.deepseek);
   }
@@ -116,25 +123,7 @@ export function providerBaseUrl(id: ProviderId, host?: OxHost): string {
       process.env.LOCAL_BASE_URL ?? DEFAULT_BASE.local
     );
   }
-  if (id === "openrouter") {
-    return cleanBase(process.env.OPENROUTER_BASE_URL ?? DEFAULT_BASE.openrouter);
-  }
-  if (host === "openrouter") {
-    return cleanBase(process.env.OPENROUTER_BASE_URL ?? DEFAULT_BASE.openrouter);
-  }
-  return cleanBase(process.env.OPENCODE_BASE_URL ?? DEFAULT_BASE.opencode);
-}
-
-/**
- * The key for a given Ox front door. Without a host it follows the user's
- * button; with one, the model's own door wins — the free DeepSeek lane is
- * Zen-only even when the button points at OpenRouter.
- */
-export function keyForOx(creds: ChatCredentials, host?: OxHost): string {
-  const h = host ?? parseOxHost(creds.oxHost);
-  const raw =
-    h === "openrouter" ? creds.openrouterApiKey : creds.opencodeApiKey;
-  return typeof raw === "string" ? raw.trim() : "";
+  return cleanBase(process.env.OPENROUTER_BASE_URL ?? DEFAULT_BASE.openrouter);
 }
 
 export function keyForProvider(
@@ -147,7 +136,6 @@ export function keyForProvider(
     // string so the Authorization header is well-formed.
     return typeof raw === "string" && raw.trim() ? raw.trim() : "local";
   }
-  if (id === "opencode") return keyForOx(creds);
   if (id === "openrouter") {
     const raw = creds.openrouterApiKey;
     return typeof raw === "string" ? raw.trim() : "";
@@ -158,52 +146,20 @@ export function keyForProvider(
 
 export function hasKeyForModel(
   modelId: string | null | undefined,
-  creds: ChatCredentials
+  creds: ChatCredentials,
+  customs?: CustomModelDef[] | null
 ): boolean {
-  const provider = getModel(modelId).provider;
+  const provider = resolveModelInfo(modelId, customs).provider;
   if (provider === "local") return true;
   return Boolean(keyForProvider(provider, creds));
 }
 
 export function resolveChatTarget(
   modelId: string | null | undefined,
-  creds: ChatCredentials
+  creds: ChatCredentials,
+  customs?: CustomModelDef[] | null
 ): ResolveSuccess | ResolveFailure {
-  const model = getModel(modelId);
-
-  if (model.provider === "opencode") {
-    // A fixedHost model lives on one door regardless of the Ox button —
-    // the free DeepSeek lane does not exist on OpenRouter at all.
-    const host = model.fixedHost ?? parseOxHost(creds.oxHost);
-    const gate = oxHostInfo(host);
-    const apiKey = keyForOx(creds, host);
-    if (!apiKey) {
-      return {
-        ok: false,
-        error:
-          model.fixedHost === "zen"
-            ? "An OpenCode Zen API key is required for this model. Add one in Settings (opencode.ai/auth)."
-            : host === "openrouter"
-              ? "An OpenRouter API key is required for Ox Alpha. Add one in Settings, or switch the Ox host back to OpenCode Zen."
-              : "An OpenCode Zen API key is required for Ox Alpha. Add one in Settings (opencode.ai/auth), or switch the Ox host to OpenRouter.",
-      };
-    }
-    // Ox Alpha's wire id differs per host (that is what the button picks).
-    // Every other model carries its own wire id on the catalog entry.
-    return {
-      ok: true,
-      target: {
-        model,
-        providerId: "opencode",
-        providerName: gate.label,
-        thinkingStyle: "openai",
-        apiKey,
-        baseUrl: providerBaseUrl("opencode", host),
-        apiModel: model.fixedHost ? model.apiModel : gate.apiModel,
-        oxHost: host,
-      },
-    };
-  }
+  const model = resolveModelInfo(modelId, customs);
 
   if (model.provider === "openrouter") {
     const apiKey = keyForProvider("openrouter", creds);
@@ -211,7 +167,8 @@ export function resolveChatTarget(
       return {
         ok: false,
         error:
-          "An OpenRouter API key is required for GLM 5.3 Flash. Add one in Settings (openrouter.ai/settings/keys).",
+          `An OpenRouter API key is required for ${model.label}. ` +
+          `Add one in Settings (openrouter.ai/settings/keys).`,
       };
     }
     return {
@@ -265,44 +222,21 @@ export function resolveChatTarget(
 /**
  * A cheap (or free) model for search planning, refine and asides.
  *
- * The helper follows the main model's provider. When the main model is Ox
- * Alpha the judge runs on Ox Alpha: it is free during the preview, so there
- * is no cost reason to hop to Flash, and a DeepSeek key with an empty
- * balance would just make every judge call fail ("it kept judging with no
- * tokens on DeepSeek"). For a DeepSeek main model the helper stays DeepSeek
- * Flash — the key is already the one paying for the reply, and Flash keeps
- * the side calls cheap. Falls back to Ox when only OpenCode is connected.
- * Local 27B is deliberately not a helper — it is the main model, not a
- * planner.
+ * DeepSeek Flash when a DeepSeek key exists — the key already paying for
+ * the reply keeps the side calls cheap. Otherwise the free Nemotron lane on
+ * OpenRouter when that key exists. Local 27B is deliberately not a helper —
+ * it is the main model, not a planner — and customs are never helpers: a
+ * side call must ride a known-cheap lane, not a user-typed price.
+ *
+ * The caller drops the helper when it equals the main model (a Flash
+ * conversation judges on Flash already; a Nemotron-free conversation judges on
+ * itself).
  */
 export function resolveHelperTarget(
   creds: ChatCredentials,
-  mainModelId?: string
+  customs?: CustomModelDef[] | null
 ): ResolvedTarget | null {
-  const ox = MODELS.find((m) => m.id === "ox-alpha");
-  if (ox && mainModelId === "ox-alpha") {
-    const host = parseOxHost(creds.oxHost);
-    const raw =
-      host === "openrouter" ? creds.openrouterApiKey : creds.opencodeApiKey;
-    const apiKey = typeof raw === "string" ? raw.trim() : "";
-    if (apiKey) {
-      const gate = oxHostInfo(host);
-      return {
-        model: ox,
-        providerId: "opencode",
-        providerName: gate.label,
-        thinkingStyle: "openai",
-        apiKey,
-        baseUrl: providerBaseUrl("opencode", host),
-        apiModel: gate.apiModel,
-        oxHost: host,
-      };
-    }
-    // The main model is Ox but its key is gone — nothing else can judge for
-    // a conversation Ox is driving, so no helper rather than a wrong one.
-    return null;
-  }
-
+  void customs;
   const flash = MODELS.find((m) => m.id === "deepseek-v4-flash");
   if (flash && keyForProvider("deepseek", creds)) {
     return {
@@ -316,29 +250,72 @@ export function resolveHelperTarget(
     };
   }
 
-  if (ox) {
-    // Only the host the user picked. Do not silently hop Zen ↔ OpenRouter —
-    // they set that button on purpose when one of them is down for ten minutes.
-    const host = parseOxHost(creds.oxHost);
-    const raw =
-      host === "openrouter" ? creds.openrouterApiKey : creds.opencodeApiKey;
-    const apiKey = typeof raw === "string" ? raw.trim() : "";
+  const free = MODELS.find((m) => m.id === FREE_OPENROUTER_MODEL_ID);
+  if (free) {
+    const apiKey = keyForProvider("openrouter", creds);
     if (apiKey) {
-      const gate = oxHostInfo(host);
       return {
-        model: ox,
-        providerId: "opencode",
-        providerName: gate.label,
+        model: free,
+        providerId: "openrouter",
+        providerName: getProviderInfo("openrouter").name,
         thinkingStyle: "openai",
         apiKey,
-        baseUrl: providerBaseUrl("opencode", host),
-        apiModel: gate.apiModel,
-        oxHost: host,
+        baseUrl: providerBaseUrl("openrouter"),
+        apiModel: free.apiModel,
       };
     }
   }
 
   return null;
+}
+
+/**
+ * Pinned cheapest OpenRouter endpoint per catalog model, by app id.
+ *
+ * The values are provider tags from OpenRouter's endpoints API (verified
+ * 2026-09-25): inference-net/fp4 is the cheapest GLM 5.3 Flash route with
+ * tools ($0.045 in / $0.14 out per 1M at the current 50% off), and morph
+ * the cheapest DeepSeek V4.1 Flash route with tools ($0.075 / $0.30 at
+ * 50% off — the nominally cheaper DekaLLM route serves no tools, so the
+ * agent cannot run on it).
+ *
+ * `allow_fallbacks: false` keeps every token on the pinned price: with
+ * fallbacks OpenRouter may re-route to a costlier provider mid-run and
+ * the bill stops matching the rate table. The free lane and custom models
+ * stay on automatic routing — :free has no meaningful choice, and a
+ * user-typed slug has no researched pin.
+ */
+const OPENROUTER_PINNED_ENDPOINTS: Record<string, string> = {
+  "glm-5.3-flash": "inference-net/fp4",
+  "deepseek-v4.1-flash": "morph",
+};
+
+/** OpenRouter `provider` body for a catalog model, or null for auto-route. */
+export function openrouterProviderFor(
+  modelId: string
+): { only: string[]; allow_fallbacks: boolean } | null {
+  const tag = OPENROUTER_PINNED_ENDPOINTS[modelId];
+  return tag ? { only: [tag], allow_fallbacks: false } : null;
+}
+
+/**
+ * Catalog models whose pinned OpenRouter endpoint mandates reasoning.
+ *
+ * inference-net/fp4 400s on `reasoning: { effort: "none" }` ("Reasoning is
+ * mandatory for this endpoint and cannot be disabled"), so the thinking-off
+ * signal must never be sent on this lane — minimal effort instead. Only
+ * verified pins belong here: an unproven entry would force thinking (and
+ * think tokens) on a user who explicitly switched it off. Unknown endpoints
+ * are covered by the route's mandatory-reasoning rejection retry, which
+ * learns the same clamp for the rest of the run after one free 400.
+ */
+const OPENROUTER_MANDATORY_REASONING: ReadonlySet<string> = new Set([
+  "glm-5.3-flash",
+]);
+
+/** True when the catalog model's pinned endpoint rejects the reasoning disable. */
+export function openrouterReasoningMandatory(modelId: string): boolean {
+  return OPENROUTER_MANDATORY_REASONING.has(modelId);
 }
 
 /** Headers for a Chat Completions POST. OpenRouter asks for a referer. */
@@ -347,7 +324,7 @@ export function completionHeaders(target: ResolvedTarget): Record<string, string
     "Content-Type": "application/json",
     Authorization: `Bearer ${target.apiKey}`,
   };
-  if (target.oxHost === "openrouter" || target.providerId === "openrouter") {
+  if (target.providerId === "openrouter") {
     headers["HTTP-Referer"] = "https://github.com/eggyeg/apiM";
     headers["X-Title"] = "apiM";
   }
@@ -359,11 +336,11 @@ export function attemptTimeoutMs(
   target: ResolvedTarget,
   inputChars = 0
 ): number {
-  if (!isOxProvider(target.providerId)) return 280_000;
+  if (target.providerId !== "openrouter") return 280_000;
   // Workspace prompts are large. Give the upload a second per 8k chars
   // on top of the base hang cap, but never sit past 90s on a dead host.
   const extra = Math.ceil(Math.max(0, inputChars) / 8_000) * 1_000;
-  return Math.min(90_000, OX_ATTEMPT_TIMEOUT_MS + extra);
+  return Math.min(90_000, OPENROUTER_ATTEMPT_TIMEOUT_MS + extra);
 }
 
 const VALID_EFFORTS = new Set(["low", "high", "max"]);
@@ -379,21 +356,32 @@ export function qwenReasoningEffort(effort: string): "low" | "medium" | "xhigh" 
  * Provider-specific thinking fields.
  *
  * DeepSeek's REST API takes a top-level `thinking: { type }` plus
- * `reasoning_effort`. OpenCode Zen is OpenAI-compatible and does not
- * document DeepSeek's `thinking` object — sending it can 400, so Ox Alpha
- * only gets `reasoning_effort` when thinking is on.
+ * `reasoning_effort`. OpenRouter is OpenAI-compatible and does not
+ * document DeepSeek's `thinking` object — sending it can 400, so
+ * OpenRouter models only get `reasoning_effort` when thinking is on.
  *
  * Qwen 3.8 27B (in-app sidecar) thinks by default.
  * Official fields: `chat_template_kwargs.enable_thinking` and
  * `reasoning_effort` of `xhigh` | `medium` | `low`. `preserve_thinking`
  * keeps prior-round thoughts in the transcript. The sidecar is started
  * with `--reasoning-format deepseek` so think tokens stay out of content.
+ *
+ * The OpenRouter branch used to send NOTHING when thinking was off — no
+ * disable signal at all — so GLM and Nemotron kept thinking by provider
+ * default: the think-only shove ("Do not think more") could not work, the
+ * model thought through the budget a second time, and the run stopped
+ * mid-task. OpenRouter documents `reasoning: { effort: "none" }` as the
+ * disable, so off now sends exactly that — except on mandatory-reasoning
+ * pins (see OPENROUTER_MANDATORY_REASONING), which 400 on the disable and
+ * get minimal effort instead. Unknown endpoints learn the same clamp from
+ * the route's rejection retry after one free 400.
  */
 export function applyThinking(
   body: Record<string, unknown>,
   style: ThinkingStyle,
   thinkingEnabled: boolean,
-  effort: string
+  effort: string,
+  opts?: { reasoningMandatory?: boolean }
 ): void {
   const level = VALID_EFFORTS.has(effort) ? effort : "high";
 
@@ -422,6 +410,11 @@ export function applyThinking(
   }
 
   if (thinkingEnabled) body.reasoning_effort = level;
+  // A mandatory-reasoning endpoint 400s on the disable — minimal effort
+  // keeps the round legal while honoring the intent (stop the giant think,
+  // answer now). The budget shove and prose continuations rely on this.
+  else if (opts?.reasoningMandatory) body.reasoning_effort = "low";
+  else body.reasoning = { effort: "none" };
 }
 
 /** User-facing error for a failed Chat Completions call. */
@@ -437,19 +430,16 @@ export function providerHttpError(
     return `Your ${providerName} account has insufficient balance. Everything done so far is saved — add credit and press Continue on the reply above. If your balance is not actually low, an old media attachment was still riding in the request body — the pre-flight estimate prices the whole body as text tokens and refuses a round whose real cost is small.`;
   }
   if (status === 429) {
-    if (providerName === "OpenCode Zen" || providerName === "OpenRouter") {
+    if (providerName === "OpenRouter") {
       return (
-        `${providerName} is out of free capacity right now (429). ` +
+        `OpenRouter is out of free capacity right now (429). ` +
         `This is their shared pool, not your key — mornings are quieter, ` +
-        `evenings and US work hours get slammed. Wait a bit, or switch the Ox host in Settings.`
+        `evenings and US work hours get slammed. Wait a bit and try again.`
       );
     }
     return `Rate limited by ${providerName}. Please wait a moment and try again.`;
   }
   if (status === 502 || status === 503 || status === 504) {
-    // OpenCode Zen often replies 503 with body {"error":{"message":"retrying"}}
-    // or "Inference is temporarily unavailable". Echoing that produced a
-    // bubble that said we were retrying after retries had already finished.
     const trimmed = detail.replace(/\s+/g, " ").trim();
     const noisy =
       !trimmed ||
@@ -460,10 +450,7 @@ export function providerHttpError(
       `${providerName} is temporarily unavailable (${status}). ` +
       `This is their servers, not your API key.` +
       (noisy ? "" : ` ${trimmed}`) +
-      ` Wait a minute and try again.` +
-      (providerName === "OpenCode Zen" || providerName === "OpenRouter"
-        ? ` Or switch the Ox host in Settings.`
-        : "")
+      ` Wait a minute and try again.`
     );
   }
   if (/exceeds the available context size/i.test(detail)) {

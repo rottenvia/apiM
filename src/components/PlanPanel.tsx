@@ -32,8 +32,8 @@ export interface PlanView {
  */
 
 const MARK: Record<string, { symbol: string; className: string }> = {
-  done: { symbol: "✓", className: "text-[#7ea05a]" },
-  doing: { symbol: "▸", className: "text-[#cfa25a]" },
+  done: { symbol: "✓", className: "text-success" },
+  doing: { symbol: "▸", className: "text-warning" },
   blocked: { symbol: "!", className: "text-danger" },
   todo: { symbol: "·", className: "text-text-muted" },
 };
@@ -109,7 +109,7 @@ export function PlanPanel({
           </span>
           <span
             className={`text-[11px] font-medium tabular-nums ${
-              blocked ? "text-danger" : complete ? "text-[#7ea05a]" : "text-text-secondary"
+              blocked ? "text-danger" : complete ? "text-success" : "text-text-secondary"
             }`}
           >
             {done}/{total}

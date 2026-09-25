@@ -51,6 +51,135 @@ check(
 );
 check("a 400 does not — a malformed request stays malformed", !R.isRetryableStatus(400));
 
+// A 400 is two failures in one status: shape (strip tools) vs size (fold
+// history). The provider's own message picks the retry path.
+check(
+  "a 400 naming tools is shape, not size",
+  !R.isSizeRejection(
+    400,
+    "Invalid request: Invalid API parameter: tools. Use tool_choice instead."
+  )
+);
+check(
+  "a 400 naming the context window is size",
+  R.isSizeRejection(
+    400,
+    "This model's maximum context length is 32768 tokens, however you requested 98000 tokens."
+  )
+);
+check(
+  "a 413 is size whatever it says",
+  R.isSizeRejection(413, "Payload Too Large") &&
+    R.isSizeRejection(413, "")
+);
+check(
+  "a 5xx is never size-driven, even with size words",
+  !R.isSizeRejection(500, "Request too large to process") &&
+    !R.isSizeRejection(502, "No endpoints found for the request")
+);
+
+// The gateway wraps provider failures: a bare error.message is sometimes
+// all envelope ("Provider returned error") with the real cause nested in
+// metadata.raw. Classification reads the unwrapped string.
+const wrappedSize = JSON.stringify({
+  error: {
+    message: "Provider returned error",
+    code: 400,
+    metadata: {
+      provider_name: "Nvidia",
+      raw: JSON.stringify({
+        error: {
+          message:
+            "This model's maximum context length is 131072 tokens, however you requested 178432 tokens.",
+          code: "context_length_exceeded",
+        },
+      }),
+    },
+  },
+});
+check(
+  "a wrapped size error unwraps to the provider's message",
+  (() => {
+    const detail = R.extractRejectionDetail(wrappedSize);
+    return (
+      detail.includes("maximum context length") &&
+      R.isSizeRejection(400, detail)
+    );
+  })(),
+  "a missed unwrap sends a 697k body down the strip-tools path and fails it identically"
+);
+check(
+  "a terse message with a size code still reads as size",
+  (() => {
+    const detail = R.extractRejectionDetail(
+      JSON.stringify({
+        error: { message: "Bad request", code: "context_length_exceeded" },
+      })
+    );
+    return R.isSizeRejection(400, detail);
+  })(),
+  "some providers name the fault in the code while the message stays terse"
+);
+check(
+  "snake_case codes read the same as prose",
+  R.isSizeRejection(400, "input_too_long · x") &&
+    R.isSizeRejection(400, "request_too_large")
+);
+check(
+  "a generic wrapper with nothing nested stays a shape verdict",
+  (() => {
+    const detail = R.extractRejectionDetail(
+      JSON.stringify({ error: { message: "Provider returned error" } })
+    );
+    return (
+      detail === "Provider returned error" && !R.isSizeRejection(400, detail)
+    );
+  })(),
+  "unknown stays on the strip-tools path — and the cascade below covers a wrong guess"
+);
+check(
+  "a tool_calls validation error is shape, not size",
+  !R.isSizeRejection(
+    400,
+    "Bad Request · Validation: `messages[28].tool_calls[0].function.arguments` must be a valid JSON object string: control character found while parsing a string at line 2 column 0"
+  ),
+  "messages[28].tool_calls fired the bare 'too' inside 'tool' — the fold retry carried the poison twice"
+);
+check(
+  "request/message lookalikes do not read as size",
+  !R.isSizeRejection(
+    400,
+    "Invalid request: messages[0].tool_calls[1].function.arguments must be a valid JSON object string"
+  ) &&
+    !R.isSizeRejection(400, "Error in context: Windows path invalid") &&
+    !R.isSizeRejection(400, "request largely unchanged") &&
+    !R.isSizeRejection(400, "cannot merge context windows")
+);
+check(
+  "genuine size phrasing still reads as size",
+  R.isSizeRejection(400, "prompt is too long") &&
+    R.isSizeRejection(400, "message too large") &&
+    R.isSizeRejection(400, "Request Entity Too Large") &&
+    R.isSizeRejection(400, "Input length exceeds model maximum of 200000 tokens")
+);
+check(
+  "an unknown model id never retries — no reshape can fix the routing",
+  R.isUnknownModelRejection(
+    "nvidia/nemotron-3-ultra-550b-a558:free is not a valid model ID"
+  ) && R.isUnknownModelRejection("Model not found")
+);
+check(
+  "size and shape verdicts are not unknown-model verdicts",
+  !R.isUnknownModelRejection(
+    "This model's maximum context length is 131072 tokens."
+  ) && !R.isUnknownModelRejection("Invalid API parameter: tools.")
+);
+check(
+  "extraction caps a runaway body and passes plain text through",
+  R.extractRejectionDetail("boom: " + "x".repeat(500)).length === 300 &&
+    R.extractRejectionDetail("plain gateway text").startsWith("plain gateway")
+);
+
 check(
   "a dropped connection is transient",
   R.isTransientNetworkError(Object.assign(new Error("socket hang up"), { name: "TypeError" }))
@@ -167,8 +296,8 @@ check(
   "the old (1/2) counter looked like the last retry when two were left"
 );
 check(
-  "OpenCode is given more than the default three tries",
-  R.OPENCODE_RETRY.attempts === 5 && R.DEFAULT_RETRY.attempts === 3
+  "OpenRouter is given more than the default three tries",
+  R.OPENROUTER_RETRY.attempts === 5 && R.DEFAULT_RETRY.attempts === 3
 );
 
 const backoffAt = 1_000;
@@ -207,6 +336,69 @@ check(
     },
     13_400
   ) === "Waiting on OpenCode Zen — try 1 of 5 · 48k chars in"
+);
+check(
+  "a fat local wait names the prefill",
+  R.visibleUpstreamNotice(
+    {
+      phase: "attempt",
+      attempt: 1,
+      attempts: 3,
+      receivedAt: 10_000,
+      host: "On this PC",
+      providerId: "local",
+      inputChars: 74_000,
+    },
+    73_000
+  ) ===
+    "Waiting on On this PC — try 1 of 3 · 74k chars in" +
+    " · prefilling — first token takes minutes on a cold start",
+  "a burning GPU with no tokens reads as stuck until the wait is named"
+);
+check(
+  "cloud waits do not get the prefill note",
+  R.visibleUpstreamNotice(
+    {
+      phase: "attempt",
+      attempt: 1,
+      attempts: 3,
+      receivedAt: 10_000,
+      host: "DeepSeek",
+      inputChars: 74_000,
+    },
+    73_000
+  ) === "Waiting on DeepSeek — try 1 of 3 · 74k chars in"
+);
+check(
+  "a small local wait stays quiet",
+  R.visibleUpstreamNotice(
+    {
+      phase: "attempt",
+      attempt: 1,
+      attempts: 3,
+      receivedAt: 10_000,
+      host: "On this PC",
+      providerId: "local",
+      inputChars: 5_000,
+    },
+    13_400
+  ) === "Waiting on On this PC — try 1 of 3"
+);
+check(
+  "the banner names the biggest contributor from 25k up",
+  R.visibleUpstreamNotice(
+    {
+      phase: "attempt",
+      attempt: 1,
+      attempts: 3,
+      receivedAt: 10_000,
+      host: "DeepSeek",
+      inputChars: 74_000,
+      breakdown: [{ label: "instructions", chars: 40_000 }],
+    },
+    13_400
+  ) === "Waiting on DeepSeek — try 1 of 3 · 74k chars in (instructions 40k)",
+  "a local prefill waits on far less than the old 100k bar"
 );
 check(
   "try 2 of a retry shows immediately so the backoff line does not vanish",
@@ -515,7 +707,7 @@ check(
   "argument stubbing preserves the call/reply pairing",
   resFat.messages[2].tool_calls[0].id === "call_fat" &&
     resFat.messages[3].tool_call_id === "call_fat",
-  "the API validates pairing, never argument content"
+  "pairing still validated — and strict gateways validate content too"
 );
 check(
   "the stub tells the model the call already ran",

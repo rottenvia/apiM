@@ -9,6 +9,7 @@
  */
 
 import { getDeepSeekPeriod, type DeepSeekPeriod } from "./deepseek-hours";
+import type { CustomModelDef } from "./models";
 export { getDeepSeekPeriod };
 
 export interface ModelRates {
@@ -20,15 +21,18 @@ export interface ModelRates {
 export const MODEL_RATES: Record<string, ModelRates> = {
   "deepseek-v4-pro": { input: 0.435, cachedInput: 0.003625, output: 0.87 },
   "deepseek-v4-flash": { input: 0.14, cachedInput: 0.0028, output: 0.28 },
-  // OpenCode Zen lists Ox Alpha Free at $0 / $0 during the stealth preview.
-  "ox-alpha": { input: 0, cachedInput: 0, output: 0 },
   // Z.ai list price for GLM 5.3 Flash on OpenRouter (verified 2026-08-26):
   // $0.15 in / $0.50 out / $0.03 cache-read per 1M. A 50% launch discount
   // (0.075 / 0.015 / 0.25) runs through 2026-09-09 — budget against the
   // list price so the spending cap never undercounts.
   "glm-5.3-flash": { input: 0.15, cachedInput: 0.03, output: 0.5 },
-  // OpenCode Zen's free preview lane for DeepSeek V4 Flash.
-  "deepseek-v4-flash-free": { input: 0, cachedInput: 0, output: 0 },
+  // Morph list price for DeepSeek V4.1 Flash (verified 2026-09-25): $0.15
+  // in / $0.60 out / $0.003 cache-read per 1M, currently 50% off. The lane
+  // is pinned to Morph with no fallbacks, so the endpoint list is the
+  // honest ceiling and the cap never undercounts.
+  "deepseek-v4.1-flash": { input: 0.15, cachedInput: 0.003, output: 0.6 },
+  // OpenRouter's free tier, currently NVIDIA Nemotron 3 Ultra.
+  "nvidia-nemotron-3-ultra-free": { input: 0, cachedInput: 0, output: 0 },
   // Electricity only — the weights run on the user's GPU.
   "qwen-3.8-27b": { input: 0, cachedInput: 0, output: 0 },
 };
@@ -59,12 +63,39 @@ function applyTemporaryDiscount(
   };
 }
 
+/**
+ * Rates for a custom OpenRouter model, from its Verify-filled pricing.
+ *
+ * Cache reads are billed at the full input rate: unlike the catalog lanes
+ * we do not know this route's cache discount, and assuming one would
+ * undercount the spending cap. Unknown pricing is null — an unknown cost
+ * must never masquerade as a free one.
+ */
+export function customRatesFor(def: CustomModelDef): ModelRates | null {
+  if (def.inputPrice === undefined && def.outputPrice === undefined) {
+    return null;
+  }
+  const input = def.inputPrice ?? 0;
+  return { input, cachedInput: input, output: def.outputPrice ?? 0 };
+}
+
+function customRatesForCustomId(
+  model: string,
+  customs: CustomModelDef[]
+): ModelRates | null {
+  const def = customs.find((c) => c.id === model);
+  return def ? customRatesFor(def) : null;
+}
+
 export function ratesFor(
   model: string,
   period: DeepSeekPeriod = getDeepSeekPeriod().period,
-  now: number = Date.now()
+  now: number = Date.now(),
+  customs?: CustomModelDef[] | null
 ): ModelRates | null {
-  const base = MODEL_RATES[model];
+  const base =
+    MODEL_RATES[model] ??
+    (customs ? customRatesForCustomId(model, customs) : null);
   if (!base) return null;
   if (period === "offpeak") {
     return applyTemporaryDiscount(model, {
@@ -162,10 +193,11 @@ export function cacheSplit(usage: UsageLike): {
 export function estimateCost(
   usage: UsageLike | null | undefined,
   model: string,
-  period?: DeepSeekPeriod
+  period?: DeepSeekPeriod,
+  customs?: CustomModelDef[] | null
 ): number | null {
   if (!usage) return null;
-  const rates = ratesFor(model, period);
+  const rates = ratesFor(model, period, Date.now(), customs);
   if (!rates) return null;
 
   const { completion, hit, miss } = cacheSplit(usage);

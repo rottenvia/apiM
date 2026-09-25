@@ -29,7 +29,7 @@ const read = (p) => readFileSync(path.join(ROOT, p), "utf8");
 
 const C = await load("src/lib/compact.ts");
 const { toolCallsAreBalanced } = await load("src/lib/prune.ts");
-const { serializeForApi } = await load("src/lib/transcript.ts");
+const { serializeForApi, foldOldestHistory } = await load("src/lib/transcript.ts");
 const route = read("src/app/api/chat/route.ts");
 
 const COLOR = process.stdout.isTTY && !process.env.NO_COLOR;
@@ -280,6 +280,199 @@ check(
   })(),
   "approaching the context window still folds, but keeps structure valid"
 );
+
+console.log("\n7. A size rejection folds oldest history and keeps the agent whole");
+
+const foldBuild = () => {
+  const msgs = [{ role: "system", content: "pinned directives" }];
+  for (let i = 0; i < 10; i += 1) {
+    msgs.push({ role: "user", content: `old question ${i} ` + "x".repeat(20_000) });
+    msgs.push({ role: "assistant", content: `old answer ${i} ` + "y".repeat(20_000) });
+  }
+  // A tool round mid-history: calls and reply must survive the fold.
+  msgs.splice(
+    11,
+    0,
+    { role: "assistant", content: "", tool_calls: [{ id: "c1", type: "function", function: { name: "read", arguments: "{}" } }] },
+    { role: "tool", tool_call_id: "c1", content: "file text" }
+  );
+  msgs.push({ role: "user", content: "the live question" });
+  return msgs;
+};
+check(
+  "a body already under target passes through untouched",
+  (() => {
+    const small = [
+      { role: "system", content: "s" },
+      { role: "user", content: "q" },
+    ];
+    const out = foldOldestHistory(small, 350_000);
+    return out.stats.dropped === 0 && out.messages === small;
+  })(),
+  "healthy rounds never lose a word — only the retry folds"
+);
+check(
+  "an over-target body folds to about the target",
+  (() => {
+    const out = foldOldestHistory(foldBuild(), 350_000);
+    const chars = JSON.stringify(out.messages).length;
+    return out.stats.dropped > 0 && chars <= 350_000 * 1.1;
+  })(),
+  "the retry lands at half the observed failure point, not just under it"
+);
+check(
+  "the fold drops the oldest plain turns first",
+  (() => {
+    const out = foldOldestHistory(foldBuild(), 350_000);
+    const text = JSON.stringify(out.messages);
+    return (
+      !text.includes("old question 0") &&
+      text.includes("old question 9") &&
+      out.stats.charsSaved > 40_000
+    );
+  })(),
+  "recency is preserved — the live context survives, the archive goes"
+);
+check(
+  "the live question and everything after it survive",
+  (() => {
+    const out = foldOldestHistory(foldBuild(), 350_000);
+    return JSON.stringify(out.messages).includes("the live question");
+  })(),
+  "folding the turn being answered would send a body with no question"
+);
+check(
+  "tool rounds and system turns are never folded away",
+  (() => {
+    const out = foldOldestHistory(foldBuild(), 60_000);
+    const text = JSON.stringify(out.messages);
+    return (
+      text.includes("pinned directives") &&
+      text.includes('"c1"') &&
+      text.includes("file text")
+    );
+  })(),
+  "broken tool-call pairing would 400 the retry it was meant to save"
+);
+check(
+  "the fold leaves a marker saying what was omitted",
+  (() => {
+    const out = foldOldestHistory(foldBuild(), 350_000);
+    const text = JSON.stringify(out.messages);
+    return (
+      out.stats.dropped > 0 &&
+      /older history turns omitted/.test(text) &&
+      /be re-sent/.test(text)
+    );
+  })(),
+  "the model must know the archive is gone, not hallucinate it"
+);
+
+console.log("\n8. Identical re-reads fold to a pointer");
+
+/* A wide loop carries every copy of every re-read on every request. The
+ * dedup pass keeps one copy (the latest, verbatim) and points the older
+ * ones at it — before the threshold check, so the bloat never trips the
+ * folding valve that would eat the evidence and force more re-reads. */
+const dupRound = (id, content) => [
+  {
+    role: "assistant",
+    content: "",
+    tool_calls: [
+      {
+        id,
+        type: "function",
+        function: {
+          name: "read_file",
+          arguments: JSON.stringify({ path: "src/a.ts" }),
+        },
+      },
+    ],
+  },
+  { role: "tool", tool_call_id: id, content },
+];
+{
+  const big = "x".repeat(500);
+  const t = [
+    { role: "system", content: "s" },
+    { role: "user", content: "u" },
+    ...dupRound("c1", big),
+    ...dupRound("c2", big),
+    ...dupRound("c3", big),
+  ];
+  const out = C.dedupeIdenticalResults(t);
+  const tools = out.messages.filter((m) => m.role === "tool");
+  check(
+    "two older copies fold, the latest survives verbatim",
+    out.dupsFolded === 2 &&
+      tools.length === 3 &&
+      tools[2].content === big &&
+      tools[0].content.includes("latest copy is below") &&
+      tools[1].content.includes("latest copy is below"),
+    `${out.dupsFolded} folded, ${out.charsSaved} chars saved`
+  );
+  check(
+    "the input transcript is never modified",
+    t[3].content === big && t[5].content === big,
+    "the caller keeps the pristine version"
+  );
+  check(
+    "folding keeps tool calls and replies paired",
+    toolCallsAreBalanced(out.messages),
+    "pointers replace replies in place — nothing removed"
+  );
+}
+{
+  // Same call, DIFFERENT bytes: new information, never folded.
+  const t = [
+    { role: "system", content: "s" },
+    { role: "user", content: "u" },
+    ...dupRound("c1", "y".repeat(500)),
+    ...dupRound("c2", "z".repeat(500)),
+  ];
+  const out = C.dedupeIdenticalResults(t);
+  check(
+    "same call with different bytes is left alone",
+    out.dupsFolded === 0 && out.messages === t,
+    "each new span is genuinely new information"
+  );
+}
+{
+  // Identical but tiny: the pointer would cost more than the copy.
+  const t = [
+    { role: "system", content: "s" },
+    { role: "user", content: "u" },
+    ...dupRound("c1", "small"),
+    ...dupRound("c2", "small"),
+  ];
+  const out = C.dedupeIdenticalResults(t);
+  check(
+    "small results are left alone",
+    out.dupsFolded === 0 && out.messages === t
+  );
+}
+{
+  // Integration: below-threshold transcripts still shed their dupes, and
+  // the savings ride in charsSaved even when no round folds.
+  const big = "w".repeat(2000);
+  const t = [
+    { role: "system", content: "s" },
+    { role: "user", content: "u" },
+    ...dupRound("c1", big),
+    ...dupRound("c2", big),
+    ...dupRound("c3", big),
+    ...dupRound("c4", big),
+  ];
+  const out = C.compactTranscript(t);
+  check(
+    "compaction folds dupes before the threshold check",
+    out.stats.rounds === 0 &&
+      out.stats.charsSaved > 0 &&
+      out.messages.filter((m) => m.role === "tool").length === 4 &&
+      toolCallsAreBalanced(out.messages),
+    `${out.stats.charsSaved} chars saved with zero rounds folded`
+  );
+}
 
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`

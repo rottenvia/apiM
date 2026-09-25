@@ -29,9 +29,10 @@
  *     of failure; this has to be chosen.
  */
 
-import { estimateCost, MODEL_RATES } from "@/lib/pricing";
+import { customRatesFor, estimateCost, MODEL_RATES } from "@/lib/pricing";
 import type { UsageLike } from "@/lib/pricing";
 import type { DeepSeekPeriod } from "@/lib/deepseek-hours";
+import type { CustomModelDef } from "@/lib/models";
 
 /** Warn once the run passes this share of its cap. */
 export const WARN_AT_FRACTION = 0.8;
@@ -77,9 +78,10 @@ export function chargeRound(
   budget: BudgetState,
   usage: UsageLike | null | undefined,
   model: string,
-  period?: DeepSeekPeriod
+  period?: DeepSeekPeriod,
+  customs?: CustomModelDef[] | null
 ): number {
-  const cost = estimateCost(usage, model, period) ?? 0;
+  const cost = estimateCost(usage, model, period, customs) ?? 0;
   budget.spentUsd += cost;
   return cost;
 }
@@ -154,14 +156,22 @@ export function checkBudget(
 export function maxTokensFor(
   budget: BudgetState,
   model: string,
-  ceiling: number
+  ceiling: number,
+  customs?: CustomModelDef[] | null
 ): number {
   if (budget.limitUsd === null) return ceiling;
 
-  const rates = MODEL_RATES[model];
+  // Base rates, not the period-adjusted ones: the cap must hold at the
+  // dearest window. Customs resolve through their Verify-filled pricing;
+  // unknown pricing returns the ceiling (nothing to divide by) rather
+  // than a guess.
+  const custom = customs?.find((c) => c.id === model);
+  const rates = custom
+    ? customRatesFor(custom)
+    : (MODEL_RATES[model] ?? null);
   if (!rates) return ceiling;
-  // A free model (Ox Alpha during preview) has a zero output rate. Dividing
-  // the remaining budget by zero is Infinity; the ceiling is the real cap.
+  // A free model (the Nemotron lane) has a zero output rate. Dividing the
+  // remaining budget by zero is Infinity; the ceiling is the real cap.
   if (rates.output <= 0) return ceiling;
 
   const remaining = budget.limitUsd - budget.spentUsd;

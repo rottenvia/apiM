@@ -5,6 +5,7 @@ import {
   isValidElement,
   memo,
   useCallback,
+  useDeferredValue,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -23,7 +24,12 @@ import type { Message, MessageAttachment } from "@/app/page";
 import { ImageLightbox } from "@/components/ImageLightbox";
 import { CompareVersions } from "@/components/CompareVersions";
 import { buildSearchRegex } from "@/lib/chat-search";
-import { estimateCost, formatCost, formatDuration } from "@/lib/pricing";
+import {
+  estimateCost,
+  formatCost,
+  formatDuration,
+  reasoningTokens,
+} from "@/lib/pricing";
 import { CodeBlock } from "@/components/CodeBlock";
 import { PlanPanel } from "@/components/PlanPanel";
 import type { PlanView } from "@/components/PlanPanel";
@@ -224,6 +230,56 @@ export function Dots({ size = 5 }: { size?: number }) {
           style={{ width: size, height: size, animationDelay: `${delay}ms` }}
         />
       ))}
+    </span>
+  );
+}
+
+/**
+ * "12s", "3m 04s" — the finished thinking label ("Thought for 12s").
+ *
+ * Fed by the server's first-to-last reasoning-token span, so it measures
+ * thought rather than network. Rounds to whole seconds; a sub-second think
+ * still reads as 1s, because "Thought for 0s" would look broken.
+ */
+function formatThoughtTime(ms: number): string {
+  const total = Math.max(1, Math.round(ms / 1000));
+  if (total < 60) return `${total}s`;
+  const minutes = Math.floor(total / 60);
+  return `${minutes}m ${String(total % 60).padStart(2, "0")}s`;
+}
+
+/**
+ * "12.4k" / "860" — thinking volume in the header. Live it is estimated from
+ * characters (~4 per token); finished it is the billed reasoning count.
+ */
+function formatThinkTokens(n: number): string {
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return `${Math.max(0, Math.round(n))}`;
+}
+
+/**
+ * Ticking seconds beside the live "Thinking" label.
+ *
+ * The status row's clock unmounts at the first token, so a reasoning stream
+ * that stalls mid-thought used to sit frozen with no liveness signal at
+ * all — "stuck at thinking, don't know why". This mounts fresh on each
+ * thinking phase, so it reads as the CURRENT stall, not the run total:
+ * tokens moving means alive, clock ticking over frozen text means stalled.
+ * No synchronous setState — the interval callback is the only writer, so
+ * the mount never trips the set-state-in-effect rule.
+ */
+function ThinkingClock() {
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setSeconds((s) => s + 1), 1000);
+    return () => clearInterval(t);
+  }, []);
+  return (
+    <span
+      className="tabular-nums"
+      title="Wall-clock in this thinking phase — if the text below is frozen while this ticks, the stream has stalled"
+    >
+      {` · ${seconds}s`}
     </span>
   );
 }
@@ -489,6 +545,8 @@ function MessageBubbleImpl({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [copied, setCopied] = useState(false);
+  /** A long steering note truncates to one quiet line; this expands it. */
+  const [noteExpanded, setNoteExpanded] = useState(false);
   const thinkingRef = useRef<HTMLDivElement>(null);
   /** Scroll target for the plan pill in the meta row. */
   const planRef = useRef<HTMLDivElement>(null);
@@ -497,8 +555,9 @@ function MessageBubbleImpl({
    * A mid-run steering note ("btw …" sent while a reply was running).
    *
    * It is a real user message in the conversation — the model acted on it —
-   * but it was handed into a task that was already running, so a full bubble
-   * would misread it as a fresh task. It renders as a compact teal chip.
+   * but it was handed into a task that was already running, so it renders
+   * as a slim centered event row (see the early return below), never as a
+   * message bubble: a wall of old note bubbles buries the real conversation.
    */
   const isNote = isUser && message.isNote === true;
 
@@ -549,18 +608,48 @@ function MessageBubbleImpl({
   /**
    * Does the panel have anything real to show right now?
    *
-   * The silent gap — streaming, thinking requested, no reasoning text yet —
-   * belongs to ChatArea's status row (dots + stage + elapsed). The panel used
-   * to mount here anyway with "Loading…" in its body, which read as a second
-   * redundant "Thinking" loader stacked above the status row. The panel now
-   * appears only when reasoning text, a reasoning notice, or a finished reply
-   * gives it content; historical bubbles keep the fetch-on-demand placeholder.
+   * This gates the CLOCK and the BODY, not the mount. The shell mounts
+   * through the silent gap — streaming, thinking requested, no reasoning
+   * text yet — but hides while the status row below covers the wait (see
+   * thinkHidden): the row already says "Thinking" with the visible clock,
+   * and the shimmer header above it stacked a second "Thinking" over it.
+   * The panel's clock keeps counting invisibly and is revealed the moment
+   * text lands, which is also when the status row unmounts — one visible
+   * timer at all times, reading the whole phase.
    */
   const panelHasContent = Boolean(
     message.reasoningNotice ||
       (typeof message.reasoningContent === "string" &&
         message.reasoningContent.trim().length > 0)
   );
+
+  /** Live, but the first reasoning token has not landed yet: header only. */
+  const thinkLoading = isThinkingPhase && !panelHasContent;
+  /**
+   * The covered gap: live, and nothing on screen yet — no reasoning text,
+   * no notice, no prose. The status row below is the thinking voice here,
+   * so the shell hides (staying mounted: its clock keeps counting and is
+   * revealed reading the whole phase when text lands, the same frame the
+   * row unmounts). Once prose streams the row is gone and the header stays
+   * visible: it is the only voice left, and the frame still warms in
+   * around it without shifting a pixel.
+   */
+  const thinkHidden = thinkLoading && !message.content.trim();
+  /** The body stays shut through the silent gap — an open frame around
+   * nothing was the empty outline this replaced. */
+  const thinkBodyOpen = showThinking && !thinkLoading;
+
+  /**
+   * The finished label's duration. Present once `done` lands; a dropped
+   * stream or an older stored reply has no timing and falls back to a bare
+   * "Thinking" rather than guessing.
+   */
+  const thoughtMs =
+    !isThinkingPhase &&
+    typeof message.reasoningMs === "number" &&
+    message.reasoningMs > 0
+      ? message.reasoningMs
+      : 0;
 
   // Keep the reasoning panel pinned to the newest text while "Follow" is on.
   // A user scroll upward turns Follow off — same rule as the chat pane, so
@@ -571,7 +660,9 @@ function MessageBubbleImpl({
     const el = thinkingRef.current;
     if (!el) return;
     ignoreThinkScroll.current = true;
-    el.scrollTop = el.scrollHeight;
+    // Write-only (see stickToBottom): no scrollHeight read, no forced layout
+    // on every reasoning frame.
+    el.scrollTop = Number.MAX_SAFE_INTEGER;
     requestAnimationFrame(() => {
       ignoreThinkScroll.current = false;
     });
@@ -612,6 +703,24 @@ function MessageBubbleImpl({
     () => estimateCost(message.usage, message.model ?? ""),
     [message.usage, message.model]
   );
+  /*
+   * How much of the output was thinking. Billed at the output rate, and on
+   * high effort it dwarfs the answer — the line that explains a $1 reply
+   * for a short answer. Zero/absent on lanes that do not report the split.
+   */
+  const thinkingTokens = useMemo(
+    () => reasoningTokens(message.usage),
+    [message.usage]
+  );
+  /*
+   * True model speed: billed reasoning tokens over the first-to-last-token
+   * span, so it measures generation rather than network. When thinking feels
+   * slow this number says whether the lane is slow or the essay is just long.
+   */
+  const thinkRate =
+    thoughtMs > 0 && thinkingTokens > 0
+      ? ` · ${formatThinkTokens(thinkingTokens / (thoughtMs / 1000))} tok/s`
+      : "";
 
   /*
    * One number, because one number is what was spent.
@@ -700,6 +809,93 @@ function MessageBubbleImpl({
       };
     }, [message.content, message.isStreaming]);
 
+  /*
+   * Live formatting that cannot saturate the thread. While the reply
+   * streams every frame grows the content, and parsing the whole reply's
+   * markdown per frame is O(n-squared) — a 20KB reply costs ~36ms per
+   * re-parse inside a 16ms frame. The deferred value lets React skip the
+   * MarkdownBody re-render on busy frames (its memo holds on the unchanged
+   * string), so formatting follows the text a few frames behind instead of
+   * blocking it; the finished reply renders the exact text.
+   */
+  const deferredContent = useDeferredValue(displayContent);
+  const liveContent = message.isStreaming ? deferredContent : displayContent;
+
+  /*
+   * A steering note is a record, not a message: one quiet centered line —
+   * chip, caption, text — instead of a right-aligned bubble. Long notes
+   * truncate with a click to expand; attachments ride as tiny name chips
+   * with the same lightbox behind them.
+   */
+  if (isNote) {
+    const text = message.content ?? "";
+    const long = text.length > 140;
+    const shown =
+      noteExpanded || !long ? text : text.slice(0, 140).trimEnd() + "…";
+    return (
+      <div
+        ref={bubbleRootRef}
+        className="animate-fade-in flex justify-center px-4"
+      >
+        <div className="flex min-w-0 max-w-[90%] flex-wrap items-baseline justify-center gap-x-2 gap-y-0.5 text-center">
+          <span className="rounded-lg bg-search/20 px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-search">
+            note
+          </span>
+          <span className="text-[11px] text-text-muted">
+            passed while the task was running
+          </span>
+          <button
+            type="button"
+            onClick={() => long && setNoteExpanded((v) => !v)}
+            title={long ? (noteExpanded ? "Collapse" : "Expand") : undefined}
+            className={`min-w-0 text-xs leading-5 text-text-secondary ${long ? "cursor-pointer hover:text-text-primary" : "cursor-default"}`}
+          >
+            <span className="whitespace-pre-wrap break-words">{shown}</span>
+            {long && (
+              <span className="ml-1 text-[11px] text-text-muted">
+                {noteExpanded ? "show less" : "more"}
+              </span>
+            )}
+          </button>
+          {(message.attachments ?? []).map((file, i) => {
+            const peekable =
+              (file.kind === "image" || file.kind === "video") &&
+              (file.dataUrl || file.frames?.length);
+            const chip = (
+              <span className="inline-flex items-center gap-1 rounded-lg border border-border bg-bg-secondary/60 px-1.5 py-0.5 text-[11px] text-text-secondary">
+                {file.name}
+              </span>
+            );
+            return peekable ? (
+              <button
+                key={i}
+                type="button"
+                onClick={() => setPreviewImage(file)}
+                title={`${file.name} — click to enlarge`}
+                className="transition-transform hover:scale-[1.03]"
+              >
+                {chip}
+              </button>
+            ) : (
+              <span key={i}>{chip}</span>
+            );
+          })}
+        </div>
+
+        {previewImage?.dataUrl && (
+          <ImageLightbox
+            src={previewImage.dataUrl}
+            name={previewImage.name}
+            description={previewImage.description}
+            source={previewImage.descriptionSource}
+            kind={previewImage.kind === "video" ? "video" : "image"}
+            onClose={() => setPreviewImage(null)}
+          />
+        )}
+      </div>
+    );
+  }
+
   return (
     <div
       ref={bubbleRootRef}
@@ -707,91 +903,13 @@ function MessageBubbleImpl({
     >
       <div
         className={`max-w-[85%] md:max-w-[75%] ${
-          isNote
-            ? "rounded-xl border border-[#6ba3a0]/30 bg-[#6ba3a0]/[0.08] px-3.5 py-2.5"
-            : isUser
-              ? "rounded-2xl bg-bg-elevated px-4 py-2.5"
-              : "bg-transparent px-4"
+          isUser
+            ? "rounded-2xl bg-bg-elevated px-4 py-2.5"
+            : "bg-transparent px-4"
         }`}
       >
-        {/* Mid-run steering note: a compact chip, not a task bubble. It is
-            information the user passed to a task that was already running, so
-            it reads as an aside to the task, not a new instruction to you. */}
-        {isNote && (
-          <div className="space-y-1">
-            <div className="flex items-center gap-1.5">
-              <span className="rounded-lg bg-[#6ba3a0]/20 px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-[#6ba3a0]">
-                note
-              </span>
-              <span className="text-[11px] text-text-muted">
-                passed while the task was running
-              </span>
-            </div>
-
-            {/* Attachments that rode along with the note: a dropped
-                screenshot, a binary, a video as a frame strip. Same shapes
-                as a user bubble — thumbnails where the pixels are on hand
-                (a reload brings them; a live chip may carry names only),
-                name chips otherwise. */}
-            {message.attachments && message.attachments.length > 0 && (
-              <div className="flex flex-wrap gap-1.5">
-                {message.attachments.map((file, i) =>
-                  (file.kind === "image" || file.kind === "video") &&
-                  (file.dataUrl || file.frames?.length) ? (
-                    <button
-                      key={i}
-                      onClick={() => setPreviewImage(file)}
-                      title={`${file.name} — click to enlarge`}
-                      className="overflow-hidden rounded-lg border border-border transition-transform hover:scale-[1.03]"
-                    >
-                      {file.kind === "video" && file.dataUrl ? (
-                        <video
-                          src={file.dataUrl}
-                          muted
-                          playsInline
-                          preload="metadata"
-                          className="h-24 w-auto max-w-[12rem] object-cover"
-                        />
-                      ) : file.kind === "video" && file.frames?.length ? (
-                        /* eslint-disable-next-line @next/next/no-img-element */
-                        <img
-                          src={file.frames[0].dataUrl}
-                          alt={file.name}
-                          className="h-24 w-auto max-w-[12rem] object-cover"
-                        />
-                      ) : (
-                        /* eslint-disable-next-line @next/next/no-img-element */
-                        <img
-                          src={file.dataUrl}
-                          alt={file.name}
-                          className="h-24 w-auto max-w-[12rem] object-cover"
-                        />
-                      )}
-                    </button>
-                  ) : (
-                    <span
-                      key={i}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-bg-secondary/60 px-2 py-1 text-xs text-text-secondary"
-                    >
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} aria-hidden="true">
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z" />
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M14 2v6h6" />
-                      </svg>
-                      {file.name}
-                    </span>
-                  )
-                )}
-              </div>
-            )}
-
-            <div className="whitespace-pre-wrap break-words text-[13px] leading-6 text-text-secondary">
-              {message.content}
-            </div>
-          </div>
-        )}
-
         {/* User message */}
-        {isUser && !isNote && (
+        {isUser && (
           <div className="space-y-2">
             {message.attachments && message.attachments.length > 0 && (
               <div className="flex flex-wrap gap-1.5">
@@ -1008,7 +1126,7 @@ function MessageBubbleImpl({
               <div className="flex flex-wrap items-center gap-1.5">
                 {message.thinkingEffort &&
                   message.thinkingEffort !== "none" && (
-                    <span className="inline-flex items-center gap-1 rounded-lg border border-[#cfa25a]/25 bg-[#cfa25a]/10 px-1.5 py-0.5 text-[11px] font-medium text-[#cfa25a]">
+                    <span className="inline-flex items-center gap-1 rounded-lg border border-thinking/25 bg-thinking/10 px-1.5 py-0.5 text-[11px] font-medium text-thinking">
                       <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} aria-hidden="true">
                         <path strokeLinecap="round" strokeLinejoin="round" d="M12 3l1.85 5.15L19 10l-5.15 1.85L12 17l-1.85-5.15L5 10l5.15-1.85L12 3z" />
                       </svg>
@@ -1045,8 +1163,8 @@ function MessageBubbleImpl({
                       planBlocked > 0
                         ? "border-danger/25 bg-danger/10 text-danger hover:bg-danger/20"
                         : planCurrent
-                          ? "border-[#cfa25a]/25 bg-[#cfa25a]/10 text-[#cfa25a] hover:bg-[#cfa25a]/20"
-                          : "border-[#7ea05a]/25 bg-[#7ea05a]/10 text-[#7ea05a] hover:bg-[#7ea05a]/20"
+                          ? "border-warning/25 bg-warning/10 text-warning hover:bg-warning/20"
+                          : "border-success/25 bg-success/10 text-success hover:bg-success/20"
                     }`}
                   >
                     <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} aria-hidden="true">
@@ -1067,7 +1185,7 @@ function MessageBubbleImpl({
                     onClick={() => setShowSources((v) => !v)}
                     aria-expanded={showSources}
                     title={searchTooltip}
-                    className="inline-flex items-center gap-1 rounded-lg border border-[#6ba3a0]/25 bg-[#6ba3a0]/10 px-1.5 py-0.5 text-[11px] font-medium text-[#6ba3a0] transition-colors hover:bg-[#6ba3a0]/20"
+                    className="inline-flex items-center gap-1 rounded-lg border border-search/25 bg-search/10 px-1.5 py-0.5 text-[11px] font-medium text-search transition-colors hover:bg-search/20"
                   >
                     <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} aria-hidden="true">
                       <circle cx="11" cy="11" r="8" />
@@ -1086,7 +1204,7 @@ function MessageBubbleImpl({
 
                 {message.tokenCount ? (
                   <span
-                    className="text-[11px] text-[#6d685d]"
+                    className="text-[11px] text-text-muted"
                     /*
                      * The cache split belongs here.
                      *
@@ -1100,6 +1218,9 @@ function MessageBubbleImpl({
                       message.usage
                         ? [
                             `${(message.usage.prompt_tokens ?? 0).toLocaleString()} in · ${(message.usage.completion_tokens ?? 0).toLocaleString()} out`,
+                            thinkingTokens > 0
+                              ? `${thinkingTokens.toLocaleString()} of the output was thinking, billed at the output rate`
+                              : null,
                             message.usage.prompt_cache_hit_tokens
                               ? `${message.usage.prompt_cache_hit_tokens.toLocaleString()} of the input was cached, billed at 1/120th the rate`
                               : null,
@@ -1115,7 +1236,7 @@ function MessageBubbleImpl({
 
                 {cost !== null && (
                   <span
-                    className="text-[11px] font-medium text-[#8b857a]"
+                    className="text-[11px] font-medium text-text-muted"
                     title={
                       [
                         `Model: ${formatCost(modelCost ?? 0)}`,
@@ -1136,7 +1257,7 @@ function MessageBubbleImpl({
 
                 {message.durationMs ? (
                   <span
-                    className="inline-flex items-center gap-1 text-[11px] text-[#6d685d]"
+                    className="inline-flex items-center gap-1 text-[11px] text-text-muted"
                     title="Time from sending to the last token"
                   >
                     <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} aria-hidden="true">
@@ -1146,35 +1267,98 @@ function MessageBubbleImpl({
                     {formatDuration(message.durationMs)}
                   </span>
                 ) : null}
+
+                {message.contextChars ? (
+                  <span
+                    className="inline-flex items-center gap-1 text-[11px] text-text-muted"
+                    title={
+                      message.contextBreakdown &&
+                      message.contextBreakdown.length > 0
+                        ? `Context sent with the final request:\n${message.contextBreakdown
+                            .map(
+                              (part) =>
+                                `${part.label} ${
+                                  part.chars >= 1000
+                                    ? `${(part.chars / 1000).toFixed(0)}k`
+                                    : `${part.chars}`
+                                }`
+                            )
+                            .join("\n")}`
+                        : "Context sent with the final request"
+                    }
+                  >
+                    <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} aria-hidden="true">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h10" />
+                    </svg>
+                    {message.contextChars >= 1000
+                      ? `~${(message.contextChars / 1000).toFixed(0)}k ctx`
+                      : `${message.contextChars} ctx`}
+                  </span>
+                ) : null}
+
+                {message.ending &&
+                (message.ending.finish ||
+                  message.ending.continuedOutput > 0 ||
+                  message.ending.continuedConnection > 0 ||
+                  message.ending.thinkOnlyStalls >= 2) ? (
+                  <span
+                    className="text-[11px] text-text-muted"
+                    /*
+                     * Why the reply is exactly as long as it is. A short
+                     * answer with `stop` and zero continuations means the
+                     * model ended it itself — nothing cut it, and Resume
+                     * (not a bug report) is the remedy. Anything else names
+                     * the cutter and what the continuation pools spent.
+                     */
+                    title={
+                      `Final finish_reason: ${message.ending.finish ?? "none (stream ended mid-content)"}` +
+                      `\nOutput-limit continuations: ${message.ending.continuedOutput}` +
+                      `\nConnection-cut continuations: ${message.ending.continuedConnection}` +
+                      (message.ending.thinkOnlyStalls > 0
+                        ? `\nThink-only stalls: ${message.ending.thinkOnlyStalls} (thinking ate the whole output budget without producing anything; thinking was then switched off)`
+                        : "")
+                    }
+                  >
+                    · {message.ending.finish ?? "cut"}
+                    {message.ending.continuedOutput +
+                      message.ending.continuedConnection >
+                    0
+                      ? ` +${message.ending.continuedOutput + message.ending.continuedConnection} cont`
+                      : ""}
+                    {message.ending.thinkOnlyStalls >= 2
+                      ? ` · thought ${message.ending.thinkOnlyStalls}×, empty`
+                      : ""}
+                  </span>
+                ) : null}
               </div>
             )}
 
             {/* Sources list — opened from the pill above */}
             {showSources && sourceCount > 0 && (
-              <div className="animate-fade-in space-y-0.5 rounded-xl border border-[#6ba3a0]/20 bg-[#141210]/60 p-1.5">
+              <div className="animate-fade-in space-y-0.5 rounded-xl border border-search/20 bg-bg-secondary/60 p-1.5">
                 {message.searchResults!.map((result, i) => (
                   <a
                     key={i}
                     href={result.url}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="group flex items-center gap-2.5 rounded-lg px-2 py-1.5 transition-colors hover:bg-[#33302a]"
+                    className="group flex items-center gap-2.5 rounded-lg px-2 py-1.5 transition-colors hover:bg-bg-hover"
                   >
-                    <span className="flex h-4 w-4 flex-none items-center justify-center rounded bg-[#6ba3a0]/15 text-[9px] font-bold text-[#6ba3a0]">
+                    <span className="flex h-4 w-4 flex-none items-center justify-center rounded bg-search/15 text-[9px] font-bold text-search">
                       {i + 1}
                     </span>
                     <span className="min-w-0 flex-1">
-                      <span className="block truncate text-xs text-[#ede9e2] transition-colors group-hover:text-[#6ba3a0]">
+                      <span className="block truncate text-xs text-text-primary transition-colors group-hover:text-search">
                         {result.title}
                       </span>
-                      <span className="block truncate text-[11px] text-[#6d685d]">
+                      <span className="block truncate text-[11px] text-text-muted">
                         {result.domain}
                       </span>
                     </span>
                     <svg
                       width="11" height="11" viewBox="0 0 24 24" fill="none"
                       stroke="currentColor" strokeWidth={2} aria-hidden="true"
-                      className="flex-none text-[#6d685d] opacity-0 transition-opacity group-hover:opacity-100"
+                      className="flex-none text-text-muted opacity-0 transition-opacity group-hover:opacity-100"
                     >
                       <path strokeLinecap="round" strokeLinejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
                     </svg>
@@ -1214,21 +1398,26 @@ function MessageBubbleImpl({
               is coming. "none" means the model was told not to think, and
               then there is correctly nothing to show.
             */}
-            {hasThinking && (panelHasContent || !isThinkingPhase) && (
+            {hasThinking && (
               <div className="thinking-panel">
                 <div
                   data-thinking={isThinkingPhase}
-                  data-open={showThinking}
-                  className="thinking-shell overflow-hidden rounded-lg"
+                  data-open={thinkBodyOpen}
+                  data-loading={thinkLoading}
+                  className={`thinking-shell overflow-hidden rounded-lg ${thinkHidden ? "hidden" : ""}`}
                 >
-                {/* The box and the amber arrive, rather than appearing.
-                    
-                    Previously the row was plain text one frame and a filled
-                    amber panel the next, which is the jump that read as a
-                    glitch. Border, background and text colour now all ease
-                    from transparent over the same 0.3s, so the label starts
-                    as ordinary metadata and warms into the panel — the change
-                    is legible as a transition rather than a repaint. */}
+                {/* The loader IS the header — once prose streams. Before the
+                    first reasoning token the shell is frameless — just a
+                    shimmering "Thinking" — and when text lands the same node
+                    gains its border, background and body over one 0.3s ease.
+                    Nothing spawns; the waiting state warms into the box.
+                    Through the covered gap (no prose yet) the whole shell
+                    hides and the status row below carries the wait alone —
+                    one Thinking, not two stacked (see thinkHidden).
+                    The row geometry never changes
+                    (same padding, chevron kept mounted but hidden, Follow
+                    kept mounted but hidden), so the transform cannot shift a
+                    pixel sideways. */}
                 <div className="flex items-center gap-2">
                   <button
                     onClick={() => {
@@ -1245,42 +1434,67 @@ function MessageBubbleImpl({
                     <svg
                       width="13" height="13" viewBox="0 0 24 24" fill="none"
                       stroke="currentColor" strokeWidth={2.2} aria-hidden="true"
-                      className={`flex-none transition-transform duration-150 ${showThinking ? "rotate-90" : ""}`}
+                      className={`flex-none transition-transform duration-150 ${showThinking ? "rotate-90" : ""} ${thinkLoading ? "invisible" : ""}`}
                     >
                       <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
                     </svg>
-                    {/* The collapsed row has to say there is something in it.
-
-                        Historical replies intentionally start compact. A bare
-                        word "Thinking" gives no hint that it holds anything,
-                        so it reads as a decorative line rather than a control.
-                        A length makes it obviously openable; replies watched
-                        live remain expanded instead of collapsing into it. */}
-                    <span className="truncate">
-                      {isThinkingPhase
-                        ? "Thinking"
-                        : reasoningChars > 0
-                          ? `Thought for ${
-                              reasoningChars >= 1000
-                                ? `${(reasoningChars / 1000).toFixed(1)}k`
-                                : reasoningChars
-                            } characters`
+                    {/* Live the label shimmers with a ticking token count, so a
+                        long think reads as progress rather than a hang;
+                        finished it states how long the model thought plus the
+                        true generation rate ("Thought for 3m 20s · 71 tok/s").
+                        The old "Thought for 40.9k characters" confused a length
+                        for a duration and read as an error — the character
+                        count survives only as the collapsed row's tooltip, for
+                        the curious. */}
+                    <span
+                      className={`truncate ${isThinkingPhase ? "thinking-shimmer" : ""}`}
+                      title={
+                        thoughtMs > 0 && reasoningChars > 0
+                          ? `${reasoningChars.toLocaleString()} characters of reasoning`
+                          : undefined
+                      }
+                    >
+                      {isThinkingPhase ? (
+                        <>
+                          Thinking
+                          {/* Counting invisibly through the silent gap: the
+                              status row owns the visible clock until the
+                              first token, then this one is revealed already
+                              showing the whole phase — one timer, no shift. */}
+                          <span className={thinkLoading ? "invisible" : undefined}>
+                            <ThinkingClock />
+                          </span>
+                          {reasoningChars > 0 && (
+                            <> · {formatThinkTokens(reasoningChars / 4)}</>
+                          )}
+                        </>
+                      ) : thoughtMs > 0
+                          ? `Thought for ${formatThoughtTime(thoughtMs)}${thinkRate}`
                           : "Thinking"}
                     </span>
                     {isThinkingPhase && <Dots size={3} />}
                   </button>
 
-                  {/* Only while reasoning is actually arriving.
+                  {/* Mounted for the whole open body, interactive only while
+                      reasoning is actually arriving.
                       
-                      It used to be tied to `message.isStreaming`, so it stayed
-                      on screen through the whole reply — long after the
+                      It used to mount and unmount with the thinking phase, so
+                      finishing visibly re-centred the header — the "unsymmetric
+                      box". Now the finished body keeps the same right-hand
+                      control at zero opacity: the living row and the finished
+                      row are geometrically identical. (Kept mounted rather
+                      than `hidden` for the same reason the chevron is: no
+                      layout shift at the transform moment.)
+                      
+                      Before that it was tied to `message.isStreaming`, so it
+                      stayed on screen through the whole reply — long after the
                       reasoning had stopped updating. Toggling it then did
                       nothing at all, which is what made it feel broken: the
                       control was live but the thing it controlled had
                       finished. The right-hand margin also read as misaligned
                       because it was 8px against the label's 12px padding; both
                       edges now match. */}
-                  {showThinking && isThinkingPhase && (
+                  {thinkBodyOpen && (
                     <button
                       onClick={() => setFollowThinking((v) => !v)}
                       title={
@@ -1289,10 +1503,14 @@ function MessageBubbleImpl({
                           : "Scrolling freely — click to follow the text"
                       }
                       aria-pressed={followThinking}
+                      aria-hidden={!isThinkingPhase}
+                      tabIndex={isThinkingPhase ? 0 : -1}
                       className={`mr-3 flex h-6 flex-none items-center gap-1 rounded-lg px-2 text-[11px] font-medium transition-colors ${
+                        isThinkingPhase ? "" : "pointer-events-none invisible"
+                      } ${
                         followThinking
-                          ? "bg-[#cfa25a]/20 text-[#cfa25a]"
-                          : "text-[#cfa25a]/55 hover:bg-[#cfa25a]/10 hover:text-[#cfa25a]"
+                          ? "bg-thinking/20 text-thinking"
+                          : "text-thinking/55 hover:bg-thinking/10 hover:text-thinking"
                       }`}
                     >
                       <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} aria-hidden="true">
@@ -1306,7 +1524,7 @@ function MessageBubbleImpl({
                 {/* Always mounted, so the body can animate its height open
                     and shut. Rendering it only when open meant the text
                     appeared instantly at full size with nothing to ease. */}
-                <div className="thinking-body" data-open={showThinking}>
+                <div className="thinking-body" data-open={thinkBodyOpen}>
                   <div>
                     <div
                       ref={thinkingRef}
@@ -1339,7 +1557,7 @@ function MessageBubbleImpl({
                             {message.reasoningNotice}
                           </span>
                         ) : isThinkingPhase ? (
-                          <span className="thinking-loading">
+                          <span className="thinking-shimmer">
                             Waiting for reasoning text…
                           </span>
                         ) : (
@@ -1348,7 +1566,7 @@ function MessageBubbleImpl({
                           </span>
                         )
                       ) : showThinking ? (
-                        <span className="thinking-loading">Loading…</span>
+                        <span className="thinking-shimmer">Loading…</span>
                       ) : (
                         ""
                       )}
@@ -1356,6 +1574,21 @@ function MessageBubbleImpl({
                   </div>
                 </div>
               </div>
+              </div>
+            )}
+
+            {/* The plan sits directly under the thinking: the two are the
+                frame the rest of the message is read inside, and a tool run
+                between them pushed the thinking far from the plan it was
+                reasoning about. Still above the reply, so it is seen rather
+                than found. */}
+            {message.plan && (
+              <div ref={planRef}>
+                <PlanPanel
+                  plan={message.plan}
+                  onUnblock={onUnblockPlan}
+                  onClear={onClearPlan}
+                />
               </div>
             )}
 
@@ -1374,14 +1607,14 @@ function MessageBubbleImpl({
                * Resume is now a full-width button on its own line, labelled
                * with what it does rather than with a bare verb.
                */
-              <div className="overflow-hidden rounded-xl border border-[#cfa25a]/30 bg-[#cfa25a]/[0.07]">
+              <div className="overflow-hidden rounded-xl border border-warning/30 bg-warning/[0.07]">
                 <div className="flex items-start gap-2.5 px-3 py-2.5">
-                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} aria-hidden="true" className="mt-0.5 flex-none text-[#cfa25a]">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} aria-hidden="true" className="mt-0.5 flex-none text-warning">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
                   </svg>
 
                   <div className="min-w-0 flex-1">
-                    <p className="text-[13px] font-medium leading-snug text-[#cfa25a]">
+                    <p className="text-[13px] font-medium leading-snug text-warning">
                       {/* The reason, when there is one. "Insufficient balance"
                           is far more use than a generic "interrupted", and it
                           names the one thing to fix before Resume will work. */}
@@ -1392,6 +1625,11 @@ function MessageBubbleImpl({
                         Everything it did is saved — the files it wrote, what it
                         read, and its reasoning. Resuming carries on from there
                         and only pays for what is left.
+                      </p>
+                    ) : message.isError ? (
+                      <p className="mt-0.5 text-[12px] leading-relaxed text-text-secondary">
+                        Nothing arrived, so there is nothing to resume — Try
+                        again re-sends the turn.
                       </p>
                     ) : (
                       <p className="mt-0.5 text-[12px] leading-relaxed text-text-secondary">
@@ -1423,7 +1661,7 @@ function MessageBubbleImpl({
                     already written and pays only for the remaining rounds.
                     Starting over buys the same work a second time, so it stays
                     reachable but quiet. */}
-                <div className="flex items-stretch gap-1.5 border-t border-[#cfa25a]/20 p-1.5">
+                <div className="flex items-stretch gap-1.5 border-t border-warning/20 p-1.5">
                   {onResume && message.canResume && (
                     /*
                      * Resume, with the option of a different model.
@@ -1447,7 +1685,7 @@ function MessageBubbleImpl({
                       <button
                         onClick={() => onResume(message.id)}
                         title="Carry on from where it stopped, keeping the work already done"
-                        className="flex flex-1 items-center justify-center gap-1.5 rounded-lg rounded-r-none bg-[#cfa25a] px-3 py-2 text-[13px] font-semibold text-[#191715] transition-colors hover:bg-[#dbb271]"
+                        className="flex flex-1 items-center justify-center gap-1.5 rounded-lg rounded-r-none bg-warning px-3 py-2 text-[13px] font-semibold text-bg-primary transition-colors hover:brightness-110"
                       >
                         <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                           <path d="M8 5v14l11-7z" />
@@ -1459,7 +1697,7 @@ function MessageBubbleImpl({
                         aria-expanded={resumeMenuOpen}
                         aria-haspopup="menu"
                         title="Resume with a different model"
-                        className="flex flex-none items-center rounded-lg rounded-l-none border-l border-[#191715]/20 bg-[#cfa25a] px-2 text-[#191715] transition-colors hover:bg-[#dbb271]"
+                        className="flex flex-none items-center rounded-lg rounded-l-none border-l border-bg-primary/20 bg-warning px-2 text-bg-primary transition-colors hover:brightness-110"
                       >
                         <svg
                           width="13" height="13" viewBox="0 0 24 24" fill="none"
@@ -1515,8 +1753,8 @@ function MessageBubbleImpl({
                       }
                       className={`flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-[13px] font-medium transition-colors ${
                         message.canResume
-                          ? "flex-none text-[#cfa25a] hover:bg-[#cfa25a]/15"
-                          : "flex-1 bg-[#cfa25a] text-[#191715] hover:bg-[#dbb271]"
+                          ? "flex-none text-warning hover:bg-warning/15"
+                          : "flex-1 bg-warning text-bg-primary hover:brightness-110"
                       }`}
                     >
                       {message.canResume ? "Start over" : "Try again"}
@@ -1565,19 +1803,6 @@ function MessageBubbleImpl({
                 </div>
               )}
 
-            {/* The plan sits above the reply: it is the frame the rest of the
-                message is read inside, and burying it under the prose would
-                make it something you find rather than something you see. */}
-            {message.plan && (
-              <div ref={planRef}>
-                <PlanPanel
-                  plan={message.plan}
-                  onUnblock={onUnblockPlan}
-                  onClear={onClearPlan}
-                />
-              </div>
-            )}
-
             {message.pendingCommand && onDecideCommand && (
               <ApprovalPrompt
                 pending={message.pendingCommand}
@@ -1591,6 +1816,10 @@ function MessageBubbleImpl({
                 toolEvents={message.toolEvents ?? []}
                 onOpenFile={onOpenWorkspaceFile}
                 markdownComponents={markdownComponents}
+                // Deferred while streaming: rows parse narration from a
+                // lagging copy, so formatting stays live without a full
+                // re-parse on every frame.
+                live={message.isStreaming}
               />
             )}
 
@@ -1607,7 +1836,7 @@ function MessageBubbleImpl({
                       : "text-text-primary"
                 }`}
               >
-                <MarkdownBody content={displayContent} regex={searchRegex} plain={deferred} />
+                <MarkdownBody content={liveContent} regex={searchRegex} plain={deferred} />
                 {message.isStreaming && displayContent && !hasPendingCode && (
                   <span className="stream-caret" aria-hidden="true" />
                 )}
@@ -1639,7 +1868,7 @@ function MessageBubbleImpl({
                   onClick={() => onDelete(message.id)}
                   title="Delete this reply and your question — both forget it"
                   aria-label="Delete this exchange"
-                  className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-[11px] font-medium text-[#6d685d] opacity-0 transition-opacity hover:bg-danger/12 hover:text-danger group-hover/del:opacity-100 focus:opacity-100"
+                  className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-[11px] font-medium text-text-muted opacity-0 transition-opacity hover:bg-danger/12 hover:text-danger group-hover/del:opacity-100 focus:opacity-100"
                 >
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} aria-hidden="true">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M4 7h16" />
@@ -1650,8 +1879,8 @@ function MessageBubbleImpl({
             )}
 
             {hasPendingCode && (
-              <div className="my-3 flex w-full items-center gap-3 rounded-xl border border-[#2c2924] bg-[#141210] px-3 py-2.5">
-                <span className="flex h-9 w-9 flex-none items-center justify-center rounded-lg bg-[#2a2723] text-[#d97f5d]">
+              <div className="my-3 flex w-full items-center gap-3 rounded-xl border border-border bg-bg-secondary px-3 py-2.5">
+                <span className="flex h-9 w-9 flex-none items-center justify-center rounded-lg bg-bg-elevated text-accent-light">
                   <svg
                     width="16"
                     height="16"
@@ -1666,16 +1895,16 @@ function MessageBubbleImpl({
                   </svg>
                 </span>
                 <span className="flex min-w-0 flex-1 flex-col">
-                  <span className="truncate text-sm font-medium text-[#ede9e2]">
+                  <span className="truncate text-sm font-medium text-text-primary">
                     {pendingLanguage
                       ? `Writing ${pendingLanguage}…`
                       : "Writing code…"}
                   </span>
-                  <span className="text-[11px] text-[#6d685d]">
+                  <span className="text-[11px] text-text-muted">
                     {pendingLines} {pendingLines === 1 ? "line" : "lines"} so far
                   </span>
                 </span>
-                <span className="flex-none text-[#c96442]">
+                <span className="flex-none text-accent">
                   <Dots size={4} />
                 </span>
               </div>
@@ -1690,14 +1919,14 @@ function MessageBubbleImpl({
                   <button
                     onClick={copyMessage}
                     title="Copy reply"
-                    className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-[11px] font-medium text-[#6d685d] transition-colors hover:bg-[#33302a] hover:text-[#ede9e2]"
+                    className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-[11px] font-medium text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
                   >
                     {copiedMessage ? (
                       <>
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#7ba478" strokeWidth={2.2} aria-hidden="true">
                           <path strokeLinecap="round" strokeLinejoin="round" d="M20 6L9 17l-5-5" />
                         </svg>
-                        <span className="text-[#7ba478]">Copied</span>
+                        <span className="text-success">Copied</span>
                       </>
                     ) : (
                       <>
@@ -1714,13 +1943,13 @@ function MessageBubbleImpl({
                     <button
                       onClick={() => setComparing(true)}
                       title="Compare with the previous reply"
-                      className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-[11px] font-medium text-[#d97f5d] transition-colors hover:bg-[#c96442]/12"
+                      className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-[11px] font-medium text-accent-light transition-colors hover:bg-accent/12"
                     >
                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} aria-hidden="true">
                         <path strokeLinecap="round" strokeLinejoin="round" d="M8 7h12m0 0l-4-4m4 4l-4 4M16 17H4m0 0l4 4m-4-4l4-4" />
                       </svg>
                       Compare
-                      <span className="text-[#6d685d]">
+                      <span className="text-text-muted">
                         {(message.previousVersions?.length ?? 0) + 1}
                       </span>
                     </button>
@@ -1730,7 +1959,7 @@ function MessageBubbleImpl({
                     <button
                       onClick={() => onRegenerate(message.id)}
                       title="Generate a different reply"
-                      className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-[11px] font-medium text-[#6d685d] transition-colors hover:bg-[#33302a] hover:text-[#ede9e2]"
+                      className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-[11px] font-medium text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
                     >
                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} aria-hidden="true">
                         <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v6h6M20 20v-6h-6" />
@@ -1745,7 +1974,7 @@ function MessageBubbleImpl({
                       onClick={() => onDelete(message.id)}
                       title="Delete this reply and your question — both forget it"
                       aria-label="Delete this exchange"
-                      className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-[11px] font-medium text-[#6d685d] transition-colors hover:bg-danger/12 hover:text-danger"
+                      className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-[11px] font-medium text-text-muted transition-colors hover:bg-danger/12 hover:text-danger"
                     >
                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} aria-hidden="true">
                         <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M4 7h16" />
@@ -1764,7 +1993,7 @@ function MessageBubbleImpl({
                   onClick={() => onDelete(message.id)}
                   title="Delete this reply and your question — both forget it"
                   aria-label="Delete this exchange"
-                  className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-[11px] font-medium text-[#6d685d] transition-colors hover:bg-danger/12 hover:text-danger"
+                  className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-[11px] font-medium text-text-muted transition-colors hover:bg-danger/12 hover:text-danger"
                 >
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} aria-hidden="true">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M4 7h16" />
@@ -1839,6 +2068,9 @@ export const MessageBubble = memo(MessageBubbleImpl, (prev, next) => {
     a.attachments === b.attachments &&
     a.usage === b.usage &&
     a.durationMs === b.durationMs &&
+    a.contextChars === b.contextChars &&
+    a.contextBreakdown === b.contextBreakdown &&
+    a.ending === b.ending &&
     a.previousVersions === b.previousVersions &&
     // New array identity on every tool frame, so this is what makes the
     // "Writing app.py" lines appear as they happen.

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { appendBtwNote } from "@/lib/store";
+import { isStopNote, skipPendingForWorkspace } from "@/lib/approvals";
 import type { StoredAttachment } from "@/lib/multimodal";
 
 export const dynamic = "force-dynamic";
@@ -21,8 +22,10 @@ export const runtime = "nodejs";
  *
  * — which the model reads as live steering at its next step, while nothing
  * that was running (a tool call, a decompile, a stream) is interrupted. The
- * note is also persisted as an ordinary user message, so it keeps steering
- * every later turn of the conversation, not just the round it landed in.
+ * note is also persisted as an ordinary user message, so the record — and a
+ * resume of this run — keeps it. Later turns replay it as plain archive
+ * history instead: steering belongs to the run it steered, and a solved
+ * correction must not nag every new request.
  *
  * No model call happens here: the note costs the next round a few dozen
  * tokens (plus the attachment bytes the composer already inlined) and
@@ -39,6 +42,8 @@ const MAX_ATTACHMENTS = 10;
 
 interface Incoming {
   conversationId?: unknown;
+  /** Present when the chat runs in a non-default workspace. */
+  workspaceId?: unknown;
   note?: unknown;
   /** Model-facing text: note plus inlined file blocks (composer output). */
   wireText?: unknown;
@@ -142,5 +147,21 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  return NextResponse.json({ queued: true });
+  /*
+   * A note that opens with "don't run it" while an approval is waiting
+   * skips that approval NOW, rather than landing next round after the
+   * user already clicked. The note itself still queues — "don't execute
+   * this now, there's a new pid" both stops the stale call and steers
+   * the run — and when nothing is pending the match costs nothing.
+   */
+  let skippedApprovals = 0;
+  if (isStopNote(note)) {
+    const workspaceScope =
+      typeof body.workspaceId === "string" && body.workspaceId.trim()
+        ? body.workspaceId.trim()
+        : conversationId;
+    skippedApprovals = skipPendingForWorkspace(workspaceScope, note);
+  }
+
+  return NextResponse.json({ queued: true, skippedApprovals });
 }

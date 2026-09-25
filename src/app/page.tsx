@@ -10,6 +10,7 @@ import { SettingsModal } from "@/components/SettingsModal";
 import { PluginsModal } from "@/components/PluginsModal";
 import { ArtifactProvider } from "@/components/ArtifactContext";
 import { SearchModal } from "@/components/SearchModal";
+import { McpConsole } from "@/components/McpConsole";
 import { WorkspacePanel } from "@/components/WorkspacePanel";
 import { WorkspaceSidePanel } from "@/components/WorkspaceSidePanel";
 import type { WorkspaceFileInfo } from "@/components/WorkspaceBar";
@@ -23,16 +24,28 @@ import { warmRoutes } from "@/lib/warmup";
 import {
   DEFAULT_LOCAL_API_MODEL,
   DEFAULT_LOCAL_BASE_URL,
-  getModel,
+  DEFAULT_MODEL_ID,
+  FREE_OPENROUTER_MODEL_ID,
   hasKeyForModel,
+  resolveModelInfo,
+  sanitizeCustomModelDef,
 } from "@/lib/models";
+import type { CustomModelDef } from "@/lib/models";
+import type { UsageLike } from "@/lib/pricing";
+import {
+  applyThemeById,
+  CUSTOM_THEME_ID,
+  DEFAULT_THEME_ID,
+  getTheme,
+  sanitizeSeeds,
+} from "@/lib/themes";
+import type { CustomThemeSeeds } from "@/lib/themes";
 import { replyCanContinue } from "@/lib/resume-target";
 import {
   shouldAutoResumeOnTimeout,
   visibleUpstreamNotice,
   type UpstreamNotice,
 } from "@/lib/retry";
-import { oxHostInfo, type OxHost } from "@/lib/ox-host";
 
 export interface Message {
   id: string;
@@ -70,6 +83,8 @@ export interface Message {
    * text arrives only if the panel is opened.
    */
   reasoningLength?: number;
+  /** How long the model spent reasoning, in ms — the "Thought for 12s" label. */
+  reasoningMs?: number;
   /** Reply was cut short (tab closed / connection dropped) and can be retried. */
   incomplete?: boolean;
   /**
@@ -99,11 +114,22 @@ export interface Message {
    */
   isNote?: boolean;
   /** Full token usage, for cost estimation. */
-  usage?: Record<string, number> | null;
+  usage?: UsageLike | null;
   /** Model that produced the reply, needed to price it. */
   model?: string;
   /** Wall-clock time the reply took. */
   durationMs?: number;
+  /** Chars in the final upstream request — the context this reply cost. */
+  contextChars?: number;
+  /** Where those bytes lived, largest first. */
+  contextBreakdown?: { label: string; chars: number }[];
+  /** How the reply ended: final finish_reason plus continuations spent. */
+  ending?: {
+    finish: string | null;
+    continuedOutput: number;
+    continuedConnection: number;
+    thinkOnlyStalls: number;
+  };
   /** How many search rounds ran, and why the loop stopped. */
   searchRounds?: number;
   searchStopReason?: string;
@@ -182,6 +208,12 @@ function parseSearchResults(
 type StreamEvent =
   | { type: "status"; stage: StatusStage }
   | {
+      type: "request_size";
+      round: number;
+      inputChars: number;
+      breakdown: { label: string; chars: number }[];
+    }
+  | {
       type: "meta";
       conversationId: string | null;
       messageId: string;
@@ -214,8 +246,11 @@ type StreamEvent =
       attempts: number;
       delayMs: number;
       reason: string;
+      detail?: string;
       host?: string;
+      providerId?: string;
       inputChars?: number;
+      breakdown?: { label: string; chars: number }[];
     }
   | { type: "continuing"; reason: string; n: number; of: number }
   | { type: "context_pruned"; collapsed: number; tokensSaved: number }
@@ -260,7 +295,7 @@ type StreamEvent =
       context: string;
     }
   | { type: "question_resolved"; id: string; answered: boolean }
-  | { type: "usage"; usage: Record<string, number>; model: string }
+  | { type: "usage"; usage: UsageLike; model: string }
   | {
       type: "tool_result";
       id: string;
@@ -285,6 +320,15 @@ type StreamEvent =
       persisted: boolean;
       usage: unknown;
       durationMs: number;
+      reasoningMs?: number;
+      contextChars?: number;
+      contextBreakdown?: { label: string; chars: number }[];
+      ending?: {
+        finish: string | null;
+        continuedOutput: number;
+        continuedConnection: number;
+        thinkOnlyStalls: number;
+      };
       model: string;
       incomplete?: boolean;
       canResume?: boolean;
@@ -341,6 +385,12 @@ type ChatSession = {
   retryNotice: string | null;
   /** Transient retry/backoff, ticked by the 200ms clock while visible. */
   liveRetry: (UpstreamNotice & { receivedAt: number }) | null;
+  /** Latest fired request's size, while its round is still running. */
+  liveRequestSize: {
+    round: number;
+    inputChars: number;
+    breakdown: { label: string; chars: number }[];
+  } | null;
   /** Server-side id of the in-flight reply, for the stop endpoint. */
   runMessageId: string | null;
   /** Set by Stop / new-chat: a pending auto-resume must not fire. */
@@ -389,6 +439,7 @@ export default function Home() {
         stage: null,
         retryNotice: null,
         liveRetry: null,
+        liveRequestSize: null,
         runMessageId: null,
         cancelResume: false,
       };
@@ -406,6 +457,18 @@ export default function Home() {
   );
   // A persistent run notice ("spending limit…", "connection dropped…").
   const [retryNotice, setRetryNoticeState] = useState<string | null>(null);
+  // Where the in-flight request's bytes live — the retry banner's tooltip.
+  const [retryBreakdown, setRetryBreakdownState] = useState<
+    { label: string; chars: number }[] | null
+  >(null);
+  // The provider's own message behind a rejection-driven retry.
+  const [retryDetail, setRetryDetailState] = useState<string | null>(null);
+  // Fire-time request size for the active run's latest round, if heavy.
+  const [requestSize, setRequestSizeState] = useState<{
+    round: number;
+    inputChars: number;
+    breakdown: { label: string; chars: number }[];
+  } | null>(null);
 
   /** Copy a session's UI state into the mirrored React states. */
   const mirrorSession = useCallback((s: ChatSession) => {
@@ -414,6 +477,9 @@ export default function Home() {
     setIsLoadingState(s.loading);
     setStatusStageState(s.stage);
     setRetryNoticeState(s.retryNotice);
+    setRetryBreakdownState(s.liveRetry?.breakdown ?? null);
+    setRetryDetailState(s.liveRetry?.detail ?? null);
+    setRequestSizeState(s.liveRequestSize);
   }, []);
 
   /**
@@ -469,6 +535,12 @@ export default function Home() {
         if (patch.stage !== undefined) setStatusStageState(s.stage);
         if (patch.retryNotice !== undefined)
           setRetryNoticeState(s.retryNotice);
+        if (patch.liveRetry !== undefined) {
+          setRetryBreakdownState(s.liveRetry?.breakdown ?? null);
+          setRetryDetailState(s.liveRetry?.detail ?? null);
+        }
+        if (patch.liveRequestSize !== undefined)
+          setRequestSizeState(s.liveRequestSize);
       }
       setSessionsVersion((v) => v + 1);
     },
@@ -499,6 +571,26 @@ export default function Home() {
       patchSession(id, {
         liveRetry: info,
         retryNotice: info ? visibleUpstreamNotice(info, Date.now()) : null,
+      });
+    },
+    [patchSession]
+  );
+  /**
+   * Fire-time request size; shown once the body passes 100k. Small chats
+   * stay quiet, and a run that shrinks back under the line clears it.
+   */
+  const setLiveRequestSize = useCallback(
+    (
+      id: string | null | undefined,
+      info: {
+        round: number;
+        inputChars: number;
+        breakdown: { label: string; chars: number }[];
+      } | null
+    ) => {
+      patchSession(id, {
+        liveRequestSize:
+          info && info.inputChars >= 100_000 ? info : null,
       });
     },
     [patchSession]
@@ -563,6 +655,7 @@ export default function Home() {
   }, [sessionsVersion]);
 
   const [showSettings, setShowSettings] = useState(false);
+  const [showMcp, setShowMcp] = useState(false);
   const [showPlugins, setShowPlugins] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -602,9 +695,16 @@ export default function Home() {
 
   // Settings
   const [deepseekKey, setDeepseekKey] = useState("");
-  const [opencodeKey, setOpencodeKey] = useState("");
   const [openrouterKey, setOpenrouterKey] = useState("");
-  const [oxHost, setOxHost] = useState<OxHost>("zen");
+  /**
+   * The user's own OpenRouter models. Sanitized on load, on add (Settings
+   * only adds Verify-shaped entries) and again on the server per request.
+   */
+  const [customModels, setCustomModels] = useState<CustomModelDef[]>([]);
+  const [themeId, setThemeId] = useState<string>(DEFAULT_THEME_ID);
+  const [customTheme, setCustomTheme] = useState<CustomThemeSeeds>(() =>
+    sanitizeSeeds(null)
+  );
   const [localBaseUrl, setLocalBaseUrl] = useState(DEFAULT_LOCAL_BASE_URL);
   const [localApiKey, setLocalApiKey] = useState("");
   const [localApiModel, setLocalApiModel] = useState(DEFAULT_LOCAL_API_MODEL);
@@ -695,13 +795,20 @@ export default function Home() {
    */
   const [budgetUsd, setBudgetUsd] = useState<number | null>(null);
 
-  const hasKeys = hasKeyForModel(model, {
-    deepseekKey,
-    opencodeKey,
-    openrouterKey,
-    oxHost,
-    localBaseUrl,
-  });
+  const hasKeys = hasKeyForModel(
+    model,
+    {
+      deepseekKey,
+      openrouterKey,
+      localBaseUrl,
+    },
+    customModels
+  );
+  // Catalog or custom — labels, provider and key gating all read this.
+  const activeModelInfo = useMemo(
+    () => resolveModelInfo(model, customModels),
+    [model, customModels]
+  );
   const initialLoadDone = useRef(false);
   /** Current workspace id, readable from callbacks without re-creating them. */
   const workspaceIdRef = useRef<string | null>(workspaceId);
@@ -806,20 +913,31 @@ export default function Home() {
           // attachment metadata (pixels, image descriptions).
           body: JSON.stringify({
             conversationId: currentConvId,
+            // Lets a "don't run it" note skip a pending approval in the
+            // right scope instead of landing after the user clicked.
+            workspaceId,
             note: text,
             wireText,
             attachments,
           }),
         });
 
-        const data = (await res.json()) as { queued?: boolean; error?: string };
+        const data = (await res.json()) as {
+          queued?: boolean;
+          error?: string;
+          skippedApprovals?: number;
+        };
         if (controller.signal.aborted) return;
 
         const queued = res.ok && !data.error;
+        const skipped =
+          typeof data.skippedApprovals === "number" && data.skippedApprovals > 0
+            ? data.skippedApprovals
+            : undefined;
         setBtwEntry((prev) =>
           prev && prev.id === id
             ? res.ok
-              ? { ...prev, status: "queued" }
+              ? { ...prev, status: "queued", skippedApprovals: skipped }
               : { ...prev, status: "queued", error: data.error ?? `HTTP ${res.status}` }
             : prev
         );
@@ -841,7 +959,7 @@ export default function Home() {
         );
       }
     },
-    [currentConvId]
+    [currentConvId, workspaceId]
   );
   /** Latest messages + sender, so stable callbacks can read them. */
   const messagesRef = useRef<Message[]>([]);
@@ -878,11 +996,23 @@ export default function Home() {
           try {
             const s = JSON.parse(saved);
             if (s.deepseekKey) setDeepseekKey(s.deepseekKey);
-            if (s.opencodeKey) setOpencodeKey(s.opencodeKey);
             if (s.openrouterKey) setOpenrouterKey(s.openrouterKey);
-            if (s.oxHost === "zen" || s.oxHost === "openrouter") {
-              setOxHost(s.oxHost);
+            if (Array.isArray(s.customModels)) {
+              const clean: CustomModelDef[] = [];
+              for (const entry of s.customModels) {
+                const def = sanitizeCustomModelDef(entry);
+                if (def) clean.push(def);
+              }
+              // Stored ids predate the slug rules; re-slug without renaming.
+              setCustomModels(clean);
             }
+            if (
+              typeof s.themeId === "string" &&
+              (s.themeId === CUSTOM_THEME_ID || getTheme(s.themeId).id === s.themeId)
+            ) {
+              setThemeId(s.themeId);
+            }
+            if (s.customTheme) setCustomTheme(sanitizeSeeds(s.customTheme));
             if (typeof s.localBaseUrl === "string" && s.localBaseUrl.trim()) {
               setLocalBaseUrl(s.localBaseUrl);
             }
@@ -898,7 +1028,28 @@ export default function Home() {
             if (s.exaEnabled === false) setExaEnabled(false);
             if (s.visionKey) setVisionKey(s.visionKey);
             if (s.visionModel) setVisionModel(s.visionModel);
-            if (s.model) setModel(s.model);
+            // Retired ids land on the lane that replaced them: Ox, the
+            // first free Flash, and the pulled 0731 free slug all merge
+            // into the current free id. A dangling custom id (a deleted
+            // model, a hand-edited blob) falls back to the default
+            // rather than displaying a model that no longer exists.
+            if (
+              s.model === "ox-alpha" ||
+              s.model === "deepseek-v4-flash-free" ||
+              s.model === "deepseek-v4-flash-0731-free"
+            ) {
+              setModel(FREE_OPENROUTER_MODEL_ID);
+            } else if (typeof s.model === "string" && s.model) {
+              const dangling =
+                s.model.startsWith("custom:") &&
+                !(
+                  Array.isArray(s.customModels) &&
+                  s.customModels.some(
+                    (c: unknown) => sanitizeCustomModelDef(c)?.id === s.model
+                  )
+                );
+              setModel(dangling ? DEFAULT_MODEL_ID : s.model);
+            }
             if (s.thinkingEffort) setThinkingEffort(s.thinkingEffort);
             if (s.enabledPlugins) setEnabledPlugins(s.enabledPlugins);
             if (s.webSearchMode) setWebSearchMode(s.webSearchMode);
@@ -937,9 +1088,10 @@ export default function Home() {
         "nexusai-settings",
         JSON.stringify({
           deepseekKey,
-          opencodeKey,
           openrouterKey,
-          oxHost,
+          customModels,
+          themeId,
+          customTheme,
           localBaseUrl,
           localApiKey,
           localApiModel,
@@ -964,9 +1116,10 @@ export default function Home() {
     }
   }, [
     deepseekKey,
-    opencodeKey,
     openrouterKey,
-    oxHost,
+    customModels,
+    themeId,
+    customTheme,
     localBaseUrl,
     localApiKey,
     localApiModel,
@@ -987,6 +1140,12 @@ export default function Home() {
     deleteDelay,
     budgetUsd,
   ]);
+
+  // The palette is CSS vars on :root, so switching is instant and every
+  // component follows — including bubbles rendered before the change.
+  useEffect(() => {
+    applyThemeById(themeId, customTheme);
+  }, [themeId, customTheme]);
 
   /** Sends the user's Run / Skip answer back to the waiting request. */
   const decideCommand = useCallback(
@@ -1193,6 +1352,10 @@ export default function Home() {
   /** Cache of loaded conversations, so switching back is instant. */
   const conversationCache = useRef(new Map<string, Message[]>());
   const loadSeq = useRef(0);
+  /** Aborts the in-flight chat load when another chat is clicked. */
+  const loadAbortRef = useRef<AbortController | null>(null);
+  /** Chat id currently loading from disk — the skeleton shows for it. */
+  const [loadingConv, setLoadingConv] = useState<string | null>(null);
 
   const loadConversation = useCallback(
     async (id: string) => {
@@ -1209,6 +1372,14 @@ export default function Home() {
       // once a newer one starts, so rapidly switching chats can't leave the
       // wrong transcript on screen.
       const seq = ++loadSeq.current;
+      // A fast clicker used to pile up full-transcript downloads and parses
+      // with no cancellation — each one froze the tab in turn. The newest
+      // click kills the previous load; the sequence number still guards the
+      // race the abort cannot (an already-arrived response).
+      loadAbortRef.current?.abort();
+      const loadController = new AbortController();
+      loadAbortRef.current = loadController;
+      setLoadingConv(id);
       workspaceIdRef.current = id;
       setCurrentConvId(id);
 
@@ -1227,13 +1398,40 @@ export default function Home() {
       }
 
       try {
-        const res = await fetch(`/api/conversations/${id}`);
+        const res = await fetch(`/api/conversations/${id}`, {
+          signal: loadController.signal,
+        });
         if (!res.ok || seq !== loadSeq.current) return;
 
       const data = (await res.json()) as { messages?: unknown };
       if (seq !== loadSeq.current) return;
 
       const list = Array.isArray(data.messages) ? data.messages : [];
+      /*
+       * Structural equality for the re-parse. Every load builds fresh
+       * object identities, so `===` on tool/timeline/plan state is always
+       * false and the "skip the swap" optimization below never fired on
+       * agent chats — every click re-rendered the whole transcript. Event
+       * history is append-only, so id sequences are enough; plans are
+       * small enough to stringify.
+       */
+      const sameIds = (a?: { id: string }[], b?: { id: string }[]) =>
+        a === b ||
+        (a?.length === b?.length &&
+          (a ?? []).every((e, i) => e.id === b?.[i]?.id));
+      const sameTimeline = (
+        a?: TimelineEntry[],
+        b?: TimelineEntry[]
+      ): boolean =>
+        a === b ||
+        (a?.length === b?.length &&
+          (a ?? []).every((e, i) => {
+            const o = b?.[i];
+            if (o === undefined || e.kind !== o.kind) return false;
+            return e.kind === "tool"
+              ? e.id === (o as { id: string }).id
+              : e.text === (o as { text: string }).text;
+          }));
       const parsed: Message[] = list.map((raw) => {
         const m = raw as Record<string, unknown>;
         return {
@@ -1244,6 +1442,7 @@ export default function Home() {
           // Sent as a length, not text — the body is fetched when the panel
           // is opened. See api/conversations/[id]/reasoning.
           reasoningLength: m.reasoningLength as number | undefined,
+          reasoningMs: m.reasoningMs as number | undefined,
           thinkingEffort: m.thinkingEffort as string | undefined,
           webSearchUsed: m.webSearchUsed as boolean | undefined,
           searchResults: parseSearchResults(m.searchResults),
@@ -1251,9 +1450,14 @@ export default function Home() {
             ? (m.searchQueries as string[])
             : undefined,
           tokenCount: m.tokenCount as number | undefined,
-          usage: (m.usage as Record<string, number> | null) ?? null,
+          usage: (m.usage as UsageLike | null) ?? null,
           model: m.model as string | undefined,
           durationMs: m.durationMs as number | undefined,
+          contextChars: m.contextChars as number | undefined,
+          contextBreakdown: Array.isArray(m.contextBreakdown)
+            ? (m.contextBreakdown as { label: string; chars: number }[])
+            : undefined,
+          ending: (m.ending as Message["ending"]) ?? undefined,
           createdAt: m.createdAt as string | undefined,
           incomplete: m.incomplete === true,
           // The server sends a flag, never the saved transcript itself: it
@@ -1314,9 +1518,11 @@ export default function Home() {
                   o.content === m.content &&
                   o.reasoningContent === m.reasoningContent &&
                   o.role === m.role &&
-                  o.toolEvents === m.toolEvents &&
-                  o.timeline === m.timeline &&
-                  o.plan === m.plan &&
+                  sameIds(o.toolEvents, m.toolEvents) &&
+                  sameTimeline(o.timeline, m.timeline) &&
+                  (o.plan === m.plan ||
+                    JSON.stringify(o.plan ?? null) ===
+                      JSON.stringify(m.plan ?? null)) &&
                   o.incomplete === m.incomplete &&
                   o.isNote === m.isNote
                 );
@@ -1328,6 +1534,11 @@ export default function Home() {
         }
       } catch {
         /* ignore — the cached/session copy stays on screen */
+      } finally {
+        // Only clear our own load: a newer click already owns the skeleton.
+        if (seq === loadSeq.current) {
+          setLoadingConv((prev) => (prev === id ? null : prev));
+        }
       }
     },
     [activateSession, writeMessages]
@@ -1337,6 +1548,8 @@ export default function Home() {
     // Starting a new chat does not cancel other chats' streams; they keep
     // running in their own sessions and saving to their own conversations.
     btwAbortRef.current?.abort();
+    loadAbortRef.current?.abort();
+    setLoadingConv(null);
     loadSeq.current += 1;
     const nextId = uuidv4();
     workspaceIdRef.current = nextId;
@@ -1641,12 +1854,18 @@ export default function Home() {
       // re-keyed to the real id in migrateSession when a draft chat is saved.
       if (runConvId) abortRefs.current.set(runConvId, controller);
 
-      // Batch deltas into one state update per animation frame. Without this a
-      // fast stream triggers hundreds of re-renders a second and the UI janks.
+      // Batch deltas into one state update at most every 100ms. Without a
+      // floor a fast stream triggers dozens of re-renders a second, and each
+      // one reconciles the whole transcript, re-lays-out the chat for scroll
+      // follow, and repaints — that per-frame bill, not the model, is what
+      // made the app feel heavy while it generated. 100ms chunks still read
+      // as live typing; the eye cannot follow faster anyway.
+      const STREAM_FLUSH_MIN_MS = 100;
       let pendingContent = "";
       let pendingReasoning = "";
       let frame: number | null = null;
       let flushTimer: ReturnType<typeof setTimeout> | null = null;
+      let lastFlushAt = 0;
 
       const flush = () => {
         // Whichever scheduler won cancels the other. requestAnimationFrame can
@@ -1656,6 +1875,7 @@ export default function Home() {
         if (flushTimer !== null) clearTimeout(flushTimer);
         frame = null;
         flushTimer = null;
+        lastFlushAt = Date.now();
         if (!pendingContent && !pendingReasoning) return;
         const c = pendingContent;
         const r = pendingReasoning;
@@ -1693,11 +1913,16 @@ export default function Home() {
         );
       };
       const scheduleFlush = () => {
-        if (frame === null) frame = requestAnimationFrame(flush);
-        // Frames may be delayed indefinitely when Chromium throttles the tab.
-        // Fifty milliseconds still batches a fast stream while making the
-        // first reasoning text visibly replace the placeholder immediately.
-        if (flushTimer === null) flushTimer = setTimeout(flush, 50);
+        if (frame !== null || flushTimer !== null) return;
+        const wait = STREAM_FLUSH_MIN_MS - (Date.now() - lastFlushAt);
+        if (wait <= 0) {
+          frame = requestAnimationFrame(flush);
+        } else {
+          flushTimer = setTimeout(() => {
+            flushTimer = null;
+            frame = requestAnimationFrame(flush);
+          }, wait);
+        }
       };
 
       /** Set when a tool changed the workspace, so the list can refresh. */
@@ -1732,9 +1957,8 @@ export default function Home() {
             attachments: options?.attachments,
             conversationId: requestConversationId,
             deepseekApiKey: deepseekKey,
-            opencodeApiKey: opencodeKey,
             openrouterApiKey: openrouterKey,
-            oxHost,
+            customModels,
             localBaseUrl,
             localApiKey,
             localApiModel,
@@ -1849,7 +2073,15 @@ export default function Home() {
               case "status":
                 setStatusStage(runConvId ?? requestConversationId, evt.stage);
                 // Do not clear retryNotice here. The route sends "thinking"
-                // before it even calls Ox, so wiping the notice hid the hang.
+                // before it even calls the provider, so wiping the notice hid the hang.
+                break;
+
+              case "request_size":
+                setLiveRequestSize(runConvId ?? requestConversationId, {
+                  round: evt.round,
+                  inputChars: evt.inputChars,
+                  breakdown: evt.breakdown,
+                });
                 break;
 
               case "retrying":
@@ -1863,15 +2095,18 @@ export default function Home() {
                   attempts: evt.attempts,
                   delayMs: evt.delayMs,
                   reason: evt.reason,
+                  detail: evt.detail,
                   host: evt.host,
+                  providerId: evt.providerId,
                   inputChars: evt.inputChars,
+                  breakdown: evt.breakdown,
                   receivedAt: Date.now(),
                 });
                 break;
 
               case "continuing":
                 // Either the answer was too long for one response, or the
-                // model stopped mid-task (Ox does this on its own limits).
+                // model stopped mid-task (free lanes do this on their own limits).
                 // Said plainly, because otherwise a long pause mid-file
                 // looks like the app has hung.
                 setRetryNotice(runConvId ?? requestConversationId,
@@ -2237,7 +2472,7 @@ export default function Home() {
                 break;
 
               case "done": {
-                const usage = evt.usage as Record<string, number> | null;
+                const usage = evt.usage as UsageLike | null;
                 const diagnostic = evt.reasoningDiagnostic;
                 const reasoningNotice =
                   diagnostic.expected && diagnostic.chars === 0
@@ -2254,6 +2489,10 @@ export default function Home() {
                   usage,
                   model: evt.model,
                   durationMs: evt.durationMs,
+                  reasoningMs: evt.reasoningMs,
+                  contextChars: evt.contextChars,
+                  contextBreakdown: evt.contextBreakdown,
+                  ending: evt.ending,
                   // A limit-stop must land as Resume on the SAME bubble.
                   // Ignoring these flags made every `done` look finished, so
                   // the next send opened a new thinking box from scratch.
@@ -2324,7 +2563,7 @@ export default function Home() {
                     autoResume: evt.autoResume,
                     hadWork,
                     used,
-                    local: getModel(activeModel).provider === "local",
+                    local: resolveModelInfo(activeModel, customModels).provider === "local",
                   })
                 ) {
                   // Keep the bubble streaming. Marking it incomplete here is
@@ -2339,7 +2578,15 @@ export default function Home() {
                 finish(
                   hadWork
                     ? { incomplete: true, canResume: true, errorNotice: evt.error }
-                    : { content: `⚠️ ${evt.error}`, isError: true }
+                    : {
+                        content: `⚠️ ${evt.error}`,
+                        isError: true,
+                        // The interrupted banner (with its Try again button)
+                        // only renders for incomplete replies. Without this
+                        // an outage error was a dead end: the run died and
+                        // the only recovery was retyping the message.
+                        incomplete: true,
+                      }
                 );
                 break;
               }
@@ -2416,6 +2663,7 @@ export default function Home() {
             loading: false,
             stage: null,
             liveRetry: null,
+            liveRequestSize: null,
             runMessageId: null,
           });
         }
@@ -2447,6 +2695,7 @@ export default function Home() {
                   loading: false,
                   stage: null,
                   liveRetry: null,
+                  liveRequestSize: null,
                 });
                 return;
               }
@@ -2469,9 +2718,8 @@ export default function Home() {
       hasKeys,
       workspaceId,
       deepseekKey,
-      opencodeKey,
       openrouterKey,
-      oxHost,
+      customModels,
       localBaseUrl,
       localApiKey,
       localApiModel,
@@ -2498,6 +2746,7 @@ export default function Home() {
       setIsLoading,
       setStatusStage,
       setLiveRetry,
+      setLiveRequestSize,
       setRetryNotice,
       migrateSession,
       activateSession,
@@ -2536,13 +2785,13 @@ export default function Home() {
   // mapped is the "100% memory after I stopped using it" report.
   useEffect(() => {
     if (!settingsHydrated) return;
-    if (getModel(model).provider === "local") return;
+    if (activeModelInfo.provider === "local") return;
     void fetch("/api/local", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action: "stop" }),
     }).catch(() => {});
-  }, [model, settingsHydrated]);
+  }, [activeModelInfo, settingsHydrated]);
 
   /**
    * Stop, meaning stop.
@@ -2598,6 +2847,7 @@ export default function Home() {
       loading: false,
       stage: null,
       liveRetry: null,
+      liveRequestSize: null,
       runMessageId: null,
     });
     writeMessages(
@@ -2708,6 +2958,7 @@ export default function Home() {
           loading: false,
           stage: null,
           liveRetry: null,
+          liveRequestSize: null,
           runMessageId: null,
         });
       }
@@ -2956,6 +3207,7 @@ export default function Home() {
         onRename={renameConversation}
         onArchive={archiveConversation}
         onOpenSettings={() => setShowSettings(true)}
+        onOpenMcp={() => setShowMcp(true)}
         runningIds={runningIds}
         deleteDelay={deleteDelay}
       />
@@ -2964,6 +3216,7 @@ export default function Home() {
       <ChatArea
         messages={messages}
         isLoading={isLoading}
+        conversationLoading={loadingConv !== null && messages.length === 0}
         statusStage={statusStage}
         canResumeLast={Boolean(lastResumable)}
         onResumeLast={(note) => {
@@ -2973,10 +3226,10 @@ export default function Home() {
           !online ? (
             <div className="px-4 pb-1.5 sm:px-6">
               <div className="mx-auto w-full max-w-3xl">
-                <div className="flex items-center gap-2.5 rounded-xl border border-[#cfa25a]/30 bg-[#cfa25a]/[0.07] px-3 py-2">
-                  <span className="h-2 w-2 flex-none rounded-full bg-[#cfa25a]" />
+                <div className="flex items-center gap-2.5 rounded-xl border border-warning/30 bg-warning/[0.07] px-3 py-2">
+                  <span className="h-2 w-2 flex-none rounded-full bg-warning" />
                   <span className="text-[12px] leading-relaxed text-text-secondary">
-                    <span className="font-medium text-[#cfa25a]">No connection.</span>{" "}
+                    <span className="font-medium text-warning">No connection.</span>{" "}
                     Anything already running keeps going on the server — it
                     will be here when you reconnect.
                   </span>
@@ -3000,18 +3253,20 @@ export default function Home() {
         onAskBtw={sendBtwNote}
         onDismissBtw={dismissBtw}
         retryNotice={retryNotice}
+        retryBreakdown={retryBreakdown}
+        retryDetail={retryDetail}
+        requestSize={requestSize}
         onStop={stopGeneration}
         hasKeys={hasKeys}
         missingKeyLabel={
-          getModel(model).provider === "opencode"
-            ? oxHostInfo(getModel(model).fixedHost ?? oxHost).label
-            : getModel(model).provider === "openrouter"
-              ? "OpenRouter"
-              : getModel(model).provider === "local"
-                ? "local server"
-                : "DeepSeek"
+          activeModelInfo.provider === "openrouter"
+            ? "OpenRouter"
+            : activeModelInfo.provider === "local"
+              ? "local server"
+              : "DeepSeek"
         }
         model={model}
+        customModels={customModels}
         thinkingEffort={thinkingEffort}
         webSearchMode={webSearchMode}
         visionKey={visionKey}
@@ -3061,10 +3316,13 @@ export default function Home() {
       {showSettings && (
         <SettingsModal
           deepseekKey={deepseekKey}
-          opencodeKey={opencodeKey}
           openrouterKey={openrouterKey}
-          oxHost={oxHost}
-          onOxHostChange={setOxHost}
+          customModels={customModels}
+          onCustomModelsChange={setCustomModels}
+          themeId={themeId}
+          onThemeChange={setThemeId}
+          customTheme={customTheme}
+          onCustomThemeChange={setCustomTheme}
           localBaseUrl={localBaseUrl}
           localApiKey={localApiKey}
           localApiModel={localApiModel}
@@ -3085,19 +3343,12 @@ export default function Home() {
           onLocalBaseUrlChange={setLocalBaseUrl}
           onLocalApiKeyChange={setLocalApiKey}
           onLocalApiModelChange={setLocalApiModel}
-          onOpencodeKeyChange={(key) => {
-            setOpencodeKey(key);
-            // A user who only connected OpenCode should land on Ox Alpha
-            // rather than a DeepSeek model they cannot call.
-            if (key.trim() && !deepseekKey && getModel(model).provider === "deepseek") {
-              setModel("ox-alpha");
-            }
-          }}
           onOpenrouterKeyChange={(key) => {
             setOpenrouterKey(key);
-            if (key.trim() && !deepseekKey && getModel(model).provider === "deepseek") {
-              setModel("ox-alpha");
-              setOxHost("openrouter");
+            // A user who only connected OpenRouter should land on the free
+            // lane rather than a DeepSeek model they cannot call.
+            if (key.trim() && !deepseekKey && activeModelInfo.provider === "deepseek") {
+              setModel(FREE_OPENROUTER_MODEL_ID);
             }
           }}
           onTavilyKeyChange={setTavilyKey}
@@ -3123,6 +3374,8 @@ export default function Home() {
           onClose={() => setShowSearch(false)}
         />
       )}
+
+      {showMcp && <McpConsole onClose={() => setShowMcp(false)} />}
 
       {renameError && (
         <div

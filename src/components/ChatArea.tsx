@@ -40,11 +40,12 @@ import {
 } from "@/lib/archive";
 import { documentKind } from "@/lib/documents";
 import type { Attachment } from "@/lib/attachments";
-import { Dots, MessageBubble } from "@/components/MessageBubble";
+import { MessageBubble } from "@/components/MessageBubble";
 import { ThinkingEffortSelector } from "@/components/ThinkingEffortSelector";
 import { BtwDock } from "@/components/BtwDock";
 import type { BtwEntry } from "@/components/BtwDock";
 import { ModelSelector } from "@/components/ModelSelector";
+import type { CustomModelDef } from "@/lib/models";
 import { WebSearchToggle } from "@/components/WebSearchToggle";
 import { WorkspaceBar } from "@/components/WorkspaceBar";
 import { WorkspaceDock } from "@/components/WorkspaceDock";
@@ -88,11 +89,24 @@ interface ChatAreaProps {
   onDismissBtw?: () => void;
   /** Set while a transient upstream failure is being retried. */
   retryNotice?: string | null;
+  /** Where the in-flight request's bytes live — the banner's tooltip. */
+  retryBreakdown?: { label: string; chars: number }[] | null;
+  /** The provider's own message behind a rejection-driven retry. */
+  retryDetail?: string | null;
+  /** A saved chat is loading and nothing is on screen yet: skeleton, not vacuum. */
+  conversationLoading?: boolean;
+  /** Latest fired request's size, while its round runs (heavy rounds only). */
+  requestSize?: {
+    round: number;
+    inputChars: number;
+    breakdown: { label: string; chars: number }[];
+  } | null;
   onStop: () => void;
   hasKeys: boolean;
   /** Which provider key is missing for the selected model. */
   missingKeyLabel?: string;
   model: string;
+  customModels: CustomModelDef[];
   thinkingEffort: string;
   webSearchMode: "off" | "auto" | "always";
   visionKey: string;
@@ -137,24 +151,26 @@ interface ChatAreaProps {
 }
 
 /**
- * The single status row for the silent wait between sending and the first
- * token: bouncing dots, the elapsed clock and — for video rounds — the
- * reason the wait can run minutes. The stage word renders only for named
- * stages the thinking panel does not already speak for (searching, reading);
- * the default thinking stage stays quiet or the word would read twice, which
- * is what made the wait look like a stack of disagreeing voices. One row
- * replaces the old
- * stack of dots row + elapsed row + retry line, which read as three
- * separate voices describing the same wait. Own clock at module level so
- * the interval identity is stable across ChatArea re-renders (status-stage
- * updates would otherwise remount a nested component and reset the count).
+ * The single status line for the silent wait between sending and the first
+ * token: one mark, one word, one clock. The thinking panel mounts its
+ * shimmer header inside the bubble during the wait, so this row is the only
+ * VISIBLE clock — the panel's own clock counts invisibly and is revealed
+ * when text lands, which is when this row unmounts. A retry morphs the
+ * word in place instead of stacking a second row beneath it. Own clock at
+ * module level so the interval identity is stable across ChatArea
+ * re-renders (status-stage updates would otherwise remount a nested
+ * component and reset the count).
  */
 function StatusRow({
   stage,
   hasVideo,
+  retryText,
+  retryTitle,
 }: {
   stage: StatusStage | null;
   hasVideo: boolean;
+  retryText?: string | null;
+  retryTitle?: string;
 }) {
   const [seconds, setSeconds] = useState(0);
   useEffect(() => {
@@ -162,29 +178,58 @@ function StatusRow({
     const t = setInterval(() => setSeconds((s) => s + 1), 1000);
     return () => clearInterval(t);
   }, []);
-  // The thinking panel on the streaming message already says "Thinking" —
-  // saying it here too is the duplication that made the wait read as a mess.
-  // Named stages (searching, reading) still announce themselves.
-  const showStage = stage != null && stage !== "thinking";
+  /*
+   * px-4, not px-1: the wait lines sit under the assistant bubble, whose
+   * content starts at px-4. Anything less leaves them hanging left of the
+   * thinking panel they describe.
+   */
   return (
-    <div className="flex justify-start px-1 py-2">
-      <div className="flex items-center gap-2.5">
-        <span className="text-[#c96442]">
-          <Dots size={5} />
+    <div className="flex justify-start px-4 py-2">
+      <div className="flex items-center gap-2">
+        <span aria-hidden="true" className="text-[13px] leading-5 text-accent">
+          ✻
         </span>
-        {showStage && (
-          <span className="animate-thinking text-xs text-[#a29d92]">
-            {STAGE_LABELS[stage ?? "thinking"]}…
-          </span>
-        )}
-        <span className="text-[11px] leading-4 tabular-nums text-[#8a857a]">
-          {showStage ? "· " : ""}
-          {seconds}s elapsed
-          {hasVideo
+        <span
+          title={retryText ? retryTitle : undefined}
+          className={
+            retryText
+              ? "cursor-default text-[13px] leading-5 text-warning"
+              : "thinking-shimmer text-[13px] leading-5"
+          }
+        >
+          {retryText ?? `${STAGE_LABELS[stage ?? "thinking"]}…`}
+        </span>
+        <span className="text-[11px] tabular-nums text-text-muted">
+          · {seconds}s
+          {hasVideo && !retryText
             ? " · watching your video — replies can take a few minutes"
             : ""}
         </span>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Placeholder bubbles while a saved chat loads. Big chats parse for a
+ * second or more with nothing on screen, which read as frozen — this is
+ * the loading screen, mounted only when there is no cached transcript
+ * to paint instantly.
+ */
+function ConversationSkeleton() {
+  return (
+    <div
+      aria-label="Loading chat"
+      className="mx-auto w-full max-w-3xl px-4 py-6 sm:px-6"
+    >
+      {[0, 1, 2].map((i) => (
+        <div key={i} className="mb-7 animate-pulse">
+          <div className="mb-2 h-3 w-24 rounded bg-bg-hover" />
+          <div className="h-3 w-full rounded bg-bg-hover" />
+          <div className="mt-1.5 h-3 w-5/6 rounded bg-bg-hover" />
+          <div className="mt-1.5 h-3 w-2/3 rounded bg-bg-hover" />
+        </div>
+      ))}
     </div>
   );
 }
@@ -201,10 +246,15 @@ export function ChatArea({
   onAskBtw,
   onDismissBtw,
   retryNotice,
+  retryBreakdown,
+  retryDetail,
+  requestSize,
+  conversationLoading,
   onStop,
   hasKeys,
   missingKeyLabel = "DeepSeek",
   model,
+  customModels,
   thinkingEffort,
   webSearchMode,
   visionKey,
@@ -1017,7 +1067,11 @@ export function ChatArea({
     const el = scrollRef.current;
     if (!el || !pinnedRef.current) return;
     ignoreScroll.current = true;
-    el.scrollTop = el.scrollHeight;
+    // Write-only: reading scrollHeight here would force a synchronous layout
+    // of the entire transcript on every stream flush (up to 60 a second),
+    // which is exactly the growing jank on long replies. Assigning past the
+    // maximum clamps to the bottom with no measurement at all.
+    el.scrollTop = Number.MAX_SAFE_INTEGER;
     requestAnimationFrame(() => {
       ignoreScroll.current = false;
     });
@@ -1244,9 +1298,15 @@ export function ChatArea({
   // Show the standalone indicator until the assistant bubble actually has
   // something to display. Previously an empty streaming bubble was created
   // instantly, which suppressed the indicator and left a silent gap between
-  // sending and the first token.
+  // sending and the first token. Whitespace-only deltas do not count: the
+  // thinking panel stays hidden until real text lands, so unmounting here
+  // would leave the gap with no voice at all.
   const streamingHasOutput = messages.some(
-    (m) => m.isStreaming && (m.content || m.reasoningContent)
+    (m) =>
+      m.isStreaming &&
+      (m.content.trim().length > 0 ||
+        (typeof m.reasoningContent === "string" &&
+          m.reasoningContent.trim().length > 0))
   );
 
   // One shared column width for the messages and the composer, and it widens
@@ -1300,6 +1360,14 @@ export function ChatArea({
         </div>
 
         <div className="flex items-center gap-1.5">
+          {totals.priced > 0 && (
+            <span
+              className="cursor-default px-1 text-[11px] tabular-nums text-text-muted"
+              title="What this chat has cost so far, estimated from published rates — the full breakdown is at the top of the conversation"
+            >
+              {formatCost(totals.cost)}
+            </span>
+          )}
           <ProcessDock
             workspaceId={workspaceId}
             onChanged={onProcessesChanged}
@@ -1443,11 +1511,15 @@ export function ChatArea({
         className="relative flex-1 overflow-y-auto overflow-x-hidden [overflow-anchor:none]"
       >
         {messages.length === 0 ? (
-          <EmptyState
-            hasKeys={hasKeys}
-            missingKeyLabel={missingKeyLabel}
-            onOpenSettings={onOpenSettings}
-          />
+          conversationLoading ? (
+            <ConversationSkeleton />
+          ) : (
+            <EmptyState
+              hasKeys={hasKeys}
+              missingKeyLabel={missingKeyLabel}
+              onOpenSettings={onOpenSettings}
+            />
+          )
         ) : (
           <div
             className={`mx-auto w-full px-4 sm:px-6 py-6 transition-[max-width] duration-300 ${columnWidth}`}
@@ -1487,7 +1559,15 @@ export function ChatArea({
             />
             )}
 
-            <div className="space-y-6">
+            {/* The covered wait stacks tight: effort pill, status row and
+                request line merge into one compact block instead of three
+                airy rows. The relaxed rhythm returns with the first token —
+                this only ever applies while the status row owns the wait. */}
+            <div
+              className={
+                isLoading && !streamingHasOutput ? "space-y-1" : "space-y-6"
+              }
+            >
               <MessageList
                 messages={messages}
                 onRegenerate={onRegenerate}
@@ -1515,9 +1595,21 @@ export function ChatArea({
                 <StatusRow
                   stage={statusStage}
                   hasVideo={videoWaitRef.current}
+                  retryText={retryNotice}
+                  retryTitle={retryTooltip(retryBreakdown, retryDetail)}
                 />
               )}
-              {retryNotice && <RetryBanner text={retryNotice} />}
+              {/* The banner survives only for mid-run retries: before the
+                  first output the wait is one line and the retry morphs the
+                  status word in place. */}
+              {retryNotice && streamingHasOutput && (
+                <RetryBanner
+                  text={retryNotice}
+                  breakdown={retryBreakdown}
+                  detail={retryDetail}
+                />
+              )}
+              {requestSize && <RequestSizeLine info={requestSize} />}
 
               <div ref={messagesEndRef} />
             </div>
@@ -1699,7 +1791,7 @@ export function ChatArea({
                 is easy to miss while reading the reply above. */}
             {canResumeLast &&
               RESUME_WORDS.has(input.trim().toLowerCase()) && (
-                <div className="flex items-center gap-1.5 px-4 pb-1 text-[11px] text-[#cfa25a]">
+                <div className="flex items-center gap-1.5 px-4 pb-1 text-[11px] text-warning">
                   <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                     <path d="M8 5v14l11-7z" />
                   </svg>
@@ -1708,7 +1800,7 @@ export function ChatArea({
               )}
 
             {isBtw && (
-              <div className="flex items-center gap-1.5 px-4 pb-1 text-[11px] text-[#6ba3a0]">
+              <div className="flex items-center gap-1.5 px-4 pb-1 text-[11px] text-search">
                 <span className="btw-pulse" aria-hidden="true" />
                 Passes it to the running task — nothing stops
               </div>
@@ -1763,7 +1855,12 @@ export function ChatArea({
                   selector was still in the DOM but unreachable — a control
                   that vanished with no scrollbar to find it by. */}
               <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
-                <ModelSelector value={model} onChange={onSetModel} />
+                <ModelSelector
+                  value={model}
+                  customs={customModels}
+                  onChange={onSetModel}
+                  onOpenSettings={onOpenSettings}
+                />
 
                 <ThinkingEffortSelector
                   value={thinkingEffort}
@@ -2141,7 +2238,10 @@ const MessageList = memo(function MessageList({
         // Bubbles older than the hydrated window render as instant plain text
         // and upgrade to full markdown in idle slices. A bubble with a search
         // hit always renders full markdown — the find bar's highlight runs
-        // inside the markdown pipeline, so plain text cannot carry it.
+        // inside the markdown pipeline, so plain text cannot carry it. (A
+        // streaming bubble renders deferred markdown instead — see
+        // liveContent in the bubble — so formatting stays live while the
+        // parse skips busy frames.)
         const deferred = index < deferredCount && !bubbleSearchQuery;
         return (
           /*
@@ -2190,15 +2290,97 @@ const STAGE_LABELS: Record<StatusStage, string> = {
 
 
 
+/**
+ * The retry tooltip: every size bucket, plus the provider's own message
+ * when the retry answers one. Shared by the banner and the status row so
+ * the pre-output wait loses no information when the banner folds into it.
+ */
+function retryTooltip(
+  breakdown?: { label: string; chars: number }[] | null,
+  detail?: string | null
+): string | undefined {
+  const body =
+    breakdown && breakdown.length > 0
+      ? `Request body: ${breakdown
+          .map(
+            (p) =>
+              `${p.label} ${
+                p.chars >= 1000 ? `${(p.chars / 1000).toFixed(0)}k` : `${p.chars}`
+              }`
+          )
+          .join(" · ")}`
+      : null;
+  return body && detail
+    ? `${body}\nProvider said: ${detail}`
+    : (body ?? (detail ? `Provider said: ${detail}` : undefined));
+}
+
 /** Instant appear / disappear — no fade. A 300ms slide is the "10s late" feel.
- *  Starts at the dots' left edge (the outer px-1): the old pl-[31px] pushed
- *  the line right of the dots it belongs to, and the wait read as two
+ *  Starts at the status line's left edge (the outer px-1): the old pl-[31px]
+ *  pushed the line right of the wait it belongs to, and the two read as
  *  misaligned columns instead of one stack. */
-function RetryBanner({ text }: { text: string }) {
+function RetryBanner({
+  text,
+  breakdown,
+  detail,
+}: {
+  text: string;
+  breakdown?: { label: string; chars: number }[] | null;
+  detail?: string | null;
+}) {
+  // The banner names the biggest contributor inline; hovering lists them
+  // all, plus the provider's own message when the retry answers one.
+  const title = retryTooltip(breakdown, detail);
   return (
-    <div className="flex justify-start px-1 pb-2">
-      <span className="text-[11px] leading-4 tabular-nums text-[#cfa25a]">
+    <div className="flex justify-start px-4 pb-2">
+      <span
+        title={title}
+        className="cursor-default text-[11px] leading-4 tabular-nums text-warning"
+      >
         {text}
+      </span>
+    </div>
+  );
+}
+
+/**
+ * Fire-time receipt for a heavy round: "Request 3 · 612k in (history 479k)".
+ *
+ * Deliberately NOT the warning color — a big request is information, not a
+ * failure. It answers "600k from nothing?" at fire time instead of after
+ * the reply, and the big-context hint sets the wait expectation up front:
+ * a stalled-looking prefill on 700k is normal, not a hang. Hovering lists
+ * every bucket. Vanishes with the run; the reply's ctx chip keeps the
+ * permanent record.
+ */
+function RequestSizeLine({
+  info,
+}: {
+  info: {
+    round: number;
+    inputChars: number;
+    breakdown: { label: string; chars: number }[];
+  };
+}) {
+  const k = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(0)}k` : `${n}`);
+  const total = `${k(info.inputChars)} in`;
+  const top = info.breakdown.slice(0, 2);
+  const title =
+    `Request ${info.round} body: ` +
+    info.breakdown.map((part) => `${part.label} ${k(part.chars)}`).join(" · ") +
+    (info.inputChars >= 400_000
+      ? "\nBig context — the first token can take a while"
+      : "");
+  return (
+    <div className="flex justify-start px-4 pb-2">
+      <span
+        title={title}
+        className="cursor-default text-[11px] leading-4 tabular-nums text-text-muted"
+      >
+        {`Request ${info.round} · ${total}`}
+        {top.length > 0 &&
+          ` (${top.map((part) => `${part.label} ${k(part.chars)}`).join(" · ")})`}
+        {info.inputChars >= 400_000 ? " — big context, first token may take a while" : ""}
       </span>
     </div>
   );

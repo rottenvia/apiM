@@ -1,12 +1,16 @@
 /**
- * A second LLM provider — OpenCode Zen serving Ox Alpha.
+ * The three providers: DeepSeek, OpenRouter, and local.
  *
  * Run:  npm run test:providers
  *
- * DeepSeek used to be the only Chat Completions host. Ox Alpha is a stealth
- * model on OpenCode Zen (`x-preview-f-free` at opencode.ai/zen/v1). The
- * agent loop stays identical; only the URL, key and on-the-wire model id
+ * DeepSeek used to be the only Chat Completions host. OpenRouter is the
+ * second (GLM 5.3 Flash, the free Nemotron lane, and any custom model
+ * the user adds); a local OpenAI-compatible host serves Qwen. The agent
+ * loop stays identical — only the URL, key and on-the-wire model id
  * change. Plugin directive priority is left alone.
+ *
+ * (Ox Alpha / OpenCode Zen was removed 2026-09: the trial lane is the
+ * free Nemotron model on OpenRouter now.)
  */
 import path from "node:path";
 import { readFileSync } from "node:fs";
@@ -32,6 +36,7 @@ const models = await load("src/lib/models.ts");
 const providers = await load("src/lib/providers.ts");
 const pricing = await load("src/lib/pricing.ts");
 const budget = await load("src/lib/budget.ts");
+const requestSize = await load("src/lib/request-size.ts");
 
 const route = read("src/app/api/chat/route.ts");
 const page = read("src/app/page.tsx");
@@ -51,20 +56,37 @@ console.log("1. The catalog");
     models.DEFAULT_MODEL_ID === "glm-5.3-flash" && models.MODELS[0].id === "glm-5.3-flash",
     models.DEFAULT_MODEL_ID
   );
-const ox = models.MODELS.find((m) => m.id === "ox-alpha");
-check("Ox Alpha is listed", Boolean(ox));
 check(
-  "Ox Alpha is served by OpenCode",
-  ox?.provider === "opencode",
-  ox?.provider
+  "Ox Alpha is gone from the catalog",
+  !models.MODELS.some((m) => m.id === "ox-alpha")
+);
+const freeNemotron = models.MODELS.find(
+  (m) => m.id === "nvidia-nemotron-3-ultra-free"
+);
+check("Nemotron 3 Ultra Free is listed", Boolean(freeNemotron));
+check(
+  "the free lane rides OpenRouter, not a Zen host",
+  freeNemotron?.provider === "openrouter",
+  freeNemotron?.provider
 );
 check(
-  "the wire id is the official Zen model",
-  ox?.apiModel === "x-preview-f-free",
-  "opencode.ai/docs/zen lists Ox Alpha Free as x-preview-f-free"
+  "the wire id is the official :free slug",
+  freeNemotron?.apiModel === "nvidia/nemotron-3-ultra-550b-a55b:free",
+  "openrouter.ai/nvidia lists the free lane as nemotron-3-ultra-550b-a55b:free"
 );
 check(
-  "unknown ids fall back to the default DeepSeek model",
+  "the old a558 typo never comes back",
+  !/a558/.test(read("src/lib/models.ts")),
+  "one wrong char 400'd every free-lane request as 'not a valid model ID'"
+);
+check(
+  "an unknown model id skips every retry",
+  /isUnknownModelRejection\(rejectedDetail\)/.test(route) &&
+    /!modelUnknown &&/.test(route),
+  "a bad model burned a 697k strip retry and a 313k composed retry to learn nothing"
+);
+check(
+  "unknown ids fall back to the default model",
   models.getModel("nope").id === models.DEFAULT_MODEL_ID
 );
 
@@ -79,27 +101,36 @@ check(
   ds.ok && ds.target.baseUrl.includes("api.deepseek.com")
 );
 
-const noDs = providers.resolveChatTarget("deepseek-v4-pro", { opencodeApiKey: "sk-zen" });
+const noDs = providers.resolveChatTarget("deepseek-v4-pro", { openrouterApiKey: "sk-or" });
 check("DeepSeek refuses without its own key", !noDs.ok);
 
-const oxOk = providers.resolveChatTarget("ox-alpha", { opencodeApiKey: "sk-zen-1" });
-check("Ox Alpha resolves with an OpenCode key", oxOk.ok);
+const glmOk = providers.resolveChatTarget("glm-5.3-flash", { openrouterApiKey: "sk-or-v1-test" });
+check("GLM resolves with an OpenRouter key", glmOk.ok);
 check(
-  "and sends x-preview-f-free on the wire",
-  oxOk.ok && oxOk.target.apiModel === "x-preview-f-free"
+  "and sends z-ai/glm-5.3-flash on the wire",
+  glmOk.ok && glmOk.target.apiModel === "z-ai/glm-5.3-flash"
 );
 check(
-  "and hits OpenCode Zen",
-  oxOk.ok && oxOk.target.baseUrl.includes("opencode.ai/zen/v1"),
-  oxOk.ok ? oxOk.target.baseUrl : ""
+  "and hits openrouter.ai",
+  glmOk.ok && glmOk.target.baseUrl.includes("openrouter.ai/api/v1"),
+  glmOk.ok ? glmOk.target.baseUrl : ""
 );
 
-const noOx = providers.resolveChatTarget("ox-alpha", { deepseekApiKey: "sk-ds" });
-check("Ox Alpha refuses a DeepSeek-only setup", !noOx.ok);
+const freeOk = providers.resolveChatTarget("nvidia-nemotron-3-ultra-free", {
+  openrouterApiKey: "sk-or-v1-test",
+});
+check("the Nemotron free lane resolves with an OpenRouter key", freeOk.ok);
+check(
+  "and sends the :free slug on the wire",
+  freeOk.ok && freeOk.target.apiModel === "nvidia/nemotron-3-ultra-550b-a55b:free"
+);
+
+const noOr = providers.resolveChatTarget("glm-5.3-flash", { deepseekApiKey: "sk-ds" });
+check("GLM refuses a DeepSeek-only setup", !noOr.ok);
 
 const helperDs = providers.resolveHelperTarget({
   deepseekApiKey: "sk-ds",
-  opencodeApiKey: "sk-zen",
+  openrouterApiKey: "sk-or",
 });
 check(
   "the helper prefers Flash when a DeepSeek key exists",
@@ -107,42 +138,23 @@ check(
   "existing DeepSeek setups keep the same cheap planning path"
 );
 
-const helperOx = providers.resolveHelperTarget({ opencodeApiKey: "sk-zen" });
+const helperFree = providers.resolveHelperTarget({ openrouterApiKey: "sk-or" });
 check(
-  "the helper falls back to Ox Alpha without DeepSeek",
-  helperOx?.model.id === "ox-alpha"
-);
-
-// The helper follows the main model's provider. An Ox conversation judges on
-// Ox (free in preview) — a DeepSeek key with an empty balance must not
-// hijack the web judge and make every judge call fail.
-const helperOxMain = providers.resolveHelperTarget(
-  { deepseekApiKey: "sk-ds", opencodeApiKey: "sk-zen" },
-  "ox-alpha"
-);
-check(
-  "an Ox main model gets the Ox helper even when a DeepSeek key exists",
-  helperOxMain?.model.id === "ox-alpha" &&
-    helperOxMain?.providerId === "opencode",
+  "the helper falls back to the Nemotron free lane without DeepSeek",
+  helperFree?.model.id === "nvidia-nemotron-3-ultra-free" &&
+    helperFree?.providerId === "openrouter",
   "the free judge never depends on a paid balance"
 );
 
-const helperOxNoKey = providers.resolveHelperTarget(
-  { deepseekApiKey: "sk-ds" },
-  "ox-alpha"
-);
+// The helper no longer follows the main model: it is always the cheapest
+// known lane (Flash on DeepSeek, Nemotron-free on OpenRouter), and the caller
+// drops it when it equals the main model. A second argument would be dead.
 check(
-  "an Ox main with no Ox key gets no helper rather than a wrong one",
-  helperOxNoKey === null,
-  "judging an Ox conversation with a different provider is a worse failure"
-);
-
-check(
-  "a DeepSeek main model still judges on Flash",
-  providers.resolveHelperTarget(
-    { deepseekApiKey: "sk-ds", opencodeApiKey: "sk-zen" },
-    "deepseek-v4-pro"
-  )?.model.id === "deepseek-v4-flash",
+  "DeepSeek still wins when both keys exist",
+  providers.resolveHelperTarget({
+    deepseekApiKey: "sk-ds",
+    openrouterApiKey: "sk-or",
+  })?.model.id === "deepseek-v4-flash",
   "the key paying for the reply stays the cheap side-call planner"
 );
 
@@ -163,29 +175,54 @@ check("and no effort", dsOff.reasoning_effort === undefined);
 const ocBody = {};
 providers.applyThinking(ocBody, "openai", true, "max");
 check(
-  "OpenCode thinking-on does NOT send DeepSeek's thinking object",
+  "OpenRouter thinking-on does NOT send DeepSeek's thinking object",
   ocBody.thinking === undefined,
   "that field 400s on OpenAI-compatible hosts"
 );
-check("OpenCode thinking-on sends reasoning_effort", ocBody.reasoning_effort === "max");
+check("OpenRouter thinking-on sends reasoning_effort", ocBody.reasoning_effort === "max");
 
 const ocOff = {};
 providers.applyThinking(ocOff, "openai", false, "none");
-check("OpenCode thinking-off sends neither field", ocOff.thinking === undefined && ocOff.reasoning_effort === undefined);
+check(
+  "OpenRouter thinking-off sends the documented disable",
+  ocOff.reasoning?.effort === "none" &&
+    ocOff.thinking === undefined &&
+    ocOff.reasoning_effort === undefined,
+  "sending nothing left GLM/Nemotron thinking by provider default"
+);
+
+const ocMandatory = {};
+providers.applyThinking(ocMandatory, "openai", false, "none", {
+  reasoningMandatory: true,
+});
+check(
+  "OpenRouter thinking-off on a mandatory endpoint clamps to minimal effort",
+  ocMandatory.reasoning === undefined &&
+    ocMandatory.reasoning_effort === "low",
+  "the disable 400s on inference-net/fp4 — low keeps the round legal"
+);
+check(
+  "GLM's pinned endpoint is marked mandatory, unverified pins are not",
+  providers.openrouterReasoningMandatory("glm-5.3-flash") === true &&
+    providers.openrouterReasoningMandatory("deepseek-v4.1-flash") === false &&
+    providers.openrouterReasoningMandatory("nvidia-nemotron-3-ultra-free") ===
+      false,
+  "only verified pins — an unproven entry would force think tokens on an explicit off"
+);
 
 console.log("\n4. Pricing");
 
-check("Ox Alpha is in the rate table", Boolean(pricing.MODEL_RATES["ox-alpha"]));
+check("the Nemotron free lane is in the rate table", Boolean(pricing.MODEL_RATES["nvidia-nemotron-3-ultra-free"]));
 check(
-  "the preview is free",
+  "the free lane is free",
   pricing.estimateCost(
     { prompt_tokens: 10_000, completion_tokens: 2_000, prompt_cache_miss_tokens: 10_000 },
-    "ox-alpha"
+    "nvidia-nemotron-3-ultra-free"
   ) === 0
 );
 check(
   "a free model does not divide-by-zero the budget cap",
-  budget.maxTokensFor(budget.createBudget(0.1), "ox-alpha", 65_536) === 65_536
+  budget.maxTokensFor(budget.createBudget(0.1), "nvidia-nemotron-3-ultra-free", 65_536) === 65_536
 );
 check(
   "DeepSeek Pro rates are unchanged",
@@ -194,9 +231,9 @@ check(
 
 console.log("\n5. The chat route actually uses the resolver");
 
-check("the route accepts an OpenCode key", /opencodeApiKey/.test(route));
+check("the route accepts an OpenRouter key", /openrouterApiKey/.test(route));
 check("it no longer requires a DeepSeek key for every request", !/Message and DeepSeek API key are required/.test(route));
-check("it resolves the target before opening the stream", /resolveChatTarget\(model, creds\)/.test(route));
+check("it resolves the target before opening the stream", /resolveChatTarget\(model, creds, customs\)/.test(route));
 check(
   "the fetch uses the resolved host",
   /target\.baseUrl/.test(route) && /completionHeaders\(target\)/.test(route)
@@ -215,15 +252,19 @@ check(
 
 console.log("\n6. The UI offers both providers");
 
-check("Settings has an OpenCode key field", /OpenCode API Key/.test(settings));
-check("Settings offers Ox Alpha as a model", /onModelChange\("ox-alpha"\)/.test(settings));
+check("Settings has a DeepSeek key field", /DeepSeek API Key/.test(settings));
+check("Settings has an OpenRouter key field", /OpenRouter API Key/.test(settings));
+check(
+  "Settings renders the model grid from the catalog, including customs",
+  /onModelChange\(m\.id\)/.test(settings) && /onModelChange\(c\.id\)/.test(settings)
+);
 check("the composer selector lists the catalog", /from "@\/lib\/models"/.test(selector));
-check("the page persists the OpenCode key", /opencodeKey/.test(page));
-check("the page sends the OpenCode key with the chat request", /opencodeApiKey: opencodeKey/.test(page));
+check("the page persists the OpenRouter key", /openrouterKey/.test(page));
+check("the page sends the OpenRouter key with the chat request", /openrouterApiKey: openrouterKey/.test(page));
 check(
   "Low effort is only remapped on V4 Pro",
   /const isPro = model === "deepseek-v4-pro"/.test(effort),
-  "Ox Alpha must not inherit Pro's silent low→high mapping"
+  "no other model inherits Pro's silent low→high mapping"
 );
 
 console.log("\n7. Local Qwen 3.8 27B");
@@ -513,6 +554,204 @@ check(
     /cudartPresent\(/.test(engineSrc) &&
     /\.dll/i.test(engineSrc)
 );
+// ---------------- CUDA that actually lands on the card, and fits on it ---
+//
+// The cudart preflight stranded users in a "click Download again" loop: the
+// failure modes (locked files, a release without the companion archive, the
+// wrong CUDA major for the card, VRAM the 27B cannot fit) each needed their
+// own honest error or automatic fix.
+
+const WIN_CUDA_BOTH = [
+  "llama-b10566-bin-win-cuda-12.4-x64.zip",
+  "llama-b10566-bin-win-cuda-13.3-x64.zip",
+  ...WIN_ASSETS,
+];
+check(
+  "Blackwell and newer (sm 12+) take the 13.x CUDA build",
+  shared.cudaMajorForComputeCap("12.0") === "13" &&
+    shared.cudaMajorForComputeCap("10.0") === "12" &&
+    shared.cudaMajorForComputeCap("8.9") === "12" &&
+    shared.cudaMajorForComputeCap(null) === "12" &&
+    shared.pickLlamaAsset(WIN_CUDA_BOTH, {
+      platform: "win32",
+      arch: "x64",
+      gpu: "nvidia",
+      cuda: "13",
+    }) === "llama-b10566-bin-win-cuda-13.3-x64.zip",
+  "a 12.x-built ggml-cuda has no kernels for sm_120 and silently ran CPU"
+);
+check(
+  "12.x stays the default when no card info is available",
+  shared.pickLlamaAsset(WIN_CUDA_BOTH, {
+    platform: "win32",
+    arch: "x64",
+    gpu: "nvidia",
+  }) === "llama-b10566-bin-win-cuda-12.4-x64.zip"
+);
+check(
+  "Download stops the sidecar before replacing its files",
+  /Stopping Qwen so its files can be replaced/.test(engineSrc) &&
+    /stopEngine\(\);\s*\n\s*await waitUntilStopped\(15_000\)/.test(engineSrc),
+  "a running server locks its DLLs on Windows and the copies used to fail silently"
+);
+check(
+  "a CUDA build with no companion runtime fails Download with an escape",
+  /ships no CUDA runtime archive/.test(engineSrc) &&
+    /Select Vulkan in/.test(engineSrc),
+  "skipping silently looped: Start kept saying 'click Download again'"
+);
+check(
+  "the cudart installer names the DLL it could not write",
+  /Could not install the CUDA runtime beside llama-server/.test(engineSrc) &&
+    /failures\.push/.test(engineSrc)
+);
+check(
+  "Download skips a 98%-complete GGUF like Status does",
+  /ggufLooksComplete\(await fileSize\(ggufPath\(\)\)\)/.test(engineSrc),
+  "the exact-bytes check re-downloaded all 17 GB every time"
+);
+check(
+  "the Start refusal names the missing DLLs and the lock suspect",
+  /missingCudartDlls\(path\.dirname\(server\), installed\)/.test(engineSrc) &&
+    /may have locked them/.test(engineSrc)
+);
+check(
+  "the sidecar raises the server timeout for slow streams",
+  args.includes("--timeout") && args[args.indexOf("--timeout") + 1] === "3600",
+  "a thinking 27B on CPU can go minutes between tokens"
+);
+const machineArgs = shared.sidecarArgs(
+  "/tmp/qwen.gguf",
+  null,
+  shared.defaultSpecState(),
+  { ngl: 40, threads: 16 }
+);
+check(
+  "GPU layers and threads follow the machine plan",
+  machineArgs.includes("-ngl") &&
+    machineArgs[machineArgs.indexOf("-ngl") + 1] === "40" &&
+    machineArgs[machineArgs.indexOf("--threads") + 1] === "16" &&
+    machineArgs[machineArgs.indexOf("--threads-batch") + 1] === "16"
+);
+check(
+  "no machine plan keeps the old static flags",
+  args[args.indexOf("-ngl") + 1] === "99" && !args.includes("--threads")
+);
+check(
+  "the launch stamp includes the machine plan",
+  (() => {
+    const spec = shared.defaultSpecState();
+    const a = shared.sidecarLaunchId(spec, { ngl: 40, threads: 16 });
+    const b = shared.sidecarLaunchId(spec, { ngl: 40, threads: 16 });
+    const c = shared.sidecarLaunchId(spec);
+    return a === b && a !== c && a.includes("-ngl40-t16");
+  })()
+);
+check(
+  "a flash retry stamps what is actually running",
+  /launchedSpec = fixed/.test(engineSrc) &&
+    /sidecarLaunchId\(launchedSpec, machine\)/.test(engineSrc),
+  "stamping the pre-retry spec bought a full 27B reload on the next Start"
+);
+const PLAN_27B = {
+  ggufBytes: shared.GGUF_BYTES,
+  blockCount: 64,
+  kvBytesPerToken: 131_072,
+  ctxTokens: shared.SIDECAR_CTX,
+  mmprojBytes: shared.MMPROJ_BYTES,
+};
+// weights/layer ~278 MB, KV/layer at 82K ~164 MB; reserves are 3 GB plus
+// the ~0.9 GB projector.
+check(
+  "a 32 GB card offloads everything",
+  shared.planGpuLayers({ ...PLAN_27B, vramMB: 32 * 1024 }) === 99
+);
+const midVram = shared.planGpuLayers({ ...PLAN_27B, vramMB: 24 * 1024 });
+check(
+  "a 24 GB card gets a partial offload, not an OOM death",
+  midVram > 30 && midVram < 64,
+  `ngl ${midVram}`
+);
+const smallVram = shared.planGpuLayers({ ...PLAN_27B, vramMB: 12 * 1024 });
+check(
+  "a 12 GB card still runs what fits",
+  smallVram > 5 && smallVram < midVram,
+  `ngl ${smallVram}`
+);
+check(
+  "a card with no room left runs CPU instead of dying",
+  shared.planGpuLayers({ ...PLAN_27B, vramMB: 2 * 1024 }) === 0
+);
+check(
+  "unknown VRAM or model shape keeps the old full-offload attempt",
+  shared.planGpuLayers({ ...PLAN_27B, vramMB: 0 }) === 99 &&
+    shared.planGpuLayers({ ...PLAN_27B, blockCount: 0 }) === 99 &&
+    shared.planGpuLayers({ ...PLAN_27B, kvBytesPerToken: 0 }) === 99
+);
+check(
+  "the panel shows the offload plan in words",
+  shared.formatGpuPlan({ ngl: 99, threads: 16, vramMB: 24576, layers: 64 }) ===
+    "Offload plan: all 64 layers on the GPU (24 GB VRAM)." &&
+    (
+      shared.formatGpuPlan({
+        ngl: 40,
+        threads: 16,
+        vramMB: 12288,
+        layers: 64,
+      }) ?? ""
+    ).includes("40/64") &&
+    shared.formatGpuPlan(null) === null &&
+    /formatGpuPlan\(status\.gpuPlan\)/.test(localUi)
+);
+check(
+  "the engine log opens with the exact spawn flags",
+  /\[apiM\] spawn:/.test(engineSrc) &&
+    /appendFile\(engineLogPath\(\), `\[apiM\] spawn:/.test(engineSrc),
+  "one screenshot of the log answers '-ngl what?' without asking the user"
+);
+check(
+  "tight RAM is named in the offload plan",
+  (
+    shared.formatGpuPlan({
+      ngl: 19,
+      threads: 16,
+      vramMB: 12288,
+      layers: 64,
+      ramFreeGB: 2.2,
+    }) ?? ""
+  ).includes("swap") &&
+    !(
+      shared.formatGpuPlan({
+        ngl: 99,
+        threads: 16,
+        vramMB: 24576,
+        layers: 64,
+        ramFreeGB: 9,
+      }) ?? ""
+    ).includes("swap"),
+  "swapped CPU layers read as 'GPU burns, nothing comes'"
+);
+check(
+  "the route tags retrying notices with the provider id",
+  /providerId: target\.providerId,/.test(route)
+);
+check(
+  "the client carries the provider id to the banner",
+  /providerId: evt\.providerId/.test(page),
+  "the banner's local-prefill note keys off it"
+);
+check(
+  "stale flags get a restart note, not a mystery crawl",
+  /Stale engine flags/.test(engineSrc) &&
+    /spilling to shared RAM/.test(engineSrc) &&
+    /Click Restart below/.test(engineSrc),
+  "the planned count proves the running server predates the VRAM planner"
+);
+check(
+  "VRAM contention gets its own note",
+  /could not fit the requested/.test(engineSrc) &&
+    /Close GPU apps/.test(engineSrc)
+);
 
 check(
   "there is no CUDA ubuntu asset, so cuda on Linux lands on Vulkan",
@@ -535,6 +774,93 @@ check(
 );
 
 const engineLib = await load("src/lib/local-engine.ts");
+// Live: the GGUF header reader and the missing-DLL reporter run for real.
+const { mkdtempSync, writeFileSync: writeTmp } = await import("node:fs");
+const { tmpdir } = await import("node:os");
+const ggufTmp = mkdtempSync(path.join(tmpdir(), "gguf-"));
+const ggufU64 = (n) => {
+  const b = Buffer.alloc(8);
+  b.writeBigUInt64LE(BigInt(n));
+  return b;
+};
+const ggufStr = (s) =>
+  Buffer.concat([ggufU64(Buffer.byteLength(s)), Buffer.from(s, "utf8")]);
+const ggufU32 = (n) => {
+  const b = Buffer.alloc(4);
+  b.writeUInt32LE(n);
+  return b;
+};
+const kvU32 = (key, val) =>
+  Buffer.concat([ggufStr(key), ggufU32(4), ggufU32(val)]);
+const kvString = (key, val) =>
+  Buffer.concat([ggufStr(key), ggufU32(8), ggufStr(val)]);
+// A Qwen3-size token table BEFORE the shape keys: the reader must walk a
+// ~152K-entry string array without choking or running past its window.
+const vocabEntries = [];
+for (let i = 0; i < 152_000; i++) vocabEntries.push(ggufStr("t"));
+const kvTokens = Buffer.concat([
+  ggufStr("tokenizer.ggml.tokens"),
+  ggufU32(9),
+  ggufU32(8),
+  ggufU64(vocabEntries.length),
+  ...vocabEntries,
+]);
+writeTmp(
+  path.join(ggufTmp, "model.gguf"),
+  Buffer.concat([
+    Buffer.from("GGUF", "ascii"),
+    ggufU32(3),
+    ggufU64(0),
+    ggufU64(6),
+    kvTokens,
+    kvString("general.architecture", "qwen3"),
+    kvU32("qwen3.block_count", 64),
+    kvU32("qwen3.embedding_length", 5120),
+    kvU32("qwen3.attention.head_count", 64),
+    kvU32("qwen3.attention.head_count_kv", 8),
+  ])
+);
+writeTmp(path.join(ggufTmp, "junk.gguf"), Buffer.from("not a gguf file"));
+const realInfo = await engineLib.readGgufModelInfo(
+  path.join(ggufTmp, "model.gguf")
+);
+check(
+  "the header reader reports layers and KV bytes per token",
+  realInfo?.blockCount === 64 && realInfo?.kvBytesPerToken === 64 * 8 * 80 * 2,
+  `kv ${realInfo?.kvBytesPerToken} B/token, past a 152K token table`
+);
+check(
+  "a garbage file yields no model info, not a crash",
+  (await engineLib.readGgufModelInfo(path.join(ggufTmp, "junk.gguf"))) ===
+    null &&
+    (await engineLib.readGgufModelInfo(path.join(ggufTmp, "nope.gguf"))) ===
+      null
+);
+const dllDir = mkdtempSync(path.join(tmpdir(), "dlls-"));
+const missing12 = await engineLib.missingCudartDlls(
+  dllDir,
+  "llama-b10566-bin-win-cuda-12.4-x64.zip"
+);
+writeTmp(path.join(dllDir, "cudart64_12.dll"), "x");
+writeTmp(path.join(dllDir, "cublas64_12.dll"), "x");
+writeTmp(path.join(dllDir, "cublasLt64_12.dll"), "x");
+check(
+  "the missing-DLL report follows the build's CUDA major",
+  missing12.length === 3 &&
+    missing12.includes("cudart64_12.dll") &&
+    (
+      await engineLib.missingCudartDlls(
+        dllDir,
+        "llama-b10566-bin-win-cuda-12.4-x64.zip"
+      )
+    ).length === 0 &&
+    (
+      await engineLib.missingCudartDlls(
+        dllDir,
+        "llama-b10566-bin-win-cuda-13.3-x64.zip"
+      )
+    ).includes("cublasLt64_13.dll")
+);
 check(
   "the offload line settles it: GPU in use",
   (() => {
@@ -563,13 +889,21 @@ check(
   engineLib.parseGpuLog("llama-server: serving on http://127.0.0.1:18765").inUse === null
 );
 check(
+  "the fit warning names the requested layer count",
+  engineLib.parseGpuLog(
+    "W common_fit_params: failed to fit params to free device memory: n_gpu_layers already set by user to 99, abort"
+  ).fitWarningNgl === 99 &&
+    engineLib.parseGpuLog("offloaded 19/64 layers to GPU (CUDA)")
+      .fitWarningNgl === null
+);
+check(
   "the engine tees its stderr to a log file",
   /createWriteStream\(engineLogPath\(\)/.test(engineSrc),
   "before this the 'CUDA failed, using CPU' line was discarded after 400 chars"
 );
 check(
   "status reports where the compute went",
-  /gpu: await buildGpuState\(running\)/.test(engineSrc) &&
+  /gpu: await buildGpuState\(running, spec\)/.test(engineSrc) &&
     /Running on the CPU/.test(engineSrc)
 );
 check(
@@ -750,9 +1084,9 @@ check(
   /Spec optimizations/.test(localUi) && /parseUserFlags/.test(sharedSrc)
 );
 
-console.log("\n9. A 503 from Ox / OpenCode is their outage, not the user's key");
+console.log("\n9. A 503 from OpenRouter is their outage, not the user's key");
 
-const busy = providers.providerHttpError(503, "OpenCode", "retrying");
+const busy = providers.providerHttpError(503, "OpenRouter", "retrying");
 check(
   "a 503 does not echo the upstream word retrying as a final error",
   !/retrying/i.test(busy),
@@ -766,23 +1100,23 @@ check(
 check(
   "a 503 with a useful detail is kept",
   /capacity exceeded/.test(
-    providers.providerHttpError(503, "OpenCode", "capacity exceeded in us-west")
+    providers.providerHttpError(503, "OpenRouter", "capacity exceeded in us-west")
   )
 );
 check(
   "a rejected key is still a 401, never a 503",
-  /API key was rejected/.test(providers.providerHttpError(401, "OpenCode", ""))
+  /API key was rejected/.test(providers.providerHttpError(401, "OpenRouter", ""))
 );
 check(
-  "a Zen 429 names the shared free pool, not the user's key",
-  /shared pool/.test(providers.providerHttpError(429, "OpenCode Zen", "")) &&
-    /not your key/.test(providers.providerHttpError(429, "OpenCode Zen", "")),
+  "a shared-pool 429 names the free pool, not the user's key",
+  /shared pool/.test(providers.providerHttpError(429, "OpenRouter", "")) &&
+    /not your key/.test(providers.providerHttpError(429, "OpenRouter", "")),
   "mornings are quiet; evenings look like the key is broken"
 );
   check(
-    "the chat route gives OpenCode extra attempts",
-    /OPENCODE_RETRY/.test(route) && /emptyStreamRetries/.test(route),
-    "Zen 503s last longer than three tries, and 200+empty is the other failure mode"
+    "the chat route gives OpenRouter extra attempts",
+    /OPENROUTER_RETRY/.test(route) && /emptyStreamRetries/.test(route),
+    "shared-pool 503s last longer than three tries, and 200+empty is the other failure mode"
   );
   check(
     "a video round skips doomed empty-stream retries",
@@ -799,91 +1133,197 @@ check(
       "sticky routing keeps every round on the endpoint holding the warm cache"
     );
 check(
+  "every round reports its fired request size",
+  /type: "request_size";/.test(route) &&
+    /type: "request_size",\s*round,\s*inputChars,/.test(route),
+  "a 600k 'new message' must arrive with its cause attached, not as a mystery"
+);
+check(
+  "the fire-time size line is quiet for small chats and clears with the run",
+  /case "request_size":/.test(page) &&
+    /info\.inputChars >= 100_000/.test(page) &&
+    (page.match(/liveRequestSize: null/g) ?? []).length >= 5 &&
+    /requestSize && <RequestSizeLine/.test(read("src/components/ChatArea.tsx")) &&
+    /big context, first token may take a while/.test(
+      read("src/components/ChatArea.tsx")
+    ),
+  "one muted line while heavy rounds run; the ctx chip keeps the record"
+);
+check(
   "the live retry label uses the real attempt total",
   /visibleUpstreamNotice/.test(page) && !/attempts - 1/.test(page)
 );
 check(
-  "the retry banner is its own row so it can vanish without remounting Thinking",
+  "the retry banner renders only mid-run — pre-output the retry morphs the status word",
   /function RetryBanner/.test(read("src/components/ChatArea.tsx")) &&
-    /retryNotice && <RetryBanner/.test(read("src/components/ChatArea.tsx"))
+    /retryNotice && streamingHasOutput && \(\s*<RetryBanner/.test(
+      read("src/components/ChatArea.tsx")
+    ) &&
+    /retryText \?\? `\$\{STAGE_LABELS/.test(read("src/components/ChatArea.tsx")),
+  "two stacked voices with two clocks was the mess; one line speaks until output lands"
+);
+check(
+  "a size rejection folds history and keeps the tools",
+  /foldOldestHistory\(/.test(route) &&
+    /tools kept/.test(route) &&
+    /isSizeRejection\(/.test(route),
+  "stripping tools keeps every offending char and fails identically with a defanged agent"
+);
+check(
+  "a shape rejection still strips tools and media",
+  /retrying without tools and media/.test(route) &&
+    /sanitizeOpenRouterRequestBody/.test(route)
+);
+check(
+  "rejection detail is unwrapped in both the retry verdict and the final error",
+  /extractRejectionDetail\(earlyErrText\)/.test(route) &&
+    /extractRejectionDetail\(errText, 200\)/.test(route) &&
+    !/openrouter_shape_rejection/.test(route),
+  "metadata.raw buries the real cause one level down; the old subject lied about size recoveries"
+);
+check(
+  "a shape verdict with nothing to strip folds once instead of failing outright",
+  /} else if \(Array\.isArray\(dsRequestBody\.messages\)\) \{/.test(route),
+  "a generic wrapper names nothing — a 697k body is guilty until proven innocent"
+);
+check(
+  "a rejected targeted retry gets one composed last chance",
+  /still rejected — retrying once more/.test(route) &&
+    /composedJson !== retryJson/.test(route) &&
+    /stillTooBig/.test(route),
+  "a double fault (oversized AND tool-shy) defeats either transform alone"
+);
+check(
+  "a mandatory-reasoning 400 lifts the disable instead of folding or stripping",
+  /\/reasoning is mandatory\/i\.test\(rejectedDetail\)/.test(route) &&
+    /delete retryBody\.reasoning;/.test(route) &&
+    /retryBody\.reasoning_effort = "low";/.test(route) &&
+    /retrying with minimal thinking instead of none/.test(route),
+  "folding keeps the offending field and fails identically with a defanged agent"
+);
+check(
+  "the clamp is learned for the run and survives the composed retry",
+  /let keepReasoningOn = false;/.test(route) &&
+    /openrouterReasoningMandatory\(target\.model\.id\) \|\|[\s\S]{0,40}keepReasoningOn/.test(
+      route
+    ) &&
+    /delete composedBase\.reasoning;/.test(route),
+  "otherwise every later shove round burns another 400 to re-learn it"
+);
+check(
+  "the retry event carries the provider's own message",
+  /detail: rejectedDetail/.test(route) &&
+    /Provider said/.test(read("src/components/ChatArea.tsx")),
+  "the banner must show WHY the retry exists, not just that one is running"
+);
+check(
+  "a fat body logs which history turns hold the mass",
+  /describeHistoryTurns/.test(route) && /round \${round} hist/.test(route),
+  "a 479k 'history' bucket is still a mystery until the fat turns are named"
+);
+check(
+  "history forensics name the biggest turns with their opening words",
+  (() => {
+    const rows = requestSize.describeHistoryTurns([
+      { role: "system", content: "directives" },
+      { role: "user", content: `a small question` },
+      { role: "assistant", content: "wall of pasted logs " + "z".repeat(50_000) },
+      { role: "user", content: "the live question" },
+    ]);
+    return (
+      rows.length === 2 &&
+      rows[0].startsWith("asst 50k") &&
+      rows[0].includes("wall of pasted logs") &&
+      !rows.join("\n").includes("the live question")
+    );
+  })(),
+  "the log line must point at the fat archived turn, never the live one"
+);
+check(
+  "the reply reports the context it cost",
+  /contextChars: lastInputChars/.test(route) &&
+    /k ctx/.test(read("src/components/MessageBubble.tsx")),
+  "every reply carries its own receipt — no more mystery 691k requests"
 );
 
-console.log("\n10. OpenRouter is a second Ox Alpha host, not a second model");
+console.log("\n10. Any OpenRouter model can be added as a custom");
 
-const oxHost = await load("src/lib/ox-host.ts");
-check("there is still only one Ox Alpha catalog entry", models.MODELS.filter((m) => m.id === "ox-alpha").length === 1);
-check("Zen wire id is x-preview-f-free", oxHost.OX_HOSTS.zen.apiModel === "x-preview-f-free");
-check("OpenRouter wire id is stealth/ox-alpha", oxHost.OX_HOSTS.openrouter.apiModel === "stealth/ox-alpha");
-
-const viaOr = providers.resolveChatTarget("ox-alpha", {
-  oxHost: "openrouter",
-  openrouterApiKey: "sk-or-v1-test",
-});
-check("Ox Alpha on OpenRouter resolves", viaOr.ok);
-check(
-  "and hits openrouter.ai",
-  viaOr.ok && viaOr.target.baseUrl.includes("openrouter.ai/api/v1"),
-  viaOr.ok ? viaOr.target.baseUrl : ""
+const customs = [
+  {
+    id: "custom:anthropic/claude-opus-4-6",
+    label: "Claude Opus 4.6",
+    apiModel: "anthropic/claude-opus-4-6",
+    vision: "helper",
+    video: false,
+    maxOutputTokens: 32000,
+  },
+];
+const customInfo = models.resolveModelInfo(
+  "custom:anthropic/claude-opus-4-6",
+  customs
 );
 check(
-  "and sends stealth/ox-alpha on the wire",
-  viaOr.ok && viaOr.target.apiModel === "stealth/ox-alpha"
+  "a custom resolves to its own entry",
+  customInfo.id === "custom:anthropic/claude-opus-4-6"
 );
 check(
-  "and stays provider opencode so pinning/retry/tools are reused",
-  viaOr.ok && viaOr.target.providerId === "opencode"
+  "and always rides OpenRouter",
+  customInfo.provider === "openrouter"
+);
+const customTarget = providers.resolveChatTarget(
+  "custom:anthropic/claude-opus-4-6",
+  { openrouterApiKey: "sk-or-v1-test" },
+  customs
+);
+check("a custom resolves with the OpenRouter key", customTarget.ok);
+check(
+  "and sends the typed slug on the wire",
+  customTarget.ok && customTarget.target.apiModel === "anthropic/claude-opus-4-6"
 );
 check(
-  "OpenRouter asks for a referer header",
-  viaOr.ok && providers.completionHeaders(viaOr.target)["HTTP-Referer"]
+  "and is refused without the OpenRouter key",
+  !providers.resolveChatTarget(
+    "custom:anthropic/claude-opus-4-6",
+    { deepseekApiKey: "sk-ds" },
+    customs
+  ).ok
 );
 check(
-  "an Ox attempt times out in 45s, not 280s",
-  viaOr.ok && providers.attemptTimeoutMs(viaOr.target) === 45_000
+  "the helper never rides a custom",
+  providers.resolveHelperTarget({ openrouterApiKey: "sk-or" }, customs)
+    ?.model.id === "nvidia-nemotron-3-ultra-free",
+  "a side call must ride a known-cheap lane, not a user-typed price"
 );
 check(
-  "a huge Ox body gets more header time, capped at 90s",
-  viaOr.ok &&
-    providers.attemptTimeoutMs(viaOr.target, 400_000) === 90_000
+  "an unknown custom id falls back to the default model, never a crash",
+  models.resolveModelInfo("custom:nope", customs).id === models.DEFAULT_MODEL_ID
 );
 check(
-  "Zen still works when the host is left default",
-  providers.resolveChatTarget("ox-alpha", { opencodeApiKey: "sk-zen-1" }).ok
+  "Settings renders the custom-model manager",
+  /CustomModelsManager/.test(settings)
 );
 check(
-  "OpenRouter without its key is refused",
-  !providers.resolveChatTarget("ox-alpha", { oxHost: "openrouter", opencodeApiKey: "sk-zen-1" }).ok
+  "Verify checks the id against OpenRouter's /models",
+  read("src/app/api/openrouter/verify/route.ts").includes("/models")
 );
 check(
-  "the helper can use the OpenRouter key when that host is selected",
-  providers.resolveHelperTarget({
-    oxHost: "openrouter",
-    openrouterApiKey: "sk-or-1",
-  })?.oxHost === "openrouter"
+  "the picker lists customs with the catalog",
+  /Your models/.test(selector)
 );
 check(
-  "the helper does not silently hop to the other Ox host",
-  providers.resolveHelperTarget({
-    oxHost: "zen",
-    openrouterApiKey: "sk-or-1",
-  }) === null,
-  "the user picks Zen vs OpenRouter by hand"
-);
-check("Settings has an OpenRouter key field", /OpenRouter API Key/.test(settings));
-check(
-  "Settings has Zen / OpenRouter host buttons",
-  settings.includes("onOxHostChange(id)")
-);
-check("the page persists the OpenRouter key and host", /openrouterKey/.test(page) && /oxHost/.test(page));
-check("the page sends both Ox fields with the chat request", /openrouterApiKey: openrouterKey/.test(page) && /oxHost/.test(page));
-check(
-  "plugin pinning still runs for the shared Ox provider",
-  route.includes('target.providerId === "opencode"') && /MAXIMUM PRIORITY/.test(plugins)
+  "sanitize keeps the :free routing suffix — verified free models must be addable",
+  models.sanitizeCustomModelDef({
+    label: "Nemotron 3 Ultra (free)",
+    apiModel: "nvidia/nemotron-3-ultra-550b-a55b:free",
+    vision: "helper",
+  })?.id === "custom:nvidia/nemotron-3-ultra-550b-a55b:free",
+  "the pattern once rejected ':' so every :free slug verified and then refused to add"
 );
 check(
-  "there is a Settings test that hits GET /models",
-  settings.includes("/api/ox/test") &&
-    read("src/app/api/ox/test/route.ts").includes("/models")
+  "the retired 0731 id migrates to the current free lane",
+  /deepseek-v4-flash-0731-free/.test(page) &&
+    /setModel\(FREE_OPENROUTER_MODEL_ID\)/.test(page),
+  "saved settings pointing at the pulled slug must land on Nemotron, not dangle"
 );
 check(
   "the live banner is driven by visibleUpstreamNotice, not a late 8s hint",
@@ -898,38 +1338,33 @@ check(
 check(
   "a 200 with no first token is retried instead of hanging the route",
   /readWithTimeout/.test(route) &&
-    /OX_FIRST_TOKEN_MS/.test(route) &&
+    /OPENROUTER_FIRST_TOKEN_MS/.test(route) &&
     /no first token/.test(route)
 );
-check(
-  "the route never auto-fails over to the other Ox host",
-  !/order: OxHost\[\]/.test(read("src/lib/providers.ts")) &&
-    /Only the host the user picked/.test(read("src/lib/providers.ts"))
-);
 
-console.log("\n11. The Ox Alpha trial ended: GLM 5.3 Flash (OpenRouter) and the free Zen Flash");
+console.log("\n11. GLM 5.3 Flash (OpenRouter) and the free Nemotron lane");
 
 const glm = models.MODELS.find((m) => m.id === "glm-5.3-flash");
-const free = models.MODELS.find((m) => m.id === "deepseek-v4-flash-free");
+const free = models.MODELS.find((m) => m.id === "nvidia-nemotron-3-ultra-free");
 check("GLM 5.3 Flash is in the catalog", Boolean(glm));
 check(
   "its wire id is the official OpenRouter slug",
   glm?.apiModel === "z-ai/glm-5.3-flash",
   "openrouter.ai/z-ai/glm-5.3-flash"
 );
-check("it is its own provider (openrouter), not a second Ox entry", glm?.provider === "openrouter");
+check("it rides its own provider (openrouter)", glm?.provider === "openrouter");
 check(
-  "it runs capped like every paid model — uncapped 401k reads fed fat fresh results into the transcript",
+  "it runs capped like every catalog model — uncapped 401k reads fed fat fresh results into the transcript",
     glm?.openToolLimits === false
   );
-check("it is a native VLM like Ox", glm?.vision === "native");
-check("DeepSeek V4 Flash Free is in the catalog", Boolean(free));
-check("the free lane rides the opencode (Zen) provider", free?.provider === "opencode");
+check("it is a native VLM", glm?.vision === "native");
+check("Nemotron 3 Ultra Free is in the catalog", Boolean(free));
+check("the free lane rides the openrouter provider", free?.provider === "openrouter");
 check(
-  "the free lane is pinned to Zen — it does not exist on OpenRouter",
-  free?.fixedHost === "zen" && free?.apiModel === "deepseek-v4-flash-free"
+  "the free lane sends the official :free slug on the wire",
+  free?.apiModel === "nvidia/nemotron-3-ultra-550b-a55b:free"
 );
-check("Ox Alpha is untouched by the new entries", models.MODELS.filter((m) => m.id === "ox-alpha").length === 1);
+check("Ox Alpha is gone from the catalog", !models.MODELS.some((m) => m.id === "ox-alpha"));
 
 const glmResolved = providers.resolveChatTarget("glm-5.3-flash", {
   openrouterApiKey: "sk-or-v1-test",
@@ -950,46 +1385,37 @@ check(
 );
 check(
   "GLM is refused without the OpenRouter key",
-  !providers.resolveChatTarget("glm-5.3-flash", { opencodeApiKey: "sk-zen-1" }).ok
+  !providers.resolveChatTarget("glm-5.3-flash", { deepseekApiKey: "sk-ds" }).ok
 );
 
-const freeResolved = providers.resolveChatTarget("deepseek-v4-flash-free", {
-  opencodeApiKey: "sk-zen-1",
+const freeResolved = providers.resolveChatTarget("nvidia-nemotron-3-ultra-free", {
+  openrouterApiKey: "sk-or-v1-test",
 });
-check("the free Flash resolves with a Zen key", freeResolved.ok);
+check("the free lane resolves with an OpenRouter key", freeResolved.ok);
 check(
-  "and hits opencode.ai/zen",
-  freeResolved.ok && freeResolved.target.baseUrl.includes("opencode.ai/zen/v1"),
+  "and hits openrouter.ai",
+  freeResolved.ok && freeResolved.target.baseUrl.includes("openrouter.ai/api/v1"),
   freeResolved.ok ? freeResolved.target.baseUrl : ""
 );
 check(
-  "and sends deepseek-v4-flash-free on the wire, not the Ox id",
-  freeResolved.ok && freeResolved.target.apiModel === "deepseek-v4-flash-free"
+  "and sends the :free slug on the wire",
+  freeResolved.ok && freeResolved.target.apiModel === "nvidia/nemotron-3-ultra-550b-a55b:free"
 );
 check(
-  "the Zen pin wins even when the Ox button points at OpenRouter",
-  providers.resolveChatTarget("deepseek-v4-flash-free", {
-    oxHost: "openrouter",
-    opencodeApiKey: "sk-zen-1",
-    openrouterApiKey: "sk-or-v1-test",
-  }).target.apiModel === "deepseek-v4-flash-free"
-);
-check(
-  "the free Flash is refused with only an OpenRouter key",
-  !providers.resolveChatTarget("deepseek-v4-flash-free", {
-    oxHost: "openrouter",
-    openrouterApiKey: "sk-or-v1-test",
+  "the free lane is refused with only a DeepSeek key",
+  !providers.resolveChatTarget("nvidia-nemotron-3-ultra-free", {
+    deepseekApiKey: "sk-ds",
   }).ok
 );
 check(
   "the client key check agrees: GLM wants the OpenRouter key",
   models.hasKeyForModel("glm-5.3-flash", { openrouterKey: "sk-or-v1" }) &&
-    !models.hasKeyForModel("glm-5.3-flash", { opencodeKey: "sk-zen-1" })
+    !models.hasKeyForModel("glm-5.3-flash", { deepseekKey: "sk-ds" })
 );
 check(
-  "and the free Flash wants the Zen key regardless of the Ox button",
-  models.hasKeyForModel("deepseek-v4-flash-free", { opencodeKey: "sk-zen-1", oxHost: "openrouter" }) &&
-    !models.hasKeyForModel("deepseek-v4-flash-free", { openrouterKey: "sk-or-v1", oxHost: "openrouter" })
+  "and the free lane wants the OpenRouter key too",
+  models.hasKeyForModel("nvidia-nemotron-3-ultra-free", { openrouterKey: "sk-or-v1" }) &&
+    !models.hasKeyForModel("nvidia-nemotron-3-ultra-free", { deepseekKey: "sk-ds" })
 );
 
 check(
@@ -998,7 +1424,7 @@ check(
     pricing.MODEL_RATES["glm-5.3-flash"]?.output === 0.5,
   "the 50% discount ends 2026-09-09; the cap must never undercount"
 );
-check("the free Flash costs nothing in the rate table", pricing.MODEL_RATES["deepseek-v4-flash-free"]?.input === 0 && pricing.MODEL_RATES["deepseek-v4-flash-free"]?.output === 0);
+check("the free lane costs nothing in the rate table", pricing.MODEL_RATES["nvidia-nemotron-3-ultra-free"]?.input === 0 && pricing.MODEL_RATES["nvidia-nemotron-3-ultra-free"]?.output === 0);
 check(
     "GLM replies are billed, so the cost chip can show real money",
     (() => {
@@ -1026,13 +1452,81 @@ check(
     0.15
 );
 check(
-  "the route's resilience gates cover the new provider, not just Ox",
+  "the route's resilience gates cover OpenRouter",
   (route.match(/target\.providerId === "openrouter"/g) ?? []).length >= 9,
   "pin/retry/empty-stream paths apply to OpenRouter too"
 );
 check(
-  "Settings says one key covers both OpenRouter models",
-  /z-ai\/glm-5\.3-flash/.test(settings)
+  "Settings says one key covers every OpenRouter model",
+  /One key covers every OpenRouter model/.test(settings)
+);
+
+console.log("\n12. DeepSeek V4.1 Flash on OpenRouter, and pinned cheapest endpoints");
+
+const v41 = models.MODELS.find((m) => m.id === "deepseek-v4.1-flash");
+check("DeepSeek V4.1 Flash is in the catalog", Boolean(v41));
+check(
+  "it rides the openrouter provider with the exact upstream slug",
+  v41?.provider === "openrouter" &&
+    v41?.apiModel === "deepseek/deepseek-v4.1-flash",
+  v41?.apiModel
+);
+check(
+  "it runs capped like every catalog model",
+  v41?.openToolLimits === false
+);
+check(
+  "it sees images natively, no video",
+  v41?.vision === "native" && v41?.video === false
+);
+check(
+  "V4.1 Flash is budgeted at the pinned endpoint's list price",
+  pricing.MODEL_RATES["deepseek-v4.1-flash"]?.input === 0.15 &&
+    pricing.MODEL_RATES["deepseek-v4.1-flash"]?.output === 0.6,
+  "Morph list; the 50% promo is not budgeted, so the cap never undercounts"
+);
+check(
+  "the client key check agrees: V4.1 Flash wants the OpenRouter key",
+  models.hasKeyForModel("deepseek-v4.1-flash", { openrouterKey: "sk-or-v1" }) &&
+    !models.hasKeyForModel("deepseek-v4.1-flash", { deepseekKey: "sk-ds" })
+);
+const v41Resolved = providers.resolveChatTarget("deepseek-v4.1-flash", {
+  openrouterApiKey: "sk-or-v1-test",
+});
+check("V4.1 Flash resolves with an OpenRouter key", v41Resolved.ok);
+check(
+  "and hits openrouter.ai with the upstream slug on the wire",
+  v41Resolved.ok &&
+    v41Resolved.target.baseUrl.includes("openrouter.ai/api/v1") &&
+    v41Resolved.target.apiModel === "deepseek/deepseek-v4.1-flash",
+  v41Resolved.ok ? v41Resolved.target.baseUrl : ""
+);
+check(
+  "V4.1 Flash is refused with only a DeepSeek key",
+  !providers.resolveChatTarget("deepseek-v4.1-flash", {
+    deepseekApiKey: "sk-ds",
+  }).ok
+);
+check(
+  "GLM pins the cheapest tools-capable endpoint",
+  JSON.stringify(providers.openrouterProviderFor("glm-5.3-flash")) ===
+    JSON.stringify({ only: ["inference-net/fp4"], allow_fallbacks: false })
+);
+check(
+  "V4.1 Flash pins morph without fallbacks",
+  JSON.stringify(providers.openrouterProviderFor("deepseek-v4.1-flash")) ===
+    JSON.stringify({ only: ["morph"], allow_fallbacks: false }),
+  "nominally cheaper routes serve no tools, so the agent cannot run on them"
+);
+check(
+  "the free lane and customs stay on automatic routing",
+  providers.openrouterProviderFor("nvidia-nemotron-3-ultra-free") === null &&
+    providers.openrouterProviderFor("custom:openrouter/x-y") === null
+);
+check(
+  "the chat body carries the pinned provider on OpenRouter",
+  /openrouterProviderFor\(target\.model\.id\)/.test(route) &&
+    /if \(pinned\) dsRequestBody\.provider = pinned;/.test(route)
 );
 
 console.log(

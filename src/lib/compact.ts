@@ -1,4 +1,5 @@
 import type { TranscriptMessage } from "@/lib/transcript";
+import { fingerprintToolCall } from "@/lib/loop-breaker";
 
 /**
  * Folding finished agent rounds into a short narrative.
@@ -127,6 +128,102 @@ function sizeOf(messages: TranscriptMessage[]): number {
   return total;
 }
 
+/** Results at or below this size are never folded — the pointer would cost more. */
+const DEDUP_MIN_CHARS = 200;
+
+/**
+ * Fold byte-identical tool results to a pointer at the surviving copy.
+ *
+ * A run that re-reads the same files carries every copy on every request:
+ * ten full reads of one file is ten copies of it in the prefill, and the
+ * bloat is what trips the folding valve below — which then eats the
+ * evidence and forces MORE re-reads. The loop in the report was exactly
+ * this: re-read, balloon, fold, re-read.
+ *
+ * Same call plus byte-identical output keeps ONE copy (the latest,
+ * verbatim) and points the older ones at it. Lossless — the pointer names
+ * the surviving copy — and legal on every wire: only assistant
+ * reasoning_content has a verbatim-replay rule; tool replies are free
+ * text. Returns a new array; the input is never modified.
+ */
+export function dedupeIdenticalResults(messages: TranscriptMessage[]): {
+  messages: TranscriptMessage[];
+  dupsFolded: number;
+  charsSaved: number;
+} {
+  const callById = new Map<string, { name: string; args: string }>();
+  for (const m of messages) {
+    if (m.role === "assistant" && m.tool_calls?.length) {
+      for (const call of m.tool_calls) {
+        callById.set(call.id, {
+          name: call.function.name,
+          args: call.function.arguments,
+        });
+      }
+    }
+  }
+
+  // Tool-message indices grouped by call, then partitioned by exact text.
+  // Groups are small (repeats of one call), so direct comparison beats
+  // hashing — no hash function to keep in sync, no collision story.
+  const byCall = new Map<string, { index: number; content: string }[]>();
+  messages.forEach((m, i) => {
+    if (m.role !== "tool") return;
+    if (typeof m.content !== "string" || m.content.length <= DEDUP_MIN_CHARS) {
+      return;
+    }
+    const call = callById.get(m.tool_call_id);
+    if (!call) return;
+    let parsed: unknown = call.args;
+    try {
+      parsed = JSON.parse(call.args) as unknown;
+    } catch {
+      /* unparseable arguments still fingerprint deterministically */
+    }
+    const key = fingerprintToolCall(call.name, parsed);
+    const list = byCall.get(key) ?? [];
+    list.push({ index: i, content: m.content });
+    byCall.set(key, list);
+  });
+
+  const out = messages.slice();
+  let dupsFolded = 0;
+  let charsSaved = 0;
+  for (const list of byCall.values()) {
+    if (list.length < 2) continue;
+    const seen = new Map<string, number[]>();
+    for (const entry of list) {
+      const group = seen.get(entry.content) ?? [];
+      group.push(entry.index);
+      seen.set(entry.content, group);
+    }
+    for (const indices of seen.values()) {
+      if (indices.length < 2) continue;
+      const keep = Math.max(...indices);
+      for (const index of indices) {
+        if (index === keep) continue;
+        const original = out[index];
+        if (original.role !== "tool" || typeof original.content !== "string") {
+          continue;
+        }
+        const call = callById.get(original.tool_call_id);
+        const desc = call
+          ? describeCall(call.name, call.args, undefined)
+          : "tool";
+        const pointer =
+          `[Folded: identical ${desc} result — same call, ` +
+          `byte-identical output. The latest copy is below; use it ` +
+          `instead of re-fetching.]`;
+        charsSaved += Math.max(0, original.content.length - pointer.length);
+        dupsFolded += 1;
+        out[index] = { ...original, content: pointer };
+      }
+    }
+  }
+  if (dupsFolded === 0) return { messages, dupsFolded: 0, charsSaved: 0 };
+  return { messages: out, dupsFolded, charsSaved };
+}
+
 /** A short, factual description of one tool call and how it turned out. */
 function describeCall(
   name: string,
@@ -173,28 +270,48 @@ export function compactTranscript(
     step = COMPACT_STEP,
   } = options;
 
-  if (sizeOf(messages) < thresholdChars) return { messages, stats: EMPTY };
+  /*
+   * Identical re-reads fold FIRST, always, before the threshold check: a
+   * transcript cycling the same files carries every copy on every
+   * request, and the bloat trips the valve below — which eats the
+   * evidence and forces more re-reads. Folding the dupes first shrinks
+   * the pressure without touching the recency tuning. Savings ride in
+   * charsSaved even when no round folds.
+   */
+  const deduped = dedupeIdenticalResults(messages);
+  const wire = deduped.messages;
+  const quiet: CompactStats =
+    deduped.charsSaved > 0
+      ? {
+          rounds: 0,
+          charsSaved: deduped.charsSaved,
+          tokensSaved: Math.round(deduped.charsSaved / 3.6),
+          reasoningChars: 0,
+        }
+      : EMPTY;
+
+  if (sizeOf(wire) < thresholdChars) return { messages: wire, stats: quiet };
 
   // Index every assistant turn that called tools — one per agent round.
   const roundIndices: number[] = [];
-  messages.forEach((m, i) => {
+  wire.forEach((m, i) => {
     if (m.role === "assistant" && m.tool_calls?.length) roundIndices.push(i);
   });
 
   const compactable = roundIndices.length - keepRecentRounds;
-  if (compactable <= 0) return { messages, stats: EMPTY };
+  if (compactable <= 0) return { messages: wire, stats: quiet };
 
   // Quantised so the boundary — and therefore the cached prefix — only moves
   // every `step` rounds instead of on every request.
   const boundary = Math.floor(compactable / step) * step;
-  if (boundary <= 0) return { messages, stats: EMPTY };
+  if (boundary <= 0) return { messages: wire, stats: quiet };
 
   const cutoff = new Set(roundIndices.slice(0, boundary));
 
   // Tool replies are looked up by id so a round's calls and results can be
   // removed together, which is what keeps the transcript balanced.
   const resultById = new Map<string, string>();
-  for (const m of messages) {
+  for (const m of wire) {
     if (m.role === "tool") resultById.set(m.tool_call_id, m.content);
   }
 
@@ -203,8 +320,8 @@ export function compactTranscript(
   let rounds = 0;
   let reasoningChars = 0;
 
-  for (let i = 0; i < messages.length; i++) {
-    const m = messages[i];
+  for (let i = 0; i < wire.length; i++) {
+    const m = wire[i];
 
     if (m.role === "tool") {
       // Dropped only if its call was folded away; otherwise kept as-is.
@@ -244,9 +361,9 @@ export function compactTranscript(
     });
   }
 
-  const before = sizeOf(messages);
+  const before = sizeOf(wire);
   const after = sizeOf(out);
-  const charsSaved = Math.max(0, before - after);
+  const charsSaved = Math.max(0, before - after) + deduped.charsSaved;
 
   return {
     messages: out,

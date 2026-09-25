@@ -239,7 +239,7 @@ const routeTextForHelper = rfs(path.join(ROOT, "src/app/api/chat/route.ts"), "ut
 );
 check(
   "the helper target is resolved separately from the main target",
-  /const helperTarget = resolveHelperTarget\(creds, model\)/.test(routeTextForHelper) &&
+  /const helperTarget = resolveHelperTarget\(creds, customs\)/.test(routeTextForHelper) &&
     /const helper = helperIsCheap \? helperTarget : null/.test(routeTextForHelper),
   "falling back to the main target used to make every search-planner call bill the model answering the chat"
 );
@@ -481,6 +481,50 @@ check(
   "the saving is real money, not rounding",
   ((inPlaceMiss - appendedMiss) / 1e6) * 0.435 > 0.02,
   `$${(((inPlaceMiss - appendedMiss) / 1e6) * 0.435).toFixed(4)} on one 40-round task`
+);
+
+// ---------------------------------------------------------------------------
+console.log("\n9. The footer proves where the money went");
+
+/*
+ * Reported: a small ESP script on GLM cost about a dollar — "unreal" for a
+ * cheap model. It was mostly thinking: reasoning bills at the output rate
+ * and on high effort dwarfs the answer, but the footer showed one total
+ * with no split, so the figure looked impossible. The server now sums
+ * reasoning tokens per round, the tokens tooltip names their share, and
+ * the header pins the chat total where scrolling cannot hide it.
+ */
+const routeSrc = rfs(path.join(ROOT, "src/app/api/chat/route.ts"), "utf8");
+const bubbleSrc = rfs(path.join(ROOT, "src/components/MessageBubble.tsx"), "utf8");
+const chatAreaSrc = rfs(path.join(ROOT, "src/components/ChatArea.tsx"), "utf8");
+
+check(
+  "reasoning tokens are summed per round like the cache split",
+  /completion_tokens_details: \{ reasoning_tokens: 0 \},/.test(routeSrc) &&
+    /reasoningDetails\?\.completion_tokens_details\s*\?\.reasoning_tokens/.test(
+      routeSrc
+    ),
+  "upstream reports the split per round; the total has to accumulate it"
+);
+check(
+  "the helper reads the split out of stored usage",
+  pricing.reasoningTokens({
+    completion_tokens: 100,
+    completion_tokens_details: { reasoning_tokens: 90 },
+  }) === 90 && pricing.reasoningTokens({}) === 0,
+  "absent on lanes that do not report it — and that must read as zero, not NaN"
+);
+check(
+  "the tokens tooltip names the thinking share",
+  bubbleSrc.includes("reasoningTokens(message.usage)") &&
+    bubbleSrc.includes("of the output was thinking, billed at the output rate"),
+  "the line that explains a $1 reply for a short answer"
+);
+check(
+  "the header pins the chat total from live totals",
+  /totals\.priced > 0 && \(/.test(chatAreaSrc) &&
+    chatAreaSrc.includes("What this chat has cost so far"),
+  "the breakdown bar scrolls away with the conversation; the total must not"
 );
 
 console.log(
