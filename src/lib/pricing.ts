@@ -26,6 +26,11 @@ export const MODEL_RATES: Record<string, ModelRates> = {
   // (0.075 / 0.015 / 0.25) runs through 2026-09-09 — budget against the
   // list price so the spending cap never undercounts.
   "glm-5.3-flash": { input: 0.15, cachedInput: 0.03, output: 0.5 },
+  // Morph list price for DeepSeek V4.1 Flash (verified 2026-09-25): $0.15
+  // in / $0.60 out / $0.003 cache-read per 1M, currently 50% off. The lane
+  // is pinned to Morph with no fallbacks, so the endpoint list is the
+  // honest ceiling and the cap never undercounts.
+  "deepseek-v4.1-flash": { input: 0.15, cachedInput: 0.003, output: 0.6 },
   // OpenRouter's free tier, currently NVIDIA Nemotron 3 Ultra.
   "nvidia-nemotron-3-ultra-free": { input: 0, cachedInput: 0, output: 0 },
   // Electricity only — the weights run on the user's GPU.
