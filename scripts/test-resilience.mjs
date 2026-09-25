@@ -338,6 +338,69 @@ check(
   ) === "Waiting on OpenCode Zen — try 1 of 5 · 48k chars in"
 );
 check(
+  "a fat local wait names the prefill",
+  R.visibleUpstreamNotice(
+    {
+      phase: "attempt",
+      attempt: 1,
+      attempts: 3,
+      receivedAt: 10_000,
+      host: "On this PC",
+      providerId: "local",
+      inputChars: 74_000,
+    },
+    73_000
+  ) ===
+    "Waiting on On this PC — try 1 of 3 · 74k chars in" +
+    " · prefilling — first token takes minutes on a cold start",
+  "a burning GPU with no tokens reads as stuck until the wait is named"
+);
+check(
+  "cloud waits do not get the prefill note",
+  R.visibleUpstreamNotice(
+    {
+      phase: "attempt",
+      attempt: 1,
+      attempts: 3,
+      receivedAt: 10_000,
+      host: "DeepSeek",
+      inputChars: 74_000,
+    },
+    73_000
+  ) === "Waiting on DeepSeek — try 1 of 3 · 74k chars in"
+);
+check(
+  "a small local wait stays quiet",
+  R.visibleUpstreamNotice(
+    {
+      phase: "attempt",
+      attempt: 1,
+      attempts: 3,
+      receivedAt: 10_000,
+      host: "On this PC",
+      providerId: "local",
+      inputChars: 5_000,
+    },
+    13_400
+  ) === "Waiting on On this PC — try 1 of 3"
+);
+check(
+  "the banner names the biggest contributor from 25k up",
+  R.visibleUpstreamNotice(
+    {
+      phase: "attempt",
+      attempt: 1,
+      attempts: 3,
+      receivedAt: 10_000,
+      host: "DeepSeek",
+      inputChars: 74_000,
+      breakdown: [{ label: "instructions", chars: 40_000 }],
+    },
+    13_400
+  ) === "Waiting on DeepSeek — try 1 of 3 · 74k chars in (instructions 40k)",
+  "a local prefill waits on far less than the old 100k bar"
+);
+check(
   "try 2 of a retry shows immediately so the backoff line does not vanish",
   R.visibleUpstreamNotice(
     {
