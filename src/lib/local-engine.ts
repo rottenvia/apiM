@@ -208,14 +208,17 @@ export async function engineStatus(): Promise<EngineStatus> {
     apiModel: DEFAULT_LOCAL_API_MODEL,
     hint: engineHint(flags),
     spec,
-    gpu: await buildGpuState(running),
+    gpu: await buildGpuState(running, spec),
     gpuPlan: ggufReady
       ? await planSidecarMachine(ggufPath(), mmprojReady ? mmprojPath() : null, spec)
       : null,
   };
 }
 
-async function buildGpuState(running: boolean): Promise<EngineGpuState> {
+async function buildGpuState(
+  running: boolean,
+  spec?: SidecarSpecState
+): Promise<EngineGpuState> {
   const detected = detectGpu();
   const logTail = await readLogTail(30);
   if (!running) {
@@ -233,7 +236,39 @@ async function buildGpuState(running: boolean): Promise<EngineGpuState> {
   }
   const reading = parseGpuLog(logTail.join("\n"));
   let note: string;
-  if (reading.inUse === true) {
+  // The fit warning outranks the offload line: on Windows the allocs spill
+  // to shared RAM instead of failing, so the log can claim 64/64 offloaded
+  // while every token crawls over PCIe.
+  if (reading.fitWarningNgl !== null) {
+    let planned: number | null = null;
+    if (spec) {
+      try {
+        const plan = await planSidecarMachine(
+          ggufPath(),
+          (await fileSize(mmprojPath())) >= MMPROJ_MIN_BYTES
+            ? mmprojPath()
+            : null,
+          spec
+        );
+        // layers 0 means "no real plan" (unknown card or shape) — comparing
+        // against the 99 fallback would lie in both directions.
+        planned = plan.layers > 0 ? plan.ngl : null;
+      } catch {
+        planned = null;
+      }
+    }
+    if (planned !== null && planned < reading.fitWarningNgl) {
+      note =
+        `Stale engine flags: this launch was told -ngl ${reading.fitWarningNgl} ` +
+        `but the card fits ${planned} — it is spilling to shared RAM and crawling. ` +
+        `Click Restart below to relaunch with the fitted count.`;
+    } else {
+      note =
+        `The engine could not fit the requested ${reading.fitWarningNgl} layers ` +
+        `into free VRAM — another app may be holding the card. Close GPU apps ` +
+        `and click Restart below.`;
+    }
+  } else if (reading.inUse === true) {
     note = `GPU in use — ${reading.offloaded} layers offloaded to ${
       reading.backend ?? "the GPU"
     }.`;
@@ -847,6 +882,15 @@ interface GpuLogReading {
   backend: string | null;
   offloaded: string | null;
   failedLine: string | null;
+  /**
+   * The -ngl the engine REFUSED to auto-fit ("failed to fit params to free
+   * device memory: n_gpu_layers already set by user to N, abort"), or null.
+   * On Windows the allocs then spill to shared RAM instead of failing, so
+   * the engine runs — at PCIe speed, which reads as "GPU burns, nothing
+   * comes". Compared against the fitted plan: a mismatch proves stale flags
+   * from before the VRAM planner.
+   */
+  fitWarningNgl: number | null;
 }
 
 /**
@@ -872,6 +916,18 @@ export function parseGpuLog(logText: string): GpuLogReading {
         ) && !/^\s*$/i.test(l)
       ) ?? null;
 
+  // "failed to fit params to free device memory: n_gpu_layers already set
+  // by user to 99, abort" — the stale-flags signature. One launch logs it
+  // at most once, so newest-first is just tidy.
+  let fitWarningNgl: number | null = null;
+  for (const line of lines) {
+    const m = /n_gpu_layers already set by user to (\d+)/i.exec(line);
+    if (m) {
+      fitWarningNgl = Number(m[1]);
+      break;
+    }
+  }
+
   // "offloaded 36/36 layers to GPU (CUDA)" — the line that settles it.
   for (let i = lines.length - 1; i >= 0; i--) {
     const m = /offloaded (\d+\/\d+) layers to GPU(?:\s*\((\w+)\))?/i.exec(
@@ -885,6 +941,7 @@ export function parseGpuLog(logText: string): GpuLogReading {
         backend: m[2]?.toUpperCase() ?? null,
         offloaded: m[1],
         failedLine: done === 0 ? failedLine : null,
+        fitWarningNgl,
       };
     }
   }
@@ -892,10 +949,22 @@ export function parseGpuLog(logText: string): GpuLogReading {
   // No offload line yet, but a backend failure was logged — that is the
   // "GPU 0%, CPU 100%" case, and the log says exactly why.
   if (failedLine) {
-    return { inUse: false, backend: null, offloaded: null, failedLine };
+    return {
+      inUse: false,
+      backend: null,
+      offloaded: null,
+      failedLine,
+      fitWarningNgl,
+    };
   }
 
-  return { inUse: null, backend: null, offloaded: null, failedLine: null };
+  return {
+    inUse: null,
+    backend: null,
+    offloaded: null,
+    failedLine: null,
+    fitWarningNgl,
+  };
 }
 
 function lastUsedPath(): string {

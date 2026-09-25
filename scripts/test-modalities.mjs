@@ -67,6 +67,12 @@ check("Qwen does not need the helper", models.modelNeedsVisionHelper("qwen-3.8-2
     check("Qwen can watch video", models.modelSeesVideo("qwen-3.8-27b"));
     check("GLM can watch video", models.modelSeesVideo("glm-5.3-flash"));
 check("Pro cannot watch video", models.modelSeesVideo("deepseek-v4-pro") === false);
+check(
+  "V4.1 Flash is a native VLM without video",
+  models.MODELS.find((m) => m.id === "deepseek-v4.1-flash")?.vision === "native" &&
+    models.modelSeesVideo("deepseek-v4.1-flash") === false &&
+    models.modelNeedsVisionHelper("deepseek-v4.1-flash") === false
+);
 check("all catalog models can receive images somehow", models.MODELS.every((m) => models.modelSeesImages(m.id)));
 
 console.log("\n2. Wire format");

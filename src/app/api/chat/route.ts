@@ -195,6 +195,7 @@ import {
   attemptTimeoutMs,
   completionHeaders,
   OPENROUTER_FIRST_TOKEN_MS,
+  openrouterProviderFor,
   providerHttpError,
   providerTimedOut,
   providerUnreachable,
@@ -2482,6 +2483,19 @@ Ask before you build the wrong thing. If a choice would change what you produce 
            */
           if (target.providerId === "openrouter" && convId) {
             dsRequestBody.session_id = `conv-${convId}`;
+          }
+
+          /*
+           * Pinned cheapest endpoint per catalog model. Without this
+           * OpenRouter auto-routes every request, so identical rounds bill
+           * at whatever provider the gateway picks — the spend wanders and
+           * the rate table cannot match it. `only` + no fallbacks keeps
+           * every token on the researched price; unpinned models (free
+           * lane, customs) keep automatic routing.
+           */
+          if (target.providerId === "openrouter") {
+            const pinned = openrouterProviderFor(target.model.id);
+            if (pinned) dsRequestBody.provider = pinned;
           }
 
           applyThinking(

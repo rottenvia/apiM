@@ -263,6 +263,13 @@ export const FREE_MAX_OUTPUT_TOKENS = 131_072;
  * spending limit still caps a round through `maxTokensFor`.
  */
 export const GLM_MAX_OUTPUT_TOKENS = 131_072;
+/**
+ * DeepSeek V4.1 Flash via OpenRouter (Morph endpoint, 943K documented max).
+ * Same generous window as GLM: it is the other cheap agent lane, and long
+ * tool-call arguments need the room. The spending limit still caps a round
+ * through `maxTokensFor`.
+ */
+export const OR_AGENT_MAX_OUTPUT_TOKENS = 131_072;
 
 export const DEFAULT_MODEL_ID = "glm-5.3-flash";
 
@@ -309,7 +316,7 @@ export const PROVIDER_INFO: Record<ProviderId, ProviderInfo> = {
     authLabel: "openrouter.ai/settings/keys",
     keyPlaceholder: "sk-or-v1-...",
     keyBlurb:
-      "One key covers every OpenRouter model: GLM 5.3 Flash, Nemotron 3 Ultra (free), and anything custom you add.",
+      "One key covers every OpenRouter model: GLM 5.3 Flash, DeepSeek V4.1 Flash, Nemotron 3 Ultra (free), and anything custom you add.",
     thinkingStyle: "openai",
   },
   local: {
@@ -351,6 +358,26 @@ export const MODELS: ModelInfo[] = [
     // transcript on the default model — the exact fat-wire disease.
     openToolLimits: false,
     maxOutputTokens: GLM_MAX_OUTPUT_TOKENS,
+  },
+  {
+    id: "deepseek-v4.1-flash",
+    apiModel: "deepseek/deepseek-v4.1-flash",
+    provider: "openrouter",
+    label: "DeepSeek V4.1 Flash",
+    shortLabel: "V4.1 Flash",
+    description:
+      "DeepSeek's sparse-MoE agent model via OpenRouter's cheapest tools-capable endpoint (Morph). 1M context, native images, tools + reasoning.",
+    specs: "1M context · 131K max output · images",
+    resumeBlurb: "Cheap DeepSeek agent lane",
+    settingsSubtitle: "OpenRouter · Morph endpoint",
+    mapsLowToHigh: false,
+    helper: false,
+    peakHours: false,
+    vision: "native",
+    video: false,
+    // Capped like every catalog model.
+    openToolLimits: false,
+    maxOutputTokens: OR_AGENT_MAX_OUTPUT_TOKENS,
   },
   {
     id: "deepseek-v4-pro",

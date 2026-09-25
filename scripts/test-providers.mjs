@@ -721,6 +721,18 @@ check(
   /providerId: evt\.providerId/.test(page),
   "the banner's local-prefill note keys off it"
 );
+check(
+  "stale flags get a restart note, not a mystery crawl",
+  /Stale engine flags/.test(engineSrc) &&
+    /spilling to shared RAM/.test(engineSrc) &&
+    /Click Restart below/.test(engineSrc),
+  "the planned count proves the running server predates the VRAM planner"
+);
+check(
+  "VRAM contention gets its own note",
+  /could not fit the requested/.test(engineSrc) &&
+    /Close GPU apps/.test(engineSrc)
+);
 
 check(
   "there is no CUDA ubuntu asset, so cuda on Linux lands on Vulkan",
@@ -858,13 +870,21 @@ check(
   engineLib.parseGpuLog("llama-server: serving on http://127.0.0.1:18765").inUse === null
 );
 check(
+  "the fit warning names the requested layer count",
+  engineLib.parseGpuLog(
+    "W common_fit_params: failed to fit params to free device memory: n_gpu_layers already set by user to 99, abort"
+  ).fitWarningNgl === 99 &&
+    engineLib.parseGpuLog("offloaded 19/64 layers to GPU (CUDA)")
+      .fitWarningNgl === null
+);
+check(
   "the engine tees its stderr to a log file",
   /createWriteStream\(engineLogPath\(\)/.test(engineSrc),
   "before this the 'CUDA failed, using CPU' line was discarded after 400 chars"
 );
 check(
   "status reports where the compute went",
-  /gpu: await buildGpuState\(running\)/.test(engineSrc) &&
+  /gpu: await buildGpuState\(running, spec\)/.test(engineSrc) &&
     /Running on the CPU/.test(engineSrc)
 );
 check(
@@ -1403,6 +1423,74 @@ check(
 check(
   "Settings says one key covers every OpenRouter model",
   /One key covers every OpenRouter model/.test(settings)
+);
+
+console.log("\n12. DeepSeek V4.1 Flash on OpenRouter, and pinned cheapest endpoints");
+
+const v41 = models.MODELS.find((m) => m.id === "deepseek-v4.1-flash");
+check("DeepSeek V4.1 Flash is in the catalog", Boolean(v41));
+check(
+  "it rides the openrouter provider with the exact upstream slug",
+  v41?.provider === "openrouter" &&
+    v41?.apiModel === "deepseek/deepseek-v4.1-flash",
+  v41?.apiModel
+);
+check(
+  "it runs capped like every catalog model",
+  v41?.openToolLimits === false
+);
+check(
+  "it sees images natively, no video",
+  v41?.vision === "native" && v41?.video === false
+);
+check(
+  "V4.1 Flash is budgeted at the pinned endpoint's list price",
+  pricing.MODEL_RATES["deepseek-v4.1-flash"]?.input === 0.15 &&
+    pricing.MODEL_RATES["deepseek-v4.1-flash"]?.output === 0.6,
+  "Morph list; the 50% promo is not budgeted, so the cap never undercounts"
+);
+check(
+  "the client key check agrees: V4.1 Flash wants the OpenRouter key",
+  models.hasKeyForModel("deepseek-v4.1-flash", { openrouterKey: "sk-or-v1" }) &&
+    !models.hasKeyForModel("deepseek-v4.1-flash", { deepseekKey: "sk-ds" })
+);
+const v41Resolved = providers.resolveChatTarget("deepseek-v4.1-flash", {
+  openrouterApiKey: "sk-or-v1-test",
+});
+check("V4.1 Flash resolves with an OpenRouter key", v41Resolved.ok);
+check(
+  "and hits openrouter.ai with the upstream slug on the wire",
+  v41Resolved.ok &&
+    v41Resolved.target.baseUrl.includes("openrouter.ai/api/v1") &&
+    v41Resolved.target.apiModel === "deepseek/deepseek-v4.1-flash",
+  v41Resolved.ok ? v41Resolved.target.baseUrl : ""
+);
+check(
+  "V4.1 Flash is refused with only a DeepSeek key",
+  !providers.resolveChatTarget("deepseek-v4.1-flash", {
+    deepseekApiKey: "sk-ds",
+  }).ok
+);
+check(
+  "GLM pins the cheapest tools-capable endpoint",
+  JSON.stringify(providers.openrouterProviderFor("glm-5.3-flash")) ===
+    JSON.stringify({ only: ["inference-net/fp4"], allow_fallbacks: false })
+);
+check(
+  "V4.1 Flash pins morph without fallbacks",
+  JSON.stringify(providers.openrouterProviderFor("deepseek-v4.1-flash")) ===
+    JSON.stringify({ only: ["morph"], allow_fallbacks: false }),
+  "nominally cheaper routes serve no tools, so the agent cannot run on them"
+);
+check(
+  "the free lane and customs stay on automatic routing",
+  providers.openrouterProviderFor("nvidia-nemotron-3-ultra-free") === null &&
+    providers.openrouterProviderFor("custom:openrouter/x-y") === null
+);
+check(
+  "the chat body carries the pinned provider on OpenRouter",
+  /openrouterProviderFor\(target\.model\.id\)/.test(route) &&
+    /if \(pinned\) dsRequestBody\.provider = pinned;/.test(route)
 );
 
 console.log(

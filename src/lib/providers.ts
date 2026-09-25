@@ -269,6 +269,35 @@ export function resolveHelperTarget(
   return null;
 }
 
+/**
+ * Pinned cheapest OpenRouter endpoint per catalog model, by app id.
+ *
+ * The values are provider tags from OpenRouter's endpoints API (verified
+ * 2026-09-25): inference-net/fp4 is the cheapest GLM 5.3 Flash route with
+ * tools ($0.045 in / $0.14 out per 1M at the current 50% off), and morph
+ * the cheapest DeepSeek V4.1 Flash route with tools ($0.075 / $0.30 at
+ * 50% off — the nominally cheaper DekaLLM route serves no tools, so the
+ * agent cannot run on it).
+ *
+ * `allow_fallbacks: false` keeps every token on the pinned price: with
+ * fallbacks OpenRouter may re-route to a costlier provider mid-run and
+ * the bill stops matching the rate table. The free lane and custom models
+ * stay on automatic routing — :free has no meaningful choice, and a
+ * user-typed slug has no researched pin.
+ */
+const OPENROUTER_PINNED_ENDPOINTS: Record<string, string> = {
+  "glm-5.3-flash": "inference-net/fp4",
+  "deepseek-v4.1-flash": "morph",
+};
+
+/** OpenRouter `provider` body for a catalog model, or null for auto-route. */
+export function openrouterProviderFor(
+  modelId: string
+): { only: string[]; allow_fallbacks: boolean } | null {
+  const tag = OPENROUTER_PINNED_ENDPOINTS[modelId];
+  return tag ? { only: [tag], allow_fallbacks: false } : null;
+}
+
 /** Headers for a Chat Completions POST. OpenRouter asks for a referer. */
 export function completionHeaders(target: ResolvedTarget): Record<string, string> {
   const headers: Record<string, string> = {
