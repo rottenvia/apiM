@@ -604,6 +604,13 @@ check(
   "the shell stays mounted so its clock keeps counting; the row below is the only visible voice until the first token"
 );
 check(
+  "the covered wait stacks tight — pill, status row, request line merge",
+  /isLoading && !streamingHasOutput \? "space-y-1" : "space-y-6"/.test(
+    chatArea
+  ),
+  "three airy rows read as misplaced lines; the relaxed rhythm returns with the first token"
+);
+check(
   "whitespace-only deltas do not unmount the status row",
   /m\.content\.trim\(\)\.length > 0/.test(chatArea) &&
     /m\.reasoningContent\.trim\(\)\.length > 0/.test(chatArea),
