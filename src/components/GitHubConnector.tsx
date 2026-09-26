@@ -422,7 +422,7 @@ export function GitHubConnector({
                     <span className="truncate font-mono text-[13px] text-success">{view.workingBranch}</span>
                     {changes && changes.ahead > 0 && (
                       <span
-                        className="flex-none rounded-full bg-accent/15 px-1.5 py-0.5 text-[10px] font-semibold text-accent-light"
+                        className="flex-none rounded-full bg-accent/15 px-1.5 py-0.5 text-[11px] font-semibold text-accent-light"
                         title={`${changes.ahead} commit${changes.ahead === 1 ? "" : "s"} ahead of ${view.baseBranch}`}
                       >
                         ↑{changes.ahead}
@@ -440,7 +440,7 @@ export function GitHubConnector({
                       className="mt-1.5 inline-flex items-center gap-1.5 text-[12px] font-medium text-accent-light hover:underline"
                     >
                       <span
-                        className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold capitalize ${
+                        className={`rounded-full px-1.5 py-0.5 text-[11px] font-semibold capitalize ${
                           prState === "merged"
                             ? "bg-accent/15 text-accent-light"
                             : prState === "closed"
@@ -803,7 +803,7 @@ export function GitHubConnector({
                       <button
                         key={mode}
                         onClick={() => setBranchMode(mode)}
-                        className={`rounded-md px-2 py-1.5 text-[12px] font-medium transition-colors ${
+                        className={`rounded-lg px-2 py-1.5 text-[12px] font-medium transition-colors ${
                           branchMode === mode
                             ? "bg-bg-secondary text-text-primary shadow-sm"
                             : "text-text-muted hover:text-text-secondary"

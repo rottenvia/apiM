@@ -1932,6 +1932,15 @@ export default function Home() {
         if (frame !== null || flushTimer !== null) return;
         const paced = () => flush(true);
         const wait = PACE_FRAME_MS - (Date.now() - lastFlushAt);
+        // A hidden tab gets no animation frames at all, so it flushes from
+        // the timer alone — the text is there, whole, when the user returns.
+        if (typeof document !== "undefined" && document.hidden) {
+          flushTimer = setTimeout(() => {
+            flushTimer = null;
+            flush();
+          }, Math.max(0, wait));
+          return;
+        }
         if (wait <= 0) {
           frame = requestAnimationFrame(paced);
         } else {
