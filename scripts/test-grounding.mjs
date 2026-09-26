@@ -115,6 +115,15 @@ check("the route pins mid-run wording once tools have run",
   const native = T.serializeForApi(turn, { includeReasoning: true })[0];
   check("DeepSeek-native replay is unchanged",
     native.reasoning_content === turn[0].reasoning_content && native.content === null);
+  const orWire = T.serializeForApi(turn, { includeReasoning: true, reasoningField: "reasoning" })[0];
+  check("DeepSeek on OpenRouter replays its reasoning in OpenRouter's field",
+    orWire.reasoning === turn[0].reasoning_content && orWire.reasoning_content === undefined &&
+      !String(orWire.content ?? "").startsWith(T.CARRIED_THOUGHT_MARKER),
+    "measured on Morph: accepted and counted as prompt tokens");
+  check("the route replays for deepseek/ models and falls back on a 400",
+    /let replayReasoningOnOpenRouter = \/\^deepseek\\\/\/i\.test\(target\.apiModel\)/.test(route) &&
+      /replayReasoningOnOpenRouter = false;/.test(route) &&
+      /endpoint rejected replayed reasoning/.test(route));
   check("the carried excerpt is stable (cache-safe)",
     JSON.stringify(T.serializeForApi(turn, { includeReasoning: false })) ===
       JSON.stringify(T.serializeForApi(turn, { includeReasoning: false })));
