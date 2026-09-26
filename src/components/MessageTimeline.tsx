@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useDeferredValue } from "react";
+import { memo, useDeferredValue, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ToolActivity } from "@/components/ToolActivity";
@@ -49,6 +49,7 @@ const TimelineRow = memo(function TimelineRow({
   text,
   tools,
   first,
+  afterThink,
   live,
   onOpenFile,
   markdownComponents,
@@ -57,6 +58,8 @@ const TimelineRow = memo(function TimelineRow({
   tools: ToolEvent[];
   /** First row: no separator rule above it. */
   first: boolean;
+  /** Follows its round's thinking: sits close under it, no rule between. */
+  afterThink?: boolean;
   /**
    * The reply is still streaming. Narration renders from a deferred copy of
    * the text: every frame grows the trailing row, and parsing the whole
@@ -101,7 +104,13 @@ const TimelineRow = memo(function TimelineRow({
                * the layout looked like disconnected columns rather than a
                * sequence of steps.
                */
-            } ${!first ? "mt-4 border-t border-border/60 pt-4" : ""}`}
+            } ${
+              afterThink
+                ? "mt-3"
+                : !first
+                  ? "mt-4 border-t border-border/60 pt-4"
+                  : ""
+            }`}
           >
             {hasText && (
               <div
@@ -139,11 +148,209 @@ const TimelineRow = memo(function TimelineRow({
 }, (prev, next) =>
   prev.text === next.text &&
   prev.first === next.first &&
+  prev.afterThink === next.afterThink &&
   prev.live === next.live &&
   prev.onOpenFile === next.onOpenFile &&
   prev.markdownComponents === next.markdownComponents &&
   sameTools(prev.tools, next.tools)
 );
+
+/**
+ * Characters of a live think rendered while following it.
+ *
+ * One round of a long think is tens of thousands of tokens, and the body is
+ * rewritten on every stream flush. Laying out 300KB of wrapped text ten times
+ * a second is what made the text crawl on long runs. Following only ever
+ * shows the bottom of the box anyway, so while live-and-following the body
+ * holds the tail; the whole text is there the moment the reader scrolls up
+ * (Free) or the think finishes.
+ */
+const LIVE_TAIL_CHARS = 12_000;
+
+function formatTokens(chars: number): string {
+  const n = chars / 4;
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return `${Math.max(1, Math.round(n))}`;
+}
+
+/** Seconds since this live think started, ticking. */
+function ThinkClock() {
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setSeconds((v) => v + 1), 1000);
+    return () => clearInterval(t);
+  }, []);
+  return <span className="tabular-nums">{` · ${seconds}s`}</span>;
+}
+
+/**
+ * One round's reasoning, in the place it happened.
+ *
+ * The reply used to keep every round's reasoning in one box at the top of
+ * the message, above the plan and every tool row. On an hour-long run the
+ * thinking for round thirty streamed into a box a full screen above the
+ * tools it was deciding — the reader, following the bottom, saw tools
+ * appear with no thought beside them, and the box itself re-rendered the
+ * whole run's reasoning on every frame. Each round now thinks in its own
+ * row: open while it streams, collapsed to one line once the round moves on.
+ */
+const ThinkRow = memo(function ThinkRow({
+  source,
+  start,
+  end,
+  live,
+  first,
+  onLoad,
+}: {
+  /** The message's whole reasoning; undefined until a stored chat loads it. */
+  source: string | undefined;
+  start: number;
+  end: number;
+  /** Reasoning is streaming into THIS row right now. */
+  live: boolean;
+  first: boolean;
+  onLoad?: () => void;
+}) {
+  const [userOpen, setUserOpen] = useState<boolean | null>(null);
+  const [follow, setFollow] = useState(true);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const open = userOpen ?? live;
+  const loaded = typeof source === "string";
+  const slice = loaded ? source.slice(start, Math.min(end, source.length)) : "";
+  const tailOnly = live && follow && slice.length > LIVE_TAIL_CHARS;
+  const shown = (tailOnly ? slice.slice(-LIVE_TAIL_CHARS) : slice).replace(
+    /^\s+/,
+    ""
+  );
+  const chars = Math.max(0, end - start);
+
+  // Pin to the newest text while following. Write-only, no layout read.
+  useEffect(() => {
+    if (!open || !follow || !live) return;
+    const el = bodyRef.current;
+    if (el) el.scrollTop = Number.MAX_SAFE_INTEGER;
+  }, [shown, open, follow, live]);
+
+  if (loaded && !slice.trim() && !live) return null;
+
+  return (
+    // The round's divider sits above its thinking, so the thought and the
+    // narration and tools it led to read as one group.
+    <div className={!first ? "mt-4 border-t border-border/60 pt-4" : ""}>
+      <div
+        data-thinking={live}
+        data-open={open}
+        className="thinking-shell overflow-hidden rounded-lg"
+      >
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => {
+              if (!open && !loaded) onLoad?.();
+              setUserOpen(!open);
+            }}
+            aria-expanded={open}
+            className="thinking-toggle flex min-w-0 flex-1 items-center gap-1.5 px-3 py-1.5 text-left font-sans text-[13px] font-medium leading-5"
+          >
+            <svg
+              width="13" height="13" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" strokeWidth={2.2} aria-hidden="true"
+              className={`flex-none transition-transform duration-150 ${open ? "rotate-90" : ""}`}
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+            </svg>
+            <span className={`truncate ${live ? "thinking-shimmer" : ""}`}>
+              {live ? (
+                <>
+                  Thinking
+                  <ThinkClock />
+                  {` · ${formatTokens(chars)} tok`}
+                </>
+              ) : (
+                `Thought · ${formatTokens(chars)} tok`
+              )}
+            </span>
+          </button>
+          {open && live && (
+            <button
+              onClick={() => setFollow((v) => !v)}
+              aria-pressed={follow}
+              title={
+                follow
+                  ? "Following the text — click to scroll freely"
+                  : "Scrolling freely — click to follow the text"
+              }
+              className={`mr-3 flex h-6 flex-none items-center rounded-lg px-2 text-[11px] font-medium transition-colors ${
+                follow
+                  ? "bg-thinking/20 text-thinking"
+                  : "text-thinking/55 hover:bg-thinking/10 hover:text-thinking"
+              }`}
+            >
+              {follow ? "Follow" : "Free"}
+            </button>
+          )}
+        </div>
+        <div className="thinking-body" data-open={open}>
+          <div>
+            <div
+              ref={bodyRef}
+              aria-hidden={!open}
+              onWheel={(e) => {
+                if (live && e.deltaY < 0) setFollow(false);
+              }}
+              className="thinking-body-text max-h-72 overflow-y-auto whitespace-pre-wrap break-words px-3 pb-2.5 font-sans text-[13px] leading-5 [overscroll-behavior:contain]"
+            >
+              {!open ? (
+                ""
+              ) : !loaded ? (
+                <span className="thinking-shimmer">Loading…</span>
+              ) : (
+                <>
+                  {tailOnly && (
+                    <span className="block pb-1 opacity-60">
+                      … earlier thinking in this round is hidden while following — click Follow to show all of it
+                    </span>
+                  )}
+                  {shown}
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}, (prev, next) =>
+  prev.start === next.start &&
+  prev.end === next.end &&
+  prev.live === next.live &&
+  prev.first === next.first &&
+  prev.onLoad === next.onLoad &&
+  sameSlice(prev.source, next.source, next.start, next.end)
+);
+
+/**
+ * Would these two reasoning strings show the same text in [start, end)?
+ *
+ * Reasoning only ever grows by appending, so once both strings cover the
+ * range, the slice is the same — checked at its ends rather than compared
+ * whole, because a full compare of every finished round on every stream
+ * frame is the cost this row exists to avoid. A string arriving where there
+ * was none (a stored chat's reasoning loading) always repaints.
+ */
+function sameSlice(
+  a: string | undefined,
+  b: string | undefined,
+  start: number,
+  end: number
+): boolean {
+  if (a === b) return true;
+  if (typeof a !== "string" || typeof b !== "string") return false;
+  if (a.length < end || b.length < end) return a.length === b.length;
+  return (
+    a.charCodeAt(start) === b.charCodeAt(start) &&
+    a.charCodeAt(end - 1) === b.charCodeAt(end - 1)
+  );
+}
 
 export function MessageTimeline({
   timeline,
@@ -151,6 +358,9 @@ export function MessageTimeline({
   onOpenFile,
   markdownComponents,
   live,
+  reasoning,
+  thinkingLive,
+  onLoadReasoning,
 }: {
   timeline: TimelineEntry[];
   toolEvents: ToolEvent[];
@@ -158,6 +368,12 @@ export function MessageTimeline({
   markdownComponents?: React.ComponentProps<typeof ReactMarkdown>["components"];
   /** The reply is still streaming — rows render deferred markdown (see TimelineRow). */
   live?: boolean;
+  /** The message's reasoning, which think rows slice by range. */
+  reasoning?: string;
+  /** Reasoning is the stream arriving right now, so the last think row is live. */
+  thinkingLive?: boolean;
+  /** Fetch a stored reply's reasoning the first time a think row opens. */
+  onLoadReasoning?: () => void;
 }) {
   const rows = buildTimelineRows(timeline, toolEvents);
 
@@ -173,17 +389,32 @@ export function MessageTimeline({
      * first still separate themselves below; the first needs no page break.
      */
     <div className="flex flex-col">
-      {rows.map((row, i) => (
+      {rows.map((row, i) =>
+        row.think ? (
+          <ThinkRow
+            key={i}
+            source={reasoning}
+            start={row.think.start}
+            end={row.think.end}
+            // Live only while it is the newest row: once a tool or prose
+            // lands after it, the round has moved on.
+            live={Boolean(live && thinkingLive && i === rows.length - 1)}
+            first={i === 0}
+            onLoad={onLoadReasoning}
+          />
+        ) : (
         <TimelineRow
           key={i}
           text={row.text}
           tools={row.tools}
           first={i === 0}
+          afterThink={Boolean(rows[i - 1]?.think)}
           live={live}
           onOpenFile={onOpenFile}
           markdownComponents={markdownComponents}
         />
-      ))}
+        )
+      )}
     </div>
   );
 }

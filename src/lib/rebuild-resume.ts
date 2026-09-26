@@ -99,6 +99,7 @@ export function rebuildResumeFromStored(
   const order: (
     | { kind: "text"; text: string }
     | { kind: "tool"; id: string }
+    | { kind: "think"; start: number; end: number }
   )[] =
     prior.timeline && prior.timeline.length
       ? prior.timeline
@@ -130,6 +131,14 @@ export function rebuildResumeFromStored(
 
     if (entry.kind === "text") {
       pendingText += entry.text;
+      i += 1;
+      continue;
+    }
+
+    // A reasoning range is display-only — the reasoning itself is replayed
+    // whole on the first turn. It does mark a new round, which the tool
+    // batch below stops at, so two rounds' calls are not merged into one.
+    if (entry.kind === "think") {
       i += 1;
       continue;
     }

@@ -733,7 +733,7 @@ check(
   /const reasoningChars = reasoningLen \|\| message\.reasoningLength \|\| 0/.test(
     read("src/components/MessageBubble.tsx")
   ) &&
-    /\{hasThinking && \(\s*\n\s*<div className="thinking-panel">/.test(
+    /\{hasThinking && (?:!inlineThinking && )?\(\s*\n\s*<div className="thinking-panel">/.test(
       read("src/components/MessageBubble.tsx")
     ) &&
     /const thinkLoading = isThinkingPhase && !panelHasContent;/.test(

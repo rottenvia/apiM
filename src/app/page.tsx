@@ -19,6 +19,7 @@ import type { PendingCommand } from "@/components/ApprovalPrompt";
 import type { PendingQuestion } from "@/components/QuestionPrompt";
 import type { PlanView, PlanStepView } from "@/components/PlanPanel";
 import type { TimelineEntry } from "@/components/MessageTimeline";
+import { appendThinkRange } from "@/lib/timeline";
 import { clampDeleteDelay, DEFAULT_DELETE_DELAY } from "@/components/DeleteChatDialog";
 import { warmRoutes } from "@/lib/warmup";
 import {
@@ -1428,6 +1429,10 @@ export default function Home() {
           (a ?? []).every((e, i) => {
             const o = b?.[i];
             if (o === undefined || e.kind !== o.kind) return false;
+            if (e.kind === "think") {
+              const t = o as { start: number; end: number };
+              return e.start === t.start && e.end === t.end;
+            }
             return e.kind === "tool"
               ? e.id === (o as { id: string }).id
               : e.text === (o as { text: string }).text;
@@ -1811,7 +1816,15 @@ export default function Home() {
         reasoningLength: existing?.reasoningLength,
         thinkingEffort: existing?.thinkingEffort,
         plan: existing?.plan,
-        timeline: existing?.timeline,
+        // Earlier rounds' reasoning ranges point into the stored reasoning.
+        // When that was never loaded, the continuation's reasoning starts
+        // from an empty string here, and the old ranges would slice it
+        // wrongly — so they are dropped for the live view (a reload brings
+        // them back with the full text).
+        timeline:
+          typeof existing?.reasoningContent === "string"
+            ? existing.timeline
+            : existing?.timeline?.filter((e) => e.kind !== "think"),
         toolEvents: existing?.toolEvents,
         isStreaming: true,
         incomplete: false,
@@ -1899,11 +1912,22 @@ export default function Home() {
               }
               timeline = list;
             }
+            // This round's reasoning goes in the timeline where it
+            // happened — beside the tools it led to, not in one box at
+            // the top of an hour-long reply.
+            const thoughtSoFar = m.reasoningContent ?? "";
+            if (r) {
+              timeline = appendThinkRange(
+                [...(timeline ?? [])],
+                thoughtSoFar.length,
+                thoughtSoFar.length + r.length
+              );
+            }
 
             return {
               ...m,
               content: m.content + c,
-              reasoningContent: (m.reasoningContent ?? "") + r,
+              reasoningContent: thoughtSoFar + r,
               // A later round may provide reasoning after an earlier one did
               // not. Real text supersedes the diagnostic immediately.
               reasoningNotice: r ? undefined : m.reasoningNotice,
@@ -2269,6 +2293,7 @@ export default function Home() {
 
               case "reasoning":
                 setLiveRetry(runConvId ?? requestConversationId, null);
+                if (pendingContent) flush();
                 pendingReasoning += evt.delta;
                 scheduleFlush();
                 break;
@@ -2467,6 +2492,9 @@ export default function Home() {
 
               case "content":
                 setLiveRetry(runConvId ?? requestConversationId, null);
+                // Keep reasoning and prose in arrival order: a batch holds
+                // one kind at a time, so the timeline can place each.
+                if (pendingReasoning) flush();
                 pendingContent += evt.delta;
                 scheduleFlush();
                 break;
