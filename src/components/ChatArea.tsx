@@ -217,17 +217,31 @@ function StatusRow({
  * to paint instantly.
  */
 function ConversationSkeleton() {
+  /*
+   * The shape of a chat, not three grey paragraphs: a question on the
+   * right, a reply on the left with an activity line and prose, shimmering
+   * rather than pulsing. Held back 120ms so a chat that loads quickly never
+   * flashes a skeleton at all (the class delays its fade-in).
+   */
   return (
     <div
       aria-label="Loading chat"
-      className="mx-auto w-full max-w-3xl px-4 py-6 sm:px-6"
+      className="chat-skeleton mx-auto w-full max-w-3xl px-4 py-6 sm:px-6"
     >
-      {[0, 1, 2].map((i) => (
-        <div key={i} className="mb-7 animate-pulse">
-          <div className="mb-2 h-3 w-24 rounded bg-bg-hover" />
-          <div className="h-3 w-full rounded bg-bg-hover" />
-          <div className="mt-1.5 h-3 w-5/6 rounded bg-bg-hover" />
-          <div className="mt-1.5 h-3 w-2/3 rounded bg-bg-hover" />
+      {[0, 1].map((i) => (
+        <div key={i} className="mb-8">
+          <div className="mb-5 flex justify-end">
+            <div className="skeleton-block h-10 w-2/5 rounded-2xl" />
+          </div>
+          <div className="space-y-2.5">
+            <div className="flex items-center gap-2">
+              <div className="skeleton-block h-5 w-5 rounded-lg" />
+              <div className="skeleton-block h-3 w-32 rounded" />
+            </div>
+            <div className="skeleton-block h-3 w-[88%] rounded" />
+            <div className="skeleton-block h-3 w-[76%] rounded" />
+            <div className="skeleton-block h-3 w-[58%] rounded" />
+          </div>
         </div>
       ))}
     </div>
@@ -1090,18 +1104,41 @@ export function ChatArea({
     }
   }, [setPinned]);
 
+  /**
+   * Can the pane actually scroll up from here? An upward wheel on a chat
+   * shorter than the window moved nothing but still unpinned, and nothing
+   * re-pinned it — the "scroll to latest" button then sat over a chat with
+   * nowhere to scroll. Only unpin when there is somewhere to go.
+   */
+  const canScrollUp = useCallback(() => {
+    const el = scrollRef.current;
+    return Boolean(el && el.scrollHeight > el.clientHeight + 1 && el.scrollTop > 0);
+  }, []);
+
   const releaseFollow = useCallback(
     (e: { deltaY?: number }) => {
-      if (typeof e.deltaY === "number" && e.deltaY < 0) setPinned(false);
+      if (typeof e.deltaY === "number" && e.deltaY < 0 && canScrollUp()) {
+        setPinned(false);
+      }
     },
-    [setPinned]
+    [setPinned, canScrollUp]
   );
 
   const touchStartY = useRef<number | null>(null);
 
   useEffect(() => {
+    if (!pinnedRef.current) {
+      // Unpinned: re-pin once the content no longer reaches past the
+      // bottom (a panel collapsed, a chat switched, a reply replaced).
+      // Measured only in this rare state, never on every pinned flush.
+      const el = scrollRef.current;
+      if (el && el.scrollHeight - el.scrollTop - el.clientHeight < 12) {
+        setPinned(true);
+      }
+      return;
+    }
     stickToBottom();
-  }, [messages, isLoading, stickToBottom]);
+  }, [messages, isLoading, stickToBottom, setPinned]);
 
   const scrollToBottom = useCallback(() => {
     setPinned(true);
@@ -1486,7 +1523,7 @@ export function ChatArea({
         }}
         onTouchMove={(e) => {
           const y = e.touches[0]?.clientY;
-          if (touchStartY.current != null && y != null && y - touchStartY.current > 6) {
+          if (touchStartY.current != null && y != null && y - touchStartY.current > 6 && canScrollUp()) {
             setPinned(false);
           }
         }}

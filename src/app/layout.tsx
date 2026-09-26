@@ -28,6 +28,25 @@ export default function RootLayout({ children }: { children: ReactNode }) {
         />
       </head>
       <body className="bg-bg-primary text-text-primary antialiased">
+        {/*
+          Startup splash. Server-rendered, so it paints with the first bytes —
+          before the app's JavaScript has downloaded, hydrated, read settings
+          and fetched the chat list, which is the blank wait after
+          `npm run start`. The page adds .is-done once it is ready; a CSS
+          timeout hides it regardless, so a failed script can never leave it
+          covering the app.
+        */}
+        <div id="app-splash" aria-hidden="true">
+          <div className="app-splash-mark">
+            <span />
+            <span />
+            <span />
+          </div>
+          <div className="app-splash-title">API Manager</div>
+          <div className="app-splash-bar">
+            <i />
+          </div>
+        </div>
         {children}
       </body>
     </html>

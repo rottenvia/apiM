@@ -106,7 +106,7 @@ const TimelineRow = memo(function TimelineRow({
                */
             } ${
               afterThink
-                ? "mt-3"
+                ? "mt-1.5"
                 : !first
                   ? "mt-4 border-t border-border/60 pt-4"
                   : ""
@@ -236,11 +236,14 @@ const ThinkRow = memo(function ThinkRow({
   return (
     // The round's divider sits above its thinking, so the thought and the
     // narration and tools it led to read as one group.
-    <div className={!first ? "mt-4 border-t border-border/60 pt-4" : ""}>
+    <div className={!first ? "mt-3 border-t border-border/40 pt-3" : ""}>
+      {/* A finished thought is one quiet line in the same grammar as the
+          tool rows under it — icon square, label, detail — not a bordered
+          box of its own width. Only the live thought is a box. */}
       <div
         data-thinking={live}
         data-open={open}
-        className="thinking-shell overflow-hidden rounded-lg"
+        className="thinking-shell think-row overflow-hidden rounded-lg"
       >
         <div className="flex items-center gap-2">
           <button
@@ -249,15 +252,18 @@ const ThinkRow = memo(function ThinkRow({
               setUserOpen(!open);
             }}
             aria-expanded={open}
-            className="thinking-toggle flex min-w-0 flex-1 items-center gap-1.5 px-3 py-1.5 text-left font-sans text-[13px] font-medium leading-5"
+            className="thinking-toggle group flex min-w-0 flex-1 items-center gap-2 px-1.5 py-1 text-left font-sans text-[13px] font-medium leading-5"
           >
-            <svg
-              width="13" height="13" viewBox="0 0 24 24" fill="none"
-              stroke="currentColor" strokeWidth={2.2} aria-hidden="true"
-              className={`flex-none transition-transform duration-150 ${open ? "rotate-90" : ""}`}
-            >
-              <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
-            </svg>
+            <span className="think-glyph flex h-5 w-5 flex-none items-center justify-center rounded-lg">
+              <svg
+                width="13" height="13" viewBox="0 0 24 24" fill="none"
+                stroke="currentColor" strokeWidth={1.9} aria-hidden="true"
+                strokeLinecap="round" strokeLinejoin="round"
+              >
+                <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z" />
+                <path d="M19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z" />
+              </svg>
+            </span>
             <span className={`truncate ${live ? "thinking-shimmer" : ""}`}>
               {live ? (
                 <>
@@ -266,9 +272,19 @@ const ThinkRow = memo(function ThinkRow({
                   {` · ${formatTokens(chars)} tok`}
                 </>
               ) : (
-                `Thought · ${formatTokens(chars)} tok`
+                <>
+                  Thought
+                  <span className="font-normal opacity-70">{` · ${formatTokens(chars)} tok`}</span>
+                </>
               )}
             </span>
+            <svg
+              width="12" height="12" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" strokeWidth={2} aria-hidden="true"
+              className={`flex-none opacity-40 transition-transform duration-150 group-hover:opacity-70 ${open ? "rotate-180" : ""}`}
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 9l6 6 6-6" />
+            </svg>
           </button>
           {open && live && (
             <button
@@ -297,7 +313,7 @@ const ThinkRow = memo(function ThinkRow({
               onWheel={(e) => {
                 if (live && e.deltaY < 0) setFollow(false);
               }}
-              className="thinking-body-text max-h-72 overflow-y-auto whitespace-pre-wrap break-words px-3 pb-2.5 font-sans text-[13px] leading-5 [overscroll-behavior:contain]"
+              className="thinking-body-text max-h-72 overflow-y-auto whitespace-pre-wrap break-words px-3 pb-2.5 pl-9 font-sans text-[13px] leading-5 [overscroll-behavior:contain]"
             >
               {!open ? (
                 ""

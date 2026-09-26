@@ -380,7 +380,7 @@ check(
 check(
   "the first tool row has no ornamental page-break line",
   !/h-px w-full[^"]*bg-border/.test(timeline) &&
-    /!first \? "mt-4 border-t/.test(timeline),
+    /!first\s*\?\s*"mt-[34] border-t/.test(timeline),
   "the reported screenshot showed that line as the only thing where thinking belonged"
 );
 

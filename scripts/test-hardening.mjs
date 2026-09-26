@@ -342,13 +342,20 @@ check(
 );
 check(
   "it fetches the bytes rather than navigating to the URL",
-  /await fetch\(`\/api\/workspace\/\$\{workspaceId\}\/download`\)/.test(sidePanel),
+  /await fetch\(`\/api\/workspace\/\$\{workspaceId\}\/download\?via=fetch`\)/.test(sidePanel),
   "a bare href is an ordinary navigation, which a download manager extension intercepts and then fails to fetch itself"
 );
 check(
   "the anchor carries a download attribute and a filename",
-  /a\.download = match\?\.\[1\] \?\? "workspace\.zip"/.test(sidePanel),
+  /a\.download = name/.test(sidePanel) &&
+    /res\.headers\.get\("x-archive-name"\) \|\| "workspace\.zip"/.test(sidePanel),
   "without it the browser may navigate instead of saving"
+);
+check(
+  "the in-app download response carries no download headers a manager could claim",
+  /searchParams\.get\("via"\) === "fetch"/.test(read("src/app/api/workspace/[id]/download/route.ts")) &&
+    /"Content-Type": "text\/plain; charset=x-user-defined"/.test(read("src/app/api/workspace/[id]/download/route.ts")),
+  "IDM watches fetch responses too: an attachment/zip response was taken over and left a 0 KB file"
 );
 check(
   "the blob url is revoked, but not before the save reads it",

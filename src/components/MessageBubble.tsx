@@ -931,8 +931,14 @@ function MessageBubbleImpl({
       <div
         className={`max-w-[85%] md:max-w-[75%] ${
           isUser
-            ? "rounded-2xl bg-bg-elevated px-4 py-2.5"
-            : "bg-transparent px-4"
+            ? // The hover group is the whole bubble, so its actions (which
+              // float just below it) stay visible while the pointer moves
+              // down onto them.
+              "group/msg relative rounded-2xl bg-bg-elevated px-4 py-2.5 transition-colors duration-150 hover:bg-bg-hover"
+            : // The reply always fills its column. Shrink-to-fit made a
+              // reply with only tools and thinking (no prose yet) collapse to
+              // its widest pill — a narrow strip of odd-width boxes.
+              "w-full bg-transparent px-4"
         }`}
       >
         {/* User message */}
@@ -1037,7 +1043,7 @@ function MessageBubbleImpl({
               </div>
             ) : (
               message.content && (
-                <div className="group/msg relative">
+                <div>
                   <div className="text-[15px] leading-6 text-text-primary">
                     <SearchHighlight
                       query={searchQuery}
@@ -1049,11 +1055,20 @@ function MessageBubbleImpl({
                   </div>
 
                   {(onEdit || onDelete) && (
-                    <div className="grid grid-rows-[0fr] opacity-0 transition-all duration-150 focus-within:grid-rows-[1fr] focus-within:opacity-100 group-hover/msg:grid-rows-[1fr] group-hover/msg:opacity-100">
-                      <div className="overflow-hidden">
+                    /*
+                     * Floated under the bubble, not expanded inside it.
+                     *
+                     * The row used to open from zero height inside the
+                     * bubble, so every pass of the pointer grew the bubble
+                     * and shoved the whole transcript down, then back up.
+                     * Absolutely positioned in the gap below, it fades in
+                     * with nothing around it moving.
+                     */
+                    <div className="msg-actions pointer-events-none absolute right-0 top-full z-10 pt-1 opacity-0 transition-[opacity,transform] duration-150 group-hover/msg:pointer-events-auto group-hover/msg:opacity-100 focus-within:pointer-events-auto focus-within:opacity-100">
+                      <div>
                         {/* Clustered on one side — the old justify-between
                             scattered Edit and Delete to opposite edges. */}
-                        <div className="mt-1 flex items-center justify-end gap-1">
+                        <div className="flex items-center justify-end gap-1">
                           <button
                             onClick={() => {
                               void navigator.clipboard.writeText(message.content);
