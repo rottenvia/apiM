@@ -114,23 +114,35 @@ console.log("\n2. read_file can read part of a file");
 await ws.writeFile(
   WS,
   "big.py",
-  Array.from({ length: 12 }, (_, i) => `line ${i + 1} content`).join("\n") + "\n"
+  // Big enough to be sliced: a small file is returned whole (checked below).
+  Array.from({ length: 2000 }, (_, i) => `line ${i + 1} content`).join("\n") + "\n"
 );
 
 res = await runTool(WS, "read_file", { path: "big.py", start_line: 3, end_line: 5 });
 check("a range returns only those lines", res.content.split("\n").filter((l) => /^\s*\d+ \|/.test(l)).length === 3);
 check("lines are numbered", /3 \| line 3 content/.test(res.content), "an unnumbered slice invites off-by-N reasoning");
-check("the range is stated with the total", /lines 3-5 of 13/.test(res.content));
+check("the range is stated with the total", /lines 3-5 of 2001/.test(res.content));
 check("the summary says what was read", res.summary === "Read big.py lines 3-5");
 
 res = await runTool(WS, "read_file", { path: "big.py" });
 check("no range still reads the whole file", res.content.includes("line 12 content") && res.summary === "Read big.py");
 
-res = await runTool(WS, "read_file", { path: "big.py", start_line: 999 });
+res = await runTool(WS, "read_file", { path: "big.py", start_line: 99999 });
 check("a range past the end is an error, not empty output", !res.ok, res.summary);
 
-res = await runTool(WS, "read_file", { path: "big.py", start_line: 10, end_line: 999 });
-check("an end past the last line is clamped", res.ok && /lines 10-13/.test(res.content));
+res = await runTool(WS, "read_file", { path: "big.py", start_line: 1995, end_line: 9999 });
+check("an end past the last line is clamped", res.ok && /lines 1995-2001/.test(res.content));
+
+await ws.writeFile(
+  WS,
+  "small.luau",
+  Array.from({ length: 300 }, (_, i) => `local v${i + 1} = ${i + 1}`).join("\n") + "\n"
+);
+res = await runTool(WS, "read_file", { path: "small.luau", start_line: 270, end_line: 290 });
+check("a range read of a small file returns the whole file, numbered",
+  res.ok && /1 \| local v1 = 1/.test(res.content) && /300 \| local v300 = 300/.test(res.content) &&
+    /never in slices/.test(res.content),
+  "reported: five rounds walking one 300-line file a slice at a time");
 
 // ---------------------------------------------------------------------------
 console.log("\n3. search_files can show surrounding lines");

@@ -48,9 +48,39 @@ interface FindingsStore {
   findings: Finding[];
 }
 
-const EMPTY: FindingsStore = { version: 1, findings: [] };
+/*
+ * A FRESH empty store every time, never a shared constant.
+ *
+ * This was one module-level `EMPTY` object returned whenever a workspace had
+ * no findings file yet — and addFinding pushes into the store it reads. So
+ * the first finding of any new chat was written into the shared object, and
+ * every other new chat in the same server process started out "knowing" it:
+ * findings leaked between chats (found when machine-scoped findings came
+ * back carrying another chat's "bar.dll is the good build").
+ */
+const emptyStore = (): FindingsStore => ({ version: 1, findings: [] });
+
+/**
+ * The store id for facts about THIS MACHINE rather than one project.
+ *
+ * Findings were per-workspace only, so what a run proved about the
+ * toolchain — "this Luau CLI: _G is readonly, no io, require isolates each
+ * module's env" — was re-discovered from zero by the next chat, probe by
+ * probe (reported: a whole ESP run spent its rounds re-learning exactly
+ * that). Machine findings are kept once and shown in every chat.
+ */
+export const MACHINE_SCOPE = "__machine__";
+
+/** Most machine findings shown per prompt: facts, not a diary. */
+export const MAX_MACHINE_FINDINGS_SHOWN = 15;
 
 function storePath(workspaceId: string): string {
+  if (workspaceId === MACHINE_SCOPE) {
+    const root = process.env.APIM_DATA_ROOT
+      ? path.resolve(process.env.APIM_DATA_ROOT)
+      : path.join(process.cwd(), "data");
+    return path.join(root, "machine-findings.json");
+  }
   return path.join(workspaceDirectory(workspaceId), FINDINGS_DIR, FINDINGS_FILE);
 }
 
@@ -59,7 +89,7 @@ async function readStore(workspaceId: string): Promise<FindingsStore> {
     const parsed = JSON.parse(
       await fs.readFile(storePath(workspaceId), "utf8")
     ) as Partial<FindingsStore>;
-    if (parsed.version !== 1 || !Array.isArray(parsed.findings)) return EMPTY;
+    if (parsed.version !== 1 || !Array.isArray(parsed.findings)) return emptyStore();
     // Sanitize on read. Findings written before the size caps existed can
     // carry megabytes of pasted content inside claim/evidence, and this
     // store rides the system prompt on EVERY request — one fat legacy note
@@ -94,7 +124,7 @@ async function readStore(workspaceId: string): Promise<FindingsStore> {
     }
     return { version: 1, findings };
   } catch {
-    return EMPTY;
+    return emptyStore();
   }
 }
 
@@ -247,6 +277,25 @@ export function formatFindingsForPrompt(store: FindingsStore): string {
     "Findings already established in this workspace (your own prior conclusions — use the ones RELEVANT to the current request, do not re-derive them; a finding this request does not need is background: never mention, cite, or act on it, leave it out of your reply entirely; if one is wrong, correct it with note_finding; when the work a finding describes is DONE and shipped, retire it — note_finding with that id, status 'disproved', and claim 'done — shipped in <commit/fix>' — so finished items stop riding every prompt):\n\n" +
     lines.join("\n") +
     `\n${FINDINGS_MARKER_CLOSE}\n`
+  );
+}
+
+/** Machine-wide findings block for the system prompt ("" when none). */
+export function formatMachineFindingsForPrompt(store: FindingsStore): string {
+  const active = store.findings
+    .filter((f) => f.status === "active")
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    .slice(0, MAX_MACHINE_FINDINGS_SHOWN);
+  if (active.length === 0) return "";
+  const lines = active.map((f) => {
+    const why = f.evidence ? ` — ${f.evidence.slice(0, 200)}` : "";
+    return `- [${f.id}] ${f.claim.slice(0, 300)}${why}`;
+  });
+  return (
+    `\n\n<machine-findings>\n` +
+    "Facts about THIS machine and its tools, proven in earlier chats (not about any project). Trust them instead of re-probing; if one turns out wrong here, correct it with note_finding (that id, status 'disproved'):\n\n" +
+    lines.join("\n") +
+    `\n</machine-findings>\n`
   );
 }
 

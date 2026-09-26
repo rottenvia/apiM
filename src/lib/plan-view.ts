@@ -46,7 +46,21 @@ export function normalisePlanStepText(value: unknown): string {
   if (title && description && normalise(title) !== normalise(description)) {
     return `${title} — ${description}`;
   }
-  return title || description;
+  if (title || description) return title || description;
+
+  /*
+   * Unknown key names still carry the step.
+   *
+   * A step sent as {"do": "…", "verify": "…"} or {"goal": "…", "check": "…"}
+   * matched none of the names above, came back empty, and the whole plan was
+   * refused as "no usable steps" — a wasted round every time a model picked
+   * its own field names. Its text values, in order, are the step.
+   */
+  const IGNORED = /^(id|index|n|num|number|state|status|done|complete|completed|priority)$/i;
+  const values = Object.entries(item)
+    .filter(([key, v]) => !IGNORED.test(key) && typeof v === "string" && v.trim().length >= 3)
+    .map(([, v]) => (v as string).trim());
+  return values.join(" — ");
 }
 
 function normalise(text: string): string {

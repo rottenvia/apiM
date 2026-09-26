@@ -1214,8 +1214,9 @@ export function buildStalePlanNudge(
   return (
     `${PLAN_NUDGE_MARKER}\n` +
     `${roundsSinceUpdate} tool rounds since your last update_plan call, ` +
-    `and the plan is going stale while you work. Call update_plan NOW ` +
-    `with verified states before your next tool call — prose claims ` +
+    `and the plan is going stale while you work. Call update_plan with ` +
+    `verified states IN THE SAME TURN as your next real tool call (tools ` +
+    `can be called together) — never as a turn of its own. Prose claims ` +
     `("step 2 done") do not count, only update_plan counts.` +
     (claimed
       ? ` You just claimed a finished step in prose; record it with ` +
