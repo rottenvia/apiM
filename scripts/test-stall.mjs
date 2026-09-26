@@ -344,6 +344,20 @@ check(
       /unchangedReadText\(\)/.test(route));
 }
 
+// Rewrite churn: write, run fails, rewrite whole — every write "progress".
+{
+  const ct = new S.ChurnTracker();
+  check("first rewrites are fine", ct.observe("write_file", { path: "tools/bundle.py" }, true) === null &&
+    ct.observe("run_command", {}, false) === null &&
+    ct.observe("write_file", { path: "tools/bundle.py" }, true) === null);
+  const hit = ct.observe("write_file", { path: "./tools/bundle.py" }, true);
+  check("the third whole rewrite with no passing run is flagged",
+    hit?.path === "tools/bundle.py" && hit.count === 3 && /edit_file/.test(S.churnNudgeText(hit)));
+  ct.observe("run_command", {}, true);
+  check("a passing run clears the count", ct.observe("write_file", { path: "tools/bundle.py" }, true) === null);
+  check("route wires the churn nudge", /churnTracker\.observe\(/.test(route) && /churnNudgeText\(churn\)/.test(route));
+}
+
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
 );

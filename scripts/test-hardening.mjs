@@ -1379,7 +1379,7 @@ check(
       },
       { role: "tool", tool_call_id: "c1", content: "ok" },
     ];
-    const stub = pruneLib.pruneTranscript(fat, { thresholdChars: 1 }).messages[0].tool_calls[0].function.arguments;
+    const stub = pruneLib.pruneTranscript(fat, { thresholdChars: 1, fileReadBudget: 0 }).messages[0].tool_calls[0].function.arguments;
     const parsed = JSON.parse(stub);
     return parsed._trimmed === true && stub.includes("arguments trimmed from history");
   })(),

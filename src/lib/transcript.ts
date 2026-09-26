@@ -255,6 +255,28 @@ export function hardenToolCallArguments(args: unknown): string {
   return unparseableArgsMarker(args);
 }
 
+/** Characters of a step's reasoning carried to hosts that strip reasoning. */
+export const CARRIED_THOUGHT_CHARS = 1_600;
+
+/** Marker opening a carried-thought excerpt. */
+export const CARRIED_THOUGHT_MARKER = "[My reasoning at this step, condensed";
+
+/**
+ * The end of a step's reasoning — where the decision is — cut on a
+ * sentence or line boundary so it reads as whole thoughts.
+ */
+export function carriedThought(reasoning: string): string {
+  const text = reasoning.trim();
+  let tail = text;
+  if (text.length > CARRIED_THOUGHT_CHARS) {
+    tail = text.slice(-CARRIED_THOUGHT_CHARS);
+    const cut = tail.search(/(?<=[.!?\n])\s+\S/);
+    if (cut > 0 && cut < 400) tail = tail.slice(cut).trimStart();
+    tail = `…${tail}`;
+  }
+  return `${CARRIED_THOUGHT_MARKER} — what I concluded and decided:]\n${tail}`;
+}
+
 export function serializeForApi(
   messages: TranscriptMessage[],
   options: { includeReasoning?: boolean } = {}
@@ -290,6 +312,24 @@ export function serializeForApi(
           out.reasoning_content = m.reasoning_content;
         // A tool-calling turn legitimately has no prose.
         out.content = m.content ?? null;
+        /*
+         * Hosts that cannot take reasoning back still get its conclusion.
+         *
+         * Stripping reasoning for OpenRouter (its strict validators reject
+         * the field) left a reasoning model with no memory of WHY it made
+         * each call: every round it saw its bare tool calls, re-derived the
+         * whole task from scratch — 5k–22k tokens of "let me catch up with
+         * where I actually am" per step — and did one small thing. The tail
+         * of each step's reasoning (where the decision is) rides as the
+         * turn's own words instead: plain content, valid on every host,
+         * fixed once written so the cached prefix never moves.
+         */
+        if (!includeReasoning && m.reasoning_content?.trim()) {
+          const carried = carriedThought(m.reasoning_content);
+          out.content = m.content?.trim()
+            ? `${carried}\n\n${m.content}`
+            : carried;
+        }
       }
       return out;
     }

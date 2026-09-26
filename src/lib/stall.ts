@@ -471,3 +471,58 @@ export function unchangedReadText(): string {
 export function isReadTool(name: string): boolean {
   return READ_TOOLS.has(name);
 }
+
+/* ------------------------------------------------------------------ *
+ * Rewrite churn
+ *
+ * Every write resets the meters above — it changed the world — so the
+ * loop "rewrite the whole file, run it, it fails, rewrite the whole file"
+ * never registers as stuck, yet each lap re-sends the entire file as
+ * output tokens. Counted per path between successful runs: the third whole
+ * rewrite of one file with no passing run in between gets a nudge toward
+ * reading the error and making a targeted edit.
+ * ------------------------------------------------------------------ */
+
+export const CHURN_NUDGE_REWRITES = 3;
+
+const RUN_TOOLS = new Set(["run_command", "run_tests", "build_project"]);
+
+export class ChurnTracker {
+  private rewrites = new Map<string, number>();
+
+  /** Returns the path being churned when this call should carry a nudge. */
+  observe(name: string, args: unknown, ok: boolean): { path: string; count: number } | null {
+    if (RUN_TOOLS.has(name)) {
+      if (ok) this.rewrites.clear();
+      return null;
+    }
+    if (!ok || (name !== "write_file" && name !== "write_files")) return null;
+    const a = (args && typeof args === "object" ? args : {}) as Record<string, unknown>;
+    const paths: string[] = [];
+    if (typeof a.path === "string") paths.push(a.path);
+    if (Array.isArray(a.files)) {
+      for (const f of a.files) {
+        const p = (f as { path?: unknown })?.path;
+        if (typeof p === "string") paths.push(p);
+      }
+    }
+    let hit: { path: string; count: number } | null = null;
+    for (const p of paths) {
+      const key = p.trim().replace(/\\/g, "/").replace(/^\.\//, "");
+      const count = (this.rewrites.get(key) ?? 0) + 1;
+      this.rewrites.set(key, count);
+      if (count >= CHURN_NUDGE_REWRITES && !hit) hit = { path: key, count };
+    }
+    return hit;
+  }
+}
+
+export function churnNudgeText(hit: { path: string; count: number }): string {
+  return (
+    `\n\n[Harness: ${hit.path} has now been rewritten whole ${hit.count} ` +
+    `times with no passing run in between. Rewriting the entire file again ` +
+    `is not converging and re-sends all of it each time. Read the exact ` +
+    `error from the last run, find the line it names, and fix THAT with ` +
+    `edit_file.]`
+  );
+}

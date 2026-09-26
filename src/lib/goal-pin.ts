@@ -76,16 +76,29 @@ export function resolveRunGoal(sources: RunGoalSources): string | null {
  * pin and the summary read as two competing goals, and the longer one
  * (the summary) wins ties in a weak model's head.
  */
-export function renderGoalPin(goal: string): string {
+export function renderGoalPin(goal: string, midRun = false): string {
   const capped =
     goal.length > MAX_GOAL_CHARS
       ? goal.slice(0, MAX_GOAL_CHARS) +
         "\n…[request truncated — the full text is the newest user turn above]…"
       : goal;
-  return (
-    `${GOAL_PIN_MARKER}\n` +
-    `Answer THIS request. Older turns and the ${HISTORY_SUMMARY_MARKER} block are ` +
-    `background — if they describe a different task, that task is over or ` +
-    `paused; do not resume it unasked.\n\n${capped}`
-  );
+  /*
+   * Mid-run, the pin must read as "the task you are IN", not a fresh ask.
+   *
+   * Restated every round as "Answer THIS request", it looked like new input
+   * at the end of every request, and the model re-oriented from zero each
+   * round — "Just me, Marsel, a big ask and a half-built workspace. Let me
+   * look at what I've got…" — spending a round's reasoning re-surveying
+   * instead of taking the next step.
+   */
+  const lead = midRun
+    ? `You are mid-task on this request — nothing new has been asked. ` +
+      `Do not restart, re-survey or re-read to re-orient: your plan, notes, ` +
+      `the files you read and your last steps are all above. Take the next ` +
+      `step. Older turns and the ${HISTORY_SUMMARY_MARKER} block are ` +
+      `background for a different, finished task if they differ.`
+    : `Answer THIS request. Older turns and the ${HISTORY_SUMMARY_MARKER} block are ` +
+      `background — if they describe a different task, that task is over or ` +
+      `paused; do not resume it unasked.`;
+  return `${GOAL_PIN_MARKER}\n${lead}\n\n${capped}`;
 }
