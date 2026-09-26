@@ -1,4 +1,5 @@
 import path from "node:path";
+import { repairEscapedNewlines, REPAIRED_NEWLINES_NOTE } from "@/lib/content-repair";
 import { createHash } from "node:crypto";
 import { modelVision } from "@/lib/models";
 import { diffLines, diffStats, diffHunks } from "@/lib/diff";
@@ -3092,7 +3093,11 @@ export async function runTool(
       }
 
       case "write_file": {
-        const content = str(args, "content");
+        const repair = repairEscapedNewlines(
+          str(args, "path"),
+          str(args, "content")
+        );
+        const content = repair.content;
         const result = await writeFile(
           workspaceId,
           str(args, "path"),
@@ -3104,7 +3109,8 @@ export async function runTool(
           content:
             `${result.created ? "Created" : "Updated"} ${result.path} ` +
             `(${result.bytes} bytes). You have the full contents above — ` +
-            `do not read it back in the next round.`,
+            `do not read it back in the next round.` +
+            (repair.repaired ? REPAIRED_NEWLINES_NOTE : ""),
           summary: `${result.created ? "Created" : "Updated"} ${result.path}`,
           changedPath: result.path,
         };
@@ -4953,6 +4959,7 @@ export async function runTool(
         const batch = raw.slice(0, limits.writeFiles);
         const written: string[] = [];
         const failed: string[] = [];
+        const repairedPaths: string[] = [];
 
         for (const entry of batch) {
           const file = entry as { path?: unknown; content?: unknown };
@@ -4961,9 +4968,11 @@ export async function runTool(
             continue;
           }
           try {
-            const result = await writeFile(workspaceId, file.path, file.content);
+            const repair = repairEscapedNewlines(file.path, file.content);
+            if (repair.repaired) repairedPaths.push(file.path);
+            const result = await writeFile(workspaceId, file.path, repair.content);
             written.push(result.path);
-            mem?.recordWrite(result.path, file.content);
+            mem?.recordWrite(result.path, repair.content);
           } catch (error) {
             // One bad path must not lose the rest of the batch.
             failed.push(
@@ -4976,6 +4985,9 @@ export async function runTool(
 
         const notes: string[] = [];
         if (written.length) notes.push(`Wrote ${written.length}:\n${written.join("\n")}`);
+        if (repairedPaths.length) {
+          notes.push(`${repairedPaths.join(", ")}:${REPAIRED_NEWLINES_NOTE}`);
+        }
         if (failed.length) notes.push(`Failed ${failed.length}:\n${failed.join("\n")}`);
         if (raw.length > batch.length) {
           notes.push(

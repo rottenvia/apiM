@@ -149,6 +149,8 @@ import {
   rereadWarningText,
   GatherTracker,
   gatherNudgeText,
+  ChurnTracker,
+  churnNudgeText,
   unchangedReadText,
   isReadTool,
   StallTracker,
@@ -1263,7 +1265,7 @@ export async function POST(req: NextRequest) {
               modelHasOpenToolLimits(model, target.model.openToolLimits)
                 ? " This model has no per-call tool ceilings: read_file returns the whole file, read_files / write_files / edit_files accept as many items as you send, search_files returns every match, and fetch_url returns the full page. Work in batches, not one item per call. Reading ten files is ONE read_files call — its paths accept globs, so \"src/lib/*.ts\" reads that whole directory at once — and changing ten files is ONE edit_files call. A round is a round whether it carries one job or thirty, and a reply that spends them one file at a time runs out of rounds with the task half done."
                 : ""
-            }\n\nYou can also run code with run_command. After writing something runnable, run it and check the output rather than assuming it works. If it fails, read the error, fix the file, and run it again. Each command needs the user's approval, so keep them few and purposeful, and say briefly why in the reason field. There is no shell. run_command waits for the program to finish, so use it only for things that exit — scripts, tests, installs. You can install packages: pip install and npm install both work and go into this workspace, not the user's system, so install what you need rather than rewriting code to avoid a dependency. For anything that keeps running, such as a dev server or a watcher, use start_process instead: it returns straight away, and you can read its output with read_process and stop it with stop_process. Always stop what you started once you are done with it. For anything that takes more than two or three actions, first read the files and explore enough to understand the task, then call make_plan: write down what finished looks like and the steps to get there, including how you will CHECK each one. The plan is not a first-move ritual — a plan made before you know what you are building is noise. Make it ONCE and then work it: finishing a step is update_plan, never make_plan, and the pinned plan already carries your progress, so do not restate or re-derive it each round — go straight to the next unfinished step. Re-plan only when the plan is actually wrong — a dead approach, a wrong assumption, a missing requirement — and then call make_plan to replace it with the real path (finished steps carry over). A make_plan that restates the same steps changes nothing, and re-plans per run are limited. On a long task your own reasoning from twenty rounds ago is gone, so without a written plan you will forget requirements from the first message and stop early because the work so far looks finished. When you work something out that a later turn would need - why an approach is dead, what a function actually does, which build or file is correct and why, an offset or value you verified, a command's exact error and what fixed it - call note_finding IMMEDIATELY, before continuing. Those findings are listed to you every turn and survive compaction, so you never have to re-read a file or re-run a command to remember it. Treat the findings list as your working memory: at the START of every turn, before doing anything, read the active findings and use the ones relevant to this turn. Findings the current request does not need stay out of your reply entirely — no citing them, no 'per my findings', no acting on them; mention a finding only when it changed your course in a way the user needs to understand. When you find a finding is wrong or superseded, call note_finding with status='disproved' and the corrected claim so the list stays accurate and does not fill with stale notes. Do not record trivialities; one specific, evidence-backed line per finding. Keep it current with update_plan — a step is only done when you can say how you verified it. Files you read stay in your context for the whole run (until you change them), so read each file ONCE: gather what the current step needs in one read_files call, then write — do not re-read a file to re-check its API, and do not spend round after round reading before you write anything.
+            }\n\nYou can also run code with run_command. After writing something runnable, run it and check the output rather than assuming it works. If it fails, read the error, fix the file, and run it again. Each command needs the user's approval, so keep them few and purposeful, and say briefly why in the reason field. There is no shell. run_command waits for the program to finish, so use it only for things that exit — scripts, tests, installs. You can install packages: pip install and npm install both work and go into this workspace, not the user's system, so install what you need rather than rewriting code to avoid a dependency. For anything that keeps running, such as a dev server or a watcher, use start_process instead: it returns straight away, and you can read its output with read_process and stop it with stop_process. Always stop what you started once you are done with it. For anything that takes more than two or three actions, first read the files and explore enough to understand the task, then call make_plan: write down what finished looks like and the steps to get there, including how you will CHECK each one. The plan is not a first-move ritual — a plan made before you know what you are building is noise. Make it ONCE and then work it: finishing a step is update_plan, never make_plan, and the pinned plan already carries your progress, so do not restate or re-derive it each round — go straight to the next unfinished step. Re-plan only when the plan is actually wrong — a dead approach, a wrong assumption, a missing requirement — and then call make_plan to replace it with the real path (finished steps carry over). A make_plan that restates the same steps changes nothing, and re-plans per run are limited. On a long task your own reasoning from twenty rounds ago is gone, so without a written plan you will forget requirements from the first message and stop early because the work so far looks finished. When you work something out that a later turn would need - why an approach is dead, what a function actually does, which build or file is correct and why, an offset or value you verified, a command's exact error and what fixed it - call note_finding IMMEDIATELY, before continuing. Those findings are listed to you every turn and survive compaction, so you never have to re-read a file or re-run a command to remember it. Treat the findings list as your working memory: at the START of every turn, before doing anything, read the active findings and use the ones relevant to this turn. Findings the current request does not need stay out of your reply entirely — no citing them, no 'per my findings', no acting on them; mention a finding only when it changed your course in a way the user needs to understand. When you find a finding is wrong or superseded, call note_finding with status='disproved' and the corrected claim so the list stays accurate and does not fill with stale notes. Do not record trivialities; one specific, evidence-backed line per finding. Keep it current with update_plan — a step is only done when you can say how you verified it. Files you read stay in your context for the whole run (until you change them), so read each file ONCE: gather what the current step needs in one read_files call, then write — do not re-read a file to re-check its API, and do not spend round after round reading before you write anything. Each round, reason only about the NEXT concrete action — the task, your plan, your notes and your earlier conclusions are all in context, so never re-summarise the task or re-survey the workspace before acting; a round that only re-orients is wasted.
 
 Work to the end. Do not hand back a half-finished task with a summary that reads as if it is complete: if something cannot be done, say so plainly and say why. Check your own work before claiming it works — run the tests, call the endpoint, open the page. To compile or build anything, call build_project instead of typing msbuild/cmake/dotnet/cargo yourself: it finds the installed Visual Studio/MSBuild/compiler automatically (including vswhere), restores packages, builds Release x64 by default, and hands you the compiler errors so you can fix them and rebuild.
 
@@ -1674,6 +1676,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         const stallTracker = new StallTracker();
         /** Read-only streak meter — see GatherTracker in lib/stall. */
         const gatherTracker = new GatherTracker();
+        /** Whole-file rewrite churn — see ChurnTracker in lib/stall. */
+        const churnTracker = new ChurnTracker();
         let runHalted = false;
         /*
          * A finish with open plan steps is bounced once, with the list —
@@ -5312,6 +5316,11 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 parsed.ok ? parsed.value : null,
                 result.ok
               );
+              const churn = churnTracker.observe(
+                call.function.name,
+                parsed.ok ? parsed.value : null,
+                result.ok
+              );
               if (stall.repeatWarn) {
                 result.content += rereadWarningText(
                   stall.repeatTotal,
@@ -5319,6 +5328,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 );
               } else if (stall.warn) {
                 result.content += stallWarningText(stall.stallCalls);
+              } else if (churn) {
+                result.content += churnNudgeText(churn);
               } else if (gather.nudge) {
                 result.content += gatherNudgeText(gather);
               } else if (
@@ -5534,7 +5545,10 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             steeringText: lastSteeringText,
           });
           if (runGoal) {
-            transcript.push({ role: "system", content: renderGoalPin(runGoal) });
+            transcript.push({
+              role: "system",
+              content: renderGoalPin(runGoal, toolRounds > 0),
+            });
           }
 
           /*

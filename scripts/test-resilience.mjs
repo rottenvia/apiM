@@ -805,6 +805,48 @@ check(
     !text.includes("-- color v1") && !/read_file\(src\/Theme\.luau\) returned/.test(text));
 }
 
+/*
+ * The files the model WROTE survive too. A write's arguments are the file;
+ * stubbed past 2k chars, the model could not see what it had just written
+ * and read it back — "Let me catch up… Read tools/bundle.py".
+ */
+{
+  const call = (id, name, args) => ({
+    role: "assistant",
+    content: null,
+    tool_calls: [{ id, type: "function", function: { name, arguments: JSON.stringify(args) } }],
+  });
+  const reply = (id, content) => ({ role: "tool", tool_call_id: id, content });
+  const body = (tag) => `-- ${tag}\n${"local y = 2\n".repeat(600)}`;
+  const msgs = [
+    { role: "system", content: "sys" },
+    { role: "user", content: "Build it." },
+    call("w1", "write_file", { path: "tools/bundle.py", content: body("bundle") }), reply("w1", "Created tools/bundle.py"),
+    call("w2", "write_file", { path: "src/Store.luau", content: body("store v1") }), reply("w2", "Created src/Store.luau"),
+    call("e1", "edit_file", { path: "src/Store.luau", old_text: "a", new_text: "b" }), reply("e1", "Edited src/Store.luau"),
+  ];
+  for (let i = 0; i < 12; i++) {
+    msgs.push(call(`p${i}`, "update_plan", { updates: [] }), reply(`p${i}`, "Plan updated " + "·".repeat(1600)));
+  }
+  msgs.push({ role: "user", content: "x".repeat(30_000) });
+  const out = P.pruneTranscript(msgs).messages;
+  const argsOf = (id) => out.find((m) => m.role === "assistant" && m.tool_calls?.[0]?.id === id).tool_calls[0].function.arguments;
+  check("a file the model wrote keeps its content in history",
+    argsOf("w1").includes("-- bundle") && !argsOf("w1").includes("_trimmed"),
+    "stubbed, it re-read its own files to see what it had written");
+  check("a written file edited since is not kept as if current",
+    argsOf("w2").includes("_trimmed"));
+  const heavy = msgs.map((m) =>
+    m.role === "assistant" ? { ...m, reasoning_content: "think ".repeat(8000) } : m
+  );
+  const folded = C.compactTranscript(P.pruneTranscript(heavy).messages).messages;
+  const text = folded.map((m) => (typeof m.content === "string" ? m.content : "")).join("\n");
+  check("compaction keeps the text of a file the model wrote",
+    /tools\/bundle\.py — exactly as you wrote it here/.test(text) && text.includes("-- bundle"));
+  check("compaction does not keep a written file that was edited since",
+    !/src\/Store\.luau — exactly as you wrote it/.test(text));
+}
+
 // The three invariants that would otherwise produce a 400.
 check(
   "every tool call still has a matching reply",
