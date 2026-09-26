@@ -24,6 +24,8 @@ export const QWEN_PRUNE = {
   keepVerbatim: 3,
   minChars: 600,
   thresholdChars: 8_000,
+  // A small local window cannot carry a working set of files.
+  fileReadBudget: 0,
 } as const;
 
 /** Fold finished rounds far earlier than the cloud safety-valve threshold. */
@@ -31,6 +33,7 @@ export const QWEN_COMPACT = {
   keepRecentRounds: 2,
   thresholdChars: 24_000,
   step: 2,
+  fileReadBudget: 0,
 } as const;
 
 /**

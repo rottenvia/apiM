@@ -451,10 +451,19 @@ check(
   "the old 0fr fallback left only the border whenever reduced motion disabled the animation"
 );
 check(
+  "the first message after a fresh page load shows on screen",
+  /const mirroredIdRef = useRef<string \| null>\(draftConvId\);/.test(page),
+  "the screen mirrored no session until New chat was clicked, so the first send ran invisibly"
+);
+check(
+  "a new chat is listed in the sidebar as soon as the server names it",
+  /List a brand-new chat now, not when its first reply ends/.test(page)
+);
+check(
   "the empty live box says it is waiting for text, not duplicate Thinking",
   /Waiting for reasoning text…/.test(bubble) &&
-    /const STREAM_FLUSH_MIN_MS = 100;/.test(page),
-  "the header owns Thinking; the body becomes real text within one 100ms flush"
+    /const STREAM_FLUSH_MIN_MS = 40;/.test(page),
+  "the header owns Thinking; the body becomes real text within one 40ms flush"
 );
 check(
   "a ref, so active-phase tracking schedules no extra render",

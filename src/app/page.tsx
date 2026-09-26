@@ -427,8 +427,17 @@ export default function Home() {
    */
   const sessionsRef = useRef<Map<string, ChatSession>>(new Map());
   const [sessionsVersion, setSessionsVersion] = useState(0);
-  /** The id the mirrored React states below belong to. */
-  const mirroredIdRef = useRef<string | null>(null);
+  /**
+   * The id the mirrored React states below belong to.
+   *
+   * Starts on the draft chat, not null. Only New chat and opening a chat
+   * ever set it, so on a fresh page load it stayed null — and the first
+   * message sent was written into the draft's session, which was not the
+   * one on screen: the text box cleared, the reply ran (files appeared in
+   * the workspace), and the chat itself stayed on "How can I help you
+   * today?" until the user clicked it in the sidebar.
+   */
+  const mirroredIdRef = useRef<string | null>(draftConvId);
 
   const getSession = (id: string | null | undefined): ChatSession => {
     const key = id ?? "__none__";
@@ -1867,13 +1876,16 @@ export default function Home() {
       // re-keyed to the real id in migrateSession when a draft chat is saved.
       if (runConvId) abortRefs.current.set(runConvId, controller);
 
-      // Batch deltas into one state update at most every 100ms. Without a
+      // Batch deltas into one state update at most every 40ms. Without a
       // floor a fast stream triggers dozens of re-renders a second, and each
       // one reconciles the whole transcript, re-lays-out the chat for scroll
       // follow, and repaints — that per-frame bill, not the model, is what
-      // made the app feel heavy while it generated. 100ms chunks still read
-      // as live typing; the eye cannot follow faster anyway.
-      const STREAM_FLUSH_MIN_MS = 100;
+      // made the app feel heavy while it generated. It was 100ms while a
+      // flush re-laid-out the whole run's reasoning; at that size text landed
+      // in visible ~8-token lumps and read as lag. With reasoning rendered
+      // per round (and only its tail while followed) a flush is cheap —
+      // measured: zero long tasks at 40ms, even with the CPU throttled 4x.
+      const STREAM_FLUSH_MIN_MS = 40;
       let pendingContent = "";
       let pendingReasoning = "";
       let frame: number | null = null;
@@ -2288,6 +2300,28 @@ export default function Home() {
                   }
                 } else if (evt.conversationId && active) {
                   workspaceIdRef.current = evt.conversationId;
+                }
+                // List a brand-new chat now, not when its first reply ends:
+                // a long first run left the sidebar saying "No conversations
+                // yet" for its whole duration, with no running dot to find
+                // it by after switching away. `done` below is a no-op then.
+                if (evt.conversationId) {
+                  const newId = evt.conversationId as string;
+                  const newTitle = streamTitle || trimmed.slice(0, 48);
+                  setConversations((prev) =>
+                    prev.some((c) => c.id === newId)
+                      ? prev
+                      : [
+                          {
+                            id: newId,
+                            title: newTitle,
+                            archived: false,
+                            createdAt: new Date().toISOString(),
+                            updatedAt: new Date().toISOString(),
+                          },
+                          ...prev,
+                        ]
+                  );
                 }
                 break;
 
