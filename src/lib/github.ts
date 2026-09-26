@@ -113,6 +113,10 @@ export interface GitHubConnection {
   baseBranch: string;
   workingBranch: string;
   connectedAt: string;
+  /** Pull request opened for `prBranch` (the working branch at the time). */
+  prUrl?: string;
+  prNumber?: number;
+  prBranch?: string;
 }
 
 function bytes(input: string): ArrayBuffer {
@@ -277,7 +281,7 @@ export async function readGitHubConnection(
   }
 }
 
-async function writeGitHubConnection(connection: GitHubConnection): Promise<void> {
+export async function writeGitHubConnection(connection: GitHubConnection): Promise<void> {
   const target = metadataPath(connection.workspaceId);
   await fs.mkdir(path.dirname(target), { recursive: true });
   const tmp = `${target}.${process.pid}.tmp`;
@@ -290,20 +294,27 @@ function gitAuthEnv(token?: string): NodeJS.ProcessEnv {
     ...process.env,
     GIT_TERMINAL_PROMPT: "0",
     GIT_LFS_SKIP_SMUDGE: "1",
+    // Merges and commits never open an editor on the server.
+    GIT_EDITOR: "true",
+    GIT_MERGE_AUTOEDIT: "no",
   };
+  // Repository hooks never run: a commit or merge the agent makes without
+  // approval must not execute code the cloned repository ships.
+  env.GIT_CONFIG_COUNT = "1";
+  env.GIT_CONFIG_KEY_0 = "core.hooksPath";
+  env.GIT_CONFIG_VALUE_0 = path.join(GITHUB_DATA, "no-hooks");
   if (!token) return env;
   const auth = Buffer.from(`x-access-token:${token}`).toString("base64");
   env.GIT_CONFIG_COUNT = "3";
-  env.GIT_CONFIG_KEY_0 = "credential.helper";
-  env.GIT_CONFIG_VALUE_0 = "";
-  env.GIT_CONFIG_KEY_1 = "core.hooksPath";
-  env.GIT_CONFIG_VALUE_1 = path.join(GITHUB_DATA, "no-hooks");
+  env.GIT_CONFIG_KEY_1 = "credential.helper";
+  env.GIT_CONFIG_VALUE_1 = "";
   env.GIT_CONFIG_KEY_2 = "http.https://github.com/.extraheader";
   env.GIT_CONFIG_VALUE_2 = `AUTHORIZATION: basic ${auth}`;
   return env;
 }
 
-async function runGit(
+/** Run git with no shell; a token only ever travels in the process env. */
+export async function runGit(
   cwd: string,
   args: string[],
   token?: string,
@@ -338,11 +349,36 @@ async function runGit(
   });
 }
 
+/** Lowercase, dash-separated, at most 40 chars — safe inside a branch name. */
+export function branchSlug(text: string): string {
+  return text
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40)
+    .replace(/-+$/g, "");
+}
+
+/**
+ * A fresh working branch: `apim/<slug-of-task>-<short id>`. Falls back to
+ * the workspace id when there is no task text to name it after.
+ */
+export function workingBranchName(task: string | undefined, workspaceId: string): string {
+  const slug = branchSlug(task ?? "") || branchSlug(workspaceId.slice(0, 8)) || "work";
+  const shortId = Math.random().toString(36).slice(2, 8).padEnd(6, "0");
+  return assertBranch(`apim/${slug}-${shortId}`);
+}
+
 export async function connectGitHubRepo(options: {
   workspaceId: string;
   token: string;
   repo: string;
   baseBranch: string;
+  /** Names the new working branch (e.g. the chat title). */
+  task?: string;
+  /** An existing remote branch to continue instead of creating a new one. */
+  continueBranch?: string;
 }): Promise<GitHubConnection> {
   const repo = assertRepoName(options.repo);
   const info = await githubApi<Record<string, unknown>>(options.token, `/repos/${repo}`);
@@ -385,10 +421,20 @@ export async function cloneGitHubRepoToWorkspace(options: {
   repo: string;
   cloneUrl: string;
   baseBranch: string;
+  task?: string;
+  continueBranch?: string;
 }): Promise<GitHubConnection> {
   const repo = assertRepoName(options.repo);
   const baseBranch = assertBranch(options.baseBranch);
   const cloneUrl = options.cloneUrl;
+  const continueBranch = options.continueBranch?.trim()
+    ? assertBranch(options.continueBranch)
+    : "";
+  if (continueBranch && continueBranch === baseBranch) {
+    throw new Error(
+      "Pick a branch other than the base to continue — the base branch is never committed to"
+    );
+  }
 
   const root = workspaceDirectory(options.workspaceId);
   const existingFiles = await listFiles(options.workspaceId).catch(() => []);
@@ -408,9 +454,8 @@ export async function cloneGitHubRepoToWorkspace(options: {
       .catch(() => false));
 
   const temp = `${root}.github-${Date.now().toString(36)}`;
-  const workingBranch = assertBranch(
-    `apim/${options.workspaceId.slice(0, 8)}-${Date.now().toString(36)}`
-  );
+  const workingBranch =
+    continueBranch || workingBranchName(options.task, options.workspaceId);
   await fs.rm(temp, { recursive: true, force: true });
   await fs.mkdir(path.dirname(root), { recursive: true });
 
@@ -425,7 +470,15 @@ export async function cloneGitHubRepoToWorkspace(options: {
     );
     // Create and switch to the dedicated writable branch IN THE CLONE, so
     // checkout can never touch or conflict with workspace files.
-    await runGit(temp, ["checkout", "-b", workingBranch, `origin/${baseBranch}`], options.token);
+    // Continuing an existing branch checks it out tracking origin; a new
+    // one starts from the selected base.
+    await runGit(
+      temp,
+      continueBranch
+        ? ["checkout", "-B", workingBranch, "--track", `origin/${workingBranch}`]
+        : ["checkout", "-b", workingBranch, `origin/${baseBranch}`],
+      options.token
+    );
     await runGit(temp, ["config", "user.name", "apiM Agent"], undefined);
     await runGit(temp, ["config", "user.email", "apim-agent@users.noreply.github.com"], undefined);
 
@@ -446,7 +499,14 @@ export async function cloneGitHubRepoToWorkspace(options: {
       // Put the repo on the (new) dedicated working branch, anchored at the
       // CURRENT commit so no file is touched — all existing work is preserved
       // and will be pushed to this fresh apim/ branch.
-      await runGit(root, ["checkout", "-B", workingBranch], undefined);
+      if (continueBranch) {
+        // Git refuses (and the error surfaces) if local edits would be lost.
+        await runGit(root, [
+          "checkout", "-B", workingBranch, "--track", `origin/${workingBranch}`,
+        ]);
+      } else {
+        await runGit(root, ["checkout", "-B", workingBranch], undefined);
+      }
     } else {
       if (!rootExists) await fs.mkdir(root, { recursive: true });
       // Attach the clone's history by moving ONLY .git into the workspace.
@@ -501,6 +561,9 @@ export async function pushGitHubWorkspace(
 ): Promise<{ connection: GitHubConnection; output: string }> {
   const connection = await readGitHubConnection(workspaceId);
   if (!connection) throw new Error("No GitHub repository is connected to this workspace");
+  if (connection.workingBranch === connection.baseBranch) {
+    throw new Error("Push refused: the working branch is the base branch");
+  }
   const root = workspaceDirectory(workspaceId);
   const branch = (await runGit(root, ["branch", "--show-current"])).stdout.trim();
   if (branch !== connection.workingBranch) {
