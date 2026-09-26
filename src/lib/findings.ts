@@ -71,6 +71,26 @@ const emptyStore = (): FindingsStore => ({ version: 1, findings: [] });
  */
 export const MACHINE_SCOPE = "__machine__";
 
+/**
+ * Does this claim describe the machine's toolchain rather than the project?
+ *
+ * Measured on real runs: the model recorded "Luau CLI (tools/luau/luau)
+ * sandboxes every chunk: each main file and each require'd module gets its
+ * own fresh global table" — the fact every run spent ~20 minutes probing
+ * for — as a plain workspace finding, so the next chat would probe it all
+ * over again. The model does not reach for scope 'machine' on its own, so a
+ * claim that names a tool AND describes tool behaviour is also kept
+ * machine-wide. Deliberately two-part: "the CLI" alone, or "sandbox" in a
+ * game-design sense, is not enough.
+ */
+export function looksLikeToolchainFact(claim: string): boolean {
+  const tool =
+    /\b(CLI|command[- ]line|interpreter|compiler|binary|executable|runtime|toolchain|luau(?:-analyze)?|python3?|node(?:\.js)?|npm|pip|gcc|clang|cargo|rustc|go toolchain|dotnet|java|powershell|cmd\.exe|bash|git)\b/i;
+  const behaviour =
+    /\b(sandbox(?:es|ed)?|readonly|read-only|not available|unavailable|is nil|no `?io`?|lacks?|supports?|does(?:n't| not) support|flag|option|version|requires?|installed|on PATH|env(?:ironment)?|global table|exit code|stdout|stderr)\b/i;
+  return tool.test(claim) && behaviour.test(claim);
+}
+
 /** Most machine findings shown per prompt: facts, not a diary. */
 export const MAX_MACHINE_FINDINGS_SHOWN = 15;
 

@@ -27,7 +27,7 @@ import {
   inspectWorkspaceBinary,
 } from "@/lib/binaries";
 import { noteBinaryInspection } from "@/lib/binary-ledger";
-import { MACHINE_SCOPE,
+import { looksLikeToolchainFact, MACHINE_SCOPE,
   addFinding,
   reviseFinding,
 } from "@/lib/findings";
@@ -2577,10 +2577,16 @@ export async function runTool(
           const whole = await readFile(workspaceId, filePath, {
             maxChars: limits.readChars,
           });
-          if (!whole.truncated) {
+          // Only the FIRST range read of an unchanged file widens. Measured:
+          // two ranges in one round each came back as the whole 611-line
+          // file — the model already had it; now it gets the lines it asked.
+          if (!whole.truncated && !mem?.alreadyServedWhole(filePath, whole.content)) {
             Object.assign(result, whole, { rangeRequested: true });
             widenedFromRange = true;
           }
+        }
+        if (!result.truncated && result.firstLine === 1 && result.nextLine == null) {
+          mem?.recordWholeRead(filePath, result.content);
         }
 
         /*
@@ -3140,6 +3146,7 @@ export async function runTool(
           content
         );
         mem?.recordWrite(result.path, content);
+        mem?.recordWholeRead(result.path, content);
         return {
           ok: true,
           content:
@@ -4949,9 +4956,16 @@ export async function runTool(
           refs,
           evidence,
         });
+        // A toolchain fact filed as a project finding is also kept
+        // machine-wide, so the next chat does not re-probe it.
+        const alsoMachine =
+          !machine && str(args, "scope") !== "workspace" && looksLikeToolchainFact(claim);
+        if (alsoMachine) {
+          await addFinding(MACHINE_SCOPE, { claim, refs, evidence }).catch(() => undefined);
+        }
         return {
           ok: true,
-          content: `Finding recorded [${finding.id}]. It will be shown on every later turn ${machine ? "in EVERY chat on this machine" : "in this workspace"} so you do not re-derive it. If it turns out wrong, note_finding again with id=${finding.id} and status='disproved'. When the work it describes is DONE, retire it the same way (id=${finding.id}, status='disproved', claim 'done — shipped in <commit/fix>') so finished items stop riding later prompts.`,
+          content: `Finding recorded [${finding.id}]. It will be shown on every later turn ${machine || alsoMachine ? "in EVERY chat on this machine" : "in this workspace"} so you do not re-derive it. If it turns out wrong, note_finding again with id=${finding.id} and status='disproved'. When the work it describes is DONE, retire it the same way (id=${finding.id}, status='disproved', claim 'done — shipped in <commit/fix>') so finished items stop riding later prompts.`,
           summary: "Finding recorded",
         };
       }
@@ -5009,9 +5023,32 @@ export async function runTool(
         const repairedPaths: string[] = [];
 
         for (const entry of batch) {
-          const file = entry as { path?: unknown; content?: unknown };
+          /*
+           * Common spellings accepted, and a rejection says exactly why.
+           *
+           * Measured on a real run: "Wrote 1, 1 failed — ? — malformed
+           * entry", after which the model re-sent the batch guessing at the
+           * shape. Models send {file, contents} or {filename, text} as often
+           * as {path, content}; anything still unusable names its problem.
+           */
+          const rawEntry = (entry && typeof entry === "object" ? entry : {}) as Record<string, unknown>;
+          const pick = (...keys: string[]) => keys.map((k) => rawEntry[k]).find((v) => v !== undefined);
+          const file = {
+            path: pick("path", "file", "filename", "file_path", "name"),
+            content: pick("content", "contents", "text", "code", "body", "data"),
+          };
           if (typeof file.path !== "string" || typeof file.content !== "string") {
-            failed.push(`${String(file.path ?? "?")} — malformed entry`);
+            const keys = Object.keys(rawEntry);
+            const why =
+              typeof file.path !== "string"
+                ? `no "path" string (entry keys: ${keys.join(", ") || "none"})`
+                : `"content" must be a string, got ${
+                    file.content === undefined ? "nothing" : typeof file.content
+                  } (entry keys: ${keys.join(", ")})`;
+            failed.push(
+              `${typeof file.path === "string" ? file.path : "?"} — malformed entry: ${why}. ` +
+                `Each entry is {"path": "...", "content": "..."}.`
+            );
             continue;
           }
           try {
@@ -5020,6 +5057,7 @@ export async function runTool(
             const result = await writeFile(workspaceId, file.path, repair.content);
             written.push(result.path);
             mem?.recordWrite(result.path, repair.content);
+            mem?.recordWholeRead(result.path, repair.content);
           } catch (error) {
             // One bad path must not lose the rest of the batch.
             failed.push(
