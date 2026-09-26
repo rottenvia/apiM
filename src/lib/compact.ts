@@ -1,5 +1,6 @@
 import type { TranscriptMessage } from "@/lib/transcript";
 import { fingerprintToolCall } from "@/lib/loop-breaker";
+import { FILE_READ_BUDGET_CHARS, retainedReads } from "@/lib/prune";
 
 /**
  * Folding finished agent rounds into a short narrative.
@@ -262,12 +263,15 @@ export function compactTranscript(
     keepRecentRounds?: number;
     thresholdChars?: number;
     step?: number;
+    /** See FILE_READ_BUDGET_CHARS; 0 folds file reads like anything else. */
+    fileReadBudget?: number;
   } = {}
 ): { messages: TranscriptMessage[]; stats: CompactStats } {
   const {
     keepRecentRounds = KEEP_RECENT_ROUNDS,
     thresholdChars = COMPACT_THRESHOLD_CHARS,
     step = COMPACT_STEP,
+    fileReadBudget = FILE_READ_BUDGET_CHARS,
   } = options;
 
   /*
@@ -314,6 +318,21 @@ export function compactTranscript(
   for (const m of wire) {
     if (m.role === "tool") resultById.set(m.tool_call_id, m.content);
   }
+  /*
+   * File contents the model is still working from survive the fold.
+   *
+   * Folding a round used to reduce "read src/Signal.luau" to that one line.
+   * On a long think the valve trips every few rounds, so the files read
+   * while gathering context were gone by the time the model sat down to
+   * write — it saw that it had read them, not what they said, and read them
+   * again: the re-read loop. The reasoning (the bulk) still goes; the file
+   * text moves into the summary, same budget and staleness rules as pruning.
+   */
+  const keptReadIds = new Set<string>();
+  for (const i of retainedReads(wire, fileReadBudget)) {
+    const m = wire[i];
+    if (m.role === "tool") keptReadIds.add(m.tool_call_id);
+  }
 
   const out: TranscriptMessage[] = [];
   const removedToolIds = new Set<string>();
@@ -339,15 +358,22 @@ export function compactTranscript(
     reasoningChars += m.reasoning_content?.length ?? 0;
 
     const lines: string[] = [];
+    const kept: string[] = [];
     for (const call of m.tool_calls ?? []) {
       removedToolIds.add(call.id);
-      lines.push(
-        `- ${describeCall(
-          call.function.name,
-          call.function.arguments,
-          resultById.get(call.id)
-        )}`
+      const desc = describeCall(
+        call.function.name,
+        call.function.arguments,
+        resultById.get(call.id)
       );
+      lines.push(`- ${desc}`);
+      if (keptReadIds.has(call.id)) {
+        kept.push(
+          `[${desc} returned — kept verbatim because the file has not ` +
+            `changed since; use this instead of reading it again:\n` +
+            `${resultById.get(call.id)}\n]`
+        );
+      }
     }
 
     // No tool_calls and no reasoning_content: with the calls gone the API no
@@ -355,9 +381,10 @@ export function compactTranscript(
     const narration = m.content?.trim() ? `${m.content.trim()}\n` : "";
     out.push({
       role: "assistant",
-      content: `${narration}[Earlier step, summarised to save context:\n${lines.join(
-        "\n"
-      )}]`,
+      content:
+        `${narration}[Earlier step, summarised to save context:\n${lines.join(
+          "\n"
+        )}]` + (kept.length ? `\n${kept.join("\n")}` : ""),
     });
   }
 
