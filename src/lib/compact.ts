@@ -1,6 +1,6 @@
 import type { TranscriptMessage } from "@/lib/transcript";
 import { fingerprintToolCall } from "@/lib/loop-breaker";
-import { FILE_READ_BUDGET_CHARS, retainedReads } from "@/lib/prune";
+import { FILE_READ_BUDGET_CHARS, retainedFileContent } from "@/lib/prune";
 
 /**
  * Folding finished agent rounds into a short narrative.
@@ -225,6 +225,31 @@ export function dedupeIdenticalResults(messages: TranscriptMessage[]): {
   return { messages: out, dupsFolded, charsSaved };
 }
 
+/** Path and full content of each file a write_file / write_files call wrote. */
+function writtenFiles(args: string): { path: string; content: string }[] {
+  try {
+    const parsed = JSON.parse(args) as {
+      path?: unknown;
+      content?: unknown;
+      files?: unknown;
+    };
+    if (typeof parsed.path === "string" && typeof parsed.content === "string") {
+      return [{ path: parsed.path, content: parsed.content }];
+    }
+    if (Array.isArray(parsed.files)) {
+      return parsed.files.flatMap((f) => {
+        const file = f as { path?: unknown; content?: unknown };
+        return typeof file?.path === "string" && typeof file.content === "string"
+          ? [{ path: file.path, content: file.content }]
+          : [];
+      });
+    }
+  } catch {
+    /* unparseable arguments carry nothing to keep */
+  }
+  return [];
+}
+
 /** A short, factual description of one tool call and how it turned out. */
 function describeCall(
   name: string,
@@ -329,7 +354,8 @@ export function compactTranscript(
    * text moves into the summary, same budget and staleness rules as pruning.
    */
   const keptReadIds = new Set<string>();
-  for (const i of retainedReads(wire, fileReadBudget)) {
+  const retained = retainedFileContent(wire, fileReadBudget);
+  for (const i of retained.reads) {
     const m = wire[i];
     if (m.role === "tool") keptReadIds.add(m.tool_call_id);
   }
@@ -373,6 +399,13 @@ export function compactTranscript(
             `changed since; use this instead of reading it again:\n` +
             `${resultById.get(call.id)}\n]`
         );
+      } else if (retained.writes.has(call.id)) {
+        for (const file of writtenFiles(call.function.arguments)) {
+          kept.push(
+            `[${file.path} — exactly as you wrote it here, unchanged since; ` +
+              `use this instead of reading it back:\n${file.content}\n]`
+          );
+        }
       }
     }
 

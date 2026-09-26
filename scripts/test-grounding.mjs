@@ -88,6 +88,52 @@ check("a giant request pins as a capped head, never whole", (() => {
   );
 })());
 
+// --- continuity: the reported "re-orient every round" loop ---
+check("mid-run, the pin says the task is in progress — not a new ask", (() => {
+  const t = G.renderGoalPin(GOAL, true);
+  return t.startsWith(G.GOAL_PIN_MARKER) && t.includes(GOAL) &&
+    /mid-task/.test(t) && /Do not restart, re-survey or re-read/.test(t) &&
+    !/Answer THIS request/.test(t);
+})());
+check("the route pins mid-run wording once tools have run",
+  /renderGoalPin\(runGoal, toolRounds > 0\)/.test(route));
+{
+  const T = await load("src/lib/transcript.ts");
+  const turn = [{
+    role: "assistant", content: null,
+    reasoning_content: "Long survey. ".repeat(400) + "Decision: the bundler must escape strings, so I rewrite bundle.py next.",
+    tool_calls: [{ id: "c1", type: "function", function: { name: "read_file", arguments: '{"path":"a"}' } }],
+  }, { role: "tool", tool_call_id: "c1", content: "x" }];
+  const stripped = T.serializeForApi(turn, { includeReasoning: false })[0];
+  check("a host that strips reasoning still gets the step's conclusion as the turn's words",
+    stripped.reasoning_content === undefined &&
+      typeof stripped.content === "string" &&
+      stripped.content.startsWith(T.CARRIED_THOUGHT_MARKER) &&
+      stripped.content.includes("I rewrite bundle.py next") &&
+      stripped.content.length < T.CARRIED_THOUGHT_CHARS + 200,
+    "without it the model re-derived the whole task every round");
+  const native = T.serializeForApi(turn, { includeReasoning: true })[0];
+  check("DeepSeek-native replay is unchanged",
+    native.reasoning_content === turn[0].reasoning_content && native.content === null);
+  check("the carried excerpt is stable (cache-safe)",
+    JSON.stringify(T.serializeForApi(turn, { includeReasoning: false })) ===
+      JSON.stringify(T.serializeForApi(turn, { includeReasoning: false })));
+}
+{
+  const R = await load("src/lib/content-repair.ts");
+  const bad = 'import os\\nimport sys\\n\\ndef main():\\n    print(\\"hi\\")\\n\\nif __name__ == \\"__main__\\":\\n    main()\\n' + "# pad\\n".repeat(10);
+  const fixed = R.repairEscapedNewlines("tools/bundle.py", bad);
+  check("a double-escaped whole-file write is decoded into real lines",
+    fixed.repaired && fixed.content.split("\n").length > 8 && fixed.content.includes('print("hi")'),
+    "bundle.py landed as one line of literal \\n and cost a run, a read and a rewrite");
+  check("a real multi-line file is never touched",
+    !R.repairEscapedNewlines("a.py", "x = '\\n'\n" + "y = 1\n".repeat(40)).repaired);
+  check("one-line JSON with \\n inside strings is left alone",
+    !R.repairEscapedNewlines("data.json", '{"a":"' + "line\\n".repeat(60) + '"}').repaired);
+  check("a minified bundle with a few escapes is left alone",
+    !R.repairEscapedNewlines("app.js", "var a=1;".repeat(200) + 'x("\\n");y("\\n");z("\\n")').repaired);
+}
+
 // --- finish-claim detection ---
 check("plain prose claims nothing", !P.stepClaimedComplete("Let me read the sandbox file first."));
 check("a bare done claim fires", P.stepClaimedComplete("Step 2 is done, moving on."));

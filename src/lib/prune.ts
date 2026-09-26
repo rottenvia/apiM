@@ -190,16 +190,33 @@ function covers(readPath: string, written: string): boolean {
   return written.startsWith(readPath.slice(0, star));
 }
 
+/** Writes whose arguments ARE the whole file (not a diff). */
+const FULL_WRITE_TOOLS = new Set(["write_file", "write_files"]);
+
+export interface RetainedFileContent {
+  /** Tool-result indices of reads to keep verbatim. */
+  reads: Set<number>;
+  /** Tool-call ids of whole-file writes whose arguments stay verbatim. */
+  writes: Set<string>;
+}
+
 /**
- * Tool-result indices of file reads that should survive the recency window:
- * the newest read of each file set, not rewritten since, within the budget.
+ * The file text the model is still working from, newest first, in budget:
+ * the newest read of each file set not rewritten since, and the newest
+ * whole-file write of each file not edited or re-read since.
+ *
+ * Writes matter as much as reads. A write's arguments ARE the file, and they
+ * were stubbed past 2k chars — so the model could not see what it had just
+ * written and read it back ("Let me catch up with where I actually am…
+ * Read tools/bundle.py"), a whole round each time, on files it authored.
  */
-export function retainedReads(
+export function retainedFileContent(
   messages: TranscriptMessage[],
   budget: number
-): Set<number> {
-  const keep = new Set<number>();
-  if (budget <= 0) return keep;
+): RetainedFileContent {
+  const reads = new Set<number>();
+  const writes = new Set<string>();
+  if (budget <= 0) return { reads, writes };
 
   const callById = new Map<string, { name: string; args: string }>();
   for (const m of messages) {
@@ -212,32 +229,55 @@ export function retainedReads(
   // Walk newest to oldest, remembering what later calls read and wrote.
   const laterWrites: string[] = [];
   const laterReads = new Set<string>();
+  const laterReadPaths: string[] = [];
   let used = 0;
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
     if (m.role !== "tool") continue;
     const call = callById.get(m.tool_call_id);
     if (!call) continue;
+    const failed = typeof m.content === "string" && /^Error/.test(m.content);
     if (FILE_WRITE_TOOLS.has(call.name)) {
-      laterWrites.push(...writtenPaths(call.name, call.args));
+      const paths = writtenPaths(call.name, call.args);
+      if (
+        !failed &&
+        FULL_WRITE_TOOLS.has(call.name) &&
+        paths.length > 0 &&
+        !paths.some((p) => laterWrites.includes(p)) &&
+        !paths.some((p) => laterReadPaths.some((r) => covers(r, p))) &&
+        used + call.args.length <= budget
+      ) {
+        used += call.args.length;
+        writes.add(m.tool_call_id);
+      }
+      if (!failed) laterWrites.push(...paths);
       continue;
     }
     if (!FILE_READ_TOOLS.has(call.name)) continue;
     if (typeof m.content !== "string" || /^\[(?:earlier|Folded)/.test(m.content)) continue;
-    if (/^Error/.test(m.content)) continue;
+    if (failed) continue;
 
     const paths = readPaths(call.args);
     const key = paths.slice().sort().join("\n");
     const superseded = laterReads.has(key);
     laterReads.add(key);
+    laterReadPaths.push(...paths);
     if (superseded || paths.length === 0) continue;
     const stale = paths.some((p) => laterWrites.some((w) => covers(p, w)));
     if (stale) continue;
     if (used + m.content.length > budget) continue;
     used += m.content.length;
-    keep.add(i);
+    reads.add(i);
   }
-  return keep;
+  return { reads, writes };
+}
+
+/** Tool-result indices of reads to keep verbatim (see retainedFileContent). */
+export function retainedReads(
+  messages: TranscriptMessage[],
+  budget: number
+): Set<number> {
+  return retainedFileContent(messages, budget).reads;
 }
 
 export interface PruneStats {
@@ -357,8 +397,10 @@ export function pruneTranscript(
         ? new Set<number>()
         : new Set(resultIndices.slice(0, resultIndices.length - keepVerbatim));
     // Source files the model is still building on are not collapsed just
-    // because bookkeeping calls moved the window past them.
-    for (const i of retainedReads(messages, fileReadBudget)) collapsible.delete(i);
+    // because bookkeeping calls moved the window past them — nor are the
+    // files it wrote itself.
+    const retained = retainedFileContent(messages, fileReadBudget);
+    for (const i of retained.reads) collapsible.delete(i);
 
   let collapsed = 0;
   let charsSaved = 0;
@@ -389,6 +431,7 @@ export function pruneTranscript(
         const calls = m.tool_calls.map((call) => {
           const args = call.function.arguments;
           if (args.length <= MAX_VERBATIM_ARGS_CHARS) return call;
+          if (retained.writes.has(call.id)) return call;
           /*
            * A valid JSON object — never truncated JSON plus prose.
            *
