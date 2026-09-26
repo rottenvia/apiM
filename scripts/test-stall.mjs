@@ -358,6 +358,19 @@ check(
   check("route wires the churn nudge", /churnTracker\.observe\(/.test(route) && /churnNudgeText\(churn\)/.test(route));
 }
 
+// The round cap: a run making progress is not cut off mid-step.
+check("a run that closed a plan step since the last check gets more rounds",
+  S.shouldExtendRoundCap({ extensionsUsed: 0, stepsDoneSinceCheck: 1, changesSinceCheck: 0 }));
+check("so does one making real changes",
+  S.shouldExtendRoundCap({ extensionsUsed: 1, stepsDoneSinceCheck: 0, changesSinceCheck: S.CAP_PROGRESS_CHANGES }));
+check("a run with no progress still stops at the cap",
+  !S.shouldExtendRoundCap({ extensionsUsed: 0, stepsDoneSinceCheck: 0, changesSinceCheck: 1 }));
+check("extensions are bounded",
+  !S.shouldExtendRoundCap({ extensionsUsed: S.MAX_CAP_EXTENSIONS, stepsDoneSinceCheck: 3, changesSinceCheck: 20 }));
+check("route checks progress before stopping at the cap",
+  /if \(round > roundCap\)/.test(route) && /shouldExtendRoundCap\(\{/.test(route) &&
+    /stoppedPrematurely = "round_cap"/.test(route));
+
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
 );

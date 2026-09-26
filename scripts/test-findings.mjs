@@ -161,6 +161,52 @@ check(
 
 await rm(path.join(DATA_ROOT, "workspaces", WS), { recursive: true, force: true });
 
+// Two fresh chats never share findings (the shared-EMPTY leak).
+{
+  const A = "findleak-a", B = "findleak-b";
+  await rm(path.join(DATA_ROOT, "workspaces", A), { recursive: true, force: true });
+  await rm(path.join(DATA_ROOT, "workspaces", B), { recursive: true, force: true });
+  await addFinding(A, { claim: "Chat A's private conclusion about its own project." });
+  const b = await readFindings(B);
+  const ok = b.findings.length === 0;
+  console.log(`${ok ? "PASS" : "FAIL"}  a finding in one new chat never appears in another new chat`);
+  if (!ok) failures++;
+  await rm(path.join(DATA_ROOT, "workspaces", A), { recursive: true, force: true });
+}
+
+// Machine-wide findings: toolchain facts proven once, shown in every chat.
+{
+  const F = await load("src/lib/findings.ts");
+  const { runTool } = await load("src/lib/tools.ts");
+  await rm(path.join(DATA_ROOT, "machine-findings.json"), { force: true });
+  const r = await runTool(WS, "note_finding", {
+    claim: "This Luau CLI build has no io library and _G is readonly; inject mocks with loadstring+setfenv.",
+    evidence: "probe_io.luau printed io=nil; writing _G raised 'readonly table'",
+    scope: "machine",
+  });
+  const machine = await F.readFindings(F.MACHINE_SCOPE);
+  const block = F.formatMachineFindingsForPrompt(machine);
+  const ok1 = r.ok && /EVERY chat/.test(r.content) && machine.findings.length === 1 &&
+    /<machine-findings>/.test(block) && /no io library/.test(block);
+  console.log(`${ok1 ? "PASS" : "FAIL"}  a machine-scoped finding is stored once and rendered for every chat`);
+  if (!ok1) failures++;
+  const local = await F.readFindings(WS);
+  const ok2 = !local.findings.some((f) => /no io library/.test(f.claim));
+  console.log(`${ok2 ? "PASS" : "FAIL"}  it does not land in the project's own findings`);
+  if (!ok2) failures++;
+  const id = machine.findings[0].id;
+  const rev = await runTool(WS, "note_finding", { id, status: "disproved", claim: "io exists after all" });
+  const after = await F.readFindings(F.MACHINE_SCOPE);
+  const ok3 = rev.ok && after.findings.find((f) => f.id === id)?.status === "disproved";
+  console.log(`${ok3 ? "PASS" : "FAIL"}  a machine finding can be retired by id from any chat`);
+  if (!ok3) failures++;
+  const route = readFileSync(path.join(ROOT, "src/app/api/chat/route.ts"), "utf8");
+  const ok4 = /formatMachineFindingsForPrompt\(await readFindings\(MACHINE_SCOPE\)\)/.test(route);
+  console.log(`${ok4 ? "PASS" : "FAIL"}  every chat's prompt carries the machine findings`);
+  if (!ok4) failures++;
+  await rm(path.join(DATA_ROOT, "machine-findings.json"), { force: true });
+}
+
 if (failures) {
   console.error(`\n${failures} check(s) failed`);
   process.exit(1);

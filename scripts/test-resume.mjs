@@ -719,8 +719,9 @@ check(
 check(
   "the agent loop has a hard round cap",
   /MAX_AGENT_ROUNDS = agentRoundsFor\(model[^)]*\)/.test(route) &&
-    /round > MAX_AGENT_ROUNDS/.test(route),
-  "per model now — a guard against a runaway loop, not a work budget"
+    /let roundCap = MAX_AGENT_ROUNDS;/.test(route) &&
+    /round > roundCap/.test(route),
+  "per model, extended in bounded blocks only while the run shows progress"
 );
 check(
   "hitting the cap is reported as the cap, not as a provider abort",

@@ -526,3 +526,37 @@ export function churnNudgeText(hit: { path: string; count: number }): string {
     `edit_file.]`
   );
 }
+
+/** Did this successful call change the world (files, processes, a run)? */
+export function isWorldChanging(name: string): boolean {
+  return WORLD_CHANGING.has(name) || name === "ask_user";
+}
+
+/** Extra rounds granted per extension when the cap hits mid-progress. */
+export const CAP_EXTENSION_ROUNDS = 32;
+/** Extensions per reply — at most 64 + 3 × 32 = 160 rounds. */
+export const MAX_CAP_EXTENSIONS = 3;
+/** Successful world-changing calls since the last check that count as progress. */
+export const CAP_PROGRESS_CHANGES = 3;
+
+/**
+ * Should a run that just hit its round cap keep going?
+ *
+ * The cap was a flat 64 rounds: a run finishing a plan step and writing
+ * files at round 64 stopped exactly like one spinning in place, and the
+ * user had to press Resume — "it was thinking, even made something, and
+ * then ended there". Real progress since the last check (a plan step
+ * closed, or several successful writes/runs) earns another block; a run
+ * with neither stops as before.
+ */
+export function shouldExtendRoundCap(input: {
+  extensionsUsed: number;
+  stepsDoneSinceCheck: number;
+  changesSinceCheck: number;
+}): boolean {
+  if (input.extensionsUsed >= MAX_CAP_EXTENSIONS) return false;
+  return (
+    input.stepsDoneSinceCheck > 0 ||
+    input.changesSinceCheck >= CAP_PROGRESS_CHANGES
+  );
+}
