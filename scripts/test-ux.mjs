@@ -462,8 +462,8 @@ check(
 check(
   "the empty live box says it is waiting for text, not duplicate Thinking",
   /Waiting for reasoning text…/.test(bubble) &&
-    /const STREAM_FLUSH_MIN_MS = 40;/.test(page),
-  "the header owns Thinking; the body becomes real text within one 40ms flush"
+    /const PACE_FRAME_MS = 30;/.test(page) && /const PACE_DRAIN_MS = 200;/.test(page),
+  "the header owns Thinking; the body becomes real text within a paced frame, bursts spread over ~200ms"
 );
 check(
   "a ref, so active-phase tracking schedules no extra render",
@@ -660,7 +660,7 @@ check(
   );
 check(
   "the message hover row clusters actions on one side instead of scattering them",
-  /mt-1 flex items-center justify-end gap-1/.test(bubble),
+  /"flex items-center justify-end gap-1"/.test(bubble),
   "the old justify-between pushed Edit and Delete to opposite edges"
 );
 check(

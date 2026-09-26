@@ -1108,3 +1108,218 @@ input:focus-visible {
   background-color: #c96442;
   color: #ffffff;
 }
+
+/* ------------------------------------------------------------------ *
+ * Activity rows: finished thoughts and tool calls share one grammar —
+ * a 20px glyph square, a label, a muted detail. Only a LIVE thought is a
+ * box (amber, from .thinking-shell[data-thinking='true']).
+ * ------------------------------------------------------------------ */
+.think-row[data-thinking='false'] {
+  border-color: transparent;
+  background: transparent;
+}
+.think-row[data-thinking='false'] .thinking-toggle {
+  border-radius: 0.5rem;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+.think-row[data-thinking='false'] .thinking-toggle:hover {
+  background: color-mix(in oklab, var(--color-bg-hover) 60%, transparent);
+}
+.think-row[data-thinking='false'][data-open='true'] {
+  border-color: var(--color-border);
+  background: color-mix(in oklab, var(--color-bg-secondary) 55%, transparent);
+}
+.think-glyph {
+  color: var(--color-thinking);
+  background: color-mix(in oklab, var(--color-thinking) 12%, transparent);
+}
+.think-row[data-thinking='false'] .think-glyph {
+  color: var(--color-text-muted);
+  background: color-mix(in oklab, var(--color-bg-hover) 70%, transparent);
+}
+
+/* ------------------------------------------------------------------ *
+ * Startup splash (layout.tsx). Pure CSS so it animates before any JS.
+ * ------------------------------------------------------------------ */
+#app-splash {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  background: var(--color-bg-primary);
+  transition: opacity 0.3s ease, visibility 0.3s ease;
+  /* Failsafe: gone after 12s even if the app never signals ready. */
+  animation: app-splash-failsafe 0.3s ease 12s forwards;
+}
+#app-splash.is-done {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+@keyframes app-splash-failsafe {
+  to {
+    opacity: 0;
+    visibility: hidden;
+  }
+}
+.app-splash-mark {
+  display: flex;
+  gap: 7px;
+}
+.app-splash-mark span {
+  width: 10px;
+  height: 10px;
+  border-radius: 9999px;
+  background: var(--color-accent-light, var(--color-thinking));
+  animation: app-splash-dot 1.5s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+.app-splash-mark span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+.app-splash-mark span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+@keyframes app-splash-dot {
+  0%,
+  100% {
+    transform: translateY(0) scale(0.85);
+    opacity: 0.45;
+  }
+  45% {
+    transform: translateY(-7px) scale(1);
+    opacity: 1;
+  }
+}
+.app-splash-title {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--color-text-secondary);
+}
+.app-splash-bar {
+  width: 140px;
+  height: 2px;
+  overflow: hidden;
+  border-radius: 9999px;
+  background: color-mix(in oklab, var(--color-text-muted) 20%, transparent);
+}
+.app-splash-bar i {
+  display: block;
+  width: 40%;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--color-accent-light, var(--color-thinking));
+  animation: app-splash-bar 1.5s cubic-bezier(0.65, 0, 0.35, 1) infinite;
+}
+@keyframes app-splash-bar {
+  from {
+    transform: translateX(-110%);
+  }
+  to {
+    transform: translateX(260%);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .app-splash-mark span,
+  .app-splash-bar i {
+    animation: none;
+  }
+}
+
+/* Chat-open skeleton: delayed so fast loads never flash it, then a soft
+ * sweep across each block rather than an on/off pulse. */
+.chat-skeleton {
+  opacity: 0;
+  animation: skeleton-in 0.3s ease 0.12s forwards;
+}
+@keyframes skeleton-in {
+  to {
+    opacity: 1;
+  }
+}
+.skeleton-block {
+  background: linear-gradient(
+    90deg,
+    color-mix(in oklab, var(--color-bg-hover) 70%, transparent) 0%,
+    color-mix(in oklab, var(--color-bg-hover) 100%, var(--color-text-muted) 12%) 45%,
+    color-mix(in oklab, var(--color-bg-hover) 70%, transparent) 90%
+  );
+  background-size: 220% 100%;
+  animation: skeleton-sweep 1.5s ease-in-out infinite;
+}
+@keyframes skeleton-sweep {
+  from {
+    background-position: 120% 0;
+  }
+  to {
+    background-position: -120% 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-skeleton {
+    animation: none;
+    opacity: 1;
+  }
+  .skeleton-block {
+    animation: none;
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Motion polish. Same three timings as everything else: 0.15s for a
+ * state the user caused, 0.3s for something arriving, 1.5s for loops.
+ * Only opacity and transform move, so none of it costs layout.
+ * ------------------------------------------------------------------ */
+
+/* User-message actions float in under the bubble. */
+.msg-actions {
+  transform: translateY(-3px);
+}
+.group\/msg:hover .msg-actions,
+.msg-actions:focus-within {
+  transform: translateY(0);
+}
+
+/* A new step in the activity list rises in rather than popping. */
+.tool-row,
+.think-row {
+  animation: fadeIn 0.3s ease-out both;
+}
+.tool-body {
+  animation: popover-in 0.15s ease-out both;
+}
+/* The glyph of a call still running breathes. */
+.tool-running {
+  animation: thinking-pulse 1.5s ease-in-out infinite;
+}
+
+/* Buttons acknowledge the press. */
+.icon-btn,
+.send-btn {
+  transition:
+    color 0.15s ease,
+    background-color 0.15s ease,
+    transform 0.15s ease;
+}
+.icon-btn:active,
+.send-btn:active {
+  transform: scale(0.94);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tool-row,
+  .think-row,
+  .tool-body,
+  .tool-running {
+    animation: none;
+  }
+  .msg-actions,
+  .icon-btn:active,
+  .send-btn:active {
+    transform: none;
+  }
+}

@@ -87,6 +87,9 @@ import {
 } from "@/lib/transcript";
 import type { TranscriptMessage } from "@/lib/transcript";
 import { pruneTranscript } from "@/lib/prune";
+
+/** Plugin blocks larger than this ride pinned (cached), never as a tail copy. */
+const PLUGIN_TAIL_MAX_CHARS = 4_000;
 import { compactTranscript } from "@/lib/compact";
 import {
   QWEN_COMPACT,
@@ -1368,7 +1371,23 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          * so Direct Mode cannot fade. DeepSeek still gets the tail-only
          * copy (cache prefix).
          */
-        if (target.providerId === "openrouter") {
+        /*
+         * One copy of the plugin block, not two.
+         *
+         * OpenRouter got it pinned on the first system message AND the tail
+         * copy re-appended every round — measured on the wire, two copies.
+         * The tail copy sits after the newest messages, so it is never in
+         * the cached prefix: a large custom plugin (the reported "plugins
+         * 84k") was paid at full input price on every single round. Pinned
+         * copies sit in the cached prefix. So: OpenRouter pins only (its
+         * lanes honour the first system message); DeepSeek keeps the tail
+         * copy for its recency weight only while the block is small enough
+         * that re-sending it is noise, and pins anything larger.
+         */
+        const pinPlugins =
+          target.providerId === "openrouter" ||
+          pluginDirectives.length > PLUGIN_TAIL_MAX_CHARS;
+        if (pinPlugins) {
           pinPluginDirectivesOnFirstSystem(transcript, pluginDirectives);
         }
 
@@ -1497,7 +1516,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               transcript.splice(i, 1);
             }
           }
-          if (pluginDirectives) {
+          if (pluginDirectives && !pinPlugins) {
             transcript.push({ role: "system", content: pluginDirectives });
           }
         };
@@ -1939,7 +1958,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           await refreshFileTree();
         }
 
-        if (target.providerId === "openrouter") {
+        if (pinPlugins) {
           pinPluginDirectivesOnFirstSystem(transcript, pluginDirectives);
         }
 
@@ -2243,7 +2262,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           appendPluginDirectives();
           // The free lanes ignore the tail copy after a few rounds. Re-pin every
           // round so a long agent loop cannot fade Direct Mode.
-          if (target.providerId === "openrouter") {
+          if (pinPlugins) {
             pinPluginDirectivesOnFirstSystem(transcript, pluginDirectives);
           }
 
@@ -2427,7 +2446,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           }
           // Compact returns a new array. Re-pin the copy that actually
           // goes on the wire so the free lanes cannot lose MAXIMUM PRIORITY.
-          if (target.providerId === "openrouter") {
+          if (pinPlugins) {
             pinPluginDirectivesOnFirstSystem(
               compacted.messages,
               pluginDirectives

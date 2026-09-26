@@ -344,18 +344,22 @@ export function WorkspaceSidePanel({
     if (!workspaceId || downloading) return;
     setDownloading(true);
     try {
-      const res = await fetch(`/api/workspace/${workspaceId}/download`);
+      // ?via=fetch: bytes as plain text, no attachment header, so a
+      // download manager watching fetch responses has nothing to claim
+      // (it used to take the response over and leave a 0 KB file).
+      const res = await fetch(`/api/workspace/${workspaceId}/download?via=fetch`);
       if (!res.ok) throw new Error(String(res.status));
 
-      const blob = await res.blob();
-      // Keep the server's filename, falling back to something sensible.
-      const disposition = res.headers.get("content-disposition") ?? "";
-      const match = /filename="?([^"]+)"?/.exec(disposition);
+      // arrayBuffer ignores the charset: the bytes arrive untouched.
+      const bytes = await res.arrayBuffer();
+      if (bytes.byteLength === 0) throw new Error("empty archive");
+      const blob = new Blob([bytes], { type: "application/zip" });
+      const name = res.headers.get("x-archive-name") || "workspace.zip";
 
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = match?.[1] ?? "workspace.zip";
+      a.download = name;
       document.body.appendChild(a);
       a.click();
       a.remove();
