@@ -5,7 +5,6 @@ import { v4 as uuidv4 } from "uuid";
 import { Sidebar } from "@/components/Sidebar";
 import { ChatArea } from "@/components/ChatArea";
 import type { BtwEntry } from "@/components/BtwDock";
-import { BalanceWarning, levelFor } from "@/components/BalanceWarning";
 import { SettingsModal } from "@/components/SettingsModal";
 import { PluginsModal } from "@/components/PluginsModal";
 import { ArtifactProvider } from "@/components/ArtifactContext";
@@ -720,72 +719,12 @@ export default function Home() {
   const [localApiModel, setLocalApiModel] = useState(DEFAULT_LOCAL_API_MODEL);
 
   /*
-   * What is actually left in the DeepSeek account.
-   *
-   * Cost per reply is estimated from token counts after the fact, which
-   * cannot answer the question that matters: will the next task finish.
-   * DeepSeek admits a request against the balance and deducts after it runs,
-   * so a long agent task can begin with a few cents and end overdrawn. This
-   * reads the real figure so the warning arrives before that, not after.
+   * The low-balance banner was removed at the user's request: it covered the
+   * composer on every lane (it read DeepSeek's balance even while chatting on
+   * OpenRouter) and a real spending stop already surfaces as the reply's own
+   * "insufficient balance" notice with Resume. No balance polling either —
+   * one request after every reply for a figure nobody asked to see.
    */
-  const [balance, setBalance] = useState<{
-    total: number;
-    available: boolean;
-  } | null>(null);
-  const [checkingBalance, setCheckingBalance] = useState(false);
-  /** Balance the user dismissed at, so it reappears only if things worsen. */
-  const [balanceDismissedAt, setBalanceDismissedAt] = useState<number | null>(
-    null
-  );
-
-  const refreshBalanceRef = useRef<(() => void) | null>(null);
-
-  const refreshBalance = useCallback(async () => {
-    if (!deepseekKey) return;
-    setCheckingBalance(true);
-    try {
-      const res = await fetch("/api/balance", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ deepseekApiKey: deepseekKey }),
-      });
-      const data = (await res.json()) as {
-        total?: number;
-        available?: boolean;
-        error?: string;
-      };
-      // A failed check leaves the last known figure alone. Showing nothing is
-      // better than replacing a real number with a guess.
-      if (!data.error && typeof data.total === "number") {
-        setBalance({ total: data.total, available: data.available === true });
-      }
-    } catch {
-      /* offline, or the key is wrong — stay quiet */
-    } finally {
-      setCheckingBalance(false);
-    }
-  }, [deepseekKey]);
-
-  useEffect(() => {
-    refreshBalanceRef.current = refreshBalance;
-  }, [refreshBalance]);
-
-  // One check when a key is first available. After that it only re-reads when
-  // a reply finishes, which is the only time the figure can have moved.
-  useEffect(() => {
-    if (deepseekKey) void refreshBalance();
-  }, [deepseekKey, refreshBalance]);
-
-  // A dismissal is tied to the amount it was dismissed at, so hiding the
-  // warning at $0.40 does not also hide it at $0.05 — it comes back when
-  // things get worse, not on a timer.
-  const balanceLevel = balance
-    ? levelFor(balance.total, balance.available)
-    : "ok";
-  const showBalanceWarning =
-    balance !== null &&
-    balanceLevel !== "ok" &&
-    (balanceDismissedAt === null || balance.total < balanceDismissedAt - 0.001);
   const [tavilyKey, setTavilyKey] = useState("");
   /** Optional fallback provider, used only when Tavily refuses. */
   const [exaKey, setExaKey] = useState("");
@@ -1332,8 +1271,23 @@ export default function Home() {
       if (Array.isArray(data)) setConversations(data as Conversation[]);
     } catch {
       /* ignore */
+    } finally {
+      setConversationsLoaded(true);
     }
   }, []);
+
+  /** The first chat-list fetch has answered (either way). */
+  const [conversationsLoaded, setConversationsLoaded] = useState(false);
+  // Lift the startup splash (see layout.tsx) once the app can actually be
+  // used: settings read and the chat list in.
+  useEffect(() => {
+    if (!settingsHydrated || !conversationsLoaded) return;
+    const splash = document.getElementById("app-splash");
+    if (!splash) return;
+    // Hidden, not removed: the node belongs to the server-rendered layout,
+    // and pulling it out from under React can break a later reconcile.
+    splash.classList.add("is-done");
+  }, [settingsHydrated, conversationsLoaded]);
 
   useEffect(() => {
     // Deferred to a microtask so the fetch's setState never lands
@@ -1876,23 +1830,42 @@ export default function Home() {
       // re-keyed to the real id in migrateSession when a draft chat is saved.
       if (runConvId) abortRefs.current.set(runConvId, controller);
 
-      // Batch deltas into one state update at most every 40ms. Without a
-      // floor a fast stream triggers dozens of re-renders a second, and each
-      // one reconciles the whole transcript, re-lays-out the chat for scroll
-      // follow, and repaints — that per-frame bill, not the model, is what
-      // made the app feel heavy while it generated. It was 100ms while a
-      // flush re-laid-out the whole run's reasoning; at that size text landed
-      // in visible ~8-token lumps and read as lag. With reasoning rendered
-      // per round (and only its tail while followed) a flush is cheap —
-      // measured: zero long tasks at 40ms, even with the CPU throttled 4x.
-      const STREAM_FLUSH_MIN_MS = 40;
+      // Batch deltas into one state update per paced frame (~30ms). Without
+      // a floor a fast stream triggers dozens of re-renders a second, each
+      // reconciling the transcript, re-laying-out for scroll follow and
+      // repainting. It was 100ms while a flush re-laid-out the whole run's
+      // reasoning, and text landed in visible lumps that read as lag; with
+      // reasoning rendered per round (only its tail while followed) a flush
+      // is cheap — measured zero long tasks even with the CPU throttled 4x.
+      /*
+       * Paced reveal. Providers deliver in bursts — twenty tokens at once,
+       * then a pause — so even at 40ms the text jumped forward in lumps:
+       * "faster, but not smooth printing". A paced frame releases only a
+       * share of the backlog, sized so any burst drains in about
+       * PACE_DRAIN_MS: a steady stream stays near real time, a burst is
+       * spread over a few frames instead of landing at once. Boundaries
+       * (a tool starting, the reply ending) still flush everything at once,
+       * so ordering and the final text are exact.
+       */
+      const PACE_FRAME_MS = 30;
+      const PACE_DRAIN_MS = 200;
       let pendingContent = "";
       let pendingReasoning = "";
       let frame: number | null = null;
       let flushTimer: ReturnType<typeof setTimeout> | null = null;
       let lastFlushAt = 0;
 
-      const flush = () => {
+      /** Leading part of `text` for this paced frame, never splitting a surrogate pair. */
+      const paceSlice = (text: string, dt: number): string => {
+        if (!text) return "";
+        let n = Math.max(2, Math.ceil((text.length * dt) / PACE_DRAIN_MS));
+        if (n >= text.length) return text;
+        const code = text.charCodeAt(n - 1);
+        if (code >= 0xd800 && code <= 0xdbff) n += 1;
+        return text.slice(0, n);
+      };
+
+      const flush = (paced = false) => {
         // Whichever scheduler won cancels the other. requestAnimationFrame can
         // pause in a throttled/background window; the timer is the guarantee
         // that real reasoning does not sit behind a permanent "Thinking…".
@@ -1900,12 +1873,19 @@ export default function Home() {
         if (flushTimer !== null) clearTimeout(flushTimer);
         frame = null;
         flushTimer = null;
-        lastFlushAt = Date.now();
+        const now = Date.now();
+        const dt = Math.min(120, Math.max(16, now - lastFlushAt));
+        lastFlushAt = now;
         if (!pendingContent && !pendingReasoning) return;
-        const c = pendingContent;
-        const r = pendingReasoning;
-        pendingContent = "";
-        pendingReasoning = "";
+        // A hidden tab has nobody to animate for: release it all.
+        const pace =
+          paced && typeof document !== "undefined" && !document.hidden;
+        const c = pace ? paceSlice(pendingContent, dt) : pendingContent;
+        const r = pace ? paceSlice(pendingReasoning, dt) : pendingReasoning;
+        pendingContent = pendingContent.slice(c.length);
+        pendingReasoning = pendingReasoning.slice(r.length);
+        // Whatever this frame held back goes out on the next one.
+        if (pendingContent || pendingReasoning) scheduleFlush();
         writeMessages(runConvId ?? requestConversationId, (prev) =>
           prev.map((m) => {
             if (m.id !== streamingId) return m;
@@ -1948,18 +1928,19 @@ export default function Home() {
           })
         );
       };
-      const scheduleFlush = () => {
+      function scheduleFlush() {
         if (frame !== null || flushTimer !== null) return;
-        const wait = STREAM_FLUSH_MIN_MS - (Date.now() - lastFlushAt);
+        const paced = () => flush(true);
+        const wait = PACE_FRAME_MS - (Date.now() - lastFlushAt);
         if (wait <= 0) {
-          frame = requestAnimationFrame(flush);
+          frame = requestAnimationFrame(paced);
         } else {
           flushTimer = setTimeout(() => {
             flushTimer = null;
-            frame = requestAnimationFrame(flush);
+            frame = requestAnimationFrame(paced);
           }, wait);
         }
-      };
+      }
 
       /** Set when a tool changed the workspace, so the list can refresh. */
       let sawToolWrite = false;
@@ -2731,9 +2712,6 @@ export default function Home() {
         }
         // Re-sync the global chat list; this does not enter any transcript.
         void refreshConversations();
-        // The balance only moves when a reply finishes, so this is the one
-        // moment worth re-reading it.
-        void refreshBalanceRef.current?.();
         if (stillActive && sawToolWrite) {
           setRecentlyChanged([...changedPaths]);
           void refreshWorkspaceFiles();
@@ -3298,17 +3276,6 @@ export default function Home() {
                 </div>
               </div>
             </div>
-          ) : null
-        }
-        balanceWarning={
-          showBalanceWarning && balance ? (
-            <BalanceWarning
-              total={balance.total}
-              available={balance.available}
-              checking={checkingBalance}
-              onRefresh={() => void refreshBalance()}
-              onDismiss={() => setBalanceDismissedAt(balance.total)}
-            />
           ) : null
         }
         btwEntry={btwEntry}

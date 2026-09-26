@@ -191,5 +191,30 @@ console.log("\n8. Thinking sits where it happened");
     "laying out the whole think ten times a second is what made it crawl");
 }
 
+console.log("\n9. Every tool reads as what it is");
+{
+  const { describeTool } = await import(
+    pathToFileURL(path.join(ROOT, "src/lib/tool-display.ts")).href
+  );
+  const rf = describeTool("read_files", JSON.stringify({ paths: ["src/A.luau", "src/B.luau", "tests/x.luau"] }));
+  check("read_files is a read with a file count, not a pencil and a raw name",
+    rf.kind === "read" && rf.done === "Read" && rf.target === "3 files",
+    "the screenshot showed 'read_files' beside the edit icon");
+  check("one path shows the path",
+    describeTool("read_files", JSON.stringify({ paths: ["src/A.luau"] })).target === "src/A.luau");
+  const ws = describeTool("web_search", JSON.stringify({ query: "luau signal library" }));
+  check("a web search shows its query in prose",
+    ws.kind === "web" && ws.target === "luau signal library" && !ws.mono);
+  const rc = describeTool("run_command", JSON.stringify({ command: "npm", args: ["test"] }));
+  check("a command shows its command line", rc.kind === "run" && rc.target === "npm test" && rc.mono);
+  check("a plan shows its step count",
+    describeTool("make_plan", JSON.stringify({ goal: "g", steps: ["a", "b", "c"] })).target === "3 steps");
+  check("streaming (partial) arguments still yield the path",
+    describeTool("write_file", '{"path":"src/Store.lu').target === "src/Store.lu");
+  const unknown = describeTool("my_custom_tool", "{}");
+  check("an unknown tool is humanised, not printed raw", unknown.done === "My custom tool" && unknown.kind === "other");
+  check("the row uses the descriptor", /describeTool\(/.test(readFileSync(path.join(ROOT, "src/components/ToolActivity.tsx"), "utf8")));
+}
+
 console.log("\n" + (fail === 0 ? g(`All ${pass} checks passed.`) : r(`${fail} of ${pass + fail} failed.`)) + "\n");
 process.exit(fail === 0 ? 0 : 1);

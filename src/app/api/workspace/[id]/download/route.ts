@@ -15,7 +15,7 @@ function archiveName(workspaceId: string): string {
 
 /** GET returns every file in the workspace as a single archive. */
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
@@ -55,6 +55,27 @@ export async function GET(
     }
 
     const zip = await createZip(entries);
+
+    /*
+     * The in-app button asks with ?via=fetch and gets the bytes WITHOUT
+     * download headers.
+     *
+     * Download managers (IDM) watch the browser's network responses — fetch
+     * included — and grab anything that says "attachment" or looks like an
+     * archive: the browser's own copy is cancelled (a 0 KB file) and IDM
+     * re-requests the URL on its own. A plain text response is never
+     * claimed; the page turns the bytes back into a .zip locally.
+     */
+    if (req.nextUrl.searchParams.get("via") === "fetch") {
+      return new NextResponse(new Uint8Array(zip), {
+        headers: {
+          "Content-Type": "text/plain; charset=x-user-defined",
+          "Content-Length": String(zip.length),
+          "X-Archive-Name": archiveName(id),
+          "Cache-Control": "no-store",
+        },
+      });
+    }
 
     return new NextResponse(new Uint8Array(zip), {
       headers: {

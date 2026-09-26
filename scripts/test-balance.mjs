@@ -48,11 +48,6 @@ check(
   /i\.currency === "USD"/.test(api),
   "balance_infos is an array; the first entry may be CNY"
 );
-check(
-  "a failed check keeps the last known figure",
-  /if \(!data\.error && typeof data\.total === "number"\)/.test(page),
-  "replacing a real number with a guess is worse than saying nothing"
-);
 
 console.log("\n2. The thresholds match how this app spends");
 check(
@@ -85,15 +80,14 @@ check(
 // setInterval across the whole file.
 const intervalBodies = page.match(/setInterval\([^;]{0,800}/g) ?? [];
 check(
-  "it is only re-read when a reply finishes",
-  /void refreshBalanceRef\.current\?\.\(\)/.test(page) &&
-    !intervalBodies.some((body) => /balance/i.test(body)),
+  "nothing polls the balance on a timer",
+  !intervalBodies.some((body) => /balance/i.test(body)),
   "polling would spend requests to learn nothing between messages"
 );
 check(
-  "dismissing hides it until the balance actually worsens",
-  /balance\.total < balanceDismissedAt - 0\.001/.test(page),
-  "hiding at $0.40 must not also hide it at $0.05"
+  "the chat page no longer shows the low-balance banner or polls for it",
+  !/<BalanceWarning/.test(page) && !/\/api\/balance/.test(page),
+  "removed at the user's request — a real stop still surfaces on the reply"
 );
 
 console.log("\n4. It says what to do");
