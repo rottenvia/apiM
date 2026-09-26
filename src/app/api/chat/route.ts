@@ -60,6 +60,8 @@ import {
   resolveRunGoal,
 } from "@/lib/goal-pin";
 import type { Plan } from "@/lib/plan";
+import { appendThinkRange } from "@/lib/timeline";
+import type { TimelineEntry } from "@/lib/timeline";
 import { BROWSER_POLICY_PROMPT, NO_BROWSER_PROMPT } from "@/lib/browser-policy";
 import { browserAvailable } from "@/lib/browser-playwright";
 import { recordAsync } from "@/lib/diagnostics";
@@ -2155,10 +2157,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          * sentence went with which action, which is the only interesting
          * part — so the order is recorded rather than flattened.
          */
-        const timeline: (
-          | { kind: "text"; text: string }
-          | { kind: "tool"; id: string }
-        )[] = [...resumedTimeline];
+        const timeline: TimelineEntry[] = [...resumedTimeline];
 
         const appendTimelineText = (text: string) => {
           const last = timeline[timeline.length - 1];
@@ -3411,8 +3410,13 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                     send({ type: "reasoning", delta: gap });
                   }
                 }
+                const thinkFrom = reasoningContent.length;
                 reasoningContent += reasoningDelta.text;
                 roundReasoning += reasoningDelta.text;
+                // Where this thinking happened, so the reply shows each
+                // round's reasoning beside the tools it led to instead of
+                // one ever-growing box at the top of the message.
+                appendThinkRange(timeline, thinkFrom, reasoningContent.length);
                 sawWork = true;
                 const reasoningNow = Date.now();
                 if (!firstReasoningAt) firstReasoningAt = reasoningNow;
