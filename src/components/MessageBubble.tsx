@@ -18,6 +18,7 @@ import { ToolActivity } from "@/components/ToolActivity";
 import { ApprovalPrompt } from "@/components/ApprovalPrompt";
 import { QuestionPrompt } from "@/components/QuestionPrompt";
 import { MessageTimeline } from "@/components/MessageTimeline";
+import { timelineHasThinking } from "@/lib/timeline";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Message, MessageAttachment } from "@/app/page";
@@ -233,6 +234,9 @@ export function Dots({ size = 5 }: { size?: number }) {
     </span>
   );
 }
+
+/** Characters of a live, followed think kept on screen (see liveTail). */
+const LIVE_TAIL_CHARS = 12_000;
 
 /**
  * "12s", "3m 04s" — the finished thinking label ("Thought for 12s").
@@ -548,6 +552,11 @@ function MessageBubbleImpl({
   /** A long steering note truncates to one quiet line; this expands it. */
   const [noteExpanded, setNoteExpanded] = useState(false);
   const thinkingRef = useRef<HTMLDivElement>(null);
+  /** Stable per message, so memoised think rows do not re-render for it. */
+  const loadReasoning = useCallback(
+    () => onLoadReasoning?.(message.id),
+    [onLoadReasoning, message.id]
+  );
   /** Scroll target for the plan pill in the meta row. */
   const planRef = useRef<HTMLDivElement>(null);
   const isUser = message.role === "user";
@@ -588,6 +597,12 @@ function MessageBubbleImpl({
       message.toolEvents?.length &&
       !searchQuery
   );
+  /**
+   * The timeline places each round's reasoning where it happened, so the
+   * single box at the top steps aside. Older replies recorded no reasoning
+   * ranges and keep the box.
+   */
+  const inlineThinking = useTimeline && timelineHasThinking(message.timeline);
 
   // Label-only signal that reasoning is still in progress. The panel itself
   // stays closed unless the user opens it, so nothing expands and collapses
@@ -638,6 +653,18 @@ function MessageBubbleImpl({
   /** The body stays shut through the silent gap — an open frame around
    * nothing was the empty outline this replaced. */
   const thinkBodyOpen = showThinking && !thinkLoading;
+  /**
+   * Render only the tail while following a live think.
+   *
+   * The body is rewritten on every stream flush, and a twenty-minute think
+   * is a few hundred KB of wrapped text — laying all of it out ten times a
+   * second is what made reasoning crawl in on long thinks. Following only
+   * ever shows the bottom anyway; Free (or the think finishing) shows it all.
+   */
+  const liveTail =
+    isThinkingPhase &&
+    followThinking &&
+    reasoningLen > LIVE_TAIL_CHARS;
 
   /**
    * The finished label's duration. Present once `done` lands; a dropped
@@ -1398,7 +1425,7 @@ function MessageBubbleImpl({
               is coming. "none" means the model was told not to think, and
               then there is correctly nothing to show.
             */}
-            {hasThinking && (
+            {hasThinking && !inlineThinking && (
               <div className="thinking-panel">
                 <div
                   data-thinking={isThinkingPhase}
@@ -1551,7 +1578,16 @@ function MessageBubbleImpl({
                       */}
                       {typeof message.reasoningContent === "string" ? (
                         message.reasoningContent.trim() ? (
-                          message.reasoningContent
+                          liveTail ? (
+                            <>
+                              <span className="block pb-1 opacity-60">
+                                … earlier thinking is hidden while following — click Follow to show all of it
+                              </span>
+                              {message.reasoningContent.slice(-LIVE_TAIL_CHARS)}
+                            </>
+                          ) : (
+                            message.reasoningContent
+                          )
                         ) : message.reasoningNotice ? (
                           <span className="opacity-70">
                             {message.reasoningNotice}
@@ -1777,32 +1813,6 @@ function MessageBubbleImpl({
                 />
               )}
 
-            {/* Between tool rounds.
-
-                After the last tool result lands, the host still has to read
-                every tool result back and prefill the next round. On a long
-                context that is the slowest stretch of the whole reply — tens
-                of seconds where nothing types, every tool row shows its green
-                check, and the reasoning panel has gone quiet. It looks done;
-                it is the opposite of done. This row is only that gap: it
-                appears once the tool work is finished and vanishes the moment
-                any new reasoning or prose streams in. Shown in both the flat
-                and timeline layouts (the comment block above the plan is the
-                one both branches render before). Purely presentational —
-                zero server work, nothing about the run changes. */}
-            {message.isStreaming &&
-              betweenToolRounds &&
-              streamIdle && (
-                <div className="mb-2.5 flex items-center gap-2 text-[13px] text-text-secondary">
-                  <span className="text-accent-light">
-                    <Dots size={4} />
-                  </span>
-                  <span className="animate-thinking">
-                    Reading the results and deciding the next step
-                  </span>
-                </div>
-              )}
-
             {message.pendingCommand && onDecideCommand && (
               <ApprovalPrompt
                 pending={message.pendingCommand}
@@ -1820,8 +1830,41 @@ function MessageBubbleImpl({
                 // lagging copy, so formatting stays live without a full
                 // re-parse on every frame.
                 live={message.isStreaming}
+                reasoning={message.reasoningContent ?? undefined}
+                thinkingLive={arriveRef.current?.last === "reasoning"}
+                onLoadReasoning={loadReasoning}
               />
             )}
+
+            {/* Between tool rounds.
+
+                After the last tool result lands, the host still has to read
+                every tool result back and prefill the next round. On a long
+                context that is the slowest stretch of the whole reply — tens
+                of seconds where nothing types, every tool row shows its green
+                check, and the reasoning panel has gone quiet. It looks done;
+                it is the opposite of done. This row is only that gap: it
+                appears once the tool work is finished and vanishes the moment
+                any new reasoning or prose streams in. Shown in both the flat
+                and timeline layouts (the comment block above the plan is the
+                one both branches render before). Rendered under the
+                timeline, where the work it is waiting on is — above it, on
+                a long run, it sat a screen away from the last tool row.
+                Purely presentational —
+                zero server work, nothing about the run changes. */}
+            {message.isStreaming &&
+              betweenToolRounds &&
+              streamIdle && (
+                <div className="mb-2.5 flex items-center gap-2 text-[13px] text-text-secondary">
+                  <span className="text-accent-light">
+                    <Dots size={4} />
+                  </span>
+                  <span className="animate-thinking">
+                    Reading the results and deciding the next step
+                  </span>
+                </div>
+              )}
+
 
             {/* Main content. While streaming, an unterminated ``` fence is
                 replaced by a placeholder card — watching code type itself line

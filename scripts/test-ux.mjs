@@ -219,7 +219,7 @@ check(
 );
 check(
   "the thinking panel mounts before the first reasoning token",
-  /\{hasThinking && \(\s*\n\s*<div className="thinking-panel">/.test(bubble) &&
+  /\{hasThinking && (?:!inlineThinking && )?\(\s*\n\s*<div className="thinking-panel">/.test(bubble) &&
     !/hasThinking && !thinkLoading/.test(bubble),
   "the mount stays (hidden) through the gap so the clock counts invisibly — the status row carries the visible voice"
 );
@@ -278,7 +278,7 @@ check(
     bubble
   ) &&
     /const hasThinking = reasoningChars > 0 \|\| thinkingRequested;/.test(bubble) &&
-    /\{hasThinking && \(\s*\n\s*<div className="thinking-panel">/.test(bubble) &&
+    /\{hasThinking && (?:!inlineThinking && )?\(\s*\n\s*<div className="thinking-panel">/.test(bubble) &&
     /const thinkLoading = isThinkingPhase && !panelHasContent;/.test(bubble),
   "a completed high-effort reply with no returned trace must still have a box — the mount no longer depends on the live phase at all"
 );
@@ -595,7 +595,7 @@ check(
 );
 check(
   "one Thinking during the silent gap — the bubble loader hides under the status row",
-  /\{hasThinking && \(\s*\n\s*<div className="thinking-panel">/.test(bubble) &&
+  /\{hasThinking && (?:!inlineThinking && )?\(\s*\n\s*<div className="thinking-panel">/.test(bubble) &&
     /const thinkHidden = thinkLoading && !message\.content\.trim\(\);/.test(
       bubble
     ) &&

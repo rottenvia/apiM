@@ -11,8 +11,10 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
-const { buildTimelineRows, textHasTable } = await import(
-  pathToFileURL(path.join(ROOT, "src/lib/timeline.ts")).href
+const { buildTimelineRows, textHasTable, appendThinkRange, timelineHasThinking } =
+  await import(pathToFileURL(path.join(ROOT, "src/lib/timeline.ts")).href);
+const { rebuildResumeFromStored } = await import(
+  pathToFileURL(path.join(ROOT, "src/lib/rebuild-resume.ts")).href
 );
 const { readFileSync } = await import("node:fs");
 const messageTimeline = readFileSync(
@@ -137,6 +139,57 @@ check("rows render deferred markdown while live, exact text on done",
     /RowMarkdown text=\{shown\}/.test(messageTimeline) &&
     /live=\{message\.isStreaming\}/.test(messageBubble),
   "formatting stays live but the parse skips busy frames");
+
+console.log("\n8. Thinking sits where it happened");
+{
+  // Round 1 thinks, narrates, writes; round 2 thinks and writes again.
+  const tl = [];
+  appendThinkRange(tl, 0, 40);
+  appendThinkRange(tl, 40, 90); // same burst, next frame
+  tl.push({ kind: "text", text: "I'll create the file." });
+  tl.push({ kind: "tool", id: "a" });
+  appendThinkRange(tl, 92, 150); // round 2 (after the round gap)
+  tl.push({ kind: "tool", id: "b" });
+  check("frames of one burst extend a single think entry",
+    tl.filter((e) => e.kind === "think").length === 2 &&
+      tl[0].start === 0 && tl[0].end === 90);
+  const rows = buildTimelineRows(tl, [ev("a", "wrote a"), ev("b", "wrote b")]);
+  check("each round's reasoning is its own row, before what it led to",
+    rows.length === 4 &&
+      rows[0].think?.start === 0 && rows[0].think?.end === 90 &&
+      rows[1].text === "I'll create the file." && rows[1].tools[0]?.id === "a" &&
+      rows[2].think?.start === 92 &&
+      rows[3].tools[0]?.id === "b" && !rows[3].think,
+    "the newest thinking is at the bottom, beside the newest tool — not in a box at the top");
+  check("a tool after thinking never lands inside the think row",
+    rows.every((row) => !row.think || (row.tools.length === 0 && row.text === "")));
+  check("the timeline reports it places reasoning in-line",
+    timelineHasThinking(tl) && !timelineHasThinking([{ kind: "text", text: "x" }]));
+  check("an empty range records nothing",
+    appendThinkRange([], 5, 5).length === 0);
+
+  const rebuilt = rebuildResumeFromStored({
+    id: "m", role: "assistant", content: "I'll create the file.",
+    reasoningContent: "x".repeat(150), createdAt: "",
+    toolEvents: [
+      { id: "a", name: "write_file", args: "{}", ok: true, summary: "wrote a" },
+      { id: "b", name: "write_file", args: "{}", ok: true, summary: "wrote b" },
+    ],
+    timeline: tl,
+  });
+  check("resume rebuilding skips reasoning ranges instead of stalling on them",
+    rebuilt !== null &&
+      rebuilt.messages.filter((m) => m.role === "assistant").length === 2 &&
+      rebuilt.messages.filter((m) => m.role === "tool").length === 2,
+    "a think entry matched neither branch of the replay loop and never advanced it — and it marks a new round");
+  check("the bubble hands the reasoning to the timeline and steps its top box aside",
+    /inlineThinking = useTimeline && timelineHasThinking/.test(messageBubble) &&
+      /\{hasThinking && !inlineThinking && \(/.test(messageBubble) &&
+      /reasoning=\{message\.reasoningContent/.test(messageBubble));
+  check("a live think renders only its tail while followed",
+    /LIVE_TAIL_CHARS/.test(messageTimeline) && /LIVE_TAIL_CHARS/.test(messageBubble),
+    "laying out the whole think ten times a second is what made it crawl");
+}
 
 console.log("\n" + (fail === 0 ? g(`All ${pass} checks passed.`) : r(`${fail} of ${pass + fail} failed.`)) + "\n");
 process.exit(fail === 0 ? 0 : 1);

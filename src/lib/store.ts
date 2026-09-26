@@ -88,6 +88,7 @@ export interface StoredMessage {
   timeline?: (
     | { kind: "text"; text: string }
     | { kind: "tool"; id: string }
+    | { kind: "think"; start: number; end: number }
   )[] | null;
   /** File operations run during this reply, so they survive a reload. */
   toolEvents?: {
