@@ -27,7 +27,7 @@ import {
   inspectWorkspaceBinary,
 } from "@/lib/binaries";
 import { noteBinaryInspection } from "@/lib/binary-ledger";
-import {
+import { MACHINE_SCOPE,
   addFinding,
   reviseFinding,
 } from "@/lib/findings";
@@ -476,7 +476,7 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
     function: {
       name: "update_plan",
       description:
-        "Mark steps as doing, done or blocked as you go. A step can only be marked done if you say how you checked it — the test you ran, the output you saw, the page you opened. If you have not checked it, it is not done. \"blocked\" is ONLY for something outside your control stopping the work — a command that fails, a missing file, a decision only the user can make. It is never a way to decline the task: imaginative, creative and technical requests on the user's own machine are done, not blocked; if one approach is unsuitable, use another.",
+        "Mark steps as doing, done or blocked as you go — always in the SAME turn as your next real tool call (call them together), never as a turn on its own: a round spent only on bookkeeping is a wasted round of reasoning. A step can only be marked done if you say how you checked it — the test you ran, the output you saw, the page you opened. If you have not checked it, it is not done. \"blocked\" is ONLY for something outside your control stopping the work — a command that fails, a missing file, a decision only the user can make. It is never a way to decline the task: imaginative, creative and technical requests on the user's own machine are done, not blocked; if one approach is unsuitable, use another.",
       parameters: {
         type: "object",
         properties: {
@@ -1454,6 +1454,12 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
             type: "string",
             description:
               "Id [f...] of an existing finding to correct; with status, marks it wrong instead of adding a new one.",
+          },
+          scope: {
+            type: "string",
+            enum: ["workspace", "machine"],
+            description:
+              "'machine' for a fact about this computer or its tools that holds in ANY project (a CLI's quirks, what is installed, what an OS command does) — kept once and shown in every chat, so later chats do not re-probe it. Default 'workspace' for anything about this project.",
           },
           status: {
                       type: "string",
@@ -2515,6 +2521,9 @@ export async function runTool(
       }
 
       case "read_file": {
+        // See the slice-walk note below.
+        const SMALL_FILE_LINES = 1_500;
+        const SMALL_FILE_CHARS = 80_000;
         const filePath = str(args, "path");
         const rangeRequested =
           num(args, "start_line") != null || num(args, "end_line") != null;
@@ -2548,6 +2557,31 @@ export async function runTool(
                 startLine: num(args, "start_line"),
                 endLine: num(args, "end_line"),
               });
+
+        /*
+         * A small file is never walked in slices.
+         *
+         * Reported: "Read test/mock_roblox.luau" five rounds in a row, a few
+         * dozen lines each, hunting one syntax error in a 300-line file — a
+         * full round of reasoning per slice. Below this size the whole file
+         * costs less than one extra round, so a range read of it returns the
+         * whole file, numbered, so the lines asked for are still findable.
+         */
+        let widenedFromRange = false;
+        if (
+          result.rangeRequested &&
+          !(result as { fromMemory?: boolean }).fromMemory &&
+          result.totalLines <= SMALL_FILE_LINES &&
+          result.totalChars <= SMALL_FILE_CHARS
+        ) {
+          const whole = await readFile(workspaceId, filePath, {
+            maxChars: limits.readChars,
+          });
+          if (!whole.truncated) {
+            Object.assign(result, whole, { rangeRequested: true });
+            widenedFromRange = true;
+          }
+        }
 
         /*
          * Numbered when the offset matters, plain when it does not.
@@ -2596,7 +2630,9 @@ export async function runTool(
         // a reason to re-read — it already had the content.
         const memoryNote = (result as { fromMemory?: boolean }).fromMemory
           ? " — served from the run's own write (you wrote these exact bytes in this reply; no re-read was needed)"
-          : "";
+          : widenedFromRange
+            ? ` — whole file returned (only ${result.totalLines} lines): a file this small is read once, never in slices`
+            : "";
 
         const header =
           `${result.path} — lines ${result.firstLine}-${result.lastLine} of ` +
@@ -4872,19 +4908,30 @@ export async function runTool(
         }
         const id = str(args, "id");
         const status = str(args, "status");
+        const machine = str(args, "scope") === "machine";
+        const store = machine ? MACHINE_SCOPE : workspaceId;
         if (id && status === "disproved") {
           const reason = str(args, "evidence") || "Corrected by later analysis.";
-          const revised = await reviseFinding(
-            workspaceId,
+          const replacement = {
+            claim,
+            refs: Array.isArray(args.refs)
+              ? args.refs.map((r) => String(r))
+              : undefined,
+            evidence: reason,
+          };
+          // The id may live in either store; try the named one, then the other.
+          let revised = await reviseFinding(
+            store,
             { id, reason, status: "disproved" },
-            {
-              claim,
-              refs: Array.isArray(args.refs)
-                ? args.refs.map((r) => String(r))
-                : undefined,
-              evidence: reason,
-            }
+            replacement
           );
+          if (!revised.updated) {
+            revised = await reviseFinding(
+              machine ? workspaceId : MACHINE_SCOPE,
+              { id, reason, status: "disproved" },
+              replacement
+            );
+          }
           return {
             ok: revised.updated,
             content: revised.updated
@@ -4897,14 +4944,14 @@ export async function runTool(
           ? args.refs.map((r) => String(r))
           : [];
         const evidence = str(args, "evidence");
-        const finding = await addFinding(workspaceId, {
+        const finding = await addFinding(store, {
           claim,
           refs,
           evidence,
         });
         return {
           ok: true,
-          content: `Finding recorded [${finding.id}]. It will be shown on every later turn in this workspace so you do not re-derive it. If it turns out wrong, note_finding again with id=${finding.id} and status='disproved'. When the work it describes is DONE, retire it the same way (id=${finding.id}, status='disproved', claim 'done — shipped in <commit/fix>') so finished items stop riding later prompts.`,
+          content: `Finding recorded [${finding.id}]. It will be shown on every later turn ${machine ? "in EVERY chat on this machine" : "in this workspace"} so you do not re-derive it. If it turns out wrong, note_finding again with id=${finding.id} and status='disproved'. When the work it describes is DONE, retire it the same way (id=${finding.id}, status='disproved', claim 'done — shipped in <commit/fix>') so finished items stop riding later prompts.`,
           summary: "Finding recorded",
         };
       }

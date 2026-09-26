@@ -394,6 +394,17 @@ check("blocked steps are counted", plan.planProgress(blocked).blocked === 1);
 check("the blocker is shown", /blocked: the API needs a key/.test(plan.formatPlan(blocked)));
 
 // ---------------------------------------------------------------------------
+{
+  const odd = plan.createPlan("Build glow chams ESP with a draggable UI", [
+    { do: "Download the Luau CLI and unpack it", verify: "luau.exe --help runs" },
+    { id: 2, check: "Write GlowChams.luau with AlwaysOnTop highlights" },
+  ]);
+  check("steps with unknown field names still become steps",
+    odd.steps.length === 2 && /Download the Luau CLI/.test(odd.steps[0].text) &&
+      /luau\.exe --help runs/.test(odd.steps[0].text),
+    "reported: 'Could not set plan — no usable steps', a wasted round");
+}
+
 console.log("\n3b. Re-planning does not restart the work");
 
 const loopPlan = plan.updatePlan(

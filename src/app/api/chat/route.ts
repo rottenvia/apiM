@@ -104,7 +104,7 @@ import {
   formatBinaryLedgerForPrompt,
   replaceBinaryLedger,
 } from "@/lib/binary-ledger";
-import {
+import { MACHINE_SCOPE, formatMachineFindingsForPrompt,
   readFindings,
   formatFindingsForPrompt,
   replaceFindings,
@@ -151,6 +151,9 @@ import {
   gatherNudgeText,
   ChurnTracker,
   churnNudgeText,
+  isWorldChanging,
+  shouldExtendRoundCap,
+  CAP_EXTENSION_ROUNDS,
   unchangedReadText,
   isReadTool,
   StallTracker,
@@ -1331,7 +1334,9 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         let findingsBlock = "";
         if (workspaceEnabled) {
           try {
-            findingsBlock = formatFindingsForPrompt(await readFindings(workspace));
+            findingsBlock =
+              formatMachineFindingsForPrompt(await readFindings(MACHINE_SCOPE)) +
+              formatFindingsForPrompt(await readFindings(workspace));
           } catch (e) {
             console.error("Could not read findings:", e);
           }
@@ -2033,6 +2038,16 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          */
         const MAX_AGENT_ROUNDS = agentRoundsFor(model, target.model.openToolLimits);
         /*
+         * The cap moves while the run is visibly working — see
+         * shouldExtendRoundCap. Progress is measured since the last check:
+         * plan steps closed and successful world-changing calls.
+         */
+        let roundCap = MAX_AGENT_ROUNDS;
+        let capExtensions = 0;
+        let worldChanges = 0;
+        let worldChangesAtCheck = 0;
+        let stepsDoneAtCheck: number | null = null;
+        /*
          * Output-limit continuation budgets start FRESH on every request —
          * including a Resume.
          *
@@ -2290,13 +2305,32 @@ Ask before you build the wrong thing. If a choice would change what you produce 
            * a directive block to a transcript that is saved unchanged.
            */
           if (stopped()) break;
-          if (round > MAX_AGENT_ROUNDS) {
-            // Named for what it is. It used to be filed as "provider_abort",
-            // which told the user their provider had cut them off when in
-            // fact this app's own guard had fired — and the revive nudge
-            // then repeated that same wrong explanation back to the model.
-            stoppedPrematurely = "round_cap";
-            break;
+          // Baseline at the run's first round (a resumed plan may already
+          // have steps done — only steps closed by THIS run count).
+          if (stepsDoneAtCheck === null) {
+            stepsDoneAtCheck = plan ? planProgress(plan).done : 0;
+          }
+          if (round > roundCap) {
+            const stepsDone = plan ? planProgress(plan).done : 0;
+            if (
+              shouldExtendRoundCap({
+                extensionsUsed: capExtensions,
+                stepsDoneSinceCheck: stepsDone - stepsDoneAtCheck,
+                changesSinceCheck: worldChanges - worldChangesAtCheck,
+              })
+            ) {
+              capExtensions += 1;
+              roundCap += CAP_EXTENSION_ROUNDS;
+              stepsDoneAtCheck = stepsDone;
+              worldChangesAtCheck = worldChanges;
+            } else {
+              // Named for what it is. It used to be filed as "provider_abort",
+              // which told the user their provider had cut them off when in
+              // fact this app's own guard had fired — and the revive nudge
+              // then repeated that same wrong explanation back to the model.
+              stoppedPrematurely = "round_cap";
+              break;
+            }
           }
 
           /*
@@ -5316,6 +5350,9 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 parsed.ok ? parsed.value : null,
                 result.ok
               );
+              if (result.ok && isWorldChanging(call.function.name)) {
+                worldChanges += 1;
+              }
               const churn = churnTracker.observe(
                 call.function.name,
                 parsed.ok ? parsed.value : null,

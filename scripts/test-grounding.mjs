@@ -149,7 +149,7 @@ check("the nudge names the count and demands the tool call", (() => {
   return (
     t.startsWith(P.PLAN_NUDGE_MARKER) &&
     t.includes("8 tool rounds") &&
-    t.includes("update_plan NOW") &&
+    t.includes("IN THE SAME TURN as your next real tool call") &&
     t.includes("do not count")
   );
 })());
