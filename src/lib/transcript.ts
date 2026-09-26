@@ -279,9 +279,16 @@ export function carriedThought(reasoning: string): string {
 
 export function serializeForApi(
   messages: TranscriptMessage[],
-  options: { includeReasoning?: boolean } = {}
+  options: {
+    includeReasoning?: boolean;
+    /**
+     * Wire field the replayed reasoning rides in. DeepSeek's own API takes
+     * `reasoning_content`; OpenRouter's normalised field is `reasoning`.
+     */
+    reasoningField?: "reasoning_content" | "reasoning";
+  } = {}
 ): Record<string, unknown>[] {
-  const { includeReasoning = true } = options;
+  const { includeReasoning = true, reasoningField = "reasoning_content" } = options;
   return messages.map((m) => {
     if (m.role === "assistant") {
       const out: Record<string, unknown> = {
@@ -309,7 +316,7 @@ export function serializeForApi(
           },
         }));
         if (includeReasoning && m.reasoning_content)
-          out.reasoning_content = m.reasoning_content;
+          out[reasoningField] = m.reasoning_content;
         // A tool-calling turn legitimately has no prose.
         out.content = m.content ?? null;
         /*

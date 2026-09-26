@@ -2043,6 +2043,18 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          * plan steps closed and successful world-changing calls.
          */
         let roundCap = MAX_AGENT_ROUNDS;
+        /*
+         * Send DeepSeek's reasoning back on OpenRouter.
+         *
+         * Reasoning used to be stripped for every OpenRouter model because
+         * the GLM catalog 400'd on it. DeepSeek is built for thinking WITH
+         * tools: each round is meant to see its own earlier reasoning.
+         * Measured on the real Morph endpoint: the replayed field is accepted
+         * and counted as prompt tokens. Without it the model re-derived the
+         * task every round. Any endpoint that rejects it is caught below and
+         * the run falls back to the condensed carried thought.
+         */
+        let replayReasoningOnOpenRouter = /^deepseek\//i.test(target.apiModel);
         let capExtensions = 0;
         let worldChanges = 0;
         let worldChangesAtCheck = 0;
@@ -2528,7 +2540,10 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             // it is a 400 "[1210] Invalid API parameter" once any tool round
             // is in the transcript (and every resume replays those rounds).
             messages: serializeForApi(wireMessages, {
-              includeReasoning: target.providerId !== "openrouter",
+              includeReasoning:
+                target.providerId !== "openrouter" || replayReasoningOnOpenRouter,
+              reasoningField:
+                target.providerId === "openrouter" ? "reasoning" : "reasoning_content",
             }),
             stream: true,
             stream_options: { include_usage: true },
@@ -2851,6 +2866,26 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   dsRequestBody.reasoning as { effort?: unknown } | undefined
                 )?.effort === "none";
               if (
+                dsResponse.status === 400 &&
+                replayReasoningOnOpenRouter &&
+                target.providerId === "openrouter" &&
+                !/reasoning is mandatory/i.test(rejectedDetail) &&
+                Array.isArray(dsRequestBody.messages) &&
+                (dsRequestBody.messages as Record<string, unknown>[]).some(
+                  (m) => typeof m.reasoning === "string"
+                )
+              ) {
+                // An endpoint that will not take reasoning back: strip it
+                // (the carried-thought excerpt takes its place) and keep it
+                // off for the rest of the run.
+                replayReasoningOnOpenRouter = false;
+                retryBody = {
+                  ...dsRequestBody,
+                  messages: serializeForApi(wireMessages, { includeReasoning: false }),
+                };
+                retryReason =
+                  "endpoint rejected replayed reasoning — retrying with its condensed form";
+              } else if (
                 dsResponse.status === 400 &&
                 /reasoning is mandatory/i.test(rejectedDetail) &&
                 disableSent
