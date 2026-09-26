@@ -46,11 +46,28 @@ export class RunFileMemory {
    */
   invalidateAll(): void {
     this.written.clear();
+    this.servedWhole.clear();
   }
 
   /** Forget one file (e.g. it was renamed or deleted). */
   invalidate(path: string): void {
     this.written.delete(this.key(path));
+    this.servedWhole.delete(this.key(path));
+  }
+
+  /** Path -> exact content last handed over WHOLE by a read. */
+  private servedWhole = new Map<string, string>();
+
+  /** Record that a read returned this file's complete content. */
+  recordWholeRead(path: string, content: string): void {
+    if (typeof path === "string" && typeof content === "string") {
+      this.servedWhole.set(this.key(path), content);
+    }
+  }
+
+  /** Was this exact content already handed over whole in this run? */
+  alreadyServedWhole(path: string, content: string): boolean {
+    return this.servedWhole.get(this.key(path)) === content;
   }
 
   /** Exact content the agent wrote to `path`, or null if it is not known. */

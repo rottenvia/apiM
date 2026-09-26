@@ -204,6 +204,17 @@ await rm(path.join(DATA_ROOT, "workspaces", WS), { recursive: true, force: true 
   const ok4 = /formatMachineFindingsForPrompt\(await readFindings\(MACHINE_SCOPE\)\)/.test(route);
   console.log(`${ok4 ? "PASS" : "FAIL"}  every chat's prompt carries the machine findings`);
   if (!ok4) failures++;
+  // The model never picks scope 'machine' itself (measured on real runs):
+  // a toolchain fact filed as a project finding is kept machine-wide too.
+  await runTool(WS, "note_finding", {
+    claim: "Luau CLI (tools/luau/luau) sandboxes every chunk: each main file and each require'd module gets its own fresh global table",
+    evidence: "_probe_shared_a.luau: rawset on _G raised 'attempt to modify a readonly table'",
+  });
+  await runTool(WS, "note_finding", { claim: "The panel's drag handler must use InputChanged, not MouseMoved." });
+  const auto = F.formatMachineFindingsForPrompt(await F.readFindings(F.MACHINE_SCOPE));
+  const ok5 = /sandboxes every chunk/.test(auto) && !/drag handler/.test(auto);
+  console.log(`${ok5 ? "PASS" : "FAIL"}  a toolchain fact is kept machine-wide automatically; a project fact is not`);
+  if (!ok5) failures++;
   await rm(path.join(DATA_ROOT, "machine-findings.json"), { force: true });
 }
 
