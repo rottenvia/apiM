@@ -15,6 +15,26 @@ interface Connection {
   repo: string;
   baseBranch: string;
   workingBranch: string;
+  prUrl?: string;
+  prNumber?: number;
+  prBranch?: string;
+}
+
+interface PullRequest {
+  number: number;
+  url: string;
+  state: string;
+  draft: boolean;
+  title: string;
+  mergeable: boolean | null;
+  checks: { total: number; passed: number; failed: number; pending: number };
+  reviewComments: number;
+}
+
+interface PrInfo {
+  pr: PullRequest | null;
+  stored: { number?: number; url: string } | null;
+  suggestion: { title: string; body: string; commits: number } | null;
 }
 
 interface FileChange {
@@ -25,6 +45,8 @@ interface FileChange {
 }
 
 interface Changes {
+  /** Latest stored connection — the agent may have switched branches. */
+  connection?: Connection | null;
   ahead: number;
   files: FileChange[];
   totalAdditions: number;
@@ -73,6 +95,16 @@ export function GitHubConnector({
   const [changes, setChanges] = useState<Changes | null>(null);
   const [changesOpen, setChangesOpen] = useState(false);
   const [diffOpen, setDiffOpen] = useState(false);
+  // Connecting: start a fresh apim/ branch or continue an existing one.
+  const [branchMode, setBranchMode] = useState<"new" | "continue">("new");
+  const [task, setTask] = useState("");
+  const [continueBranch, setContinueBranch] = useState("");
+  // Pull request for the working branch.
+  const [prInfo, setPrInfo] = useState<PrInfo | null>(null);
+  const [prFormOpen, setPrFormOpen] = useState(false);
+  const [prTitle, setPrTitle] = useState("");
+  const [prBody, setPrBody] = useState("");
+  const [prDraft, setPrDraft] = useState(false);
 
   const authHeaders = useCallback(
     (): Record<string, string> => {
@@ -92,6 +124,22 @@ export function GitHubConnector({
       setChanges(data);
     } catch {
       /* cosmetic — the panel stays usable without it */
+    }
+  }, [workspaceId]);
+
+  // PR state hits the GitHub API, so it is loaded on open and after actions
+  // rather than on the 5-second changes poll.
+  const loadPr = useCallback(async () => {
+    try {
+      const token = readStoredPat();
+      const res = await fetch(
+        `/api/github/pr?workspaceId=${encodeURIComponent(workspaceId)}`,
+        { headers: token ? { "x-github-token": token } : {} }
+      );
+      if (!res.ok) return;
+      setPrInfo((await res.json()) as PrInfo);
+    } catch {
+      /* cosmetic */
     }
   }, [workspaceId]);
 
@@ -116,7 +164,10 @@ export function GitHubConnector({
       setConnected(status.connected === true);
       setLogin(status.user?.login ?? "");
       setConnection(connectedRepo.connection ?? null);
-      if (connectedRepo.connection) void loadChanges();
+      if (connectedRepo.connection) {
+        void loadChanges();
+        void loadPr();
+      }
       if (status.connected) {
         const repoRes = await fetch("/api/github/repos", {
           headers: token ? { "x-github-token": token } : {},
@@ -130,7 +181,7 @@ export function GitHubConnector({
     } finally {
       setLoading(false);
     }
-  }, [workspaceId, loadChanges]);
+  }, [workspaceId, loadChanges, loadPr]);
 
   useEffect(() => {
     queueMicrotask(() => void load());
@@ -176,6 +227,7 @@ export function GitHubConnector({
     setSelected(repo);
     setBranch(repo.defaultBranch);
     setBranches([]);
+    setContinueBranch("");
     setError("");
     try {
       const res = await fetch(
@@ -227,6 +279,10 @@ export function GitHubConnector({
 
   const connectRepo = async () => {
     if (!selected || !branch || busy) return;
+    if (branchMode === "continue" && !continueBranch) {
+      setError("Pick the branch to continue.");
+      return;
+    }
     setBusy(true);
     setError("");
     try {
@@ -238,15 +294,54 @@ export function GitHubConnector({
           repo: selected.fullName,
           baseBranch: branch,
           token: pat.trim() || readStoredPat() || undefined,
+          ...(branchMode === "continue"
+            ? { continueBranch }
+            : { task: task.trim() || undefined }),
         }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Could not connect repository");
       setConnection(data.connection);
       await loadChanges();
+      void loadPr();
       onConnected();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not connect repository");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openPrForm = () => {
+    setPrTitle(prInfo?.suggestion?.title ?? "");
+    setPrBody(prInfo?.suggestion?.body ?? "");
+    setPrFormOpen(true);
+  };
+
+  // The click is the approval: pushes the working branch if needed, then
+  // opens the PR (or returns the one that already exists).
+  const createPr = async () => {
+    if (!prTitle.trim() || busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      const res = await fetch("/api/github/pr", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId,
+          title: prTitle.trim(),
+          body: prBody,
+          draft: prDraft,
+          token: pat.trim() || readStoredPat() || undefined,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Could not open the pull request");
+      setPrFormOpen(false);
+      await Promise.all([loadPr(), loadChanges()]);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not open the pull request");
     } finally {
       setBusy(false);
     }
@@ -263,6 +358,7 @@ export function GitHubConnector({
       );
       setConnection(null);
       setChanges(null);
+      setPrInfo(null);
       setSelected(null);
       onConnected();
     } catch (e) {
@@ -285,6 +381,17 @@ export function GitHubConnector({
     setSelected(null);
   };
 
+  // The agent can switch branches mid-run; the changes poll carries the
+  // latest stored connection, so the header follows it.
+  const view: Connection | null = connection ? changes?.connection ?? connection : null;
+  const pr = prInfo?.pr ?? null;
+  const prLink =
+    pr?.url ??
+    prInfo?.stored?.url ??
+    (view?.prUrl && view.prBranch === view.workingBranch ? view.prUrl : "");
+  const prNumber = pr?.number ?? prInfo?.stored?.number ?? view?.prNumber;
+  const prState = pr ? (pr.draft && pr.state === "open" ? "draft" : pr.state) : "open";
+
   return (
     <div className="fixed inset-0 z-[80] flex items-center justify-center p-4">
       <button className="absolute inset-0 bg-black/65 backdrop-blur-sm" onClick={onClose} aria-label="Close GitHub connector" />
@@ -304,20 +411,50 @@ export function GitHubConnector({
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
           {loading ? (
             <p className="py-16 text-center text-[13px] text-text-muted">Loading GitHub…</p>
-          ) : connection ? (
+          ) : connection && view ? (
             /* ---------------- Connected: on/off toggle + changes review ---------------- */
             <div className="space-y-3">
               <div className="flex items-start justify-between gap-3 rounded-xl border border-border bg-bg-tertiary/50 p-4">
                 <div className="min-w-0">
-                  <p className="truncate text-[15px] font-semibold text-text-primary">
-                    {connection.repo}
+                  <p className="flex min-w-0 items-center gap-1.5 text-[15px] font-semibold text-text-primary">
+                    <span className="truncate">{view.repo}</span>
+                    <span className="flex-none text-text-muted">·</span>
+                    <span className="truncate font-mono text-[13px] text-success">{view.workingBranch}</span>
+                    {changes && changes.ahead > 0 && (
+                      <span
+                        className="flex-none rounded-full bg-accent/15 px-1.5 py-0.5 text-[10px] font-semibold text-accent-light"
+                        title={`${changes.ahead} commit${changes.ahead === 1 ? "" : "s"} ahead of ${view.baseBranch}`}
+                      >
+                        ↑{changes.ahead}
+                      </span>
+                    )}
                   </p>
                   <p className="mt-1 text-[12px] text-text-muted">
-                    Base <span className="font-mono">{connection.baseBranch}</span>
+                    Base <span className="font-mono">{view.baseBranch}</span>
                   </p>
-                  <p className="mt-0.5 break-all font-mono text-[11px] text-text-muted">
-                    Working branch <span className="text-success">{connection.workingBranch}</span>
-                  </p>
+                  {prLink && (
+                    <a
+                      href={prLink}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="mt-1.5 inline-flex items-center gap-1.5 text-[12px] font-medium text-accent-light hover:underline"
+                    >
+                      <span
+                        className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold capitalize ${
+                          prState === "merged"
+                            ? "bg-accent/15 text-accent-light"
+                            : prState === "closed"
+                            ? "bg-danger/10 text-danger"
+                            : prState === "draft"
+                            ? "bg-bg-hover text-text-muted"
+                            : "bg-success/10 text-success"
+                        }`}
+                      >
+                        {prState}
+                      </span>
+                      Pull request{prNumber ? ` #${prNumber}` : ""}
+                    </a>
+                  )}
                 </div>
                 <div className="flex flex-none flex-col items-end gap-2">
                   <span className="flex items-center gap-1.5 rounded-full bg-success/10 px-2 py-0.5 text-[11px] font-semibold text-success">
@@ -344,7 +481,7 @@ export function GitHubConnector({
                   className="flex w-full items-center justify-between gap-2 bg-bg-tertiary/40 px-4 py-3 text-left"
                 >
                   <span className="text-[13px] font-semibold text-text-primary">
-                    Changes vs {connection.baseBranch}
+                    Changes vs {view.baseBranch}
                   </span>
                   {changes && changes.files.length > 0 ? (
                     <span className="flex items-center gap-2 text-[12px]">
@@ -421,19 +558,118 @@ export function GitHubConnector({
                       </>
                     ) : (
                       <p className="px-4 py-6 text-center text-[12px] text-text-muted">
-                        Nothing differs from {connection.baseBranch} yet. Edits the agent
+                        Nothing differs from {view.baseBranch} yet. Edits the agent
                         makes show up here, and pushes go only to{" "}
-                        <span className="font-mono">{connection.workingBranch}</span>.
+                        <span className="font-mono">{view.workingBranch}</span>.
                       </p>
                     )}
                   </div>
                 )}
               </div>
 
+              {/* Pull request: status once it exists, otherwise a create form. */}
+              <div className="overflow-hidden rounded-xl border border-border">
+                {pr ? (
+                  <div className="flex items-center justify-between gap-3 bg-bg-tertiary/40 px-4 py-3">
+                    <div className="min-w-0">
+                      <p className="truncate text-[13px] font-semibold text-text-primary">
+                        #{pr.number} {pr.title}
+                      </p>
+                      <p className="mt-0.5 text-[11px] text-text-muted">
+                        {pr.checks.total === 0
+                          ? "No checks reported"
+                          : `Checks: ${pr.checks.passed} passed · ${pr.checks.failed} failed · ${pr.checks.pending} pending`}
+                        {pr.mergeable === false ? " · not mergeable" : ""}
+                        {pr.reviewComments > 0
+                          ? ` · ${pr.reviewComments} review comment${pr.reviewComments === 1 ? "" : "s"}`
+                          : ""}
+                      </p>
+                    </div>
+                    <div className="flex flex-none items-center gap-2">
+                      <button
+                        onClick={() => void loadPr()}
+                        className="rounded-lg border border-border px-2.5 py-1 text-[12px] font-medium text-text-secondary hover:border-border-light hover:text-text-primary"
+                      >
+                        Refresh
+                      </button>
+                      <a
+                        href={pr.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="rounded-lg bg-accent px-2.5 py-1 text-[12px] font-semibold text-white"
+                      >
+                        Open
+                      </a>
+                    </div>
+                  </div>
+                ) : !prFormOpen ? (
+                  <div className="flex items-center justify-between gap-3 bg-bg-tertiary/40 px-4 py-3">
+                    <span className="text-[12px] text-text-muted">
+                      {changes && changes.ahead > 0
+                        ? `${changes.ahead} commit${changes.ahead === 1 ? "" : "s"} ready for review`
+                        : "Commit work to open a pull request"}
+                    </span>
+                    <button
+                      onClick={openPrForm}
+                      disabled={busy || !changes || changes.ahead === 0}
+                      className="flex-none rounded-lg bg-accent px-3 py-1.5 text-[12px] font-semibold text-white disabled:opacity-50"
+                    >
+                      Create pull request
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-2 p-3">
+                    <p className="text-[11px] text-text-muted">
+                      <span className="font-mono">{view.workingBranch}</span> →{" "}
+                      <span className="font-mono">{view.baseBranch}</span>. The branch is pushed first if needed.
+                    </p>
+                    <input
+                      value={prTitle}
+                      onChange={(e) => setPrTitle(e.target.value)}
+                      placeholder="Pull request title"
+                      className="w-full rounded-lg border border-border bg-bg-primary px-3 py-2 text-[13px] text-text-primary outline-none focus:border-border-light"
+                    />
+                    <textarea
+                      value={prBody}
+                      onChange={(e) => setPrBody(e.target.value)}
+                      rows={6}
+                      placeholder="What changed and how it was tested"
+                      className="w-full resize-y rounded-lg border border-border bg-bg-primary px-3 py-2 font-mono text-[12px] text-text-primary outline-none focus:border-border-light"
+                    />
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="flex items-center gap-1.5 text-[12px] text-text-secondary">
+                        <input
+                          type="checkbox"
+                          checked={prDraft}
+                          onChange={(e) => setPrDraft(e.target.checked)}
+                        />
+                        Draft
+                      </label>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => setPrFormOpen(false)}
+                          className="rounded-lg border border-border px-3 py-1.5 text-[12px] font-medium text-text-secondary hover:text-text-primary"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          onClick={() => void createPr()}
+                          disabled={busy || !prTitle.trim()}
+                          className="rounded-lg bg-accent px-3 py-1.5 text-[12px] font-semibold text-white disabled:opacity-50"
+                        >
+                          {busy ? "Opening…" : "Create pull request"}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+
               <p className="text-[12px] leading-5 text-text-muted">
-                The agent works in this workspace and — only after you approve a{" "}
-                <code>github_push</code> — pushes to the dedicated working branch.
-                Turning off keeps all your files and just disconnects the repository.
+                The agent commits on the working branch, merges the latest{" "}
+                <span className="font-mono">{view.baseBranch}</span> when behind, and —
+                only after you approve — pushes it and opens a pull request. The base
+                branch is never pushed or force-pushed. Turning off keeps all your files.
               </p>
             </div>
           ) : !connected ? (
@@ -562,13 +798,57 @@ export function GitHubConnector({
                       <option key={name} value={name}>{name}</option>
                     ))}
                   </select>
-                  <p className="mt-2 text-[11px] leading-4 text-text-muted">
-                    apiM branches off this into a dedicated <code>apim/…</code> branch.
-                    The base branch is never pushed directly.
-                  </p>
+                  <div className="mt-3 grid grid-cols-2 gap-1 rounded-lg border border-border bg-bg-tertiary p-0.5">
+                    {(["new", "continue"] as const).map((mode) => (
+                      <button
+                        key={mode}
+                        onClick={() => setBranchMode(mode)}
+                        className={`rounded-md px-2 py-1.5 text-[12px] font-medium transition-colors ${
+                          branchMode === mode
+                            ? "bg-bg-secondary text-text-primary shadow-sm"
+                            : "text-text-muted hover:text-text-secondary"
+                        }`}
+                      >
+                        {mode === "new" ? "New branch" : "Continue existing branch"}
+                      </button>
+                    ))}
+                  </div>
+                  {branchMode === "new" ? (
+                    <>
+                      <input
+                        value={task}
+                        onChange={(e) => setTask(e.target.value)}
+                        placeholder="What is this work? (names the branch, optional)"
+                        className="mt-2 w-full rounded-lg border border-border bg-bg-tertiary px-3 py-2 text-[13px] text-text-primary outline-none focus:border-border-light"
+                      />
+                      <p className="mt-2 text-[11px] leading-4 text-text-muted">
+                        apiM branches off {branch || "the base"} into a dedicated{" "}
+                        <code>apim/…</code> branch. The base branch is never pushed directly.
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <select
+                        value={continueBranch}
+                        onChange={(e) => setContinueBranch(e.target.value)}
+                        className="mt-2 w-full rounded-lg border border-border bg-bg-tertiary px-3 py-2 text-[13px] text-text-primary"
+                      >
+                        <option value="">Choose a branch to continue…</option>
+                        {branches
+                          .filter((name) => name !== branch)
+                          .map((name) => (
+                            <option key={name} value={name}>{name}</option>
+                          ))}
+                      </select>
+                      <p className="mt-2 text-[11px] leading-4 text-text-muted">
+                        The branch is checked out tracking origin; commits and pull requests
+                        continue on it, targeting {branch || "the base"}.
+                      </p>
+                    </>
+                  )}
                   <button
                     onClick={() => void connectRepo()}
-                    disabled={busy || !branch}
+                    disabled={busy || !branch || (branchMode === "continue" && !continueBranch)}
                     className="mt-3 w-full rounded-lg bg-accent px-3 py-2.5 text-[13px] font-semibold text-white disabled:opacity-50"
                   >
                     {busy ? "Cloning repository…" : `Connect ${selected.fullName}`}
