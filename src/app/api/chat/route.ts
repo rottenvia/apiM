@@ -48,6 +48,11 @@ import {
   PLAN_STALE_AFTER_TOOL_ROUNDS,
   stepClaimedComplete,
   buildStalePlanNudge,
+  isRedundantReplan,
+  redundantReplanMessage,
+  replanBudgetMessage,
+  nextStepLine,
+  MAX_REPLANS_PER_RUN,
 } from "@/lib/plan";
 import {
   GOAL_PIN_MARKER,
@@ -1243,7 +1248,7 @@ export async function POST(req: NextRequest) {
               modelHasOpenToolLimits(model, target.model.openToolLimits)
                 ? " This model has no per-call tool ceilings: read_file returns the whole file, read_files / write_files / edit_files accept as many items as you send, search_files returns every match, and fetch_url returns the full page. Work in batches, not one item per call. Reading ten files is ONE read_files call — its paths accept globs, so \"src/lib/*.ts\" reads that whole directory at once — and changing ten files is ONE edit_files call. A round is a round whether it carries one job or thirty, and a reply that spends them one file at a time runs out of rounds with the task half done."
                 : ""
-            }\n\nYou can also run code with run_command. After writing something runnable, run it and check the output rather than assuming it works. If it fails, read the error, fix the file, and run it again. Each command needs the user's approval, so keep them few and purposeful, and say briefly why in the reason field. There is no shell. run_command waits for the program to finish, so use it only for things that exit — scripts, tests, installs. You can install packages: pip install and npm install both work and go into this workspace, not the user's system, so install what you need rather than rewriting code to avoid a dependency. For anything that keeps running, such as a dev server or a watcher, use start_process instead: it returns straight away, and you can read its output with read_process and stop it with stop_process. Always stop what you started once you are done with it. For anything that takes more than two or three actions, first read the files and explore enough to understand the task, then call make_plan: write down what finished looks like and the steps to get there, including how you will CHECK each one. The plan is not a first-move ritual — a plan made before you know what you are building is noise. It is also not a contract: when work teaches you something the plan did not know — a dead approach, a wrong assumption, a simpler path, a requirement you now understand better — call make_plan again immediately to replace it with the real path. On a long task your own reasoning from twenty rounds ago is gone, so without a written plan you will forget requirements from the first message and stop early because the work so far looks finished. When you work something out that a later turn would need - why an approach is dead, what a function actually does, which build or file is correct and why, an offset or value you verified, a command's exact error and what fixed it - call note_finding IMMEDIATELY, before continuing. Those findings are listed to you every turn and survive compaction, so you never have to re-read a file or re-run a command to remember it. Treat the findings list as your working memory: at the START of every turn, before doing anything, read the active findings and use the ones relevant to this turn. Findings the current request does not need stay out of your reply entirely — no citing them, no 'per my findings', no acting on them; mention a finding only when it changed your course in a way the user needs to understand. When you find a finding is wrong or superseded, call note_finding with status='disproved' and the corrected claim so the list stays accurate and does not fill with stale notes. Do not record trivialities; one specific, evidence-backed line per finding. Keep it current with update_plan — a step is only done when you can say how you verified it.
+            }\n\nYou can also run code with run_command. After writing something runnable, run it and check the output rather than assuming it works. If it fails, read the error, fix the file, and run it again. Each command needs the user's approval, so keep them few and purposeful, and say briefly why in the reason field. There is no shell. run_command waits for the program to finish, so use it only for things that exit — scripts, tests, installs. You can install packages: pip install and npm install both work and go into this workspace, not the user's system, so install what you need rather than rewriting code to avoid a dependency. For anything that keeps running, such as a dev server or a watcher, use start_process instead: it returns straight away, and you can read its output with read_process and stop it with stop_process. Always stop what you started once you are done with it. For anything that takes more than two or three actions, first read the files and explore enough to understand the task, then call make_plan: write down what finished looks like and the steps to get there, including how you will CHECK each one. The plan is not a first-move ritual — a plan made before you know what you are building is noise. Make it ONCE and then work it: finishing a step is update_plan, never make_plan, and the pinned plan already carries your progress, so do not restate or re-derive it each round — go straight to the next unfinished step. Re-plan only when the plan is actually wrong — a dead approach, a wrong assumption, a missing requirement — and then call make_plan to replace it with the real path (finished steps carry over). A make_plan that restates the same steps changes nothing, and re-plans per run are limited. On a long task your own reasoning from twenty rounds ago is gone, so without a written plan you will forget requirements from the first message and stop early because the work so far looks finished. When you work something out that a later turn would need - why an approach is dead, what a function actually does, which build or file is correct and why, an offset or value you verified, a command's exact error and what fixed it - call note_finding IMMEDIATELY, before continuing. Those findings are listed to you every turn and survive compaction, so you never have to re-read a file or re-run a command to remember it. Treat the findings list as your working memory: at the START of every turn, before doing anything, read the active findings and use the ones relevant to this turn. Findings the current request does not need stay out of your reply entirely — no citing them, no 'per my findings', no acting on them; mention a finding only when it changed your course in a way the user needs to understand. When you find a finding is wrong or superseded, call note_finding with status='disproved' and the corrected claim so the list stays accurate and does not fill with stale notes. Do not record trivialities; one specific, evidence-backed line per finding. Keep it current with update_plan — a step is only done when you can say how you verified it.
 
 Work to the end. Do not hand back a half-finished task with a summary that reads as if it is complete: if something cannot be done, say so plainly and say why. Check your own work before claiming it works — run the tests, call the endpoint, open the page. To compile or build anything, call build_project instead of typing msbuild/cmake/dotnet/cargo yourself: it finds the installed Visual Studio/MSBuild/compiler automatically (including vswhere), restores packages, builds Release x64 by default, and hands you the compiler errors so you can fix them and rebuild.
 
@@ -1610,7 +1615,10 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          * being caught gets the post-hoc note instead of another round.
          */
         let claimRetried = false;
-        /** How many times the plan has been rewritten, to catch thrashing. */
+        /**
+         * Real re-plans this run (replacing an existing plan), capped at
+         * MAX_REPLANS_PER_RUN — see the re-plan loop guard in lib/plan.
+         */
         let replanCount = 0;
         /**
          * Every tool the model has actually used in this reply.
@@ -4440,36 +4448,69 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                  * the generic "Could not set plan" the user kept hitting.
                  */
                 const planned = readPlanToolArgs(parsed.value);
-                plan = replacePlan(
-                  plan,
-                  createPlan(planned.goal, planned.steps),
-                  { allowShrink: allowFirstPlanShrink }
-                );
-                allowFirstPlanShrink = false;
-                replanCount += 1;
-                lastPlanUpdateToolRound = toolRounds;
-                // Saved immediately, not at the end of the run: Stop, a
-                // crash, or a closed tab must not lose it.
-                await writePlan(workspace, plan);
-                send({
-                  type: "plan",
-                  goal: plan.goal,
-                  steps: plan.steps,
-                  summary: planSummary(plan),
-                });
-                // Short acknowledgement only: the full plan is appended as a
-                // system message and kept pinned at the end of the transcript
-                // every round. Echoing it here too meant every subsequent
-                // round paid for two copies of the plan; the pinned copy is
-                // the one compaction can't summarise away.
-                result = {
-                  ok: true,
-                  content:
-                    `Plan recorded and now pinned above your next reply — ` +
-                    `it stays there, updated, for the whole run. Start on ` +
-                    `step 1; update progress with update_plan as you go.`,
-                  summary: `Planned ${plan.steps.length} steps`,
-                };
+                const drafted = createPlan(planned.goal, planned.steps);
+                /*
+                 * The re-plan loop guard. A live plan being "replaced" by
+                 * the same steps, or replaced yet again after the budget
+                 * is spent, is how a run thinks for an hour, finishes one
+                 * step, and starts over. Neither replaces anything: the
+                 * plan stands and the model is pointed at its next step.
+                 * Only a plan inherited from a previous message may be
+                 * replaced freely by the first make_plan of this one.
+                 */
+                const live =
+                  plan && !planIsComplete(plan) && !allowFirstPlanShrink
+                    ? plan
+                    : null;
+                if (live && isRedundantReplan(live, drafted)) {
+                  result = {
+                    ok: true,
+                    content: redundantReplanMessage(live),
+                    summary: "Plan unchanged",
+                  };
+                } else if (live && replanCount >= MAX_REPLANS_PER_RUN) {
+                  result = {
+                    ok: false,
+                    content: `Error: ${replanBudgetMessage(live, replanCount)}`,
+                    summary: "Re-plan refused — plan stands",
+                  };
+                } else {
+                  if (live) replanCount += 1;
+                  plan = replacePlan(plan, drafted, {
+                    allowShrink: allowFirstPlanShrink,
+                  });
+                  allowFirstPlanShrink = false;
+                  lastPlanUpdateToolRound = toolRounds;
+                  // Saved immediately, not at the end of the run: Stop, a
+                  // crash, or a closed tab must not lose it.
+                  await writePlan(workspace, plan);
+                  send({
+                    type: "plan",
+                    goal: plan.goal,
+                    steps: plan.steps,
+                    summary: planSummary(plan),
+                  });
+                  // Short acknowledgement only: the full plan is appended as a
+                  // system message and kept pinned at the end of the transcript
+                  // every round. Echoing it here too meant every subsequent
+                  // round paid for two copies of the plan; the pinned copy is
+                  // the one compaction can't summarise away.
+                  /*
+                   * Point at the first unfinished step, not "step 1": after a
+                   * re-plan the carried-over steps are already done, and
+                   * "Start on step 1" sent the model back to redo them.
+                   */
+                  result = {
+                    ok: true,
+                    content:
+                      `Plan recorded and now pinned above your next reply — ` +
+                      `it stays there, updated, for the whole run. ` +
+                      `${nextStepLine(plan)}. Update progress with ` +
+                      `update_plan as you go; do not call make_plan again ` +
+                      `unless the plan is actually wrong.`,
+                    summary: `Planned ${plan.steps.length} steps`,
+                  };
+                }
               } catch (error) {
                 const detail =
                   error instanceof Error ? error.message : "bad plan";
