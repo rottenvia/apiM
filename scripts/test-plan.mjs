@@ -394,6 +394,78 @@ check("blocked steps are counted", plan.planProgress(blocked).blocked === 1);
 check("the blocker is shown", /blocked: the API needs a key/.test(plan.formatPlan(blocked)));
 
 // ---------------------------------------------------------------------------
+console.log("\n3b. Re-planning does not restart the work");
+
+const loopPlan = plan.updatePlan(
+  plan.createPlan("Add a settings page to the dashboard app", [
+    "Read the router and the existing layout component",
+    "Create the settings page component with the form",
+    "Wire the settings route into the router",
+    "Run the build and open the settings page to verify it renders",
+  ]),
+  [
+    { id: 1, state: "done", verified: "read_file on router.ts and Layout.tsx" },
+    { id: 2, state: "doing" },
+  ]
+);
+const reworded = plan.createPlan("Add a settings page to the dashboard app", [
+  "Read the router and existing layout component",
+  "Create the settings page component with the form fields",
+  "Wire the settings route into the router",
+  "Run the build and open the settings page to verify that it renders",
+]);
+check(
+  "a re-plan that only rewords the steps is recognised as redundant",
+  plan.isRedundantReplan(loopPlan, reworded),
+  "the reported loop: finish one step, re-send the same plan, start over"
+);
+const carriedOver = plan.replacePlan(loopPlan, reworded);
+check(
+  "a reworded finished step stays done with its evidence",
+  carriedOver.steps[0].state === "done" &&
+    /router\.ts/.test(carriedOver.steps[0].verified ?? ""),
+  "exact-text matching brought it back as todo, and the model redid it"
+);
+check(
+  "a reworded in-progress step stays in progress",
+  carriedOver.steps[1].state === "doing"
+);
+check(
+  "the next step line points past the finished work",
+  /Continue with step 2/.test(plan.nextStepLine(carriedOver))
+);
+check(
+  "a genuinely different step is not treated as the same",
+  plan.stepSimilarity(
+    "Verify the build passes on Windows",
+    "Verify the build passes on Linux"
+  ) < plan.SAME_STEP_SIMILARITY,
+  "carrying 'done' onto different work would skip it"
+);
+const extended = plan.createPlan("Add a settings page to the dashboard app", [
+  "Read the router and the existing layout component",
+  "Create the settings page component with the form",
+  "Add validation for the email field on the settings form",
+  "Wire the settings route into the router",
+  "Run the build and open the settings page to verify it renders",
+]);
+check(
+  "a re-plan that adds real work is not redundant",
+  !plan.isRedundantReplan(loopPlan, extended)
+);
+check(
+  "the redundant-plan reply names the next step and keeps progress",
+  /plan is unchanged/i.test(plan.redundantReplanMessage(loopPlan)) &&
+    /Continue with step 2/.test(plan.redundantReplanMessage(loopPlan))
+);
+check(
+  "the budget reply refuses and points at update_plan",
+  /Not re-planned/.test(plan.replanBudgetMessage(loopPlan, 3)) &&
+    /update_plan/.test(plan.replanBudgetMessage(loopPlan, 3)) &&
+    plan.MAX_REPLANS_PER_RUN >= 2
+);
+
+// ---------------------------------------------------------------------------
 console.log("\n4. Wiring");
 
 const names = WORKSPACE_TOOLS.map((t) => t.function.name);
@@ -458,10 +530,24 @@ check(
   "planning before you know the task burns a round on a guessed plan"
 );
 check(
-  "the plan can be replaced at runtime when work changes it",
-  /call make_plan again immediately to replace it/.test(route) &&
-    /Call it again any time the situation changes mid-run/.test(toolsSrc),
+  "the plan can be replaced at runtime when it is actually wrong",
+  /Re-plan only when the plan is actually wrong/.test(route) &&
+    /Call it again only when the plan is actually wrong mid-run/.test(toolsSrc),
   "a dead approach or wrong assumption should re-plan, not be fought"
+);
+check(
+  "the prompt no longer invites a re-plan after every step",
+  !/call make_plan again immediately/.test(route) &&
+    /finishing a step is update_plan, never make_plan/.test(route) &&
+    /finishing a step is update_plan, never make_plan/.test(toolsSrc),
+  "'re-plan immediately whenever work teaches you something' read as re-plan after each step"
+);
+check(
+  "make_plan is guarded against redundant and runaway re-plans",
+  /isRedundantReplan\(live, drafted\)/.test(route) &&
+    /replanCount >= MAX_REPLANS_PER_RUN/.test(route) &&
+    !/`step 1; update progress with update_plan/.test(route),
+  "the acknowledgement names the next unfinished step, not step 1"
 );
 check(
   "make_plan coerces messy arguments instead of refusing them",

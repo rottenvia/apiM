@@ -442,18 +442,181 @@ export function replacePlan(
     return true;
   });
 
-  const byText = new Map(history.map((h) => [h.text.toLowerCase(), h]));
+  /*
+   * Carried by MEANING, not by exact text.
+   *
+   * This matched `step.text.toLowerCase()` exactly, so a re-plan that
+   * reworded a finished step — "Read the config loader" becoming "Read the
+   * config loader module" — brought it back as [ ] todo. The pinned plan
+   * then told the model step 1 was not done, and it did step 1 again: the
+   * reported loop of "complete one step, remake the plan, start over".
+   * Each proved entry is used at most once so two new steps cannot both
+   * inherit the same evidence.
+   */
+  const usedProof = new Set<number>();
+  const doingSteps = previous.steps.filter((s) => s.state === "doing");
+  const usedDoing = new Set<number>();
 
   return {
     ...next,
     history,
     steps: next.steps.map((step) => {
-      const already = byText.get(step.text.toLowerCase());
-      return already
-        ? { ...step, state: "done" as const, verified: already.verified }
-        : step;
+      const proof = bestStepMatch(
+        step.text,
+        history.map((h) => h.text),
+        usedProof
+      );
+      if (proof !== -1) {
+        usedProof.add(proof);
+        return {
+          ...step,
+          state: "done" as const,
+          verified: history[proof].verified,
+        };
+      }
+      // A step the model was in the middle of stays in progress, so the
+      // rewrite does not read as "start this from scratch".
+      const doing = bestStepMatch(
+        step.text,
+        doingSteps.map((s) => s.text),
+        usedDoing
+      );
+      if (doing !== -1) {
+        usedDoing.add(doing);
+        return { ...step, state: "doing" as const };
+      }
+      return step;
     }),
   };
+}
+
+/* ------------------------------------------------------------------ *
+ * Re-plan loop guard
+ *
+ * Reported on every model, worst on long thinkers: think for twenty minutes,
+ * make a plan, finish ONE step, call make_plan again with essentially the
+ * same plan, think for another twenty minutes about the "new" plan, finish
+ * one step, re-plan... A re-plan is not free — on a reasoning model it costs
+ * a whole round of deliberation over the entire task, which is exactly the
+ * hour the user watched. Two guards, both deterministic:
+ *
+ *   1. A re-plan that says nothing new (same steps, maybe reworded) is a
+ *      no-op: the plan stands and the model is pointed at its next step.
+ *   2. A run gets a small budget of real re-plans. Past it, make_plan is
+ *      refused and the model is told to record progress with update_plan
+ *      (or mark a step blocked) instead.
+ * ------------------------------------------------------------------ */
+
+/** Real re-plans allowed in one run, on top of the first plan. */
+export const MAX_REPLANS_PER_RUN = 3;
+
+/**
+ * Word-overlap score at or above which two step texts are the same step.
+ *
+ * Deliberately high. Carrying "done" onto a step that is actually different
+ * work would skip it, which is worse than the old exact-match behaviour of
+ * redoing it. "Verify the build on Windows" vs "…on Linux" scores 0.6 and
+ * stays distinct; a reworded step ("Create the login page component" vs
+ * "Create login page component with the form") scores 0.8 and matches.
+ */
+export const SAME_STEP_SIMILARITY = 0.75;
+
+const STEP_STOPWORDS = new Set([
+  "the", "and", "for", "with", "that", "this", "then", "into", "from",
+  "its", "all", "any", "each", "every", "our", "your", "are", "was",
+  "will", "make", "sure", "step", "also", "using", "use", "via", "out",
+]);
+
+function stepWords(text: string): Set<string> {
+  return new Set(
+    text
+      .toLowerCase()
+      .replace(/[^a-z0-9_.\/-]+/g, " ")
+      .split(/\s+/)
+      .map((w) => w.replace(/^[.\/-]+|[.\/-]+$/g, ""))
+      .filter((w) => w.length >= 2 && !STEP_STOPWORDS.has(w))
+  );
+}
+
+/** Jaccard overlap of the meaningful words in two step texts, 0..1. */
+export function stepSimilarity(a: string, b: string): number {
+  if (a.trim().toLowerCase() === b.trim().toLowerCase()) return 1;
+  const wa = stepWords(a);
+  const wb = stepWords(b);
+  if (wa.size === 0 || wb.size === 0) return 0;
+  let shared = 0;
+  for (const w of wa) if (wb.has(w)) shared++;
+  return shared / (wa.size + wb.size - shared);
+}
+
+/** Index of the best unused candidate at or above the threshold, or -1. */
+function bestStepMatch(
+  text: string,
+  candidates: string[],
+  used: Set<number>
+): number {
+  let best = -1;
+  let bestScore = SAME_STEP_SIMILARITY;
+  candidates.forEach((candidate, i) => {
+    if (used.has(i)) return;
+    const score = stepSimilarity(text, candidate);
+    if (score >= bestScore) {
+      best = i;
+      bestScore = score;
+    }
+  });
+  return best;
+}
+
+/**
+ * Does this make_plan call restate the current plan rather than change it?
+ *
+ * True when every step of the new plan is a step the current plan already
+ * has, and every unfinished step of the current plan is still there — the
+ * same work in (possibly) different words. Adding, dropping or genuinely
+ * rewriting a step makes it a real re-plan.
+ */
+export function isRedundantReplan(current: Plan, next: Plan): boolean {
+  if (next.steps.length === 0) return false;
+  const oldTexts = current.steps.map((s) => s.text);
+  const used = new Set<number>();
+  for (const step of next.steps) {
+    const match = bestStepMatch(step.text, oldTexts, used);
+    if (match === -1) return false;
+    used.add(match);
+  }
+  return current.steps.every(
+    (s, i) => used.has(i) || s.state === "done" || s.state === "blocked"
+  );
+}
+
+/** "Continue with step 3: …" — where the model should pick up. */
+export function nextStepLine(plan: Plan): string {
+  const next = planProgress(plan).next;
+  return next
+    ? `Continue with step ${next.id}: ${next.text}`
+    : "Every step is done — call finish";
+}
+
+/** Tool reply when a make_plan call only restated the current plan. */
+export function redundantReplanMessage(plan: Plan): string {
+  return (
+    `The plan is unchanged — this make_plan call restates the steps you ` +
+    `already have, so nothing was replaced and your progress stands ` +
+    `(${planSummary(plan)}). Do not re-plan to restate the plan. ` +
+    `${nextStepLine(plan)}. Record progress with update_plan.`
+  );
+}
+
+/** Tool reply when the run has used its re-plan budget. */
+export function replanBudgetMessage(plan: Plan, used: number): string {
+  return (
+    `Not re-planned: you have already replaced the plan ${used} times in ` +
+    `this run, and each re-plan restarts your deliberation over the whole ` +
+    `task. The current plan stands (${planSummary(plan)}). ${nextStepLine(plan)}. ` +
+    `Use update_plan to mark steps doing/done as you go; if a step is ` +
+    `genuinely impossible, mark it blocked with the reason and move on.`
+  );
 }
 
 export interface StepUpdate {
