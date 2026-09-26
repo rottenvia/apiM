@@ -33,6 +33,10 @@ export async function POST(req: NextRequest) {
     repo?: string;
     baseBranch?: string;
     token?: string;
+    /** Names the new apim/ working branch (e.g. the chat title). */
+    task?: string;
+    /** Continue this existing remote branch instead of creating one. */
+    continueBranch?: string;
   };
   try {
     body = await req.json();
@@ -74,6 +78,9 @@ export async function POST(req: NextRequest) {
       token,
       repo: body.repo,
       baseBranch: body.baseBranch,
+      task: typeof body.task === "string" ? body.task.slice(0, 200) : undefined,
+      continueBranch:
+        typeof body.continueBranch === "string" ? body.continueBranch : undefined,
     });
     return NextResponse.json({ connection });
   } catch (error) {

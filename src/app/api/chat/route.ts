@@ -18,7 +18,7 @@ import {
   buildPluginDirectives,
   pinPluginDirectivesOnFirstSystem,
 } from "@/lib/plugins";
-import { workspaceToolsFor, runTool, WORK_LOOP_PROMPT } from "@/lib/tools";
+import { workspaceToolsFor, runTool, WORK_LOOP_PROMPT, GITHUB_TOOLS } from "@/lib/tools";
 import { callMcpTool, parseMcpToolName, MCP_TOOL_PREFIX } from "@/lib/mcp";
 import { getMcpServer, mcpToolsForModel } from "@/lib/mcp-store";
 import { RunFileMemory } from "@/lib/run-memory";
@@ -186,6 +186,12 @@ import {
   pushGitHubWorkspace,
   readGitHubConnection,
 } from "@/lib/github";
+import {
+  GIT_AGENT_TOOLS,
+  GITHUB_REMOTE_TOOLS,
+  createGitHubPullRequest,
+  runGitAgentTool,
+} from "@/lib/git-agent";
 import {
   createBudget,
   chargeRound,
@@ -1265,11 +1271,14 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             }${
               githubConnection
                 ? `\n\nThis workspace is connected to GitHub repository ${githubConnection.repo}. ` +
-                  `The selected base is ${githubConnection.baseBranch}; your writable branch is ` +
-                  `${githubConnection.workingBranch}. Work only on that branch. You may inspect ` +
-                  `other branches with read-only git show/log/branch commands. Use git status and ` +
-                  `git diff before committing, commit through run_command after approval, and call ` +
-                  `github_push only when the committed work is ready. Never merge or force-push.`
+                  `The selected base is ${githubConnection.baseBranch}; your working branch is ` +
+                  `${githubConnection.workingBranch} — a real clone, so work like a developer on it. ` +
+                  `Check git_status and git_diff, then commit each logical change with git_commit ` +
+                  `and a clear message. If git_status shows the branch behind the base, run ` +
+                  `git_pull_base and resolve any conflicts it reports. When the work is done and ` +
+                  `verified, call github_create_pr with a title and a body saying what changed and ` +
+                  `how it was tested (it pushes the branch); github_pr_status shows checks and reviews. ` +
+                  `Never commit to or push the base branch, and never force-push.`
                 : ""
             }${hasBrowser ? BROWSER_POLICY_PROMPT : NO_BROWSER_PROMPT}${WORK_LOOP_PROMPT}`
           : "";
@@ -2547,10 +2556,11 @@ Ask before you build the wrong thing. If a choice would change what you produce 
              * open-ceiling model, which can use free local OCR; web_search needs a
              * Tavily or Exa key.
              */
-            dsRequestBody.tools = workspaceToolsFor(
-              model,
-              target.model.openToolLimits
-            ).filter((t) => {
+            dsRequestBody.tools = [
+              ...workspaceToolsFor(model, target.model.openToolLimits),
+              // Git/PR tools exist only for a workspace connected to GitHub.
+              ...(githubConnection ? GITHUB_TOOLS : []),
+            ].filter((t) => {
               if (t.function.name === "view_image") {
                 return Boolean(visionApiKey) || modelHasOpenToolLimits(model, target.model.openToolLimits);
               }
@@ -2563,7 +2573,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               // The browser is an optional install. Offering it when Chromium
               // is absent buys an error, an apology and a worse fallback.
               if (t.function.name === "browse") return hasBrowser;
-              if (t.function.name === "github_push") {
+              if (GITHUB_REMOTE_TOOLS.has(t.function.name)) {
                 return Boolean(githubConnection && githubToken);
               }
               return true;
@@ -4799,6 +4809,82 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                         summary: `Asked: ${question.slice(0, 60)}`,
                       };
               }
+            } else if (GIT_AGENT_TOOLS.has(call.function.name)) {
+              // Local git (and the read-only PR status): no approval needed.
+              result = githubConnection
+                ? await runGitAgentTool(workspace, call.function.name, parsed.value, githubToken)
+                : {
+                    ok: false,
+                    content: "GitHub is not connected to this workspace.",
+                    summary: "GitHub not connected",
+                  };
+            } else if (call.function.name === "github_create_pr") {
+              if (!githubConnection || !githubToken) {
+                result = {
+                  ok: false,
+                  content: "GitHub is not connected to this workspace. Open the GitHub connector and choose a repository first.",
+                  summary: "GitHub not connected",
+                };
+              } else {
+                // Re-read: git_branch may have moved the working branch this run.
+                const live = (await readGitHubConnection(workspace)) ?? githubConnection;
+                const prArgs = parsed.value as { title?: unknown; body?: unknown; draft?: unknown };
+                const title = typeof prArgs.title === "string" ? prArgs.title.trim() : "";
+                const args = ["pr", "create", "--base", live.baseBranch, "--head", live.workingBranch];
+                const reason = title
+                  ? `Open pull request: ${title.slice(0, 120)}`
+                  : "Open a pull request for the working branch";
+                const preApproved =
+                  autoRunCommands || isRemembered(workspace, "github", args);
+                let approved = true;
+                if (!preApproved) {
+                  send({
+                    type: "approval_request",
+                    id: call.id,
+                    command: "github",
+                    args,
+                    display: `push ${live.workingBranch} and open PR → ${live.repo}:${live.baseBranch}`,
+                    reason,
+                  });
+                  const decision = await requestApproval(
+                    { id: call.id, workspaceId: workspace, command: "github", args, reason },
+                    AbortSignal.any([req.signal, runSignal])
+                  );
+                  approved = decision.approved;
+                  send({ type: "approval_resolved", id: call.id, approved });
+                }
+                if (!approved) {
+                  result = {
+                    ok: false,
+                    content: "The pull request was not opened. Do not retry until the user asks.",
+                    summary: "Pull request skipped",
+                  };
+                } else {
+                  try {
+                    const { pr, pushed } = await createGitHubPullRequest(workspace, githubToken, {
+                      title,
+                      body: typeof prArgs.body === "string" ? prArgs.body : "",
+                      draft: prArgs.draft === true,
+                    });
+                    result = {
+                      ok: true,
+                      content:
+                        `${pr.existing ? "A pull request already exists" : "Opened pull request"} #${pr.number}: ${pr.url}` +
+                        `\n${pr.head} → ${pr.base} (${pr.state}${pr.draft ? ", draft" : ""})` +
+                        (pushed ? "\nPushed the branch first." : ""),
+                      summary: `PR #${pr.number}${pr.existing ? " (existing)" : ""}`,
+                    };
+                  } catch (error) {
+                    result = {
+                      ok: false,
+                      content: `Could not open the pull request: ${
+                        error instanceof Error ? error.message : "unknown error"
+                      }`,
+                      summary: "Pull request failed",
+                    };
+                  }
+                }
+              }
             } else if (call.function.name === "github_push") {
               if (!githubConnection || !githubToken) {
                 result = {
@@ -4807,7 +4893,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   summary: "GitHub not connected",
                 };
               } else {
-                const args = ["push", "origin", githubConnection.workingBranch];
+                const live = (await readGitHubConnection(workspace)) ?? githubConnection;
+                const args = ["push", "origin", live.workingBranch];
                 const reason =
                   typeof parsed.value.reason === "string"
                     ? parsed.value.reason.trim()
@@ -4821,7 +4908,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                     id: call.id,
                     command: "git",
                     args,
-                    display: `git push origin ${githubConnection.workingBranch}`,
+                    display: `git push origin ${live.workingBranch}`,
                     reason,
                   });
                   const decision = await requestApproval(
