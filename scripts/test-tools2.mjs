@@ -143,6 +143,20 @@ check("a range read of a small file returns the whole file, numbered",
   res.ok && /1 \| local v1 = 1/.test(res.content) && /300 \| local v300 = 300/.test(res.content) &&
     /never in slices/.test(res.content),
   "reported: five rounds walking one 300-line file a slice at a time");
+{
+  const memo = new RunFileMemory();
+  const first = await runTool(WS, "read_file", { path: "small.luau", start_line: 10, end_line: 12 }, { fileMemory: memo });
+  const second = await runTool(WS, "read_file", { path: "small.luau", start_line: 200, end_line: 202 }, { fileMemory: memo });
+  check("only the first range read of an unchanged file widens; the next gets its lines",
+    /never in slices/.test(first.content) && /300 \| local v300/.test(first.content) &&
+      !/never in slices/.test(second.content) && /200 \| local v200 = 200/.test(second.content) &&
+      !/300 \| local v300/.test(second.content),
+    "measured: two ranges in one round each returned the whole 611-line file");
+  const wf = await runTool(WS, "write_files", { files: [{ file: "alias.luau", contents: "return 1\n" }, { path: "bad.luau" }] });
+  check("write_files accepts common field spellings and names what is wrong",
+    /Wrote 1/.test(wf.content) && /bad\.luau — malformed entry: "content" must be a string, got nothing/.test(wf.content),
+    "measured: '? — malformed entry' left the model guessing");
+}
 
 // ---------------------------------------------------------------------------
 console.log("\n3. search_files can show surrounding lines");
