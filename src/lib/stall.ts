@@ -92,6 +92,10 @@ const WORLD_CHANGING = new Set([
   "stop_process",
   "write_process",
   "github_push",
+  "github_create_pr",
+  "git_commit",
+  "git_branch",
+  "git_pull_base",
 ]);
 
 /** Planning without doing is the narration loop in tool form. */

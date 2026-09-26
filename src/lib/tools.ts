@@ -1518,9 +1518,8 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
     function: {
       name: "github_push",
       description:
-        "Push committed work from this workspace's dedicated GitHub branch. " +
-        "Use git status/diff/log first, commit with run_command, then call this. " +
-        "Never pushes the selected base branch and never force-pushes. Requires user approval.",
+        "Push the working branch to GitHub. Commit with git_commit first. " +
+        "Never pushes the base branch and never force-pushes. Requires user approval.",
       parameters: {
         type: "object",
         properties: {
@@ -1775,6 +1774,138 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
         },
         required: ["query"],
       },
+    },
+  },
+];
+
+/**
+ * Git and pull-request tools, offered only when the chat's workspace has a
+ * GitHub connection (the chat route appends them). Kept out of
+ * WORKSPACE_TOOLS so chats without a repository never pay for the schemas.
+ * Handled in src/lib/git-agent.ts; github_create_pr is approved in the route.
+ */
+export const GITHUB_TOOLS: ToolDefinition[] = [
+  {
+    type: "function",
+    function: {
+      name: "git_status",
+      description:
+        "Git status of the connected repo: current branch, ahead/behind origin/<base>, " +
+        "whether the branch is pushed, and staged/unstaged/untracked files.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "git_diff",
+      description:
+        "Unified diff of the connected repo (capped). Default: unstaged changes. " +
+        "staged=true: staged changes. base=true: everything this branch changes vs the base.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Limit to one file or directory." },
+          staged: { type: "boolean", description: "Diff the index instead of the working tree." },
+          base: { type: "boolean", description: "Diff the branch against origin/<base>." },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "git_log",
+      description: "Recent commits on the current branch (hash, date, author, subject).",
+      parameters: {
+        type: "object",
+        properties: {
+          count: { type: "number", description: "How many commits, 1-50. Default 10." },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "git_commit",
+      description:
+        "Stage and commit locally on the working branch (no push). Commit each logical " +
+        "change separately. Refused on the base branch and when there is nothing to commit.",
+      parameters: {
+        type: "object",
+        properties: {
+          message: {
+            type: "string",
+            description: "Commit message: an imperative summary line, optional body after a blank line.",
+          },
+          paths: {
+            type: "array",
+            items: { type: "string" },
+            description: "Only commit these paths. Default: all changes.",
+          },
+        },
+        required: ["message"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "git_branch",
+      description:
+        "List, create (from HEAD, under apim/) or switch local branches. The branch you " +
+        "create or switch to becomes the working branch that github_push and " +
+        "github_create_pr target. Switching to the base branch is refused.",
+      parameters: {
+        type: "object",
+        properties: {
+          action: { type: "string", enum: ["list", "create", "switch"] },
+          name: { type: "string", description: "Branch name for create/switch." },
+        },
+        required: ["action"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "git_pull_base",
+      description:
+        "Fetch origin and merge the latest base branch into the working branch. Needs a " +
+        "clean tree (commit first). On conflict the merge is aborted and the conflicted files listed.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "github_create_pr",
+      description:
+        "Open a pull request from the working branch into the base, pushing the branch " +
+        "first if needed. Returns the existing PR if one is already open. Requires user approval.",
+      parameters: {
+        type: "object",
+        properties: {
+          title: { type: "string", description: "PR title, one line." },
+          body: {
+            type: "string",
+            description: "PR description in Markdown: what changed, why, and how it was tested.",
+          },
+          draft: { type: "boolean", description: "Open as a draft PR." },
+        },
+        required: ["title", "body"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "github_pr_status",
+      description:
+        "State of this branch's pull request: open/merged/closed, mergeable, CI check " +
+        "results and review comment count.",
+      parameters: { type: "object", properties: {} },
     },
   },
 ];
