@@ -1492,7 +1492,7 @@ function MessageBubbleImpl({
                             <ThinkingClock />
                           </span>
                           {reasoningChars > 0 && (
-                            <> · {formatThinkTokens(reasoningChars / 4)}</>
+                            <> · {formatThinkTokens(reasoningChars / 4)} tok</>
                           )}
                         </>
                       ) : thoughtMs > 0

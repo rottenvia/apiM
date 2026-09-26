@@ -377,3 +377,93 @@ export function stallTripUserNote(recent: string[]): string {
     `try differently and Resume to carry on.`
   );
 }
+
+/* ------------------------------------------------------------------ *
+ * Gathering without doing
+ *
+ * The meters above only count calls that return nothing NEW. The reported
+ * loop evaded both: each round read a different module (Signal, Color,
+ * Schema, Theme, the test harness...) or re-read one after it had been
+ * collapsed, narrated "continuing step 1", and never wrote a line. Every
+ * call was novel, so nothing fired. This counts the streak itself — calls
+ * in a row that neither changed the world nor asked the user — and names
+ * what is already in hand, because the model re-reads when it believes the
+ * text is gone.
+ * ------------------------------------------------------------------ */
+
+/** Read-only calls in a row before the model is told to start doing. */
+export const GATHER_NUDGE_CALLS = 10;
+
+const READ_TOOLS = new Set(["read_file", "read_files", "read_document"]);
+
+export interface GatherObservation {
+  /** Calls in the current read-only streak. */
+  streak: number;
+  /** Nudge on this call (every GATHER_NUDGE_CALLS of the streak). */
+  nudge: boolean;
+  /** Files read during the streak, oldest first. */
+  files: string[];
+}
+
+export class GatherTracker {
+  private streak = 0;
+  private files: string[] = [];
+
+  observe(name: string, args: unknown, ok: boolean): GatherObservation {
+    if (ok && (name === "ask_user" || WORLD_CHANGING.has(name))) {
+      this.streak = 0;
+      this.files = [];
+      return { streak: 0, nudge: false, files: [] };
+    }
+    this.streak += 1;
+    if (READ_TOOLS.has(name) && args && typeof args === "object") {
+      const a = args as Record<string, unknown>;
+      const raw = a.paths ?? a.path;
+      for (const p of Array.isArray(raw) ? raw : [raw]) {
+        if (typeof p === "string" && p.trim() && !this.files.includes(p.trim())) {
+          this.files.push(p.trim());
+        }
+      }
+    }
+    return {
+      streak: this.streak,
+      nudge: this.streak % GATHER_NUDGE_CALLS === 0,
+      files: [...this.files],
+    };
+  }
+
+  reset(): void {
+    this.streak = 0;
+    this.files = [];
+  }
+}
+
+/** Appended to the tool result on a gathering nudge. */
+export function gatherNudgeText(obs: GatherObservation): string {
+  const shown = obs.files.slice(-12);
+  const list = shown.length
+    ? ` You already have ${shown.join(", ")}${
+        obs.files.length > shown.length ? ` (+${obs.files.length - shown.length} more)` : ""
+      } — their text is kept in your context, so do not read them again.`
+    : "";
+  return (
+    `\n\n[Harness: ${obs.streak} tool calls in a row without writing, ` +
+    `running or asking anything.${list} Stop gathering and do the current ` +
+    `step now: write or edit the code. If one specific thing you need is ` +
+    `genuinely missing, name it in a line and fetch only that.]`
+  );
+}
+
+/** Appended when a file is read again with byte-identical content. */
+export function unchangedReadText(): string {
+  return (
+    `\n\n[Harness: you already read this in this run and it has not ` +
+    `changed — the earlier copy is still in your context. Do not read it ` +
+    `again; work from what you have.]`
+  );
+}
+
+/** Is this one of the file-reading tools? */
+export function isReadTool(name: string): boolean {
+  return READ_TOOLS.has(name);
+}

@@ -323,6 +323,27 @@ check(
   /if \(stall\.repeatWarn\)/.test(route)
 );
 
+// Gathering without doing: every call novel, nothing written.
+{
+  const gt = new S.GatherTracker();
+  let obs;
+  const reads = ["src/Signal.luau", "src/Color.luau", "tests/logic.luau", "src/Schema.luau", "src/Theme.luau"];
+  for (let i = 0; i < S.GATHER_NUDGE_CALLS - 1; i++) {
+    obs = gt.observe(i % 3 === 2 ? "update_plan" : "read_file", { path: reads[i % reads.length] }, true);
+  }
+  check("a streak of novel reads does not nudge early", obs.nudge === false);
+  obs = gt.observe("read_files", { paths: ["src/Util.luau"] }, true);
+  check("the streak nudges at the threshold, naming what is already in hand",
+    obs.nudge === true && obs.files.includes("src/Signal.luau") && obs.files.includes("src/Util.luau") &&
+      /do not read them again/.test(S.gatherNudgeText(obs)) && /write or edit the code/.test(S.gatherNudgeText(obs)),
+    "the reported loop read a different module every round and nothing fired");
+  obs = gt.observe("write_file", { path: "src/Store.luau" }, true);
+  check("a write ends the streak", obs.streak === 0 && gt.observe("read_file", { path: "a" }, true).streak === 1);
+  check("route wires the gather nudge and the first-re-read note",
+    /gatherTracker\.observe\(/.test(route) && /gatherNudgeText\(gather\)/.test(route) &&
+      /unchangedReadText\(\)/.test(route));
+}
+
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
 );

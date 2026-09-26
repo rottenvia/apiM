@@ -19,6 +19,7 @@ const load = (p) => import(pathToFileURL(path.join(ROOT, p)).href);
 
 const R = await load("src/lib/retry.ts");
 const P = await load("src/lib/prune.ts");
+const C = await load("src/lib/compact.ts");
 
 const COLOR = process.stdout.isTTY && !process.env.NO_COLOR;
 const g = (s) => (COLOR ? `\x1b[32m${s}\x1b[0m` : s);
@@ -651,7 +652,9 @@ check(
 // decompiles every round is what cost real money. Small reads (under the
 // floor) are never collapsed, so ordinary coding stays intact.
 const wholeProject = buildTranscript(40);
-const pruned = P.pruneTranscript(wholeProject);
+// The recency window alone; retention of the files being worked from is
+// pinned separately below.
+const pruned = P.pruneTranscript(wholeProject, { fileReadBudget: 0 });
 check(
   "old large tool results are collapsed after enough rounds",
   pruned.stats.collapsed > 0,
@@ -728,7 +731,7 @@ const perRound = 12_000;
 // older ones are well past the threshold and actually collapse.
 const rounds = P.KEEP_VERBATIM_RESULTS * 3;
 const long = buildTranscript(rounds, perRound);
-res = P.pruneTranscript(long);
+res = P.pruneTranscript(long, { fileReadBudget: 0 });
 
 check("a long run does get pruned", res.stats.collapsed > 0, `${res.stats.collapsed} collapsed`);
 check(
@@ -748,6 +751,59 @@ check(
   res.stats.collapsed === collapsibleCount,
   `${rounds} rounds, ${collapsibleCount} older ones collapsed`
 );
+
+/*
+ * The files the model is working from survive the window.
+ *
+ * The window counts every result — update_plan, searches, listings — so the
+ * source files read while gathering context were collapsed a few rounds
+ * later and the model read them again, and again: the re-read loop.
+ */
+{
+  const call = (id, name, args) => ({
+    role: "assistant",
+    content: null,
+    tool_calls: [{ id, type: "function", function: { name, arguments: JSON.stringify(args) } }],
+  });
+  const reply = (id, content) => ({ role: "tool", tool_call_id: id, content });
+  const src = (tag) => `-- ${tag}\n${"local x = 1\n".repeat(400)}`;
+  const msgs = [
+    { role: "system", content: "sys" },
+    { role: "user", content: "Build the store." },
+    call("r1", "read_file", { path: "src/Signal.luau" }), reply("r1", src("signal")),
+    call("r2", "read_file", { path: "src/Color.luau" }), reply("r2", src("color v1")),
+    call("r3", "read_file", { path: "src/Theme.luau" }), reply("r3", src("theme")),
+    call("w1", "edit_file", { path: "src/Theme.luau", old_text: "a", new_text: "b" }), reply("w1", "edited src/Theme.luau"),
+    call("r4", "read_file", { path: "src/Color.luau" }), reply("r4", src("color v2")),
+  ];
+  for (let i = 0; i < 12; i++) {
+    msgs.push(call(`p${i}`, "update_plan", { updates: [] }), reply(`p${i}`, "Plan updated " + "·".repeat(1600)));
+  }
+  msgs.push({ role: "user", content: "x".repeat(30_000) });
+  const out = P.pruneTranscript(msgs).messages;
+  const body = (id) => out.find((m) => m.role === "tool" && m.tool_call_id === id).content;
+  check("a file read stays verbatim after bookkeeping pushes it out of the window",
+    body("r1").startsWith("-- signal"), "twelve update_plan calls used to collapse it");
+  check("a later read of the same file supersedes the earlier one",
+    body("r2").startsWith("[earlier") && body("r4").startsWith("-- color v2"));
+  check("a read the model has since edited is not kept as if current",
+    body("r3").startsWith("[earlier"));
+  check("the budget still bounds what is carried",
+    P.pruneTranscript(msgs, { fileReadBudget: 100 }).messages
+      .find((m) => m.tool_call_id === "r1").content.startsWith("[earlier"));
+
+  // Compaction folds the round but keeps the file text in its summary.
+  const heavy = msgs.map((m) =>
+    m.role === "assistant" ? { ...m, reasoning_content: "think ".repeat(8000) } : m
+  );
+  const folded = C.compactTranscript(P.pruneTranscript(heavy).messages).messages;
+  const text = folded.map((m) => (typeof m.content === "string" ? m.content : "")).join("\n");
+  check("compaction keeps the text of a file still being worked from",
+    folded.length < heavy.length && /read_file\(src\/Signal\.luau\) returned — kept verbatim/.test(text) && text.includes("-- signal"),
+    "it used to fold to one line, and the model read it again");
+  check("compaction does not resurrect a superseded or edited read",
+    !text.includes("-- color v1") && !/read_file\(src\/Theme\.luau\) returned/.test(text));
+}
 
 // The three invariants that would otherwise produce a 400.
 check(

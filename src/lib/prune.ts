@@ -98,6 +98,148 @@ export const MAX_VERBATIM_ARGS_CHARS = 2_000;
 // are preserved, only old LARGE outputs become previews.
 export const PRUNE_THRESHOLD_CHARS = 24_000;
 
+/**
+ * File reads the agent is still working from stay verbatim past the recency
+ * window, up to this many characters in total (newest first).
+ *
+ * The window above counts EVERY tool result — each update_plan, search and
+ * listing uses a slot — so on a real run the source files the model had just
+ * read were collapsed to a one-line pointer three or four rounds later, while
+ * it was still gathering the rest. It then re-read them, which pushed the
+ * next ones out: the reported loop of "Read src/Signal.luau … Read
+ * src/Signal.luau … I need Signal's exact API" that never reached a write.
+ * A read stays until it is superseded by a later read of the same file, made
+ * stale by a later write to it, or pushed past this budget. ~40k tokens; it
+ * sits in the cached prefix, so it is cheap to carry.
+ */
+export const FILE_READ_BUDGET_CHARS = 150_000;
+
+/** Tools whose result IS file content the model builds on. */
+const FILE_READ_TOOLS = new Set(["read_file", "read_files"]);
+
+/** Tools whose success changes the files they name. */
+const FILE_WRITE_TOOLS = new Set([
+  "write_file",
+  "write_files",
+  "edit_file",
+  "edit_files",
+  "apply_patch",
+  "replace_in_files",
+  "move_file",
+  "delete_file",
+  "undo_file",
+]);
+
+function normPath(p: string): string {
+  return p.trim().replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
+}
+
+/** Paths a read call asked for (globs kept as written). */
+function readPaths(args: string): string[] {
+  try {
+    const parsed = JSON.parse(args) as Record<string, unknown>;
+    const raw = parsed.paths ?? parsed.path ?? parsed.files;
+    const list = Array.isArray(raw) ? raw : [raw];
+    return list
+      .map((p) =>
+        typeof p === "string"
+          ? p
+          : p && typeof p === "object" && typeof (p as { path?: unknown }).path === "string"
+            ? ((p as { path: string }).path)
+            : ""
+      )
+      .filter(Boolean)
+      .map(normPath);
+  } catch {
+    return [];
+  }
+}
+
+/** Every path a write-ish call touches, as best the arguments say. */
+function writtenPaths(name: string, args: string): string[] {
+  const out: string[] = [];
+  const walk = (value: unknown, key?: string) => {
+    if (typeof value === "string") {
+      if (key === "path" || key === "from" || key === "to") out.push(normPath(value));
+      if (key === "patch" || (name === "apply_patch" && key === "input")) {
+        for (const m of value.matchAll(
+          /^(?:\*\*\* (?:Update|Add|Delete) File: |\+\+\+ b\/|--- a\/)(.+)$/gm
+        )) {
+          out.push(normPath(m[1]));
+        }
+      }
+    } else if (Array.isArray(value)) {
+      for (const v of value) walk(v, key);
+    } else if (value && typeof value === "object") {
+      for (const [k, v] of Object.entries(value)) walk(v, k);
+    }
+  };
+  try {
+    walk(JSON.parse(args));
+  } catch {
+    /* unparseable arguments name nothing */
+  }
+  return out;
+}
+
+/** Does a (possibly glob) read path cover this written path? */
+function covers(readPath: string, written: string): boolean {
+  if (readPath === written) return true;
+  const star = readPath.indexOf("*");
+  if (star === -1) return false;
+  return written.startsWith(readPath.slice(0, star));
+}
+
+/**
+ * Tool-result indices of file reads that should survive the recency window:
+ * the newest read of each file set, not rewritten since, within the budget.
+ */
+export function retainedReads(
+  messages: TranscriptMessage[],
+  budget: number
+): Set<number> {
+  const keep = new Set<number>();
+  if (budget <= 0) return keep;
+
+  const callById = new Map<string, { name: string; args: string }>();
+  for (const m of messages) {
+    if (m.role !== "assistant") continue;
+    for (const call of m.tool_calls ?? []) {
+      callById.set(call.id, { name: call.function.name, args: call.function.arguments });
+    }
+  }
+
+  // Walk newest to oldest, remembering what later calls read and wrote.
+  const laterWrites: string[] = [];
+  const laterReads = new Set<string>();
+  let used = 0;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role !== "tool") continue;
+    const call = callById.get(m.tool_call_id);
+    if (!call) continue;
+    if (FILE_WRITE_TOOLS.has(call.name)) {
+      laterWrites.push(...writtenPaths(call.name, call.args));
+      continue;
+    }
+    if (!FILE_READ_TOOLS.has(call.name)) continue;
+    if (typeof m.content !== "string" || /^\[(?:earlier|Folded)/.test(m.content)) continue;
+    if (/^Error/.test(m.content)) continue;
+
+    const paths = readPaths(call.args);
+    const key = paths.slice().sort().join("\n");
+    const superseded = laterReads.has(key);
+    laterReads.add(key);
+    if (superseded || paths.length === 0) continue;
+    const stale = paths.some((p) => laterWrites.some((w) => covers(p, w)));
+    if (stale) continue;
+    if (used + m.content.length > budget) continue;
+    used += m.content.length;
+    keep.add(i);
+  }
+  return keep;
+}
+
 export interface PruneStats {
   /** Tool results replaced with a placeholder. */
   collapsed: number;
@@ -156,7 +298,7 @@ function placeholder(name: string, content: string): string {
   const head = meaningful.slice(0, 3).map((l) => l.trim().slice(0, 160)).join(" | ");
   const paths = Array.from(
     new Set(
-      (content.match(/[\w./\\-]+\.(?:c|cpp|h|hpp|cs|ts|js|py|json|md|txt|sln|vcxproj|dll|exe)\b/gi) ?? [])
+      (content.match(/[\w./\\-]+\.(?:c|cpp|h|hpp|cs|ts|tsx|js|jsx|mjs|py|lua|luau|rs|go|java|kt|rb|php|css|html|json|toml|yaml|yml|md|txt|sln|vcxproj|dll|exe)\b/gi) ?? [])
         .slice(0, 6)
     )
   ).join(", ");
@@ -183,12 +325,15 @@ export function pruneTranscript(
     keepVerbatim?: number;
     minChars?: number;
     thresholdChars?: number;
+    /** See FILE_READ_BUDGET_CHARS; 0 turns read retention off. */
+    fileReadBudget?: number;
   } = {}
 ): { messages: TranscriptMessage[]; stats: PruneStats } {
   const {
     keepVerbatim = KEEP_VERBATIM_RESULTS,
     minChars = MIN_COLLAPSE_CHARS,
     thresholdChars = PRUNE_THRESHOLD_CHARS,
+    fileReadBudget = FILE_READ_BUDGET_CHARS,
   } = options;
 
   const empty: PruneStats = { collapsed: 0, charsSaved: 0, tokensSaved: 0 };
@@ -211,6 +356,9 @@ export function pruneTranscript(
       resultIndices.length <= keepVerbatim
         ? new Set<number>()
         : new Set(resultIndices.slice(0, resultIndices.length - keepVerbatim));
+    // Source files the model is still building on are not collapsed just
+    // because bookkeeping calls moved the window past them.
+    for (const i of retainedReads(messages, fileReadBudget)) collapsible.delete(i);
 
   let collapsed = 0;
   let charsSaved = 0;
