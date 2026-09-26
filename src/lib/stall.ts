@@ -560,3 +560,45 @@ export function shouldExtendRoundCap(input: {
     input.changesSinceCheck >= CAP_PROGRESS_CHANGES
   );
 }
+
+/* ------------------------------------------------------------------ *
+ * Drafting code inside the reasoning
+ *
+ * Measured on a real run (DeepSeek V4.1 Flash, max effort): one round's
+ * reasoning held 98 code fences and ~245 lines of Luau — the whole script
+ * drafted in thought, then written AGAIN as the write_file argument. Every
+ * file was paid for twice in output tokens, and on a 16 tok/s endpoint the
+ * round took 7–15 minutes before its first action. The next round is told,
+ * with the count, to put code straight into the file.
+ * ------------------------------------------------------------------ */
+
+export const CODE_DRAFT_NUDGE_MARKER = "[Harness: code drafted in reasoning]";
+
+/** Lines of drafted code in a round's reasoning before it is worth a nudge. */
+export const CODE_DRAFT_LINES = 60;
+
+/** Count code-looking lines inside fenced blocks of a reasoning text. */
+export function draftedCodeLines(reasoning: string): number {
+  let inFence = false;
+  let lines = 0;
+  for (const line of reasoning.split("\n")) {
+    if (/^\s*```/.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence && line.trim()) lines += 1;
+  }
+  return lines;
+}
+
+export function codeDraftNudgeText(lines: number): string {
+  return (
+    `${CODE_DRAFT_NUDGE_MARKER}\n` +
+    `Your last round drafted about ${lines} lines of code inside your ` +
+    `reasoning before writing anything. That code is paid for twice — once ` +
+    `as thought, once again as the write_file argument — and delays every ` +
+    `action. Decide the structure in a few sentences, then put the code ` +
+    `DIRECTLY into write_file/edit_file: the file is the draft. Run it, ` +
+    `and fix what fails with edit_file.`
+  );
+}

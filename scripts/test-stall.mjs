@@ -358,6 +358,21 @@ check(
   check("route wires the churn nudge", /churnTracker\.observe\(/.test(route) && /churnNudgeText\(churn\)/.test(route));
 }
 
+// Code drafted in the reasoning (measured: 461 lines in one real round).
+{
+  const fence = "```";
+  const draft = `Let me design it.\n${fence}lua\n${"local x = 1\n".repeat(80)}${fence}\nThen write it.`;
+  check("code lines inside fences are counted", S.draftedCodeLines(draft) === 80);
+  check("prose reasoning counts nothing", S.draftedCodeLines("I will read the file, then edit line 12.\nlocal x = 1 is fine") === 0);
+  const t = S.codeDraftNudgeText(461);
+  check("the nudge names the count and sends the code to the file",
+    t.startsWith(S.CODE_DRAFT_NUDGE_MARKER) && /461 lines/.test(t) && /DIRECTLY into write_file/.test(t));
+  check("the route nudges after a drafting round and clears it next round",
+    /draftedCodeLines\(roundReasoning\)/.test(route) &&
+      /m\.content\.startsWith\(CODE_DRAFT_NUDGE_MARKER\)/.test(route) &&
+      /Never draft a file's code in your reasoning/.test(route));
+}
+
 // The round cap: a run making progress is not cut off mid-step.
 check("a run that closed a plan step since the last check gets more rounds",
   S.shouldExtendRoundCap({ extensionsUsed: 0, stepsDoneSinceCheck: 1, changesSinceCheck: 0 }));
