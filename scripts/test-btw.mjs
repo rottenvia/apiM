@@ -62,6 +62,9 @@ const {
   appendBtwNote,
   drainBtwNotes,
   getConversation,
+  upsertMessage,
+  updateConversation,
+  deleteTurn,
 } = await import("@/lib/store");
 const { serializeForApi, MID_RUN_NOTE_LABEL, MID_RUN_NOTE_ABSORB } = await import(
   "@/lib/transcript"
@@ -638,6 +641,33 @@ check(
   /compactTranscript\(resumed\.messages\)/.test(routeSrc),
   "same-run liveness is preserved — only NEW turns archive notes"
 );
+
+// Found by review: mutations read the chat before queueing and wrote the
+// stale copy back — a checkpoint erased a note, reverted a rename, and
+// brought a deleted turn back. Fire them all at once and keep every change.
+{
+  const RACE = "btw-race-1";
+  const at = () => new Date().toISOString();
+  await appendMessages(RACE, "race chat", [
+    { id: "u1", role: "user", content: "first", createdAt: at() },
+    { id: "a1", role: "assistant", content: "one", createdAt: at() },
+    { id: "u2", role: "user", content: "second", createdAt: at() },
+  ]);
+  await Promise.all([
+    upsertMessage(RACE, "race chat", { id: "a2", role: "assistant", content: "checkpoint 1", createdAt: at() }),
+    appendBtwNote(RACE, "steer left"),
+    updateConversation(RACE, { title: "renamed race" }),
+    upsertMessage(RACE, "race chat", { id: "a2", role: "assistant", content: "checkpoint 2", createdAt: at() }),
+    deleteTurn(RACE, "u1"),
+  ]);
+  const after = await getConversation(RACE);
+  check("concurrent checkpoint, note, rename and delete all survive",
+    after?.title === "renamed race" &&
+      after.btwNotes?.some((n) => n.text === "steer left") &&
+      !after.messages.some((m) => m.id === "u1" || m.id === "a1") &&
+      after.messages.find((m) => m.id === "a2")?.content === "checkpoint 2",
+    JSON.stringify({ title: after?.title, notes: after?.btwNotes?.length, ids: after?.messages.map((m) => m.id) }));
+}
 
 // Clean up the scratch data root.
 fs.rmSync(dataRoot, { recursive: true, force: true });
