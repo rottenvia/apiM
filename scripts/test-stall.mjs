@@ -412,6 +412,9 @@ check("a think cut by the connection is asked again with thinking on, partial th
   /if \(\s*streamCut &&\s*calls\.length === 0 &&\s*!roundContent &&\s*streamCuts < MAX_STREAM_CUTS\s*\)/.test(route) &&
     /roundReasoning\.length >= DROPPED_THINK_CARRY_CHARS/.test(route) &&
     /content: DROPPED_THINK_TEXT/.test(route));
+check("a dropped no-thinking round is asked again without thinking",
+  /const roundWasNoThink = noThinkNext;\s*noThinkNext = false;/.test(route) &&
+    /streamCuts \+= 1;\s*if \(roundWasNoThink\) noThinkNext = true;/.test(route));
 check("only a real output-limit cut counts as thinking eating the budget",
   /const thinkOnlyCut =\s*hardTruncated &&/.test(route));
 check("a prose continuation turns thinking off for one round, not the rest of the run",

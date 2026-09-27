@@ -186,6 +186,26 @@ check("a range read of a small file returns the whole file, numbered",
   check("edit_files takes {path, edits:[…]} groups and a top-level path",
     grouped.ok && top.ok && /rawset\(env, 'game', M\.game\)/.test(after2) && /return M -- module/.test(after2),
     "measured: 'Edited 0 files, 11 failed' — every entry 'no file path'");
+  // Measured live: six edits, only the last with a path (another file).
+  await ws.writeFile(WS, "inline.py", "def _restore(text, store):\n    return text\n\nshared = 1\n");
+  await ws.writeFile(WS, "other.py", "shared = 1\nvalue = 2\n");
+  const inf = await runTool(WS, "edit_files", {
+    edits: [
+      { old_text: "def _restore(text, store):\n    return text", new_text: "def _restore(text, store):\n    return text.strip()" },
+      { old_text: "shared = 1", new_text: "shared = 3" },
+      { path: "other.py", old_text: "value = 2", new_text: "value = 5" },
+    ],
+  });
+  const inl = (await ws.readFile(WS, "inline.py")).content;
+  const oth = (await ws.readFile(WS, "other.py")).content;
+  check("an edit with no path goes to the one file its old_text is in",
+    /return text\.strip\(\)/.test(inl) && /value = 5/.test(oth) &&
+      /edit 1: no path was given — its old_text occurs only in inline\.py/.test(inf.content),
+    "measured: 'Edited 1 file, 5 failed' — five pathless edits, a round spent resending them");
+  check("an ambiguous pathless edit is refused, naming the candidates",
+    /edit 2\/3: no "path" given, and its old_text occurs in 2 files \(.*inline\.py.*\)/.test(inf.content) &&
+      /shared = 1/.test(inl) && /shared = 1/.test(oth),
+    "guessing there would edit the wrong file");
   const wf = await runTool(WS, "write_files", { files: [{ file: "alias.luau", contents: "return 1\n" }, { path: "bad.luau" }] });
   check("write_files accepts common field spellings and names what is wrong",
     /Wrote 1/.test(wf.content) && /bad\.luau — malformed entry: "content" must be a string, got nothing/.test(wf.content),
