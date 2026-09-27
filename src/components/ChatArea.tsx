@@ -103,6 +103,14 @@ interface ChatAreaProps {
     firedAt?: number;
     answered?: boolean;
   } | null;
+  /** A tool call still streaming in — usually a file being written. */
+  drafting?: {
+    name: string;
+    chars: number;
+    path: string | null;
+    calls: number;
+    since: number;
+  } | null;
   onStop: () => void;
   hasKeys: boolean;
   /** Which provider key is missing for the selected model. */
@@ -265,6 +273,7 @@ export function ChatArea({
   retryBreakdown,
   retryDetail,
   requestSize,
+  drafting,
   conversationLoading,
   onStop,
   hasKeys,
@@ -1667,6 +1676,9 @@ export function ChatArea({
                     info={requestSize}
                   />
                 )}
+              {isLoading && drafting && (
+                <DraftRow key={`${drafting.name}:${drafting.since}`} info={drafting} />
+              )}
 
               <div ref={messagesEndRef} />
             </div>
@@ -2466,6 +2478,52 @@ function WaitRow({
         >
           · {seconds}s · {describeRequest(info)}
           {heavy ? " — big context, first token may take a while" : ""}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/** "Writing src/app.py", "Editing 3 files", "Planning" — what a call is doing. */
+function draftingLabel(name: string, path: string | null): string {
+  const file = path ? path.split("/").slice(-2).join("/") : null;
+  if (/^write_files?$|^create_file$/.test(name)) return file ? `Writing ${file}` : "Writing files";
+  if (/^edit_files?$|^replace_in_files$/.test(name)) return file ? `Editing ${file}` : "Preparing edits";
+  if (/plan/.test(name)) return "Planning";
+  return `Preparing ${name.replace(/_/g, " ")}`;
+}
+
+/**
+ * A tool call streaming in: "✻ Writing GlowHighlight.luau… · 12.4k chars ·
+ * 48s". A whole file arrives as the call's arguments and nothing shows
+ * until it completes — on a 16 tok/s endpoint a big script is ten minutes
+ * of a bubble that looks finished (the reported "is it stuck?" screenshot:
+ * "Plan, then the script itself." and then nothing).
+ */
+function DraftRow({
+  info,
+}: {
+  info: { name: string; chars: number; path: string | null; since: number };
+}) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  const seconds = Math.max(0, Math.round((now - info.since) / 1000));
+  const size =
+    info.chars >= 1000 ? `${(info.chars / 1000).toFixed(1)}k chars` : `${info.chars} chars`;
+  return (
+    <div className="flex justify-start px-4 pb-2">
+      <div className="flex items-center gap-2">
+        <span aria-hidden="true" className="text-[13px] leading-5 text-accent">
+          ✻
+        </span>
+        <span className="thinking-shimmer text-[13px] leading-5">
+          {draftingLabel(info.name, info.path)}…
+        </span>
+        <span className="text-[11px] tabular-nums text-text-muted">
+          · {size} · {seconds}s
         </span>
       </div>
     </div>

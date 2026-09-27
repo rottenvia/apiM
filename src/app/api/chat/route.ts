@@ -411,6 +411,14 @@ type StreamEvent =
       breakdown: { label: string; chars: number }[];
     }
   | {
+      /** A tool call still streaming its arguments (a file being written). */
+      type: "tool_drafting";
+      name: string;
+      chars: number;
+      path: string | null;
+      calls: number;
+    }
+  | {
       type: "meta";
       conversationId: string | null;
       /** Id of the reply being generated, so Stop can name it. */
@@ -859,7 +867,24 @@ export async function POST(req: NextRequest) {
           closed = true;
         }
       };
+      /*
+       * Heartbeat. A reply can be silent for minutes with nothing wrong: a
+       * big request's prefill before the first token, a file streaming in
+       * as tool arguments. Measured: a client with a 300s body timeout
+       * dropped the stream mid-write — proxies and antivirus do the same
+       * to an idle connection. An SSE comment every 15s keeps it open and
+       * is ignored by every parser.
+       */
+      const heartbeat = setInterval(() => {
+        if (closed) return;
+        try {
+          controller.enqueue(encoder.encode(": ping\n\n"));
+        } catch {
+          closed = true;
+        }
+      }, 15_000);
       const close = () => {
+        clearInterval(heartbeat);
         if (closed) return;
         closed = true;
         try {
@@ -2453,6 +2478,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           let draftLinesAtCut = 0;
           let draftCheckedAt = 0;
           let roundUsageSeen = false;
+          let lastDraftSentAt = 0;
           const roundDeltaFields = new Set<string>();
           /** "stop" if the model finished, "length" if it ran out of room. */
           let roundFinishReason = "";
@@ -3600,6 +3626,15 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               if (delta.tool_calls) {
                 markUpstream();
                 for (const tc of delta.tool_calls) toolAcc.add(tc);
+                // A file written through a tool streams in as its
+                // arguments — minutes of silence on a slow endpoint unless
+                // it is shown. Throttled: a big write is thousands of deltas.
+                const nowMs = Date.now();
+                if (nowMs - lastDraftSentAt >= 700) {
+                  lastDraftSentAt = nowMs;
+                  const d = toolAcc.drafting();
+                  if (d) send({ type: "tool_drafting", ...d });
+                }
               }
               if (delta.content) {
                 markUpstream();

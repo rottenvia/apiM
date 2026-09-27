@@ -208,6 +208,13 @@ function parseSearchResults(
 type StreamEvent =
   | { type: "status"; stage: StatusStage }
   | {
+      type: "tool_drafting";
+      name: string;
+      chars: number;
+      path: string | null;
+      calls: number;
+    }
+  | {
       type: "request_size";
       round: number;
       inputChars: number;
@@ -392,6 +399,15 @@ type LiveRequest = {
   answered: boolean;
 };
 
+/** The tool call the model is still writing — see the tool_drafting event. */
+type LiveDrafting = {
+  name: string;
+  chars: number;
+  path: string | null;
+  calls: number;
+  since: number;
+};
+
 type ChatSession = {
   messages: Message[];
   loading: boolean;
@@ -402,6 +418,8 @@ type ChatSession = {
   liveRetry: (UpstreamNotice & { receivedAt: number }) | null;
   /** Latest fired request's size, while its round is still running. */
   liveRequestSize: LiveRequest | null;
+  /** A tool call streaming in (a file being written), until it completes. */
+  liveDrafting: LiveDrafting | null;
   /** Server-side id of the in-flight reply, for the stop endpoint. */
   runMessageId: string | null;
   /** Set by Stop / new-chat: a pending auto-resume must not fire. */
@@ -460,6 +478,7 @@ export default function Home() {
         retryNotice: null,
         liveRetry: null,
         liveRequestSize: null,
+        liveDrafting: null,
         runMessageId: null,
         cancelResume: false,
       };
@@ -487,6 +506,7 @@ export default function Home() {
   const [requestSize, setRequestSizeState] = useState<LiveRequest | null>(
     null
   );
+  const [drafting, setDraftingState] = useState<LiveDrafting | null>(null);
 
   /** Copy a session's UI state into the mirrored React states. */
   const mirrorSession = useCallback((s: ChatSession) => {
@@ -498,6 +518,7 @@ export default function Home() {
     setRetryBreakdownState(s.liveRetry?.breakdown ?? null);
     setRetryDetailState(s.liveRetry?.detail ?? null);
     setRequestSizeState(s.liveRequestSize);
+    setDraftingState(s.liveDrafting);
   }, []);
 
   /**
@@ -559,6 +580,8 @@ export default function Home() {
         }
         if (patch.liveRequestSize !== undefined)
           setRequestSizeState(s.liveRequestSize);
+        if (patch.liveDrafting !== undefined)
+          setDraftingState(s.liveDrafting);
       }
       setSessionsVersion((v) => v + 1);
     },
@@ -2234,7 +2257,31 @@ export default function Home() {
                 // before it even calls the provider, so wiping the notice hid the hang.
                 break;
 
+              case "tool_drafting": {
+                const cid = runConvId ?? requestConversationId;
+                markRoundAnswered(cid);
+                const prevDraft = getSession(cid).liveDrafting;
+                patchSession(cid, {
+                  liveDrafting: {
+                    name: evt.name,
+                    chars: evt.chars,
+                    path: evt.path,
+                    calls: evt.calls,
+                    since:
+                      prevDraft &&
+                      prevDraft.name === evt.name &&
+                      prevDraft.calls === evt.calls
+                        ? prevDraft.since
+                        : Date.now(),
+                  },
+                });
+                break;
+              }
+
               case "request_size":
+                patchSession(runConvId ?? requestConversationId, {
+                  liveDrafting: null,
+                });
                 setLiveRequestSize(runConvId ?? requestConversationId, {
                   round: evt.round,
                   inputChars: evt.inputChars,
@@ -2485,6 +2532,9 @@ export default function Home() {
               case "tool_start": {
                 setLiveRetry(runConvId ?? requestConversationId, null);
                 markRoundAnswered(runConvId ?? requestConversationId);
+                patchSession(runConvId ?? requestConversationId, {
+                  liveDrafting: null,
+                });
                 const started: ToolEvent = {
                   id: evt.id,
                   name: evt.name,
@@ -2855,6 +2905,7 @@ export default function Home() {
             stage: null,
             liveRetry: null,
             liveRequestSize: null,
+            liveDrafting: null,
             runMessageId: null,
           });
         }
@@ -2884,6 +2935,7 @@ export default function Home() {
                   stage: null,
                   liveRetry: null,
                   liveRequestSize: null,
+                  liveDrafting: null,
                 });
                 return;
               }
@@ -3037,6 +3089,7 @@ export default function Home() {
       stage: null,
       liveRetry: null,
       liveRequestSize: null,
+      liveDrafting: null,
       runMessageId: null,
     });
     writeMessages(
@@ -3148,6 +3201,7 @@ export default function Home() {
           stage: null,
           liveRetry: null,
           liveRequestSize: null,
+          liveDrafting: null,
           runMessageId: null,
         });
       }
@@ -3434,6 +3488,7 @@ export default function Home() {
         retryBreakdown={retryBreakdown}
         retryDetail={retryDetail}
         requestSize={requestSize}
+        drafting={drafting}
         onStop={stopGeneration}
         hasKeys={hasKeys}
         missingKeyLabel={
