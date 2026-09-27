@@ -1456,16 +1456,51 @@ export function diagnoseEditFailure(raw: string, oldText: string): string {
 }
 
 /** All the places a single anchor line matches, ignoring indentation. */
-function anchorMatches(fileLines: string[], anchor: string): number[] {
-  const wanted = anchor.trim();
-  const exact: number[] = [];
-  const loose: number[] = [];
-  for (let i = 0; i < fileLines.length; i++) {
-    const line = fileLines[i];
-    if (line.trim() === wanted) exact.push(i);
-    else if (line.includes(anchor.trim())) loose.push(i);
+/**
+ * Where an anchor sits, as a span of whole lines.
+ *
+ * Anchors were matched against ONE line at a time, so a multi-line anchor
+ * — "function M.installGlobals()\n\t_G.game = M.game", which models send
+ * all the time — could never match anything, even when the text was in the
+ * file verbatim, and the error then blamed the wording (measured: two
+ * wasted rounds in one real run). A multi-line anchor is now matched line
+ * by line, ignoring indentation; its first and last lines may be partial,
+ * since an anchor is often cut mid-line ("…-- set by tests th").
+ */
+function anchorSpans(
+  fileLines: string[],
+  anchor: string
+): { start: number; end: number }[] {
+  const lines = anchor.split("\n").map((l) => l.trim());
+  while (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+  while (lines.length > 1 && lines[0] === "") lines.shift();
+
+  if (lines.length <= 1) {
+    const wanted = lines[0] ?? "";
+    const exact: number[] = [];
+    const loose: number[] = [];
+    for (let i = 0; i < fileLines.length; i++) {
+      const line = fileLines[i];
+      if (line.trim() === wanted) exact.push(i);
+      else if (wanted && line.includes(wanted)) loose.push(i);
+    }
+    return (exact.length ? exact : loose).map((i) => ({ start: i, end: i }));
   }
-  return exact.length ? exact : loose;
+
+  const spans: { start: number; end: number }[] = [];
+  const last = lines.length - 1;
+  for (let i = 0; i + last < fileLines.length; i++) {
+    let ok = true;
+    for (let j = 0; j <= last && ok; j++) {
+      const have = fileLines[i + j].trim();
+      const want = lines[j];
+      if (j === 0) ok = have === want || (want !== "" && have.endsWith(want));
+      else if (j === last) ok = have === want || (want !== "" && have.startsWith(want));
+      else ok = have === want;
+    }
+    if (ok) spans.push({ start: i, end: i + last });
+  }
+  return spans;
 }
 
 /**
@@ -1496,7 +1531,8 @@ export function resolveEditRegion(
       ? stripLineGutter(String(spec.endAnchor)).trim()
       : null;
 
-    const startHits = anchorMatches(fileLines, startAnchor);
+    const startSpans = anchorSpans(fileLines, startAnchor);
+    const startHits = startSpans.map((sp) => sp.start);
     if (startHits.length === 0) {
       throw new WorkspaceError(
         `start_anchor not found: ${JSON.stringify(startAnchor.slice(0, 80))}. ` +
@@ -1512,28 +1548,25 @@ export function resolveEditRegion(
       );
     }
 
-    const startIdx = startHits[0];
-    let endIdx = startIdx;
+    const startSpan = startSpans[0];
+    const startIdx = startSpan.start;
+    let endSpan = startSpan;
     if (endAnchorRaw) {
-      const after = fileLines
-        .map((line, i) => ({ line, i }))
-        .filter(({ i }) => i >= startIdx)
-        .filter(
-          ({ line }) =>
-            line.trim() === endAnchorRaw || line.includes(endAnchorRaw)
-        );
+      const after = anchorSpans(fileLines, endAnchorRaw).filter(
+        (sp) => sp.start >= startIdx
+      );
       if (after.length === 0) {
         throw new WorkspaceError(
           `end_anchor not found after line ${startIdx + 1}: ` +
             `${JSON.stringify(endAnchorRaw.slice(0, 80))}`
         );
       }
-      endIdx = after[0].i;
+      endSpan = after[0];
     }
 
     const include = spec.includeAnchors !== false;
-    const firstLine = include ? startIdx : startIdx + 1;
-    const lastLine = include ? endIdx : endIdx - 1;
+    const firstLine = include ? startSpan.start : startSpan.end + 1;
+    const lastLine = include ? endSpan.end : endSpan.start - 1;
     if (lastLine < firstLine) {
       throw new WorkspaceError(
         `the two anchors are adjacent, so there is nothing between them to ` +

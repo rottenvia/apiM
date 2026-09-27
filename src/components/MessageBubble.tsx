@@ -1213,8 +1213,11 @@ function MessageBubbleImpl({
                       <path strokeLinecap="round" strokeLinejoin="round" d="M9 11l3 3L22 4" />
                       <path strokeLinecap="round" strokeLinejoin="round" d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" />
                     </svg>
+                    {/* "Step 4 of 5", in words: the step being worked on.
+                        As "4/5" it read as a progress count and seemed to
+                        contradict the plan box's "3/5 done" beside it. */}
                     {planCurrent
-                      ? `Step ${planCurrent.id}/${message.plan.steps.length}`
+                      ? `Step ${planCurrent.id} of ${message.plan.steps.length}`
                       : `${message.plan.steps.length}/${message.plan.steps.length} done`}
                     {planBlocked > 0 && ` · ${planBlocked} blocked`}
                   </button>
