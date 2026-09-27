@@ -75,3 +75,16 @@ export class RunFileMemory {
     return this.written.get(this.key(path)) ?? null;
   }
 }
+
+/**
+ * Drop everything a run remembers, after anything that may have written
+ * files without going through the file tools — run_command above all, which
+ * the chat route runs itself rather than through runTool, so runTool's own
+ * invalidation never sees it. Safe on a missing memory.
+ *
+ * read_file also checks remembered bytes against the disk before serving
+ * them, so a missed call costs a disk read, not a stale answer.
+ */
+export function invalidateRunMemory(memory: RunFileMemory | null | undefined): void {
+  memory?.invalidateAll();
+}

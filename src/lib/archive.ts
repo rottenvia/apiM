@@ -245,7 +245,7 @@ export async function readFolderTree(
       continue;
     }
 
-    const text = decodeText(bytes);
+    const text = decodeText(bytes, file.size > bytes.length);
     if (text === null) {
       /*
        * Binary file: keep it as exact bytes under the same caps as
@@ -290,8 +290,13 @@ export async function readFolderTree(
   return { entries, binaries, skipped, hitLimit };
 }
 
-/** Decode as UTF-8 or UTF-16, refusing anything that is clearly not text. */
-function decodeText(bytes: Uint8Array): string | null {
+/**
+ * Decode as UTF-8 or UTF-16, refusing anything that is clearly not text.
+ *
+ * `partial` says the bytes are only the head of a longer file, so a UTF-8
+ * sequence cut at the very end is not evidence of anything.
+ */
+function decodeText(bytes: Uint8Array, partial = false): string | null {
   /*
    * UTF-16 first, because it fails the NUL test below.
    *
@@ -334,8 +339,18 @@ function decodeText(bytes: Uint8Array): string | null {
   }
   if (probe.length > 0 && control / probe.length > 0.1) return null;
 
+  /*
+   * Strict UTF-8. The lenient decoder turned a Latin-1 "Configuración:
+   * año=café" into U+FFFD replacement characters, and that lossy text is
+   * what reached the disk — the original bytes were gone. A file that is
+   * not valid UTF-8 now comes back null and is kept as exact bytes, like
+   * any other non-text file.
+   */
   try {
-    return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(
+      bytes,
+      { stream: partial }
+    );
   } catch {
     return null;
   }
@@ -563,10 +578,15 @@ async function readZip(buf: Uint8Array): Promise<ArchiveResult> {
       continue;
     }
 
-    const truncated = text.length > MAX_ENTRY_CHARS;
-    const content = truncated ? text.slice(0, MAX_ENTRY_CHARS) : text;
-    totalChars += content.length;
-    entries.push({ path: name, content, bytes: bytes.length, truncated });
+    /*
+     * The whole text, always. `content` is what gets written to the
+     * workspace, and slicing it here wrote a 300k-char prefix to disk as if
+     * it were the file (measured). Only the inline rendering is capped —
+     * formatArchive does that — and the running total counts what would be
+     * inlined, so the budget still bounds the message.
+     */
+    totalChars += Math.min(text.length, MAX_ENTRY_CHARS);
+    entries.push({ path: name, content: text, bytes: bytes.length, truncated: false });
   }
 
   return { entries, binaries, skipped, hitLimit };
@@ -593,6 +613,19 @@ function readTar(buf: Uint8Array): ArchiveResult {
       .replace(/\0.*$/, "")
       .trim();
 
+  /*
+   * Names longer than the 100-byte field.
+   *
+   * GNU tar writes a `././@LongLink` entry of type "L" whose data is the
+   * next entry's real name; pax writes an "x" header with a `path=` record.
+   * Both were skipped as "not a regular file", so the next entry kept its
+   * name cut at 100 bytes (measured: a deep project path lost its tail and
+   * main.py landed under a truncated directory).
+   */
+  let pendingName: string | null = null;
+  const fullStr = (start: number, len: number) =>
+    new TextDecoder().decode(buf.subarray(start, start + len)).replace(/\0+$/, "");
+
   while (offset + 512 <= buf.length) {
     const name = str(offset, 100);
     // Two zero blocks mark the end; one empty name is enough to stop.
@@ -603,10 +636,26 @@ function readTar(buf: Uint8Array): ArchiveResult {
     const typeFlag = String.fromCharCode(buf[offset + 156]);
     // A prefix field carries long paths in the ustar format.
     const prefix = str(offset + 345, 155);
-    const full = prefix ? `${prefix}/${name}` : name;
+    const headerName = prefix ? `${prefix}/${name}` : name;
 
     const dataStart = offset + 512;
     offset = dataStart + Math.ceil(size / 512) * 512;
+
+    if (typeFlag === "L") {
+      pendingName = fullStr(dataStart, size) || null;
+      continue;
+    }
+    if (typeFlag === "x") {
+      const records = fullStr(dataStart, size);
+      const match = /(?:^|\n)\d+ path=([^\n]*)\n/.exec(records);
+      if (match) pendingName = match[1];
+      continue;
+    }
+    // Long LINK names and global pax headers describe no file of their own
+    // and must not consume the pending name.
+    if (typeFlag === "K" || typeFlag === "g") continue;
+    const full = pendingName ?? headerName;
+    pendingName = null;
 
     // "0" and "\0" are regular files; everything else is a link or directory.
     if (typeFlag !== "0" && typeFlag !== "\0" && typeFlag !== "") continue;
@@ -667,10 +716,9 @@ function readTar(buf: Uint8Array): ArchiveResult {
       continue;
     }
 
-    const truncated = text.length > MAX_ENTRY_CHARS;
-    const content = truncated ? text.slice(0, MAX_ENTRY_CHARS) : text;
-    totalChars += content.length;
-    entries.push({ path: full, content, bytes: size, truncated });
+    // Whole text, as for zip: only the inline preview is capped.
+    totalChars += Math.min(text.length, MAX_ENTRY_CHARS);
+    entries.push({ path: full, content: text, bytes: size, truncated: false });
   }
 
   return { entries, binaries, skipped, hitLimit };
@@ -748,8 +796,9 @@ export function formatArchive(name: string, result: ArchiveResult): string {
     return `[${name} contained no readable text or binary files]`;
   }
 
+  const cut = (e: ArchiveEntry) => e.truncated || e.content.length > MAX_ENTRY_CHARS;
   const tree = [
-    ...entries.map((e) => `  ${e.path}${e.truncated ? "  (truncated)" : ""}`),
+    ...entries.map((e) => `  ${e.path}${cut(e) ? "  (truncated)" : ""}`),
     ...binaries.map((e) => `  ${e.path}  (binary bytes; saving to workspace)`),
   ].join("\n");
 
@@ -759,8 +808,15 @@ export function formatArchive(name: string, result: ArchiveResult): string {
   }
   if (hitLimit) notes.push("an extraction limit was reached");
 
+  // The inline copy is capped per file; the file written to disk is not.
   const body = entries
-    .map((e) => `--- ${e.path} ---\n${e.content}`)
+    .map(
+      (e) =>
+        `--- ${e.path} ---\n${e.content.slice(0, MAX_ENTRY_CHARS)}` +
+        (e.content.length > MAX_ENTRY_CHARS
+          ? `\n[… ${(e.content.length - MAX_ENTRY_CHARS).toLocaleString()} more chars — the full file is in the workspace]`
+          : "")
+    )
     .join("\n\n");
   const count = entries.length + binaries.length;
 
