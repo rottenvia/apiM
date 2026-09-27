@@ -1001,14 +1001,20 @@ function MessageBubbleImpl({
                   value={draft}
                   onChange={(e) => setDraft(e.target.value)}
                   onKeyDown={(e) => {
+                    // Enter that confirms an IME composition is not a send
+                    // (audit: it resent the half-composed question).
+                    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                     if (e.key === "Escape") {
                       e.preventDefault();
                       setEditing(false);
                     }
                     if (e.key === "Enter" && !e.shiftKey) {
                       e.preventDefault();
-                      if (draft.trim()) {
-                        onEdit?.(message.id, draft.trim());
+                      // onEdit is withheld while the chat is answering; the
+                      // box stays open with the draft rather than closing
+                      // on a resend that cannot happen yet.
+                      if (draft.trim() && onEdit) {
+                        onEdit(message.id, draft.trim());
                         setEditing(false);
                       }
                     }
@@ -1030,11 +1036,12 @@ function MessageBubbleImpl({
                   </button>
                   <button
                     onClick={() => {
-                      if (!draft.trim()) return;
-                      onEdit?.(message.id, draft.trim());
+                      if (!draft.trim() || !onEdit) return;
+                      onEdit(message.id, draft.trim());
                       setEditing(false);
                     }}
-                    disabled={!draft.trim()}
+                    disabled={!draft.trim() || !onEdit}
+                    title={onEdit ? undefined : "Available once this reply finishes"}
                     className="rounded-lg bg-accent px-2.5 py-1 text-[11px] font-medium text-white transition-colors hover:bg-accent-light disabled:opacity-40"
                   >
                     Send

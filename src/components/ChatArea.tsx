@@ -8,6 +8,7 @@ import type { ChatSearchIndex } from "@/lib/chat-search";
 import { ChatSearchBar } from "@/components/ChatSearchBar";
 import { AttachmentChips } from "@/components/AttachmentChips";
 import {
+  attachmentsBlockSend,
   buildMessageWithAttachments,
   bytesLookBinary,
   isVideoFile,
@@ -160,6 +161,14 @@ interface ChatAreaProps {
   onToggleSidePanel: () => void;
 }
 
+/** One conversation's unsent composer state (see `drafts` in ChatArea). */
+type ComposerDraft = {
+  input: string;
+  attachments: Attachment[];
+  error: string | null;
+};
+const EMPTY_DRAFT: ComposerDraft = { input: "", attachments: [], error: null };
+
 /**
  * The single status line for the silent wait between sending and the first
  * token: one mark, one word, one clock. The thinking panel mounts its
@@ -311,18 +320,74 @@ export function ChatArea({
   sidePanelOpen,
   onToggleSidePanel,
 }: ChatAreaProps) {
-  const [input, setInput] = useState("");
   const [isFullscreen, setIsFullscreen] = useState(false);
 
+  /*
+   * The composer — typed text, attachments and the attach error — kept per
+   * conversation.
+   *
+   * Reported (audit): the draft text and attachments survived switching
+   * chats. A binary or zip dropped in chat A is uploaded into A's workspace,
+   * yet it stayed on the composer and was sent into chat B, whose workspace
+   * never had it. Each chat now has its own draft, restored when you switch
+   * back. A file still being read when you switch keeps landing in the chat
+   * it was dropped on (addFiles captures that chat's key).
+   */
+  const draftKey = workspaceId ?? "__none__";
+  // For effects that act on "the chat on screen" without re-running on
+  // every switch.
+  const draftKeyRef = useRef(draftKey);
+  useEffect(() => {
+    draftKeyRef.current = draftKey;
+  }, [draftKey]);
+  const [drafts, setDrafts] = useState<Record<string, ComposerDraft>>({});
+  const draft = drafts[draftKey] ?? EMPTY_DRAFT;
+  const input = draft.input;
   // Text attachments, read in the browser and inlined into the message.
-  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const attachments = draft.attachments;
+  const attachError = draft.error;
+  const updateDraft = useCallback(
+    (key: string, fn: (d: ComposerDraft) => ComposerDraft) => {
+      setDrafts((prev) => {
+        const current = prev[key] ?? EMPTY_DRAFT;
+        const next = fn(current);
+        if (next === current) return prev;
+        // An emptied draft is dropped, so the map only holds real drafts.
+        if (!next.input && next.attachments.length === 0 && !next.error) {
+          if (!(key in prev)) return prev;
+          const rest = { ...prev };
+          delete rest[key];
+          return rest;
+        }
+        return { ...prev, [key]: next };
+      });
+    },
+    []
+  );
+  /** Update one chat's attachments — not necessarily the chat on screen. */
+  const patchAttachments = useCallback(
+    (key: string, fn: (prev: Attachment[]) => Attachment[]) => {
+      updateDraft(key, (d) => {
+        const next = fn(d.attachments);
+        return next === d.attachments ? d : { ...d, attachments: next };
+      });
+    },
+    [updateDraft]
+  );
+  const setDraftError = useCallback(
+    (key: string, error: string | null) => {
+      updateDraft(key, (d) => (d.error === error ? d : { ...d, error }));
+    },
+    [updateDraft]
+  );
+  const setInput = (value: string) =>
+    updateDraft(draftKey, (d) => (d.input === value ? d : { ...d, input: value }));
   // Mirrors the state so addFiles can read the current count without
   // depending on it, which would rebuild the callback on every attachment.
   const attachmentsRef = useRef<Attachment[]>([]);
   useEffect(() => {
     attachmentsRef.current = attachments;
   }, [attachments]);
-  const [attachError, setAttachError] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
@@ -332,7 +397,7 @@ export function ChatArea({
 
   /** Ask the server to describe an image, then store the result on the chip. */
   const analyzeImage = useCallback(
-    async (image: Attachment) => {
+    async (image: Attachment, key: string) => {
       if (!image.dataUrl) return;
       // Native VLMs see the pixels. Hitting /api/vision here is what made
       // "extracted text" appear on Ox Alpha, and what surfaced a dead
@@ -356,7 +421,7 @@ export function ChatArea({
           source?: "vision" | "ocr";
         };
 
-        setAttachments((prev) =>
+        patchAttachments(key, (prev) =>
           prev.map((a) =>
             a.id === image.id
               ? {
@@ -370,7 +435,7 @@ export function ChatArea({
           )
         );
       } catch {
-        setAttachments((prev) =>
+        patchAttachments(key, (prev) =>
           prev.map((a) =>
             a.id === image.id
               ? { ...a, analyzing: false, visionError: "Couldn't reach the server" }
@@ -379,12 +444,19 @@ export function ChatArea({
         );
       }
     },
-    [model, visionKey, visionModel]
+    [model, visionKey, visionModel, patchAttachments]
   );
 
   const addFiles = useCallback(async (files: FileList | File[]) => {
     const all = Array.from(files);
     if (all.length === 0) return;
+    // The chat these files were dropped on. Every update below goes to its
+    // draft, so a read that finishes after a chat switch is not lost and
+    // never lands in the other chat's composer.
+    const key = draftKey;
+    const setAttachments = (fn: (prev: Attachment[]) => Attachment[]) =>
+      patchAttachments(key, fn);
+    const setAttachError = (error: string | null) => setDraftError(key, error);
 
     /*
      * A picked folder is one item, not one per file inside it.
@@ -858,17 +930,25 @@ export function ChatArea({
     // Native models skip this — they receive the pixels themselves.
     if (modelNeedsVisionHelper(model)) {
       for (const image of accepted.filter((a) => a.kind === "image")) {
-        void analyzeImage(image);
+        void analyzeImage(image, key);
       }
     }
 
     if (errors.length > 0) setAttachError(errors.join(" · "));
-  }, [analyzeImage, model, workspaceId, onProcessesChanged]);
+  }, [
+    analyzeImage,
+    model,
+    workspaceId,
+    onProcessesChanged,
+    draftKey,
+    patchAttachments,
+    setDraftError,
+  ]);
 
   /** Re-run a failed description, so a transient API error isn't terminal. */
   const retryImage = useCallback(
     (id: string) => {
-      setAttachments((prev) =>
+      patchAttachments(draftKey, (prev) =>
         prev.map((a) =>
           a.id === id
             ? { ...a, analyzing: true, visionError: undefined }
@@ -876,20 +956,26 @@ export function ChatArea({
         )
       );
       const target = attachments.find((a) => a.id === id);
-      if (target) void analyzeImage({ ...target, visionError: undefined });
+      if (target) void analyzeImage({ ...target, visionError: undefined }, draftKey);
     },
-    [attachments, analyzeImage]
+    [attachments, analyzeImage, draftKey, patchAttachments]
   );
 
   const removeAttachment = useCallback((id: string) => {
-      setAttachments((prev) => prev.filter((a) => a.id !== id));
-      setAttachError(null);
-    }, []);
+      updateDraft(draftKey, (d) => ({
+        ...d,
+        attachments: d.attachments.filter((a) => a.id !== id),
+        error: null,
+      }));
+    }, [draftKey, updateDraft]);
 
   // Flip a video chip between frames mode and the native clip. The bytes
   // live in the session (video-frames.ts); a reload drops them and the
   // toggle with them — old attachments simply stay in their stored mode.
   const switchVideoMode = useCallback(async (id: string) => {
+      const key = draftKey;
+      const setAttachments = (fn: (prev: Attachment[]) => Attachment[]) =>
+        patchAttachments(key, fn);
       const current = attachmentsRef.current.find((a) => a.id === id);
       const file = nativeVideoFiles.get(id);
       if (!current || current.kind !== "video" || !file) return;
@@ -916,17 +1002,32 @@ export function ChatArea({
           );
         }
       }
-    }, []);
+    }, [draftKey, patchAttachments]);
 
   // Switching onto a blind model with screenshots already attached: describe
   // them now. Switching onto a seeing model must not leave a helper spinner.
   useEffect(() => {
     if (!modelNeedsVisionHelper(model)) {
-      setAttachments((prev) =>
-        prev.some((a) => a.analyzing)
-          ? prev.map((a) => (a.analyzing ? { ...a, analyzing: false } : a))
-          : prev
-      );
+      // Every chat's draft, not just this one: a spinner left in a
+      // background draft would block its Send forever.
+      setDrafts((prev) => {
+        let changed = false;
+        const next: Record<string, ComposerDraft> = {};
+        for (const [k, d] of Object.entries(prev)) {
+          if (d.attachments.some((a) => a.analyzing)) {
+            changed = true;
+            next[k] = {
+              ...d,
+              attachments: d.attachments.map((a) =>
+                a.analyzing ? { ...a, analyzing: false } : a
+              ),
+            };
+          } else {
+            next[k] = d;
+          }
+        }
+        return changed ? next : prev;
+      });
     } else {
       for (const a of attachmentsRef.current) {
         if (
@@ -936,7 +1037,7 @@ export function ChatArea({
           !a.analyzing &&
           !a.visionError
         ) {
-          void analyzeImage(a);
+          void analyzeImage(a, draftKeyRef.current);
         }
       }
     }
@@ -944,11 +1045,12 @@ export function ChatArea({
       getModel(model).vision !== "native" &&
       attachmentsRef.current.some((a) => a.kind === "video")
     ) {
-      setAttachError(
+      setDraftError(
+        draftKeyRef.current,
         `${getModel(model).label} cannot watch video. Remove the video or switch to Ox Alpha / GLM 5.3 Flash / Qwen 3.8 27B.`
       );
     }
-  }, [model, analyzeImage]);
+  }, [model, analyzeImage, setDraftError]);
 
   // In-chat find. Whole-word is the default so "calc" doesn't match
   // "calculator"; the bar's toggle switches to substring matching.
@@ -1151,6 +1253,19 @@ export function ChatArea({
     stickToBottom();
   }, [messages, isLoading, stickToBottom, setPinned]);
 
+  /*
+   * A different chat opens at its newest message, following.
+   *
+   * Reported (audit): the pinned state and scrollTop carried over between
+   * chats — scrolled up in chat A, chat B opened part-way up with follow
+   * off, so its running reply streamed out of view. Keyed on the chat, not
+   * on messages, so a reply arriving never re-pins someone reading history.
+   */
+  useEffect(() => {
+    setPinned(true);
+    stickToBottom();
+  }, [draftKey, setPinned, stickToBottom]);
+
   const scrollToBottom = useCallback(() => {
     setPinned(true);
     const el = scrollRef.current;
@@ -1199,6 +1314,21 @@ export function ChatArea({
   const btwNote = isLoading && btwMatch ? btwMatch[1].trim() : "";
   const isBtw = Boolean(btwNote) && Boolean(onAskBtw);
 
+  const analyzingImages = attachments.some((a) => a.analyzing);
+  const blockedVideo =
+    !modelSeesVideo(model) && attachments.some((a) => a.kind === "video");
+  // A file still being read / unpacked / uploaded, or an image still being
+  // described: sending now would post an empty file block and drop the
+  // result when it lands (audit). The reason is shown under the composer.
+  const attachBusy = attachmentsBlockSend(attachments);
+  const canSend =
+    (Boolean(input.trim()) || attachments.length > 0) &&
+    !isLoading &&
+    !analyzingImages &&
+    !attachBusy &&
+    !blockedVideo &&
+    hasKeys;
+
   const handleSubmit = () => {
     // A note is sendable while the main task runs; a normal message is not.
     // Sending it never stops anything — it is queued and the task reads it
@@ -1211,6 +1341,8 @@ export function ChatArea({
     // the pixels to native-vision models. Dropping the file without sending
     // it with the note is how a "btw look at this" loses the "this".
     if (isBtw) {
+      // Same gate as Send: a note carries the attachments too.
+      if (attachBusy) return;
       videoWaitRef.current = attachments.some(
         (a) => a.kind === "video" && !a.frames
       );
@@ -1228,9 +1360,7 @@ export function ChatArea({
           descriptionSource: a.descriptionSource,
         }))
       );
-      setInput("");
-      setAttachments([]);
-      setAttachError(null);
+      updateDraft(draftKey, () => EMPTY_DRAFT);
       return;
     }
     /*
@@ -1276,7 +1406,8 @@ export function ChatArea({
       }
     }
     // A message of only attachments is valid — the files are the content.
-    if ((!input.trim() && attachments.length === 0) || isLoading) return;
+    // The button's own gate, applied here too so Enter cannot bypass it.
+    if (!canSend) return;
     // The model receives the file contents and (for blind models) image
     // descriptions; the transcript shows only what the user typed, plus chips.
     videoWaitRef.current = attachments.some(
@@ -1295,12 +1426,14 @@ export function ChatArea({
         descriptionSource: a.descriptionSource,
       })),
     });
-    setInput("");
-    setAttachments([]);
-    setAttachError(null);
+    updateDraft(draftKey, () => EMPTY_DRAFT);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    // Enter that confirms an IME composition (Chinese, Japanese, Korean…)
+    // is not a send. Reported (audit): it submitted the half-composed text.
+    // keyCode 229 covers browsers that fire keydown before isComposing.
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSubmit();
@@ -1334,15 +1467,6 @@ export function ChatArea({
     [onOpenWorkspace]
   );
 
-  const analyzingImages = attachments.some((a) => a.analyzing);
-  const blockedVideo =
-    !modelSeesVideo(model) && attachments.some((a) => a.kind === "video");
-  const canSend =
-    (Boolean(input.trim()) || attachments.length > 0) &&
-    !isLoading &&
-    !analyzingImages &&
-    !blockedVideo &&
-    hasKeys;
   // Show the standalone indicator until the assistant bubble actually has
   // something to display. Previously an empty streaming bubble was created
   // instantly, which suppressed the indicator and left a silent gap between
@@ -1618,6 +1742,7 @@ export function ChatArea({
             >
               <MessageList
                 messages={messages}
+                busy={isLoading}
                 onRegenerate={onRegenerate}
                 onResume={onResume}
                 onLoadReasoning={onLoadReasoning}
@@ -1868,6 +1993,18 @@ export function ChatArea({
                 </div>
               )}
 
+            {/* Why Send is greyed out while a file is still on its way in.
+                A disabled button with no reason reads as broken. */}
+            {attachBusy && (
+              <div
+                role="status"
+                className="flex items-center gap-1.5 px-4 pb-1 text-[11px] text-text-muted"
+              >
+                <span className="btw-pulse" aria-hidden="true" />
+                {attachBusy}
+              </div>
+            )}
+
             {isBtw && (
               <div className="flex items-center gap-1.5 px-4 pb-1 text-[11px] text-search">
                 <span className="btw-pulse" aria-hidden="true" />
@@ -1986,8 +2123,12 @@ export function ChatArea({
                    the input and it returns. */
                 <button
                   onClick={handleSubmit}
+                  disabled={Boolean(attachBusy)}
                   className="send-btn btw-send"
-                  title="Pass it to the running task — won't interrupt it"
+                  title={
+                    attachBusy ??
+                    "Pass it to the running task — won't interrupt it"
+                  }
                   aria-label="Pass it to the running task"
                 >
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
@@ -2012,7 +2153,7 @@ export function ChatArea({
                   disabled={!canSend}
                   data-enabled={canSend}
                   className="send-btn"
-                  title="Send message"
+                  title={attachBusy ?? "Send message"}
                   aria-label="Send message"
                 >
                   <svg
@@ -2159,6 +2300,7 @@ const HYDRATION_BATCH = 6;
 
 const MessageList = memo(function MessageList({
   messages,
+  busy,
   onRegenerate,
   onResume,
   onLoadReasoning,
@@ -2176,6 +2318,8 @@ const MessageList = memo(function MessageList({
   onClearPlan,
 }: {
   messages: Message[];
+  /** This chat is answering: editing a question is unavailable until done. */
+  busy: boolean;
   onRegenerate: (assistantId: string) => void;
   onResume: (assistantId: string, model?: string) => void;
   onLoadReasoning?: (messageId: string) => void;
@@ -2332,7 +2476,10 @@ const MessageList = memo(function MessageList({
             onRegenerate={onRegenerate}
             onResume={onResume}
             onLoadReasoning={onLoadReasoning}
-            onEdit={msg.role === "user" ? onEdit : undefined}
+            // No Edit while the chat is answering: the resend would be
+            // refused mid-run after the question had already been changed
+            // on screen (audit). The bubble keeps an open edit box's draft.
+            onEdit={msg.role === "user" && !busy ? onEdit : undefined}
             onDelete={msg.isStreaming ? undefined : onDeleteMessage}
             searchQuery={bubbleSearchQuery}
             searchWholeWord={searchWholeWord}

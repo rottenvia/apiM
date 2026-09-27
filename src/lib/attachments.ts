@@ -92,6 +92,29 @@ export interface Attachment {
 }
 
 /**
+ * Why the composer must not send yet, or null when every attachment is ready.
+ *
+ * Reported (audit): Send and Enter worked while a file was still being read,
+ * unpacked or uploaded (a placeholder chip with a `stage` and empty content)
+ * or while an image was still being described (`analyzing`). The message went
+ * out with an empty file block, and the finished result arrived to find its
+ * placeholder gone and was dropped. The composer gates on this, and says why.
+ */
+export function attachmentsBlockSend(
+  attachments: readonly Pick<Attachment, "name" | "stage" | "analyzing">[]
+): string | null {
+  const busy = attachments.find((a) => a.stage || a.analyzing);
+  if (!busy) return null;
+  const stage: AttachStage = busy.stage ?? "analyzing";
+  const others = attachments.filter((a) => a.stage || a.analyzing).length - 1;
+  return (
+    `Waiting for ${busy.name} (${STAGE_LABELS[stage].toLowerCase()}…)` +
+    (others > 0 ? ` and ${others} more` : "") +
+    " — you can send once it is ready"
+  );
+}
+
+/**
  * Per-file cap.
  *
  * Raised to match the model's 1M token window; the old 200k was sized for a

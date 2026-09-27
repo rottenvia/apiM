@@ -718,6 +718,28 @@ export default function Home() {
   const [showPlugins, setShowPlugins] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  /*
+   * Phones start with the sidebar closed, and it floats over the chat.
+   *
+   * Reported (audit): below the md breakpoint the sidebar opened by default
+   * as a 288px in-flow column, leaving ~87px of a 375px phone for the chat
+   * itself. Checked on mount, not during SSR (the server has no viewport);
+   * the startup splash covers the first paint, so there is no flash. Below
+   * md the Sidebar renders as an overlay with a backdrop, and picking a
+   * chat closes it (closeSidebarIfOverlay).
+   */
+  const isOverlayViewport = () =>
+    typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(max-width: 767px)").matches;
+  useEffect(() => {
+    queueMicrotask(() => {
+      if (isOverlayViewport()) setSidebarOpen(false);
+    });
+  }, []);
+  const closeSidebarIfOverlay = () => {
+    if (isOverlayViewport()) setSidebarOpen(false);
+  };
 
   // Workspace. The id follows the conversation so each chat gets its own
   // folder; `pendingWorkspaceId` covers a brand-new chat that has no id yet.
@@ -884,7 +906,18 @@ export default function Home() {
       attachments: MessageAttachment[]
     ) => {
       const text = note.trim();
-      if (!text || !currentConvId) return;
+      /*
+       * The run's conversation, read from the ref at send time — not the
+       * rendered `currentConvId`.
+       *
+       * Reported (audit): during the FIRST run of a new chat currentConvId
+       * stayed null until `done`, so every btw note in that window was
+       * silently dropped — after ChatArea had already cleared the input.
+       * The ref holds the id this chat's run was sent under (the draft id
+       * the server adopts, or the real id once `meta` migrated it).
+       */
+      const convId = workspaceIdRef.current;
+      if (!text || !convId) return;
 
       // One at a time in the dock. A second note replaces the first's
       // display rather than stacking — both notes still reach the task,
@@ -911,10 +944,10 @@ export default function Home() {
           // the model-facing text (file blocks inlined) and the stored
           // attachment metadata (pixels, image descriptions).
           body: JSON.stringify({
-            conversationId: currentConvId,
+            conversationId: convId,
             // Lets a "don't run it" note skip a pending approval in the
             // right scope instead of landing after the user clicked.
-            workspaceId,
+            workspaceId: convId,
             note: text,
             wireText,
             attachments,
@@ -958,7 +991,7 @@ export default function Home() {
         );
       }
     },
-    [currentConvId, workspaceId]
+    []
   );
   /** Latest messages + sender, so stable callbacks can read them. */
   const messagesRef = useRef<Message[]>([]);
@@ -980,6 +1013,10 @@ export default function Home() {
            * switched to another. Used by a background run's auto-resume.
            */
           conversationId?: string;
+          /** Files to send with the message (Retry / Edit re-send them). */
+          attachments?: MessageAttachment[];
+          /** Edit: the question's new text, for the stored copy. */
+          editedContent?: string;
         }
       ) => void)
     | null
@@ -990,9 +1027,19 @@ export default function Home() {
   useEffect(() => {
     queueMicrotask(() => {
       if (typeof window !== "undefined") {
-        const saved = localStorage.getItem("nexusai-settings");
-        if (saved) {
-          try {
+        /*
+         * The read itself is inside the try, and the hydrated flag is set in
+         * `finally`.
+         *
+         * Reported (audit): localStorage.getItem sat outside the try/catch.
+         * It throws in a locked-down or storage-disabled browser, and then
+         * settingsHydrated never became true — the startup splash waited
+         * for it and hung the full 12s fallback. A failed read now just
+         * means default settings.
+         */
+        try {
+          const saved = localStorage.getItem("nexusai-settings");
+          if (saved) {
             const s = JSON.parse(saved);
             if (s.deepseekKey) setDeepseekKey(s.deepseekKey);
             if (s.openrouterKey) setOpenrouterKey(s.openrouterKey);
@@ -1070,12 +1117,13 @@ export default function Home() {
             if (s.deleteDelay !== undefined) {
               setDeleteDelay(clampDeleteDelay(s.deleteDelay));
             }
-          } catch {
-            /* ignore */
           }
+        } catch {
+          /* ignore — unreadable or corrupt settings fall back to defaults */
+        } finally {
+          initialLoadDone.current = true;
+          setSettingsHydrated(true);
         }
-        initialLoadDone.current = true;
-        setSettingsHydrated(true);
       }
     });
   }, []);
@@ -1382,42 +1430,162 @@ export default function Home() {
    * (spinner, Stop, composer locked) and follows the server's saved
    * progress every couple of seconds until the run ends.
    */
-  const rejoiningRef = useRef<Set<string>>(new Set());
+  /*
+   * One cancel token per conversation's rejoin loop.
+   *
+   * Reported (audit): the polling loop below was never cancelled. Stop did
+   * not end it, so it kept writing the disk copy over the bubble every 2s —
+   * including over a Resume's live bubble (stale text, isStreaming from the
+   * old run) — and its `finally` set loading:false on a NEW run in the same
+   * chat, unlocking the composer mid-reply. Starting a rejoin, Stop, a new
+   * send in that chat and unmount all cancel it; it also stands down the
+   * moment a live stream owns the chat (abortRefs), which is the stream's
+   * job to render.
+   */
+  const rejoinTokens = useRef<Map<string, { cancelled: boolean }>>(new Map());
+  const cancelRejoin = useCallback((convId: string | null | undefined) => {
+    if (!convId) return;
+    const token = rejoinTokens.current.get(convId);
+    if (token) token.cancelled = true;
+    rejoinTokens.current.delete(convId);
+  }, []);
+  useEffect(() => {
+    const tokens = rejoinTokens.current;
+    return () => {
+      for (const token of tokens.values()) token.cancelled = true;
+      tokens.clear();
+    };
+  }, []);
   const rejoinRun = useCallback(
-    async (convId: string, knownMessageId: string | null) => {
-      const runningIds = async (): Promise<string[]> => {
+    async (
+      convId: string,
+      knownMessageId: string | null,
+      opts: {
+        /**
+         * The caller left the chat's composer locked (a stream that dropped
+         * while its server run may still be going): if the run turns out
+         * not to be live, unlock it here instead of leaving it stuck.
+         */
+        heldLoading?: boolean;
+      } = {}
+    ) => {
+      // One loop per chat. A second call (reopening the chat while its
+      // loop runs) leaves the running one alone; a dropped stream's call
+      // (heldLoading) replaces it, since it knows the exact reply to follow.
+      const running = rejoinTokens.current.get(convId);
+      if (running && !running.cancelled && !opts.heldLoading) return;
+      cancelRejoin(convId);
+      const token = { cancelled: false };
+      rejoinTokens.current.set(convId, token);
+      const cancelled = () =>
+        token.cancelled || abortRefs.current.has(convId);
+      const release = () => {
+        if (rejoinTokens.current.get(convId) === token) {
+          rejoinTokens.current.delete(convId);
+        }
+      };
+      /*
+       * null = the check itself failed (offline, server restarting), which
+       * is not the same as "no run". A dropped stream is usually exactly
+       * that moment: treating a failed check as "not live" gave up on the
+       * run on the spot and unlocked the composer while it kept going.
+       */
+      const runningIds = async (): Promise<string[] | null> => {
         try {
           const r = await fetch(
             `/api/chat/stop?conversationId=${encodeURIComponent(convId)}`
           );
+          if (!r.ok) return null;
           const j = (await r.json()) as { running?: string[] };
           return Array.isArray(j.running) ? j.running : [];
         } catch {
-          return [];
+          return null;
         }
       };
+      const RECHECK_MS = 2000;
+      /** ~1 minute of failed checks before a rejoin gives up. */
+      const MAX_FAILED_CHECKS = 30;
       // Unknown id: the run has not saved its reply yet (still waiting for
       // its first tokens), so the chat on disk ends with the question.
-      const first = await runningIds();
+      let checked = await runningIds();
+      // A dropped stream keeps asking through a short outage.
+      for (
+        let tries = 0;
+        checked === null && opts.heldLoading && tries < MAX_FAILED_CHECKS;
+        tries++
+      ) {
+        if (cancelled()) break;
+        await new Promise((r) => setTimeout(r, RECHECK_MS));
+        if (cancelled()) break;
+        checked = await runningIds();
+      }
+      const first = checked ?? [];
       const messageId = knownMessageId ?? first[0] ?? null;
-      if (!messageId || !first.includes(messageId)) return;
-      if (rejoiningRef.current.has(messageId)) return;
-      const isLive = async () => (await runningIds()).includes(messageId);
-      rejoiningRef.current.add(messageId);
+      if (
+        cancelled() ||
+        !messageId ||
+        !first.includes(messageId)
+      ) {
+        // Nothing to follow. A composer held locked for this check is
+        // released — unless a newer run or Stop owns the chat by now.
+        if (opts.heldLoading && !cancelled()) {
+          patchSession(convId, {
+            loading: false,
+            stage: null,
+            runMessageId: null,
+          });
+        }
+        release();
+        return;
+      }
+      let failedChecks = 0;
+      /** Unknown (a failed check) counts as live, up to MAX_FAILED_CHECKS. */
+      const isLive = async () => {
+        const ids = await runningIds();
+        if (ids === null) {
+          failedChecks += 1;
+          return failedChecks < MAX_FAILED_CHECKS;
+        }
+        failedChecks = 0;
+        return ids.includes(messageId);
+      };
       if (!knownMessageId) {
+        writeMessages(convId, (prev) => {
+          if (prev.some((m) => m.id === messageId)) return prev;
+          const fresh: Message = {
+            id: messageId,
+            role: "assistant",
+            content: "",
+            isStreaming: true,
+            createdAt: new Date().toISOString(),
+          };
+          // A stream that died before its `meta` frame left a provisional
+          // `stream-…` bubble. The server run it started is this one, so
+          // it takes that bubble's place rather than stacking a second.
+          const last = prev[prev.length - 1];
+          if (last?.role === "assistant" && last.id.startsWith("stream-")) {
+            return [
+              ...prev.slice(0, -1),
+              { ...fresh, clientRenderKey: last.clientRenderKey ?? last.id },
+            ];
+          }
+          return [...prev, fresh];
+        });
+      } else {
+        // The run is live: show it as running now, not after the first
+        // 2s poll — a dropped stream marked this bubble interrupted.
         writeMessages(convId, (prev) =>
-          prev.some((m) => m.id === messageId)
-            ? prev
-            : [
-                ...prev,
-                {
-                  id: messageId,
-                  role: "assistant",
-                  content: "",
+          prev.map((m) =>
+            m.id === messageId
+              ? {
+                  ...m,
                   isStreaming: true,
-                  createdAt: new Date().toISOString(),
-                },
-              ]
+                  incomplete: false,
+                  canResume: false,
+                  ...(m.isError ? { isError: false, content: "" } : {}),
+                }
+              : m
+          )
         );
       }
       getSession(convId).runMessageId = messageId;
@@ -1425,7 +1593,9 @@ export default function Home() {
       let reasoningShown = -1;
       try {
         for (;;) {
+          if (cancelled()) return;
           const live = await isLive();
+          if (cancelled()) return;
           let raw: Record<string, unknown> | undefined;
           try {
             const res = await fetch(`/api/conversations/${convId}`);
@@ -1451,6 +1621,9 @@ export default function Home() {
               }
             }
             const found = raw;
+            // Checked after every await: Stop or a new run may own the
+            // bubble by now, and a stale disk copy must not overwrite it.
+            if (cancelled()) return;
             writeMessages(convId, (prev) =>
               prev.map((m) =>
                 m.id === messageId
@@ -1477,14 +1650,40 @@ export default function Home() {
             );
           }
           if (!live) break;
-          await new Promise((r) => setTimeout(r, 2000));
+          await new Promise((r) => setTimeout(r, RECHECK_MS));
         }
       } finally {
-        rejoiningRef.current.delete(messageId);
-        patchSession(convId, { loading: false, stage: null, runMessageId: null });
+        // A cancelled loop leaves the chat's state alone: Stop already
+        // reset it, and a new run in this chat owns `loading` now.
+        if (!cancelled()) {
+          // Gave up without a final disk copy (the server stayed out of
+          // reach): the bubble must not be left spinning with no run.
+          writeMessages(convId, (prev) =>
+            prev.map((m) =>
+              m.id === messageId && m.isStreaming
+                ? {
+                    ...m,
+                    isStreaming: false,
+                    incomplete: true,
+                    canResume: Boolean(
+                      m.content?.trim() ||
+                        m.reasoningContent?.trim() ||
+                        m.toolEvents?.length
+                    ),
+                  }
+                : m
+            )
+          );
+          patchSession(convId, {
+            loading: false,
+            stage: null,
+            runMessageId: null,
+          });
+        }
+        release();
       }
     },
-    [patchSession, writeMessages]
+    [patchSession, writeMessages, cancelRejoin]
   );
 
   const loadConversation = useCallback(
@@ -1788,7 +1987,10 @@ export default function Home() {
       // show the deleted messages from memory.
       conversationCache.current.delete(id);
       setConversations((prev) => prev.filter((c) => c.id !== id));
-      if (currentConvId === id) {
+      // The ref too: a brand-new chat's first run used to leave
+      // currentConvId null until `done`, and deleting it from the sidebar
+      // then left the user inside the deleted chat (audit).
+      if (currentConvId === id || workspaceIdRef.current === id) {
         startNewChat();
       }
     },
@@ -1840,7 +2042,12 @@ export default function Home() {
         removed.forEach((id) => conversationCache.current.delete(id));
         const gone = new Set(removed);
         setConversations((prev) => prev.filter((c) => !gone.has(c.id)));
-        if (currentConvId && gone.has(currentConvId)) startNewChat();
+        if (
+          (currentConvId && gone.has(currentConvId)) ||
+          (workspaceIdRef.current && gone.has(workspaceIdRef.current))
+        ) {
+          startNewChat();
+        }
       }
 
       if (failed.length > 0) {
@@ -1881,6 +2088,12 @@ export default function Home() {
          * switched to another. Used by a background run's auto-resume.
          */
         conversationId?: string;
+        /**
+         * Edit-and-resend: the question's new text. Sent so the server can
+         * rewrite the STORED question (regenerate keeps it as it was);
+         * the model already gets the new text as `message`.
+         */
+        editedContent?: string;
       }
     ) => {
       // Read at send time, not from a render closure. New-chat/select-chat
@@ -1902,6 +2115,10 @@ export default function Home() {
 
       // A fresh send (not the silent timeout continue) may auto-resume again.
       if (!options?.force) targetSession.cancelResume = false;
+      // This run owns the chat now: a rejoin loop still polling the disk
+      // copy would overwrite the live bubble and, when it ended, unlock the
+      // composer mid-reply (audit).
+      cancelRejoin(requestConversationId);
 
       // Keyed to the conversation THIS run belongs to (named explicitly, not
       // read from the "current chat" ref). Becomes the real server id when a
@@ -1935,7 +2152,20 @@ export default function Home() {
       const existing = resumeMessageId
         ? targetSession.messages.find((m) => m.id === resumeMessageId)
         : undefined;
-      const streamingId = resumeMessageId ?? `stream-${Date.now()}`;
+      /*
+       * The bubble's id — mutable, because it becomes the server's id at
+       * `meta`.
+       *
+       * Reported (audit): a live reply kept the client id `stream-<ts>`
+       * until `done`; `meta` only recorded the server id for Stop. After a
+       * Stop, an error or a dropped stream, Resume / auto-resume / Retry /
+       * Edit then sent `resumeMessageId: "stream-…"`, which the server
+       * cannot find — so it answered from scratch, redoing the work and
+       * duplicating messages. Every handler below matches on this binding,
+       * so they all follow the rename; the React key is clientRenderKey,
+       * which never changes, so the bubble does not remount.
+       */
+      let streamingId = resumeMessageId ?? `stream-${Date.now()}`;
       const assistantMsg: Message = {
         id: streamingId,
         // `id` becomes the server's persisted id when the stream finishes.
@@ -2212,6 +2442,16 @@ export default function Home() {
       // A bubble id whose dead connection THIS run should resume itself.
       // Local to the run: a run in another chat must not resume on it.
       let pendingAutoResume: string | null = null;
+      // Set once `meta` named this run's server-side reply.
+      let sawMeta = false;
+      // Set by `done`: the run finished, there is nothing to rejoin.
+      let sawDone = false;
+      /*
+       * The stream ended without `done`/`error` while the server run may
+       * still be live: the reply id to rejoin (null = whichever run is live
+       * in this chat). `undefined` means the run is simply over.
+       */
+      let rejoinAfter: string | null | undefined = undefined;
 
       const finish = (patch: Partial<Message>) => {
         flush();
@@ -2258,6 +2498,7 @@ export default function Home() {
             webSearchMode,
             enabledPluginIds: enabledPlugins,
             regenerateFromId,
+            editedContent: regenerateFromId ? options?.editedContent : undefined,
             resumeMessageId,
             resumeNote,
             workspaceEnabled,
@@ -2337,7 +2578,6 @@ export default function Home() {
             // below only touch the on-screen state when this conversation is
             // the visible one, so a background run is never lost and never
             // leaks into another chat.
-            const active = mirroredIdRef.current === requestConversationId;
 
             /*
              * Preserve stream order at visible boundaries.
@@ -2353,6 +2593,14 @@ export default function Home() {
             // retry notices) used to dump the whole paced backlog at once —
             // a visible jump every time one arrived mid-sentence.
             if (!PACE_THROUGH_EVENTS.has(evt.type)) await drain();
+
+            // Whether this run's chat is the one on screen — computed AFTER
+            // the drain. Reported (audit): it was read before `await drain()`
+            // (up to ~370ms), so switching to chat B during that window let
+            // `done` still set currentConvId / the workspace ref to chat A
+            // while B was displayed.
+            const active =
+              mirroredIdRef.current === (runConvId ?? requestConversationId);
 
             switch (evt.type) {
               case "status":
@@ -2520,6 +2768,7 @@ export default function Home() {
                 break;
 
               case "meta":
+                sawMeta = true;
                 streamTitle = evt.title;
                 // Needed by Stop: the server aborts by message id now, so a
                 // closed tab no longer doubles as a stop signal.
@@ -2551,14 +2800,31 @@ export default function Home() {
                  * Only this one field: the search and cost numbers are not
                  * final yet and showing a half-filled meta row mid-reply
                  * would be worse than showing it at the end.
+                 *
+                 * The same write adopts the server's message id — now, not
+                 * at `done`. From here on the bubble carries the id the server saves
+                 * the reply under, so a Resume / Retry / Edit after a Stop,
+                 * an error or a dropped stream names a message the server
+                 * can find (see `let streamingId` above). The React key
+                 * (clientRenderKey) stays the original client id.
                  */
-                writeMessages(runConvId ?? requestConversationId, (prev) =>
-                  prev.map((m) =>
-                    m.id === streamingId
-                      ? { ...m, thinkingEffort: evt.resolvedEffort }
-                      : m
-                  )
-                );
+                {
+                  const fromId = streamingId;
+                  const toId = evt.messageId || streamingId;
+                  streamingId = toId;
+                  writeMessages(runConvId ?? requestConversationId, (prev) =>
+                    prev.map((m) =>
+                      m.id === fromId
+                        ? {
+                            ...m,
+                            id: toId,
+                            clientRenderKey: m.clientRenderKey ?? fromId,
+                            thinkingEffort: evt.resolvedEffort,
+                          }
+                        : m
+                    )
+                  );
+                }
                 if (evt.conversationId &&
                     evt.conversationId !== requestConversationId) {
                   // The server has saved the conversation under its real id;
@@ -2577,6 +2843,17 @@ export default function Home() {
                   }
                 } else if (evt.conversationId && active) {
                   workspaceIdRef.current = evt.conversationId;
+                  /*
+                   * Enter the chat now, not at `done`.
+                   *
+                   * Reported (audit): during a NEW chat's first run
+                   * currentConvId stayed null until the reply finished, so
+                   * deleting that chat from the sidebar left you inside it
+                   * and the workspace panel would not open. The id is the
+                   * draft id the server adopted, so workspaceId does not
+                   * change and migrateSession is not involved.
+                   */
+                  setCurrentConvId(evt.conversationId);
                 }
                 // List a brand-new chat now, not when its first reply ends:
                 // a long first run left the sidebar saying "No conversations
@@ -2751,7 +3028,12 @@ export default function Home() {
                 // reply ends. The panel used to sit unchanged for the length
                 // of a long agent run, so a file deleted on round three still
                 // showed until the very end and the workspace looked frozen.
-                if (isWrite) {
+                // Only while this run's chat is on screen. Reported (audit):
+                // a background run's writes highlighted "recently changed"
+                // paths in, and refreshed the file list of, whichever chat
+                // the user had switched to. The run's `finally` still
+                // refreshes if the user comes back before it ends.
+                if (isWrite && active) {
                   setRecentlyChanged([...changedPaths]);
                   // Coalesced: a batch of writes produces one refresh once
                   // they stop, not one per file.
@@ -2813,6 +3095,7 @@ export default function Home() {
                 break;
 
               case "done": {
+                sawDone = true;
                 const usage = evt.usage as UsageLike | null;
                 const diagnostic = evt.reasoningDiagnostic;
                 const reasoningNotice =
@@ -2937,6 +3220,18 @@ export default function Home() {
 
         // Stream ended without a terminal frame (dropped connection).
         if (!sawError) {
+          /*
+           * Release the paced backlog first, unpaced.
+           *
+           * Reported (audit): text still queued in the pacer was either
+           * dropped (the finally cancelled the pending frame without
+           * flushing) or appended after the bubble had already been marked
+           * finished. The whole reply lands before it is marked.
+           */
+          flush();
+          // No `done`, but the server run may well still be going — runs
+          // outlive their connection. Once `meta` named it, follow it.
+          if (sawMeta && !sawDone) rejoinAfter = streamingId;
           writeMessages(runConvId ?? requestConversationId, (prev) =>
             prev.map((m) => {
               if (m.id !== streamingId || !m.isStreaming) return m;
@@ -2951,9 +3246,14 @@ export default function Home() {
                 isStreaming: false,
                 incomplete: true,
                 canResume: hadWork,
+                // A reply about to be rejoined keeps its (maybe empty) text:
+                // the live run fills it; a warning would sit in a running
+                // bubble until the first disk poll.
                 content:
                   m.content ||
-                  "⚠️ The connection closed before a reply arrived.",
+                  (rejoinAfter !== undefined
+                    ? ""
+                    : "⚠️ The connection closed before a reply arrived."),
               };
             })
           );
@@ -2974,15 +3274,59 @@ export default function Home() {
           );
           finish({ incomplete: true, canResume: hadWork });
         } else {
-          finish({
-            content: `⚠️ Couldn't reach the server: ${
-              err instanceof Error ? err.message : "connection failed"
-            }. Check your connection and try again.`,
-            isError: true,
-          });
+          /*
+           * A network failure mid-stream is not the end of the run.
+           *
+           * Reported (audit): this replaced the whole reply with "Couldn't
+           * reach the server", left it un-resumable, and unlocked the
+           * composer while the server run carried on — so the next send
+           * started a parallel run. Now the text stays, the bubble is
+           * marked interrupted exactly like the error-frame branch, and the
+           * chat rejoins the live server run (see rejoinAfter in finally).
+           * Only a failure before the server named its reply (no `meta`)
+           * still reads as "couldn't reach the server".
+           */
+          const reason = `Couldn't reach the server: ${
+            err instanceof Error ? err.message : "connection failed"
+          }`;
+          const current = getSession(runConvId).messages.find(
+            (m) => m.id === streamingId
+          );
+          const hadWork = Boolean(
+            current?.content?.trim() ||
+              current?.reasoningContent?.trim() ||
+              current?.toolEvents?.length
+          );
+          if (sawDone) {
+            // The reply already finished; a read error after `done` must
+            // not re-mark it interrupted.
+          } else if (sawMeta || hadWork) {
+            finish({
+              incomplete: true,
+              canResume: hadWork,
+              errorNotice: reason,
+            });
+            if (sawMeta) rejoinAfter = streamingId;
+          } else {
+            finish({
+              content: `⚠️ ${reason}. Check your connection and try again.`,
+              isError: true,
+              // Keeps the interrupted banner (Try again) on the bubble.
+              incomplete: true,
+            });
+            // The request may have reached the server even though its first
+            // frame never came back: follow whatever run is live.
+            rejoinAfter = null;
+          }
         }
       } finally {
+        // Anything still queued goes out now; then no timer or frame may
+        // fire into a finished bubble (flushTimer was never cleared here).
+        flush();
         if (frame !== null) cancelAnimationFrame(frame);
+        if (flushTimer !== null) clearTimeout(flushTimer);
+        frame = null;
+        flushTimer = null;
         // Drop this run's controller now that it has finished (under the id
         // it actually ran as, after any draft->real migration).
         if (runConvId) abortRefs.current.delete(runConvId);
@@ -2998,7 +3342,20 @@ export default function Home() {
             runConvId,
             "The connection dropped — continuing from where it left off"
           );
-        } else if (!resumeId) {
+        } else if (rejoinAfter !== undefined && !endSession.cancelResume) {
+          // The connection dropped but the server run may still be going.
+          // Keep the composer locked (and the server id for Stop) while
+          // rejoinRun checks; it follows the run if it is live and unlocks
+          // the chat if it is not.
+          patchSession(runConvId, {
+            stage: "working",
+            liveRetry: null,
+            liveRequestSize: null,
+            liveDrafting: null,
+            runMessageId: rejoinAfter ?? endSession.runMessageId,
+          });
+          void rejoinRun(runConvId, rejoinAfter, { heldLoading: true });
+        } else {
           // Run is over: clear the spinner for its own conversation only.
           patchSession(runConvId, {
             loading: false,
@@ -3091,6 +3448,8 @@ export default function Home() {
       setRetryNotice,
       migrateSession,
       activateSession,
+      cancelRejoin,
+      rejoinRun,
     ]
   );
 
@@ -3173,6 +3532,9 @@ export default function Home() {
     const session = getSession(convId);
     // A stopped run must not silently resume itself.
     session.cancelResume = true;
+    // Nor keep being followed: a rejoin loop left running after Stop wrote
+    // the disk copy back over the stopped bubble every 2s (audit).
+    cancelRejoin(convId);
     void fetch("/api/chat/stop", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -3201,13 +3563,20 @@ export default function Home() {
             : m
         )
     );
-  }, [currentConvId, patchSession, writeMessages]);
+  }, [currentConvId, patchSession, writeMessages, cancelRejoin]);
 
   /** Resend an edited user message, discarding everything after it. */
   const editMessage = useCallback((messageId: string, newContent: string) => {
+    // Not while this chat is still answering. The edit rewrote the question
+    // and dropped the reply locally, then sendMessage refused the resend
+    // because the chat was busy — leaving a transcript that matched neither
+    // the screen nor the server (audit). The Edit button is hidden while
+    // loading too (MessageList `busy`); this is the backstop.
+    if (getSession(workspaceIdRef.current).loading) return;
     const list = messagesRef.current;
     const index = list.findIndex((m) => m.id === messageId);
     if (index === -1) return;
+    const question = list[index];
 
     // The reply directly after the question is the one being replaced.
     // Regenerating from the REPLY id keeps the question in the optimistic
@@ -3241,22 +3610,46 @@ export default function Home() {
       )
     );
 
-    if (reply?.role === "assistant") {
+    /*
+     * The question's files ride again. Reported (audit): Edit resent only
+     * the text, so an image or video attached to the question silently
+     * vanished from the model's view of the re-asked turn. `attachments` is
+     * the same request field a normal send uses; the server rebuilds the
+     * pixels (native) or the image descriptions (helper models) from it.
+     */
+    const attachments = question.attachments?.length
+      ? question.attachments
+      : undefined;
+
+    // A reply that never got its server id (the stream failed before
+    // `meta`) is unknown to the store: regenerating from it would truncate
+    // nothing and leave the OLD question stored. Ask again as a fresh send
+    // instead, which stores the edited question as a new message.
+    if (reply?.role === "assistant" && !reply.id.startsWith("stream-")) {
       void sendMessageRef.current?.(newContent, {
         regenerateFromId: reply.id,
         previousVersions: carried,
+        attachments,
+        // Lets the server rewrite the stored question too (it replays the
+        // request text to the model already, but truncateFrom keeps the
+        // old text on disk). Ignored by a server that does not read it.
+        editedContent: newContent,
       });
       return;
     }
 
-    // No reply to replace (the question stands alone): move it to the end
-    // and answer it as a fresh send.
+    // No reply to replace (the question stands alone, or its reply was
+    // provisional): move it to the end and answer it as a fresh send.
     writeMessages(workspaceIdRef.current, (prev) => {
       const i = prev.findIndex((m) => m.id === messageId);
       if (i === -1) return prev;
-      return [...prev.slice(0, i), ...prev.slice(i + 1)];
+      const drop =
+        prev[i + 1]?.role === "assistant" && prev[i + 1].id.startsWith("stream-")
+          ? 2
+          : 1;
+      return [...prev.slice(0, i), ...prev.slice(i + drop)];
     });
-    void sendMessageRef.current?.(newContent);
+    void sendMessageRef.current?.(newContent, { attachments });
   }, [writeMessages]);
 
   /** Remove a whole exchange — the question and the reply — from UI and disk. */
@@ -3322,7 +3715,10 @@ export default function Home() {
 
     const params = new URLSearchParams();
     params.set("message", persistId ?? pair[0].id);
-    if (!persistId && isLastPair) params.set("last", "1");
+    // A live reply carries its server id from `meta` on, but may not be on
+    // disk yet — so the last pair always keeps the "last pair" fallback,
+    // not only when no id is known.
+    if (isLastPair) params.set("last", "1");
     void fetch(`/api/conversations/${convId}/messages?${params}`, {
       method: "DELETE",
     }).catch(() => {});
@@ -3333,11 +3729,18 @@ export default function Home() {
   // `messages` would give MessageBubble a new prop on every message and defeat
   // its memoisation, which is what made typing slow in long conversations.
   const regenerate = useCallback((assistantId: string) => {
+    // A busy chat refuses the resend, so do not drop anything first.
+    if (getSession(workspaceIdRef.current).loading) return;
     const list = messagesRef.current;
     const index = list.findIndex((m) => m.id === assistantId);
     if (index < 1) return;
     const prompt = list[index - 1];
     if (prompt.role !== "user") return;
+    // Reported (audit): Retry resent only prompt.content, dropping the
+    // question's images/video. Same `attachments` field as a normal send.
+    const attachments = prompt.attachments?.length
+      ? prompt.attachments
+      : undefined;
 
     // A reply stopped before the server confirmed it still carries its
     // temporary streaming id, which the store knows nothing about. Retrying
@@ -3351,13 +3754,14 @@ export default function Home() {
         const i = prev.findIndex((m) => m.id === assistantId);
         return i < 1 ? prev : prev.slice(0, i - 1);
       });
-      void sendMessageRef.current?.(prompt.content);
+      void sendMessageRef.current?.(prompt.content, { attachments });
       return;
     }
 
     const old = list[index];
     void sendMessageRef.current?.(prompt.content, {
       regenerateFromId: assistantId,
+      attachments,
       previousVersions: old.content
         ? [
             ...(old.previousVersions ?? []),
@@ -3542,9 +3946,15 @@ export default function Home() {
         currentConvId={currentConvId}
         isOpen={sidebarOpen}
         onToggle={() => setSidebarOpen(!sidebarOpen)}
-        onSelect={loadConversation}
+        onSelect={(id) => {
+          closeSidebarIfOverlay();
+          void loadConversation(id);
+        }}
         onImported={() => void refreshConversations()}
-        onNew={startNewChat}
+        onNew={() => {
+          closeSidebarIfOverlay();
+          startNewChat();
+        }}
         onDelete={deleteConversation}
         onDeleteMany={deleteConversations}
         onRename={renameConversation}
