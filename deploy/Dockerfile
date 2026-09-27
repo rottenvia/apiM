@@ -35,4 +35,7 @@ RUN mkdir -p /app/data && chown -R nextjs:nodejs /app/data
 USER nextjs
 EXPOSE 3000
 
-CMD ["npm", "run", "start"]
+# Inside the container the app must listen on every interface for Caddy to
+# reach it; `npm run start` binds localhost only, which is right on a PC.
+# The compose file requires APP_PASSWORD, so this is never an open port.
+CMD ["npx", "next", "start", "-H", "0.0.0.0"]
