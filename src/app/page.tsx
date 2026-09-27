@@ -19,6 +19,7 @@ import type { PendingQuestion } from "@/components/QuestionPrompt";
 import type { PlanView, PlanStepView } from "@/components/PlanPanel";
 import type { TimelineEntry } from "@/components/MessageTimeline";
 import { appendThinkRange } from "@/lib/timeline";
+import { StreamPacer } from "@/lib/pacer";
 import { clampDeleteDelay, DEFAULT_DELETE_DELAY } from "@/components/DeleteChatDialog";
 import { warmRoutes } from "@/lib/warmup";
 import {
@@ -384,6 +385,23 @@ interface ChatResponse {
  * workspace/conversation id; the React states the screen renders are just a
  * mirror of whichever session is currently on top.
  */
+/**
+ * Stream events that neither add a row nor end the reply. The paced text
+ * reveal flows straight through them; every other event is a boundary that
+ * releases the backlog first, so rows never overtake the text before them.
+ */
+const PACE_THROUGH_EVENTS: ReadonlySet<string> = new Set([
+  "reasoning",
+  "content",
+  "status",
+  "usage",
+  "request_size",
+  "tool_drafting",
+  "retrying",
+  "context_pruned",
+  "context_compacted",
+]);
+
 /**
  * The round in flight: its size, when it was fired, and whether anything
  * has come back yet. `answered` flips on the round's first reasoning,
@@ -2002,22 +2020,52 @@ export default function Home() {
        * (a tool starting, the reply ending) still flush everything at once,
        * so ordering and the final text are exact.
        */
-      const PACE_FRAME_MS = 30;
-      const PACE_DRAIN_MS = 200;
-      let pendingContent = "";
-      let pendingReasoning = "";
+      /*
+       * Steady reveal (lib/pacer). The first pass drained each burst in a
+       * fixed 200ms, and a slow endpoint's bursts are further apart than
+       * that — type, stop for ~0.4s, type again: "not laggy but freezy".
+       * Now text is revealed at the rate it is arriving, behind a small
+       * buffer sized to the gaps between bursts, so it keeps flowing
+       * through them.
+       *
+       * One ordered queue for reasoning and prose. Two buffers meant the
+       * switch from thinking to answering dumped the rest of the thought
+       * at once; the queue flows straight across it.
+       */
+      const PACE_FRAME_MS = 24;
+      const pacer = new StreamPacer();
+      const queue: { kind: "c" | "r"; text: string }[] = [];
+      let queuedChars = 0;
       let frame: number | null = null;
       let flushTimer: ReturnType<typeof setTimeout> | null = null;
       let lastFlushAt = 0;
 
-      /** Leading part of `text` for this paced frame, never splitting a surrogate pair. */
-      const paceSlice = (text: string, dt: number): string => {
-        if (!text) return "";
-        let n = Math.max(2, Math.ceil((text.length * dt) / PACE_DRAIN_MS));
-        if (n >= text.length) return text;
-        const code = text.charCodeAt(n - 1);
-        if (code >= 0xd800 && code <= 0xdbff) n += 1;
-        return text.slice(0, n);
+      const enqueue = (kind: "c" | "r", text: string) => {
+        if (!text) return;
+        const last = queue[queue.length - 1];
+        if (last && last.kind === kind) last.text += text;
+        else queue.push({ kind, text });
+        queuedChars += text.length;
+        pacer.arrive(text.length, performance.now());
+        scheduleFlush();
+      };
+
+      /** Take `n` chars off the front of the queue, in order, whole code points. */
+      const dequeue = (n: number): { kind: "c" | "r"; text: string }[] => {
+        const out: { kind: "c" | "r"; text: string }[] = [];
+        while (n > 0 && queue.length) {
+          const head = queue[0];
+          let k = Math.min(n, head.text.length);
+          const code = head.text.charCodeAt(k - 1);
+          if (k < head.text.length && code >= 0xd800 && code <= 0xdbff) k += 1;
+          out.push({ kind: head.kind, text: head.text.slice(0, k) });
+          head.text = head.text.slice(k);
+          if (!head.text) queue.shift();
+          queuedChars -= k;
+          n -= k;
+        }
+        if (!queue.length) queuedChars = 0;
+        return out;
       };
 
       const flush = (paced = false) => {
@@ -2028,56 +2076,108 @@ export default function Home() {
         if (flushTimer !== null) clearTimeout(flushTimer);
         frame = null;
         flushTimer = null;
-        const now = Date.now();
-        const dt = Math.min(120, Math.max(16, now - lastFlushAt));
+        const now = performance.now();
+        const dt = Math.min(120, Math.max(8, now - lastFlushAt));
         lastFlushAt = now;
-        if (!pendingContent && !pendingReasoning) return;
+        if (queuedChars <= 0) return;
         // A hidden tab has nobody to animate for: release it all.
         const pace =
           paced && typeof document !== "undefined" && !document.hidden;
-        const c = pace ? paceSlice(pendingContent, dt) : pendingContent;
-        const r = pace ? paceSlice(pendingReasoning, dt) : pendingReasoning;
-        pendingContent = pendingContent.slice(c.length);
-        pendingReasoning = pendingReasoning.slice(r.length);
+        const n = pace ? pacer.take(queuedChars, now, dt) : queuedChars;
+        reveal(n);
         // Whatever this frame held back goes out on the next one.
-        if (pendingContent || pendingReasoning) scheduleFlush();
+        if (queuedChars > 0) scheduleFlush();
+      };
+
+      /*
+       * Before a boundary (a tool row, a plan, the end of the reply) the
+       * buffered text is typed out quickly rather than dumped: up to
+       * ~0.8s of text appearing in one frame read as a skip. The stream
+       * reader waits for this, so nothing overtakes the text before it.
+       */
+      const DRAIN_MAX_MS = 220;
+      const drain = async () => {
+        if (queuedChars <= 0) return;
+        if (frame !== null) cancelAnimationFrame(frame);
+        if (flushTimer !== null) clearTimeout(flushTimer);
+        frame = null;
+        flushTimer = null;
+        if (typeof document === "undefined" || document.hidden) {
+          flush();
+          return;
+        }
+        const start = performance.now();
+        let prev = start;
+        await new Promise<void>((resolve) => {
+          const guard = setTimeout(() => resolve(), DRAIN_MAX_MS + 150);
+          const step = () => {
+            const now = performance.now();
+            const left = DRAIN_MAX_MS - (now - start);
+            const n =
+              left <= 16
+                ? queuedChars
+                : Math.max(1, Math.ceil((queuedChars * (now - prev)) / left));
+            prev = now;
+            reveal(n);
+            if (queuedChars <= 0) {
+              clearTimeout(guard);
+              resolve();
+            } else {
+              requestAnimationFrame(step);
+            }
+          };
+          requestAnimationFrame(step);
+        });
+        // The guard fired (frames paused): whatever is left goes now.
+        flush();
+        lastFlushAt = performance.now();
+      };
+
+      /** Write the next `n` queued chars into the streaming bubble, in order. */
+      const reveal = (n: number) => {
+        const parts = dequeue(n);
+        if (!parts.length) return;
         writeMessages(runConvId ?? requestConversationId, (prev) =>
           prev.map((m) => {
             if (m.id !== streamingId) return m;
-
-            // Appended to the trailing text entry rather than pushed, so a
-            // paragraph split across frames stays one block instead of
-            // fragmenting into dozens of rows.
             let timeline = m.timeline;
-            if (c) {
-              const list = [...(timeline ?? [])];
-              const last = list[list.length - 1];
-              if (last && last.kind === "text") {
-                list[list.length - 1] = { kind: "text", text: last.text + c };
+            let content = m.content;
+            let thought = m.reasoningContent ?? "";
+            let sawReasoning = false;
+            for (const part of parts) {
+              if (part.kind === "c") {
+                // Appended to the trailing text entry rather than pushed, so
+                // a paragraph split across frames stays one block instead of
+                // fragmenting into dozens of rows.
+                const list = [...(timeline ?? [])];
+                const last = list[list.length - 1];
+                if (last && last.kind === "text") {
+                  list[list.length - 1] = { kind: "text", text: last.text + part.text };
+                } else {
+                  list.push({ kind: "text", text: part.text });
+                }
+                timeline = list;
+                content += part.text;
               } else {
-                list.push({ kind: "text", text: c });
+                // This round's reasoning goes in the timeline where it
+                // happened — beside the tools it led to, not in one box at
+                // the top of an hour-long reply.
+                timeline = appendThinkRange(
+                  [...(timeline ?? [])],
+                  thought.length,
+                  thought.length + part.text.length
+                );
+                thought += part.text;
+                sawReasoning = true;
               }
-              timeline = list;
             }
-            // This round's reasoning goes in the timeline where it
-            // happened — beside the tools it led to, not in one box at
-            // the top of an hour-long reply.
-            const thoughtSoFar = m.reasoningContent ?? "";
-            if (r) {
-              timeline = appendThinkRange(
-                [...(timeline ?? [])],
-                thoughtSoFar.length,
-                thoughtSoFar.length + r.length
-              );
-            }
-
             return {
               ...m,
-              content: m.content + c,
-              reasoningContent: thoughtSoFar + r,
+              content,
+              reasoningContent: thought,
               // A later round may provide reasoning after an earlier one did
               // not. Real text supersedes the diagnostic immediately.
-              reasoningNotice: r ? undefined : m.reasoningNotice,
+              reasoningNotice: sawReasoning ? undefined : m.reasoningNotice,
               timeline,
             };
           })
@@ -2086,7 +2186,7 @@ export default function Home() {
       function scheduleFlush() {
         if (frame !== null || flushTimer !== null) return;
         const paced = () => flush(true);
-        const wait = PACE_FRAME_MS - (Date.now() - lastFlushAt);
+        const wait = PACE_FRAME_MS - (performance.now() - lastFlushAt);
         // A hidden tab gets no animation frames at all, so it flushes from
         // the timer alone — the text is there, whole, when the user returns.
         if (typeof document !== "undefined" && document.hidden) {
@@ -2248,7 +2348,11 @@ export default function Home() {
              * a browser frame — exactly the intermittent double-"Thinking…"
              * state in Screenshot_169.
              */
-            if (evt.type !== "reasoning" && evt.type !== "content") flush();
+            // Only events that add rows or end the reply are boundaries.
+            // Status-only events (usage, sizes, a file being drafted,
+            // retry notices) used to dump the whole paced backlog at once —
+            // a visible jump every time one arrived mid-sentence.
+            if (!PACE_THROUGH_EVENTS.has(evt.type)) await drain();
 
             switch (evt.type) {
               case "status":
@@ -2501,9 +2605,7 @@ export default function Home() {
               case "reasoning":
                 setLiveRetry(runConvId ?? requestConversationId, null);
                 markRoundAnswered(runConvId ?? requestConversationId);
-                if (pendingContent) flush();
-                pendingReasoning += evt.delta;
-                scheduleFlush();
+                enqueue("r", evt.delta);
                 break;
 
               case "reasoning_status": {
@@ -2707,9 +2809,7 @@ export default function Home() {
                 markRoundAnswered(runConvId ?? requestConversationId);
                 // Keep reasoning and prose in arrival order: a batch holds
                 // one kind at a time, so the timeline can place each.
-                if (pendingReasoning) flush();
-                pendingContent += evt.delta;
-                scheduleFlush();
+                enqueue("c", evt.delta);
                 break;
 
               case "done": {
