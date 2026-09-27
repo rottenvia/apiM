@@ -615,26 +615,52 @@ async function writeConversation(conv: StoredConversation): Promise<void> {
   });
 }
 
+/**
+ * Read, change and write one conversation as a single unit.
+ *
+ * Found by review: every mutation here used to read the chat BEFORE taking
+ * its place in the write queue, then write that stale copy back through the
+ * queue. A streaming checkpoint read before a btw note was queued, wrote
+ * after it, and erased the note; renaming a chat mid-reply was reverted by
+ * the next checkpoint (folder and all); a deleted turn came back. The read
+ * now happens inside the queue slot, after every earlier write has landed.
+ *
+ * `change` returns the value to hand back and whether to write — false (or
+ * a missing conversation) writes nothing.
+ */
+function mutate<T>(
+  id: string,
+  change: (
+    conv: StoredConversation | null
+  ) => Promise<{ write: StoredConversation | null; result: T }> | { write: StoredConversation | null; result: T }
+): Promise<T> {
+  return transact(id, async () => {
+    const { write, result } = await change(await getConversation(id));
+    if (write && !deletedIds.has(write.id)) await writeConversationNow(write);
+    return result;
+  });
+}
+
 export async function appendMessages(
   conversationId: string,
   title: string,
   newMessages: StoredMessage[]
 ): Promise<void> {
-  const now = new Date().toISOString();
-  const existing = await getConversation(conversationId);
-
-  const conv: StoredConversation = existing ?? {
-    id: conversationId,
-    title,
-    archived: false,
-    createdAt: now,
-    updatedAt: now,
-    messages: [],
-  };
-
-  conv.messages.push(...newMessages);
-  conv.updatedAt = now;
-  await writeConversation(conv);
+  if (deletedIds.has(conversationId)) return;
+  await mutate(conversationId, (existing) => {
+    const now = new Date().toISOString();
+    const conv: StoredConversation = existing ?? {
+      id: conversationId,
+      title,
+      archived: false,
+      createdAt: now,
+      updatedAt: now,
+      messages: [],
+    };
+    conv.messages.push(...newMessages);
+    conv.updatedAt = now;
+    return { write: conv, result: undefined };
+  });
 }
 
 /**
@@ -649,9 +675,9 @@ export async function upsertMessage(
   title: string,
   message: StoredMessage
 ): Promise<void> {
+  if (deletedIds.has(conversationId)) return;
+  await mutate(conversationId, (existing) => {
   const now = new Date().toISOString();
-  const existing = await getConversation(conversationId);
-
   const conv: StoredConversation = existing ?? {
     id: conversationId,
     title,
@@ -685,7 +711,8 @@ export async function upsertMessage(
   }
 
   conv.updatedAt = now;
-  await writeConversation(conv);
+  return { write: conv, result: undefined };
+  });
 }
 
 /**
@@ -807,24 +834,23 @@ export async function deleteTurn(
   messageId: string,
   options: { fallbackLastPair?: boolean } = {}
 ): Promise<{ removed: string[] } | null> {
-  const conv = await getConversation(conversationId);
-  if (!conv) return null;
+  return mutate(conversationId, (conv) => {
+    if (!conv) return { write: null, result: null };
+    let index = conv.messages.findIndex((m) => m.id === messageId);
+    if (index === -1 && options.fallbackLastPair && conv.messages.length) {
+      index = conv.messages.length - 1;
+    }
+    const slice = turnSlice(conv.messages, index);
+    if (!slice) return { write: null, result: null };
 
-  let index = conv.messages.findIndex((m) => m.id === messageId);
-  if (index === -1 && options.fallbackLastPair && conv.messages.length) {
-    index = conv.messages.length - 1;
-  }
-  const slice = turnSlice(conv.messages, index);
-  if (!slice) return null;
-
-  const removed = conv.messages.slice(slice.start, slice.end).map((m) => m.id);
-  conv.messages = [
-    ...conv.messages.slice(0, slice.start),
-    ...conv.messages.slice(slice.end),
-  ];
-  conv.updatedAt = new Date().toISOString();
-  await writeConversation(conv);
-  return { removed };
+    const removed = conv.messages.slice(slice.start, slice.end).map((m) => m.id);
+    conv.messages = [
+      ...conv.messages.slice(0, slice.start),
+      ...conv.messages.slice(slice.end),
+    ];
+    conv.updatedAt = new Date().toISOString();
+    return { write: conv, result: { removed } };
+  });
 }
 
 /**
@@ -835,16 +861,14 @@ export async function truncateFrom(
   conversationId: string,
   messageId: string
 ): Promise<boolean> {
-  const conv = await getConversation(conversationId);
-  if (!conv) return false;
-
-  const index = conv.messages.findIndex((m) => m.id === messageId);
-  if (index === -1) return false;
-
-  conv.messages = conv.messages.slice(0, index);
-  conv.updatedAt = new Date().toISOString();
-  await writeConversation(conv);
-  return true;
+  return mutate(conversationId, (conv) => {
+    if (!conv) return { write: null, result: false };
+    const index = conv.messages.findIndex((m) => m.id === messageId);
+    if (index === -1) return { write: null, result: false };
+    conv.messages = conv.messages.slice(0, index);
+    conv.updatedAt = new Date().toISOString();
+    return { write: conv, result: true };
+  });
 }
 
 /** Thrown when a rename would collide with another chat. */
@@ -911,28 +935,27 @@ export async function updateConversation(
   id: string,
   patch: { title?: string; archived?: boolean }
 ): Promise<StoredConversation | null> {
-  const conv = await getConversation(id);
-  if (!conv) return null;
+  return mutate(id, async (conv) => {
+    if (!conv) return { write: null, result: null };
 
-  if (typeof patch.title === "string") {
-    const next = patch.title.slice(0, 200).trim();
+    if (typeof patch.title === "string") {
+      const next = patch.title.slice(0, 200).trim();
 
-    // Renaming to the same thing is a no-op, not an error — otherwise
-    // clicking Save without editing would look like a failure.
-    if (titleKey(next) !== titleKey(conv.title)) {
-      const clash = await findByTitle(next, id);
-      if (clash) throw new DuplicateTitleError(next);
+      // Renaming to the same thing is a no-op, not an error — otherwise
+      // clicking Save without editing would look like a failure.
+      if (titleKey(next) !== titleKey(conv.title)) {
+        const clash = await findByTitle(next, id);
+        if (clash) throw new DuplicateTitleError(next);
+      }
+
+      conv.title = next;
     }
-
-    conv.title = next;
-  }
-  if (typeof patch.archived === "boolean") {
-    conv.archived = patch.archived;
-  }
-  conv.updatedAt = new Date().toISOString();
-
-  await writeConversation(conv);
-  return conv;
+    if (typeof patch.archived === "boolean") {
+      conv.archived = patch.archived;
+    }
+    conv.updatedAt = new Date().toISOString();
+    return { write: conv, result: conv };
+  });
 }
 
 /**
@@ -950,13 +973,17 @@ export async function saveHistorySummary(
   expectedUpToId: string | null,
   next: StoredHistorySummary
 ): Promise<boolean> {
-  const conv = await getConversation(id);
-  if (!conv) return false;
-  if ((conv.historySummary?.upToId ?? null) !== expectedUpToId) return false;
-  conv.historySummary = next;
-  conv.updatedAt = new Date().toISOString();
-  await writeConversation(conv);
-  return true;
+  // The cursor check is inside the queue slot too, or two refreshes could
+  // both pass it and the loser would still rewind the winner.
+  return mutate(id, (conv) => {
+    if (!conv) return { write: null, result: false };
+    if ((conv.historySummary?.upToId ?? null) !== expectedUpToId) {
+      return { write: null, result: false };
+    }
+    conv.historySummary = next;
+    conv.updatedAt = new Date().toISOString();
+    return { write: conv, result: true };
+  });
 }
 
 export async function deleteConversation(id: string): Promise<boolean> {
