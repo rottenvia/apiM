@@ -199,6 +199,19 @@ import type { CustomModelDef } from "@/lib/models";
  * pixels without touching anything the user actually attached.
  */
 const TOOL_IMAGE_TAG = "[tool image]";
+
+/** Does every tool call in the transcript have its tool result? */
+function toolCallsAnswered(messages: readonly TranscriptMessage[]): boolean {
+  const open = new Set<string>();
+  for (const m of messages) {
+    if (m.role === "assistant" && m.tool_calls?.length) {
+      for (const c of m.tool_calls) open.add(c.id);
+    } else if (m.role === "tool") {
+      open.delete((m as { tool_call_id?: string }).tool_call_id ?? "");
+    }
+  }
+  return open.size === 0;
+}
 import {
   GITHUB_TOKEN_COOKIE,
   resolveGitHubToken,
@@ -886,8 +899,17 @@ export async function POST(req: NextRequest) {
           closed = true;
         }
       }, 15_000);
+      /*
+       * Every exit ends the run. Found by review: the early `close();
+       * return;` exits (provider unreachable, HTTP error, stream timeout,
+       * empty-stream error) skipped endRun, so a run that died on a 402
+       * stayed registered for up to 30 minutes — and a reload "rejoined" it:
+       * spinner, locked composer, a Stop that stopped nothing.
+       */
+      let endThisRun: (() => void) | null = null;
       const close = () => {
         clearInterval(heartbeat);
+        endThisRun?.();
         if (closed) return;
         closed = true;
         try {
@@ -920,9 +942,12 @@ export async function POST(req: NextRequest) {
       // Two chats opened with the same first message would otherwise want the
       // same title, and the second would land in the first's folder. Only new
       // chats are adjusted; an existing one keeps whatever it is called.
+      // A store read error here used to reject start() outside every try —
+      // the stream never closed and its heartbeat timer leaked. A plain
+      // title is a fine fallback.
       const title = conversationId
         ? derivedTitle
-        : await availableTitle(derivedTitle);
+        : await availableTitle(derivedTitle).catch(() => derivedTitle);
       // Resuming rewrites the reply that was cut short, rather than adding a
       // second one beneath it.
       const assistantMsgId = resumeMessageId ?? uuidv4();
@@ -938,6 +963,7 @@ export async function POST(req: NextRequest) {
        * Only the Stop button aborts, through /api/chat/stop.
        */
       const runSignal = beginRun(assistantMsgId, convId);
+      endThisRun = () => endRun(assistantMsgId, runSignal);
       const stopped = () => runSignal.aborted;
       let emergencySave: (() => Promise<void>) | null = null;
 
@@ -1111,6 +1137,8 @@ export async function POST(req: NextRequest) {
         let resumedReasoningMs = 0;
         let resumedToolEvents: NonNullable<StoredMessage["toolEvents"]> = [];
         let resumedTimeline: NonNullable<StoredMessage["timeline"]> = [];
+        /** What the reply had already cost before this Resume. */
+        let resumedUsage: StoredMessage["usage"] = null;
         /** Set when the transcript was reconstructed rather than replayed. */
         let rebuilt: RebuiltResume | null = null;
 
@@ -1157,6 +1185,7 @@ export async function POST(req: NextRequest) {
             }
 
             if (resumed && prior) {
+              resumedUsage = prior.usage ?? null;
               // Keep the text already shown, so resuming extends the reply
               // rather than replacing it with only the new part.
               resumedContent = prior.content ?? "";
@@ -2107,8 +2136,9 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          * the reply stopped at the same message over and over no matter how
          * many times it was resumed. An explicit Resume IS the authorisation
          * for another set of budgets; the user chose to keep paying. The
-         * round cap (toolRounds, below) still carries, so a genuinely
-         * runaway loop remains finite.
+         * round cap counts rounds of THIS request (`round`), so a Resume gets
+         * a fresh one too — each request stays finite, and the per-reply
+         * spending limit (carried across Resume) bounds the total.
          */
         let continuations = 0;
         /*
@@ -2132,6 +2162,9 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          * thinking is NOT told it may think again.
          */
         let thinkNudges = 0;
+        /** Saved with resume state: the higher of this run's and the prior
+         *  run's, so thinking-off survives every Resume, not just one. */
+        const savedThinkNudges = () => Math.max(thinkNudges, resumed?.thinkNudges ?? 0);
         /** Think-only strikes observed this run, recovered or not. */
         let thinkOnlyStalls = 0;
         /** The ceiling trip was thinking eating the budget, not a long answer. */
@@ -2307,6 +2340,27 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           prompt_cache_miss_tokens: 0,
           completion_tokens_details: { reasoning_tokens: 0 },
         };
+        /*
+         * A resumed reply carries what it had already cost. Found by review:
+         * usage and the budget started at zero, so the saved cost showed
+         * only the resumed part and every Resume granted a fresh full
+         * spending cap — a per-reply limit that was really per request.
+         */
+        if (resumedUsage) {
+          const u = resumedUsage as Record<string, unknown> & {
+            completion_tokens_details?: { reasoning_tokens?: number };
+          };
+          const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+          totalUsage.prompt_tokens += n(u.prompt_tokens);
+          totalUsage.completion_tokens += n(u.completion_tokens);
+          totalUsage.total_tokens += n(u.total_tokens);
+          totalUsage.prompt_cache_hit_tokens += n(u.prompt_cache_hit_tokens);
+          totalUsage.prompt_cache_miss_tokens += n(u.prompt_cache_miss_tokens);
+          totalUsage.completion_tokens_details.reasoning_tokens += n(
+            u.completion_tokens_details?.reasoning_tokens
+          );
+          budget.spentUsd += estimateCost(resumedUsage, model, undefined, customs) ?? 0;
+        }
         /**
          * Last tool round whose full transcript was persisted.
          *
@@ -2339,7 +2393,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             resumeState: {
               toolRounds,
               continuations,
-              thinkNudges,
+              thinkNudges: savedThinkNudges(),
               messages: transcript,
             },
           });
@@ -2365,6 +2419,27 @@ Ask before you build the wrong thing. If a choice would change what you produce 
            * a directive block to a transcript that is saved unchanged.
            */
           if (stopped()) break;
+          /*
+           * The spending limit, on EVERY round. Found by review: it was
+           * only checked before running tools, so rounds that call none —
+           * output-limit continuations (up to sixteen), nudges, revives,
+           * cut-overs — each paid for the full input with no check. With a
+           * cap already reached, a long answer ending every round at
+           * "length" continued sixteen more times.
+           */
+          if (round > 1 && lastRoundCost > 0) {
+            const verdict = checkBudget(budget, lastRoundCost);
+            if (verdict.action === "stop") {
+              send({
+                type: "budget_stopped",
+                spentUsd: verdict.spentUsd,
+                limitUsd: verdict.limitUsd,
+                reason: verdict.reason,
+              });
+              stoppedByBudget = true;
+              break;
+            }
+          }
           // Baseline at the run's first round (a resumed plan may already
           // have steps done — only steps closed by THIS run count).
           if (stepsDoneAtCheck === null) {
@@ -2924,6 +2999,10 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 replayReasoningOnOpenRouter &&
                 target.providerId === "openrouter" &&
                 !/reasoning is mandatory/i.test(rejectedDetail) &&
+                // A size rejection is not about reasoning. Found by review:
+                // a context-length 400 took this branch, switched replay off
+                // for the rest of the run and skipped the fold that fixes it.
+                !sizeDriven &&
                 Array.isArray(dsRequestBody.messages) &&
                 (dsRequestBody.messages as Record<string, unknown>[]).some(
                   (m) => typeof m.reasoning === "string"
@@ -3212,7 +3291,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                   resumeState: {
                     toolRounds,
                     continuations,
-                    thinkNudges,
+                    thinkNudges: savedThinkNudges(),
                     messages: transcript,
                   },
                 });
@@ -3320,6 +3399,12 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           const markUpstream = () => {
             if (gotUpstreamSignal) return;
             gotUpstreamSignal = true;
+            // The provider answered: its blips so far are over. Found by
+            // review: these counters were per RUN, so two first-token
+            // timeouts at rounds 5 and 30 of a long run left none for a
+            // third at round 50, which then failed outright.
+            emptyStreamRetries = 0;
+            rateLimitRetries = 0;
             send({
               type: "retrying",
               phase: "clear",
@@ -3355,6 +3440,17 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             if (checkpointing) return;
             checkpointing = true;
             lastCheckpoint = nowMs;
+            /*
+             * Snapshot before the await. Found by review: the live array was
+             * handed over and serialised later (the store now reads inside
+             * its queue slot), and toolRounds was read after the write — a
+             * round's tools starting meanwhile could save tool_calls with
+             * only some of their results and skip the next round's state.
+             * A snapshot taken mid-round is never saved as resume state.
+             */
+            const roundsNow = toolRounds;
+            const snapshot = roundsNow > lastResumeRound ? transcript.slice() : null;
+            const resumable = snapshot !== null && toolCallsAnswered(snapshot);
             try {
               await upsertMessage(convId, title, {
                 id: assistantMsgId,
@@ -3391,14 +3487,13 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                  * granularity worth protecting; the prose since the last
                  * round is checkpointed as before and simply re-generated.
                  */
-                resumeState:
-                  toolRounds > lastResumeRound
-                    ? { toolRounds, continuations, thinkNudges, messages: transcript }
-                    : undefined,
+                resumeState: resumable
+                  ? { toolRounds: roundsNow, continuations, thinkNudges: savedThinkNudges(), messages: snapshot }
+                  : undefined,
               });
               // Recorded after a successful write, so a failed checkpoint
               // retries rather than skipping the round entirely.
-              if (toolRounds > lastResumeRound) lastResumeRound = toolRounds;
+              if (resumable && roundsNow > lastResumeRound) lastResumeRound = roundsNow;
               checkpointGap = Math.min(
                 30_000,
                 Math.max(CHECKPOINT_MS, (Date.now() - nowMs) * 40)
@@ -3664,6 +3759,14 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           }
           } catch (streamErr) {
             if (runSignal.aborted) {
+              /*
+               * Stop landed while a read was pending. Found by review: the
+               * fetch was no longer tied to the run signal once headers
+               * arrived, and this path returned without cancelling — the
+               * provider kept generating (and billing) up to max_tokens,
+               * which is exactly when Stop gets pressed: mid-think.
+               */
+              await reader.cancel().catch(() => {});
               await checkpoint(true);
               close();
               return;
@@ -4476,6 +4579,16 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             }
           }
 
+          /*
+           * Images tools produced this round, pushed after the LAST tool
+           * result. Found by review: pushed inside the loop, a
+           * [view_image, read_file] round became assistant(tool_calls) →
+           * tool → user(image) → tool, and a tool message that does not
+           * directly follow its tool_calls is a 400 on the next round and
+           * on every Resume.
+           */
+          const deferredToolImages: (typeof transcript)[number][] = [];
+
           for (const call of calls) {
             if (stopped()) break;
 
@@ -4553,9 +4666,15 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               // intact even though the JSON object never closed; write that
               // prefix too so the model appends the rest instead of resending
               // the whole file into the same limit.
-              const prefixFile = looksTruncated
-                ? salvagePartialFile(call.function.arguments)
-                : null;
+              // Writes only. Found by review: an edit_file whose replacement
+              // arrived as `content` (an accepted alias for new_text) matched
+              // the file-prefix shape, and a cut-off EDIT overwrote the whole
+              // file with the partial snippet, reported as "RECOVERED".
+              const prefixFile =
+                looksTruncated &&
+                /^(write_file|write_files|create_file)$/.test(call.function.name)
+                  ? salvagePartialFile(call.function.arguments)
+                  : null;
 
               if (salvaged && salvagedCount > 0) {
                 const partial = await runTool(
@@ -5643,7 +5762,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
              * enough to refer back to.
              */
             if (result.image && target.model.vision === "native") {
-              for (const message of transcript) {
+              for (const message of [...transcript, ...deferredToolImages]) {
                 if (
                   message.role === "user" &&
                   Array.isArray(message.content) &&
@@ -5662,7 +5781,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 }
               }
 
-              transcript.push({
+              deferredToolImages.push({
                 role: "user",
                 content: [
                   {
@@ -5741,6 +5860,32 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             }
             if (runHalted) break;
           }
+
+          /*
+           * Every call gets a result. Found by review: a halt (stall
+           * tracker, loop breaker) or Stop part-way through a batched round
+           * left later calls with no tool message; the saved transcript
+           * then had orphaned tool_calls and every Resume was a 400 —
+           * "tool_calls must be followed by tool messages" — for good.
+           */
+          {
+            const answered = new Set(
+              transcript
+                .filter((m) => m.role === "tool")
+                .map((m) => (m as { tool_call_id?: string }).tool_call_id)
+            );
+            for (const call of calls) {
+              if (answered.has(call.id)) continue;
+              transcript.push({
+                role: "tool",
+                tool_call_id: call.id,
+                content: stopped()
+                  ? "Not run — the user pressed Stop before this call ran."
+                  : "Not run — the run was halted before this call ran.",
+              });
+            }
+          }
+          transcript.push(...deferredToolImages);
 
           // The next round must see the workspace as it is now, not as it was
           // before these tools ran.
@@ -5949,7 +6094,12 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           hitOutputCeiling ||
           stoppedByBudget ||
           Boolean(stoppedPrematurely) ||
-          connectionCutsExhausted;
+          connectionCutsExhausted ||
+          // Stop between rounds (a 429 backoff, an approval or ask_user
+          // wait) fell through to here and was saved complete, with the
+          // resume transcript thrown away. Every call it cut off now has a
+          // "not run" result, so the transcript is valid to resume from.
+          stopped();
         try {
           await upsertMessage(convId, title, {
             id: assistantMsgId,
@@ -6001,7 +6151,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             // drops it: it is the largest field in the record and resuming a
             // complete answer means nothing.
             resumeState: unfinished
-              ? { toolRounds, continuations, thinkNudges, messages: transcript }
+              ? { toolRounds, continuations, thinkNudges: savedThinkNudges(), messages: transcript }
               : null,
           });
           persisted = true;

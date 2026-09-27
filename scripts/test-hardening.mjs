@@ -210,8 +210,9 @@ console.log("\n7. Resume state is not rewritten every 2.5 seconds");
  */
 check(
   "it is written once per tool round, not per checkpoint",
-  /toolRounds > lastResumeRound/.test(route),
-  "a megabyte of JSON every 2.5s costs more than it protects"
+  /roundsNow > lastResumeRound \? transcript\.slice\(\) : null/.test(route) &&
+    /toolCallsAnswered\(snapshot\)/.test(route),
+  "a megabyte of JSON every 2.5s costs more than it protects — and only a snapshot with every tool call answered"
 );
 
 const KEEP = "hardkeep";
