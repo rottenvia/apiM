@@ -231,8 +231,9 @@ check(
 );
 check(
   "reasoning is flushed before a plan or tool event is rendered",
-  /evt\.type !== "reasoning" && evt\.type !== "content"\) flush\(\)/.test(page),
-  "otherwise the action appears while the reasoning before it is still buffered"
+  /if \(!PACE_THROUGH_EVENTS\.has\(evt\.type\)\) await drain\(\);/.test(page) &&
+    !/const PACE_THROUGH_EVENTS[^;]*"(tool_start|tool_result|plan|done|error)"/.test(page),
+  "otherwise the action appears while the reasoning before it is still buffered — the reader waits for the drain"
 );
 check(
   "the server normalizes reasoning fields and reports a missing round",
