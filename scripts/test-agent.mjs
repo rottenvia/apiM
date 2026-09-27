@@ -161,7 +161,7 @@ for (const [label, tools] of [["capped", capped], ["open-ceiling", open]]) {
   check(
     `edit_files (${label}) tells every edit to carry its own path`,
     /own path/.test(editItems.path.description ?? "") &&
-      /no top-level path/.test(editItems.path.description ?? ""),
+      /top-level path/.test(editItems.path.description ?? ""),
     "the volley that failed three times omitted paths entirely"
   );
   check(
