@@ -2263,6 +2263,8 @@ export default function Home() {
                     ? "Used the thinking budget — answering now, without another think"
                     : evt.reason === "output_limit"
                     ? `Answer was longer than one response allows — continuing (${evt.n}/${evt.of})`
+                    : evt.reason === "code_draft"
+                    ? "It was writing the whole program in its head — stopped the think, writing the draft to files now"
                     : evt.reason === "unverified_claim"
                     ? "That reply claimed work that did not run — it is redoing it for real"
                     : `The model stopped mid-task — continuing from where it left off (${evt.n}/${evt.of})`

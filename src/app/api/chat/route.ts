@@ -157,6 +157,10 @@ import {
   CODE_DRAFT_LINES,
   draftedCodeLines,
   codeDraftNudgeText,
+  DRAFT_CUTOVER_LINES,
+  MAX_DRAFT_CUTOVERS,
+  draftCarry,
+  draftCutoverText,
   CAP_EXTENSION_ROUNDS,
   unchangedReadText,
   isReadTool,
@@ -2107,6 +2111,15 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           (resumed?.thinkNudges ?? 0) > 0 ||
           /do not think more/i.test(resumeNote ?? "");
         /**
+         * Live thinks cut short because they were drafting a whole program
+         * in thought (see DRAFT_CUTOVER_LINES), and whether the round after
+         * one thinks at low effort — its job is writing the carried draft
+         * out, not designing it again. One round only, unlike
+         * forceNoThinking, which holds for the rest of the run.
+         */
+        let draftCutovers = 0;
+        let lowEffortNext = false;
+        /**
          * Times we auto-continued a mid-task stop that was not an output
          * ceiling. Separate from MAX_CONTINUATIONS, and not carried across
          * Resume: an explicit continue is the user asking us to try again.
@@ -2432,6 +2445,11 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           // stripped the tools. A stop on such a round is harness-caused.
           let roundRanWithoutTools = false;
           let roundReasoning = "";
+          /** This round's think was stopped mid-draft; see draftCutovers. */
+          let draftCutover = false;
+          let draftLinesAtCut = 0;
+          let draftCheckedAt = 0;
+          let roundUsageSeen = false;
           const roundDeltaFields = new Set<string>();
           /** "stop" if the model finished, "length" if it ran out of room. */
           let roundFinishReason = "";
@@ -2609,7 +2627,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             dsRequestBody,
             target.thinkingStyle,
             thinkingEnabled && !forceNoThinking,
-            forceNoThinking ? "none" : resolvedEffort,
+            forceNoThinking ? "none" : lowEffortNext ? "low" : resolvedEffort,
             // Mandatory-reasoning endpoints 400 on the disable (the budget
             // shove and prose continuations kept dying on the fp4 pin), so
             // the off signal clamps to minimal effort there instead.
@@ -3457,6 +3475,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               }
 
               if (chunk.usage) {
+                roundUsageSeen = true;
                 usage = chunk.usage;
                 const u = chunk.usage as Record<string, number>;
                 totalUsage.prompt_tokens += u.prompt_tokens ?? 0;
@@ -3552,6 +3571,28 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 markUpstream();
                 send({ type: "reasoning", delta: reasoningDelta.text });
                 void checkpoint();
+                /*
+                 * A think drafting a whole program before any action: stop
+                 * it here and hand the draft back (see draftCarry). Counted
+                 * every ~1.5k chars, not per delta — a 50k think arrives in
+                 * thousands of deltas. Only while the round has neither
+                 * spoken nor called a tool, so nothing half-sent is lost.
+                 */
+                if (
+                  workspaceEnabled &&
+                  draftCutovers < MAX_DRAFT_CUTOVERS &&
+                  roundReasoning.length - draftCheckedAt >= 1_500 &&
+                  !roundContent &&
+                  toolAcc.result().length === 0
+                ) {
+                  draftCheckedAt = roundReasoning.length;
+                  const lines = draftedCodeLines(roundReasoning);
+                  if (lines >= DRAFT_CUTOVER_LINES) {
+                    draftCutover = true;
+                    draftLinesAtCut = lines;
+                    break;
+                  }
+                }
               }
               if (delta.tool_calls) {
                 markUpstream();
@@ -3574,6 +3615,10 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 send({ type: "content", delta: emit });
                 void checkpoint();
               }
+            }
+            if (draftCutover) {
+              await reader.cancel().catch(() => {});
+              break;
             }
           }
           } catch (streamErr) {
@@ -3715,6 +3760,55 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             });
             close();
             return;
+          }
+
+          // The low-effort round after a cut-over has now run.
+          lowEffortNext = false;
+
+          if (draftCutover) {
+            draftCutovers += 1;
+            /*
+             * A cancelled stream never gets its usage frame, so the budget
+             * would not see this think at all. Charge an estimate (4 chars
+             * a token, input all at the miss rate) — over rather than under,
+             * the right side to err on for a spending limit.
+             */
+            if (!roundUsageSeen) {
+              const est = {
+                prompt_tokens: Math.ceil(inputChars / 4),
+                completion_tokens: Math.ceil(roundReasoning.length / 4),
+                total_tokens: 0,
+                completion_tokens_details: {
+                  reasoning_tokens: Math.ceil(roundReasoning.length / 4),
+                },
+              };
+              est.total_tokens = est.prompt_tokens + est.completion_tokens;
+              totalUsage.prompt_tokens += est.prompt_tokens;
+              totalUsage.completion_tokens += est.completion_tokens;
+              totalUsage.total_tokens += est.total_tokens;
+              totalUsage.prompt_cache_miss_tokens += est.prompt_tokens;
+              totalUsage.completion_tokens_details.reasoning_tokens +=
+                est.completion_tokens;
+              lastRoundCost = chargeRound(budget, est, model, undefined, customs);
+            }
+            transcript.push({
+              role: "assistant",
+              content: draftCarry(roundReasoning),
+              reasoning_content: null,
+            });
+            transcript.push({
+              role: "user",
+              content: draftCutoverText(draftLinesAtCut),
+            });
+            lowEffortNext = true;
+            send({
+              type: "continuing",
+              reason: "code_draft",
+              n: draftCutovers,
+              of: MAX_DRAFT_CUTOVERS,
+            });
+            await checkpoint(true);
+            continue;
           }
 
           if (thinkingEnabled && !roundReasoning) {
