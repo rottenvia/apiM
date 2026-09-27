@@ -231,6 +231,35 @@ async function main() {
     check("and the model is told where it went", told);
   }
 
+  // ------------------------------------------------------------------
+  console.log(bold("\n6. Other websites cannot drive the local API"));
+  {
+    const base = `http://127.0.0.1:${appPort}`;
+    const body = JSON.stringify({ message: "x", model: "deepseek-v4-flash", deepseekApiKey: "k" });
+    const post = (headers, b = body) =>
+      fetch(`${base}/api/chat`, { method: "POST", headers, body: b }).then((r) => r.status);
+    // The measured exploit: a no-cors text/plain POST from any page.
+    check("a cross-site request is refused",
+      (await post({ "Content-Type": "application/json", "Sec-Fetch-Site": "cross-site", Origin: "https://evil.example" })) === 403);
+    check("so is another app on a different localhost port (same-site)",
+      (await post({ "Content-Type": "application/json", "Sec-Fetch-Site": "same-site", Origin: "http://localhost:5173" })) === 403);
+    check("an Origin that is not this app is refused even without Sec-Fetch-Site",
+      (await post({ "Content-Type": "application/json", Origin: "https://evil.example" })) === 403);
+    check("a text/plain body is refused",
+      (await post({ "Content-Type": "text/plain" })) === 403);
+    // fetch() will not send a custom Host header; a raw request will.
+    const { request } = await import("node:http");
+    const rebound = await new Promise((resolve) => {
+      const r = request({ host: "127.0.0.1", port: appPort, path: "/api/conversations", headers: { Host: "evil.example:3000" } },
+        (res) => { res.resume(); resolve(res.statusCode); });
+      r.on("error", () => resolve(0));
+      r.end();
+    });
+    check("a rebound host name is refused (DNS rebinding)", rebound === 403, `status ${rebound}`);
+    check("the app's own requests still work",
+      (await fetch(`${base}/api/conversations`, { headers: { "Sec-Fetch-Site": "same-origin" } }).then((r) => r.status)) === 200);
+  }
+
   cleanup();
   for (const s of ["draft_cutover", "drop_mid_think", "drop_after_cutover", "length_cut", "pathless_edit"]) {
     await rm(path.join(DATA_ROOT, "workspaces", `loop-${s}`), { recursive: true, force: true });

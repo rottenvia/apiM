@@ -31,8 +31,108 @@ function isPublic(pathname: string): boolean {
   );
 }
 
+/**
+ * Hosts a browser may reach the API through without a password.
+ *
+ * DNS rebinding: a page on evil.example re-points its own name at
+ * 127.0.0.1, and to the browser every request it then makes is same-origin
+ * — Origin and Host both say evil.example. Only the Host NAME gives it
+ * away. An IP literal cannot be rebound, and localhost is loopback, so
+ * those pass; any other name needs APIM_ALLOWED_HOSTS (or a password,
+ * whose cookie a rebound origin never has).
+ */
+function hostAllowed(host: string | null): boolean {
+  if (!host) return true; // HTTP/1.0 or a non-browser client: nothing to rebind
+  const name = host
+    .replace(/:\d+$/, "")
+    .replace(/^\[(.*)\]$/, "$1")
+    .toLowerCase();
+  if (name === "localhost" || name.endsWith(".localhost")) return true;
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(name)) return true;
+  if (name.includes(":")) return true; // IPv6 literal
+  const extra = (process.env.APIM_ALLOWED_HOSTS ?? "")
+    .split(",")
+    .map((h) => h.trim().toLowerCase())
+    .filter(Boolean);
+  return extra.includes(name);
+}
+
+/**
+ * Is this API request from some OTHER site?
+ *
+ * Measured by review: with no check, any web page the user visits could
+ * POST text/plain (no CORS preflight) to localhost:3000/api/chat with
+ * autoRunCommands and a model base URL it controls, and have the agent run
+ * a command on the user's machine. Browsers label every request with
+ * Sec-Fetch-Site, and send Origin on every cross-origin POST (no-cors
+ * included) — "same-site" is refused too, because another app on a
+ * different localhost port is the same site.
+ */
+function crossSite(req: NextRequest): string | null {
+  // A top-level GET navigation cannot read the response, and the GitHub
+  // OAuth callback arrives as one (a redirect from github.com is
+  // cross-site). Everything a page script could do stays refused.
+  if (
+    req.method === "GET" &&
+    req.headers.get("sec-fetch-mode") === "navigate" &&
+    req.headers.get("sec-fetch-dest") === "document"
+  ) {
+    return null;
+  }
+  const site = req.headers.get("sec-fetch-site");
+  if (site && site !== "same-origin" && site !== "none") {
+    return `cross-site request (${site})`;
+  }
+  const origin = req.headers.get("origin");
+  if (origin && origin !== "null") {
+    try {
+      if (new URL(origin).host !== req.headers.get("host")) {
+        return "cross-origin request";
+      }
+    } catch {
+      return "malformed Origin";
+    }
+  } else if (origin === "null") {
+    return "opaque origin";
+  }
+  // A state-changing call must be JSON (or an upload): a plain form or a
+  // text/plain beacon from anywhere is refused even from an old browser.
+  if (req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS") {
+    const type = (req.headers.get("content-type") ?? "").toLowerCase();
+    if (
+      type &&
+      !type.startsWith("application/json") &&
+      !type.startsWith("multipart/form-data") &&
+      !type.startsWith("application/octet-stream")
+    ) {
+      return `unexpected content type ${type.split(";")[0]}`;
+    }
+  }
+  return null;
+}
+
 export async function proxy(req: NextRequest) {
   const { enabled, required, secret } = authConfig();
+
+  if (req.nextUrl.pathname.startsWith("/api/")) {
+    const why = crossSite(req);
+    if (why) {
+      return NextResponse.json(
+        { error: `Refused: ${why}. The API only answers this app's own pages.` },
+        { status: 403 }
+      );
+    }
+    if (!(enabled && secret) && !hostAllowed(req.headers.get("host"))) {
+      return NextResponse.json(
+        {
+          error:
+            "Refused: unknown host name. Open the app at localhost or its IP, " +
+            "or list the name in APIM_ALLOWED_HOSTS.",
+        },
+        { status: 403 }
+      );
+    }
+  }
 
   // Misconfiguration guard: if a deployment demands auth but no password is
   // set, refuse every request rather than serving the app unprotected. A hard
