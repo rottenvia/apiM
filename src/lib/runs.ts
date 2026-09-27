@@ -27,6 +27,8 @@ interface ActiveRun {
   controller: AbortController;
   conversationId: string;
   startedAt: number;
+  /** Last time the run showed life: a chunk from the model, a tool result. */
+  lastActivity: number;
 }
 
 const runs = new Map<string, ActiveRun>();
@@ -39,7 +41,25 @@ const runs = new Map<string, ActiveRun>();
  * Without it a wedged run would hold a controller for the life of the
  * process.
  */
-export const MAX_RUN_MS = 30 * 60 * 1000;
+export const MAX_RUN_MS = 8 * 60 * 60 * 1000;
+
+/**
+ * How long a run may sit with NO activity before the safety net stops it.
+ *
+ * This used to be the only limit, measured from the START: every run older
+ * than 30 minutes was aborted the next time anything called sweep() — which
+ * happens whenever any new message starts or a tab asks what is running. On
+ * a 16 tok/s endpoint a real task takes 40+ minutes, so starting a message
+ * in another chat silently killed a long run mid-work. Wedged means idle,
+ * not old: the run is touched on every model chunk and tool result.
+ */
+export const MAX_IDLE_MS = 30 * 60 * 1000;
+
+/** Record that a run is alive (a chunk arrived, a tool finished). */
+export function touchRun(messageId: string): void {
+  const run = runs.get(messageId);
+  if (run) run.lastActivity = Date.now();
+}
 
 /** Registers a run and returns the signal the work should watch. */
 export function beginRun(
@@ -54,6 +74,7 @@ export function beginRun(
     controller,
     conversationId,
     startedAt: Date.now(),
+    lastActivity: Date.now(),
   });
 
   sweep();
@@ -124,7 +145,7 @@ export function isRunning(messageId: string): boolean {
 function sweep(): void {
   const now = Date.now();
   for (const [id, run] of runs) {
-    if (now - run.startedAt > MAX_RUN_MS) {
+    if (now - run.lastActivity > MAX_IDLE_MS || now - run.startedAt > MAX_RUN_MS) {
       run.controller.abort();
       runs.delete(id);
     }

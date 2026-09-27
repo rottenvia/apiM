@@ -844,8 +844,31 @@ check(
 );
 check(
   "there is a ceiling so a wedged run cannot live forever",
-  runs.MAX_RUN_MS > 0 && runs.MAX_RUN_MS <= 60 * 60 * 1000,
-  `${runs.MAX_RUN_MS / 60000} minutes`
+  runs.MAX_IDLE_MS > 0 && runs.MAX_IDLE_MS <= 60 * 60 * 1000 && runs.MAX_RUN_MS > runs.MAX_IDLE_MS,
+  `${runs.MAX_IDLE_MS / 60000} idle minutes, ${runs.MAX_RUN_MS / 3600000}h absolute`
+);
+{
+  // A long ACTIVE run must survive a sweep; an idle one must not.
+  const realNow = Date.now;
+  try {
+    let t = realNow();
+    Date.now = () => t;
+    const busy = runs.beginRun("hard-busy", "hard-conv-a");
+    const idle = runs.beginRun("hard-idle", "hard-conv-b");
+    for (let m = 0; m < 40; m += 5) { t += 5 * 60 * 1000; runs.touchRun("hard-busy"); }
+    runs.activeRuns("hard-conv-x"); // any caller sweeps
+    check("a 40-minute run that is still working survives a sweep",
+      !busy.aborted && runs.isRunning("hard-busy"),
+      "it was aborted at 30 minutes from its START whenever any new message began");
+    check("a run idle for 30+ minutes is stopped by the safety net", idle.aborted);
+    runs.stopRun("hard-busy");
+  } finally {
+    Date.now = realNow;
+  }
+}
+check(
+  "the route keeps its run alive on every chunk and tool result",
+  (routeSrc.match(/touchRun\(assistantMsgId\)/g) ?? []).length >= 2
 );
 check(
   "Stop tells the server rather than just closing the stream",
