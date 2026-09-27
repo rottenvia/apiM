@@ -973,9 +973,10 @@ check(
   /is not a valid regular expression/.test(toolsSrc3)
 );
 check(
-  "the pattern is passed to the file matcher too",
-  /regex: useRegex,/.test(toolsSrc3),
-  "otherwise preview and the real thing disagree about which files are in scope"
+  "every file in scope is scanned whole, not the capped search hit list",
+  /const globRe = globPattern\(glob\);/.test(toolsSrc3) &&
+    /\(f\) => !globRe \|\| globRe\.test\(f\.path\)/.test(toolsSrc3),
+  "a file with 70 matches used to exhaust the 60-hit cap and silently skip the rest"
 );
 check(
   "a fresh regex per file, because /g is stateful",
@@ -984,7 +985,7 @@ check(
 );
 check(
   "literal replacement still works unchanged",
-  /count = file\.content\.split\(find\)\.length - 1;/.test(toolsSrc3)
+  /count = file\.content\.split\(needle\)\.length - 1;/.test(toolsSrc3)
 );
 
 // A security review found these all passing the as-written check.

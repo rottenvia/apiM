@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
 import crossSpawn from "cross-spawn";
 import path from "node:path";
-import { promises as fs, statSync } from "node:fs";
+import fsSync, { promises as fs, statSync } from "node:fs";
+import os from "node:os";
 import { workspaceDirectory } from "@/lib/workspace";
 import { checkBrowserPolicy } from "@/lib/browser-policy";
 
@@ -250,8 +251,105 @@ const READ_ONLY_COMMANDS = new Map<string, Set<string>>([
   ["cargo", new Set(["--version", "tree"])],
 ]);
 
-/** Flags that mean "print information and exit", whatever the program. */
-const INFO_FLAGS = new Set(["--version", "-v", "--help", "-h", "version"]);
+/**
+ * Flags that mean "print information and exit", whatever the program.
+ *
+ * Only real flags. The bare word `version` used to be here, which made
+ * `python3 version` and `node version` approval-free — and both run a
+ * workspace FILE called "version" (measured: an audit script named
+ * `version` printed "ARBITRARY CODE RAN" with no prompt). A word is a
+ * filename to an interpreter; only a leading dash makes it an option.
+ */
+const INFO_FLAGS = new Set(["--version", "-v", "-V", "--help", "-h"]);
+
+/**
+ * Programs that execute whatever file they are handed.
+ *
+ * Never approval-free except for an info flag: any positional argument to
+ * one of these is a script to run, however harmless its name looks.
+ */
+const INTERPRETERS = new Set([
+  "python",
+  "python3",
+  "node",
+  "tsx",
+  "deno",
+  "bun",
+  "ruby",
+  "php",
+  "java",
+  "dotnet",
+  "npx",
+]);
+
+/*
+ * git: which global options may come before the subcommand, and which
+ * subcommand arguments turn a read into a write or an escape.
+ *
+ * Measured: `git diff --no-index /etc/passwd /dev/null` was approval-free
+ * and printed any file on the machine — and `git diff <outside path>` does
+ * the same implicitly, because git falls back to --no-index for a path
+ * outside the repository. `git -c`/`--exec-path=` before the subcommand
+ * reconfigure what git runs; `git branch -D`/`git remote add` write.
+ */
+const GIT_SAFE_GLOBAL = new Set([
+  "--no-pager",
+  "-P",
+  "--no-optional-locks",
+  "--literal-pathspecs",
+]);
+const GIT_FORBIDDEN_ARGS =
+  /^(--no-index|--ext-diff|--textconv|--exec-path|--upload-pack|--receive-pack|--config-env|-O.*|--orderfile.*|--output.*|--open-files-in-pager.*)$|^--(exec-path|upload-pack|config-env)=/;
+const GIT_BRANCH_WRITES =
+  /^(-d|-D|-m|-M|-c|-C|-f|-u|--delete|--move|--copy|--force|--set-upstream-to.*|--unset-upstream|--edit-description|--track.*|--no-track|--create-reflog)$/;
+
+/** A path argument that points outside the workspace, or at another drive. */
+function escapesWorkspace(arg: string): boolean {
+  const value = arg.includes("=") && arg.startsWith("-") ? arg.slice(arg.indexOf("=") + 1) : arg;
+  if (!value) return false;
+  if (value.startsWith("~")) return true;
+  if (path.isAbsolute(value) || /^[a-zA-Z]:/.test(value) || value.startsWith("\\\\")) {
+    return true;
+  }
+  // A revision spec like HEAD~1:src/a.ts is resolved inside the repository,
+  // but `..` in a plain path climbs out of it.
+  return value.replace(/\\/g, "/").split("/").some((seg) => seg === "..");
+}
+
+/** Extra rules for git, on top of the generic ones below. */
+function gitArgsAreSafe(args: string[]): boolean {
+  const subAt = args.findIndex((a) => !a.startsWith("-"));
+  if (subAt === -1) return false;
+  // Global options before the subcommand: only the harmless few.
+  for (const a of args.slice(0, subAt)) {
+    if (!GIT_SAFE_GLOBAL.has(a)) return false;
+  }
+  const sub = args[subAt];
+  const rest = args.slice(subAt + 1);
+  for (const a of rest) {
+    if (GIT_FORBIDDEN_ARGS.test(a)) return false;
+    // Split on "/", so a revision range like `main..HEAD` is one harmless
+    // segment; only a whole `..` segment or an absolute path escapes.
+    if (escapesWorkspace(a)) return false;
+  }
+  if (sub === "branch") {
+    // A bare name creates a branch; only listing is a read. A positional is
+    // allowed only as the value of a listing option (`--contains abc`).
+    if (rest.some((a) => GIT_BRANCH_WRITES.test(a))) return false;
+    const listing = /^(-l|--list|--contains|--no-contains|--merged|--no-merged|--points-at)$/;
+    if (rest.some((a) => !a.startsWith("-")) && !rest.some((a) => listing.test(a))) {
+      return false;
+    }
+  }
+  if (sub === "remote") {
+    // `remote show`/`update`/`prune` go to the network; `add`/`set-url`
+    // write. Listing and get-url only.
+    if (rest.length === 0) return true;
+    if (rest.every((a) => a === "-v" || a === "--verbose")) return true;
+    return rest[0] === "get-url" && rest.length <= 3;
+  }
+  return true;
+}
 
 /** Programs whose entire job is to report, never to change anything. */
 const ALWAYS_READ_ONLY = new Set(["which", "where"]);
@@ -286,6 +384,9 @@ export function isReadOnlyCommand(command: string, args: string[]): boolean {
     // timeout. Not dangerous, but not useful either — let it ask.
     return false;
   }
+  // Anything else handed to an interpreter is a program to run.
+  if (INTERPRETERS.has(name)) return false;
+  if (name === "git" && !gitArgsAreSafe(args)) return false;
 
   const subcommands = READ_ONLY_COMMANDS.get(name);
   if (!subcommands) return false;
@@ -588,19 +689,82 @@ export function validateCommand(
   return { ok: true, command: name, args: clean };
 }
 
+/**
+ * Config overrides that stop a repository from choosing what git executes.
+ *
+ * Measured: a workspace `.git/config` with `core.fsmonitor = touch PWNED`
+ * made an approval-free `git status` run that command. A repository's own
+ * config (and, with HOME pointed at the workspace, its `.gitconfig`) can
+ * name programs for fsmonitor, hooks, external diff, the pager and ssh —
+ * `-c` on the command line outranks every one of them.
+ *
+ * Hooks point at a directory created empty for this process: an empty
+ * string is not a portable "no hooks", and /dev/null does not exist on
+ * Windows. Nothing ever writes into it.
+ */
+let gitSandbox: { hooks: string; config: string } | null = null;
+function gitSandboxPaths(): { hooks: string; config: string } {
+  if (gitSandbox && fsSync.existsSync(gitSandbox.hooks)) return gitSandbox;
+  const base = fsSync.mkdtempSync(path.join(os.tmpdir(), "apim-git-"));
+  const hooks = path.join(base, "no-hooks");
+  const config = path.join(base, "empty.gitconfig");
+  fsSync.mkdirSync(hooks, { recursive: true });
+  fsSync.writeFileSync(config, "");
+  gitSandbox = { hooks, config };
+  return gitSandbox;
+}
+
+export function gitHardeningConfig(): string[] {
+  const { hooks } = gitSandboxPaths();
+  return [
+    "-c", "core.fsmonitor=false",
+    "-c", `core.hooksPath=${hooks}`,
+    // Empty diff.external makes git refuse to run one at all; the diff
+    // commands also get --no-ext-diff below so they still produce output.
+    "-c", "diff.external=",
+    "-c", "core.pager=cat",
+    "-c", "core.sshCommand=",
+    // A directory the agent filled with HEAD/objects/refs/config must not
+    // be picked up as a bare repository whose config git then obeys.
+    "-c", "safe.bareRepository=explicit",
+  ];
+}
+
+/** Environment additions for a hardened git: no system or HOME config. */
+export function gitHardeningEnv(): Record<string, string> {
+  return {
+    GIT_CONFIG_NOSYSTEM: "1",
+    // HOME is the workspace for commands, so its .gitconfig would otherwise
+    // be git's "global" config — written by the agent, obeyed by git.
+    GIT_CONFIG_GLOBAL: gitSandboxPaths().config,
+    GIT_TERMINAL_PROMPT: "0",
+  };
+}
+
+/**
+ * The same git arguments with the overrides in front, and external diff /
+ * textconv switched off for the subcommands that would run them.
+ */
+export function hardenGitArgs(args: string[]): string[] {
+  const out = [...gitHardeningConfig(), ...args];
+  const offset = out.length - args.length;
+  const subAt = args.findIndex((a) => !a.startsWith("-"));
+  if (subAt === -1) return out;
+  const sub = args[subAt];
+  const extra =
+    sub === "diff" || sub === "log" || sub === "show"
+      ? ["--no-ext-diff", "--no-textconv"]
+      : sub === "blame"
+        ? ["--no-textconv"]
+        : [];
+  out.splice(offset + subAt + 1, 0, ...extra);
+  return out;
+}
+
 /** A single line summarising what will run, for the approval prompt. */
 export function describeCommand(command: string, args: string[]): string {
   const quoted = args.map((a) => (/\s/.test(a) ? JSON.stringify(a) : a));
   return [command, ...quoted].join(" ");
-}
-
-function clip(text: string): { text: string; truncated: boolean } {
-  if (text.length <= MAX_OUTPUT_CHARS) return { text, truncated: false };
-  return {
-    // Keep the end: errors and stack traces are almost always last.
-    text: text.slice(text.length - MAX_OUTPUT_CHARS),
-    truncated: true,
-  };
 }
 
 /**
@@ -900,24 +1064,38 @@ export async function runCommand(
 
   const started = Date.now();
 
+  /*
+   * A read-only git runs without approval, so the repository must not be
+   * able to decide what that git executes. See hardenGitArgs.
+   */
+  const hardenGit = check.command === "git" && isReadOnlyCommand("git", check.args);
+  const spawnArgs = hardenGit ? hardenGitArgs(check.args) : check.args;
+  const env = hardenGit
+    ? ({ ...childEnv(cwd, venvPath), ...gitHardeningEnv() } as NodeJS.ProcessEnv)
+    : childEnv(cwd, venvPath);
+
   return new Promise<RunResult>((resolve) => {
     // The env is cast because Next augments ProcessEnv with required keys,
     // and passing a deliberately minimal environment is the point here.
     // shell stays false: cross-spawn handles .cmd by invoking cmd.exe itself
     // with escaped arguments, which is the safe form of what `shell: true`
     // would do unsafely.
-    const child = crossSpawn(resolved, check.args, {
+    const child = crossSpawn(resolved, spawnArgs, {
       cwd,
       shell: false,
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
-      env: childEnv(cwd, venvPath),
+      env,
+      // Its own process group on POSIX, so a timeout can kill the whole
+      // tree. Measured: a script that spawned a child survived the parent's
+      // SIGKILL and wrote a file 9s after the "timed out" result.
+      detached: process.platform !== "win32",
     });
 
     const limitMs = timeoutFor(check.command, check.args, timeoutMs);
 
-    let stdout = "";
-    let stderr = "";
+    const stdout = new OutputBuffer();
+    const stderr = new OutputBuffer();
     let timedOut = false;
     let settled = false;
     let spawnError: string | undefined;
@@ -928,8 +1106,8 @@ export async function runCommand(
       clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);
 
-      const out = clip(stdout);
-      const err = clip(stderr);
+      const out = stdout.render();
+      const err = stderr.render();
       resolve({
         command: check.command,
         args: check.args,
@@ -943,15 +1121,7 @@ export async function runCommand(
       });
     };
 
-    const kill = () => {
-      try {
-        // Negative pid would target a process group, but detached isn't set
-        // here; SIGKILL on the child is enough for an interpreter.
-        child.kill("SIGKILL");
-      } catch {
-        /* already gone */
-      }
-    };
+    const kill = () => killTree(child.pid, () => child.kill("SIGKILL"));
 
     const timer = setTimeout(() => {
       timedOut = true;
@@ -967,15 +1137,17 @@ export async function runCommand(
     };
     signal?.addEventListener("abort", onAbort, { once: true });
 
-    child.stdout?.on("data", (d) => {
-      // Cap in memory too: clipping only at the end would still let a runaway
-      // loop consume gigabytes first.
-      if (stdout.length < MAX_OUTPUT_CHARS * 2) stdout += d.toString();
-      else if (!timedOut) kill();
-    });
-    child.stderr?.on("data", (d) => {
-      if (stderr.length < MAX_OUTPUT_CHARS * 2) stderr += d.toString();
-    });
+    /*
+     * Bounded in memory, but never a reason to kill.
+     *
+     * Output past 40k chars used to SIGKILL the process — measured: a build
+     * that printed 3000 progress lines was killed before its last line, and
+     * the result read as a crash. stderr kept its BEGINNING, so the final
+     * error ("FINAL ERROR: the real cause") was the part thrown away. Both
+     * streams now keep a head and a rolling tail, and say what was dropped.
+     */
+    child.stdout?.on("data", (d) => stdout.push(d.toString()));
+    child.stderr?.on("data", (d) => stderr.push(d.toString()));
 
     child.on("error", (err) => {
       spawnError = err.message;
@@ -983,15 +1155,95 @@ export async function runCommand(
       // "Failed to start msbuild" when a full path was resolved is precisely
       // how this bug hid: the receipt showed one thing and the spawn did
       // another, and nothing in the output admitted the difference.
-      stderr += `\nFailed to start ${resolved}: ${err.message}`;
+      stderr.push(`\nFailed to start ${resolved}: ${err.message}`);
       if (resolved !== command) {
-        stderr += `\n(requested: ${command})`;
+        stderr.push(`\n(requested: ${command})`);
       }
       finish(null);
     });
 
     child.on("close", (code) => finish(code));
   });
+}
+
+/** Characters kept from the start of a long stream: the command's banner. */
+const HEAD_CHARS = 2_000;
+
+/**
+ * A stream's head plus a rolling tail, with an honest count of the middle.
+ *
+ * The end of the output is what matters (the error, the summary), but the
+ * first lines often say what was running; both survive, the middle is
+ * counted rather than silently lost.
+ */
+class OutputBuffer {
+  private head = "";
+  private tail = "";
+  private dropped = 0;
+
+  push(chunk: string): void {
+    if (this.head.length < HEAD_CHARS) {
+      const room = HEAD_CHARS - this.head.length;
+      this.head += chunk.slice(0, room);
+      chunk = chunk.slice(room);
+      if (!chunk) return;
+    }
+    this.tail += chunk;
+    // Trim in bulk rather than per chunk, so a chatty process does not pay
+    // for a copy on every write.
+    const keep = MAX_OUTPUT_CHARS - HEAD_CHARS;
+    if (this.tail.length > keep * 2) {
+      this.dropped += this.tail.length - keep;
+      this.tail = this.tail.slice(this.tail.length - keep);
+    }
+  }
+
+  render(): { text: string; truncated: boolean } {
+    const keep = MAX_OUTPUT_CHARS - HEAD_CHARS;
+    let tail = this.tail;
+    let dropped = this.dropped;
+    if (tail.length > keep) {
+      dropped += tail.length - keep;
+      tail = tail.slice(tail.length - keep);
+    }
+    if (dropped === 0) return { text: this.head + tail, truncated: false };
+    return {
+      text:
+        `${this.head}\n… [${dropped.toLocaleString()} chars of output omitted] …\n` +
+        tail,
+      truncated: true,
+    };
+  }
+}
+
+/**
+ * Kill a process and everything it started.
+ *
+ * POSIX: the child leads its own group (spawned detached), so a negative
+ * pid reaches grandchildren too. Windows has no groups; taskkill /T walks
+ * the tree, the same as processes.ts does for start_process.
+ */
+function killTree(pid: number | undefined, fallback: () => void): void {
+  try {
+    if (!pid) {
+      fallback();
+      return;
+    }
+    if (process.platform === "win32") {
+      spawn("taskkill", ["/pid", String(pid), "/T", "/F"], {
+        windowsHide: true,
+        stdio: "ignore",
+      }).on("error", () => fallback());
+      return;
+    }
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {
+      fallback();
+    }
+  } catch {
+    /* already gone */
+  }
 }
 
 /** Formats a result for the model. */
@@ -1030,7 +1282,9 @@ export function formatRunResult(result: RunResult): string {
     parts.push("\n(no output)");
   }
 
-  if (result.truncated) parts.push("\n(output was long; only the end is shown)");
+  if (result.truncated) {
+    parts.push("\n(output was long; the start and the end are shown, the middle is omitted)");
+  }
 
   return parts.join("\n");
 }

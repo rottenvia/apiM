@@ -1,7 +1,12 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { listFiles, resolveInside, workspaceDirectory } from "@/lib/workspace";
+import {
+  isProtectedPath,
+  listFiles,
+  resolveInside,
+  workspaceDirectory,
+} from "@/lib/workspace";
 
 /**
  * Point-in-time copies of a whole workspace.
@@ -288,6 +293,15 @@ export async function restoreSnapshot(
   let restored = 0;
   for (const file of manifest.files) {
     try {
+      /*
+       * The manifest is data on disk, so it is validated like input. A
+       * `hash` of "../../../etc/passwd" was joined straight onto the object
+       * directory, and a path into .git or .history would be written like
+       * any other file. Hashes are sha256 hex, exactly as createSnapshot
+       * writes them.
+       */
+      if (file.hash !== undefined && !/^[0-9a-f]{64}$/.test(file.hash)) continue;
+      if (typeof file.path !== "string" || isProtectedPath(file.path)) continue;
       // Content-addressed when the snapshot has a hash; the old flattened
       // copy otherwise. Both shapes have to work, or upgrading the app would
       // quietly break every snapshot taken before it.
@@ -298,7 +312,17 @@ export async function restoreSnapshot(
       );
       const target = resolveInside(workspaceId, file.path);
       await fs.mkdir(path.dirname(target), { recursive: true });
-      await fs.writeFile(target, data);
+      // Temp + rename: an interrupted restore must not leave half a file,
+      // and a rename replaces a symlink at the target instead of writing
+      // through it.
+      const tmp = `${target}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+      try {
+        await fs.writeFile(tmp, data);
+        await fs.rename(tmp, target);
+      } catch (error) {
+        await fs.unlink(tmp).catch(() => {});
+        throw error;
+      }
       restored++;
     } catch {
       /* skip rather than abandon the rest */

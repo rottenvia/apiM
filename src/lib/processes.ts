@@ -53,6 +53,14 @@ export interface TrackedProcess {
   stoppedByUser: boolean;
   log: string;
   truncated: boolean;
+  /**
+   * Characters ever appended to `log`. Monotonic, unlike log.length, which
+   * stops growing once the log is capped — so a position taken from it
+   * stays meaningful after old output has been dropped.
+   */
+  totalChars?: number;
+  /** totalChars when the last wait_for_output returned; later waits match after it. */
+  waitCursor?: number;
   child: ChildProcess;
   /**
    * Decompiler jobs (Ghidra/ILSpy) are adopted into this map so they show in
@@ -91,6 +99,7 @@ function nextId(): string {
 }
 
 function append(proc: TrackedProcess, chunk: string): void {
+  proc.totalChars = (proc.totalChars ?? proc.log.length) + chunk.length;
   proc.log += chunk;
   if (proc.log.length > MAX_LOG_CHARS) {
     // Keep the tail: a server's useful output is the most recent error, not
@@ -229,7 +238,14 @@ export function killPidTree(pid: number): boolean {
 
 export function stopLeftoverById(id: string): boolean {
   if (id.startsWith("orphan-")) {
-    return killPidTree(Number(id.slice("orphan-".length)));
+    /*
+     * Only a pid that is on the leftover list right now. The id used to be
+     * trusted as-is, so `orphan-<any pid>` killed any process on the machine
+     * (measured: a `sleep 60` unrelated to apiM died by SIGKILL).
+     */
+    const listed = listLeftoverDecompilers().find((item) => item.id === id);
+    if (!listed) return false;
+    return killPidTree(listed.pid);
   }
   const proc = processes.get(id);
   if (!proc) return false;
@@ -280,6 +296,7 @@ export function adoptProcess(opts: {
     exitCode: null,
     stoppedByUser: false,
     log: "",
+    totalChars: 0,
     truncated: false,
     child: opts.child,
     kind: opts.kind ?? "user",
@@ -331,34 +348,42 @@ export interface WaitResult {
 export async function waitForOutput(
   id: string,
   pattern: string,
-  timeoutMs: number
+  timeoutMs: number,
+  /** When given, a process from another workspace is "not found". */
+  workspaceId?: string
 ): Promise<WaitResult | null> {
   const proc = processes.get(id);
   if (!proc) return null;
+  // Scoped like read_process and stop_process: one chat must not be able to
+  // wait on (and read the output of) another chat's process.
+  if (workspaceId !== undefined && proc.workspaceId !== workspaceId) return null;
 
   const limit = Math.min(Math.max(1000, timeoutMs), MAX_WAIT_MS);
   const started = Date.now();
 
   /*
-   * Search the whole log, not just what arrives from now on.
+   * Positions are counted in characters EVER written, not in log.length.
    *
-   * My first version recorded the log length at the start of the wait and
-   * only matched text after it, reasoning that a stale banner should not
-   * satisfy a fresh wait. Testing killed that: `start_process` deliberately
-   * pauses for a startup grace period before returning, and a fast server
-   * prints "Ready" during it. So by the time the agent could possibly call
-   * this, the line it is waiting for was already in the buffer — and the wait
-   * ran to its full timeout while the answer sat there.
+   * Measured: once a chatty server passed the 30k log cap, log.length stayed
+   * at 30000 forever, so "output since the wait began" (log.slice(from))
+   * was always empty — the wait reported "printed nothing" while the
+   * server printed thousands of lines.
    *
-   * That is the common case, not an edge case: the faster the process, the
-   * more reliably it broke.
-   *
-   * Matching the whole log makes an already-satisfied wait return instantly,
-   * which is correct — "wait until it says Ready" is satisfied by it having
-   * already said Ready. The output reported back is still only what is new,
-   * so the model is not re-shown text it has seen.
+   * What a wait may MATCH: the first wait on a process searches everything
+   * since start, because start_process pauses for a grace period and a fast
+   * server prints "Ready" during it (see git history for the version that
+   * timed out while the answer sat in the buffer). Every later wait matches
+   * only output produced after the previous wait returned — otherwise
+   * "wait for Compiled" after an edit is satisfied instantly by the
+   * Compiled line from the previous build.
    */
-  const from = proc.log.length;
+  const total = () => proc.totalChars ?? proc.log.length;
+  const since = (position: number): string => {
+    const logStart = total() - proc.log.length;
+    return proc.log.slice(Math.max(0, position - logStart));
+  };
+  const from = total();
+  const matchFrom = proc.waitCursor ?? 0;
 
   let regex: RegExp | null = null;
   if (pattern) {
@@ -382,35 +407,38 @@ export async function waitForOutput(
     return null;
   };
 
+  const done = (result: WaitResult): WaitResult => {
+    proc.waitCursor = total();
+    return result;
+  };
+
   // Polling rather than hooking the stream: `append` is called from several
   // places and a listener would have to be unregistered on every exit path.
   // 100ms is imperceptible next to a process start and costs nothing.
   for (;;) {
-    const sinceStart = proc.log.slice(from);
-    // Matched against everything the process has said; reported as only what
-    // is new. See the note above on why the whole log has to be searched.
-    const hit = matches(proc.log);
+    const sinceStart = since(from);
+    const hit = matches(since(matchFrom));
     if (hit) {
-      return {
+      return done({
         outcome: "matched",
         newOutput: sinceStart,
         matchedLine: hit,
         waitedMs: Date.now() - started,
-      };
+      });
     }
     if (!isRunning(proc)) {
-      return {
+      return done({
         outcome: "exited",
         newOutput: sinceStart,
         waitedMs: Date.now() - started,
-      };
+      });
     }
     if (Date.now() - started >= limit) {
-      return {
+      return done({
         outcome: "timeout",
         newOutput: sinceStart,
         waitedMs: Date.now() - started,
-      };
+      });
     }
     await new Promise((r) => setTimeout(r, 100));
   }
@@ -554,6 +582,7 @@ export async function startProcess(
     exitCode: null,
     stoppedByUser: false,
     log: "",
+    totalChars: 0,
     truncated: false,
     child,
     hidden: placement,

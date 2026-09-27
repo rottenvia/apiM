@@ -49,8 +49,10 @@ import {
   readImageAsDataUrl,
   readFileBytes,
   moveFile,
-  previousVersion,
+  previousVersionBytes,
   historyDepth,
+  withHistoryBatch,
+  MAX_HISTORY_VERSIONS,
   readFileWhole,
   searchFiles,
   writeFile,
@@ -2254,7 +2256,7 @@ async function workspaceTextsForInference(
   for (const f of files) {
     if (out.length >= 400) break;
     if (f.size > 1024 * 1024) continue;
-    if (/(^|\/)(node_modules|\.git|\.venv|venv|__pycache__|dist|build)\//.test(f.path)) continue;
+    if (/(^|\/)(node_modules|\.git|\.venv|venv|__pycache__)\/|^(dist|build)\//.test(f.path)) continue;
     try {
       const { content } = await readFileWhole(workspaceId, f.path);
       if (content.includes("\u0000")) continue;
@@ -2304,6 +2306,21 @@ export function normaliseEditEntry(
     for (const spelling of spellings) {
       const found = source[spelling];
       if (found === undefined || found === null) continue;
+      /*
+       * A NUMBER under an anchor alias is a line, not text. Measured:
+       * {from: 3, to: 5} became start_anchor "3" / end_anchor "5", which
+       * matched "y = 20" and "w = 45" — the edit landed on the wrong lines
+       * and reported success. `from`/`to` are aliases for both, so the
+       * value's type decides.
+       */
+      if (
+        (canonical === "start_anchor" || canonical === "end_anchor") &&
+        typeof found === "number"
+      ) {
+        const lineKey = canonical === "start_anchor" ? "start_line" : "end_line";
+        if (out[lineKey] === undefined) out[lineKey] = found;
+        break;
+      }
       // Numbers and booleans are coerced rather than refused: a model that
       // sends new_text as a number meant the digits.
       out[canonical] =
@@ -2510,6 +2527,16 @@ export async function runTool(
   args: Record<string, unknown>,
   context: ToolContext = {}
 ): Promise<ToolResult> {
+  // One undo-history entry per file per tool call; see withHistoryBatch.
+  return withHistoryBatch(() => runToolInner(workspaceId, name, args, context));
+}
+
+async function runToolInner(
+  workspaceId: string,
+  name: string,
+  args: Record<string, unknown>,
+  context: ToolContext
+): Promise<ToolResult> {
   const limits: ToolLimits = toolLimitsFor(
     context.modelId,
     context.openLimits
@@ -2561,8 +2588,25 @@ export async function runTool(
         // write call carried them), so re-reading is a wasted round. A region
         // read is left to disk, since a slice line count from memory would
         // need to mirror the on-disk numbering.
-        const recalled =
+        let recalled =
           mem && !rangeRequested ? mem.get(filePath) : null;
+        /*
+         * Memory is a shortcut, never a second source of truth. Measured:
+         * after edit_files, replace_in_files, undo_file or apply_patch the
+         * memory still held the pre-change bytes and read_file served them
+         * stamped EXACT. Every mutating tool now invalidates, and the bytes
+         * are checked against the disk here as well, so a writer nobody
+         * thought of (a command, the user's editor) cannot make it lie.
+         */
+        if (recalled != null) {
+          const onDisk = await readFileWhole(workspaceId, filePath)
+            .then((f) => f.content)
+            .catch(() => null);
+          if (onDisk !== recalled) {
+            mem?.invalidate(filePath);
+            recalled = null;
+          }
+        }
         const result =
           recalled != null
             ? (() => {
@@ -3164,16 +3208,42 @@ export async function runTool(
       }
 
       case "write_file": {
+        /*
+         * The same spellings write_files accepts, and no content means no
+         * write. Measured: {path, contents: "new data"} replaced a file
+         * holding "important data" with an EMPTY file and reported success,
+         * because str() turns a missing key into "".
+         */
+        const pickArg = (...keys: string[]) =>
+          keys.map((k) => args[k]).find((v) => v !== undefined && v !== null);
+        const rawPath = pickArg("path", "file", "filename", "file_path", "name");
+        const rawContent = pickArg("content", "contents", "text", "code", "body", "data");
+        if (typeof rawPath !== "string" || !rawPath.trim()) {
+          return {
+            ok: false,
+            content:
+              `Error: no "path" given (keys present: ${Object.keys(args).join(", ") || "none"}). ` +
+              `Nothing was written.`,
+            summary: "No path",
+          };
+        }
+        if (rawContent === undefined || typeof rawContent === "object") {
+          return {
+            ok: false,
+            content:
+              `Error: no "content" string given for ${rawPath} (keys present: ` +
+              `${Object.keys(args).join(", ")}). Nothing was written — send ` +
+              `{"path": "...", "content": "..."}; an empty string is fine for ` +
+              `an intentionally empty file.`,
+            summary: "No content",
+          };
+        }
         const repair = repairEscapedNewlines(
-          str(args, "path"),
-          str(args, "content")
+          rawPath,
+          typeof rawContent === "string" ? rawContent : String(rawContent)
         );
         const content = repair.content;
-        const result = await writeFile(
-          workspaceId,
-          str(args, "path"),
-          content
-        );
+        const result = await writeFile(workspaceId, rawPath, content);
         mem?.recordWrite(result.path, content);
         mem?.recordWholeRead(result.path, content);
         return {
@@ -3848,6 +3918,8 @@ export async function runTool(
           str(args, "from"),
           str(args, "to")
         );
+        mem?.invalidate(result.from);
+        mem?.invalidate(result.to);
         return {
           ok: true,
           content: `Moved ${result.from} to ${result.to} (${result.bytes} bytes).`,
@@ -3977,12 +4049,76 @@ export async function runTool(
         /** Edits that missed on the first pass, kept for one retry. */
         const deferred: { index: number; entry: unknown }[] = [];
 
+        /*
+         * Line numbers mean the file as the model READ it.
+         *
+         * Measured: edit 1 replaced line 2 with three lines, and edit 2's
+         * "line 4" then landed on what had been line 2 — the batch applied
+         * line ranges one after another against a file that kept moving,
+         * although the tool promises the edits are independent. Line-range
+         * edits are therefore resolved against the ORIGINAL text: they run
+         * first, bottom-up per file, so none shifts another; text- and
+         * anchor-based edits follow and find their text wherever it now is.
+         * Two line ranges that overlap cannot both mean the original, so the
+         * later one is refused rather than guessed at.
+         */
+        const lineRange = (entry: unknown): { path: string; from: number; to: number } | null => {
+          const parsed = normaliseEditEntry(entry);
+          if (!parsed.ok) return null;
+          const spec = readEditSpec(parsed.args);
+          if (spec.startAnchor?.trim() || (spec.oldText ?? "").trim()) return null;
+          if (spec.startLine == null) return null;
+          const key = String(parsed.args.path)
+            .replace(/\\/g, "/")
+            .replace(/^(\.\/)+/, "");
+          return {
+            path: key,
+            from: spec.startLine,
+            to: Math.max(spec.startLine, spec.endLine ?? spec.startLine),
+          };
+        };
+        const ranges = batch.map(lineRange);
+        const overlapReason = new Map<number, string>();
+        ranges.forEach((range, i) => {
+          if (!range) return;
+          for (let j = 0; j < i; j++) {
+            const other = ranges[j];
+            if (!other || other.path !== range.path || overlapReason.has(j)) continue;
+            if (range.from <= other.to && other.from <= range.to) {
+              overlapReason.set(
+                i,
+                `lines ${range.from}-${range.to} overlap edit ${j + 1}'s lines ` +
+                  `${other.from}-${other.to} in the same file — line numbers refer ` +
+                  `to the file as it was before this call, so two edits cannot ` +
+                  `both own a line. Merge them into one edit.`
+              );
+              break;
+            }
+          }
+        });
+        const order = [
+          ...batch
+            .map((_, i) => i)
+            .filter((i) => ranges[i])
+            .sort(
+              (a, b) =>
+                ranges[a]!.path.localeCompare(ranges[b]!.path) ||
+                ranges[b]!.from - ranges[a]!.from
+            ),
+          ...batch.map((_, i) => i).filter((i) => !ranges[i]),
+        ];
+
         const attempt = async (
           index: number,
           entry: unknown,
           secondPass: boolean
         ): Promise<{ ok: boolean; reason?: string }> => {
           const label = `edit ${index + 1}/${batch.length}`;
+          const overlap = overlapReason.get(index);
+          if (overlap) {
+            failures.push(`${label}: ${overlap}`);
+            return { ok: false };
+          }
 
           // Exactly the same normalisation a single edit_file call gets, so
           // "it worked one at a time but not in a batch" cannot be true of
@@ -4049,9 +4185,11 @@ export async function runTool(
                 reason += ` — but that old_text IS in ${elsewhere.join(", ")}: did you mean ${elsewhere.length === 1 ? "that file" : "one of those"}?`;
               }
             }
-            if (!secondPass) return { ok: false, reason };
+            // A line-range edit is never retried: after its siblings land,
+            // its numbers no longer point at the lines the model meant.
+            if (!secondPass && !ranges[index]) return { ok: false, reason };
             failures.push(`${label} (${editPath}): ${reason}`);
-            return { ok: false, reason };
+            return { ok: false };
           }
         };
 
@@ -4072,7 +4210,8 @@ export async function runTool(
          * the file as its siblings left it. Nothing is retried twice, so a
          * genuinely wrong hunk still fails fast and says why.
          */
-        for (const [index, entry] of batch.entries()) {
+        for (const index of order) {
+          const entry = batch[index];
           const first = await attempt(index, entry, false);
           if (!first.ok && first.reason) deferred.push({ index, entry });
         }
@@ -4080,6 +4219,14 @@ export async function runTool(
         for (const { index, entry } of deferred) {
           await attempt(index, entry, true);
         }
+
+        // Every file this call touched is re-read from disk from now on.
+        for (const changed of distinct) mem?.invalidate(changed);
+        // Reported in the order the edits were sent, not the order applied.
+        const editNumber = (line: string) => Number(/^edit (\d+)\//.exec(line)?.[1] ?? 0);
+        applied.sort((a, b) => editNumber(a) - editNumber(b));
+        previews.sort((a, b) => editNumber(a) - editNumber(b));
+        failures.sort((a, b) => editNumber(a) - editNumber(b));
 
         const fileWord = (n: number) => `${n} file${n === 1 ? "" : "s"}`;
         const notes: string[] = [];
@@ -4161,7 +4308,10 @@ export async function runTool(
         let pattern: RegExp | null = null;
         if (useRegex) {
           try {
-            pattern = new RegExp(find, "g");
+            // "m" because the pattern now runs over whole files: ^ and $
+            // mean line starts and ends, as they did when matching was
+            // line by line.
+            pattern = new RegExp(find, "gm");
           } catch (error) {
             return {
               ok: false,
@@ -4174,35 +4324,38 @@ export async function runTool(
           }
         }
 
-        // Reuses the same matcher the search tool uses, so a preview and the
-        // real thing can never disagree about which files are in scope.
-        const hits = await searchFiles(workspaceId, find, {
-          glob,
-          regex: useRegex,
-          maxHits: limits.searchHits,
-          maxFileBytes: limits.searchableBytes,
-        });
-        const paths = [...new Set(hits.hits.map((h) => h.path))];
-
-        if (paths.length === 0) {
-          return {
-            ok: false,
-            content:
-              `"${find}" does not appear in any file${glob ? ` matching ${glob}` : ""}. ` +
-              `Check the exact text, or search first.`,
-            summary: "No matches",
-          };
-        }
+        /*
+         * Every file is a candidate, not just the ones a search listed.
+         *
+         * Candidates used to come from searchFiles, which stops at its hit
+         * cap and matches one line at a time. Measured: a file with 70
+         * occurrences used up the 60-hit cap, so b.ts and c.ts were never
+         * considered and the rename reported success with two files still
+         * on the old name; a multi-line `find` matched no single line and
+         * was "not in any file". Each file is now read whole and matched
+         * whole, and anything not searched is named with the reason.
+         */
+        const globRe = globPattern(glob);
+        const candidates = (await listFiles(workspaceId)).filter(
+          (f) => !globRe || globRe.test(f.path)
+        );
 
         const changed: string[] = [];
         const failed: string[] = [];
+        const skipped: string[] = [];
         let occurrences = 0;
 
-        for (const filePath of paths) {
+        for (const candidate of candidates) {
+          const filePath = candidate.path;
+          if (candidate.size > limits.searchableBytes) {
+            skipped.push(`${filePath} — too large to search (${Math.round(candidate.size / 1024)}KB)`);
+            continue;
+          }
           try {
             // Whole file: this is a read-modify-WRITE, so a capped read would
             // write the truncated copy back and delete the tail.
             const file = await readFileWhole(workspaceId, filePath);
+            if (file.content.includes("\0")) continue; // binary: never a text match
 
             let count: number;
             let updated: string;
@@ -4216,14 +4369,20 @@ export async function runTool(
                 replace
               );
             } else {
-              count = file.content.split(find).length - 1;
-              updated = file.content.split(find).join(replace);
+              // A multi-line find written with LF still matches a CRLF file,
+              // and the replacement keeps that file's line endings.
+              const crlf = file.content.includes("\r\n") && find.includes("\n") && !find.includes("\r\n");
+              const needle = crlf ? find.replace(/\n/g, "\r\n") : find;
+              const substitute = crlf ? replace.replace(/\r?\n/g, "\r\n") : replace;
+              count = file.content.split(needle).length - 1;
+              updated = file.content.split(needle).join(substitute);
             }
             if (count === 0) continue;
 
             occurrences += count;
             if (!preview) {
               await writeFile(workspaceId, filePath, updated);
+              mem?.invalidate(filePath);
             }
             changed.push(`${filePath} (${count})`);
           } catch (error) {
@@ -4233,6 +4392,18 @@ export async function runTool(
               }`
             );
           }
+        }
+
+        if (changed.length === 0 && failed.length === 0) {
+          return {
+            ok: false,
+            content:
+              `"${find}" does not appear in any file${glob ? ` matching ${glob}` : ""}` +
+              ` (${candidates.length - skipped.length} searched). ` +
+              `Check the exact text, or search first.` +
+              (skipped.length ? `\n\nNot searched:\n${skipped.join("\n")}` : ""),
+            summary: "No matches",
+          };
         }
 
         const heading = preview
@@ -4245,6 +4416,9 @@ export async function runTool(
             heading,
             changed.join("\n"),
             failed.length ? `Failed:\n${failed.join("\n")}` : null,
+            skipped.length
+              ? `Not searched (so any occurrences there are UNCHANGED):\n${skipped.join("\n")}`
+              : null,
           ]
             .filter(Boolean)
             .join("\n\n"),
@@ -4384,7 +4558,8 @@ export async function runTool(
       case "undo_file": {
         const target = str(args, "path");
         const steps = Math.max(1, num(args, "steps") ?? 1);
-        const previous = await previousVersion(workspaceId, target, steps);
+        // Bytes, so a binary file comes back exactly as it was.
+        const previous = await previousVersionBytes(workspaceId, target, steps);
 
         if (previous === null) {
           const depth = await historyDepth(workspaceId, target);
@@ -4392,7 +4567,8 @@ export async function runTool(
             ok: false,
             content: depth
               ? `Cannot go back ${steps} writes: only ${depth} previous ` +
-                `version${depth === 1 ? " is" : "s are"} kept for ${target}. ` +
+                `version${depth === 1 ? " is" : "s are"} kept for ${target}` +
+                `${steps > MAX_HISTORY_VERSIONS ? ` (at most ${MAX_HISTORY_VERSIONS} are ever kept)` : ""}. ` +
                 `Try a smaller number, or restore_snapshot for a bigger step ` +
                 `back.`
               : `No previous version of ${target} is kept — it has not been ` +
@@ -4407,7 +4583,17 @@ export async function runTool(
          * deliberate: undoing an undo is a real thing to want, and it falls
          * out for free rather than needing a redo stack.
          */
-        const written = await writeFile(workspaceId, target, previous);
+        let text: string | null = null;
+        try {
+          text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(previous);
+        } catch {
+          text = null;
+        }
+        const written =
+          text !== null
+            ? await writeFile(workspaceId, target, text)
+            : await writeFileBytes(workspaceId, target, previous, { keepHistory: true });
+        mem?.invalidate(written.path);
         return {
           ok: true,
           content:
@@ -4460,7 +4646,7 @@ export async function runTool(
         const pattern = typeof args.pattern === "string" ? args.pattern : "";
         const timeout = num(args, "timeout_ms") ?? 30_000;
 
-        const result = await waitForOutput(id, pattern, timeout);
+        const result = await waitForOutput(id, pattern, timeout, workspaceId);
         if (!result) {
           return {
             ok: false,
@@ -4817,6 +5003,7 @@ export async function runTool(
         }
 
         await writeFile(workspaceId, relative, applied.content);
+        mem?.invalidate(relative);
 
         const failed = applied.results.filter((h) => !h.applied);
         return {
@@ -4865,6 +5052,8 @@ export async function runTool(
       case "restore_snapshot": {
         const id = str(args, "id");
         const result = await restoreSnapshot(workspaceId, id);
+        // Any file may have changed; the disk is the truth now.
+        mem?.invalidateAll();
         return {
           ok: true,
           content:
@@ -5073,7 +5262,7 @@ export async function runTool(
             { id, reason, status: "disproved" },
             replacement
           );
-          if (!revised.updated) {
+          if (!revised.updated && !revised.alreadyRetired) {
             revised = await reviseFinding(
               machine ? workspaceId : MACHINE_SCOPE,
               { id, reason, status: "disproved" },
@@ -5083,9 +5272,19 @@ export async function runTool(
           return {
             ok: revised.updated,
             content: revised.updated
-              ? `Finding ${id} marked disproved and replaced with the corrected conclusion. It will no longer steer later turns.`
-              : `No active finding with id ${id} was found to revise.`,
-            summary: revised.updated ? "Finding corrected" : "Finding not found",
+              ? revised.replacement
+                ? `Finding ${id} marked disproved and replaced with the corrected conclusion [${revised.replacement.id}]. The old one will no longer steer later turns.`
+                : `Finding ${id} retired. It will no longer be shown on later turns, and nothing replaces it.`
+              : revised.alreadyRetired
+                ? `Finding ${id} is already retired — nothing to do. Record a new finding (no id) if there is a new conclusion.`
+                : `No active finding with id ${id} was found to revise.`,
+            summary: revised.updated
+              ? revised.replacement
+                ? "Finding corrected"
+                : "Finding retired"
+              : revised.alreadyRetired
+                ? "Finding already retired"
+                : "Finding not found",
           };
         }
         const refs = Array.isArray(args.refs)
