@@ -32,6 +32,10 @@ const say = (text, finish = "stop", then) => ({ kind: "say", text, finish, then 
 const drop = (reasoning) => ({ kind: "drop", reasoning });
 /** Think forever, drafting fenced code, until the client hangs up. */
 const draft = () => ({ kind: "draft" });
+/** Think slowly (prose) until the client hangs up — for Stop. */
+const slowThink = () => ({ kind: "slowThink" });
+/** Several tool calls in one round. */
+const tools = (...calls) => ({ kind: "tools", calls });
 
 const prose = (n) =>
   Array.from({ length: n }, (_, i) => `Considering option ${i}: the loader must stay in one environment.`).join(" ");
@@ -61,6 +65,15 @@ const SCENARIOS = {
     think("Now check it.", tool("read_file", { path: "c.txt" })),
     say("Done."),
   ],
+  stop_mid_think: [slowThink()],
+  stop_mid_batch: [
+    tools(
+      tool("run_command", { command: "python3", args: ["-c", "import time; time.sleep(4)"] }),
+      tool("write_file", { path: "late.txt", content: "late\n" })
+    ),
+    say("Done."),
+  ],
+  budget_prose: Array.from({ length: 30 }, () => say("More of a very long answer. ", "length")),
   pathless_edit: [
     tool("write_file", { path: "mod.py", content: "def f():\n    return 1\n" }),
     tool("edit_files", { edits: [{ old_text: "    return 1", new_text: "    return 2" }] }),
@@ -111,7 +124,14 @@ createServer((req, res) => {
 
     res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
     let closed = false;
-    res.on("close", () => (closed = true));
+    let finished = false;
+    res.on("close", () => {
+      closed = true;
+      // The client hung up before the response ended: Stop reached upstream.
+      if (!finished && LOG) {
+        appendFileSync(LOG, JSON.stringify({ scenario: name, index, event: "client_closed", at: Date.now() }) + "\n");
+      }
+    });
     const send = (o) => {
       if (!closed) res.write("data: " + JSON.stringify(o) + "\n\n");
     };
@@ -121,6 +141,7 @@ createServer((req, res) => {
         choices: [{ delta: {} }],
         usage: { prompt_tokens: 500, completion_tokens: 60, total_tokens: 560 },
       });
+      finished = true;
       if (!closed) res.end("data: [DONE]\n\n");
     };
 
@@ -148,6 +169,29 @@ createServer((req, res) => {
         });
         return finish("tool_calls");
       }
+      if (turn.kind === "tools") {
+        send({
+          choices: [{
+            delta: {
+              tool_calls: turn.calls.map((c, i) => ({
+                index: i,
+                id: `call-${name}-${index}-${i}`,
+                type: "function",
+                function: { name: c.name, arguments: JSON.stringify(c.args) },
+              })),
+            },
+          }],
+        });
+        return finish("tool_calls");
+      }
+      if (turn.kind === "slowThink") {
+        for (let i = 0; i < 1200 && !closed; i++) {
+          send({ choices: [{ delta: { reasoning_content: `Weighing approach ${i}. ` } }] });
+          await sleep(50);
+        }
+        if (!closed) finish("stop");
+        return;
+      }
       if (turn.kind === "say") {
         send({ choices: [{ delta: { content: turn.text } }] });
         if (turn.then) return play(turn.then);
@@ -157,6 +201,7 @@ createServer((req, res) => {
         send({ choices: [{ delta: { reasoning_content: turn.reasoning } }] });
         await sleep(20);
         // No finish_reason, no usage: the connection simply ends.
+        finished = true;
         if (!closed) res.end();
         return;
       }

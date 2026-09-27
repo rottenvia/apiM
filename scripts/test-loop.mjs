@@ -84,7 +84,7 @@ function requestsFor(scenario) {
     .split("\n")
     .filter(Boolean)
     .map((l) => JSON.parse(l))
-    .filter((r) => r.scenario === scenario);
+    .filter((r) => r.scenario === scenario && !r.event);
 }
 
 const text = (m) =>
@@ -94,7 +94,7 @@ const text = (m) =>
       ? m.content.map((p) => p.text ?? "").join(" ")
       : "";
 
-async function runScenario(appPort, scenario) {
+async function runScenario(appPort, scenario, opts = {}) {
   const workspaceId = `loop-${scenario}`;
   await rm(path.join(DATA_ROOT, "workspaces", workspaceId), { recursive: true, force: true });
   const res = await fetch(`http://127.0.0.1:${appPort}/api/chat`, {
@@ -110,8 +110,11 @@ async function runScenario(appPort, scenario) {
       webSearchMode: "off",
       thinkingEffort: "high",
       autoRunCommands: true,
+      ...(opts.budgetUsd ? { budgetUsd: opts.budgetUsd } : {}),
     }),
   });
+  let meta = null;
+  let stopSent = false;
   const frames = [];
   const decoder = new TextDecoder();
   const reader = res.body.getReader();
@@ -124,10 +127,22 @@ async function runScenario(appPort, scenario) {
     buffer = lines.pop() ?? "";
     for (const line of lines) {
       if (!line.startsWith("data: ")) continue;
+      let frame;
       try {
-        frames.push(JSON.parse(line.slice(6)));
+        frame = JSON.parse(line.slice(6));
       } catch {
-        /* ignore */
+        continue;
+      }
+      frames.push(frame);
+      if (frame.type === "meta") meta = frame;
+      // Press Stop the way the page does, once the scenario says so.
+      if (opts.stopWhen && !stopSent && meta && opts.stopWhen(frame, frames)) {
+        stopSent = Date.now();
+        await fetch(`http://127.0.0.1:${appPort}/api/chat/stop`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ messageId: meta.messageId, conversationId: meta.conversationId }),
+        });
       }
     }
   }
@@ -140,6 +155,21 @@ async function runScenario(appPort, scenario) {
     done: frames.some((f) => f.type === "done"),
     errors: frames.filter((f) => f.type === "error").map((f) => f.error),
     file: async (f) => (existsSync(ws(f)) ? readFile(ws(f), "utf8") : null),
+    stopSent,
+    meta,
+    /** The reply as stored on disk (resumeState included). */
+    stored: async () => {
+      const { readdirSync } = await import("node:fs");
+      const dir = path.join(DATA_ROOT, "chats");
+      for (const d of existsSync(dir) ? readdirSync(dir) : []) {
+        const f = path.join(dir, d, "chat.json");
+        if (!existsSync(f)) continue;
+        const conv = JSON.parse(readFileSync(f, "utf8"));
+        const m = conv.messages?.find((x) => x.id === meta?.messageId);
+        if (m) return m;
+      }
+      return null;
+    },
   };
 }
 
@@ -232,6 +262,47 @@ async function main() {
   }
 
   // ------------------------------------------------------------------
+  console.log(bold("\n7. Stop really stops, and leaves a reply that can be resumed"));
+  {
+    // Stop pressed mid-think: the provider's stream must be hung up on, or
+    // it keeps generating (and billing) up to max_tokens.
+    const r = await runScenario(appPort, "stop_mid_think", {
+      stopWhen: (f, all) => all.filter((x) => x.type === "reasoning").length >= 5,
+    });
+    await new Promise((res) => setTimeout(res, 500));
+    const closedAt = readFileSync(LOG, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l))
+      .find((e) => e.scenario === "stop_mid_think" && e.event === "client_closed")?.at;
+    check("Stop mid-think hangs up on the provider", Boolean(closedAt) && closedAt - r.stopSent < 3000,
+      closedAt ? `${closedAt - r.stopSent}ms after Stop` : "the provider stream was never closed");
+
+    // Stop while the first of two batched calls runs: the second has no
+    // result, which used to leave the saved run unresumable forever.
+    const b = await runScenario(appPort, "stop_mid_batch", {
+      stopWhen: (f) => f.type === "tool_start" && f.name === "run_command",
+    });
+    const m = await b.stored();
+    const msgs = m?.resumeState?.messages ?? [];
+    const open = new Set();
+    for (const x of msgs) {
+      if (x.role === "assistant") for (const c of x.tool_calls ?? []) open.add(c.id);
+      if (x.role === "tool") open.delete(x.tool_call_id);
+    }
+    check("a reply stopped between tools is saved as resumable", m?.incomplete === true && msgs.length > 0,
+      `incomplete=${m?.incomplete} resumeState=${msgs.length} messages`);
+    check("and every tool call in it has a result", msgs.length > 0 && open.size === 0, `${open.size} unanswered`);
+    check("the call that never ran was not run", (await b.file("late.txt")) === null);
+  }
+
+  // ------------------------------------------------------------------
+  console.log(bold("\n8. The spending limit holds on rounds that call no tools"));
+  {
+    const r = await runScenario(appPort, "budget_prose", { budgetUsd: 0.0000001 });
+    check("an answer cut at the output limit again and again stops at the cap",
+      r.frames.some((f) => f.type === "budget_stopped") && r.requests.length <= 2,
+      `${r.requests.length} requests, continuing: ${r.continuing.length}`);
+  }
+
+  // ------------------------------------------------------------------
   console.log(bold("\n6. Other websites cannot drive the local API"));
   {
     const base = `http://127.0.0.1:${appPort}`;
@@ -261,7 +332,7 @@ async function main() {
   }
 
   cleanup();
-  for (const s of ["draft_cutover", "drop_mid_think", "drop_after_cutover", "length_cut", "pathless_edit"]) {
+  for (const s of ["draft_cutover", "drop_mid_think", "drop_after_cutover", "length_cut", "pathless_edit", "stop_mid_think", "stop_mid_batch", "budget_prose"]) {
     await rm(path.join(DATA_ROOT, "workspaces", `loop-${s}`), { recursive: true, force: true });
   }
   await rm(LOG, { force: true });
