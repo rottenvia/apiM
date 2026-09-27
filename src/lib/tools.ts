@@ -835,7 +835,7 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
                   type: "string",
                   description:
                     "File to change, e.g. 'src/app.py'. Every edit " +
-                    "carries its own path — there is no top-level path.",
+                    "carries its own path (a single top-level path, or {path, edits:[…]} groups, are also accepted).",
                 },
                 old_text: {
                   type: "string",
@@ -2048,7 +2048,7 @@ export function workspaceToolsFor(
                       type: "string",
                       description:
                         "File to change, e.g. 'src/app.py'. Every edit " +
-                        "carries its own path — there is no top-level path.",
+                        "carries its own path (a single top-level path, or {path, edits:[…]} groups, are also accepted).",
                     },
                     old_text: {
                       type: "string",
@@ -3828,7 +3828,51 @@ export async function runTool(
       }
 
       case "edit_files": {
-        const raw = Array.isArray(args.edits) ? args.edits : [];
+        /*
+         * Two shapes models send constantly, both accepted.
+         *
+         * Measured on a real run: "Edited 0 files, 11 failed", "0 files, 3
+         * failed" — every entry "no file path" — because the path was given
+         * ONCE at the top level, or the edits were grouped per file as
+         * {path, edits: [...]}. The model concluded its calls were being
+         * truncated and fell back to one edit_file per change. An entry
+         * without its own path now inherits its group's or the call's.
+         */
+        const topPath =
+          typeof args.path === "string" && args.path.trim()
+            ? args.path
+            : typeof args.file === "string" && args.file.trim()
+              ? args.file
+              : undefined;
+        const hasOwnPath = (e: Record<string, unknown>) =>
+          ["path", "file", "file_path", "filename"].some(
+            (k) => typeof e[k] === "string" && (e[k] as string).trim()
+          );
+        const raw: unknown[] = [];
+        for (const entry of Array.isArray(args.edits) ? args.edits : []) {
+          if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+            const e = entry as Record<string, unknown>;
+            if (Array.isArray(e.edits)) {
+              const groupPath = hasOwnPath(e)
+                ? String(e.path ?? e.file ?? e.file_path ?? e.filename)
+                : topPath;
+              for (const sub of e.edits) {
+                raw.push(
+                  sub && typeof sub === "object" && !Array.isArray(sub) &&
+                    !hasOwnPath(sub as Record<string, unknown>) && groupPath
+                    ? { path: groupPath, ...(sub as Record<string, unknown>) }
+                    : sub
+                );
+              }
+              continue;
+            }
+            if (!hasOwnPath(e) && topPath) {
+              raw.push({ path: topPath, ...e });
+              continue;
+            }
+          }
+          raw.push(entry);
+        }
         if (raw.length === 0) {
           return {
             ok: false,

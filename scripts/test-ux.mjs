@@ -179,8 +179,13 @@ const atPill = bubble.indexOf("Which step the plan is on, in one pill");
 check("the pill exists", atPill !== -1);
 check(
   "it shows the current step and the total",
-  /Step \$\{planCurrent\.id\}\/\$\{message\.plan\.steps\.length\}/.test(bubble),
-  '"Step 3/7" answers the question without scrolling'
+  /Step \$\{planCurrent\.id\} of \$\{message\.plan\.steps\.length\}/.test(bubble),
+  '"Step 3 of 7" answers the question without scrolling — in words, so it never reads as a done count'
+);
+check(
+  "the plan box says its fraction is a done count",
+  /\{done\}\/\{total\} done/.test(await read("src/components/PlanPanel.tsx")),
+  'reported: the chip read "Step 4/5" while the box read "3/5" — two fractions that looked contradictory'
 );
 check(
   "the current step is the one being done, or the next one up",

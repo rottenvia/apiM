@@ -112,7 +112,7 @@ export function PlanPanel({
               blocked ? "text-danger" : complete ? "text-success" : "text-text-secondary"
             }`}
           >
-            {done}/{total}
+            {done}/{total} done
           </span>
         </span>
       </button>

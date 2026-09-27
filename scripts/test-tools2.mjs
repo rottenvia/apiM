@@ -152,6 +152,40 @@ check("a range read of a small file returns the whole file, numbered",
       !/never in slices/.test(second.content) && /200 \| local v200 = 200/.test(second.content) &&
       !/300 \| local v300/.test(second.content),
     "measured: two ranges in one round each returned the whole 611-line file");
+  await ws.writeFile(WS, "mock.luau", [
+    "local M = {}",
+    "M.task = {",
+    "\tdefer = function(fn, ...)",
+    "\t\tfn(...)",
+    "\tend,",
+    "end",
+    "",
+    "M.gethui = nil -- set by tests that need it",
+    "function M.installGlobals()",
+    "\t_G.game = M.game",
+    "end",
+    "return M",
+  ].join("\n") + "\n");
+  const multi = await runTool(WS, "edit_file", {
+    path: "mock.luau",
+    start_anchor: "defer = function(fn, ...)\n\t\tfn(...)\n\tend,\nend\n\nM.gethui = nil -- set by tests th",
+    new_text: "\tdefer = function(fn, ...)\n\t\tfn(...)\n\tend,\n}\n\nM.gethui = nil -- set by tests that need it",
+  });
+  const after = (await ws.readFile(WS, "mock.luau")).content;
+  check("a multi-line start_anchor (the reported miss) now matches and edits",
+    multi.ok && /\tend,\n}\n\nM\.gethui/.test(after) && !/\tend,\nend\n/.test(after),
+    "matched one line at a time, it could never match and blamed the wording");
+  const grouped = await runTool(WS, "edit_files", {
+    edits: [{ path: "mock.luau", edits: [{ old_text: "_G.game = M.game", new_text: "rawset(env, 'game', M.game)" }] }],
+  });
+  const top = await runTool(WS, "edit_files", {
+    path: "mock.luau",
+    edits: [{ old_text: "return M", new_text: "return M -- module" }],
+  });
+  const after2 = (await ws.readFile(WS, "mock.luau")).content;
+  check("edit_files takes {path, edits:[…]} groups and a top-level path",
+    grouped.ok && top.ok && /rawset\(env, 'game', M\.game\)/.test(after2) && /return M -- module/.test(after2),
+    "measured: 'Edited 0 files, 11 failed' — every entry 'no file path'");
   const wf = await runTool(WS, "write_files", { files: [{ file: "alias.luau", contents: "return 1\n" }, { path: "bad.luau" }] });
   check("write_files accepts common field spellings and names what is wrong",
     /Wrote 1/.test(wf.content) && /bad\.luau — malformed entry: "content" must be a string, got nothing/.test(wf.content),
