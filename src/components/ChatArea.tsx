@@ -95,11 +95,13 @@ interface ChatAreaProps {
   retryDetail?: string | null;
   /** A saved chat is loading and nothing is on screen yet: skeleton, not vacuum. */
   conversationLoading?: boolean;
-  /** Latest fired request's size, while its round runs (heavy rounds only). */
+  /** The round in flight: size, fire time, and whether anything came back. */
   requestSize?: {
     round: number;
     inputChars: number;
     breakdown: { label: string; chars: number }[];
+    firedAt?: number;
+    answered?: boolean;
   } | null;
   onStop: () => void;
   hasKeys: boolean;
@@ -1646,7 +1648,25 @@ export function ChatArea({
                   detail={retryDetail}
                 />
               )}
-              {requestSize && <RequestSizeLine info={requestSize} />}
+              {/* Before the first output the status row owns the wait and
+                  a heavy request adds its receipt; mid-run, a fired round
+                  that has not answered yet gets a live row of its own —
+                  otherwise the bubble looks finished for the minutes a big
+                  prefill takes ("is it stuck, or can I just not see it?"). */}
+              {requestSize &&
+                !streamingHasOutput &&
+                requestSize.inputChars - mediaChars(requestSize.breakdown) >= 100_000 && (
+                  <RequestSizeLine info={requestSize} />
+                )}
+              {requestSize &&
+                isLoading &&
+                streamingHasOutput &&
+                !requestSize.answered && (
+                  <WaitRow
+                    key={`${requestSize.round}:${requestSize.firedAt ?? 0}`}
+                    info={requestSize}
+                  />
+                )}
 
               <div ref={messagesEndRef} />
             </div>
@@ -2380,6 +2400,78 @@ function RetryBanner({
   );
 }
 
+/** Base64 characters of attached images/videos in a request breakdown. */
+function mediaChars(breakdown: { label: string; chars: number }[]): number {
+  return breakdown.find((p) => p.label === "media")?.chars ?? 0;
+}
+
+const kChars = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(0)}k` : `${n}`);
+
+/**
+ * "215k in (tool results 56k · tool schemas 49k) + 1 image 0.4 MB".
+ *
+ * Media is split out: an image is base64 in the body (4 chars per 3 bytes)
+ * but the model bills it as a few hundred tokens, so counting its
+ * characters as "in" made one screenshot read as millions of characters.
+ */
+function describeRequest(info: {
+  inputChars: number;
+  breakdown: { label: string; chars: number }[];
+}): string {
+  const media = mediaChars(info.breakdown);
+  const text = info.inputChars - media;
+  const top = info.breakdown.filter((p) => p.label !== "media").slice(0, 2);
+  return (
+    `${kChars(text)} in` +
+    (top.length > 0
+      ? ` (${top.map((p) => `${p.label} ${kChars(p.chars)}`).join(" · ")})`
+      : "") +
+    (media > 0 ? ` + media ${((media * 3) / 4 / (1024 * 1024)).toFixed(1)} MB` : "")
+  );
+}
+
+/**
+ * Live row for a mid-run round that has been fired and not yet answered:
+ * "✻ Waiting for the model · 42s · 215k in (…)". Counts from the fire
+ * time, so a re-render or chat switch never resets the clock.
+ */
+function WaitRow({
+  info,
+}: {
+  info: {
+    inputChars: number;
+    breakdown: { label: string; chars: number }[];
+    firedAt?: number;
+  };
+}) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  const seconds = Math.max(0, Math.round((now - (info.firedAt ?? now)) / 1000));
+  const heavy = info.inputChars - mediaChars(info.breakdown) >= 400_000;
+  return (
+    <div className="flex justify-start px-4 pb-2">
+      <div className="flex items-center gap-2">
+        <span aria-hidden="true" className="text-[13px] leading-5 text-accent">
+          ✻
+        </span>
+        <span className="thinking-shimmer text-[13px] leading-5">
+          Waiting for the model…
+        </span>
+        <span
+          title="The next round was sent. The provider is reading it (a big request can take a while) before the first token comes back."
+          className="cursor-default text-[11px] tabular-nums text-text-muted"
+        >
+          · {seconds}s · {describeRequest(info)}
+          {heavy ? " — big context, first token may take a while" : ""}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 /**
  * Fire-time receipt for a heavy round: "Request 3 · 612k in (history 479k)".
  *
@@ -2399,9 +2491,7 @@ function RequestSizeLine({
     breakdown: { label: string; chars: number }[];
   };
 }) {
-  const k = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(0)}k` : `${n}`);
-  const total = `${k(info.inputChars)} in`;
-  const top = info.breakdown.slice(0, 2);
+  const k = kChars;
   const title =
     `Request ${info.round} body: ` +
     info.breakdown.map((part) => `${part.label} ${k(part.chars)}`).join(" · ") +
@@ -2414,10 +2504,10 @@ function RequestSizeLine({
         title={title}
         className="cursor-default text-[11px] leading-4 tabular-nums text-text-muted"
       >
-        {`Request ${info.round} · ${total}`}
-        {top.length > 0 &&
-          ` (${top.map((part) => `${part.label} ${k(part.chars)}`).join(" · ")})`}
-        {info.inputChars >= 400_000 ? " — big context, first token may take a while" : ""}
+        {`Request ${info.round} · ${describeRequest(info)}`}
+        {info.inputChars - mediaChars(info.breakdown) >= 400_000
+          ? " — big context, first token may take a while"
+          : ""}
       </span>
     </div>
   );

@@ -377,6 +377,21 @@ interface ChatResponse {
  * workspace/conversation id; the React states the screen renders are just a
  * mirror of whichever session is currently on top.
  */
+/**
+ * The round in flight: its size, when it was fired, and whether anything
+ * has come back yet. `answered` flips on the round's first reasoning,
+ * prose or tool frame — until then the reply is waiting on the provider
+ * (upload + prefill + first token), which on a big request is minutes of
+ * a bubble that otherwise looks finished.
+ */
+type LiveRequest = {
+  round: number;
+  inputChars: number;
+  breakdown: { label: string; chars: number }[];
+  firedAt: number;
+  answered: boolean;
+};
+
 type ChatSession = {
   messages: Message[];
   loading: boolean;
@@ -386,11 +401,7 @@ type ChatSession = {
   /** Transient retry/backoff, ticked by the 200ms clock while visible. */
   liveRetry: (UpstreamNotice & { receivedAt: number }) | null;
   /** Latest fired request's size, while its round is still running. */
-  liveRequestSize: {
-    round: number;
-    inputChars: number;
-    breakdown: { label: string; chars: number }[];
-  } | null;
+  liveRequestSize: LiveRequest | null;
   /** Server-side id of the in-flight reply, for the stop endpoint. */
   runMessageId: string | null;
   /** Set by Stop / new-chat: a pending auto-resume must not fire. */
@@ -473,11 +484,9 @@ export default function Home() {
   // The provider's own message behind a rejection-driven retry.
   const [retryDetail, setRetryDetailState] = useState<string | null>(null);
   // Fire-time request size for the active run's latest round, if heavy.
-  const [requestSize, setRequestSizeState] = useState<{
-    round: number;
-    inputChars: number;
-    breakdown: { label: string; chars: number }[];
-  } | null>(null);
+  const [requestSize, setRequestSizeState] = useState<LiveRequest | null>(
+    null
+  );
 
   /** Copy a session's UI state into the mirrored React states. */
   const mirrorSession = useCallback((s: ChatSession) => {
@@ -585,22 +594,22 @@ export default function Home() {
     [patchSession]
   );
   /**
-   * Fire-time request size; shown once the body passes 100k. Small chats
-   * stay quiet, and a run that shrinks back under the line clears it.
+   * Fire-time request size, kept for every round: the bubble shows a live
+   * "waiting for the model" row from here until the round's first frame.
    */
   const setLiveRequestSize = useCallback(
-    (
-      id: string | null | undefined,
-      info: {
-        round: number;
-        inputChars: number;
-        breakdown: { label: string; chars: number }[];
-      } | null
-    ) => {
-      patchSession(id, {
-        liveRequestSize:
-          info && info.inputChars >= 100_000 ? info : null,
-      });
+    (id: string | null | undefined, info: LiveRequest | null) => {
+      patchSession(id, { liveRequestSize: info });
+    },
+    [patchSession]
+  );
+  /** The round's first frame arrived — the wait row goes. Cheap per delta. */
+  const markRoundAnswered = useCallback(
+    (id: string | null | undefined) => {
+      const live = getSession(id).liveRequestSize;
+      if (live && !live.answered) {
+        patchSession(id, { liveRequestSize: { ...live, answered: true } });
+      }
     },
     [patchSession]
   );
@@ -2230,6 +2239,8 @@ export default function Home() {
                   round: evt.round,
                   inputChars: evt.inputChars,
                   breakdown: evt.breakdown,
+                  firedAt: Date.now(),
+                  answered: false,
                 });
                 break;
 
@@ -2442,6 +2453,7 @@ export default function Home() {
 
               case "reasoning":
                 setLiveRetry(runConvId ?? requestConversationId, null);
+                markRoundAnswered(runConvId ?? requestConversationId);
                 if (pendingContent) flush();
                 pendingReasoning += evt.delta;
                 scheduleFlush();
@@ -2472,6 +2484,7 @@ export default function Home() {
               // existed.
               case "tool_start": {
                 setLiveRetry(runConvId ?? requestConversationId, null);
+                markRoundAnswered(runConvId ?? requestConversationId);
                 const started: ToolEvent = {
                   id: evt.id,
                   name: evt.name,
@@ -2641,6 +2654,7 @@ export default function Home() {
 
               case "content":
                 setLiveRetry(runConvId ?? requestConversationId, null);
+                markRoundAnswered(runConvId ?? requestConversationId);
                 // Keep reasoning and prose in arrival order: a batch holds
                 // one kind at a time, so the timeline can place each.
                 if (pendingReasoning) flush();
@@ -2921,6 +2935,7 @@ export default function Home() {
       setStatusStage,
       setLiveRetry,
       setLiveRequestSize,
+      markRoundAnswered,
       setRetryNotice,
       migrateSession,
       activateSession,
