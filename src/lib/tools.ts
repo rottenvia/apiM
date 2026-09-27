@@ -2237,6 +2237,35 @@ const EDIT_ALIASES: Record<string, string[]> = {
  * actually present, because "malformed" with no evidence is exactly the
  * silence this whole campaign has been about.
  */
+/**
+ * Text files of a workspace, for finding which one an edit's old_text is in.
+ * Bounded: skips dependency and VCS folders, big files and binaries.
+ */
+async function workspaceTextsForInference(
+  workspaceId: string
+): Promise<[string, string][]> {
+  const out: [string, string][] = [];
+  let files: { path: string; size: number }[] = [];
+  try {
+    files = await listFiles(workspaceId);
+  } catch {
+    return out;
+  }
+  for (const f of files) {
+    if (out.length >= 400) break;
+    if (f.size > 1024 * 1024) continue;
+    if (/(^|\/)(node_modules|\.git|\.venv|venv|__pycache__|dist|build)\//.test(f.path)) continue;
+    try {
+      const { content } = await readFileWhole(workspaceId, f.path);
+      if (content.includes("\u0000")) continue;
+      out.push([f.path, content.replace(/\r\n/g, "\n")]);
+    } catch {
+      // Unreadable: not a candidate.
+    }
+  }
+  return out;
+}
+
 export function normaliseEditEntry(
   entry: unknown
 ): { ok: true; args: Record<string, unknown> } | { ok: false; reason: string } {
@@ -3881,6 +3910,50 @@ export async function runTool(
           };
         }
 
+        /*
+         * An edit with no path anywhere: find the file from its old_text.
+         *
+         * Measured live: six edits, only the LAST carrying a path — and that
+         * one for a different file. Five failed "no file path" and the round
+         * was spent sending them again. Guessing from a sibling's path would
+         * be wrong exactly there, so the text decides instead: if the
+         * old_text occurs in exactly one workspace file, that is the file.
+         * Zero or several matches still fail, naming the candidates.
+         */
+        const inferred: string[] = [];
+        const pathHints = new Map<number, string>();
+        const pathlessOld = raw.map((entry) => {
+          if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
+          const parsed = normaliseEditEntry(entry);
+          if (parsed.ok) return null; // has a path, or fails for another reason
+          const e = entry as Record<string, unknown>;
+          if (hasOwnPath(e)) return null;
+          const old = [e.old_text, e.oldText, e.old_string, e.old, e.find, e.search]
+            .find((v) => typeof v === "string" && v.trim()) as string | undefined;
+          return old ?? null;
+        });
+        if (pathlessOld.some((v) => v !== null)) {
+          const texts = await workspaceTextsForInference(workspaceId);
+          pathlessOld.forEach((oldText, i) => {
+            if (oldText === null) return;
+            const needle = oldText.replace(/\r\n/g, "\n");
+            const hits = texts.filter(([, body]) => body.includes(needle)).map(([p]) => p);
+            if (hits.length === 1) {
+              raw[i] = { path: hits[0], ...(raw[i] as Record<string, unknown>) };
+              inferred.push(
+                `edit ${i + 1}: no path was given — its old_text occurs only in ${hits[0]}, so it was applied there`
+              );
+            } else {
+              pathHints.set(
+                i,
+                hits.length > 1
+                  ? `no "path" given, and its old_text occurs in ${hits.length} files (${hits.slice(0, 5).join(", ")}) — add "path"`
+                  : `no "path" given, and its old_text is in no workspace file — add "path" and check the text`
+              );
+            }
+          });
+        }
+
         const batch = raw.slice(0, limits.batchEdits);
         const previewOnly = args.preview === true;
 
@@ -3915,7 +3988,7 @@ export async function runTool(
           // the arguments any more.
           const parsed = normaliseEditEntry(entry);
           if (!parsed.ok) {
-            failures.push(`${label}: ${parsed.reason}`);
+            failures.push(`${label}: ${pathHints.get(index) ?? parsed.reason}`);
             return { ok: false };
           }
           const edit = parsed.args;
@@ -4010,6 +4083,12 @@ export async function runTool(
             `NOT applied — ${failures.length} of ${batch.length}. Everything ` +
               `else already landed, so fix and retry just these:\n` +
               `${failures.join("\n")}`
+          );
+        }
+        if (inferred.length) {
+          notes.push(
+            `Paths inferred (give "path" on every edit to skip this):\n` +
+              inferred.join("\n")
           );
         }
         if (raw.length > batch.length) {

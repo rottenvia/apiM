@@ -3765,7 +3765,11 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             return;
           }
 
-          // The no-thinking round after a cut-over has now run.
+          // The no-thinking round after a cut-over has now run — unless it
+          // is about to be asked again (a dropped connection, below), which
+          // must keep it: measured live, a drop in that round sent the
+          // retry back to a full think, which drafted and was cut again.
+          const roundWasNoThink = noThinkNext;
           noThinkNext = false;
 
           if (draftCutover) {
@@ -3905,6 +3909,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             streamCuts < MAX_STREAM_CUTS
           ) {
             streamCuts += 1;
+            if (roundWasNoThink) noThinkNext = true;
             if (roundReasoning.length >= DROPPED_THINK_CARRY_CHARS) {
               transcript.push({
                 role: "assistant",
