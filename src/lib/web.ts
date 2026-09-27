@@ -14,6 +14,9 @@
  */
 
 /** Enough for a large page, short of pulling a whole app bundle into context. */
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
+
 export const MAX_FETCH_BYTES = 5 * 1024 * 1024;
 /** What reaches the model after extraction. */
 export const MAX_FETCH_CHARS = 200_000;
@@ -59,6 +62,145 @@ export function isLoopbackHost(hostname: string): boolean {
   }
   const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
   return Boolean(v4 && Number(v4[1]) === 127);
+}
+
+/* ------------------------------------------------------------------ *
+ * Where an address actually points
+ *
+ * assertPublicUrl judged the URL as written. A security review found every
+ * one of these passing it: http://[::ffff:127.0.0.1]:3000/ (IPv4-mapped
+ * loopback — this app's own API), http://[::]:3000/, 127.0.0.1.nip.io (a
+ * public NAME for loopback), [::ffff:a9fe:a9fe] (cloud metadata) and
+ * 100.64.0.0/10. So literal addresses are classified after unwrapping the
+ * IPv6 forms that embed an IPv4 one, and names are resolved before use.
+ * ------------------------------------------------------------------ */
+
+function v4Private(parts: number[]): boolean {
+  const [a, b] = parts;
+  return (
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 0 && parts[2] === 0) ||
+    (a === 192 && b === 168) ||
+    (a === 198 && (b === 18 || b === 19)) ||
+    a >= 224
+  );
+}
+
+/** Eight 16-bit groups of an IPv6 literal, or null. */
+function v6Groups(ip: string): number[] | null {
+  let text = ip.toLowerCase().replace(/^\[|\]$/g, "").replace(/%.*$/, "");
+  // A trailing dotted IPv4 (::ffff:1.2.3.4) becomes two groups.
+  const tail = /(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(text);
+  if (tail) {
+    const n = tail.slice(1).map(Number);
+    if (n.some((x) => x > 255)) return null;
+    text =
+      text.slice(0, tail.index) +
+      ((n[0] << 8) | n[1]).toString(16) + ":" + ((n[2] << 8) | n[3]).toString(16);
+  }
+  const halves = text.split("::");
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const rest = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const fill = halves.length === 2 ? 8 - head.length - rest.length : 0;
+  if (fill < 0) return null;
+  const all = [...head, ...Array(fill).fill("0"), ...rest];
+  if (all.length !== 8) return null;
+  const groups = all.map((g) => parseInt(g, 16));
+  return groups.every((g) => Number.isInteger(g) && g >= 0 && g <= 0xffff) ? groups : null;
+}
+
+/** True for any address that is not on the public internet. */
+export function isNonPublicIp(ip: string): boolean {
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip);
+  if (v4) return v4Private(v4.slice(1).map(Number));
+  const g = v6Groups(ip);
+  if (!g) return true; // unparseable: refuse rather than guess
+  const embedded = (hi: number, lo: number) => [hi >> 8, hi & 255, lo >> 8, lo & 255];
+  if (g.every((x) => x === 0)) return true; // ::
+  if (g.slice(0, 7).every((x) => x === 0) && g[7] === 1) return true; // ::1
+  // ::ffff:a.b.c.d (mapped) and ::a.b.c.d (compatible)
+  if (g.slice(0, 5).every((x) => x === 0) && (g[5] === 0xffff || g[5] === 0)) {
+    return v4Private(embedded(g[6], g[7]));
+  }
+  if (g[0] === 0x64 && g[1] === 0xff9b) return v4Private(embedded(g[6], g[7])); // NAT64
+  if (g[0] === 0x2002) return v4Private(embedded(g[1], g[2])); // 6to4
+  if ((g[0] & 0xfe00) === 0xfc00) return true; // fc00::/7 unique local
+  if ((g[0] & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local
+  if ((g[0] & 0xff00) === 0xff00) return true; // multicast
+  return false;
+}
+
+function isLoopbackIp(ip: string): boolean {
+  const v4 = /^(\d{1,3})\./.exec(ip);
+  if (v4) return Number(v4[1]) === 127;
+  const g = v6Groups(ip);
+  if (!g) return false;
+  if (g.slice(0, 7).every((x) => x === 0) && g[7] === 1) return true;
+  return g.slice(0, 5).every((x) => x === 0) && g[5] === 0xffff && g[6] >> 8 === 127;
+}
+
+/**
+ * Ports this app itself serves on. http_request's local mode exists for the
+ * user's OWN dev servers; pointed at this app it would let text on a web
+ * page drive the app's API (autoRunCommands and all). Filled from the Host
+ * of incoming chat requests, plus PORT.
+ */
+const selfPorts = new Set<string>(process.env.PORT ? [process.env.PORT] : []);
+export function rememberSelfHost(host: string | null | undefined): void {
+  const port = /:(\d+)$/.exec(host ?? "")?.[1];
+  if (port) selfPorts.add(port);
+}
+
+function refuseSelf(url: URL): void {
+  const port = url.port || (url.protocol === "https:" ? "443" : "80");
+  if (selfPorts.has(port)) {
+    throw new WebError(
+      "That is this app's own server. Local mode is for your own dev servers, not the app's API."
+    );
+  }
+}
+
+/**
+ * assertPublicUrl, then resolve the name and check where it really points.
+ * Use this before every connection (and every redirect hop).
+ */
+export async function assertPublicUrlResolved(
+  raw: string | URL,
+  policy: UrlPolicy = {}
+): Promise<URL> {
+  const url = assertPublicUrl(String(raw), policy);
+  const host = url.hostname.replace(/^\[|\]$/g, "");
+  if (policy.allowLoopback && isLoopbackHost(url.hostname)) {
+    refuseSelf(url);
+    return url;
+  }
+  let addresses: string[];
+  if (isIP(host)) {
+    addresses = [host];
+  } else {
+    try {
+      addresses = (await lookup(host, { all: true, verbatim: true })).map((a) => a.address);
+    } catch {
+      throw new WebError(`Could not resolve ${host}.`);
+    }
+  }
+  for (const address of addresses) {
+    if (!isNonPublicIp(address)) continue;
+    if (policy.allowLoopback && isLoopbackIp(address)) {
+      refuseSelf(url);
+      continue;
+    }
+    throw new WebError(
+      `${host} points at ${address}, which is on this machine or a private network — this tool will not fetch it.`
+    );
+  }
+  return url;
 }
 
 export function assertPublicUrl(raw: string, policy: UrlPolicy = {}): URL {
@@ -118,6 +260,14 @@ export function assertPublicUrl(raw: string, policy: UrlPolicy = {}): URL {
 
   // IPv6 private/loopback prefixes.
   if (host.startsWith("[fc") || host.startsWith("[fd") || host.startsWith("[fe80")) {
+    throw new WebError(
+      "That is a private network address, which this tool will not fetch."
+    );
+  }
+
+  // Every other literal, after unwrapping mapped/NAT64/6to4 forms.
+  const literal = host.replace(/^\[|\]$/g, "");
+  if (isIP(literal) && isNonPublicIp(literal)) {
     throw new WebError(
       "That is a private network address, which this tool will not fetch."
     );
@@ -210,7 +360,7 @@ export async function downloadResource(
   rawUrl: string,
   options: { signal?: AbortSignal; allowLocal?: boolean; maxBytes?: number } = {}
 ): Promise<DownloadedResource> {
-  let url = assertPublicUrl(rawUrl, {
+  let url = await assertPublicUrlResolved(rawUrl, {
     allowLoopback: options.allowLocal === true,
   });
   const requestSignal = options.signal
@@ -233,7 +383,7 @@ export async function downloadResource(
     if (redirects >= 5) throw new WebError("Too many redirects (more than 5).");
     // Re-check every hop. Local mode permits loopback only; neither mode may
     // redirect into cloud metadata or a private-LAN service.
-    url = assertPublicUrl(new URL(location, url).toString(), {
+    url = await assertPublicUrlResolved(new URL(location, url).toString(), {
       allowLoopback: options.allowLocal === true,
     });
   }
@@ -341,23 +491,34 @@ export async function fetchPage(
     maxChars?: number;
   } = {}
 ): Promise<FetchedPage> {
-  const url = assertPublicUrl(rawUrl);
+  let url = await assertPublicUrlResolved(rawUrl);
 
   let res: Response;
   try {
-    res = await fetch(url, {
-      redirect: "follow",
-      signal: options.signal
-        ? AbortSignal.any([options.signal, AbortSignal.timeout(FETCH_TIMEOUT_MS)])
-        : AbortSignal.timeout(FETCH_TIMEOUT_MS),
-      headers: {
-        "User-Agent": USER_AGENT,
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-      },
-    });
+    const signal = options.signal
+      ? AbortSignal.any([options.signal, AbortSignal.timeout(FETCH_TIMEOUT_MS)])
+      : AbortSignal.timeout(FETCH_TIMEOUT_MS);
+    // Redirects are followed by hand so every hop is checked: with
+    // redirect "follow" only the first URL was, and a public page could
+    // bounce the fetch into 169.254.169.254 or the LAN.
+    for (let redirects = 0; ; redirects += 1) {
+      res = await fetch(url, {
+        redirect: "manual",
+        signal,
+        headers: {
+          "User-Agent": USER_AGENT,
+          Accept:
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": "en-US,en;q=0.9",
+        },
+      });
+      const location = res.headers.get("location");
+      if (![301, 302, 303, 307, 308].includes(res.status) || !location) break;
+      if (redirects >= 5) throw new WebError("Too many redirects (more than 5).");
+      url = await assertPublicUrlResolved(new URL(location, url).toString());
+    }
   } catch (error) {
+    if (error instanceof WebError) throw error;
     if (error instanceof Error && error.name === "TimeoutError") {
       throw new WebError(`${url.hostname} did not respond within 25 seconds.`);
     }
