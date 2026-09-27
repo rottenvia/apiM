@@ -406,6 +406,19 @@ check(
     /if \(!roundUsageSeen\) \{[\s\S]{0,900}chargeRound\(budget, est/.test(route));
 }
 
+// A dropped connection is not a think that ate the budget (measured: a
+// 5s drop on round 1 ran the whole task with thinking off).
+check("a think cut by the connection is asked again with thinking on, partial think carried",
+  /if \(\s*streamCut &&\s*calls\.length === 0 &&\s*!roundContent &&\s*streamCuts < MAX_STREAM_CUTS\s*\)/.test(route) &&
+    /roundReasoning\.length >= DROPPED_THINK_CARRY_CHARS/.test(route) &&
+    /content: DROPPED_THINK_TEXT/.test(route));
+check("only a real output-limit cut counts as thinking eating the budget",
+  /const thinkOnlyCut =\s*hardTruncated &&/.test(route));
+check("a prose continuation turns thinking off for one round, not the rest of the run",
+  /noThinkNext = true;[\s\S]{0,400}transcript\.push\(\{\s*role: "assistant",\s*content: roundContent \|\| null,\s*reasoning_content: roundReasoning \|\| null,\s*\}\);\s*transcript\.push\(\{\s*role: "user",\s*content:\s*\(hardTruncated/.test(route));
+check("the dropped-think carry says why",
+  /connection dropped mid-thought/.test(S.draftCarry("x".repeat(3000), "the connection dropped mid-thought")));
+
 // The round cap: a run making progress is not cut off mid-step.
 check("a run that closed a plan step since the last check gets more rounds",
   S.shouldExtendRoundCap({ extensionsUsed: 0, stepsDoneSinceCheck: 1, changesSinceCheck: 0 }));

@@ -161,6 +161,8 @@ import {
   MAX_DRAFT_CUTOVERS,
   draftCarry,
   draftCutoverText,
+  DROPPED_THINK_CARRY_CHARS,
+  DROPPED_THINK_TEXT,
   CAP_EXTENSION_ROUNDS,
   unchangedReadText,
   isReadTool,
@@ -3886,8 +3888,46 @@ Ask before you build the wrong thing. If a choice would change what you produce 
            * is real now (`reasoning: { effort: "none" }`), and a second,
            * blunter shove stands between one dead think and a dead run.
            */
+          /*
+           * A connection that dropped mid-THINK is not a think that ate the
+           * budget. Measured live: Morph dropped the very first request 5s
+           * in; it took the path below, which (a) told the model it had
+           * used its whole output budget and (b) set forceNoThinking, which
+           * never resets — so one network blip ran the entire task without
+           * a single thought. Now the round is simply asked again with
+           * thinking on, carrying the partial think if there is enough of
+           * it to be worth not redoing.
+           */
+          if (
+            streamCut &&
+            calls.length === 0 &&
+            !roundContent &&
+            streamCuts < MAX_STREAM_CUTS
+          ) {
+            streamCuts += 1;
+            if (roundReasoning.length >= DROPPED_THINK_CARRY_CHARS) {
+              transcript.push({
+                role: "assistant",
+                content: draftCarry(
+                  roundReasoning,
+                  "the connection dropped mid-thought"
+                ),
+                reasoning_content: null,
+              });
+              transcript.push({ role: "user", content: DROPPED_THINK_TEXT });
+            }
+            send({
+              type: "continuing",
+              reason: "connection_cut",
+              n: streamCuts,
+              of: MAX_STREAM_CUTS,
+            });
+            continue;
+          }
+
+          // Only a real output-limit cut is "thinking ate the budget".
           const thinkOnlyCut =
-            truncated &&
+            hardTruncated &&
             calls.length === 0 &&
             roundReasoning.length >= 80 &&
             (roundContent?.trim().length ?? 0) < 40;
@@ -3959,7 +3999,11 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               // the whole output ceiling on fresh reasoning and eight of them
               // still could not finish one long file: the run stopped with
               // the resume banner on work a continuation should have closed.
-              forceNoThinking = true;
+              //
+              // One round only. This was forceNoThinking, which never
+              // resets: after any cut prose the rest of the run — every
+              // later step of the task — ran without a thought.
+              noThinkNext = true;
               transcript.push({
                 role: "assistant",
                 content: roundContent || null,
