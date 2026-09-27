@@ -66,6 +66,7 @@
     "test:adversarial": "tsx scripts/test-adversarial.mjs",
     "score": "tsx scripts/score-tools.mjs",
     "test:autonomy": "tsx scripts/test-autonomy.mjs",
+    "test:loop": "tsx scripts/test-loop.mjs",
     "test:dispatch": "tsx scripts/test-dispatch.mjs",
     "test:honesty": "tsx scripts/test-honesty.mjs",
     "test:ux": "tsx scripts/test-ux.mjs",
