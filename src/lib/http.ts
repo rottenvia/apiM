@@ -21,7 +21,7 @@
  * followed, so a public URL cannot bounce around the guard.
  */
 
-import { assertPublicUrl, WebError } from "@/lib/web";
+import { assertPublicUrlResolved, WebError } from "@/lib/web";
 
 /** Longer than a page fetch: an API doing real work can be slow. */
 export const HTTP_TIMEOUT_MS = 30_000;
@@ -76,7 +76,7 @@ export async function httpRequest(options: {
   /** Explicit opt-in for localhost/127.0.0.0/8/[::1] dev servers only. */
   allowLocal?: boolean;
 }): Promise<HttpResult> {
-  let url = assertPublicUrl(options.url, {
+  let url = await assertPublicUrlResolved(options.url, {
     allowLoopback: options.allowLocal === true,
   });
 
@@ -136,7 +136,7 @@ export async function httpRequest(options: {
       if (![301, 302, 303, 307, 308].includes(res.status) || !location) break;
       if (redirects >= 5) throw new WebError("Too many redirects (more than 5).");
 
-      url = assertPublicUrl(new URL(location, url).toString(), {
+      url = await assertPublicUrlResolved(new URL(location, url).toString(), {
         allowLoopback: options.allowLocal === true,
       });
 

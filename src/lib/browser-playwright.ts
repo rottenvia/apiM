@@ -21,6 +21,7 @@ import path from "node:path";
 import type { BrowserDriver } from "@/lib/browser";
 import { NAV_TIMEOUT_MS } from "@/lib/browser";
 import { AGENT_PROFILE_DIR } from "@/lib/browser-policy";
+import { assertPublicUrlResolved } from "@/lib/web";
 
 export interface LaunchResult {
   driver: BrowserDriver;
@@ -140,6 +141,43 @@ export async function launch(workspaceDir: string): Promise<LaunchResult> {
   page.setDefaultTimeout(NAV_TIMEOUT_MS);
 
   /*
+   * The public web only — for navigations AND everything a page loads.
+   *
+   * Found by review: browse had no URL check at all, despite web.ts saying
+   * it was public-web-only. Text on any page the agent read could send it
+   * to file:///home/user/.ssh/id_rsa, 169.254.169.254 or this app's own API
+   * on localhost, and the result went back to the model. Hosts are cached
+   * per session: a page makes hundreds of requests to a handful of hosts.
+   */
+  const verdicts = new Map<string, Promise<boolean>>();
+  const allowed = (raw: string): Promise<boolean> => {
+    let url: URL;
+    try {
+      url = new URL(raw);
+    } catch {
+      return Promise.resolve(false);
+    }
+    if (url.protocol === "data:" || url.protocol === "blob:" || url.protocol === "about:") {
+      return Promise.resolve(true);
+    }
+    if (url.protocol !== "http:" && url.protocol !== "https:") return Promise.resolve(false);
+    const key = `${url.protocol}//${url.host}`;
+    let verdict = verdicts.get(key);
+    if (!verdict) {
+      verdict = assertPublicUrlResolved(raw).then(
+        () => true,
+        () => false
+      );
+      verdicts.set(key, verdict);
+    }
+    return verdict;
+  };
+  await page.route("**/*", async (route: any) => {
+    if (await allowed(String(route.request().url()))) return route.continue();
+    return route.abort("blockedbyclient");
+  });
+
+  /*
    * The console and failed requests are captured, not ignored.
    *
    * This is most of the value for self-testing. A page that renders but is
@@ -175,6 +213,8 @@ export async function launch(workspaceDir: string): Promise<LaunchResult> {
 
   const driver: BrowserDriver = {
     async goto(url) {
+      // Throws a readable WebError for file:, localhost, the LAN, metadata.
+      await assertPublicUrlResolved(url);
       // "domcontentloaded" rather than "load": a page with a slow analytics
       // beacon is usable long before `load` fires, and waiting for it is the
       // most common cause of a pointless 30-second timeout.
@@ -182,6 +222,13 @@ export async function launch(workspaceDir: string): Promise<LaunchResult> {
         waitUntil: "domcontentloaded",
         timeout: NAV_TIMEOUT_MS,
       });
+      // A redirect hop is not always routed through page.route: check
+      // where the navigation actually ended up.
+      if (!(await allowed(page.url()))) {
+        const landed = page.url();
+        await page.goto("about:blank").catch(() => {});
+        throw new Error(`Redirected to ${landed}, which is not on the public web — not loaded.`);
+      }
       return { url: page.url(), status: response?.status() ?? null };
     },
     async click(selector, force = false) {

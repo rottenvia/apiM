@@ -987,6 +987,41 @@ check(
   /count = file\.content\.split\(find\)\.length - 1;/.test(toolsSrc3)
 );
 
+// A security review found these all passing the as-written check.
+{
+  const refused = async (u, policy) => {
+    try { await web.assertPublicUrlResolved(u, policy); return false; } catch (e) { return e instanceof web.WebError; }
+  };
+  const bypasses = [
+    "http://[::ffff:127.0.0.1]:3000/api/conversations",
+    "http://[::]:3000/",
+    "http://[::ffff:a9fe:a9fe]/latest/meta-data/",
+    "http://[64:ff9b::a9fe:a9fe]/",
+    "http://[2002:7f00:1::]/",
+    "http://100.64.0.1/",
+    "http://198.18.0.1/",
+    "http://localhost./",
+    "file:///etc/passwd",
+  ];
+  const results = await Promise.all(bypasses.map((u) => refused(u)));
+  check("addresses that only LOOK public are refused (mapped, NAT64, 6to4, CGNAT, [::])",
+    results.every(Boolean), bypasses.filter((_, i) => !results[i]).join(" "));
+  check("a name is resolved and refused when it points at loopback",
+    await refused("http://localhost/") && !web.isNonPublicIp("93.184.216.34") && web.isNonPublicIp("::ffff:10.0.0.1"));
+  check("a public literal address still passes", !(await refused("http://93.184.216.34/")));
+  web.rememberSelfHost("127.0.0.1:3999");
+  check("local mode reaches a dev server but never this app's own port",
+    !(await refused("http://127.0.0.1:5173/", { allowLoopback: true })) &&
+      (await refused("http://127.0.0.1:3999/api/chat", { allowLoopback: true })) &&
+      (await refused("http://localhost:3999/", { allowLoopback: true })));
+  const pw = readFileSync(path.join(ROOT, "src/lib/browser-playwright.ts"), "utf8");
+  check("browse checks every navigation and every request a page makes",
+    /await assertPublicUrlResolved\(url\);/.test(pw) && /await page\.route\("\*\*\/\*"/.test(pw) &&
+      /route\.abort\("blockedbyclient"\)/.test(pw));
+  const webSrc = readFileSync(path.join(ROOT, "src/lib/web.ts"), "utf8");
+  check("fetch_url re-checks every redirect hop", /redirect: "manual",\s*signal,/.test(webSrc) && !/redirect: "follow"/.test(webSrc));
+}
+
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
 );

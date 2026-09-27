@@ -1,3 +1,4 @@
+import { rememberSelfHost } from "@/lib/web";
 import { NextRequest, NextResponse } from "next/server";
 import { v4 as uuidv4 } from "uuid";
 import {
@@ -695,6 +696,8 @@ function sanitizeOpenRouterRequestBody(
 }
 
 export async function POST(req: NextRequest) {
+  // The agent's local-mode http_request must never reach this app itself.
+  rememberSelfHost(req.headers.get("host"));
   // ---------------------------------------------------------------------
   // Validation happens before the stream opens, so these can still be real
   // HTTP error codes with JSON bodies.
