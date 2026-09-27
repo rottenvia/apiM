@@ -3921,6 +3921,7 @@ export async function runTool(
          * Zero or several matches still fail, naming the candidates.
          */
         const inferred: string[] = [];
+        let inferenceTexts: [string, string][] | null = null;
         const pathHints = new Map<number, string>();
         const pathlessOld = raw.map((entry) => {
           if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
@@ -3933,7 +3934,7 @@ export async function runTool(
           return old ?? null;
         });
         if (pathlessOld.some((v) => v !== null)) {
-          const texts = await workspaceTextsForInference(workspaceId);
+          const texts = (inferenceTexts = await workspaceTextsForInference(workspaceId));
           pathlessOld.forEach((oldText, i) => {
             if (oldText === null) return;
             const needle = oldText.replace(/\r\n/g, "\n");
@@ -4025,12 +4026,29 @@ export async function runTool(
              * behind a generic message either: the reason carries the line
              * numbers needed to fix exactly this hunk.
              */
-            const reason =
+            let reason =
               error instanceof WorkspaceError
                 ? error.message
                 : error instanceof Error
                   ? error.message
                   : "could not be edited";
+            /*
+             * The text is right and the path is wrong. Measured live: an
+             * edit named tests/roblox_stub.luau for a function that lives
+             * in tests/smoke_test.luau. Not applied elsewhere — the model
+             * named a file on purpose — but the miss says where the text is.
+             */
+            const oldText = typeof edit.old_text === "string" ? edit.old_text : "";
+            if (oldText.trim() && error instanceof WorkspaceError) {
+              inferenceTexts ??= await workspaceTextsForInference(workspaceId);
+              const needle = oldText.replace(/\r\n/g, "\n");
+              const elsewhere = inferenceTexts
+                .filter(([p, body]) => p !== editPath && body.includes(needle))
+                .map(([p]) => p);
+              if (elsewhere.length > 0 && elsewhere.length <= 3) {
+                reason += ` — but that old_text IS in ${elsewhere.join(", ")}: did you mean ${elsewhere.length === 1 ? "that file" : "one of those"}?`;
+              }
+            }
             if (!secondPass) return { ok: false, reason };
             failures.push(`${label} (${editPath}): ${reason}`);
             return { ok: false, reason };

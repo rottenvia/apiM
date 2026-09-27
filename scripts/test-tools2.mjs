@@ -206,6 +206,13 @@ check("a range read of a small file returns the whole file, numbered",
     /edit 2\/3: no "path" given, and its old_text occurs in 2 files \(.*inline\.py.*\)/.test(inf.content) &&
       /shared = 1/.test(inl) && /shared = 1/.test(oth),
     "guessing there would edit the wrong file");
+  const wrong = await runTool(WS, "edit_files", {
+    edits: [{ path: "inline.py", old_text: "value = 5", new_text: "value = 6" }],
+  });
+  check("an edit aimed at the wrong file says which file has the text",
+    !wrong.ok && /that old_text IS in other\.py: did you mean that file\?/.test(wrong.content) &&
+      /value = 5/.test((await ws.readFile(WS, "other.py")).content),
+    "measured: eq() was edited in tests/roblox_stub.luau but lives in tests/smoke_test.luau — not applied, but named");
   const wf = await runTool(WS, "write_files", { files: [{ file: "alias.luau", contents: "return 1\n" }, { path: "bad.luau" }] });
   check("write_files accepts common field spellings and names what is wrong",
     /Wrote 1/.test(wf.content) && /bad\.luau — malformed entry: "content" must be a string, got nothing/.test(wf.content),
