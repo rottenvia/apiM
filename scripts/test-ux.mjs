@@ -641,8 +641,8 @@ check(
 check(
   "the wait lines start at the assistant bubble's content edge",
   (chatArea.match(/<div className="flex justify-start px-4 p[by]-2">/g) ?? [])
-    .length === 3,
-  "status row, retry banner and request line all px-4 like the bubble — px-1 left them hanging left of the thinking panel"
+    .length === 4,
+  "status row, retry banner, request line and mid-run wait row all px-4 like the bubble — px-1 left them hanging left of the thinking panel"
 );
 check(
   "the retry banner survives only for mid-run retries",
@@ -747,6 +747,37 @@ check(
     /<ThinkingClock \/>/.test(bubble),
   "the status row unmounts at the first token — this is the stall signal after that"
 );
+
+// Reported: a screenshot on DeepSeek Flash "adds 3mil characters" and the
+// reply then looked stuck behind a static "Request 2 · 215k in" line.
+{
+  const att = await read("src/lib/attachments.ts");
+  check(
+    "an attached image is scaled to the edge the model uses and re-encoded smaller",
+    /export const IMAGE_MAX_EDGE = 2048;/.test(att) &&
+      /canvas\.toDataURL\("image\/png"\)/.test(att) &&
+      /canvas\.toDataURL\("image\/jpeg", 0\.9\)/.test(att) &&
+      /const dataUrl = await shrinkImageDataUrl\(file, original\);/.test(att),
+    "measured: a 9.2MB 4K PNG went out as 951k chars instead of 12.2M"
+  );
+  check(
+    "the image limit applies to what is sent, after shrinking",
+    /if \(\(dataUrl\.length \* 3\) \/ 4 > MAX_IMAGE_BYTES\) return tooBig\(\);/.test(att)
+  );
+  check(
+    "a fired round that has not answered gets a live waiting row with a clock",
+    /function WaitRow\(/.test(chatArea) &&
+      /Waiting for the model…/.test(chatArea) &&
+      /!requestSize\.answered/.test(chatArea) &&
+      /markRoundAnswered\(runConvId \?\? requestConversationId\);/.test(page) &&
+      (page.match(/markRoundAnswered\(runConvId/g) ?? []).length >= 3,
+    "otherwise a big prefill looks like a finished reply"
+  );
+  check(
+    "media is shown as MB beside the text size, not counted as characters",
+    /\+ media \$\{/.test(chatArea) && /const text = info\.inputChars - media;/.test(chatArea)
+  );
+}
 
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`

@@ -314,19 +314,89 @@ async function readAsDataUrl(file: File): Promise<string | null> {
   });
 }
 
+/**
+ * Longest edge an attached image keeps. Vision models downscale to about
+ * this themselves (the pixels past it are never seen), so sending more only
+ * costs upload and request size.
+ */
+export const IMAGE_MAX_EDGE = 2048;
+/** Below this an image is sent as-is — re-encoding it would gain nothing. */
+export const IMAGE_SHRINK_MIN_BYTES = 400 * 1024;
+
+/**
+ * Shrink a screenshot before it rides in the request.
+ *
+ * Reported: a screenshot added ~3M characters to a DeepSeek Flash request.
+ * A 4K PNG is 3–5MB, and as base64 it is re-sent on every round of the run
+ * (the model may need to look again), so one screenshot was millions of
+ * characters per request — slow to upload, and counted as text by the
+ * gateway's pre-flight estimate. Scaled to the edge the model actually
+ * uses and encoded as whichever of PNG / JPEG q0.9 is smaller (PNG keeps
+ * UI text crisp; JPEG wins on photos), it is typically 5–15x smaller.
+ *
+ * Browser-only and best effort: any failure keeps the original. GIFs (may
+ * be animated) and SVGs (not pixels) are left alone.
+ */
+export async function shrinkImageDataUrl(
+  file: File,
+  dataUrl: string
+): Promise<string> {
+  if (typeof document === "undefined" || typeof createImageBitmap !== "function") {
+    return dataUrl;
+  }
+  if (!/^image\/(png|jpeg|webp|bmp)$/i.test(file.type)) return dataUrl;
+  try {
+    const bitmap = await createImageBitmap(file);
+    const edge = Math.max(bitmap.width, bitmap.height);
+    if (file.size < IMAGE_SHRINK_MIN_BYTES && edge <= IMAGE_MAX_EDGE) {
+      bitmap.close();
+      return dataUrl;
+    }
+    const scale = Math.min(1, IMAGE_MAX_EDGE / edge);
+    const w = Math.max(1, Math.round(bitmap.width * scale));
+    const h = Math.max(1, Math.round(bitmap.height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      bitmap.close();
+      return dataUrl;
+    }
+    // JPEG has no alpha: paint white first so transparency does not go black.
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, w, h);
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(bitmap, 0, 0, w, h);
+    bitmap.close();
+    const candidates = [
+      canvas.toDataURL("image/png"),
+      canvas.toDataURL("image/jpeg", 0.9),
+    ].filter((u) => u.startsWith("data:image/"));
+    let best = dataUrl;
+    for (const c of candidates) if (c.length < best.length) best = c;
+    return best;
+  } catch {
+    return dataUrl;
+  }
+}
+
 /** Read an image as a data URL so it can be previewed and sent for analysis. */
 export async function readImageFile(
   file: File,
   options: { analyze?: boolean } = {}
 ): Promise<ReadResult> {
-  if (file.size > MAX_IMAGE_BYTES) {
-    return {
-      error: `${file.name} is ${formatBytes(file.size)} — the image limit is ${formatBytes(MAX_IMAGE_BYTES)}`,
-    };
-  }
+  // The limit applies to what is SENT. A big screenshot shrinks well under
+  // it, so only a file too large to even decode sensibly is refused up front.
+  const tooBig = () => ({
+    error: `${file.name} is ${formatBytes(file.size)} — the image limit is ${formatBytes(MAX_IMAGE_BYTES)}`,
+  });
+  if (file.size > MAX_IMAGE_BYTES * 5) return tooBig();
 
-  const dataUrl = await readAsDataUrl(file);
-  if (!dataUrl) return { error: `Couldn't read ${file.name}` };
+  const original = await readAsDataUrl(file);
+  if (!original) return { error: `Couldn't read ${file.name}` };
+  const dataUrl = await shrinkImageDataUrl(file, original);
+  if ((dataUrl.length * 3) / 4 > MAX_IMAGE_BYTES) return tooBig();
 
   // Native VLMs see the pixels themselves — do not mark the chip as
   // "Looking at image" or the composer will wait on a helper that never runs.
@@ -336,7 +406,11 @@ export async function readImageFile(
     attachment: {
       id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
       name: file.name,
-      size: file.size,
+      // What is actually sent: base64 is 4 chars per 3 bytes.
+      size:
+        dataUrl === original
+          ? file.size
+          : Math.round(((dataUrl.length - dataUrl.indexOf(",") - 1) * 3) / 4),
       content: "",
       truncated: false,
       kind: "image",
