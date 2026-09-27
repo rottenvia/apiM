@@ -641,8 +641,8 @@ check(
 check(
   "the wait lines start at the assistant bubble's content edge",
   (chatArea.match(/<div className="flex justify-start px-4 p[by]-2">/g) ?? [])
-    .length === 4,
-  "status row, retry banner, request line and mid-run wait row all px-4 like the bubble — px-1 left them hanging left of the thinking panel"
+    .length === 5,
+  "status row, retry banner, request line, mid-run wait row and drafting row all px-4 like the bubble — px-1 left them hanging left of the thinking panel"
 );
 check(
   "the retry banner survives only for mid-run retries",
@@ -777,6 +777,30 @@ check(
     "media is shown as MB beside the text size, not counted as characters",
     /\+ media \$\{/.test(chatArea) && /const text = info\.inputChars - media;/.test(chatArea)
   );
+}
+
+// The reported "stuck?" screenshot: "Plan, then the script itself." — then
+// the script streamed in as tool-call arguments, invisible for minutes.
+{
+  const route = await read("src/app/api/chat/route.ts");
+  const { ToolCallAccumulator } = await import(pathToFileURL(path.join(ROOT, "src/lib/transcript.ts")).href);
+  const acc = new ToolCallAccumulator();
+  acc.add({ index: 0, id: "a", function: { name: "write_files", arguments: '{"files":[{"path":"src/a.luau","content":"x"},{"path":"src/b.lu' } });
+  acc.add({ index: 0, function: { arguments: 'au","content":"local y' } });
+  const d = acc.drafting();
+  check("the call being streamed is named with the file it is writing now",
+    d && d.name === "write_files" && d.path === "src/b.luau" && d.chars > 60);
+  check("the route sends it, throttled, while tool arguments stream",
+    /if \(nowMs - lastDraftSentAt >= 700\)/.test(route) &&
+      /if \(d\) send\(\{ type: "tool_drafting", \.\.\.d \}\);/.test(route));
+  check("the page shows a live drafting row until the call completes",
+    /function DraftRow\(/.test(chatArea) && /\{isLoading && drafting && \(/.test(chatArea) &&
+      /case "tool_drafting": \{/.test(page) &&
+      /case "tool_start": \{[\s\S]{0,300}liveDrafting: null/.test(page));
+  check("the stream gets a heartbeat so a silent minute is not a dropped connection",
+    /controller\.enqueue\(encoder\.encode\(": ping\\n\\n"\)\);/.test(route) &&
+      /clearInterval\(heartbeat\);/.test(route),
+    "measured: a 300s client body timeout killed the stream while a file was being written");
 }
 
 console.log(
