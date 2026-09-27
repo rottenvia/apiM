@@ -183,14 +183,6 @@ check(
   '"Step 3 of 7" answers the question without scrolling — in words, so it never reads as a done count'
 );
 check(
-  "a reopened chat rejoins a run still going on the server",
-  /const rejoinRun = useCallback\(/.test(page) &&
-    /\/api\/chat\/stop\?conversationId=/.test(page) &&
-    /void rejoinRun\(id, last\.id\)/.test(page) &&
-    /void rejoinRun\(id, null\)/.test(page),
-  "measured: a reopened app showed a live 40-minute run as just the question — no reply, no Stop"
-);
-check(
   "the plan box says its fraction is a done count",
   /\{done\}\/\{total\} done/.test(await read("src/components/PlanPanel.tsx")),
   'reported: the chip read "Step 4/5" while the box read "3/5" — two fractions that looked contradictory'
@@ -302,6 +294,14 @@ check(
 );
 
 const page = await read("src/app/page.tsx");
+check(
+  "a reopened chat rejoins a run still going on the server",
+  /const rejoinRun = useCallback\(/.test(page) &&
+    /\/api\/chat\/stop\?conversationId=/.test(page) &&
+    /void rejoinRun\(id, last\.id\)/.test(page) &&
+    /void rejoinRun\(id, null\)/.test(page),
+  "measured: a reopened app showed a live 40-minute run as just the question — no reply, no Stop"
+);
 check(
   "the resolved effort reaches the LIVE message, not just the finished one",
   /m\.id === streamingId\s*\?\s*\{ \.\.\.m, thinkingEffort: evt\.resolvedEffort \}/.test(
