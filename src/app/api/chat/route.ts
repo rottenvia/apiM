@@ -2113,12 +2113,13 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         /**
          * Live thinks cut short because they were drafting a whole program
          * in thought (see DRAFT_CUTOVER_LINES), and whether the round after
-         * one thinks at low effort — its job is writing the carried draft
+         * one runs without thinking — its job is writing the carried draft
          * out, not designing it again. One round only, unlike
-         * forceNoThinking, which holds for the rest of the run.
+         * forceNoThinking, which holds for the rest of the run. (Not "low"
+         * effort: measured live, the endpoint thought just as long at low.)
          */
         let draftCutovers = 0;
-        let lowEffortNext = false;
+        let noThinkNext = false;
         /**
          * Times we auto-continued a mid-task stop that was not an output
          * ceiling. Separate from MAX_CONTINUATIONS, and not carried across
@@ -2626,8 +2627,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           applyThinking(
             dsRequestBody,
             target.thinkingStyle,
-            thinkingEnabled && !forceNoThinking,
-            forceNoThinking ? "none" : lowEffortNext ? "low" : resolvedEffort,
+            thinkingEnabled && !forceNoThinking && !noThinkNext,
+            forceNoThinking || noThinkNext ? "none" : resolvedEffort,
             // Mandatory-reasoning endpoints 400 on the disable (the budget
             // shove and prose continuations kept dying on the fp4 pin), so
             // the off signal clamps to minimal effort there instead.
@@ -3762,8 +3763,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             return;
           }
 
-          // The low-effort round after a cut-over has now run.
-          lowEffortNext = false;
+          // The no-thinking round after a cut-over has now run.
+          noThinkNext = false;
 
           if (draftCutover) {
             draftCutovers += 1;
@@ -3800,7 +3801,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               role: "user",
               content: draftCutoverText(draftLinesAtCut),
             });
-            lowEffortNext = true;
+            noThinkNext = true;
             send({
               type: "continuing",
               reason: "code_draft",
