@@ -110,7 +110,7 @@ import { MACHINE_SCOPE, formatMachineFindingsForPrompt,
   replaceFindings,
 } from "@/lib/findings";
 import { runRefine } from "@/lib/refine";
-import { beginRun, endRun } from "@/lib/runs";
+import { beginRun, endRun, touchRun } from "@/lib/runs";
 import { listProcesses, isRunning } from "@/lib/processes";
 import {
   rebuildResumeFromStored,
@@ -3405,6 +3405,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             if (done) break;
 
             buffer += decoder.decode(value, { stream: true });
+            // Alive: the idle safety net in lib/runs measures from here.
+            touchRun(assistantMsgId);
 
             // SSE frames are newline-delimited; keep the trailing partial line.
             const lines = buffer.split("\n");
@@ -5493,6 +5495,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               });
             }
 
+            touchRun(assistantMsgId);
             send({
               type: "tool_result",
               id: call.id,

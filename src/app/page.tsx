@@ -1321,6 +1321,122 @@ export default function Home() {
   /** Chat id currently loading from disk — the skeleton shows for it. */
   const [loadingConv, setLoadingConv] = useState<string | null>(null);
 
+  /*
+   * Rejoin a run that is still going on the server.
+   *
+   * Runs deliberately outlive their tab (only Stop ends one), but a reloaded
+   * or reopened app showed such a chat as just the question: no reply, no
+   * progress, no Stop — as if the run had died, inviting a second send that
+   * started a parallel run. Now an unfinished last reply is checked against
+   * the server's live runs; if it is live, the bubble shows as streaming
+   * (spinner, Stop, composer locked) and follows the server's saved
+   * progress every couple of seconds until the run ends.
+   */
+  const rejoiningRef = useRef<Set<string>>(new Set());
+  const rejoinRun = useCallback(
+    async (convId: string, knownMessageId: string | null) => {
+      const runningIds = async (): Promise<string[]> => {
+        try {
+          const r = await fetch(
+            `/api/chat/stop?conversationId=${encodeURIComponent(convId)}`
+          );
+          const j = (await r.json()) as { running?: string[] };
+          return Array.isArray(j.running) ? j.running : [];
+        } catch {
+          return [];
+        }
+      };
+      // Unknown id: the run has not saved its reply yet (still waiting for
+      // its first tokens), so the chat on disk ends with the question.
+      const first = await runningIds();
+      const messageId = knownMessageId ?? first[0] ?? null;
+      if (!messageId || !first.includes(messageId)) return;
+      if (rejoiningRef.current.has(messageId)) return;
+      const isLive = async () => (await runningIds()).includes(messageId);
+      rejoiningRef.current.add(messageId);
+      if (!knownMessageId) {
+        writeMessages(convId, (prev) =>
+          prev.some((m) => m.id === messageId)
+            ? prev
+            : [
+                ...prev,
+                {
+                  id: messageId,
+                  role: "assistant",
+                  content: "",
+                  isStreaming: true,
+                  createdAt: new Date().toISOString(),
+                },
+              ]
+        );
+      }
+      getSession(convId).runMessageId = messageId;
+      patchSession(convId, { loading: true, stage: "working" });
+      let reasoningShown = -1;
+      try {
+        for (;;) {
+          const live = await isLive();
+          let raw: Record<string, unknown> | undefined;
+          try {
+            const res = await fetch(`/api/conversations/${convId}`);
+            const data = (await res.json()) as { messages?: unknown[] };
+            raw = (data.messages ?? []).find(
+              (m) => (m as { id?: string }).id === messageId
+            ) as Record<string, unknown> | undefined;
+          } catch {
+            raw = undefined;
+          }
+          if (raw) {
+            const reasoningLength = (raw.reasoningLength as number) ?? 0;
+            let reasoning: string | undefined;
+            if (reasoningLength > 0 && reasoningLength !== reasoningShown) {
+              try {
+                const r = await fetch(
+                  `/api/conversations/${convId}/reasoning/${messageId}`
+                );
+                reasoning = ((await r.json()) as { reasoning?: string }).reasoning;
+                reasoningShown = reasoningLength;
+              } catch {
+                reasoning = undefined;
+              }
+            }
+            const found = raw;
+            writeMessages(convId, (prev) =>
+              prev.map((m) =>
+                m.id === messageId
+                  ? {
+                      ...m,
+                      content: (found.content as string) ?? m.content,
+                      reasoningContent: reasoning ?? m.reasoningContent,
+                      reasoningLength,
+                      toolEvents: Array.isArray(found.toolEvents)
+                        ? (found.toolEvents as ToolEvent[])
+                        : m.toolEvents,
+                      timeline: Array.isArray(found.timeline)
+                        ? (found.timeline as TimelineEntry[])
+                        : m.timeline,
+                      plan: found.plan ? (found.plan as PlanView) : m.plan,
+                      thinkingEffort:
+                        (found.thinkingEffort as string | undefined) ?? m.thinkingEffort,
+                      isStreaming: live,
+                      incomplete: live ? false : found.incomplete === true,
+                      canResume: live ? false : found.canResume === true,
+                    }
+                  : m
+              )
+            );
+          }
+          if (!live) break;
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+      } finally {
+        rejoiningRef.current.delete(messageId);
+        patchSession(convId, { loading: false, stage: null, runMessageId: null });
+      }
+    },
+    [patchSession, writeMessages]
+  );
+
   const loadConversation = useCallback(
     async (id: string) => {
       // Switching chats deliberately does NOT abort the other chat's stream:
@@ -1499,6 +1615,13 @@ export default function Home() {
           } else {
             setSessionsVersion((v) => v + 1);
           }
+          // An unfinished last reply may still be running server-side.
+          const last = parsed[parsed.length - 1];
+          if (last?.role === "assistant" && last.incomplete) {
+            void rejoinRun(id, last.id);
+          } else if (last?.role === "user") {
+            void rejoinRun(id, null);
+          }
         }
       } catch {
         /* ignore — the cached/session copy stays on screen */
@@ -1509,7 +1632,7 @@ export default function Home() {
         }
       }
     },
-    [activateSession, writeMessages]
+    [activateSession, writeMessages, rejoinRun]
   );
 
   const startNewChat = useCallback(() => {
