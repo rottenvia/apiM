@@ -1,5 +1,6 @@
 import fsSync, { promises as fs } from "node:fs";
 import path from "node:path";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { documentKind, readDocument } from "@/lib/documents";
 
 /**
@@ -432,7 +433,100 @@ export function resolveInside(workspaceId: string, relative: string): string {
   if (target !== root && !target.startsWith(root + path.sep)) {
     throw new WorkspaceError("Path escapes the workspace");
   }
+  assertNoSymlinkEscape(root, target);
   return target;
+}
+
+/** Is `child` the same as, or inside, `parent`? Case-insensitive on Windows. */
+function isWithin(parent: string, child: string): boolean {
+  const a = process.platform === "win32" ? parent.toLowerCase() : parent;
+  const b = process.platform === "win32" ? child.toLowerCase() : child;
+  return b === a || b.startsWith(a.endsWith(path.sep) ? a : a + path.sep);
+}
+
+/**
+ * The lexical check above cannot see symlinks.
+ *
+ * Measured: with `vendor` a symlink to a directory outside, write_file
+ * "vendor/escaped.txt" created a file OUTSIDE the workspace, and a link
+ * `h -> /etc/hostname` made read_file return the machine's hostname. The
+ * real location is what matters, so the deepest part of the path that
+ * exists is resolved through every link and must still be inside the
+ * workspace's own real path. A final-component link is resolved too, so a
+ * read cannot follow one out; a dangling one is judged by where it points.
+ */
+function assertNoSymlinkEscape(root: string, target: string): void {
+  let realRoot: string;
+  try {
+    realRoot = fsSync.realpathSync(root);
+  } catch {
+    return; // The workspace does not exist yet, so nothing inside it can be a link.
+  }
+
+  let probe = target;
+  for (;;) {
+    let stat: fsSync.Stats | null = null;
+    try {
+      stat = fsSync.lstatSync(probe);
+    } catch {
+      stat = null;
+    }
+    if (stat) {
+      let real: string;
+      try {
+        real = fsSync.realpathSync(probe);
+      } catch {
+        // A dangling link: judge it by what it names, not by its absence.
+        try {
+          const link = fsSync.readlinkSync(probe);
+          const parent = fsSync.realpathSync(path.dirname(probe));
+          real = path.resolve(parent, link);
+        } catch {
+          throw new WorkspaceError("Path could not be resolved safely");
+        }
+      }
+      if (!isWithin(realRoot, real)) {
+        throw new WorkspaceError("Path escapes the workspace through a symbolic link");
+      }
+      return;
+    }
+    const parent = path.dirname(probe);
+    if (parent === probe || !isWithin(root, parent)) return;
+    probe = parent;
+  }
+}
+
+/**
+ * Directories the file tools may read but never write.
+ *
+ * `.git` holds the repository's config, and a config can name programs git
+ * runs (core.fsmonitor ran on an approval-free `git status` — measured). A
+ * `.git` FILE is refused too: "gitdir: elsewhere" would point git at a
+ * config the agent wrote. `.history` and `.snapshots` are this app's own
+ * undo state; a forged manifest or history slot would restore anything.
+ */
+const WRITE_PROTECTED_ROOT = new Set<string>([".history", ".snapshots", ".workspace-id"]);
+
+export function isProtectedPath(relative: string): boolean {
+  const segments = String(relative ?? "")
+    .replace(/\\/g, "/")
+    .split("/")
+    .filter((seg) => seg !== "" && seg !== ".");
+  if (segments.length === 0) return false;
+  const lower = segments.map((seg) =>
+    process.platform === "win32" ? seg.toLowerCase() : seg
+  );
+  if (lower.some((seg) => seg === ".git")) return true;
+  return WRITE_PROTECTED_ROOT.has(lower[0]);
+}
+
+function assertWritable(relative: string): void {
+  if (isProtectedPath(relative)) {
+    throw new WorkspaceError(
+      `${relative} is inside a protected folder (.git, .history or .snapshots) ` +
+        `and cannot be written, moved or deleted by the file tools`
+    );
+  }
 }
 
 /**
@@ -518,12 +612,21 @@ const IGNORED = new Set([
   "node_modules",
   ".git",
   ".next",
-  "dist",
-  "build",
   "__pycache__",
   ".venv",
   "venv",
 ]);
+
+/**
+ * Build output, hidden only at the top of the workspace.
+ *
+ * These were in IGNORED, which applies at every depth — so `src/build/
+ * config.ts` and `tools/dist/index.ts` were invisible to list_files,
+ * search_files and replace_in_files (measured: a rename skipped both and
+ * reported success). A top-level `dist/` is the project's output; a
+ * `build` folder deeper in is as likely to be source.
+ */
+const IGNORED_AT_ROOT = new Set(["dist", "build"]);
 
 export async function listFiles(
   workspaceId: string,
@@ -548,6 +651,7 @@ export async function listFiles(
 
   async function walk(dir: string): Promise<void> {
     if (out.length >= MAX_FILES_PER_WORKSPACE) return;
+    const atRoot = dir === root;
 
     let entries;
     try {
@@ -573,6 +677,7 @@ export async function listFiles(
     for (const entry of entries) {
       if (out.length >= MAX_FILES_PER_WORKSPACE) return;
       if (IGNORED.has(entry.name)) continue;
+      if (atRoot && IGNORED_AT_ROOT.has(entry.name)) continue;
 
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) {
@@ -989,32 +1094,59 @@ export async function readFileWhole(
  */
 function historyPathFor(workspaceId: string, relative: string): string {
   const root = workspaceRoot(workspaceId);
-  // Flatten the path into one filename so nested directories don't need
-  // recreating inside the history folder.
-  const flat = relative.replace(/[\\/]/g, "__");
+  /*
+   * One filename per path, and never the same one for two paths.
+   *
+   * Flattening "/" to "__" made `src/util.ts` and `src__util.ts` share a
+   * history (measured: undo on one restored the other's content), and the
+   * raw spelling was the key, so `./p.ts` and `p.ts` had separate ones.
+   * The path is normalised first, then escaped reversibly.
+   */
+  const flat = historyKey(relative).replace(/%/g, "%25").replace(/\//g, "%2F");
   return path.join(root, ".history", `${flat}.prev`);
 }
 
+/** The canonical spelling of a workspace path: forward slashes, no `./`. */
+export function historyKey(relative: string): string {
+  const posix = String(relative ?? "").replace(/\\/g, "/");
+  return path.posix.normalize(posix).replace(/^(\.\/)+/, "").replace(/\/+$/, "");
+}
+
 /**
- * A previous version of a file. `steps` of 1 is the last write, 2 the one
- * before it, and so on.
+ * Bytes of a previous version. `steps` of 1 is the last write, 2 the one
+ * before it, and so on. Null when that far back is not kept — never a
+ * silently nearer version.
+ */
+export async function previousVersionBytes(
+  workspaceId: string,
+  relative: string,
+  steps = 1
+): Promise<Buffer | null> {
+  // Validates the path, so a crafted name can't read outside the history dir.
+  resolveInside(workspaceId, relative);
+  // Measured: steps 12 was clamped to the oldest slot (10) and reported as
+  // "how it was 12 writes ago". Out of range is an honest miss instead.
+  if (!Number.isFinite(steps) || steps < 1 || steps > MAX_HISTORY_VERSIONS) {
+    return null;
+  }
+  try {
+    return await fs.readFile(historySlotPath(workspaceId, relative, steps - 1));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A previous version of a file, as text. `steps` of 1 is the last write, 2
+ * the one before it, and so on.
  */
 export async function previousVersion(
   workspaceId: string,
   relative: string,
   steps = 1
 ): Promise<string | null> {
-  // Validates the path, so a crafted name can't read outside the history dir.
-  resolveInside(workspaceId, relative);
-  const slot = Math.max(0, Math.min(MAX_HISTORY_VERSIONS - 1, steps - 1));
-  try {
-    return await fs.readFile(
-      historySlotPath(workspaceId, relative, slot),
-      "utf8"
-    );
-  } catch {
-    return null;
-  }
+  const bytes = await previousVersionBytes(workspaceId, relative, steps);
+  return bytes === null ? null : bytes.toString("utf8");
 }
 
 /**
@@ -1041,6 +1173,22 @@ function historySlotPath(
 }
 
 /**
+ * One history entry per file per tool call.
+ *
+ * Every write used to push a version, so one edit_files call with twelve
+ * hunks on one file pushed twelve and evicted the version from before the
+ * call (measured: undo_file steps 12 could not get back to it). Inside a
+ * batch the first write of a file records its pre-call state and later
+ * writes of the same file in that call record nothing — undo then means
+ * "before that tool call", which is what a person means by it.
+ */
+const historyBatch = new AsyncLocalStorage<Set<string>>();
+
+export function withHistoryBatch<T>(fn: () => Promise<T>): Promise<T> {
+  return historyBatch.run(new Set<string>(), fn);
+}
+
+/**
  * Records the current contents before they are overwritten.
  *
  * Versions shift down a slot each time, so `.prev` is always the most recent
@@ -1054,8 +1202,12 @@ async function saveHistory(
   relative: string,
   target: string
 ): Promise<void> {
+  const batch = historyBatch.getStore();
+  const batchKey = `${workspaceId}\0${historyKey(relative)}`;
+  if (batch?.has(batchKey)) return;
   try {
-    const current = await fs.readFile(target, "utf8");
+    const stat = await fs.stat(target);
+    if (!stat.isFile()) return;
     const dest = historyPathFor(workspaceId, relative);
     await fs.mkdir(path.dirname(dest), { recursive: true });
 
@@ -1071,7 +1223,10 @@ async function saveHistory(
       }
     }
 
-    await fs.writeFile(dest, current, "utf8");
+    // Bytes, not text: a UTF-8 round trip corrupted binaries (measured: a
+    // deleted PNG header came back with 0xFF 0xFE turned into U+FFFD).
+    await fs.copyFile(target, dest);
+    batch?.add(batchKey);
 
     // Drop anything that fell off the end.
     await fs
@@ -1080,8 +1235,8 @@ async function saveHistory(
       })
       .catch(() => {});
   } catch {
-    // No existing file, or it isn't text. Either way there is nothing worth
-    // keeping, and failing to save history must never block the write.
+    // No existing file, or it could not be copied. Either way failing to
+    // save history must never block the write.
   }
 }
 
@@ -1199,9 +1354,14 @@ export async function readImageAsDataUrl(
 export async function writeFileBytes(
   workspaceId: string,
   relative: string,
-  data: Buffer
+  data: Buffer,
+  options: {
+    /** Keep the replaced version in undo history, as writeFile does. */
+    keepHistory?: boolean;
+  } = {}
 ): Promise<{ path: string; bytes: number }> {
   await ensureRoot(workspaceId);
+  assertWritable(relative);
   const target = resolveInside(workspaceId, relative);
 
   if (!Buffer.isBuffer(data)) {
@@ -1211,9 +1371,39 @@ export async function writeFileBytes(
     throw new WorkspaceError("File is too large to write");
   }
 
+  if (options.keepHistory) await saveHistory(workspaceId, relative, target);
   await fs.mkdir(path.dirname(target), { recursive: true });
-  await fs.writeFile(target, data);
+  // Temp + rename like writeFile: a direct write follows a symlink sitting
+  // at the target, and a crash mid-write would leave half a file.
+  await writeAtomically(target, data);
   return { path: relative, bytes: data.byteLength };
+}
+
+/**
+ * Write through a temp file and rename it into place.
+ *
+ * Keeps the permission bits of the file being replaced. Measured: an edit
+ * to an executable `run.sh` (0755) left it 0644, because the temp file got
+ * default permissions and the rename carried those over.
+ */
+async function writeAtomically(target: string, data: string | Buffer): Promise<void> {
+  let mode: number | null = null;
+  try {
+    const stat = await fs.lstat(target);
+    if (stat.isFile()) mode = stat.mode & 0o7777;
+  } catch {
+    mode = null;
+  }
+  const tmp = `${target}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+  try {
+    if (typeof data === "string") await fs.writeFile(tmp, data, "utf8");
+    else await fs.writeFile(tmp, data);
+    if (mode !== null) await fs.chmod(tmp, mode).catch(() => {});
+    await fs.rename(tmp, target);
+  } catch (err) {
+    await fs.unlink(tmp).catch(() => {});
+    throw err;
+  }
 }
 
 export async function writeFile(
@@ -1222,6 +1412,7 @@ export async function writeFile(
   content: string
 ): Promise<{ path: string; bytes: number; created: boolean }> {
   await ensureRoot(workspaceId);
+  assertWritable(relative);
   const target = resolveInside(workspaceId, relative);
 
   if (typeof content !== "string") {
@@ -1243,14 +1434,7 @@ export async function writeFile(
   await fs.mkdir(path.dirname(target), { recursive: true });
 
   // Write then rename so a crash can't leave a half-written file.
-  const tmp = `${target}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
-  try {
-    await fs.writeFile(tmp, content, "utf8");
-    await fs.rename(tmp, target);
-  } catch (err) {
-    await fs.unlink(tmp).catch(() => {});
-    throw err;
-  }
+  await writeAtomically(target, content);
 
   return {
     path: relative,
@@ -1469,7 +1653,14 @@ export function diagnoseEditFailure(raw: string, oldText: string): string {
  */
 function anchorSpans(
   fileLines: string[],
-  anchor: string
+  anchor: string,
+  /**
+   * First line (0-based) a match may start on. Applied BEFORE exact is
+   * preferred over partial: measured, an exact `return x;` above the start
+   * anchor hid the partial `if (a) return x;` below it, so the end anchor
+   * was "not found after" the start although it plainly was there.
+   */
+  minStart = 0
 ): { start: number; end: number }[] {
   const lines = anchor.split("\n").map((l) => l.trim());
   while (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
@@ -1479,7 +1670,7 @@ function anchorSpans(
     const wanted = lines[0] ?? "";
     const exact: number[] = [];
     const loose: number[] = [];
-    for (let i = 0; i < fileLines.length; i++) {
+    for (let i = Math.max(0, minStart); i < fileLines.length; i++) {
       const line = fileLines[i];
       if (line.trim() === wanted) exact.push(i);
       else if (wanted && line.includes(wanted)) loose.push(i);
@@ -1489,7 +1680,7 @@ function anchorSpans(
 
   const spans: { start: number; end: number }[] = [];
   const last = lines.length - 1;
-  for (let i = 0; i + last < fileLines.length; i++) {
+  for (let i = Math.max(0, minStart); i + last < fileLines.length; i++) {
     let ok = true;
     for (let j = 0; j <= last && ok; j++) {
       const have = fileLines[i + j].trim();
@@ -1523,7 +1714,14 @@ export function resolveEditRegion(
   const starts = lineOffsets(fileLines);
 
   const hasAnchors = Boolean(spec.startAnchor?.trim());
-  const hasLines = spec.startLine != null;
+  /*
+   * old_text wins over a line number. Measured: {old_text: "gamma\ndelta",
+   * line: 1} replaced "alpha" — the line range was checked first and the
+   * text the model quoted was ignored. The text says WHAT; a line is only
+   * used to pick between several places the text occurs.
+   */
+  const hasOldText = Boolean(stripLineGutter(String(spec.oldText ?? "")).trim());
+  const hasLines = spec.startLine != null && !hasOldText;
 
   if (hasAnchors) {
     const startAnchor = stripLineGutter(String(spec.startAnchor)).trim();
@@ -1552,9 +1750,7 @@ export function resolveEditRegion(
     const startIdx = startSpan.start;
     let endSpan = startSpan;
     if (endAnchorRaw) {
-      const after = anchorSpans(fileLines, endAnchorRaw).filter(
-        (sp) => sp.start >= startIdx
-      );
+      const after = anchorSpans(fileLines, endAnchorRaw, startIdx);
       if (after.length === 0) {
         throw new WorkspaceError(
           `end_anchor not found after line ${startIdx + 1}: ` +
@@ -1617,7 +1813,7 @@ export function resolveEditRegion(
     );
   }
 
-  const match = findEditTarget(raw, oldText);
+  const match = findEditTarget(raw, oldText, spec.startLine ?? null);
   if (match.kind === "none") {
     throw new WorkspaceError(
       `old_text not found — ${diagnoseEditFailure(raw, oldText)}`
@@ -1635,8 +1831,11 @@ export function resolveEditRegion(
         (occurrences.length
           ? ` (lines ${occurrences.join(", ")})`
           : "") +
-        ` — include surrounding lines to make it unique, or use ` +
-        `start_line/end_line to name the one you mean`
+        (spec.startLine != null
+          ? ` and line ${spec.startLine} is not nearest to exactly one of them`
+          : "") +
+        ` — include surrounding lines to make it unique, or add ` +
+        `start_line to say which occurrence you mean`
     );
   }
 
@@ -1692,14 +1891,32 @@ export async function applyEdit(
 
   if (spec.preview) return outcome;
 
-  const updated =
-    raw.slice(0, region.start) +
+  let replacement =
     // Re-indent the replacement by however much the match was shifted, so a
     // whitespace-tolerant match does not flatten the file it lands in.
-    (region.indent && region.mode === "snippet"
+    region.indent && region.mode === "snippet"
       ? reindent(newText, region.indent)
-      : newText) +
-    raw.slice(region.end);
+      : newText;
+
+  /*
+   * Keep the file's line endings.
+   *
+   * Measured on a CRLF file: an edit wrote its new lines with bare LF and
+   * dropped the "\r" that ended the replaced span, leaving a file with
+   * mixed endings ("  TWO\n  THREE\nfour\r\n"). The replacement is
+   * converted to the file's EOL, and a span that ended in "\r" (a line
+   * range or a whole-line match splits on "\n") keeps it.
+   */
+  const crlfCount = (raw.match(/\r\n/g) ?? []).length;
+  const lfCount = (raw.match(/\n/g) ?? []).length - crlfCount;
+  if (crlfCount > 0 && crlfCount >= lfCount) {
+    replacement = replacement.replace(/\r?\n/g, "\r\n");
+    if (matchedText.endsWith("\r") && !replacement.endsWith("\r")) {
+      replacement += "\r";
+    }
+  }
+
+  const updated = raw.slice(0, region.start) + replacement + raw.slice(region.end);
 
   await writeFile(workspaceId, relative, updated);
   return { ...outcome, replaced: true };
@@ -1723,12 +1940,50 @@ type EditMatch =
   | { kind: "none" }
   | { kind: "ambiguous" };
 
-function findEditTarget(raw: string, oldText: string): EditMatch {
+/**
+ * Of several matches, the one nearest a line hint — or null on a tie.
+ * A match whose span contains the line is at distance zero.
+ */
+function nearestTo<T extends { start: number; end: number }>(
+  raw: string,
+  found: T[],
+  line: number
+): T | null {
+  let best: T | null = null;
+  let bestDistance = Infinity;
+  let tie = false;
+  for (const candidate of found) {
+    const from = lineAt(raw, candidate.start);
+    const to = lineAt(raw, candidate.end);
+    const distance = line < from ? from - line : line > to ? line - to : 0;
+    if (distance < bestDistance) {
+      best = candidate;
+      bestDistance = distance;
+      tie = false;
+    } else if (distance === bestDistance) {
+      tie = true;
+    }
+  }
+  return tie ? null : best;
+}
+
+function findEditTarget(
+  raw: string,
+  oldText: string,
+  /** Only consulted when the text occurs more than once. */
+  nearLine: number | null = null
+): EditMatch {
   // --- Pass 1: exactly as written -----------------------------------------
   const first = raw.indexOf(oldText);
   if (first !== -1) {
     if (raw.indexOf(oldText, first + oldText.length) !== -1) {
-      return { kind: "ambiguous" };
+      if (nearLine == null) return { kind: "ambiguous" };
+      const all: { start: number; end: number }[] = [];
+      for (let at = first; at !== -1; at = raw.indexOf(oldText, at + Math.max(1, oldText.length))) {
+        all.push({ start: at, end: at + oldText.length });
+      }
+      const pick = nearestTo(raw, all, nearLine);
+      return pick ? { kind: "exact", ...pick, indent: "" } : { kind: "ambiguous" };
     }
     return {
       kind: "exact",
@@ -1777,11 +2032,15 @@ function findEditTarget(raw: string, oldText: string): EditMatch {
       // to match it.
       const indent = /^[ \t]*/.exec(fileLines[i])?.[0] ?? "";
       found.push({ start, end, indent });
-      if (found.length > 1) return { kind: "ambiguous" };
+      if (found.length > 1 && nearLine == null) return { kind: "ambiguous" };
     }
 
     if (found.length === 1) {
       return { kind: "fuzzy", ...found[0] };
+    }
+    if (found.length > 1) {
+      const pick = nearLine == null ? null : nearestTo(raw, found, nearLine);
+      return pick ? { kind: "fuzzy", ...pick } : { kind: "ambiguous" };
     }
     return { kind: "none" };
   };
@@ -1854,6 +2113,8 @@ export async function moveFile(
   from: string,
   to: string
 ): Promise<{ from: string; to: string; bytes: number }> {
+  assertWritable(from);
+  assertWritable(to);
   const source = resolveInside(workspaceId, from);
   const destination = resolveInside(workspaceId, to);
 
@@ -1901,6 +2162,7 @@ export async function deleteFile(
   workspaceId: string,
   relative: string
 ): Promise<{ path: string; deleted: boolean }> {
+  assertWritable(relative);
   const target = resolveInside(workspaceId, relative);
   // Keep a copy first, so a deletion by the model is recoverable too.
   await saveHistory(workspaceId, relative, target);

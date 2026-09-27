@@ -456,6 +456,399 @@ await rm(path.join(DATA_ROOT, "workspaces", MEMWS), {
   force: true,
 });
 
+// ---------------------------------------------------------------------------
+// 9. Audit fixes. Every check below reproduces a failure that was measured
+// against the previous code, and passes only with the fix in place.
+{
+  const fsp = await import("node:fs/promises");
+  const fsSync = await import("node:fs");
+  const os = await import("node:os");
+  const { spawn, spawnSync } = await import("node:child_process");
+  const runner = await load("src/lib/runner.ts");
+  const procs = await load("src/lib/processes.ts");
+  const findings = await load("src/lib/findings.ts");
+  const snaps = await load("src/lib/snapshots.ts");
+  const archive = await load("src/lib/archive.ts");
+  const github = await load("src/lib/github.ts");
+  const POSIX = process.platform !== "win32";
+  const A = "tools2audit";
+  const AROOT = path.join(DATA_ROOT, "workspaces", A);
+  await rm(AROOT, { recursive: true, force: true });
+  const tool = (name, args, ctx) => runTool(A, name, args, ctx);
+  const disk = async (p) => (await ws.readFileWhole(A, p)).content;
+  const threwOn = async (fn) => {
+    try {
+      await fn();
+      return "";
+    } catch (e) {
+      return e?.message ?? String(e);
+    }
+  };
+
+  console.log("\n9.1 Approval-free commands cannot run code or read outside");
+  check("`python3 version` is not approval-free (it runs a file named version)",
+    !runner.isReadOnlyCommand("python3", ["version"]));
+  check("`node version` is not approval-free", !runner.isReadOnlyCommand("node", ["version"]));
+  check("`tsx version` is not approval-free", !runner.isReadOnlyCommand("tsx", ["version"]));
+  check("`node --version` still is", runner.isReadOnlyCommand("node", ["--version"]));
+  check("`git diff --no-index` asks",
+    !runner.isReadOnlyCommand("git", ["diff", "--no-index", "/etc/passwd", "/dev/null"]));
+  check("`git diff <absolute path>` asks (git falls back to --no-index)",
+    !runner.isReadOnlyCommand("git", ["diff", "/etc/passwd", "/etc/hostname"]));
+  check("`git show ../x` asks", !runner.isReadOnlyCommand("git", ["log", "--", "../outside"]));
+  check("`git --exec-path=/x status` asks", !runner.isReadOnlyCommand("git", ["--exec-path=/tmp", "status"]));
+  check("`git branch -D x` asks", !runner.isReadOnlyCommand("git", ["branch", "-D", "x"]));
+  check("`git remote add x url` asks", !runner.isReadOnlyCommand("git", ["remote", "add", "x", "u"]));
+  check("`git log main..HEAD` is still free", runner.isReadOnlyCommand("git", ["log", "main..HEAD"]));
+  check("`git branch -a` is still free", runner.isReadOnlyCommand("git", ["branch", "-a"]));
+
+  console.log("\n9.2 A repository cannot choose what git runs");
+  const hasGit = spawnSync("git", ["--version"], { encoding: "utf8" }).status === 0;
+  if (hasGit) {
+    await ws.writeFile(A, "a.txt", "x\n");
+    spawnSync("git", ["init", "-q"], { cwd: AROOT });
+    spawnSync("git", ["add", "a.txt"], { cwd: AROOT });
+    spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@e", "commit", "-q", "-m", "i"], { cwd: AROOT });
+    await fsp.appendFile(path.join(AROOT, "a.txt"), "changed\n");
+    const marker = path.join(AROOT, "PWNED_BY_FSMONITOR");
+    const cfg = path.join(AROOT, ".git", "config");
+    await fsp.appendFile(cfg, `[core]\n\tfsmonitor = "touch '${marker}'; false"\n[diff]\n\texternal = "touch '${marker}.diff'"\n`);
+    const status = await runner.runCommand(A, "git", ["status"]);
+    check("an approval-free `git status` does not run core.fsmonitor",
+      !fsSync.existsSync(marker), status.stderr.slice(0, 120));
+    const diff = await runner.runCommand(A, "git", ["diff"]);
+    check("`git diff` does not run diff.external, and still works",
+      !fsSync.existsSync(`${marker}.diff`) && diff.exitCode === 0, diff.stderr.slice(0, 120));
+    await github.runGit(AROOT, ["status"]).catch(() => {});
+    await github.runGit(AROOT, ["diff"]).catch(() => {});
+    check("github.ts runGit is hardened the same way",
+      !fsSync.existsSync(marker) && !fsSync.existsSync(`${marker}.diff`));
+    await rm(path.join(AROOT, ".git"), { recursive: true, force: true });
+  } else {
+    check("git hardening (skipped: git not installed)", true);
+  }
+  process.env.APIM_TEST_SECRET_FOR_GIT = "must-not-leak";
+  process.env.AUTH_SECRET_SAVED = process.env.AUTH_SECRET ?? "";
+  process.env.AUTH_SECRET = "auth-secret-must-not-leak";
+  const gitEnv = typeof github.gitAuthEnv === "function" ? github.gitAuthEnv("tok123") : { AUTH_SECRET: "(not exported)" };
+  check("git does not inherit the server's secrets",
+    gitEnv.AUTH_SECRET === undefined && gitEnv.APIM_TEST_SECRET_FOR_GIT === undefined);
+  check("but still gets PATH and the token header",
+    Boolean(gitEnv.PATH ?? gitEnv.Path) &&
+      Object.values(gitEnv).some((v) => typeof v === "string" && v.startsWith("AUTHORIZATION: basic")));
+  if (process.env.AUTH_SECRET_SAVED) process.env.AUTH_SECRET = process.env.AUTH_SECRET_SAVED;
+  else delete process.env.AUTH_SECRET;
+  delete process.env.AUTH_SECRET_SAVED;
+  delete process.env.APIM_TEST_SECRET_FOR_GIT;
+
+  console.log("\n9.3 Internal folders and symlinks");
+  check("write_file into .git/ is refused",
+    /protected/.test(await threwOn(() => ws.writeFile(A, ".git/config", "x"))));
+  check("write into .history/ is refused",
+    /protected/.test(await threwOn(() => ws.writeFile(A, ".history/a.txt.prev", "x"))));
+  check("writeFileBytes into .snapshots/ is refused",
+    /protected/.test(await threwOn(() => ws.writeFileBytes(A, ".snapshots/x", Buffer.from("x")))));
+  check("move into .git/ is refused",
+    /protected/.test(await threwOn(() => ws.moveFile(A, "a.txt", ".git/hooks/pre-commit"))));
+  await fsp.mkdir(path.join(AROOT, ".git"), { recursive: true });
+  await fsp.writeFile(path.join(AROOT, ".git", "HEAD"), "ref: refs/heads/main\n");
+  check("delete inside .git/ is refused",
+    /protected/.test(await threwOn(() => ws.deleteFile(A, ".git/HEAD"))));
+  await fsp.writeFile(path.join(AROOT, ".git", "HEAD"), "ref: refs/heads/main\n");
+  check("reading .git is still allowed",
+    (await ws.readFile(A, ".git/HEAD")).content.startsWith("ref:"));
+  await rm(path.join(AROOT, ".git"), { recursive: true, force: true });
+  if (POSIX) {
+    const outside = await fsp.mkdtemp(path.join(os.tmpdir(), "apim-outside-"));
+    await fsp.writeFile(path.join(outside, "secret.txt"), "OUTSIDE SECRET\n");
+    await fsp.symlink(outside, path.join(AROOT, "vendor"));
+    await fsp.symlink(path.join(outside, "secret.txt"), path.join(AROOT, "h"));
+    const wrote = await threwOn(() => ws.writeFile(A, "vendor/escaped.txt", "x"));
+    check("a write through a symlinked directory is refused",
+      /symbolic link/.test(wrote) && !fsSync.existsSync(path.join(outside, "escaped.txt")), wrote);
+    const read = await threwOn(() => ws.readFile(A, "h"));
+    check("a read through a symlink pointing outside is refused", /symbolic link/.test(read), read);
+    await fsp.symlink(path.join(outside, "dangling-target"), path.join(AROOT, "dangling"));
+    await threwOn(() => ws.writeFileBytes(A, "dangling", Buffer.from("x")));
+    check("a dangling symlink cannot be written through",
+      !fsSync.existsSync(path.join(outside, "dangling-target")));
+    await rm(path.join(AROOT, "vendor"), { force: true });
+    await rm(path.join(AROOT, "h"), { force: true });
+    await rm(path.join(AROOT, "dangling"), { force: true });
+
+    if (hasGit) {
+      // A cloned repository's symlink is skipped, not copied through.
+        const fx = await fsp.mkdtemp(path.join(os.tmpdir(), "apim-ghfx-"));
+      const bare = path.join(fx, "origin.git");
+      const seed = path.join(fx, "seed");
+      const g = (cwd, args) => spawnSync("git", args, { cwd, encoding: "utf8" });
+      g(fx, ["init", "-q", "--bare", bare]);
+      await fsp.mkdir(seed);
+      g(seed, ["init", "-q", "-b", "main"]);
+      await fsp.writeFile(path.join(seed, "real.txt"), "real\n");
+      await fsp.symlink(path.join(outside, "secret.txt"), path.join(seed, "link.txt"));
+      g(seed, ["add", "-A"]);
+      g(seed, ["-c", "user.name=t", "-c", "user.email=t@e", "commit", "-q", "-m", "s"]);
+      g(seed, ["push", "-q", bare, "main"]);
+      const GH = "tools2auditgh";
+      await rm(path.join(DATA_ROOT, "workspaces", GH), { recursive: true, force: true });
+      await github.cloneGitHubRepoToWorkspace({ workspaceId: GH, repo: "o/r", cloneUrl: bare, baseBranch: "main" });
+      const linkAt = path.join(DATA_ROOT, "workspaces", GH, "link.txt");
+      const leaked = fsSync.existsSync(linkAt) && !fsSync.lstatSync(linkAt).isSymbolicLink() &&
+        fsSync.readFileSync(linkAt, "utf8").includes("OUTSIDE SECRET");
+      check("a cloned symlink is not copied through into the workspace", !leaked);
+      await rm(path.join(DATA_ROOT, "workspaces", GH), { recursive: true, force: true });
+      await rm(fx, { recursive: true, force: true });
+    }
+    await rm(outside, { recursive: true, force: true });
+  }
+
+  console.log("\n9.4 stop_process cannot kill an arbitrary pid");
+  if (POSIX) {
+    const victim = spawn("sleep", ["30"], { stdio: "ignore" });
+    await new Promise((r) => setTimeout(r, 200));
+    const res = await tool("stop_process", { id: `orphan-${victim.pid}` });
+    await new Promise((r) => setTimeout(r, 300));
+    check("orphan-<pid> of a process that is not a leftover decompiler is refused",
+      !res.ok && victim.exitCode === null && victim.signalCode === null, res.content);
+    victim.kill("SIGKILL");
+  }
+
+  console.log("\n9.5 Snapshot manifests are validated");
+  await ws.writeFile(A, "snap.txt", "snapshot me\n");
+  const snap = await snaps.createSnapshot(A, "audit");
+  const manifestPath = path.join(AROOT, ".snapshots", snap.id, "manifest.json");
+  const manifest = JSON.parse(await fsp.readFile(manifestPath, "utf8"));
+  const sentinel = path.join(DATA_ROOT, "tools2-audit-sentinel.txt");
+  await fsp.writeFile(sentinel, "SENTINEL OUTSIDE\n");
+  manifest.files.push({ path: "stolen.txt", size: 1, hash: path.relative(path.join(AROOT, ".snapshots", "objects"), sentinel) });
+  await fsp.writeFile(manifestPath, JSON.stringify(manifest));
+  await snaps.restoreSnapshot(A, snap.id);
+  check("a manifest hash that is a path is not followed",
+    !fsSync.existsSync(path.join(AROOT, "stolen.txt")));
+  check("valid entries still restore", (await disk("snap.txt")) === "snapshot me\n");
+  await rm(sentinel, { force: true });
+
+  console.log("\n9.6 old_text wins over a line number; numeric from/to are lines");
+  await ws.writeFile(A, "b.txt", "alpha\nbeta\ngamma\ndelta\n");
+  await tool("edit_file", { path: "b.txt", old_text: "gamma\ndelta", new_text: "GD", line: 1 });
+  check("old_text + line edits the quoted text, not line 1",
+    (await disk("b.txt")) === "alpha\nbeta\nGD\n", JSON.stringify(await disk("b.txt")));
+  await ws.writeFile(A, "dup.txt", "x = 1\nmid\nx = 1\n");
+  const dup = await tool("edit_file", { path: "dup.txt", old_text: "x = 1", new_text: "x = 2", start_line: 3 });
+  check("a line picks between duplicate matches",
+    dup.ok && (await disk("dup.txt")) === "x = 1\nmid\nx = 2\n", dup.content.slice(0, 80));
+  await ws.writeFile(A, "c.txt", "x = 1\ny = 20\nz = 3\nw = 45\nv = 5\n");
+  await tool("edit_file", { path: "c.txt", from: 3, to: 5, new_text: "REPLACED" });
+  check("numeric from/to replace lines 3-5, not text containing \"3\"",
+    (await disk("c.txt")) === "x = 1\ny = 20\nREPLACED\n", JSON.stringify(await disk("c.txt")));
+
+  console.log("\n9.7 Line-range edits in one batch refer to the original file");
+  await ws.writeFile(A, "lines.txt", "L1\nL2\nL3\nL4\nL5\n");
+  await tool("edit_files", { edits: [
+    { path: "lines.txt", start_line: 2, end_line: 2, new_text: "N2a\nN2b\nN2c" },
+    { path: "lines.txt", start_line: 4, end_line: 4, new_text: "N4" },
+    { path: "lines.txt", old_text: "L5", new_text: "T5" },
+  ] });
+  check("edit 2's line 4 is the original L4",
+    (await disk("lines.txt")) === "L1\nN2a\nN2b\nN2c\nL3\nN4\nT5\n", JSON.stringify(await disk("lines.txt")));
+  const overlap = await tool("edit_files", { edits: [
+    { path: "lines.txt", start_line: 1, end_line: 2, new_text: "A" },
+    { path: "lines.txt", start_line: 2, end_line: 3, new_text: "B" },
+  ] });
+  check("overlapping line ranges are refused, not guessed", /overlap/.test(overlap.content));
+
+  console.log("\n9.8 The run memory never serves stale bytes");
+  const mem = new RunFileMemory();
+  const ctx = { fileMemory: mem };
+  for (const [label, name, args] of [
+    ["edit_files", "edit_files", { edits: [{ path: "m.txt", old_text: "version one", new_text: "version TWO" }] }],
+    ["replace_in_files", "replace_in_files", { find: "version one", replace: "version TWO" }],
+    ["undo_file", "undo_file", { path: "m.txt" }],
+    ["apply_patch", "apply_patch", { path: "m.txt", patch: "--- a/m.txt\n+++ b/m.txt\n@@ -1 +1 @@\n-version one\n+version TWO\n" }],
+  ]) {
+    await tool("write_file", { path: "m.txt", content: "version zero\n" }, ctx);
+    await tool("write_file", { path: "m.txt", content: "version one\n" }, ctx);
+    await tool(name, args, ctx);
+    const now = await disk("m.txt");
+    const rd = await tool("read_file", { path: "m.txt" }, ctx);
+    check(`after ${label}, read_file shows the disk`,
+      rd.content.includes(now.trim()) && !rd.content.includes("served from the run's own write"),
+      JSON.stringify(now));
+  }
+  await tool("write_file", { path: "behind.txt", content: "mine\n" }, ctx);
+  await fsp.writeFile(path.join(AROOT, "behind.txt"), "changed by a command\n");
+  const behind = await tool("read_file", { path: "behind.txt" }, ctx);
+  check("a change made behind the memory's back is read from disk",
+    behind.content.includes("changed by a command"));
+  check("RunFileMemory.invalidateAll exists for the route", typeof mem.invalidateAll === "function");
+
+  console.log("\n9.9 write_file never writes empty by accident");
+  await ws.writeFile(A, "d.txt", "important data\n");
+  const wc = await tool("write_file", { path: "d.txt", contents: "new data" });
+  check("`contents` is accepted like write_files", wc.ok && (await disk("d.txt")) === "new data");
+  await ws.writeFile(A, "d.txt", "important data\n");
+  const wn = await tool("write_file", { path: "d.txt", body_text: "oops" });
+  check("no content key fails and leaves the file alone",
+    !wn.ok && (await disk("d.txt")) === "important data\n", wn.content.slice(0, 80));
+
+  console.log("\n9.10 replace_in_files is not limited by the search cap");
+  await ws.writeFile(A, "r/a_many.ts", Array.from({ length: 70 }, (_, i) => `oldName(${i});`).join("\n"));
+  await ws.writeFile(A, "r/b.ts", "oldName();\n");
+  await ws.writeFile(A, "r/c.ts", "oldName();\n");
+  await tool("replace_in_files", { find: "oldName", replace: "newName", glob: "r/*" });
+  check("files after a 70-hit file are still replaced",
+    (await disk("r/b.ts")) === "newName();\n" && (await disk("r/c.ts")) === "newName();\n");
+  await ws.writeFile(A, "r/m.ts", "function a() {\n  return 1;\n}\n");
+  const multi = await tool("replace_in_files", { find: "function a() {\n  return 1;", replace: "function a() {\n  return 2;", glob: "r/*" });
+  check("a multi-line find works", multi.ok && (await disk("r/m.ts")).includes("return 2;"), multi.content.slice(0, 80));
+  const anchored = await tool("replace_in_files", { find: "^  return", replace: "  yield", regex: true, glob: "r/*" });
+  check("regex ^ anchors match line starts", anchored.ok && (await disk("r/m.ts")).includes("  yield 2;"), anchored.content.slice(0, 80));
+
+  console.log("\n9.11 Long output is kept, not killed; timeouts kill the tree");
+  await ws.writeFile(A, "loud.js", "console.log('FIRST LINE');\nfor (let i=0;i<3000;i++) console.log('progress line ' + i + ' ' + 'x'.repeat(40));\nconsole.log('ALL DONE');\n");
+  const loud = await runner.runCommand(A, "node", ["loud.js"]);
+  check("a chatty command runs to completion", loud.exitCode === 0 && loud.stdout.includes("ALL DONE"),
+    `exit ${loud.exitCode}`);
+  check("and keeps its head too, saying what was omitted",
+    loud.stdout.startsWith("FIRST LINE") && /omitted/.test(loud.stdout) && loud.stdout.length <= runner.MAX_OUTPUT_CHARS + 200);
+  await ws.writeFile(A, "err.js", "for (let i=0;i<1500;i++) console.error('warning ' + i + ' ' + 'y'.repeat(40));\nconsole.error('FINAL ERROR: the real cause');\nprocess.exitCode = 1;\n");
+  const err = await runner.runCommand(A, "node", ["err.js"]);
+  check("stderr keeps its END", err.stderr.includes("FINAL ERROR: the real cause"));
+  if (POSIX) {
+    await ws.writeFile(A, "spawner.js",
+      "const {spawn}=require('child_process'); spawn(process.execPath, ['-e','setTimeout(()=>require(\"fs\").writeFileSync(\"GRANDCHILD_ALIVE\",\"1\"), 6500)'], {stdio:'inherit'}); setTimeout(()=>{}, 100000);");
+    const timed = await runner.runCommand(A, "node", ["spawner.js"], undefined, 5000);
+    await new Promise((r) => setTimeout(r, 2500));
+    check("a timeout kills the grandchild as well",
+      timed.timedOut && !fsSync.existsSync(path.join(AROOT, "GRANDCHILD_ALIVE")));
+  }
+
+  console.log("\n9.12 Undo history");
+  await ws.writeFile(A, "src/util.ts", "ORIGINAL src/util.ts\n");
+  await ws.writeFile(A, "src/util.ts", "EDITED src/util.ts\n");
+  await ws.writeFile(A, "src__util.ts", "other v1\n");
+  await ws.writeFile(A, "src__util.ts", "other v2\n");
+  await tool("undo_file", { path: "src/util.ts" });
+  check("src/util.ts and src__util.ts have separate histories",
+    (await disk("src/util.ts")) === "ORIGINAL src/util.ts\n", JSON.stringify(await disk("src/util.ts")));
+  await ws.writeFile(A, "p.ts", "p v1\n");
+  await ws.writeFile(A, "./p.ts", "p v2\n");
+  const undoP = await tool("undo_file", { path: "p.ts" });
+  check("./p.ts and p.ts share one history", undoP.ok && (await disk("p.ts")) === "p v1\n", undoP.content.slice(0, 80));
+  const bin = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff, 0xfe, 0x00, 0x80, 0x81]);
+  await ws.writeFileBytes(A, "img.bin", bin);
+  await tool("delete_file", { path: "img.bin" });
+  await tool("undo_file", { path: "img.bin" });
+  check("a deleted binary comes back byte for byte",
+    Buffer.from(await ws.readFileBytes(A, "img.bin")).equals(bin));
+  await ws.writeFile(A, "k.txt", Array.from({ length: 12 }, (_, i) => `line${i}`).join("\n") + "\n");
+  await tool("edit_files", { edits: Array.from({ length: 12 }, (_, i) => ({ path: "k.txt", old_text: `line${i}\n`, new_text: `LINE${i}\n` })) });
+  await tool("undo_file", { path: "k.txt" });
+  check("one undo reverts a 12-edit batch to its pre-call state",
+    (await disk("k.txt")).startsWith("line0\nline1\n") && (await disk("k.txt")).includes("line11"));
+  const far = await tool("undo_file", { path: "k.txt", steps: 12 });
+  check("steps past the kept history is refused honestly, not clamped",
+    !far.ok && /Cannot go back 12/.test(far.content), far.content.slice(0, 80));
+
+  console.log("\n9.13 Build folders are hidden only at the root");
+  await ws.writeFile(A, "src/build/config.ts", "export const secretSetting = 1;\n");
+  await ws.writeFile(A, "build/out.js", "generated\n");
+  const listed = (await ws.listFiles(A)).map((f) => f.path);
+  check("src/build/config.ts is listed", listed.includes("src/build/config.ts"));
+  check("a top-level build/ is still hidden", !listed.includes("build/out.js"));
+
+  console.log("\n9.14 Edits keep the executable bit and the line endings");
+  if (POSIX) {
+    await ws.writeFile(A, "run.sh", "#!/bin/sh\necho hi\n");
+    await fsp.chmod(path.join(AROOT, "run.sh"), 0o755);
+    await ws.applyEdit(A, "run.sh", { oldText: "echo hi", newText: "echo bye" });
+    check("an edit keeps mode 0755", (fsSync.statSync(path.join(AROOT, "run.sh")).mode & 0o777) === 0o755);
+  }
+  await ws.writeFile(A, "w.txt", "one\r\n  two\r\n  three\r\nfour\r\n");
+  await ws.applyEdit(A, "w.txt", { oldText: "two\nthree", newText: "TWO\nTHREE" });
+  check("a CRLF file stays CRLF after a multi-line edit",
+    (await disk("w.txt")) === "one\r\n  TWO\r\n  THREE\r\nfour\r\n", JSON.stringify(await disk("w.txt")));
+  await ws.writeFile(A, "w2.txt", "one\r\ntwo\r\nthree\r\n");
+  await ws.applyEdit(A, "w2.txt", { startLine: 2, endLine: 2, newText: "TWO" });
+  check("a line-range edit keeps the line's \\r", (await disk("w2.txt")) === "one\r\nTWO\r\nthree\r\n");
+
+  console.log("\n9.15 Archives: exact bytes, long names, whole files");
+  const tarOf = (name, data, type = "0") => {
+    const h = Buffer.alloc(512);
+    h.write(name, 0, 100);
+    h.write("0000644\0", 100); h.write("0000000\0", 108); h.write("0000000\0", 116);
+    h.write(data.length.toString(8).padStart(11, "0") + "\0", 124);
+    h.write("00000000000\0", 136); h.write("        ", 148); h.write(type, 156);
+    h.write("ustar\0" + "00", 257);
+    const pad = Buffer.alloc(Math.ceil(data.length / 512) * 512 - data.length);
+    return Buffer.concat([h, data, pad]);
+  };
+  const latin1 = Buffer.from("# Configuración: año=café\n", "latin1");
+  const longName = "project/" + "a".repeat(60) + "/" + "b".repeat(60) + "/main.py";
+  const big = "z".repeat(archive.MAX_ENTRY_CHARS + 5000);
+  const tar = Buffer.concat([
+    tarOf("cfg.py", latin1),
+    tarOf("././@LongLink", Buffer.from(longName + "\0"), "L"),
+    tarOf(longName.slice(0, 99), Buffer.from("print(1)\n")),
+    tarOf("big.txt", Buffer.from(big)),
+    Buffer.alloc(1024),
+  ]);
+  const unpacked = await archive.readArchive("x.tar", new Uint8Array(tar));
+  const cfg = (unpacked.binaries ?? []).find((b) => b.path === "cfg.py");
+  check("non-UTF-8 text is kept as exact bytes, not decoded lossily",
+    cfg && Buffer.from(cfg.data).equals(latin1) && !unpacked.entries.some((e) => e.path === "cfg.py"));
+  check("a GNU long name is used", unpacked.entries.some((e) => e.path === longName));
+  const bigEntry = unpacked.entries.find((e) => e.path === "big.txt");
+  check("a big text file is kept whole for the disk", bigEntry?.content.length === big.length);
+  check("while the inline preview is still capped",
+    archive.formatArchive("x.tar", unpacked).length < big.length);
+
+  console.log("\n9.16 wait_for_output after the log cap, and only on new output");
+  await ws.writeFile(A, "srv.js", "let i=0; console.log('Compiled'); setInterval(()=>{ console.log('tick ' + (i++) + ' ' + 'z'.repeat(200)); }, 5);");
+  const started = await procs.startProcess(A, "node", ["srv.js"]);
+  if (started.ok) {
+    await new Promise((r) => setTimeout(r, 800));
+    const w1 = await procs.waitForOutput(started.process.id, "never-matches", 1500, A);
+    check("output since the wait is reported after the 30k cap",
+      w1 && started.process.log.length >= procs.MAX_LOG_CHARS && w1.newOutput.length > 0,
+      `newOutput ${w1?.newOutput.length}`);
+    check("a process from another workspace is not visible",
+      (await procs.waitForOutput(started.process.id, "tick", 1000, "some-other-ws")) === null);
+    procs.stopProcess(started.process.id);
+  } else {
+    check("wait_for_output checks (process failed to start)", false, started.reason);
+  }
+  await ws.writeFile(A, "watch.js", "console.log('Compiled'); let i=0; setInterval(()=>console.log('tick ' + (i++)), 200);");
+  const watcher = await procs.startProcess(A, "node", ["watch.js"]);
+  if (watcher.ok) {
+    const first = await procs.waitForOutput(watcher.process.id, "Compiled", 3000, A);
+    check("the first wait still sees output from the startup grace period", first?.outcome === "matched");
+    const second = await procs.waitForOutput(watcher.process.id, "Compiled", 1200, A);
+    check("a later wait does not match a line an earlier wait already consumed",
+      second && second.outcome !== "matched", second?.outcome);
+    procs.stopProcess(watcher.process.id);
+  }
+
+  console.log("\n9.17 Retiring a finding adds nothing");
+  const noted = await tool("note_finding", { claim: "Parser crashes on empty input in parse.ts", scope: "workspace" });
+  const fid = /\[(f[^\]]+)\]/.exec(noted.content)?.[1];
+  await tool("note_finding", { id: fid, status: "disproved", claim: "done — shipped in abc123", scope: "workspace" });
+  const again = await tool("note_finding", { id: fid, status: "disproved", claim: "done again", scope: "workspace" });
+  const active = (await findings.readFindings(A)).findings.filter((f) => f.status === "active");
+  check("a retirement leaves no active 'done' finding behind", active.length === 0,
+    active.map((f) => f.claim).join(" | "));
+  check("retiring an already-retired finding is refused", !again.ok, again.content.slice(0, 80));
+
+  console.log("\n9.18 End anchors are searched after the start anchor");
+  await ws.writeFile(A, "an.ts", "return x;\nfunction f() {\n  if (a) return x; // end\n  more();\n}\n");
+  const an = await tool("edit_file", { path: "an.ts", start_anchor: "function f() {", end_anchor: "return x;", new_text: "X" });
+  check("an exact match above the start does not hide a partial one below it",
+    an.ok && (await disk("an.ts")) === "return x;\nX\n  more();\n}\n", an.content.slice(0, 100));
+
+  await rm(AROOT, { recursive: true, force: true });
+}
+
 await rm(path.join(DATA_ROOT, "workspaces", WS), { recursive: true, force: true });
 await rm(DETECT, { recursive: true, force: true });
 

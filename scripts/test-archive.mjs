@@ -233,9 +233,10 @@ if (await have("zip")) {
   const res = await A.readArchive("many.zip", buf);
   const huge = res.entries.find((e) => e.path.endsWith("huge.txt"));
   check(
-    "an oversized file is truncated, not dropped",
-    Boolean(huge) && huge.truncated && huge.content.length === A.MAX_ENTRY_CHARS,
-    "half a file beats none of it"
+    "an oversized file is kept whole for disk; only the inline preview is capped",
+    Boolean(huge) && huge.content.length === A.MAX_ENTRY_CHARS + 5000 &&
+      A.formatArchive("many.zip", res).includes("more chars — the full file is in the workspace"),
+    "the truncated copy used to be written to disk, and read_file then called it EXACT"
   );
 }
 

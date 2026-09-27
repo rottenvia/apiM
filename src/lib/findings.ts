@@ -231,21 +231,42 @@ export interface FindingRevision {
   status?: "superseded" | "disproved";
 }
 
+/**
+ * Is this "claim" a retirement note rather than a corrected conclusion?
+ *
+ * The prompt tells the model to retire finished work with a claim like
+ * "done — shipped in abc123". That text was filed as a NEW active finding,
+ * so every retirement put a "done — shipped" line on every later prompt —
+ * the clutter retiring exists to remove (measured).
+ */
+export function isRetirementClaim(claim: string): boolean {
+  return /^\s*(done|fixed|resolved|shipped|retired|completed?|obsolete|no longer (needed|relevant|applies|true)|n\/a)\b/i.test(
+    claim
+  );
+}
+
 /** Mark a prior finding wrong, with the reason. */
 export async function reviseFinding(
   workspaceId: string,
   revision: FindingRevision,
   replacement?: NewFinding
-): Promise<{ updated: boolean; replacement?: Finding }> {
+): Promise<{ updated: boolean; replacement?: Finding; alreadyRetired?: boolean }> {
   const store = await readStore(workspaceId);
   const old = store.findings.find((f) => f.id === revision.id);
   if (!old) return { updated: false };
+  // Retiring twice is refused: a second "disproved" used to succeed and add
+  // yet another active replacement for a finding that was already gone.
+  if (old.status !== "active") return { updated: false, alreadyRetired: true };
   const now = new Date().toISOString();
   old.status = revision.status === "disproved" ? "disproved" : "superseded";
   old.updatedAt = now;
 
   let replacementFinding: Finding | undefined;
-  if (replacement) {
+  if (
+    replacement &&
+    replacement.claim.trim() &&
+    !isRetirementClaim(replacement.claim)
+  ) {
     replacementFinding = {
       id: `f${Date.now().toString(36)}${store.findings.length}`,
       claim: replacement.claim.trim().slice(0, 400),

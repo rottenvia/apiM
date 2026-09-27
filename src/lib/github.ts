@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import crossSpawn from "cross-spawn";
 import { workspaceDirectory, listFiles } from "@/lib/workspace";
+import { hardenGitArgs } from "@/lib/runner";
 
 export const GITHUB_TOKEN_COOKIE = "apim_github";
 export const GITHUB_STATE_COOKIE = "apim_github_state";
@@ -289,28 +290,71 @@ export async function writeGitHubConnection(connection: GitHubConnection): Promi
   await fs.rename(tmp, target);
 }
 
-function gitAuthEnv(token?: string): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
+/**
+ * What git is allowed to see of the server's environment.
+ *
+ * This spread the whole of process.env into git, so AUTH_SECRET,
+ * APP_PASSWORD, GITHUB_CLIENT_SECRET and every provider key reached git and
+ * anything git launches (hooks, helpers, a repository-configured program).
+ * Git needs a PATH, a HOME for its own config, temp and locale — plus the
+ * proxy and CA settings when the network goes through one. Nothing else.
+ */
+const GIT_ENV_KEYS = [
+  "PATH",
+  "Path",
+  "HOME",
+  "USERPROFILE",
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "SystemRoot",
+  "SYSTEMROOT",
+  "windir",
+  "COMSPEC",
+  "PATHEXT",
+  "TEMP",
+  "TMP",
+  "TMPDIR",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "HTTPS_PROXY",
+  "https_proxy",
+  "HTTP_PROXY",
+  "http_proxy",
+  "NO_PROXY",
+  "no_proxy",
+  "ALL_PROXY",
+  "all_proxy",
+  "GIT_SSL_CAINFO",
+  "GIT_SSL_CAPATH",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+  "CURL_CA_BUNDLE",
+];
+
+export function gitAuthEnv(token?: string): NodeJS.ProcessEnv {
+  const env: Record<string, string> = {};
+  for (const key of GIT_ENV_KEYS) {
+    const value = process.env[key];
+    if (value !== undefined) env[key] = value;
+  }
+  Object.assign(env, {
     GIT_TERMINAL_PROMPT: "0",
     GIT_LFS_SKIP_SMUDGE: "1",
     // Merges and commits never open an editor on the server.
     GIT_EDITOR: "true",
     GIT_MERGE_AUTOEDIT: "no",
-  };
-  // Repository hooks never run: a commit or merge the agent makes without
-  // approval must not execute code the cloned repository ships.
-  env.GIT_CONFIG_COUNT = "1";
-  env.GIT_CONFIG_KEY_0 = "core.hooksPath";
-  env.GIT_CONFIG_VALUE_0 = path.join(GITHUB_DATA, "no-hooks");
-  if (!token) return env;
+  });
+  // Repository hooks never run: runGit passes core.hooksPath (and the rest
+  // of the hardening) as -c options, which outrank any repository config.
+  if (!token) return env as unknown as NodeJS.ProcessEnv;
   const auth = Buffer.from(`x-access-token:${token}`).toString("base64");
-  env.GIT_CONFIG_COUNT = "3";
-  env.GIT_CONFIG_KEY_1 = "credential.helper";
-  env.GIT_CONFIG_VALUE_1 = "";
-  env.GIT_CONFIG_KEY_2 = "http.https://github.com/.extraheader";
-  env.GIT_CONFIG_VALUE_2 = `AUTHORIZATION: basic ${auth}`;
-  return env;
+  env.GIT_CONFIG_COUNT = "2";
+  env.GIT_CONFIG_KEY_0 = "credential.helper";
+  env.GIT_CONFIG_VALUE_0 = "";
+  env.GIT_CONFIG_KEY_1 = "http.https://github.com/.extraheader";
+  env.GIT_CONFIG_VALUE_1 = `AUTHORIZATION: basic ${auth}`;
+  return env as unknown as NodeJS.ProcessEnv;
 }
 
 /** Run git with no shell; a token only ever travels in the process env. */
@@ -320,9 +364,15 @@ export async function runGit(
   token?: string,
   timeoutMs = 180_000
 ): Promise<{ stdout: string; stderr: string }> {
-  await fs.mkdir(path.join(GITHUB_DATA, "no-hooks"), { recursive: true });
+  /*
+   * Every git call carries the same overrides as an approval-free git in
+   * runner.ts: no fsmonitor, no hooks, no external diff/textconv, no pager,
+   * no repository-chosen ssh. A cloned repository's config must never pick
+   * a program this server runs. hardenGitArgs also adds --no-ext-diff /
+   * --no-textconv to diff, log and show.
+   */
   return new Promise((resolve, reject) => {
-    const child = crossSpawn("git", args, {
+    const child = crossSpawn("git", hardenGitArgs(args), {
       cwd,
       shell: false,
       windowsHide: true,
@@ -404,9 +454,17 @@ async function mergeTreeWithoutOverwriting(
     const src = path.join(from, name);
     const dst = path.join(to, name);
     const stat = await fs.lstat(src);
+    // A symlink in the clone is skipped, never followed: copyFile through a
+    // link pointing at /etc/passwd (or at a directory outside) would copy
+    // that target's bytes into the workspace.
+    if (stat.isSymbolicLink()) continue;
+    // lstat, not access: access follows a link, so a dangling symlink in the
+    // workspace read as "free" and copyFile then wrote through it.
+    const existing = await fs.lstat(dst).catch(() => null);
     if (stat.isDirectory()) {
+      if (existing && !existing.isDirectory()) continue;
       added += await mergeTreeWithoutOverwriting(src, dst);
-    } else if (!await fs.access(dst).then(() => true, () => false)) {
+    } else if (stat.isFile() && !existing) {
       await fs.copyFile(src, dst);
       added++;
     }
