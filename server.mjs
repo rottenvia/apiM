@@ -27,7 +27,7 @@ import { stat, rename, unlink, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "node:url";
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHmac, timingSafeEqual } from "node:crypto";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const dev = process.env.NODE_ENV !== "production";
@@ -181,11 +181,52 @@ function handleBinaryUpload(req, res, workspaceId) {
 
 const BINARY_ROUTE = /^\/api\/workspace\/([^/]+)\/binary-raw\/?$/;
 
+/*
+ * The raw upload is handled here, before Next — so src/proxy.ts never sees
+ * it. Found by review: with auth on, this path took uploads from anyone,
+ * and it never had the cross-site check at all. Both mirrored here (same
+ * token format as src/lib/auth.ts: `expiry.hmacSha256Hex(expiry)`).
+ */
+function sessionValid(req) {
+  const password = process.env.APP_PASSWORD?.trim();
+  const secret = process.env.AUTH_SECRET?.trim();
+  if (!password || !secret) return process.env.REQUIRE_AUTH !== "1";
+  const cookie = String(req.headers.cookie || "")
+    .split(";")
+    .map((c) => c.trim())
+    .find((c) => c.startsWith("apim_session="));
+  const token = cookie ? decodeURIComponent(cookie.slice("apim_session=".length)) : "";
+  const dot = token.lastIndexOf(".");
+  if (dot < 1) return false;
+  const payload = token.slice(0, dot);
+  const sig = token.slice(dot + 1);
+  const expected = createHmac("sha256", secret).update(payload).digest("hex");
+  if (sig.length !== expected.length) return false;
+  if (!timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return false;
+  return Date.now() < Number(payload);
+}
+
+function crossSiteUpload(req) {
+  const site = req.headers["sec-fetch-site"];
+  if (site && site !== "same-origin" && site !== "none") return true;
+  const origin = req.headers.origin;
+  if (origin) {
+    try {
+      if (origin === "null" || new URL(origin).host !== req.headers.host) return true;
+    } catch {
+      return true;
+    }
+  }
+  return false;
+}
+
 const server = createServer(async (req, res) => {
   try {
     const parsed = parse(req.url || "", true);
     const m = req.method === "POST" && BINARY_ROUTE.exec(parsed.pathname || "");
     if (m) {
+      if (crossSiteUpload(req)) return send(res, 403, { error: "Refused: cross-site request" });
+      if (!sessionValid(req)) return send(res, 401, { error: "Not signed in" });
       return handleBinaryUpload(req, res, decodeURIComponent(m[1]));
     }
     // Everything else goes through Next exactly as `next dev` would.
