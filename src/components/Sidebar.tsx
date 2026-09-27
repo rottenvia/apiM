@@ -39,6 +39,7 @@ export function Sidebar({
   conversations,
   currentConvId,
   isOpen,
+  onToggle,
   onSelect,
   onNew,
   onDelete,
@@ -233,10 +234,35 @@ export function Sidebar({
   };
 
   return (
+    <>
+    {/*
+      Below md the sidebar floats over the chat instead of taking a column.
+
+      Reported (audit): on a phone it opened by default as a 288px in-flow
+      column, leaving ~87px for the conversation. It now starts closed there
+      (page.tsx), overlays with a backdrop that closes it on tap, and closes
+      when a chat is picked. At md and up nothing changes.
+    */}
+    {isOpen && (
+      <div
+        aria-hidden="true"
+        onClick={onToggle}
+        className="fixed inset-0 z-30 bg-black/50 md:hidden"
+      />
+    )}
     <div
+      /*
+       * Collapsed means out of the tab order too. At w-0 the buttons were
+       * clipped but still focusable, so Tab walked through a dozen invisible
+       * controls (audit). `inert` removes them from focus and the
+       * accessibility tree until the sidebar opens.
+       */
+      inert={!isOpen}
       className={`flex flex-col border-r border-border bg-bg-secondary transition-[width] duration-300 ease-in-out ${
         isOpen ? "w-72" : "w-0"
-      } flex-shrink-0 overflow-hidden`}
+      } flex-shrink-0 overflow-hidden max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:z-40 ${
+        isOpen ? "max-md:shadow-2xl" : ""
+      }`}
     >
       <div className="flex h-full min-w-[288px] flex-col">
         {/* New chat — the only control in this row, so it can take the
@@ -675,6 +701,7 @@ export function Sidebar({
         />
       )}
     </div>
+    </>
   );
 }
 

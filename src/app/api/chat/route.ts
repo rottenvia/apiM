@@ -360,6 +360,8 @@ interface ChatRequestBody {
   conversationHistory?: ChatMessage[];
   /** When set, this message and everything after it is dropped first. */
   regenerateFromId?: string;
+  /** Edit-and-resend: the new text of the question above regenerateFromId. */
+  editedContent?: string;
   /**
    * Continue an unfinished reply instead of starting it again.
    *
@@ -741,6 +743,7 @@ export async function POST(req: NextRequest) {
     webSearchMode = "off",
     enabledPluginIds = [],
     regenerateFromId,
+    editedContent,
     resumeMessageId,
     resumeNote,
     displayContent,
@@ -1023,7 +1026,11 @@ export async function POST(req: NextRequest) {
         // new one replaces it rather than appending a duplicate.
         if (regenerateFromId) {
           try {
-            await truncateFrom(convId, regenerateFromId);
+            await truncateFrom(
+              convId,
+              regenerateFromId,
+              typeof editedContent === "string" ? editedContent : undefined
+            );
           } catch (e) {
             console.error("Failed to truncate for regenerate:", e);
           }
@@ -5505,6 +5512,11 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                       ? args.timeout_ms
                       : null
                   );
+                  // A command can change any file. Found by review: the
+                  // route calls runCommand directly, bypassing runTool's
+                  // clear, so read_file could serve pre-command bytes
+                  // stamped EXACT.
+                  fileMemory.invalidateAll();
                   result = {
                     ok: run.exitCode === 0 && !run.timedOut,
                     content: formatRunResult(run),

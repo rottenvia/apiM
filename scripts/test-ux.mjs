@@ -304,7 +304,9 @@ check(
 );
 check(
   "the resolved effort reaches the LIVE message, not just the finished one",
-  /m\.id === streamingId\s*\?\s*\{ \.\.\.m, thinkingEffort: evt\.resolvedEffort \}/.test(
+  // The same write now also renames the bubble to the server's id (see
+  // the UI-audit section below), so the effort rides in that object.
+  /m\.id === fromId\s*\?\s*\{[^}]*thinkingEffort: evt\.resolvedEffort,?\s*\}/.test(
     page
   ),
   "finalMeta is merged at the end, which is far too late to open a panel"
@@ -835,6 +837,234 @@ check(
   check("status-only events flow through the reveal; real boundaries drain it quickly, not in one jump",
     /if \(!PACE_THROUGH_EVENTS\.has\(evt\.type\)\) await drain\(\);/.test(page) &&
       /"tool_drafting",/.test(page) && /const DRAIN_MAX_MS = 220;/.test(page));
+}
+
+// ------------------------------------------------- UI audit (client bugs)
+//
+// Fifteen client-side bugs an audit verified by reading the code. The UI has
+// no DOM in this suite, so most are pinned at source level — each pin names
+// the property that was broken, not just the new line. The attachment gate is
+// a pure function and is checked by behaviour.
+console.log("\nUI audit — client-side bugs");
+{
+  const sidebarSrc = await read("src/components/Sidebar.tsx");
+  const settingsSrc = await read("src/components/SettingsModal.tsx");
+  const send = page.slice(
+    page.indexOf("const sendMessage = useCallback("),
+    page.indexOf("// Mirror the latest values into refs after each commit")
+  );
+  const rejoin = page.slice(
+    page.indexOf("const rejoinRun = useCallback("),
+    page.indexOf("const loadConversation = useCallback(")
+  );
+
+  // 1. The live bubble adopts the server's id at `meta`.
+  check(
+    "1. the live bubble takes the server's message id at meta, not at done",
+    /let streamingId = resumeMessageId \?\? `stream-\$\{Date\.now\(\)\}`;/.test(send) &&
+      /case "meta":[\s\S]{0,3000}const toId = evt\.messageId \|\| streamingId;\s*streamingId = toId;/.test(send) &&
+      /m\.id === fromId\s*\?\s*\{\s*\.\.\.m,\s*id: toId,\s*clientRenderKey: m\.clientRenderKey \?\? fromId,/.test(send),
+    "a Stop / drop left `stream-…`, so Resume/Retry/Edit named an id the server never saved and it started over"
+  );
+  check(
+    "   every later handler matches the renamed id (one mutable binding, no stale const)",
+    !/const streamingId\b/.test(send) &&
+      (send.match(/m\.id === streamingId|m\.id !== streamingId/g) ?? []).length >= 10 &&
+      /key=\{msg\.clientRenderKey \?\? msg\.id\}/.test(chatArea),
+    "React keys on clientRenderKey, so the rename does not remount the bubble"
+  );
+
+  // 2. A network error mid-stream keeps the work and rejoins the run.
+  check(
+    "2. a network error mid-stream keeps the text, marks it resumable, and rejoins",
+    /else if \(sawMeta \|\| hadWork\) \{\s*finish\(\{\s*incomplete: true,\s*canResume: hadWork,\s*errorNotice: reason,/.test(send) &&
+      /if \(sawMeta\) rejoinAfter = streamingId;/.test(send) &&
+      /void rejoinRun\(runConvId, rejoinAfter, \{ heldLoading: true \}\);/.test(send),
+    "it replaced the whole reply with \"Couldn't reach the server\" and unlocked the composer mid-run"
+  );
+  check(
+    "   the composer stays locked while the rejoin checks, and unlocks if the run is gone",
+    /rejoinAfter !== undefined && !endSession\.cancelResume\) \{[\s\S]{0,700}patchSession\(runConvId, \{\s*stage: "working",/.test(send) &&
+      /if \(opts\.heldLoading && !cancelled\(\)\) \{\s*patchSession\(convId, \{\s*loading: false,/.test(rejoin)
+  );
+
+  // 3. Activeness is read after the drain.
+  const drainAt = send.indexOf("if (!PACE_THROUGH_EVENTS.has(evt.type)) await drain();");
+  const activeAt = send.indexOf("const active =");
+  check(
+    "3. `active` is computed AFTER the paced drain, against the run's current id",
+    drainAt !== -1 && activeAt > drainAt &&
+      /const active =\s*mirroredIdRef\.current === \(runConvId \?\? requestConversationId\);/.test(send),
+    "switching chats during the ~370ms drain let `done` enter chat A while B was on screen"
+  );
+
+  // 4. The rejoin loop can be cancelled.
+  check(
+    "4. rejoinRun has a per-chat cancel token, checked after every await",
+    /const rejoinTokens = useRef<Map<string, \{ cancelled: boolean \}>>/.test(page) &&
+      /const cancelled = \(\) =>\s*token\.cancelled \|\| abortRefs\.current\.has\(convId\);/.test(rejoin) &&
+      (rejoin.match(/if \(cancelled\(\)\) return;/g) ?? []).length >= 3 &&
+      /if \(!cancelled\(\)\) \{[\s\S]{0,900}?patchSession\(convId, \{\s*loading: false/.test(rejoin) &&
+      // A failed liveness check is "unknown", not "over": a dropped stream
+      // is usually exactly that moment.
+      /if \(ids === null\) \{\s*failedChecks \+= 1;/.test(rejoin),
+    "the loop was never cancelled: it overwrote a resumed bubble and set loading:false on a new run"
+  );
+  check(
+    "   Stop, a new send in that chat, and unmount all cancel it",
+    /session\.cancelResume = true;[\s\S]{0,200}cancelRejoin\(convId\);/.test(page) &&
+      /cancelRejoin\(requestConversationId\);/.test(send) &&
+      /for \(const token of tokens\.values\(\)\) token\.cancelled = true;/.test(page)
+  );
+
+  // 5. A new chat is entered at meta; btw uses the run's id.
+  check(
+    "5. a new chat's id becomes current at meta (not at done), and btw uses the live id",
+    /else if \(evt\.conversationId && active\) \{\s*workspaceIdRef\.current = evt\.conversationId;[\s\S]{0,700}setCurrentConvId\(evt\.conversationId\);/.test(send) &&
+      /const convId = workspaceIdRef\.current;\s*if \(!text \|\| !convId\) return;/.test(page) &&
+      !/if \(!text \|\| !currentConvId\) return;/.test(page),
+    "currentConvId was null for the whole first run: btw notes dropped, delete left you in the chat"
+  );
+  check(
+    "   deleting the chat you are in works mid-first-run too",
+    /currentConvId === id \|\| workspaceIdRef\.current === id/.test(page)
+  );
+
+  // 6. Sending waits for attachments.
+  const att = await load("src/lib/attachments.ts");
+  const ready = { name: "a.txt" };
+  check(
+    "6. attachmentsBlockSend: ready files pass, a reading/unpacking/uploading file blocks",
+    att.attachmentsBlockSend([ready]) === null &&
+      att.attachmentsBlockSend([]) === null &&
+      /Waiting for big\.zip \(unpacking…\)/.test(att.attachmentsBlockSend([ready, { name: "big.zip", stage: "unpacking" }]) ?? "") &&
+      /saving binary/.test(att.attachmentsBlockSend([{ name: "x.exe", stage: "saving" }]) ?? ""),
+    "Send went out with an empty file block and the late result was dropped"
+  );
+  check(
+    "   an image still being described blocks too, and the count of the rest is given",
+    /looking at image/.test(att.attachmentsBlockSend([{ name: "s.png", analyzing: true }]) ?? "") &&
+      /and 1 more/.test(att.attachmentsBlockSend([{ name: "a", stage: "reading" }, { name: "b", analyzing: true }]) ?? "")
+  );
+  check(
+    "   the composer gates Send, Enter and the btw note on it, and says why",
+    /const attachBusy = attachmentsBlockSend\(attachments\);/.test(chatArea) &&
+      /!attachBusy &&/.test(chatArea) &&
+      /\/\/ The button's own gate, applied here too so Enter cannot bypass it\.\s*if \(!canSend\) return;/.test(chatArea) &&
+      /if \(isBtw\) \{\s*\/\/[^\n]*\n\s*if \(attachBusy\) return;/.test(chatArea) &&
+      /\{attachBusy && \(\s*<div\s*role="status"/.test(chatArea)
+  );
+
+  // 7. Retry / Edit re-send the question's attachments.
+  const regen = page.slice(page.indexOf("const regenerate = useCallback("), page.indexOf("const lastResumable"));
+  const edit = page.slice(page.indexOf("const editMessage = useCallback("), page.indexOf("const deleteMessage = useCallback("));
+  check(
+    "7. Retry and Edit send the question's attachments with the same field a normal send uses",
+    /const attachments = prompt\.attachments\?\.length/.test(regen) &&
+      /regenerateFromId: assistantId,\s*attachments,/.test(regen) &&
+      /sendMessageRef\.current\?\.\(prompt\.content, \{ attachments \}\)/.test(regen) &&
+      /const attachments = question\.attachments\?\.length/.test(edit) &&
+      /previousVersions: carried,\s*attachments,/.test(edit) &&
+      /attachments: options\?\.attachments,/.test(send),
+    "only prompt.content was resent, so images/video vanished from the re-asked turn"
+  );
+
+  // 8. Edit: carries the new text for storage, not while busy.
+  check(
+    "8. Edit sends editedContent with the regenerate, and a provisional reply re-asks fresh",
+    /editedContent: newContent,/.test(edit) &&
+      /editedContent: regenerateFromId \? options\?\.editedContent : undefined,/.test(send) &&
+      /reply\?\.role === "assistant" && !reply\.id\.startsWith\("stream-"\)/.test(edit),
+    "server side still needed: rewrite the stored question from editedContent (see report)"
+  );
+  check(
+    "   Edit is unavailable while the chat is answering (UI and handler)",
+    /onEdit=\{msg\.role === "user" && !busy \? onEdit : undefined\}/.test(chatArea) &&
+      /busy=\{isLoading\}/.test(chatArea) &&
+      /const editMessage = useCallback\(\(messageId: string, newContent: string\) => \{[\s\S]{0,700}if \(getSession\(workspaceIdRef\.current\)\.loading\) return;/.test(page) &&
+      /if \(draft\.trim\(\) && onEdit\) \{/.test(bubble)
+  );
+
+  // 9. Drafts are per conversation.
+  check(
+    "9. the composer's text, attachments and error are kept per conversation",
+    /const draftKey = workspaceId \?\? "__none__";/.test(chatArea) &&
+      /const \[drafts, setDrafts\] = useState<Record<string, ComposerDraft>>/.test(chatArea) &&
+      /const input = draft\.input;/.test(chatArea) &&
+      /const attachments = draft\.attachments;/.test(chatArea) &&
+      !/const \[input, setInput\] = useState/.test(chatArea) &&
+      !/const \[attachments, setAttachments\] = useState/.test(chatArea),
+    "files uploaded into chat A's workspace were sent into chat B"
+  );
+  check(
+    "   a file still being read when you switch lands in the chat it was dropped on",
+    /const key = draftKey;\s*const setAttachments = \(fn: \(prev: Attachment\[\]\) => Attachment\[\]\) =>\s*patchAttachments\(key, fn\);/.test(chatArea) &&
+      /void analyzeImage\(image, key\);/.test(chatArea)
+  );
+
+  // 10. Phones: sidebar closed by default, overlay with a backdrop.
+  check(
+    "10. below md the sidebar starts closed (checked on mount) and overlays with a backdrop",
+    /window\.matchMedia\("\(max-width: 767px\)"\)\.matches/.test(page) &&
+      /queueMicrotask\(\(\) => \{\s*if \(isOverlayViewport\(\)\) setSidebarOpen\(false\);/.test(page) &&
+      /max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:z-40/.test(sidebarSrc) &&
+      /onClick=\{onToggle\}\s*className="fixed inset-0 z-30 bg-black\/50 md:hidden"/.test(sidebarSrc),
+    "a 288px in-flow column left ~87px of a phone for the chat"
+  );
+  check(
+    "   picking a chat (or New chat) closes the overlay",
+    /onSelect=\{\(id\) => \{\s*closeSidebarIfOverlay\(\);/.test(page) &&
+      /onNew=\{\(\) => \{\s*closeSidebarIfOverlay\(\);/.test(page)
+  );
+
+  // 11. Paced text is flushed before the end-of-stream write.
+  const eofAt = send.indexOf("// Stream ended without a terminal frame");
+  check(
+    "11. a stream that ends without done/error flushes the paced text before marking the bubble",
+    eofAt !== -1 && /if \(!sawError\) \{[\s\S]{0,700}?flush\(\);[\s\S]{0,300}writeMessages\(/.test(send.slice(eofAt)) &&
+      /\} finally \{\s*\/\/[^\n]*\n\s*\/\/[^\n]*\n\s*flush\(\);[\s\S]{0,120}if \(flushTimer !== null\) clearTimeout\(flushTimer\);/.test(send),
+    "the finally cancelled the pending frame without flushing, and never cleared flushTimer"
+  );
+
+  // 12. Tool results only touch the workspace UI of the chat on screen.
+  check(
+    "12. tool_result updates recently-changed / the file list only for the chat on screen",
+    /if \(isWrite && active\) \{\s*setRecentlyChanged\(\[\.\.\.changedPaths\]\);/.test(send)
+  );
+
+  // 13. Scroll resets per chat.
+  check(
+    "13. switching chats re-pins and scrolls to the newest message",
+    /useEffect\(\(\) => \{\s*setPinned\(true\);\s*stickToBottom\(\);\s*\}, \[draftKey, setPinned, stickToBottom\]\);/.test(chatArea),
+    "the scrolled-up state of chat A carried over into chat B"
+  );
+
+  // 14. Settings hydration cannot hang the splash.
+  check(
+    "14. reading settings is inside try/catch and hydration is set in finally",
+    /try \{\s*const saved = localStorage\.getItem\("nexusai-settings"\);/.test(page) &&
+      /\} finally \{\s*initialLoadDone\.current = true;\s*setSettingsHydrated\(true\);/.test(page),
+    "a throwing getItem left settingsHydrated false and the splash up for 12s"
+  );
+
+  // 15. Accessibility.
+  check(
+    "15. Enter during IME composition does not submit (composer and edit box)",
+    /if \(e\.nativeEvent\.isComposing \|\| e\.keyCode === 229\) return;[\s\S]{0,80}if \(e\.key === "Enter" && !e\.shiftKey\)/.test(chatArea) &&
+      /if \(e\.nativeEvent\.isComposing \|\| e\.keyCode === 229\) return;/.test(bubble)
+  );
+  check(
+    "   Settings is a labelled modal dialog: Escape closes, focus moves in, close button named",
+    /role="dialog"\s*aria-modal="true"\s*aria-labelledby="settings-dialog-title"/.test(settingsSrc) &&
+      /id="settings-dialog-title"/.test(settingsSrc) &&
+      /e\.key === "Escape"[\s\S]{0,80}onClose\(\);/.test(settingsSrc) &&
+      /closeRef\.current\?\.focus\(\);/.test(settingsSrc) &&
+      /aria-label="Close settings"/.test(settingsSrc)
+  );
+  check(
+    "   the collapsed sidebar is inert, so its buttons leave the tab order",
+    /inert=\{!isOpen\}/.test(sidebarSrc)
+  );
 }
 
 console.log(

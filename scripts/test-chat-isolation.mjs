@@ -86,7 +86,9 @@ check(
   "late stream frames are NEVER discarded: they route to the run's own session",
   // The old line dropped every frame of a backgrounded chat, which made a
   // running task vanish the moment you clicked another conversation.
-  /const active = mirroredIdRef\.current === requestConversationId/.test(page) &&
+  // `active` is read after the drain and against the run's CURRENT id
+  // (runConvId follows a draft->real migration) — UI audit.
+  /const active =\s*mirroredIdRef\.current === \(runConvId \?\? requestConversationId\)/.test(page) &&
     !/workspaceIdRef\.current !== requestConversationId\) continue/.test(page)
 );
 check(

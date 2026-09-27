@@ -859,12 +859,26 @@ export async function deleteTurn(
  */
 export async function truncateFrom(
   conversationId: string,
-  messageId: string
+  messageId: string,
+  /**
+   * Edit-and-resend: the question just above the reply becomes this text,
+   * in the same write. Found by review: an edit only changed the browser's
+   * copy, so after a reload the old question sat above the answer to the
+   * new one, and every later turn's history paired them the same way.
+   * Matched by position — the client's user ids are temp- ids the store
+   * never saw.
+   */
+  editedQuestion?: string
 ): Promise<boolean> {
   return mutate(conversationId, (conv) => {
     if (!conv) return { write: null, result: false };
     const index = conv.messages.findIndex((m) => m.id === messageId);
     if (index === -1) return { write: null, result: false };
+    const question = conv.messages[index - 1];
+    const edited = editedQuestion?.trim();
+    if (edited && question?.role === "user" && !question.note) {
+      conv.messages[index - 1] = { ...question, content: edited };
+    }
     conv.messages = conv.messages.slice(0, index);
     conv.updatedAt = new Date().toISOString();
     return { write: conv, result: true };

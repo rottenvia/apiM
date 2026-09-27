@@ -65,6 +65,7 @@ const {
   upsertMessage,
   updateConversation,
   deleteTurn,
+  truncateFrom,
 } = await import("@/lib/store");
 const { serializeForApi, MID_RUN_NOTE_LABEL, MID_RUN_NOTE_ABSORB } = await import(
   "@/lib/transcript"
@@ -388,7 +389,10 @@ const sendBtwNote = page.slice(
 );
 check(
   "the client posts the note trio plus scope — no keys",
-  /conversationId: currentConvId,[\s\S]{0,400}note: text,[\s\S]{0,80}wireText,[\s\S]{0,80}attachments/.test(
+  // The run's conversation comes from the ref at send time (convId): the
+  // rendered currentConvId was null for a new chat's whole first run, and
+  // every note sent then was dropped (UI audit).
+  /const convId = workspaceIdRef\.current;[\s\S]{0,1500}conversationId: convId,[\s\S]{0,400}note: text,[\s\S]{0,80}wireText,[\s\S]{0,80}attachments/.test(
     sendBtwNote
   ) &&
     /workspaceId/.test(sendBtwNote) &&
@@ -423,7 +427,9 @@ check(
   /onAskBtw\?\.\(\s*btwNote,[\s\S]{0,300}buildMessageWithAttachments\(btwNote, attachments/.test(
     chat
   ) &&
-    /onAskBtw\?\.\([\s\S]{0,600}setAttachments\(\[\]\)/.test(chat),
+    // The composer is per conversation now; clearing it empties this
+    // chat's draft (text + attachments) in one step.
+    /onAskBtw\?\.\([\s\S]{0,600}updateDraft\(draftKey, \(\) => EMPTY_DRAFT\)/.test(chat),
   "a dropped file left behind after the note is a silent loss"
 );
 check(
@@ -601,7 +607,7 @@ check(
 );
 check(
   "the client sends the workspace scope with the note",
-  /workspaceId,\s*\n\s*note: text,/.test(page),
+  /workspaceId: convId,\s*\n\s*note: text,/.test(page),
   "the skip must land in the right conversation"
 );
 check(
@@ -667,6 +673,21 @@ check(
       !after.messages.some((m) => m.id === "u1" || m.id === "a1") &&
       after.messages.find((m) => m.id === "a2")?.content === "checkpoint 2",
     JSON.stringify({ title: after?.title, notes: after?.btwNotes?.length, ids: after?.messages.map((m) => m.id) }));
+}
+
+// Edit-and-resend used to change only the browser's copy of the question.
+{
+  const E = "btw-edit-1";
+  const at = () => new Date().toISOString();
+  await appendMessages(E, "edit chat", [
+    { id: "q1", role: "user", content: "old question", createdAt: at() },
+    { id: "r1", role: "assistant", content: "old answer", createdAt: at() },
+  ]);
+  await truncateFrom(E, "r1", "  new question  ");
+  const conv = await getConversation(E);
+  check("an edited question is stored, and the old reply dropped, in one write",
+    conv?.messages.length === 1 && conv.messages[0].content === "new question",
+    JSON.stringify(conv?.messages.map((m) => m.content)));
 }
 
 // Clean up the scratch data root.

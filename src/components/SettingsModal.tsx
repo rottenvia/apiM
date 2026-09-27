@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   clampDeleteDelay,
@@ -307,8 +307,34 @@ export function SettingsModal({
   const [showExaKey, setShowExaKey] = useState(false);
   const [showVsKey, setShowVsKey] = useState(false);
 
+  /*
+   * A real dialog for keyboard and screen-reader users.
+   *
+   * Reported (audit): no dialog role, no aria-modal, Escape did nothing,
+   * focus stayed on the page behind it, and the close button was an
+   * unlabelled icon. Focus now moves into the dialog on open and returns
+   * to whatever opened it on close; Escape closes it.
+   */
+  const closeRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    const opener =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    closeRef.current?.focus();
+    return () => {
+      opener?.focus?.();
+    };
+  }, []);
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      onKeyDown={(e) => {
+        if (e.key === "Escape" && !e.defaultPrevented) {
+          e.stopPropagation();
+          onClose();
+        }
+      }}
+    >
       {/* Backdrop */}
       <div
         className="absolute inset-0 bg-black/60 backdrop-blur-sm"
@@ -316,11 +342,19 @@ export function SettingsModal({
       />
 
       {/* Modal */}
-      <div className="relative flex h-[min(86vh,40rem)] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-border-light bg-bg-secondary shadow-2xl shadow-black/50 animate-fade-in">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="settings-dialog-title"
+        className="relative flex h-[min(86vh,40rem)] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-border-light bg-bg-secondary shadow-2xl shadow-black/50 animate-fade-in"
+      >
         {/* Header */}
         <div className="flex flex-none items-center justify-between gap-3 border-b border-border px-5 py-4">
           <div className="min-w-0">
-            <h2 className="text-[15px] font-semibold leading-5 text-text-primary">
+            <h2
+              id="settings-dialog-title"
+              className="text-[15px] font-semibold leading-5 text-text-primary"
+            >
               Settings
             </h2>
             <p className="mt-0.5 truncate text-[12px] leading-4 text-text-muted">
@@ -328,10 +362,14 @@ export function SettingsModal({
             </p>
           </div>
           <button
+            ref={closeRef}
             onClick={onClose}
+            aria-label="Close settings"
+            title="Close (Esc)"
             className="p-2 rounded-xl hover:bg-bg-hover transition-colors text-text-secondary"
           >
             <svg
+              aria-hidden="true"
               className="w-5 h-5"
               fill="none"
               stroke="currentColor"
