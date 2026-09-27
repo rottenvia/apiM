@@ -602,3 +602,88 @@ export function codeDraftNudgeText(lines: number): string {
     `and fix what fails with edit_file.`
   );
 }
+
+/* ------------------------------------------------------------------ *
+ * Cutting a drafting think short
+ *
+ * The nudge above only lands AFTER the round, and the round is the
+ * problem: measured live, one think ran 57k chars (~15 minutes at 16
+ * tok/s) drafting 324 lines of a Python module with no tool call yet, and
+ * another drafted 461 lines of an ESP script. The user watches a spinner
+ * for a quarter of an hour, and every one of those lines is then paid for
+ * again as the write_file argument.
+ *
+ * So the stream is stopped once the draft is plainly a whole program, and
+ * the draft itself — the fenced code, newest last — is handed back as the
+ * model's own words, with one instruction: write it to files now. Nothing
+ * is lost (the code is carried verbatim) and the next round thinks at low
+ * effort, because its job is transcription, not design.
+ * ------------------------------------------------------------------ */
+
+export const DRAFT_CUTOVER_MARKER = "[My code draft so far, from my reasoning";
+
+/** Drafted code lines in ONE live think before the stream is cut over. */
+export const DRAFT_CUTOVER_LINES = 150;
+
+/** Cut-overs per run. Past this the model is left to think its own way. */
+export const MAX_DRAFT_CUTOVERS = 3;
+
+/** How much of the draft rides back into the transcript. */
+export const DRAFT_CARRY_CHARS = 40_000;
+
+/**
+ * The code a think drafted, as fenced blocks each led by the line of
+ * prose before it (usually the file name or what the block is for).
+ * Newest blocks win the size cap — a later draft of the same file
+ * supersedes an earlier one. An unclosed block at the end (the cut landed
+ * mid-block) is kept and closed.
+ */
+export function draftCarry(reasoning: string): string {
+  const blocks: string[] = [];
+  let label = "";
+  let current: string[] | null = null;
+  for (const line of reasoning.split("\n")) {
+    if (/^\s*```/.test(line)) {
+      if (current) {
+        current.push("```");
+        blocks.push(current.join("\n"));
+        current = null;
+      } else {
+        current = label ? [label.slice(0, 200), line.trim()] : [line.trim()];
+      }
+      continue;
+    }
+    if (current) current.push(line);
+    else if (line.trim()) label = line.trim();
+  }
+  if (current) {
+    while (current.length > 1 && !current[current.length - 1].trim()) current.pop();
+    current.push("```  (my draft was cut off here — finish it in the file)");
+    blocks.push(current.join("\n"));
+  }
+  const kept: string[] = [];
+  let size = 0;
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    if (size + blocks[i].length > DRAFT_CARRY_CHARS && kept.length) break;
+    kept.unshift(blocks[i].slice(0, DRAFT_CARRY_CHARS));
+    size += blocks[i].length;
+  }
+  const dropped = blocks.length - kept.length;
+  return (
+    `${DRAFT_CUTOVER_MARKER} — stopped so I write it to files instead:]\n` +
+    (dropped > 0 ? `(${dropped} earlier block(s) omitted — superseded drafts)\n\n` : "") +
+    kept.join("\n\n")
+  );
+}
+
+export function draftCutoverText(lines: number): string {
+  return (
+    `Your thinking had drafted about ${lines} lines of code without writing ` +
+    `a single file, so it was stopped there — at this endpoint's speed that ` +
+    `think was many minutes of waiting, and every line would be paid for ` +
+    `again as the file's content. Your draft is above, verbatim. Now write ` +
+    `it: call write_files with the files straight from the draft, finishing ` +
+    `any cut-off part directly in the file. Do not re-plan or re-draft in ` +
+    `thought. Then run it and fix what fails with edit_files.`
+  );
+}

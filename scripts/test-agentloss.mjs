@@ -98,8 +98,17 @@ const step = async (body) => {
   const file = path.join(SCRATCH, `step-${stepNo++}.mjs`);
   await fsWrite(
     file,
-    `import { appendMessages } from "@/lib/store";
-import { writeFile, listFiles } from "@/lib/workspace";
+    /*
+     * Both through one require. An ESM import of these CommonJS-compiled
+     * files makes tsx re-run each one to discover its exports
+     * (?tsx-commonjs-export-preparse), so the step got a SECOND workspace
+     * module whose folder map the store never wrote to — the chat was named
+     * in one instance and the file was written through the other.
+     */
+    `import { createRequire } from "node:module";
+const require = createRequire(import.meta.url);
+const { appendMessages } = require("@/lib/store");
+const { writeFile, listFiles } = require("@/lib/workspace");
 ${body}
 `,
     "utf8"
