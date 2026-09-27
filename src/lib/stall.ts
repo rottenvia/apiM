@@ -640,7 +640,10 @@ export const DRAFT_CARRY_CHARS = 48_000;
  * (conclusions and the latest draft are at the end), and a fence the cut
  * landed inside closed and marked, so the carried text is well-formed.
  */
-export function draftCarry(reasoning: string): string {
+export function draftCarry(
+  reasoning: string,
+  why = "stopped so I write the code to files instead"
+): string {
   let text = reasoning.replace(/\s+$/, "");
   let dropped = 0;
   if (text.length > DRAFT_CARRY_CHARS) {
@@ -656,7 +659,7 @@ export function draftCarry(reasoning: string): string {
   for (const line of text.split("\n")) if (/^\s*```/.test(line)) open = !open;
   if (open) text += "\n```  (my draft was cut off here — finish it in the file)";
   return (
-    `${DRAFT_CUTOVER_MARKER} — stopped so I write the code to files instead:]\n` +
+    `${DRAFT_CUTOVER_MARKER} — ${why}:]\n` +
     (dropped > 0 ? `(…${dropped} earlier chars omitted)\n` : "") +
     text
   );
@@ -673,3 +676,14 @@ export function draftCutoverText(lines: number): string {
     `the file. Then run it and fix what fails with edit_files.`
   );
 }
+
+/**
+ * A think the connection dropped is worth carrying past this size; a
+ * shorter one is simply asked again.
+ */
+export const DROPPED_THINK_CARRY_CHARS = 2_000;
+
+export const DROPPED_THINK_TEXT =
+  "The connection dropped while you were still thinking, before you had " +
+  "answered or called a tool. Your reasoning so far is above, verbatim. " +
+  "Carry on from where it stopped — do not start the analysis over.";
