@@ -382,26 +382,26 @@ check(
     `Actually rework it.\nsrc/parse.py (v2):\n${fence}python\n${"y = 2\n".repeat(30)}${fence}\n` +
     `Now the CLI.\n${fence}python\n${"print(1)\n".repeat(10)}`;
   const carry = S.draftCarry(think);
-  check("the carry is marked and keeps every drafted block with its label",
-    carry.startsWith(S.DRAFT_CUTOVER_MARKER) && /src\/parse\.py \(v2\):/.test(carry) &&
+  check("the carry is marked and keeps the whole think, design prose included",
+    carry.startsWith(S.DRAFT_CUTOVER_MARKER) && /Actually rework it/.test(carry) &&
+      /src\/parse\.py \(v2\):/.test(carry) &&
       (carry.match(/x = 1/g) ?? []).length === 40 && (carry.match(/y = 2/g) ?? []).length === 30);
-  check("a block cut mid-way is closed and says so",
+  check("a fence the cut landed in is closed and says so",
     /print\(1\)\n```  \(my draft was cut off here/.test(carry));
-  check("the carry drops no prose-free code and holds no reasoning prose",
-    !/Actually rework it/.test(carry));
-  const huge = `${fence}js\n${"a();\n".repeat(12000)}${fence}\nnewest:\n${fence}js\n${"b();\n".repeat(100)}${fence}`;
+  const huge = `${"early design. ".repeat(6000)}\nnewest:\n${fence}js\n${"b();\n".repeat(100)}${fence}`;
   const hc = S.draftCarry(huge);
-  check("the carry is capped and keeps the newest draft", hc.length <= S.DRAFT_CARRY_CHARS + 400 && /b\(\);/.test(hc));
+  check("the carry is capped, keeps the newest text and says what it dropped",
+    hc.length <= S.DRAFT_CARRY_CHARS + 200 && /b\(\);/.test(hc) && /earlier chars omitted/.test(hc));
   check("the instruction names the count and says write it now",
-    /about 324 lines/.test(S.draftCutoverText(324)) && /call write_files/.test(S.draftCutoverText(324)));
+    /about 324 lines/.test(S.draftCutoverText(324)) && /call write_files/i.test(S.draftCutoverText(324)) && /no thinking/.test(S.draftCutoverText(324)));
   check("the threshold is a whole program, not a snippet",
     S.DRAFT_CUTOVER_LINES >= 100 && S.DRAFT_CUTOVER_LINES > S.CODE_DRAFT_LINES && S.MAX_DRAFT_CUTOVERS <= 3);
-  check("the route cuts the live stream, carries the draft and thinks low next round",
+  check("the route cuts the live stream, carries the think and does not think next round",
     /draftedCodeLines\(roundReasoning\);\s*if \(lines >= DRAFT_CUTOVER_LINES\)/.test(route) &&
       /if \(draftCutover\) \{\s*await reader\.cancel\(\)/.test(route) &&
       /content: draftCarry\(roundReasoning\)/.test(route) &&
-      /lowEffortNext \? "low" : resolvedEffort/.test(route) &&
-      /lowEffortNext = false;/.test(route));
+      /forceNoThinking \|\| noThinkNext \? "none" : resolvedEffort/.test(route) &&
+      /noThinkNext = false;/.test(route) && /noThinkNext = true;/.test(route));
   check("a cut stream is still charged to the budget",
     /if \(!roundUsageSeen\) \{[\s\S]{0,900}chargeRound\(budget, est/.test(route));
 }
