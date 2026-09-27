@@ -1139,15 +1139,17 @@ check(
   "a 600k 'new message' must arrive with its cause attached, not as a mystery"
 );
 check(
-  "the fire-time size line is quiet for small chats and clears with the run",
+  "the fire-time size receipt is quiet for small chats and clears with the run",
   /case "request_size":/.test(page) &&
-    /info\.inputChars >= 100_000/.test(page) &&
+    /firedAt: Date\.now\(\),\s*answered: false,/.test(page) &&
     (page.match(/liveRequestSize: null/g) ?? []).length >= 5 &&
-    /requestSize && <RequestSizeLine/.test(read("src/components/ChatArea.tsx")) &&
+    /mediaChars\(requestSize\.breakdown\) >= 100_000 && \(\s*<RequestSizeLine/.test(
+      read("src/components/ChatArea.tsx")
+    ) &&
     /big context, first token may take a while/.test(
       read("src/components/ChatArea.tsx")
     ),
-  "one muted line while heavy rounds run; the ctx chip keeps the record"
+  "a heavy round's receipt before the first output; mid-run the live wait row carries it; the ctx chip keeps the record"
 );
 check(
   "the live retry label uses the real attempt total",
