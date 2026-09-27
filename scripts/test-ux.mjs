@@ -475,8 +475,8 @@ check(
 check(
   "the empty live box says it is waiting for text, not duplicate Thinking",
   /Waiting for reasoning text…/.test(bubble) &&
-    /const PACE_FRAME_MS = 30;/.test(page) && /const PACE_DRAIN_MS = 200;/.test(page),
-  "the header owns Thinking; the body becomes real text within a paced frame, bursts spread over ~200ms"
+    /const PACE_FRAME_MS = 24;/.test(page) && /const pacer = new StreamPacer\(\);/.test(page),
+  "the header owns Thinking; the body becomes real text within a paced frame"
 );
 check(
   "a ref, so active-phase tracking schedules no extra render",
@@ -801,6 +801,40 @@ check(
     /controller\.enqueue\(encoder\.encode\(": ping\\n\\n"\)\);/.test(route) &&
       /clearInterval\(heartbeat\);/.test(route),
     "measured: a 300s client body timeout killed the stream while a file was being written");
+}
+
+// Reported: "not laggy but freezy — it can freeze for 0.4 seconds and then
+// go smooth again", in thinking and in prose. Each burst was drained in a
+// fixed 200ms; a slow endpoint's bursts are further apart than that.
+{
+  const { StreamPacer } = await import(pathToFileURL(path.join(ROOT, "src/lib/pacer.ts")).href);
+  const sim = (seed) => {
+    let x = seed; const rnd = () => ((x = (x * 1103515245 + 12345) % 2147483648) / 2147483648);
+    const arr = []; let t = 0;
+    while (t < 30000) { const gap = 150 + rnd() * 750; t += gap; arr.push({ t, n: Math.round(64 * gap / 1000 * (0.7 + rnd() * 0.6)) }); if (rnd() < 0.03) t += 900; }
+    const p = new StreamPacer(); let backlog = 0, i = 0, last = 0, maxPause = 0, total = 0, shownTotal = 0;
+    for (let now = 0; now < arr[arr.length - 1].t; now += 24) {
+      while (i < arr.length && arr[i].t <= now) { backlog += arr[i].n; total += arr[i].n; p.arrive(arr[i].n, arr[i].t); i++; }
+      const n = p.take(backlog, now, 24); backlog -= n; shownTotal += n;
+      if (n > 0) { if (last && now > 2000) maxPause = Math.max(maxPause, now - last); last = now; }
+    }
+    return { maxPause, lagChars: total - shownTotal };
+  };
+  const runs = [1, 7, 42].map(sim);
+  check("bursty arrivals (a 16 tok/s endpoint) reveal with no pause over 150ms",
+    runs.every((r) => r.maxPause <= 150),
+    `longest pause per run: ${runs.map((r) => r.maxPause).join(", ")}ms — the fixed 200ms drain paused 570-1290ms`);
+  check("and the reveal keeps up — the held-back buffer stays small",
+    runs.every((r) => r.lagChars < 200), `left in the buffer at the end: ${runs.map((r) => r.lagChars).join(", ")} chars`);
+  const q = new StreamPacer();
+  check("the reveal never stalls while text is waiting",
+    (() => { q.arrive(5, 0); let got = 0; for (let t = 0; t < 2000; t += 24) got += q.take(5 - got, t, 24); return got === 5; })());
+  check("thinking and prose share one ordered queue, so the switch does not dump the thought",
+    /enqueue\("r", evt\.delta\);/.test(page) && /enqueue\("c", evt\.delta\);/.test(page) &&
+      !/pendingReasoning/.test(page));
+  check("status-only events flow through the reveal; real boundaries drain it quickly, not in one jump",
+    /if \(!PACE_THROUGH_EVENTS\.has\(evt\.type\)\) await drain\(\);/.test(page) &&
+      /"tool_drafting",/.test(page) && /const DRAIN_MAX_MS = 220;/.test(page));
 }
 
 console.log(
