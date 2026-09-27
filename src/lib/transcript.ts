@@ -513,6 +513,23 @@ export class ToolCallAccumulator {
     return this.order.length;
   }
 
+  /**
+   * The call still streaming in, for a live "Writing app.py · 12k chars"
+   * row: a whole file arrives as tool-call arguments, which can take many
+   * minutes on a slow endpoint and was invisible until the call completed.
+   * `path` is the last file path seen in the partial JSON — for a
+   * multi-file write, the file being written right now.
+   */
+  drafting(): { name: string; chars: number; path: string | null; calls: number } | null {
+    const call = this.order[this.order.length - 1];
+    if (!call || !call.function.name) return null;
+    const args = call.function.arguments;
+    let path: string | null = null;
+    const re = /"(?:path|file|filename|file_path)"\s*:\s*"((?:[^"\\]|\\.){1,300})"/g;
+    for (let m = re.exec(args); m; m = re.exec(args)) path = m[1];
+    return { name: call.function.name, chars: args.length, path, calls: this.order.length };
+  }
+
   reset(): void {
     this.open.clear();
     this.order = [];
