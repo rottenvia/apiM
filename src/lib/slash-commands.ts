@@ -302,7 +302,9 @@ export function matchOptions(options: SlashOption[], typed: string): SlashOption
 /** Parse "/budget" amounts: "2", "$2.50", "off". NaN when unreadable. */
 export function parseBudget(arg: string): number | null {
   const t = arg.trim().toLowerCase();
-  if (t === "off" || t === "none" || t === "0") return null;
+  // "0" is refused, not read as "no limit" (found by review: /budget 0
+  // removed the cap while "0.00" was an error). Removing it is explicit.
+  if (t === "off" || t === "none") return null;
   const n = Number(t.replace(/^\$/, ""));
   return Number.isFinite(n) && n > 0 ? n : NaN;
 }

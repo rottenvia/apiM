@@ -69,13 +69,25 @@ export interface Definition {
   match: SymbolMatch;
 }
 
+/** A declaration keyword on the signature: the strongest "this is it". */
+const KEYWORD_DECL =
+  /^(?:export\s+)?(?:default\s+)?(?:(?:public|private|protected|static|abstract|async|override|pub(?:\(\w+\))?|unsafe|inline|virtual)\s+)*(?:function\*?|class|interface|type|enum|struct|trait|impl|def|fn|func|fun|module|namespace|const|let|var)\b/;
+
 export function findDefinitionsIn(files: SourceFile[], name: string): Definition[] {
   const out: Definition[] = [];
   for (const f of files) {
     if (!f.content.includes(bareName(name))) continue;
     for (const match of findSymbols(f.content, name, f.path)) out.push({ path: f.path, match });
   }
-  return out;
+  // Declared with a keyword first, then source over tests and scripts:
+  // the definition a person means is rarely a test helper of the same name.
+  const rank = (d: Definition) =>
+    (KEYWORD_DECL.test(d.match.signature) ? 0 : 2) +
+    (/(?:^|\/)(?:tests?|__tests__|spec|scripts|examples?)\/|\.(?:test|spec)\.[^/]+$/i.test(d.path) ? 1 : 0);
+  return out
+    .map((d, i) => ({ d, i, r: rank(d) }))
+    .sort((a, b) => a.r - b.r || a.i - b.i)
+    .map((x) => x.d);
 }
 
 export type ReferenceKind = "definition" | "import" | "use";
@@ -89,6 +101,11 @@ export interface Reference {
 
 function classify(line: string, id: string): ReferenceKind {
   const t = line.trim();
+  // Signatures are short. A long line is data or minified code, and the
+  // patterns below backtrack on it (found by review: 569ms on one line).
+  if (t.length > 600) return "use";
+  // A module-level assignment (Python constants, JS globals): column 0.
+  if (new RegExp(`^${id}\\s*(?::[^=]*)?=(?!=)`).test(line)) return "definition";
   const importLine =
     /^(?:import\b|from\s+\S+\s+import\b|export\s+\{|export\s+\*|#include\b|use\s)/.test(t) ||
     (/\brequire\(/.test(t) && /^(?:const|let|var)\b/.test(t));
@@ -97,11 +114,13 @@ function classify(line: string, id: string): ReferenceKind {
     [
       // function/class/type declarations across the common languages
       `\\b(?:function\\*?|class|interface|type|enum|struct|trait|impl|def|fn|func|fun|module|namespace)\\s+${id}\\b`,
+      // Go methods: func (s *Server) Handle(
+      `\\bfunc\\s*\\([^)]*\\)\\s*${id}\\s*\\(`,
       // const foo = …, let foo: T = …, var foo = …
       `\\b(?:const|let|var|val)\\s+${id}\\b`,
       // C-family: returnType name(…) {  — a type word is required, and a
       // statement keyword is not one ("return foo(x)" is a use).
-      `^(?!(?:return|await|new|throw|yield|else|case|typeof|delete|void|if|while|for|switch|echo|print)\\b)[\\w:<>,*&\\[\\]]+(?:\\s+[\\w:<>,*&\\[\\]]+)*\\s+[*&]*${id}\\s*\\([^;]*\\)\\s*(?:const\\s*)?(?:->[^{;]*)?\\{?\\s*$`,
+      `^(?!(?:return|await|new|throw|yield|else|case|typeof|delete|void|if|while|for|switch|echo|print|raise|defer|go|puts|export\\s+default)\\b)[\\w:<>,*&\\[\\]]+(?:\\s+[\\w:<>,*&\\[\\]]+)*\\s+[*&]*${id}\\s*\\([^;]*\\)\\s*(?:const\\s*)?(?:->[^{;]*)?\\{?\\s*$`,
       // object/class member: foo(…) {  or  foo = (…) =>  or  foo: function
       `^(?:(?:public|private|protected|static|async|override|readonly)\\s+)*${id}\\s*(?:=\\s*(?:async\\s*)?(?:\\([^)]*\\)|\\w+)\\s*=>|:\\s*(?:async\\s+)?function\\b|\\([^)]*\\)\\s*(?::[^{]+)?\\{)`,
     ].join("|")

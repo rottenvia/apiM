@@ -33,6 +33,8 @@ const RE_READABLE = new Set([
   "list_files",
   "search_files",
   "inspect_binary",
+  "read_symbol",
+  "find_references",
 ]);
 
 /**
@@ -44,6 +46,14 @@ const RE_READABLE = new Set([
  */
 function missingResult(name: string, summary: string | undefined): string {
   const what = summary ? `${summary}. ` : "";
+  // A helper changes nothing; saying its "action took effect" (found by
+  // review) would let the model believe it still had the findings.
+  if (name === "delegate") {
+    return (
+      `[${what}The helper's report was not kept when the reply was ` +
+      `interrupted. It changed nothing — delegate again if you still need it.]`
+    );
+  }
   if (RE_READABLE.has(name)) {
     return (
       `[${what}This ran successfully, but its output was not kept when the ` +

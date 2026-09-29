@@ -46,25 +46,27 @@ export function SlashMenu({ items, active, onHover, onPick, title }: SlashMenuPr
       <div className="popover-card overflow-hidden">
       <div
         ref={listRef}
+        id="slash-menu"
         role="listbox"
         aria-label={title ?? "Commands"}
         className="max-h-[min(22rem,50vh)] overflow-y-auto p-1.5"
       >
         {title && (
-          <div className="px-2.5 pb-1 pt-0.5 text-[11px] font-medium text-text-muted">{title}</div>
+          <div role="presentation" className="px-2.5 pb-1 pt-0.5 text-[11px] font-medium text-text-muted">{title}</div>
         )}
         {items.map((item, i) => {
           const header = item.group && item.group !== items[i - 1]?.group ? item.group : null;
           return (
-            <div key={item.key}>
+            <div key={item.key} role="presentation">
               {header && (
-                <div className="px-2.5 pb-0.5 pt-2 text-[11px] font-semibold uppercase tracking-wide text-text-muted first:pt-0.5">
+                <div role="presentation" className="px-2.5 pb-0.5 pt-2 text-[11px] font-semibold uppercase tracking-wide text-text-muted first:pt-0.5">
                   {header}
                 </div>
               )}
               <button
                 type="button"
                 role="option"
+                id={`slash-opt-${i}`}
                 aria-selected={i === active}
                 data-index={i}
                 // Keep focus in the textarea: a mousedown default would blur it.

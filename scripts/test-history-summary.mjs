@@ -302,8 +302,9 @@ check(
   route.includes("loadHistoryForRequest(convId")
 );
 check(
-  "route gates the refresh on the trigger and a cheap helper",
-  /shouldRefreshHistorySummary\(full\.pending\) &&\s*helper/.test(route)
+  "route gates the refresh on the trigger and a cheap lane (even when it is the chat model)",
+  /const summariser = helper \?\? helperTarget;/.test(route) &&
+    /shouldRefreshHistorySummary\(full\.pending\) &&\s*summariser/.test(route)
 );
 check(
   "route persists the refreshed cursor",

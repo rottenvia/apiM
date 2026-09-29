@@ -9,7 +9,7 @@ import {
 import { stopAll } from "@/lib/processes";
 import { forgetWorkspace } from "@/lib/approvals";
 import { deleteAllSnapshots } from "@/lib/snapshots";
-import type { StoredHistorySummary } from "@/lib/history-summary";
+import { HISTORY_VERBATIM_MAX, type StoredHistorySummary } from "@/lib/history-summary";
 import type { StoredAttachment } from "@/lib/multimodal";
 
 /**
@@ -833,20 +833,39 @@ export function turnSlice(
 }
 
 /**
- * Forget a history summary whose cursor turn no longer exists.
+ * Keep a history summary honest when its cursor turn is removed.
  *
- * A summary covers everything up to its cursor. After /compact the cursor is
- * the newest turn, so Retry or an edit removes it — and the summary would
- * then describe an answer (or a question) the user just replaced, while
- * shapeHistory, unable to find the cursor, replays the whole backlog as
- * well. Dropping it lets the older turns ride verbatim again until the next
- * refresh summarises them from what is actually there.
+ * A summary covers everything up to its cursor. After /compact the cursor
+ * is the newest turn, so Retry, an edit or a rewind removes it. Deleting
+ * the whole summary (the first version) was lossy: history replays at most
+ * HISTORY_VERBATIM_MAX turns, so on a long chat everything older silently
+ * left context. Now:
+ *   - if what remains fits the verbatim window, the summary goes — every
+ *     surviving turn rides in full, nothing is lost;
+ *   - otherwise the cursor moves back to the nearest surviving earlier turn
+ *     and the summary is flagged `revised`, which tells the model the
+ *     transcript wins wherever the two disagree.
  */
-function dropStaleSummary(conv: StoredConversation): void {
-  const cursor = conv.historySummary?.upToId;
-  if (cursor && !conv.messages.some((m) => m.id === cursor)) {
+function dropStaleSummary(
+  conv: StoredConversation,
+  before: StoredMessage[]
+): void {
+  const summary = conv.historySummary;
+  const cursor = summary?.upToId;
+  if (!summary || !cursor || conv.messages.some((m) => m.id === cursor)) return;
+  if (conv.messages.length <= HISTORY_VERBATIM_MAX) {
     delete conv.historySummary;
+    return;
   }
+  const alive = new Set(conv.messages.map((m) => m.id));
+  const at = before.findIndex((m) => m.id === cursor);
+  for (let i = at - 1; i >= 0; i--) {
+    if (alive.has(before[i].id)) {
+      conv.historySummary = { ...summary, upToId: before[i].id, revised: true };
+      return;
+    }
+  }
+  delete conv.historySummary;
 }
 
 /**
@@ -871,11 +890,12 @@ export async function deleteTurn(
     if (!slice) return { write: null, result: null };
 
     const removed = conv.messages.slice(slice.start, slice.end).map((m) => m.id);
+    const before = conv.messages;
     conv.messages = [
       ...conv.messages.slice(0, slice.start),
       ...conv.messages.slice(slice.end),
     ];
-    dropStaleSummary(conv);
+    dropStaleSummary(conv, before);
     conv.updatedAt = new Date().toISOString();
     return { write: conv, result: { removed } };
   });
@@ -907,8 +927,9 @@ export async function truncateFrom(
     if (edited && question?.role === "user" && !question.note) {
       conv.messages[index - 1] = { ...question, content: edited };
     }
+    const before = conv.messages;
     conv.messages = conv.messages.slice(0, index);
-    dropStaleSummary(conv);
+    dropStaleSummary(conv, before);
     conv.updatedAt = new Date().toISOString();
     return { write: conv, result: true };
   });
@@ -963,10 +984,11 @@ export async function rewindConversation<T>(
     if (cut === null || cut < 0 || cut >= conv.messages.length) {
       return { write: null, result };
     }
+    const before = conv.messages;
     conv.messages = conv.messages.slice(0, cut);
     // Notes queued for a run that no longer has a place in the history.
     delete conv.btwNotes;
-    dropStaleSummary(conv);
+    dropStaleSummary(conv, before);
     conv.updatedAt = new Date().toISOString();
     return { write: conv, result };
   });
@@ -1079,6 +1101,13 @@ export async function saveHistorySummary(
   return mutate(id, (conv) => {
     if (!conv) return { write: null, result: false };
     if ((conv.historySummary?.upToId ?? null) !== expectedUpToId) {
+      return { write: null, result: false };
+    }
+    // Found by review: a /compact can take minutes, and a Retry meanwhile
+    // deletes the turn it was about to use as its cursor. A cursor that
+    // points at nothing makes shapeHistory replay the backlog AND the
+    // summary of the rejected answer — refuse it instead.
+    if (!conv.messages.some((m) => m.id === next.upToId)) {
       return { write: null, result: false };
     }
     conv.historySummary = next;

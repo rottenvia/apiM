@@ -95,6 +95,12 @@ export interface StoredHistorySummary {
   manual?: boolean;
   /** Turns the summary stands in for, for the "compacted" divider. */
   coveredTurns?: number;
+  /**
+   * The cursor turn was retried, edited or rewound away and the cursor
+   * moved back to the nearest surviving turn: the text may describe a turn
+   * that no longer exists, so the model is told to trust the transcript.
+   */
+  revised?: boolean;
 }
 
 export interface HistoryShape {
@@ -151,7 +157,7 @@ function attachmentMarker(a: StoredAttachment): string {
   return `[${a.kind} ${a.name}${desc}]`;
 }
 
-function renderDigestTurn(m: ScopedHistoryMessage): string {
+export function renderDigestTurn(m: ScopedHistoryMessage): string {
   const who = m.role === "user" ? "USER" : "ASSISTANT";
   // No [mid-task note] tag: by the time a turn reaches the digest its run
   // is over, and a live-framed correction would nag the summary forever.
@@ -325,7 +331,10 @@ export function renderHistorySummary(summary: StoredHistorySummary): string {
     summary.droppedTurns > 0
       ? `\n(${summary.droppedTurns} oldest turn${summary.droppedTurns === 1 ? "" : "s"} predate${summary.droppedTurns === 1 ? "s" : ""} this summary and ${summary.droppedTurns === 1 ? "is" : "are"} not in context.)`
       : "";
-  return `${HISTORY_SUMMARY_MARKER}\n${summary.text}${dropped}`;
+  const revised = summary.revised
+    ? "\n(Some of the newest turns this summary covered were later retried, edited or rewound. Where it disagrees with the conversation below, the conversation is right.)"
+    : "";
+  return `${HISTORY_SUMMARY_MARKER}\n${summary.text}${dropped}${revised}`;
 }
 
 /** Stored /compact summaries may be longer: they replace the whole chat. */
@@ -372,7 +381,10 @@ export function compactChunks(
   let current: ScopedHistoryMessage[] = [];
   let chars = 0;
   for (const turn of turns) {
-    const size = Math.min(turn.content?.length ?? 0, SUMMARY_TURN_MAX_CHARS) + 40;
+    // Sized exactly as the digest renders it — attachment markers included.
+    // An estimate (content + 40) let a chunk render past the digest cap,
+    // and the digest then dropped its oldest turns without a trace.
+    const size = renderDigestTurn(turn).length + 2;
     if (current.length > 0 && chars + size > COMPACT_CHUNK_CHARS) {
       chunks.push(current);
       current = [];

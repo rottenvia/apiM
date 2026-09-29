@@ -99,6 +99,48 @@ console.log("\nfind_references / go to definition");
   check("bareName takes the last segment", CI.bareName("Cls::run") === "run" && CI.bareName("a.b.c") === "c");
 }
 
+// --- review fixes ---
+console.log("\nreview fixes");
+{
+  const S = await load("src/lib/symbols.ts");
+  const table = "export function f() {}\nconst table = [" + Array.from({ length: 40000 }, (_, i) => i).join(",") + "];\nf();\n";
+  const t0 = performance.now();
+  const found = S.findSymbols(table, "f", "x.ts");
+  const ms = performance.now() - t0;
+  check("a 229KB generated line no longer freezes the scan", ms < 1000 && found.length === 1, `${Math.round(ms)}ms (was 65s)`);
+  const src = "async function main() {\n  await runTool(ws, 'x', {\n    a: 1\n  });\n  if (runTool(a)) {\n  }\n  x.set(\n    runTool(b, {\n    })\n  );\n}\nexport async function runTool(ws, name, args) {\n  return 1;\n}\n";
+  const defs = S.findSymbols(src, "runTool", "a.ts");
+  check("call sites with a block are not definitions", defs.length === 1 && /export async function runTool/.test(defs[0].signature), defs.map((d) => d.signature).join(" | "));
+  check("const arrow functions are definitions", S.findSymbols("const go = async (a) => {\n  return a;\n};\n", "go", "a.ts").length === 1);
+  check("C++ qualified methods still are", S.findSymbols("void Foo::bar(int x) {\n}\n", "bar", "a.cpp").length === 1);
+  await tool("write_files", { files: [
+    { path: "tests/helper.test.ts", content: "export function loadConfig() {\n  return 0;\n}\n" },
+    { path: "g/server.go", content: "func (s *Server) Handle(w int) {\n}\n" },
+    { path: "py/consts.py", content: "LIMIT = 10\nraise Foo(LIMIT)\n" },
+  ] });
+  const ranked = await tool("read_symbol", { name: "loadConfig" });
+  check("go to definition prefers source over tests", /src\/config\.ts/.test(ranked.summary), ranked.summary);
+  const go = await tool("find_references", { name: "Handle" });
+  check("Go methods are definitions", /\[definition\] func \(s \*Server\) Handle/.test(go.content));
+  const limit = await tool("find_references", { name: "LIMIT" });
+  check("module constants are definitions", /\[definition\] LIMIT = 10/.test(limit.content) && /\[use\] raise Foo\(LIMIT\)/.test(limit.content));
+
+  const bom = await tool("write_file", { path: "appsettings.json", content: "\uFEFF{ \"a\": 1 }\n" });
+  check("JSON with a byte-order mark is not an error", !/Syntax check/.test(bom.content));
+  const jsonc = await tool("write_file", { path: ".eslintrc.json", content: "{\n  // rules\n  \"rules\": {},\n}\n" });
+  check("JSON-with-comments files are not errors", !/Syntax check/.test(jsonc.content));
+  const stillBad = await tool("write_file", { path: "conf.json", content: "{ \"a\": }\n" });
+  check("…while broken JSON still is", /Syntax check/.test(stillBad.content));
+  const flow = await tool("write_file", { path: "rn/App.js", content: "// @flow\nfunction f(x: number): string { return String(x); }\n" });
+  check("Flow-typed JavaScript is skipped", !/Syntax check/.test(flow.content));
+  const pyBom = await tool("write_file", { path: "bom.py", content: "\uFEFFx = 1\n" });
+  check("Python with a byte-order mark is not an error", !/Syntax check/.test(pyBom.content));
+  const pyBad = await tool("write_file", { path: "bad2.py", content: "def (:\n" });
+  check("Python errors name the interpreter version", /parsed with Python 3\.\d+/.test(pyBad.content));
+
+  check("helper context follows the model window", SA.helperContextCap(81_920) < 170_000 && SA.helperContextCap(1_000_000) === 420_000, `${SA.helperContextCap(81_920)} chars for 80K tokens`);
+}
+
 // --- sub-agent ---
 console.log("\ndelegate (sub-agent)");
 const script = [];
@@ -183,6 +225,32 @@ try {
   const stopped = await helper("PAR stopped", { signal: ctl.signal });
   check("Stop ends a helper", stopped.stoppedBecause === "stopped");
 
+  // A context overflow (400) after some work: shrink and still report.
+  seen.length = 0;
+  script.push({ key: "OVERFLOW", turns: [{ calls: [["read_file", { path: "src/config.ts" }]] }] });
+  let n400 = 0;
+  const overflowFetch = async (url, init) => {
+    const body = JSON.parse(init.body);
+    if (body.messages.some((m) => m.role === "tool") && body.tool_choice !== "none" && n400++ === 0) {
+      return new Response("context length exceeded", { status: 400 });
+    }
+    return fetch(url, init);
+  };
+  const salvaged = await helper("OVERFLOW please", { fetchImpl: overflowFetch });
+  check("a context overflow after work still produces a report", salvaged.ok && /Partial/.test(salvaged.report), salvaged.report.slice(0, 80));
+
+  script.push({ key: "GIT", turns: [{ calls: [["git_status", {}]] }, { say: "git checked" }] });
+  seen.length = 0;
+  await helper("GIT status please", { available: new Set([...all, "git_status"]) });
+  check("read-only git tools reach the git agent", !/Unknown tool/.test(JSON.stringify(seen.at(-1).messages)), JSON.stringify(seen.at(-1).messages.at(-1)).slice(0, 120));
+
+  const slow = new AbortController();
+  const t1 = Date.now();
+  const deadFetch = async () => { throw new Error("ECONNRESET"); };
+  setTimeout(() => slow.abort(), 300);
+  const aborted = await helper("PAR stop in backoff", { fetchImpl: deadFetch, signal: slow.signal });
+  check("Stop cuts a helper's retry wait short", aborted.stoppedBecause === "stopped" && Date.now() - t1 < 1200, `${Date.now() - t1}ms`);
+
   const broken = await SA.runSubAgent({ task: "x", workspaceId: ws, target: { ...target, baseUrl: "http://127.0.0.1:9/v1" }, toolContext: {}, available: all, signal: new AbortController().signal });
   check("an unreachable model fails cleanly", !broken.ok && /helper failed/.test(broken.report));
 } finally {
@@ -196,8 +264,15 @@ console.log("\nwiring");
   check("delegate is offered with the workspace tools", /\[\.\.\.\(dsRequestBody\.tools as ToolDefinition\[\]\), DELEGATE_TOOL\]/.test(route));
   check("several delegates in a round start together", /if \(call\.function\.name !== "delegate"\) continue;[\s\S]{0,200}runDelegate\(parsedArgs\.value, call\.id\)/.test(route));
   check("helper usage counts toward the reply and its cap", /onUsage: \(u\) => \{[\s\S]{0,600}chargeRound\(budget/.test(route) && /shouldStop: \(\) =>\s*budget\.limitUsd !== null/.test(route));
+  check("helpers a halted round never awaited are aborted", /roundAbort\.abort\(\);/.test(route) && /AbortSignal\.any\(\[runSignal, roundAbort\.signal\]\)/.test(route));
+  check("the helper's context is sized to the model", /contextCapChars: helperContextCap\(contextWindowFor\(model, customs\)\)/.test(route));
+  check("progress from a prefetched helper waits for its row", /heldProgress\.get\(call\.id\)/.test(route));
+  const rebuild = await load("src/lib/rebuild-resume.ts");
+  void rebuild;
+  check("a lost helper report is not described as an action that took effect", /The helper's report was not kept/.test(read("src/lib/rebuild-resume.ts")));
+  check("AGENTS.md is framed as project information, not orders", /not instructions from the user/.test(route) && /<project-notes file=/.test(route) && !/Follow them\./.test(route));
   check("the agent is told about delegate and find_references", /call delegate: a read-only helper/.test(route) && /call find_references so no caller is missed/.test(route));
-  check("helper rounds stream to the running row", /onProgress: \(p\) =>\s*send\(\{\s*type: "tool_progress",\s*id: callId/.test(route));
+  check("helper rounds stream to the running row", /onProgress: \(p\) => \{[\s\S]{0,300}if \(shownTools\.has\(callId\)\) send\(\{ type: "tool_progress", id: callId, text \}\)/.test(route));
   const pageSrc = read("src/app/page.tsx");
   const toolRow = read("src/components/ToolActivity.tsx");
   check("the page shows the progress on the running tool", /case "tool_progress":[\s\S]{0,900}progress: evt\.text/.test(pageSrc) && /running && event\.progress/.test(toolRow));

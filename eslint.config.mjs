@@ -26,5 +26,7 @@ export default defineConfig([
     "next-env.d.ts",
     "data/**",
     ".test-data/**",
+    // Benchmark fixtures: deliberately buggy starting code and graders.
+    "bench/**",
   ]),
 ]);

@@ -118,6 +118,7 @@ export async function POST(
   );
 
   const { chunks, skipped } = compactChunks(uncovered);
+  let digestDropped = 0;
   let text = stored?.text ?? null;
   const usage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
   for (const chunk of chunks) {
@@ -151,6 +152,7 @@ export async function POST(
       );
     }
     text = fresh.text;
+    digestDropped += fresh.droppedTurns;
     if (fresh.usage) {
       usage.prompt_tokens += fresh.usage.prompt_tokens;
       usage.completion_tokens += fresh.usage.completion_tokens;
@@ -163,7 +165,7 @@ export async function POST(
   const next: StoredHistorySummary = {
     text: text ?? "",
     upToId: last.id,
-    droppedTurns: (stored?.droppedTurns ?? 0) + skipped,
+    droppedTurns: (stored?.droppedTurns ?? 0) + skipped + digestDropped,
     updatedAt: new Date().toISOString(),
     manual: true,
     coveredTurns: messages.length,
