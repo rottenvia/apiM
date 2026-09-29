@@ -1,0 +1,12 @@
+{
+  "audit_writer": {"file": "fleetdesk/storage/journal.py", "function": "JournalWriter.flush"},
+  "webhook_backoff": {"config_key": "webhooks.delivery.backoff_initial_ms", "default": 500},
+  "purge_expired_callers": [
+    "fleetdesk/services/session_service.py:SessionService.validate",
+    "fleetdesk/services/retention_service.py:RetentionService.run",
+    "fleetdesk/handlers/admin.py:run_maintenance",
+    "fleetdesk/repositories/session_repo.py:SessionRepository.rotate"
+  ],
+  "unauthenticated_endpoint": {"method": "POST", "path": "/api/v1/webhooks/telematics/replay"},
+  "duplicate_vin_status": 422
+}

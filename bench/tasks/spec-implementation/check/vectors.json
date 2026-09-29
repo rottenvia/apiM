@@ -113,6 +113,18 @@
    "hex": "b71e0101"
   },
   {
+   "name": "magic only",
+   "hex": "b71e"
+  },
+  {
+   "name": "magic and version only",
+   "hex": "b71e01"
+  },
+  {
+   "name": "single byte",
+   "hex": "b7"
+  },
+  {
    "name": "bad magic",
    "hex": "b71f0101009373"
   },
