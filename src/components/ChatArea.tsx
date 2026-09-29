@@ -771,8 +771,10 @@ export function ChatArea({
       if (!saved.path) {
         return file.size > UPLOAD_LIMIT ? { error: saved.error } : null;
       }
-      setStage(placeholderId, isArchive(file.name) ? "unpacking" : "describing");
-      const d = await describeSaved(saved.path, isArchive(file.name));
+      // The server decides what is an archive (by its bytes); the label is a guess.
+      const looksPacked = /\.(?:zip|rar|7z|tar|tgz|tbz2?|txz|gz|bz2|xz|zst|cab|iso|\d{3})$/i.test(file.name);
+      setStage(placeholderId, looksPacked ? "unpacking" : "describing");
+      const d = await describeSaved(saved.path, true);
       if ("error" in d && !("text" in d)) {
         return {
           attachment: {

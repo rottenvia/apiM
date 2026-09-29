@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { describeUpload } from "@/lib/ingest";
+import { ingestUpload } from "@/lib/ingest";
 import { WorkspaceError } from "@/lib/workspace";
 
 export const dynamic = "force-dynamic";
@@ -18,10 +18,13 @@ export async function POST(
 ) {
   try {
     const { id } = await params;
-    const body = (await req.json().catch(() => ({}))) as { path?: unknown };
+    const body = (await req.json().catch(() => ({}))) as { path?: unknown; extract?: unknown };
     const rel = typeof body.path === "string" ? body.path.replace(/\\/g, "/").trim() : "";
     if (!rel) return NextResponse.json({ error: "path is required" }, { status: 400 });
-    return NextResponse.json(await describeUpload(id, rel));
+    // extract:true unpacks an archive first (zip, rar, 7z, tar…) — lib/extract.
+    return NextResponse.json(
+      await ingestUpload(id, rel, { extract: body.extract === true, signal: req.signal })
+    );
   } catch (error) {
     if (error instanceof WorkspaceError) {
       return NextResponse.json({ error: error.message }, { status: 400 });

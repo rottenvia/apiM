@@ -18,6 +18,7 @@ import { resolveInside, listFiles } from "@/lib/workspace";
 import { describeData, loadData, formatFor, mainCollection, MAX_DATA_BYTES } from "@/lib/data-query";
 import { documentKind, readDocument } from "@/lib/documents";
 import { detectBinaryFormat } from "@/lib/binaries";
+import { ExtractError, extractArchive, formatExtractSummary, sniffArchive } from "@/lib/extract";
 
 /** Text up to this many characters is shown whole (≈28k tokens). */
 export const INLINE_CHARS = 100_000;
@@ -262,6 +263,79 @@ export async function describeUpload(workspaceId: string, rel: string): Promise<
   }
 
   return describeText(rel, abs, bytes);
+}
+
+// ---------------------------------------------------------------- archives
+
+/** Listings stop at this many files; an archive may not unpack past it. */
+const MAX_ARCHIVE_FILES = 100_000;
+
+/**
+ * Describe a dropped file, unpacking it first when it is an archive.
+ *
+ * zip, rar, 7z, tar(.gz/.xz/.bz2/.zst), gz and the rest go through
+ * lib/extract (7-Zip in WebAssembly, streamed to disk, zip-slip, symlink
+ * and bomb checks). The message then carries the unpacked tree instead of
+ * "binary file". Office documents, JARs and APKs are zips too, but they
+ * stay files — the sniff refuses them unless asked.
+ */
+export async function ingestUpload(
+  workspaceId: string,
+  rel: string,
+  opts: { extract?: boolean; signal?: AbortSignal } = {}
+): Promise<UploadDescription> {
+  if (!opts.extract) return describeUpload(workspaceId, rel);
+  const abs = resolveInside(workspaceId, rel);
+  const st = await fs.stat(abs);
+  if (!st.isFile()) return describeUpload(workspaceId, rel);
+  const kind = sniffArchive(new Uint8Array(await readHead(abs, 8192)), path.basename(rel));
+  if (!kind) return describeUpload(workspaceId, rel);
+  try {
+    const r = await extractArchive(workspaceId, rel, { maxFiles: MAX_ARCHIVE_FILES, signal: opts.signal });
+    const single = r.files === 1 && !r.dirs;
+    return {
+      path: r.dest,
+      bytes: r.bytes,
+      kind: "archive",
+      inline: false,
+      fileCount: r.files,
+      label: `${kind.toUpperCase()} · ${r.files.toLocaleString()} file${r.files === 1 ? "" : "s"} · ${formatSize(r.bytes)}`,
+      text:
+        `Attached archive: ${rel} (${formatSize(st.size)}) — unpacked in the workspace${single ? "" : ` into ${r.dest}/`}.\n` +
+        formatExtractSummary(r) +
+        (() => {
+          const bins = r.entries.filter((e) => /\.(?:exe|dll|sys|so|dylib|jar|apk|class|dex|wasm|pyc)$/i.test(e.path)).slice(0, 20);
+          return bins.length
+            ? `\nExecutables/libraries (inspect_binary; never executed):\n${bins.map((b) => `  ${b.path}`).join("\n")}`
+            : "";
+        })() +
+        `\nThe original archive is still at ${rel}.`,
+    };
+  } catch (e) {
+    if (e instanceof ExtractError && (e.code === "password_required" || e.code === "wrong_password")) {
+      return {
+        path: rel,
+        bytes: st.size,
+        kind: "archive",
+        inline: false,
+        label: `${kind.toUpperCase()} · password-protected`,
+        text:
+          `Attached archive: ${rel} (${formatSize(st.size)}) — it is password-protected, so it was saved but not unpacked. ` +
+          `Ask the user for the password, then call extract_archive path="${rel}" password="…".`,
+      };
+    }
+    const why = e instanceof Error ? e.message : String(e);
+    return {
+      path: rel,
+      bytes: st.size,
+      kind: "archive",
+      inline: false,
+      label: `${kind.toUpperCase()} · ${formatSize(st.size)} · not unpacked`,
+      text:
+        `Attached archive: ${rel} (${formatSize(st.size)}) — saved, but it could not be unpacked: ${why}. ` +
+        `If it may be a partial download or another format, say so to the user; extract_archive path="${rel}" retries (with encoding or password if needed).`,
+    };
+  }
 }
 
 // ---------------------------------------------------------------- folders
