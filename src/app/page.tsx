@@ -22,6 +22,7 @@ import { appendThinkRange } from "@/lib/timeline";
 import { StreamPacer } from "@/lib/pacer";
 import { clampDeleteDelay, DEFAULT_DELETE_DELAY } from "@/components/DeleteChatDialog";
 import { warmRoutes } from "@/lib/warmup";
+import { advanceSplash, finishSplash } from "@/components/startupSplash";
 import {
   DEFAULT_LOCAL_API_MODEL,
   DEFAULT_LOCAL_BASE_URL,
@@ -1397,14 +1398,12 @@ export default function Home() {
   /** The first chat-list fetch has answered (either way). */
   const [conversationsLoaded, setConversationsLoaded] = useState(false);
   // Lift the startup splash (see layout.tsx) once the app can actually be
-  // used: settings read and the chat list in.
+  // used: settings read and the chat list in. Until then each milestone
+  // (this first run = the app is running) advances its progress bar, and
+  // finishing fills the bar before the fade — see startupSplash.ts.
   useEffect(() => {
-    if (!settingsHydrated || !conversationsLoaded) return;
-    const splash = document.getElementById("app-splash");
-    if (!splash) return;
-    // Hidden, not removed: the node belongs to the server-rendered layout,
-    // and pulling it out from under React can break a later reconcile.
-    splash.classList.add("is-done");
+    if (settingsHydrated && conversationsLoaded) finishSplash();
+    else advanceSplash(settingsHydrated, conversationsLoaded);
   }, [settingsHydrated, conversationsLoaded]);
 
   useEffect(() => {
