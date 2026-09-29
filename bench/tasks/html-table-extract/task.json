@@ -1,0 +1,9 @@
+{
+  "title": "Extract a clean dataset from a messy wiki table",
+  "category": "data",
+  "language": "python",
+  "difficulty": "medium",
+  "prompt": "hydro_2023.html is a page saved from our internal energy wiki. I need its \"Hydroelectricity by country\" table as clean JSON. We get a fresh snapshot of this page every year, so I want a reusable script, not a one-off conversion.\n\nWrite extract.py so that `python extract.py <page.html> <out.json>` writes the dataset, then run it to produce hydro_2023.json from hydro_2023.html. Standard library only: parse with html.parser (no BeautifulSoup, lxml, pandas, etc.).\n\nOutput is a JSON array with one object per country row, in page order, like:\n\n{\"region\": \"Asia\", \"country\": \"China\", \"capacity_mw\": 367720, \"generation_gwh\": {\"2022\": 1303200, \"2023\": 1226000}, \"share_pct\": 13.5}\n\nRules:\n- `region` comes from the Region column (one region cell spans several rows).\n- Text should be what a reader sees on the rendered page: no footnote/reference markers ([1], [a], [p], *, † ...), no hidden sort keys, no flag images, whitespace collapsed, HTML entities decoded.\n- Numbers are JSON numbers: remove thousands separators (commas or non-breaking spaces), `%` signs and annotations such as `(est.)`. `capacity_mw` is an integer.\n- `generation_gwh` has one entry per year column under the \"Generation (GWh)\" heading, keyed by the year as shown in the header. The set of years differs between snapshots.\n- Missing values (blank, a dash, n/a) become null.\n- Leave out subtotal and total rows, and ignore the other tables on the page.",
+  "timeoutMinutes": 15,
+  "budgetUsd": 0.6
+}

@@ -1,0 +1,9 @@
+{
+  "title": "Rename calc to calculate_total",
+  "category": "refactor",
+  "language": "python",
+  "difficulty": "medium",
+  "prompt": "In the `shop` package, the pricing function `shop.pricing.calc` has a name that's far too vague. Please rename it to `calculate_total` and update every place in this repo that uses it (package code, tests, docs examples) so nothing goes through the old name any more; `calculate_total` should also be exported from `shop` (including `__all__`). Other code outside this repo still calls `shop.calc` / `shop.pricing.calc`, so keep that name working as a deprecated alias: it must behave exactly like `calculate_total` but emit a DeprecationWarning when called. Careful: only that one function is being renamed. Other things in the codebase that happen to be called `calc` are unrelated and must keep their names and behaviour, and the command line interface must keep working exactly as it does today. Behaviour must not change. The tests run with `python -m unittest discover -s tests -t .`.",
+  "timeoutMinutes": 15,
+  "budgetUsd": 0.5
+}

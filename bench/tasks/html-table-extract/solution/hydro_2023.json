@@ -1,0 +1,192 @@
+[
+  {
+    "region": "Asia",
+    "country": "China",
+    "capacity_mw": 367720,
+    "generation_gwh": {
+      "2022": 1303200,
+      "2023": 1226000
+    },
+    "share_pct": 13.5
+  },
+  {
+    "region": "Asia",
+    "country": "India",
+    "capacity_mw": 46850,
+    "generation_gwh": {
+      "2022": 174300,
+      "2023": 149200
+    },
+    "share_pct": 8
+  },
+  {
+    "region": "Asia",
+    "country": "Japan",
+    "capacity_mw": 50030,
+    "generation_gwh": {
+      "2022": 76800,
+      "2023": 75900.4
+    },
+    "share_pct": 7.4
+  },
+  {
+    "region": "Asia",
+    "country": "Vietnam",
+    "capacity_mw": 22504,
+    "generation_gwh": {
+      "2022": 95900,
+      "2023": 80900
+    },
+    "share_pct": 30.1
+  },
+  {
+    "region": "Asia",
+    "country": "Tajikistan",
+    "capacity_mw": 5757,
+    "generation_gwh": {
+      "2022": 20100,
+      "2023": null
+    },
+    "share_pct": 91.2
+  },
+  {
+    "region": "Europe",
+    "country": "Norway",
+    "capacity_mw": 33691,
+    "generation_gwh": {
+      "2022": 128800,
+      "2023": 136900
+    },
+    "share_pct": 88.5
+  },
+  {
+    "region": "Europe",
+    "country": "Sweden",
+    "capacity_mw": 16479,
+    "generation_gwh": {
+      "2022": 70100,
+      "2023": 66000
+    },
+    "share_pct": 40.2
+  },
+  {
+    "region": "Europe",
+    "country": "France",
+    "capacity_mw": 25700,
+    "generation_gwh": {
+      "2022": 49600,
+      "2023": 58800
+    },
+    "share_pct": 11.8
+  },
+  {
+    "region": "Europe",
+    "country": "Bosnia & Herzegovina",
+    "capacity_mw": 2104,
+    "generation_gwh": {
+      "2022": 4650.5,
+      "2023": 6011.2
+    },
+    "share_pct": 38.9
+  },
+  {
+    "region": "Europe",
+    "country": "Iceland",
+    "capacity_mw": 2086,
+    "generation_gwh": {
+      "2022": 13800,
+      "2023": 13900
+    },
+    "share_pct": 69.7
+  },
+  {
+    "region": "Americas",
+    "country": "Brazil",
+    "capacity_mw": 109900,
+    "generation_gwh": {
+      "2022": 427100,
+      "2023": 428800
+    },
+    "share_pct": 60.2
+  },
+  {
+    "region": "Americas",
+    "country": "Canada",
+    "capacity_mw": 83300,
+    "generation_gwh": {
+      "2022": 398300,
+      "2023": 363600
+    },
+    "share_pct": 57.8
+  },
+  {
+    "region": "Americas",
+    "country": "United States",
+    "capacity_mw": 80080,
+    "generation_gwh": {
+      "2022": 254800,
+      "2023": 240400
+    },
+    "share_pct": 5.7
+  },
+  {
+    "region": "Americas",
+    "country": "Paraguay",
+    "capacity_mw": 8810,
+    "generation_gwh": {
+      "2022": 36200,
+      "2023": 45400
+    },
+    "share_pct": null
+  },
+  {
+    "region": "Americas",
+    "country": "Colombia",
+    "capacity_mw": 13500,
+    "generation_gwh": {
+      "2022": 57300,
+      "2023": 52700
+    },
+    "share_pct": 66.4
+  },
+  {
+    "region": "Africa",
+    "country": "Ethiopia",
+    "capacity_mw": 4870,
+    "generation_gwh": {
+      "2022": 15900,
+      "2023": 17700
+    },
+    "share_pct": 95.6
+  },
+  {
+    "region": "Africa",
+    "country": "Congo, Democratic Republic of the",
+    "capacity_mw": 2760,
+    "generation_gwh": {
+      "2022": 12100,
+      "2023": 12900
+    },
+    "share_pct": 99.4
+  },
+  {
+    "region": "Africa",
+    "country": "Côte d'Ivoire",
+    "capacity_mw": 879,
+    "generation_gwh": {
+      "2022": 2790.4,
+      "2023": null
+    },
+    "share_pct": 27.5
+  },
+  {
+    "region": "Africa",
+    "country": "Zambia",
+    "capacity_mw": 3011,
+    "generation_gwh": {
+      "2022": 16400,
+      "2023": 11900
+    },
+    "share_pct": 78
+  }
+]
