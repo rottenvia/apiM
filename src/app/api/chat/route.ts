@@ -24,7 +24,7 @@ import { callMcpTool, parseMcpToolName, MCP_TOOL_PREFIX } from "@/lib/mcp";
 import { getMcpServer, mcpToolsForModel } from "@/lib/mcp-store";
 import { RunFileMemory } from "@/lib/run-memory";
 import { agentRoundsFor, modelHasOpenToolLimits } from "@/lib/tool-limits";
-import type { ToolResult } from "@/lib/tools";
+import type { ToolDefinition, ToolResult } from "@/lib/tools";
 import { buildWorkspaceContext } from "@/lib/workspace-context";
 import { TreeTracker } from "@/lib/tree-delta";
 import {
@@ -177,6 +177,7 @@ import {
 } from "@/lib/stall";
 import { extractReasoningDelta } from "@/lib/reasoning-stream";
 import { loadHistoryForRequest } from "@/lib/chat-history";
+import { DELEGATE_TOOL, formatSubAgentResult, runSubAgent } from "@/lib/subagent";
 import {
   COMPACT_TEXT_MAX_CHARS,
   compactSystemPrompt,
@@ -1371,7 +1372,7 @@ export async function POST(req: NextRequest) {
 
 Work to the end. Do not hand back a half-finished task with a summary that reads as if it is complete: if something cannot be done, say so plainly and say why. Check your own work before claiming it works — run the tests, call the endpoint, open the page. To compile or build anything, call build_project instead of typing msbuild/cmake/dotnet/cargo yourself: it finds the installed Visual Studio/MSBuild/compiler automatically (including vswhere), restores packages, builds Release x64 by default, and hands you the compiler errors so you can fix them and rebuild.
 
-Ask before you build the wrong thing. If a choice would change what you produce and you cannot settle it by reading a file or looking it up, call ask_user — one question up front is far cheaper than twenty rounds of work in the wrong direction, and the user would rather be asked than handed something they have to throw away. Ask early, while the work is cheap to redo, not after you have committed to an approach. Offer concrete options with a sensible default so it is one click. Do not ask about things you can find out yourself, and do not ask the same thing twice. When you are done, briefly say what you changed and whether it ran.\n\nUse search_files to find where something lives rather than opening files one at a time, and read_files when you already know you need several — each separate call costs a whole round.\n\nYou can also look at the live web. When a task depends on what is actually on a page — its markup, its data, its exact wording — fetch it rather than reasoning from memory. Before writing anything that targets a site, such as a content script, a userscript or a scraper, call inspect_page on the real URL and use the ids and classes it returns. Never invent a selector you have not seen: a plausible-looking one that does not exist produces code that runs and does nothing, which is worse than admitting you need to look. Use fetch_url to read a page, fetch_url with raw for its HTML, and download_file to save something from a URL straight into the workspace. ${webSearchMode !== "off" && canSearch ? "When you hit something you do not know — an unfamiliar error, a library's current API — call web_search rather than guessing, because a wrong assumption compounds over every round after it. One web_search costs several model calls of its own, so make the query specific and read what comes back before searching again." : "There is no web_search tool available in this reply — the Web toggle is off or no Tavily/Exa key is set in Settings. fetch_url still works if you already know the URL. When you genuinely do not know something and cannot look it up, say so instead of guessing, and name what you would have searched for."}\n\nIf an edit turns out to be wrong, undo_file puts that file back exactly as it was; reverting is safer than patching your own mistake. restore_snapshot rolls the whole workspace back to a restore point, which is a much larger step — list_snapshots first, and say what you are undoing before you do it. read_document opens PDF, Word, Excel, PowerPoint, EPUB and ODT files, which read_file cannot. inspect_binary statically reads Windows EXEs/DLLs without executing them. Select only the layers the request needs: analyses:["decompile"] to test Ghidra/ILSpy, ["strings"] for a strings dump, ["entropy"], ["carve"], ["dependencies"], or ["capa"] for those individual jobs, and ["all"] only when the user asks to check everything. Omitted analyses means a cheap summary, not everything. After download_file of a large DLL, start with summary/strings and then decompile only the functions you name in focus_terms for THAT file — enable a specific analyzer such as Decompiler Parameter ID via enable_analyzers if you need it. Do not dump the whole binary and do not rely on a default hook list. Ghidra leftover after a closed or refreshed tab has no inspect UI: call list_processes and stop_process id=leftover to kill it. Decompiling is expensive and its artifacts persist on disk; the system message lists every executable already analyzed in this workspace with its hash and artifact paths - if the binary you need is already there, read those artifacts with read_file instead of running inspect_binary again, and never re-decompile the same hash unless the user asks you to. The moment you reach a conclusion about a binary - which one works, what is flawed, where the good build is, what a hook actually does - call note_binary so that verdict survives Stop and compaction instead of being paid for twice. write_files creates several files in one call, which is worth using whenever you are scaffolding.\n\nBatch the changes that belong together. move_file renames in one step instead of read-write-delete. edit_files applies several replacements at once, across one file or many. replace_in_files changes the same text everywhere it appears, which is what you want for renaming a function or an import path — doing that file by file costs a round each. When a string might occur somewhere you did not intend, run it with preview first and read the list before committing.${
+Ask before you build the wrong thing. If a choice would change what you produce and you cannot settle it by reading a file or looking it up, call ask_user — one question up front is far cheaper than twenty rounds of work in the wrong direction, and the user would rather be asked than handed something they have to throw away. Ask early, while the work is cheap to redo, not after you have committed to an approach. Offer concrete options with a sensible default so it is one click. Do not ask about things you can find out yourself, and do not ask the same thing twice. When you are done, briefly say what you changed and whether it ran.\n\nUse search_files to find where something lives rather than opening files one at a time, and read_files when you already know you need several — each separate call costs a whole round. read_symbol without a path jumps to a definition anywhere in the workspace, and before you rename, delete or change the signature of a function, class or variable, call find_references so no caller is missed. For a broad survey or research job — tracing how something works across many files, reviewing a large area, checking a library's current API on the web — call delegate: a read-only helper does that reading in its own context and hands back only its report, so your context stays small for the actual work. Give it a complete brief (it cannot see this conversation); several delegate calls in one round run in parallel. Do not delegate a single known file read or any edit. After every write or edit the files are parse-checked and any syntax error is appended to the tool result — fix it before anything else.\n\nYou can also look at the live web. When a task depends on what is actually on a page — its markup, its data, its exact wording — fetch it rather than reasoning from memory. Before writing anything that targets a site, such as a content script, a userscript or a scraper, call inspect_page on the real URL and use the ids and classes it returns. Never invent a selector you have not seen: a plausible-looking one that does not exist produces code that runs and does nothing, which is worse than admitting you need to look. Use fetch_url to read a page, fetch_url with raw for its HTML, and download_file to save something from a URL straight into the workspace. ${webSearchMode !== "off" && canSearch ? "When you hit something you do not know — an unfamiliar error, a library's current API — call web_search rather than guessing, because a wrong assumption compounds over every round after it. One web_search costs several model calls of its own, so make the query specific and read what comes back before searching again." : "There is no web_search tool available in this reply — the Web toggle is off or no Tavily/Exa key is set in Settings. fetch_url still works if you already know the URL. When you genuinely do not know something and cannot look it up, say so instead of guessing, and name what you would have searched for."}\n\nIf an edit turns out to be wrong, undo_file puts that file back exactly as it was; reverting is safer than patching your own mistake. restore_snapshot rolls the whole workspace back to a restore point, which is a much larger step — list_snapshots first, and say what you are undoing before you do it. read_document opens PDF, Word, Excel, PowerPoint, EPUB and ODT files, which read_file cannot. inspect_binary statically reads Windows EXEs/DLLs without executing them. Select only the layers the request needs: analyses:["decompile"] to test Ghidra/ILSpy, ["strings"] for a strings dump, ["entropy"], ["carve"], ["dependencies"], or ["capa"] for those individual jobs, and ["all"] only when the user asks to check everything. Omitted analyses means a cheap summary, not everything. After download_file of a large DLL, start with summary/strings and then decompile only the functions you name in focus_terms for THAT file — enable a specific analyzer such as Decompiler Parameter ID via enable_analyzers if you need it. Do not dump the whole binary and do not rely on a default hook list. Ghidra leftover after a closed or refreshed tab has no inspect UI: call list_processes and stop_process id=leftover to kill it. Decompiling is expensive and its artifacts persist on disk; the system message lists every executable already analyzed in this workspace with its hash and artifact paths - if the binary you need is already there, read those artifacts with read_file instead of running inspect_binary again, and never re-decompile the same hash unless the user asks you to. The moment you reach a conclusion about a binary - which one works, what is flawed, where the good build is, what a hook actually does - call note_binary so that verdict survives Stop and compaction instead of being paid for twice. write_files creates several files in one call, which is worth using whenever you are scaffolding.\n\nBatch the changes that belong together. move_file renames in one step instead of read-write-delete. edit_files applies several replacements at once, across one file or many. replace_in_files changes the same text everywhere it appears, which is what you want for renaming a function or an import path — doing that file by file costs a round each. When a string might occur somewhere you did not intend, run it with preview first and read the list before committing.${
               visionApiKey || modelHasOpenToolLimits(model, target.model.openToolLimits)
                 ? " You can also view_image to look at a screenshot or mockup saved in the workspace."
                 : ""
@@ -2845,6 +2846,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               }
               return true;
             });
+            // Read-only helpers with their own context (lib/subagent).
+            dsRequestBody.tools = [...(dsRequestBody.tools as ToolDefinition[]), DELEGATE_TOOL];
             /*
              * MCP servers contribute their tools best-effort: a server that
              * is down or slow is skipped, never allowed to break the reply.
@@ -4616,8 +4619,106 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             "download_file",
           ]);
 
+          /*
+           * delegate: a read-only helper in its own context (lib/subagent).
+           * Its requests go to the reply's own model with thinking off, and
+           * every one is added to this reply's usage and spending cap — a
+           * helper is never free money outside the limit.
+           */
+          const offeredTools = new Set(
+            Array.isArray(dsRequestBody.tools)
+              ? (dsRequestBody.tools as ToolDefinition[]).map((t) => t.function.name)
+              : []
+          );
+          const runDelegate = async (
+            args: Record<string, unknown>
+          ): Promise<ToolResult> => {
+            const task = typeof args.task === "string" ? args.task.trim() : "";
+            if (!task) {
+              return {
+                ok: false,
+                content: "Error: task is required — the helper's complete brief.",
+                summary: "No task given",
+              };
+            }
+            const extraBody: Record<string, unknown> = {};
+            if (target.providerId === "openrouter") {
+              const pinned = openrouterProviderFor(target.model.id);
+              if (pinned) extraBody.provider = pinned;
+            }
+            applyThinking(
+              extraBody,
+              target.thinkingStyle,
+              false,
+              "none",
+              target.providerId === "openrouter"
+                ? { reasoningMandatory: openrouterReasoningMandatory(target.model.id) }
+                : undefined
+            );
+            const outcome = await runSubAgent({
+              task,
+              workspaceId: workspace,
+              target: {
+                baseUrl: target.baseUrl,
+                apiModel: target.apiModel,
+                headers: completionHeaders(target),
+                extraBody,
+              },
+              toolContext: {
+                modelId: model,
+                openLimits: target.model.openToolLimits,
+                modelNativeVision: target.model.vision === "native",
+                visionKey: visionApiKey,
+                visionModel,
+                searchKey: tavilyApiKey,
+                exaKey: exaApiKey,
+                deepseekKey: helperApiKey,
+                planner: planner ?? undefined,
+                searchProfile,
+                conversationId: convId,
+              },
+              available: offeredTools,
+              signal: runSignal,
+              maxRounds: typeof args.max_rounds === "number" ? args.max_rounds : undefined,
+              shouldStop: () =>
+                budget.limitUsd !== null && budget.spentUsd >= budget.limitUsd,
+              onUsage: (u) => {
+                totalUsage.prompt_tokens += u.prompt_tokens ?? 0;
+                totalUsage.completion_tokens += u.completion_tokens ?? 0;
+                totalUsage.total_tokens += u.total_tokens ?? 0;
+                const split = cacheSplit(u as Parameters<typeof cacheSplit>[0]);
+                totalUsage.prompt_cache_hit_tokens += split.hit;
+                totalUsage.prompt_cache_miss_tokens += split.miss;
+                chargeRound(budget, u as UsageLike, model, undefined, customs);
+                send({
+                  type: "usage",
+                  usage: { ...totalUsage },
+                  model,
+                  spentUsd: budget.spentUsd,
+                  limitUsd: budget.limitUsd ?? undefined,
+                });
+              },
+            });
+            const formatted = formatSubAgentResult(outcome);
+            return { ok: outcome.ok, content: formatted.content, summary: formatted.summary };
+          };
+
           const prefetched = new Map<string, Promise<ToolResult>>();
           if (calls.length > 1) {
+            // Several helpers in one round work at the same time.
+            for (const call of calls) {
+              if (call.function.name !== "delegate") continue;
+              const parsedArgs = parseToolArguments(call.function.arguments);
+              if (!parsedArgs.ok) continue;
+              prefetched.set(
+                call.id,
+                runDelegate(parsedArgs.value).catch((error) => ({
+                  ok: false,
+                  content: `Error: ${error instanceof Error ? error.message : "helper failed"}`,
+                  summary: "Helper failed",
+                }))
+              );
+            }
             for (const call of calls) {
               if (!PARALLEL_SAFE.has(call.function.name)) continue;
               const parsedArgs = parseToolArguments(call.function.arguments);
@@ -5686,6 +5787,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             } else if (prefetched.has(call.id)) {
               // Already in flight since the top of the round.
               result = await prefetched.get(call.id)!;
+            } else if (call.function.name === "delegate") {
+              result = await runDelegate(parsed.value);
             } else {
               result = await runTool(
                 workspace,
