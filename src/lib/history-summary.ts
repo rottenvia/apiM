@@ -87,6 +87,14 @@ export interface StoredHistorySummary {
    */
   droppedTurns: number;
   updatedAt: string;
+  /**
+   * Set by /compact: the user asked for everything up to the cursor to
+   * leave context, the newest turns included. Automatic refreshes only ever
+   * cover turns already outside the verbatim window.
+   */
+  manual?: boolean;
+  /** Turns the summary stands in for, for the "compacted" divider. */
+  coveredTurns?: number;
 }
 
 export interface HistoryShape {
@@ -108,13 +116,18 @@ export function shapeHistory(
   messages: ScopedHistoryMessage[],
   stored: StoredHistorySummary | null
 ): HistoryShape {
-  const tail = messages.slice(-HISTORY_VERBATIM_TURNS);
-  const overflow = messages.slice(0, messages.length - tail.length);
-  let pending = overflow;
-  if (stored) {
-    const covered = overflow.findIndex((m) => m.id === stored.upToId);
-    pending = covered >= 0 ? overflow.slice(covered + 1) : overflow;
-  }
+  /*
+   * Turns after the cursor are the only candidates. An automatic summary's
+   * cursor always sits in the overflow, so this is the old split; a /compact
+   * cursor can be the newest turn, and then nothing before it rides
+   * verbatim — that is what the user asked for.
+   */
+  const covered = stored
+    ? messages.findIndex((m) => m.id === stored.upToId)
+    : -1;
+  const open = covered >= 0 ? messages.slice(covered + 1) : messages;
+  const tail = open.slice(-HISTORY_VERBATIM_TURNS);
+  const pending = open.slice(0, open.length - tail.length);
   const verbatim = [...pending, ...tail].slice(-HISTORY_VERBATIM_MAX);
   return { verbatim, pending, stored };
 }
@@ -237,7 +250,16 @@ export async function runHistorySummary(
   previous: string | null,
   pending: ScopedHistoryMessage[],
   creds: HistorySummaryCredentials,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options: {
+    /** Replaces the default system prompt (the /compact variant). */
+    system?: string;
+    maxTokens?: number;
+    maxChars?: number;
+    /** Extra request fields: thinking switches, endpoint pins. */
+    extraBody?: Record<string, unknown>;
+    headers?: Record<string, string>;
+  } = {}
 ): Promise<HistorySummaryResult | null> {
   if (pending.length === 0) return null;
   const digest = buildSummaryDigest(pending);
@@ -248,6 +270,7 @@ export async function runHistorySummary(
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${creds.apiKey}`,
+        ...options.headers,
       },
       signal,
       body: JSON.stringify({
@@ -255,9 +278,10 @@ export async function runHistorySummary(
         ...(creds.thinkingStyle === "deepseek"
           ? { thinking: { type: "disabled" } }
           : {}),
-        max_tokens: 700,
+        ...options.extraBody,
+        max_tokens: options.maxTokens ?? 700,
         messages: [
-          { role: "system", content: SUMMARY_SYSTEM },
+          { role: "system", content: options.system ?? SUMMARY_SYSTEM },
           {
             role: "user",
             content:
@@ -279,7 +303,7 @@ export async function runHistorySummary(
     if (!raw.trim()) return null;
 
     return {
-      text: raw.trim().slice(0, SUMMARY_TEXT_MAX_CHARS),
+      text: raw.trim().slice(0, options.maxChars ?? SUMMARY_TEXT_MAX_CHARS),
       droppedTurns: digest.dropped,
       usage:
         typeof body.usage?.prompt_tokens === "number" &&
@@ -302,4 +326,76 @@ export function renderHistorySummary(summary: StoredHistorySummary): string {
       ? `\n(${summary.droppedTurns} oldest turn${summary.droppedTurns === 1 ? "" : "s"} predate${summary.droppedTurns === 1 ? "s" : ""} this summary and ${summary.droppedTurns === 1 ? "is" : "are"} not in context.)`
       : "";
   return `${HISTORY_SUMMARY_MARKER}\n${summary.text}${dropped}`;
+}
+
+/** Stored /compact summaries may be longer: they replace the whole chat. */
+export const COMPACT_TEXT_MAX_CHARS = 12_000;
+
+/** Turns-worth of digest per /compact helper call; longer chats roll. */
+const COMPACT_CHUNK_CHARS = SUMMARY_DIGEST_MAX_CHARS;
+
+/** Beyond this many rolls the oldest turns are counted, not summarised. */
+const COMPACT_MAX_CHUNKS = 8;
+
+/** The /compact prompt: the summary becomes the whole conversation. */
+export function compactSystemPrompt(instructions?: string): string {
+  const focus = instructions?.trim()
+    ? `\n\nThe user asked this compaction to focus on: ${instructions.trim().slice(0, 500)}`
+    : "";
+  return `You are compacting a chat between a user and an AI coding assistant. Your summary REPLACES the conversation: after this, the assistant sees only your summary plus new messages, so anything you leave out is forgotten.
+
+You get PREVIOUS SUMMARY (may be empty) and NEW TURNS, oldest first.
+
+Write the updated summary with these parts, as short plain-text lines:
+- Goal: what the user is ultimately trying to get done, in their terms.
+- Current state: what is done and working, what is half-done, what is broken.
+- Files and systems: every file, command, URL or service that matters, with exact paths and names.
+- Decisions and constraints: choices made and why; requirements and preferences the user stated.
+- Facts learned: errors and their fixes, quirks, values that were verified.
+- Next steps: what was about to happen, and any question left open.
+
+Keep exact identifiers (paths, function names, versions, error strings) verbatim. No play-by-play, no pleasantries, no code beyond short identifiers. Up to 800 words.${focus}`;
+}
+
+/**
+ * Split every uncovered turn into digest-sized chunks, oldest first.
+ *
+ * /compact must cover the WHOLE conversation, and one digest holds 60k
+ * chars — the automatic refresh would drop the rest. Chunks roll through
+ * the summary in order, so the oldest material is folded first and the
+ * newest turns are the last thing the summary absorbs.
+ */
+export function compactChunks(
+  turns: ScopedHistoryMessage[]
+): { chunks: ScopedHistoryMessage[][]; skipped: number } {
+  const chunks: ScopedHistoryMessage[][] = [];
+  let current: ScopedHistoryMessage[] = [];
+  let chars = 0;
+  for (const turn of turns) {
+    const size = Math.min(turn.content?.length ?? 0, SUMMARY_TURN_MAX_CHARS) + 40;
+    if (current.length > 0 && chars + size > COMPACT_CHUNK_CHARS) {
+      chunks.push(current);
+      current = [];
+      chars = 0;
+    }
+    current.push(turn);
+    chars += size;
+  }
+  if (current.length) chunks.push(current);
+  if (chunks.length <= COMPACT_MAX_CHUNKS) return { chunks, skipped: 0 };
+  const dropped = chunks.slice(0, chunks.length - COMPACT_MAX_CHUNKS);
+  return {
+    chunks: chunks.slice(-COMPACT_MAX_CHUNKS),
+    skipped: dropped.reduce((n, c) => n + c.length, 0),
+  };
+}
+
+/** Chars a history window occupies on the wire, for before/after figures. */
+export function historyChars(
+  turns: ScopedHistoryMessage[],
+  summary: StoredHistorySummary | null
+): number {
+  let chars = summary ? renderHistorySummary(summary).length : 0;
+  for (const t of turns) chars += (t.content?.length ?? 0) + 16;
+  return chars;
 }

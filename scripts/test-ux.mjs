@@ -659,8 +659,8 @@ check(
 check(
   "the flag is stamped at send time in both send paths",
   (chatArea.match(/videoWaitRef\.current = attachments\.some/g) || []).length ===
-    2,
-  "main send + btw send; a stale flag from the previous round would mislabel it"
+    3,
+  "main send + btw send + slash-command prompt send; a stale flag from the previous round would mislabel it"
 );
   check(
     "the retry banner starts at the dots' left edge, one column for the whole wait",

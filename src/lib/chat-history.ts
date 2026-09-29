@@ -90,3 +90,27 @@ export async function loadHistoryForRequest(
   if (options.dropLastUser && messages.at(-1)?.role === "user") messages.pop();
   return shapeHistory(messages, stored?.historySummary ?? null);
 }
+
+/**
+ * Every replayable turn plus the stored summary, for /compact.
+ *
+ * Same filter as the request path, so compaction covers exactly the turns a
+ * request would otherwise have replayed — no more, no fewer.
+ */
+export async function loadReplayableHistory(conversationId: string): Promise<{
+  messages: ScopedHistoryMessage[];
+  stored: HistoryShape["stored"];
+} | null> {
+  const stored = await getConversation(conversationId);
+  if (!stored) return null;
+  const messages: ScopedHistoryMessage[] = stored.messages
+    .filter(replayable)
+    .map((entry) => ({
+      id: entry.id,
+      role: entry.role as "user" | "assistant",
+      content: entry.content,
+      attachments: entry.attachments ?? null,
+      ...(entry.note === true ? { note: true } : {}),
+    }));
+  return { messages, stored: stored.historySummary ?? null };
+}

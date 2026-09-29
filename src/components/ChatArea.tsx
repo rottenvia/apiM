@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback, useMemo, useDeferredValue } from "react";
-import { memo } from "react";
+import { Fragment, memo } from "react";
 import { buildChatSearchIndex, messageHasMatch } from "@/lib/chat-search";
 import { estimateCost, formatCost, formatDuration } from "@/lib/pricing";
 import type { ChatSearchIndex } from "@/lib/chat-search";
@@ -53,6 +53,15 @@ import { WorkspaceDock } from "@/components/WorkspaceDock";
 import { ProcessDock } from "@/components/ProcessDock";
 import type { WorkspaceFileInfo } from "@/components/WorkspaceBar";
 import type { Message, MessageAttachment, StatusStage } from "@/app/page";
+import { ContextMeter, type ContextSummaryInfo } from "@/components/ContextMeter";
+import { SlashMenu, type SlashItem } from "@/components/SlashMenu";
+import {
+  findCommand,
+  matchCommands,
+  matchOptions,
+  parseSlash,
+  type SlashOption,
+} from "@/lib/slash-commands";
 
 interface ChatAreaProps {
   messages: Message[];
@@ -159,7 +168,30 @@ interface ChatAreaProps {
   onProcessesChanged?: () => void;
   sidePanelOpen: boolean;
   onToggleSidePanel: () => void;
+  /** Tokens the selected model's context window holds. */
+  contextWindow: number;
+  /** Display name of the selected model, for the meter. */
+  modelLabel: string;
+  /** The stored summary standing in for older turns, if any. */
+  historySummary?: (ContextSummaryInfo & { upToId: string }) | null;
+  /** After /compact: the estimated window until the next reply reports. */
+  contextEstimate?: { tokens: number; afterMessageId: string | null } | null;
+  /** Run /compact. Resolves to the line shown under the button. */
+  onCompact?: (instructions?: string) => Promise<{ ok: boolean; text: string }>;
+  /**
+   * Slash commands the page owns (rename, export, theme…). Resolves to a
+   * notice for the composer, if there is anything to say.
+   */
+  onCommand?: (
+    name: string,
+    arg: string
+  ) => Promise<{ ok: boolean; text?: string } | void>;
+  /** Values offered for command arguments: models, themes, formats. */
+  slashOptions?: Record<string, SlashOption[]>;
 }
+
+/** Rough chars per token for a request whose size was measured in chars. */
+const CHARS_PER_TOKEN = 3.6;
 
 /** One conversation's unsent composer state (see `drafts` in ChatArea). */
 type ComposerDraft = {
@@ -319,6 +351,13 @@ export function ChatArea({
   onProcessesChanged,
   sidePanelOpen,
   onToggleSidePanel,
+  contextWindow,
+  modelLabel,
+  historySummary,
+  contextEstimate,
+  onCompact,
+  onCommand,
+  slashOptions,
 }: ChatAreaProps) {
   const [isFullscreen, setIsFullscreen] = useState(false);
 
@@ -1329,7 +1368,352 @@ export function ChatArea({
     !blockedVideo &&
     hasKeys;
 
+  /*
+   * Slash commands.
+   *
+   * A message starting with "/" opens the command menu; Enter runs the
+   * highlighted command, Tab completes it, Esc closes the menu. Commands
+   * that act on the chat on screen (find, copy, context) run here; the rest
+   * go to the page, which owns that state.
+   */
+  const [contextOpen, setContextOpen] = useState(false);
+  const [compacting, setCompacting] = useState(false);
+  const [compactNotice, setCompactNotice] = useState<
+    { tone: "ok" | "error"; text: string } | null
+  >(null);
+  const [commandNotice, setCommandNotice] = useState<
+    { tone: "ok" | "error"; text: string } | null
+  >(null);
+  const [slashActive, setSlashActive] = useState(0);
+  // The input the menu was dismissed on; any edit reopens it.
+  const [slashDismissed, setSlashDismissed] = useState<string | null>(null);
+
+  // A notice belongs to the chat it was raised in.
+  useEffect(() => {
+    setCommandNotice(null);
+    setCompactNotice(null);
+    setContextOpen(false);
+  }, [draftKey]);
+
+  useEffect(() => {
+    if (!commandNotice) return;
+    const t = setTimeout(() => setCommandNotice(null), 8000);
+    return () => clearTimeout(t);
+  }, [commandNotice]);
+
+  const slashItems = useMemo((): SlashItem[] => {
+    if (!input.startsWith("/") || input.includes("\n")) return [];
+    const word = /^\/([\w-]*)$/.exec(input);
+    if (word) {
+      return matchCommands(word[1]).map((c) => ({
+        key: c.name,
+        label: `/${c.name}`,
+        hint: c.args,
+        description: c.description,
+        group: word[1] ? undefined : c.group,
+        insert: `/${c.name}${c.args ? " " : ""}`,
+        run: !c.argRequired && !(slashOptions?.[c.name]?.length && c.name !== "export"),
+      }));
+    }
+    const withArg = /^\/([\w-]+)\s+(.*)$/.exec(input);
+    if (!withArg) return [];
+    const c = findCommand(withArg[1]);
+    const options = c ? slashOptions?.[c.name] : undefined;
+    if (!c || !options?.length) return [];
+    return matchOptions(options, withArg[2]).map((o) => ({
+      key: `${c.name}:${o.value}`,
+      label: o.label,
+      hint: o.label.toLowerCase() !== o.value.toLowerCase() ? o.value : undefined,
+      description: o.description,
+      insert: `/${c.name} ${o.value}`,
+      run: true,
+      current: o.current,
+    }));
+  }, [input, slashOptions]);
+  const slashMenuOpen = slashItems.length > 0 && slashDismissed !== input;
+
+  useEffect(() => {
+    setSlashActive(0);
+  }, [input]);
+
+  const mappedAttachments = () =>
+    attachments.map((a) => ({
+      name: a.name,
+      kind: a.kind,
+      dataUrl: a.dataUrl,
+      frames: a.frames,
+      durationSec: a.durationSec,
+      frameIntervalSec: a.frameIntervalSec,
+      description: a.description,
+      descriptionSource: a.descriptionSource,
+    }));
+
+  const lastReply = () =>
+    [...messages]
+      .reverse()
+      .find((m) => m.role === "assistant" && !m.isStreaming && !m.isNote);
+
+  const canCompact =
+    Boolean(onCompact) &&
+    !isLoading &&
+    messages.some((m) => m.role === "assistant" && !m.isStreaming);
+
+  const runCompact = async (instructions?: string) => {
+    setContextOpen(true);
+    if (!onCompact) return;
+    if (isLoading) {
+      setCompactNotice({ tone: "error", text: "Wait for the reply to finish, then compact." });
+      return;
+    }
+    if (!messages.some((m) => m.role === "assistant" && !m.isStreaming)) {
+      setCompactNotice({ tone: "error", text: "Nothing to compact yet — send a message first." });
+      return;
+    }
+    setCompacting(true);
+    setCompactNotice(null);
+    try {
+      setCompactNotice(await onCompact(instructions).then(
+        (r) => ({ tone: r.ok ? ("ok" as const) : ("error" as const), text: r.text })
+      ));
+    } catch {
+      setCompactNotice({ tone: "error", text: "Compacting failed — nothing was changed." });
+    } finally {
+      setCompacting(false);
+    }
+  };
+
+  const executeSlash = async (text: string) => {
+    const parsed = parseSlash(text);
+    if (!parsed) return;
+    const note = (msg: string, tone: "ok" | "error" = "ok") =>
+      setCommandNotice({ tone, text: msg });
+    const clearInput = () => setInput("");
+
+    if (parsed.kind === "unknown") {
+      note(
+        `Unknown command /${parsed.name}. Type / to see them all — or start with a space to send it as a message.`,
+        "error"
+      );
+      return;
+    }
+    const { command: c, arg } = parsed;
+    const options = slashOptions?.[c.name];
+
+    if (c.argRequired && !arg) {
+      setInput(`/${c.name} `);
+      note(`/${c.name} needs ${c.args}.`, "error");
+      return;
+    }
+    if (isLoading && !c.whileRunning) {
+      note(`A reply is running — wait for it, or /stop it first.`, "error");
+      return;
+    }
+    // A bare /model, /theme… opens its choices instead of doing nothing.
+    if (!arg && options?.length && c.name !== "export") {
+      setInput(`/${c.name} `);
+      setSlashDismissed(null);
+      textareaRef.current?.focus();
+      return;
+    }
+
+    if (c.prompt) {
+      if (!hasKeys) return note(`Add your ${missingKeyLabel} key in Settings first.`, "error");
+      if (attachBusy) return note(attachBusy, "error");
+      if (analyzingImages) return note("Still reading the attached images…", "error");
+      videoWaitRef.current = attachments.some((a) => a.kind === "video" && !a.frames);
+      onSend(
+        buildMessageWithAttachments(c.prompt(arg), attachments, getModel(model).vision),
+        { displayContent: text.trim(), attachments: mappedAttachments() }
+      );
+      updateDraft(draftKey, () => EMPTY_DRAFT);
+      return;
+    }
+
+    const pick = (): SlashOption | null => {
+      if (!options?.length) return null;
+      const t = arg.toLowerCase();
+      return (
+        options.find((o) => o.value.toLowerCase() === t || o.label.toLowerCase() === t) ??
+        matchOptions(options, arg)[0] ??
+        null
+      );
+    };
+
+    switch (c.name) {
+      case "help":
+        setInput("/");
+        setSlashDismissed(null);
+        textareaRef.current?.focus();
+        return;
+      case "context":
+      case "cost":
+        clearInput();
+        setContextOpen(true);
+        return;
+      case "compact":
+        clearInput();
+        void runCompact(arg || undefined);
+        return;
+      case "find":
+        clearInput();
+        setFindOpen(true);
+        if (arg) {
+          setFindQuery(arg);
+          setActiveMatch(0);
+        }
+        return;
+      case "copy": {
+        const last = lastReply();
+        if (!last?.content.trim()) return note("There is no reply to copy yet.", "error");
+        clearInput();
+        try {
+          await navigator.clipboard.writeText(last.content);
+          note("Copied the last reply.");
+        } catch {
+          note("The browser blocked clipboard access.", "error");
+        }
+        return;
+      }
+      case "stop":
+        clearInput();
+        if (isLoading) onStop();
+        else note("Nothing is running.");
+        return;
+      case "btw":
+        if (!isLoading || !onAskBtw) {
+          return note("Nothing is running — send it as a normal message.", "error");
+        }
+        onAskBtw(
+          arg,
+          buildMessageWithAttachments(arg, attachments, getModel(model).vision),
+          mappedAttachments()
+        );
+        updateDraft(draftKey, () => EMPTY_DRAFT);
+        return;
+      case "resume":
+        if (!canResumeLast) return note("There is no interrupted reply to resume.", "error");
+        clearInput();
+        onResumeLast?.(arg || undefined);
+        return;
+      case "retry": {
+        const last = lastReply();
+        if (!last) return note("There is no reply to retry yet.", "error");
+        clearInput();
+        onRegenerate(last.id);
+        return;
+      }
+      case "new":
+        clearInput();
+        onNewChat();
+        return;
+      case "files":
+        clearInput();
+        onOpenWorkspace();
+        return;
+      case "panel":
+        clearInput();
+        onToggleSidePanel();
+        return;
+      case "settings":
+        clearInput();
+        onOpenSettings();
+        return;
+      case "plugins":
+        clearInput();
+        onOpenPlugins();
+        return;
+      case "sidebar":
+        clearInput();
+        onToggleSidebar();
+        return;
+      case "model":
+      case "effort":
+      case "web": {
+        const hit = pick();
+        if (!hit) return note(`Nothing matches "${arg}". Type /${c.name} to see the choices.`, "error");
+        clearInput();
+        if (c.name === "model") onSetModel(hit.value);
+        else if (c.name === "effort") onSetThinkingEffort(hit.value);
+        else onSetSearchMode(hit.value as "off" | "auto" | "always");
+        note(
+          c.name === "model"
+            ? `Model: ${hit.label}`
+            : c.name === "effort"
+              ? `Thinking: ${hit.label}`
+              : `Web search: ${hit.label}`
+        );
+        return;
+      }
+      default: {
+        if (!onCommand) return;
+        const value = options?.length && arg ? pick()?.value ?? arg : arg;
+        clearInput();
+        const result = await onCommand(c.name, value);
+        if (result?.text) note(result.text, result.ok ? "ok" : "error");
+      }
+    }
+  };
+
+  const pickSlash = (item: SlashItem, run: boolean) => {
+    if (run && item.run) {
+      void executeSlash(item.insert);
+      return;
+    }
+    setInput(item.insert);
+    setSlashDismissed(null);
+    textareaRef.current?.focus();
+  };
+
+  /*
+   * The context meter: what the newest request carried. Live while a reply
+   * runs (its rounds report as they go), the last reply's figure otherwise,
+   * and after /compact an estimate until the next reply reports for real.
+   */
+  const contextUsage = useMemo(() => {
+    const last = [...messages]
+      .reverse()
+      .find(
+        (m) =>
+          m.role === "assistant" &&
+          (m.contextTokens || m.contextChars || m.isStreaming)
+      );
+    let used: number | null = null;
+    let estimated = false;
+    let breakdown: { label: string; chars: number }[] | null = null;
+    if (last?.contextTokens) {
+      used = last.contextTokens;
+      breakdown = last.contextBreakdown ?? null;
+    } else if (last?.contextChars) {
+      used = Math.round(last.contextChars / CHARS_PER_TOKEN);
+      estimated = true;
+      breakdown = last.contextBreakdown ?? null;
+    }
+    if (isLoading && requestSize?.inputChars) {
+      const live = Math.round(requestSize.inputChars / CHARS_PER_TOKEN);
+      if (!last?.isStreaming || !last.contextTokens) {
+        used = live;
+        estimated = true;
+      }
+      breakdown = requestSize.breakdown;
+    }
+    if (
+      contextEstimate &&
+      !isLoading &&
+      (contextEstimate.afterMessageId === null ||
+        contextEstimate.afterMessageId === (last?.id ?? null))
+    ) {
+      used = contextEstimate.tokens;
+      estimated = true;
+      breakdown = null;
+    }
+    return { used, estimated, breakdown };
+  }, [messages, isLoading, requestSize, contextEstimate]);
+
   const handleSubmit = () => {
+    if (parseSlash(input)) {
+      void executeSlash(input);
+      return;
+    }
     // A note is sendable while the main task runs; a normal message is not.
     // Sending it never stops anything — it is queued and the task reads it
     // at its next thinking step.
@@ -1429,11 +1813,41 @@ export function ChatArea({
     updateDraft(draftKey, () => EMPTY_DRAFT);
   };
 
+  /** Menu keys while the slash menu is open. True when the key was used. */
+  const handleSlashKey = (e: React.KeyboardEvent): boolean => {
+    const n = slashItems.length;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      setSlashActive((i) => (i + (e.key === "ArrowDown" ? 1 : n - 1)) % n);
+      return true;
+    }
+    const item = slashItems[Math.min(slashActive, n - 1)];
+    if (e.key === "Tab") {
+      e.preventDefault();
+      pickSlash(item, false);
+      return true;
+    }
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      // A bare "/" only browses: Enter must not fire the first command
+      // (compacting costs a model call) just because it is listed first.
+      pickSlash(item, input !== "/");
+      return true;
+    }
+    if (e.key === "Escape") {
+      e.preventDefault();
+      setSlashDismissed(input);
+      return true;
+    }
+    return false;
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     // Enter that confirms an IME composition (Chinese, Japanese, Korean…)
     // is not a send. Reported (audit): it submitted the half-composed text.
     // keyCode 229 covers browsers that fire keydown before isComposing.
     if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+    if (slashMenuOpen && handleSlashKey(e)) return;
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSubmit();
@@ -1758,6 +2172,8 @@ export function ChatArea({
                 onAnswerQuestion={onAnswerQuestion}
                 onUnblockPlan={onPlanAction ? () => onPlanAction("unblock") : undefined}
                 onClearPlan={onPlanAction ? () => onPlanAction("clear") : undefined}
+                compactedAfterId={historySummary?.manual ? historySummary.upToId : undefined}
+                compactedTurns={historySummary?.coveredTurns ?? null}
               />
 
               {/* One status row until the bubble has something to show:
@@ -1899,6 +2315,16 @@ export function ChatArea({
               </div>
             )}
 
+            {slashMenuOpen && (
+              <SlashMenu
+                items={slashItems}
+                active={Math.min(slashActive, slashItems.length - 1)}
+                onHover={setSlashActive}
+                onPick={(item) => pickSlash(item, true)}
+                title={/^\/[\w-]+\s/.test(input) ? "Choose" : undefined}
+              />
+            )}
+
             <input
               ref={fileInputRef}
               type="file"
@@ -1951,10 +2377,24 @@ export function ChatArea({
               </p>
             )}
 
+            {commandNotice && (
+              <p
+                role="status"
+                className={`px-4 pt-2 text-[11px] leading-4 ${
+                  commandNotice.tone === "error" ? "text-danger" : "text-text-secondary"
+                }`}
+              >
+                {commandNotice.text}
+              </p>
+            )}
+
             <textarea
               ref={textareaRef}
               value={input}
-              onChange={(e) => setInput(e.target.value)}
+              onChange={(e) => {
+                setInput(e.target.value);
+                if (commandNotice) setCommandNotice(null);
+              }}
               onKeyDown={handleKeyDown}
               onPaste={(e) => {
                 // Pasting a file (e.g. from a file manager) attaches it.
@@ -1972,7 +2412,7 @@ export function ChatArea({
                       ? "Type \"resume\" to carry on, or ask something new…"
                     : attachments.length > 0
                       ? "Add a question about these files…"
-                      : "Type your message…"
+                      : "Type your message, or / for commands…"
                   : "Add your API keys in Settings to start chatting"
               }
               disabled={!hasKeys}
@@ -2105,6 +2545,31 @@ export function ChatArea({
                   </span>
                 </button>
               </div>
+
+              <ContextMeter
+                used={contextUsage.used}
+                estimated={contextUsage.estimated}
+                windowTokens={contextWindow}
+                modelLabel={modelLabel}
+                breakdown={contextUsage.breakdown}
+                totals={{
+                  ...totals,
+                  messages: messages.filter((m) => m.role === "user").length,
+                }}
+                summary={historySummary ?? null}
+                open={contextOpen}
+                onOpenChange={setContextOpen}
+                onCompact={canCompact ? (focus) => void runCompact(focus) : null}
+                compacting={compacting}
+                compactBlocked={
+                  isLoading
+                    ? "Compact is available once the reply finishes."
+                    : null
+                }
+                notice={compactNotice}
+                formatCost={formatCost}
+                formatDuration={formatDuration}
+              />
 
               <span
                 className="h-6 w-px flex-none self-center bg-border"
@@ -2316,7 +2781,12 @@ const MessageList = memo(function MessageList({
   onAnswerQuestion,
   onUnblockPlan,
   onClearPlan,
+  compactedAfterId,
+  compactedTurns,
 }: {
+  /** /compact's cursor: a divider marks where the model's memory restarts. */
+  compactedAfterId?: string;
+  compactedTurns?: number | null;
   messages: Message[];
   /** This chat is answering: editing a question is unavailable until done. */
   busy: boolean;
@@ -2456,7 +2926,7 @@ const MessageList = memo(function MessageList({
         // liveContent in the bubble — so formatting stays live while the
         // parse skips busy frames.)
         const deferred = index < deferredCount && !bubbleSearchQuery;
-        return (
+        const bubble = (
           /*
            * Do not stop the loader at MessageList. Historical messages only
            * carry `reasoningLength`; their actual text is fetched when this
@@ -2490,6 +2960,23 @@ const MessageList = memo(function MessageList({
             onUnblockPlan={onUnblockPlan}
             onClearPlan={onClearPlan}
           />
+        );
+        if (msg.id !== compactedAfterId || msg.isStreaming) return bubble;
+        return (
+          <Fragment key={msg.clientRenderKey ?? msg.id}>
+            {bubble}
+            <div
+              className="my-4 flex items-center gap-3 px-4 text-[11px] text-text-muted"
+              title="Everything above is summarised for the model. It sees the summary plus what comes after this line."
+            >
+              <span className="h-px flex-1 bg-border" />
+              <span>
+                Context compacted
+                {compactedTurns ? ` · ${compactedTurns} messages summarised` : ""}
+              </span>
+              <span className="h-px flex-1 bg-border" />
+            </div>
+          </Fragment>
         );
       })}
     </>
