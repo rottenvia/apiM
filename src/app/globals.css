@@ -1139,9 +1139,14 @@ input:focus-visible {
 }
 
 /* ------------------------------------------------------------------ *
- * Startup splash (layout.tsx). Pure CSS so it animates before any JS.
+ * Startup splash (layout.tsx). Pure CSS until the page mounts, so it
+ * animates before any JS; startupSplash.ts then drives the bar through
+ * the real startup milestones.
  * ------------------------------------------------------------------ */
 #app-splash {
+  /* One number for "the app never signalled ready": the failsafe fade and
+   * the pre-JS creep of the bar are both paced to it. */
+  --splash-timeout: 12s;
   position: fixed;
   inset: 0;
   z-index: 9999;
@@ -1153,12 +1158,16 @@ input:focus-visible {
   background: var(--color-bg-primary);
   transition: opacity 0.3s ease, visibility 0.3s ease;
   /* Failsafe: gone after 12s even if the app never signals ready. */
-  animation: app-splash-failsafe 0.3s ease 12s forwards;
+  animation: app-splash-failsafe 0.3s ease var(--splash-timeout) forwards;
 }
 #app-splash.is-done {
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
+}
+/* Faded out: out of rendering entirely, so its loops stop ticking. */
+#app-splash.is-gone {
+  display: none;
 }
 @keyframes app-splash-failsafe {
   to {
@@ -1200,38 +1209,105 @@ input:focus-visible {
   letter-spacing: 0.02em;
   color: var(--color-text-secondary);
 }
+.app-splash-progress {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
 .app-splash-bar {
-  width: 140px;
-  height: 2px;
+  position: relative;
+  width: 168px;
+  height: 3px;
   overflow: hidden;
   border-radius: 9999px;
-  background: color-mix(in oklab, var(--color-text-muted) 20%, transparent);
+  background: color-mix(in oklab, var(--color-text-muted) 22%, transparent);
 }
-.app-splash-bar i {
-  display: block;
-  width: 40%;
-  height: 100%;
+/*
+ * The fill is the full width of the track, slid left by the part not yet
+ * done — a transform, so the compositor animates it even while the main
+ * thread is busy booting the app. Before JS it creeps on its own (fast
+ * first, ever slower, never past half); startupSplash.ts takes it over
+ * from wherever it got to.
+ */
+.app-splash-fill {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
   border-radius: inherit;
   background: var(--color-accent-light, var(--color-thinking));
-  animation: app-splash-bar 1.5s cubic-bezier(0.65, 0, 0.35, 1) infinite;
+  transform: translateX(-97%);
+  animation: app-splash-creep var(--splash-timeout) cubic-bezier(0.1, 0.75, 0.3, 1) forwards;
+  will-change: transform;
 }
-@keyframes app-splash-bar {
+/* A soft highlight travelling along the filled part: alive while a stage
+ * waits, without pretending to be progress. */
+.app-splash-fill::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in oklab, var(--color-accent-light, var(--color-thinking)) 45%, white) 50%,
+    transparent 100%
+  );
+  background-size: 40% 100%;
+  background-repeat: no-repeat;
+  animation: app-splash-sheen 1.5s ease-in-out infinite;
+}
+@keyframes app-splash-creep {
   from {
-    transform: translateX(-110%);
+    transform: translateX(-97%);
   }
   to {
-    transform: translateX(260%);
+    transform: translateX(-50%);
   }
 }
+@keyframes app-splash-sheen {
+  from {
+    background-position: -70% 0;
+  }
+  to {
+    background-position: 170% 0;
+  }
+}
+.app-splash-status {
+  min-height: 16px;
+  font-size: 11px;
+  line-height: 16px;
+  letter-spacing: 0.01em;
+  color: var(--color-text-muted);
+}
+.app-splash-status::after {
+  content: 'Starting up';
+}
+#app-splash[data-stage='app'] .app-splash-status::after,
+#app-splash[data-stage='settings'] .app-splash-status::after {
+  content: 'Loading your chats';
+}
+#app-splash[data-stage='chats'] .app-splash-status::after {
+  content: 'Reading settings';
+}
+#app-splash[data-stage='done'] .app-splash-status::after {
+  content: 'Ready';
+}
+/* The loops are decoration and go; the fill is the information on this
+ * screen, moves slowly across a 3px strip, and stays (see startupSplash.ts). */
 @media (prefers-reduced-motion: reduce) {
   .app-splash-mark span,
-  .app-splash-bar i {
+  .app-splash-fill::before {
     animation: none;
+  }
+  .app-splash-fill::before {
+    opacity: 0;
   }
 }
 
-/* Chat-open skeleton: delayed so fast loads never flash it, then a soft
- * sweep across each block rather than an on/off pulse. */
+/* Chat-open skeleton (ConversationSkeleton in ChatArea.tsx): a wireframe of
+ * the real message column. Delayed 120ms so fast loads never flash it, then
+ * the rows rise in one after another under a single light sweep. Every
+ * colour is a theme token or a mix of one, so it reads in every theme. */
 .chat-skeleton {
   opacity: 0;
   animation: skeleton-in 0.3s ease 0.12s forwards;
@@ -1241,31 +1317,78 @@ input:focus-visible {
     opacity: 1;
   }
 }
-.skeleton-block {
-  background: linear-gradient(
-    90deg,
-    color-mix(in oklab, var(--color-bg-hover) 70%, transparent) 0%,
-    color-mix(in oklab, var(--color-bg-hover) 100%, var(--color-text-muted) 12%) 45%,
-    color-mix(in oklab, var(--color-bg-hover) 70%, transparent) 90%
+.skel-row {
+  opacity: 0;
+  transform: translateY(4px);
+  animation: skeleton-rise 0.3s ease calc(0.12s + var(--skel-i, 0) * 0.07s) forwards;
+}
+@keyframes skeleton-rise {
+  to {
+    opacity: 1;
+    /* none, not translateY(0): a transformed ancestor would detach the
+     * lines' viewport-anchored sweep below. */
+    transform: none;
+  }
+}
+/* The real bubble's colour and radius; the lines inside carry the shimmer. */
+.skel-bubble {
+  background: var(--color-bg-elevated);
+}
+/* Meta pills and the thinking panel, as outlines in their real resting
+ * colours (see .thinking-shell). */
+.skel-pill {
+  border: 1px solid var(--color-border);
+}
+.skel-panel {
+  border: 1px solid var(--color-border);
+  background: color-mix(in oklab, var(--color-bg-secondary) 55%, transparent);
+}
+/*
+ * Text lines. Translucent text colour rather than a fixed grey, so they sit
+ * correctly on the page and inside the bubble alike, in any theme.
+ *
+ * The sweep: one band of extra text colour, anchored to the viewport
+ * (background-attachment: fixed), so a single highlight crosses every line
+ * together, left to right, and rests off-screen between passes. Per-block
+ * gradients each ran on their own width — a dozen unsynchronised shimmers,
+ * which is much of what read as cheap.
+ */
+.skel-line {
+  flex: none;
+  background-color: color-mix(in oklab, var(--color-text-muted) 26%, transparent);
+  background-image: linear-gradient(
+    100deg,
+    transparent 35%,
+    color-mix(in oklab, var(--color-text-secondary) 22%, transparent) 50%,
+    transparent 65%
   );
-  background-size: 220% 100%;
+  background-size: 100vw 100%;
+  background-repeat: no-repeat;
+  background-attachment: fixed;
   animation: skeleton-sweep 1.5s ease-in-out infinite;
+}
+.skel-bubble .skel-line {
+  background-color: color-mix(in oklab, var(--color-text-muted) 34%, transparent);
 }
 @keyframes skeleton-sweep {
   from {
-    background-position: 120% 0;
+    background-position: -100vw 0;
   }
   to {
-    background-position: -120% 0;
+    background-position: 100vw 0;
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .chat-skeleton {
+  /* The 120ms-delayed fade stays (it is what keeps fast loads from
+   * flashing); the rise and the sweep go. */
+  .skel-row {
     animation: none;
     opacity: 1;
+    transform: none;
   }
-  .skeleton-block {
+  .skel-line {
     animation: none;
+    background-image: none;
   }
 }
 
