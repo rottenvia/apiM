@@ -4097,6 +4097,9 @@ export default function Home() {
         case "mcp":
           setShowMcp(true);
           return;
+        case "search":
+          setShowSearch(true);
+          return;
         case "theme": {
           const t = THEMES.find(
             (x) => x.id === arg || x.name.toLowerCase() === arg.toLowerCase()

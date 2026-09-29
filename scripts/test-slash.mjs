@@ -188,6 +188,18 @@ try {
   const src = read("src/app/api/conversations/[id]/compact/route.ts");
   check("refuses while a reply is running", /activeRuns\(id\)\.length > 0/.test(src) && /status: 409/.test(src));
 
+  // Every command must land somewhere: a prompt, a case in the composer,
+  // or a case in the page. One that falls through does nothing at all.
+  const composer = read("src/components/ChatArea.tsx");
+  const pageSrc = read("src/app/page.tsx");
+  const unhandled = SC.SLASH_COMMANDS.filter(
+    (c) =>
+      !c.prompt &&
+      !composer.includes(`case "${c.name}":`) &&
+      !pageSrc.includes(`case "${c.name}":`)
+  ).map((c) => c.name);
+  check("every command has a handler", unhandled.length === 0, unhandled.join(", "));
+
   const chat = read("src/app/api/chat/route.ts");
   check("an automatic refresh keeps a compact summary's detail", /summary\?\.manual\s*\?\s*\{\s*system: compactSystemPrompt\(\)/.test(chat));
   check("AGENTS.md is read into the standing instructions", /\["AGENTS\.md", "CLAUDE\.md"\]/.test(chat) && /projectNotesBlock \+\s*lessonsBlock,/.test(chat));
