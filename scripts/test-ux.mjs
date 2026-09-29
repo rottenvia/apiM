@@ -712,7 +712,7 @@ check(
 );
 check(
   "a loading chat shows placeholder bubbles, not a vacuum",
-  /function ConversationSkeleton\(\)/.test(chatArea) &&
+  /function ConversationSkeleton\(/.test(chatArea) &&
     /conversationLoading \? \(/.test(chatArea) &&
     /conversationLoading=\{loadingConv !== null && messages\.length === 0\}/.test(
       page

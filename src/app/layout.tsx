@@ -35,6 +35,13 @@ export default function RootLayout({ children }: { children: ReactNode }) {
           `npm run start`. The page adds .is-done once it is ready; a CSS
           timeout hides it regardless, so a failed script can never leave it
           covering the app.
+
+          The bar is real progress, not a loop: CSS creeps it forward from the
+          first paint (so it moves even while the scripts are still parsing),
+          and src/components/startupSplash.ts then steps it through the actual
+          milestones — app running, settings read, chat list in — before
+          filling it and fading out. The status line under it is CSS content
+          keyed on the same stage.
         */}
         <div id="app-splash" aria-hidden="true">
           <div className="app-splash-mark">
@@ -43,8 +50,11 @@ export default function RootLayout({ children }: { children: ReactNode }) {
             <span />
           </div>
           <div className="app-splash-title">API Manager</div>
-          <div className="app-splash-bar">
-            <i />
+          <div className="app-splash-progress">
+            <div className="app-splash-bar">
+              <i className="app-splash-fill" />
+            </div>
+            <div className="app-splash-status" />
           </div>
         </div>
         {children}

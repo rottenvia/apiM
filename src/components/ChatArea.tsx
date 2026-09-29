@@ -267,34 +267,70 @@ function StatusRow({
  * the loading screen, mounted only when there is no cached transcript
  * to paint instantly.
  */
-function ConversationSkeleton() {
+function ConversationSkeleton({ columnWidth }: { columnWidth: string }) {
   /*
-   * The shape of a chat, not three grey paragraphs: a question on the
-   * right, a reply on the left with an activity line and prose, shimmering
-   * rather than pulsing. Held back 120ms so a chat that loads quickly never
-   * flashes a skeleton at all (the class delays its fade-in).
+   * A wireframe of the chat that is about to appear, drawn to its real
+   * measurements so the swap to real messages does not jump: the same
+   * column width and gutters, the user bubble in the bubble's own colour
+   * and radius with 24px text lines, the reply at its real 75% measure with
+   * its meta pill and thinking-panel outline, then prose lines at prose
+   * line height and ragged widths.
+   *
+   * Reported: the previous version — grey slabs, each shimmering on its own
+   * clock — "looks cheap and unintended". Here one light band sweeps the
+   * whole wireframe (the gradient is anchored to the viewport, see
+   * .skel-line in globals.css), and the rows rise in one after another.
+   *
+   * Held back 120ms so a chat that loads quickly never flashes a skeleton
+   * at all (the .chat-skeleton class delays its fade-in).
    */
+  const line = (w: string, key?: number) => (
+    <div key={key} className="flex h-6 items-center">
+      <div className={`skel-line h-2 rounded-full ${w}`} />
+    </div>
+  );
+  const row = (i: number) => ({ "--skel-i": i }) as import("react").CSSProperties;
   return (
     <div
+      role="status"
       aria-label="Loading chat"
-      className="chat-skeleton mx-auto w-full max-w-3xl px-4 py-6 sm:px-6"
+      className={`chat-skeleton mx-auto w-full px-4 py-6 sm:px-6 ${columnWidth}`}
     >
-      {[0, 1].map((i) => (
-        <div key={i} className="mb-8">
-          <div className="mb-5 flex justify-end">
-            <div className="skeleton-block h-10 w-2/5 rounded-2xl" />
-          </div>
-          <div className="space-y-2.5">
-            <div className="flex items-center gap-2">
-              <div className="skeleton-block h-5 w-5 rounded-lg" />
-              <div className="skeleton-block h-3 w-32 rounded" />
-            </div>
-            <div className="skeleton-block h-3 w-[88%] rounded" />
-            <div className="skeleton-block h-3 w-[76%] rounded" />
-            <div className="skeleton-block h-3 w-[58%] rounded" />
+      <div className="space-y-6">
+        <div className="skel-row flex justify-end" style={row(0)}>
+          <div className="skel-bubble w-[85%] rounded-2xl px-4 py-2.5 md:w-[70%]">
+            {line("w-full")}
+            {line("w-[58%]")}
           </div>
         </div>
-      ))}
+        <div className="w-full max-w-[85%] space-y-3 px-4 md:max-w-[75%]">
+          <div className="skel-row space-y-3" style={row(1)}>
+            <div className="flex items-center gap-1.5">
+              <div className="skel-pill flex h-5 w-14 items-center rounded-lg px-1.5">
+                <div className="skel-line h-1.5 w-full rounded-full" />
+              </div>
+            </div>
+            <div className="skel-panel flex h-[38px] items-center gap-2 rounded-lg px-3">
+              <div className="skel-line h-2 w-2 rounded-full" />
+              <div className="skel-line h-2 w-28 rounded-full" />
+            </div>
+          </div>
+          <div className="skel-row" style={row(2)}>
+            {["w-[96%]", "w-full", "w-[91%]", "w-[62%]"].map((w, k) => line(w, k))}
+            <div className="mt-2">
+              {["w-[88%]", "w-[94%]", "w-[41%]"].map((w, k) => line(w, k))}
+            </div>
+          </div>
+        </div>
+        <div className="skel-row flex justify-end" style={row(3)}>
+          <div className="skel-bubble w-[52%] rounded-2xl px-4 py-2.5 md:w-[34%]">
+            {line("w-[82%]")}
+          </div>
+        </div>
+        <div className="skel-row w-full max-w-[85%] px-4 md:max-w-[75%]" style={row(4)}>
+          {["w-[93%]", "w-[86%]", "w-[48%]"].map((w, k) => line(w, k))}
+        </div>
+      </div>
     </div>
   );
 }
@@ -2098,7 +2134,7 @@ export function ChatArea({
       >
         {messages.length === 0 ? (
           conversationLoading ? (
-            <ConversationSkeleton />
+            <ConversationSkeleton columnWidth={columnWidth} />
           ) : (
             <EmptyState
               hasKeys={hasKeys}
