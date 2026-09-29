@@ -24,6 +24,8 @@ import { extractVideoFrames, nativeVideoFiles } from "@/lib/video-frames";
  * that had been ignored.
  */
 export type AttachStage =
+  | "uploading"
+  | "describing"
   | "reading"
   | "saving"
   | "unpacking"
@@ -32,6 +34,8 @@ export type AttachStage =
   | "frames";
 
 export const STAGE_LABELS: Record<AttachStage, string> = {
+  uploading: "Uploading",
+  describing: "Looking inside",
   reading: "Reading",
   saving: "Saving binary",
   unpacking: "Unpacking",
@@ -64,6 +68,15 @@ export interface Attachment {
   unpackedTo?: string;
   /** Size of the original file in bytes. */
   size: number;
+  /**
+   * Saved to the workspace and described by the server (lib/ingest):
+   * `content` is already the finished message block, and `label` the
+   * chip's one-line summary ("JSON · 150,000 items").
+   */
+  preformatted?: boolean;
+  label?: string;
+  /** Progress detail beside the stage, e.g. "312 / 800". */
+  progress?: string;
   content: string;
   /** True when the file was longer than MAX_CHARS and had to be cut. */
   truncated: boolean;
@@ -768,9 +781,13 @@ export function buildMessageWithAttachments(
     // Native VLMs receive pixels on the wire — do not also dump a helper
     // description into the typed text, or the chip overlay looks like OCR.
     if (a.kind === "image") {
-      if (vision === "native") return [];
+      // Also on disk, so a tool (view_image, a script) can use the file.
+      const saved = a.unpackedTo
+        ? `[${a.name} is also saved in the workspace at ${a.unpackedTo}]`
+        : null;
+      if (vision === "native") return saved ? [saved] : [];
       if (a.description) {
-        return [`<image name="${a.name}">\n${a.description}\n</image>`];
+        return [`<image name="${a.name}">\n${a.description}\n</image>`, ...(saved ? [saved] : [])];
       }
       return [`<image name="${a.name}">\n[the image could not be read]\n</image>`];
     }
@@ -781,6 +798,9 @@ export function buildMessageWithAttachments(
         `<video name="${a.name}">\n[this model cannot watch video — switch to Ox Alpha or Qwen 3.8 27B]\n</video>`,
       ];
     }
+
+    // Saved and described server-side: already the finished block.
+    if (a.preformatted) return [a.content];
 
     const ext = extensionOf(a.name);
     const fence = ext && ext.length <= 12 ? ext : "";

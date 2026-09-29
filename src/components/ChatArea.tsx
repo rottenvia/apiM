@@ -11,6 +11,7 @@ import {
   attachmentsBlockSend,
   buildMessageWithAttachments,
   bytesLookBinary,
+  formatBytes,
   isVideoFile,
   readImageFile,
   readTextFile,
@@ -689,6 +690,107 @@ export function ChatArea({
         : { error: saved.error ?? `HTTP ${response.status}` };
     };
 
+    /*
+     * Every dropped file lands in the workspace as exact bytes, then the
+     * server says what is in it (lib/ingest). Reported: a 35MB JSON was cut
+     * to its first 800k characters in the browser and the rest never
+     * existed; archives kept only their text; RAR and 7z were refused. Now
+     * the agent gets the real file and a map of it, and reads the rest with
+     * tools. The browser readers below remain only for a chat that cannot
+     * save files.
+     */
+    const UPLOAD_LIMIT = 256 * 1024 * 1024;
+    const uploadFile = async (
+      file: File,
+      target: string,
+      unique: boolean
+    ): Promise<{ path?: string; bytes?: number; error?: string }> => {
+      if (!workspaceId) return { error: "this chat has no workspace yet" };
+      if (file.size > UPLOAD_LIMIT) {
+        return { error: `${file.name} is ${formatBytes(file.size)} — uploads are capped at 256 MB` };
+      }
+      try {
+        const res = await fetch(
+          `/api/workspace/${workspaceId}/upload${unique ? "?unique=1" : ""}`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/octet-stream",
+              "X-Upload-Path": encodeURIComponent(target),
+            },
+            body: file,
+          }
+        );
+        const body = (await res.json().catch(() => ({}))) as { path?: string; bytes?: number; error?: string };
+        return res.ok && body.path ? body : { error: body.error ?? `HTTP ${res.status}` };
+      } catch {
+        return { error: "couldn't reach the server" };
+      }
+    };
+    type Described = {
+      path: string;
+      bytes: number;
+      kind: string;
+      text: string;
+      label: string;
+      fileCount?: number;
+      error?: string;
+    };
+    const describeSaved = async (rel: string, extract: boolean): Promise<Described | { error: string }> => {
+      try {
+        const res = await fetch(`/api/workspace/${workspaceId}/describe`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: rel, extract }),
+        });
+        const body = (await res.json().catch(() => ({}))) as Described;
+        return res.ok && body.text ? body : { error: body.error ?? `HTTP ${res.status}` };
+      } catch {
+        return { error: "couldn't reach the server" };
+      }
+    };
+    const fromDescription = (name: string, size: number, d: Described): Attachment => ({
+      id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      name,
+      size: d.bytes || size,
+      content: d.text,
+      preformatted: true,
+      label: d.label,
+      truncated: false,
+      kind: "text",
+      unpackedTo: d.path,
+      fileCount: d.fileCount,
+      binaryPaths: d.kind === "binary" ? [d.path] : undefined,
+    });
+    const setProgress = (id: string, progress: string | undefined) =>
+      setAttachments((prev) => prev.map((a) => (a.id === id ? { ...a, progress } : a)));
+    /** Upload + describe one file. Null when the workspace path failed (use the fallback). */
+    const ingestFile = async (file: File, placeholderId: string): Promise<{ attachment?: Attachment; error?: string } | null> => {
+      setStage(placeholderId, "uploading");
+      const saved = await uploadFile(file, `uploads/${file.name}`, true);
+      if (!saved.path) {
+        return file.size > UPLOAD_LIMIT ? { error: saved.error } : null;
+      }
+      setStage(placeholderId, isArchive(file.name) ? "unpacking" : "describing");
+      const d = await describeSaved(saved.path, isArchive(file.name));
+      if ("error" in d && !("text" in d)) {
+        return {
+          attachment: {
+            id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+            name: file.name,
+            size: file.size,
+            content: `Attached file: ${saved.path} (${formatBytes(file.size)}) — saved in the workspace. It could not be summarised here (${d.error}); open it with the workspace tools.`,
+            preformatted: true,
+            label: formatBytes(file.size),
+            truncated: false,
+            kind: "text",
+            unpackedTo: saved.path,
+          },
+        };
+      }
+      return { attachment: fromDescription(file.name, file.size, d as Described) };
+    };
+
     for (let i = 0; i < list.length; i++) {
       const placeholder = pending[i];
       // Beyond the cap the placeholder was never added, so there is nothing
@@ -700,7 +802,61 @@ export function ChatArea({
       let attachment: Attachment | undefined;
       let error: string | undefined;
       try {
-        if (item.kind === "folder") {
+        // The workspace path: saved exactly, described by the server.
+        let handled = false;
+        if (workspaceId && item.kind === "folder") {
+          const root = `uploads/${item.name}`;
+          const total = item.files.length;
+          if (total > 20_000) {
+            error = `${item.name} has ${total.toLocaleString()} files — the folder limit is 20,000. Zip it instead.`;
+            handled = true;
+          } else {
+            setStage(placeholder.id, "uploading");
+            let done = 0;
+            const failed: string[] = [];
+            const queue = [...item.files];
+            const worker = async () => {
+              for (let f = queue.shift(); f; f = queue.shift()) {
+                const relative = folderPathOf(f).split("/").slice(1).join("/") || f.name;
+                const saved = await uploadFile(f, `${root}/${relative}`, false);
+                if (!saved.path) failed.push(`${relative}: ${saved.error}`);
+                done++;
+                if (done % 10 === 0 || done === total) setProgress(placeholder.id, `${done} / ${total}`);
+              }
+            };
+            await Promise.all(Array.from({ length: Math.min(6, total) }, worker));
+            setProgress(placeholder.id, undefined);
+            if (failed.length < total) {
+              setStage(placeholder.id, "describing");
+              const d = await describeSaved(root, false);
+              if ("text" in d) {
+                attachment = fromDescription(item.name, placeholder.size, d);
+                if (failed.length) {
+                  attachment.content += `\n\n${failed.length} file(s) could not be saved:\n${failed.slice(0, 20).map((f) => `  ${f}`).join("\n")}`;
+                }
+                onProcessesChanged?.();
+                handled = true;
+              }
+            }
+            if (!handled && failed.length) error = `Couldn't save ${item.name}: ${failed[0]}`;
+            handled = handled || failed.length === total;
+          }
+        } else if (
+          workspaceId &&
+          item.kind === "file" &&
+          !isImageFile(item.file) &&
+          !isVideoFile(item.file)
+        ) {
+          const out = await ingestFile(item.file, placeholder.id);
+          if (out) {
+            ({ attachment, error } = out);
+            if (attachment) onProcessesChanged?.();
+            handled = true;
+          }
+        }
+        if (handled) {
+          // Done above.
+        } else if (item.kind === "folder") {
           /*
            * Text and executables take different paths from the same folder.
            * The text reader intentionally skips binaries; losing every DLL at
@@ -824,6 +980,11 @@ export function ChatArea({
           ({ attachment, error } = await readImageFile(item.file, {
             analyze: modelNeedsVisionHelper(model),
           }));
+          // Also saved as a file, so tools and scripts can use it too.
+          if (attachment && workspaceId) {
+            const saved = await uploadFile(item.file, `uploads/${item.file.name}`, true);
+            if (saved.path) attachment = { ...attachment, unpackedTo: saved.path };
+          }
         } else if (isVideoFile(item.file)) {
           if (!modelSeesVideo(model) && getModel(model).vision !== "native") {
             error =
