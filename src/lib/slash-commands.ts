@@ -60,6 +60,12 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "new", aliases: ["clear"], description: "Start a new chat", group: "Chat", whileRunning: true },
   { name: "retry", aliases: ["regenerate"], description: "Answer the last message again", group: "Chat" },
   {
+    name: "rewind",
+    aliases: ["undo"],
+    description: "Go back to before your last message — chat and files — and put its text back in the box",
+    group: "Chat",
+  },
+  {
     name: "resume",
     aliases: ["continue"],
     args: "[instruction]",
