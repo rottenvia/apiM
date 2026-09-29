@@ -118,6 +118,25 @@ console.log("\ndescribe");
   check("UTF-16 text is decoded, not called binary", du.kind === "text" && /hello from windows/.test(du.text));
 }
 
+// --- binary formats ---
+console.log("\nbinary formats");
+{
+  const B = await load("src/lib/binaries.ts");
+  const fmt = (bytes, name = "") => B.detectBinaryFormat(new Uint8Array(bytes), name);
+  const cls = fmt([0xca, 0xfe, 0xba, 0xbe, 0x00, 0x00, 0x00, 0x34, 0, 0], "A.class");
+  check("a Java class is not mistaken for a macOS fat binary", cls.format === "Java class" && /Java 8/.test(cls.architecture), cls.architecture);
+  check("a real fat binary still is", fmt([0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 2, 0, 0]).format === "Mach-O universal");
+  check("Android DEX", fmt([0x64, 0x65, 0x78, 0x0a, 0x30, 0x33, 0x35, 0]).format === "Android DEX");
+  check("WebAssembly", fmt([0x00, 0x61, 0x73, 0x6d, 1, 0, 0, 0]).format === "WebAssembly");
+  check("Python bytecode", fmt([0xa7, 0x0d, 0x0d, 0x0a, 0, 0, 0, 0], "mod.cpython-312.pyc").format === "Python bytecode");
+  check("JAR and APK are packages, not zips to guess at", fmt([0x50, 0x4b, 3, 4], "app.jar").format === "Java archive" && fmt([0x50, 0x4b, 3, 4], "app.apk").format === "Android package");
+  const apkNote = /extract_archive it \(force:true\)/.test(read("src/lib/binaries.ts"));
+  check("the report says what to do next with a package", apkNote);
+  await W.writeFileBytes(ws, "uploads/app.jar", Buffer.from([0x50, 0x4b, 3, 4, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
+  const jar = await I.describeUpload(ws, "uploads/app.jar");
+  check("a dropped JAR is described as a Java archive", jar.kind === "binary" && /Java archive/.test(jar.label), jar.label);
+}
+
 // --- query_data ---
 console.log("\nquery_data");
 {
