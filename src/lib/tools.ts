@@ -3704,10 +3704,12 @@ async function runToolInner(
           const pick = num(args, "index");
           const chosen =
             pick && pick >= 1 && pick <= defs.length ? defs[pick - 1] : defs[0];
+          const LIST_MAX = 12;
           const list =
             defs.length > 1
-              ? `${defs.length} definitions of "${symbolName}":\n` +
+              ? `${defs.length} definitions of "${symbolName}"${defs.length > LIST_MAX ? ` (first ${LIST_MAX}; pass path to narrow)` : ""}:\n` +
                 defs
+                  .slice(0, LIST_MAX)
                   .map(
                     (d, i) =>
                       `  ${i + 1}. ${d.path}:${d.match.startLine}-${d.match.endLine} — ${d.match.signature}`

@@ -1933,7 +1933,7 @@ export default function Home() {
   }, [activateSession]);
 
   const renameConversation = useCallback(
-    async (id: string, title: string) => {
+    async (id: string, title: string): Promise<boolean> => {
       const previous = conversationsRef.current.find((c) => c.id === id)?.title;
 
       setConversations((prev) =>
@@ -1959,7 +1959,9 @@ export default function Home() {
             );
           }
           setRenameError(data.error ?? "Couldn't rename that chat.");
+          return false;
         }
+        return true;
       } catch {
         if (previous !== undefined) {
           setConversations((prev) =>
@@ -1967,6 +1969,7 @@ export default function Home() {
           );
         }
         setRenameError("Couldn't reach the server.");
+        return false;
       }
     },
     []
@@ -4202,8 +4205,10 @@ export default function Home() {
       switch (name) {
         case "rename": {
           if (!convId) return needChat();
-          await renameConversation(convId, arg.slice(0, 200));
-          return { ok: true, text: `Renamed to "${arg.slice(0, 200)}".` };
+          // The failure itself is already shown by the rename error toast.
+          return (await renameConversation(convId, arg.slice(0, 200)))
+            ? { ok: true, text: `Renamed to "${arg.slice(0, 200)}".` }
+            : { ok: false, text: "The chat was not renamed." };
         }
         case "archive": {
           if (!convId) return needChat();

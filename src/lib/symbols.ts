@@ -132,9 +132,39 @@ export function findSymbols(
     : findBraceSymbols(source, wanted);
 }
 
+/** Lines longer than this are generated data, not declarations. */
+const LONG_LINE = 2000;
+
+/**
+ * The same text with every overlong line defanged, character for character.
+ *
+ * Found by review: the declaration pattern backtracks quadratically over a
+ * long run of identifier characters, so one 229KB numeric-table line took
+ * 65 seconds — synchronous, stalling the whole server. Replacing the
+ * identifier characters of such lines with "#" keeps every offset
+ * identical (the text is still sliced from the original) while giving the
+ * pattern nothing to chew on. A declaration inside a minified line is not
+ * one anybody wants to jump to.
+ */
+function scanCopy(source: string): string {
+  if (!new RegExp(`[^\\n]{${LONG_LINE + 1}}`).test(source)) return source;
+  return source.replace(new RegExp(`[^\\n]{${LONG_LINE + 1},}`, "g"), (line) =>
+    line.replace(/[\w:<>,*&~$]/g, "#")
+  );
+}
+
+/**
+ * What stands before a name on its line when it is being CALLED, not
+ * defined: an assignment, a keyword that takes an expression, an open
+ * paren or comma, or member access. `Foo::bar` stays a definition.
+ */
+const CALL_PREFIX =
+  /(?:^|[^=!<>])=(?!=)|\b(?:return|await|new|yield|throw|typeof|case|else|if|while|for|switch|raise|defer|go|puts|print|echo|delete|in|of)\s*$|\bexport\s+default\s+$|(?:[(,!?|&+\-*/%]|(?<!:):|\.)\s*$/;
+
 function findBraceSymbols(source: string, name: string): SymbolMatch[] {
   const out: SymbolMatch[] = [];
   const id = escape(name);
+  const scan = scanCopy(source);
 
   /*
    * Two shapes, deliberately narrow:
@@ -156,12 +186,34 @@ function findBraceSymbols(source: string, name: string): SymbolMatch[] {
     `(^|[^\\w:])(?:[\\w:<>,*&~][^\\S\\n]*)*?(?:[\\w<>]+::)?${id}[^\\S\\n]*\\(`,
     "gm"
   );
+  // const name = (…) => {…}, const name = function (…) {…}, and the
+  // async forms — the most common JS/TS definition, which the two shapes
+  // above never matched.
+  const exprDecl = new RegExp(
+    `\\b(?:const|let|var)\\s+${id}\\s*(?::[^=\\n]+)?=\\s*(?:async\\s*)?(?:function\\b|\\([^)\\n]*\\)\\s*(?::[^=\\n]+)?=>|[\\w$]+\\s*=>)`,
+    "g"
+  );
 
   const seen = new Set<number>();
 
-  for (const re of [typeDecl, funcDecl]) {
-    for (const hit of source.matchAll(re)) {
+  for (const re of [typeDecl, funcDecl, exprDecl]) {
+    for (const hit of scan.matchAll(re)) {
       if (hit.index === undefined) continue;
+      if (re === funcDecl) {
+        // A call with a block after it (`await run(x, {`) is not a
+        // definition — found by review: go-to-definition across a whole
+        // workspace answered with call sites, 120 of them for one name.
+        const at = hit.index + Math.max(0, hit[0].lastIndexOf(name));
+        const prefix = source.slice(source.lastIndexOf("\n", at - 1) + 1, at);
+        if (CALL_PREFIX.test(prefix.replace(/(?:[\w<>]+::)$/, ""))) continue;
+        // …or an argument on a call that began on the line above.
+        if (!prefix.trim()) {
+          const lineStart = source.lastIndexOf("\n", at - 1) + 1;
+          const prevStart = source.lastIndexOf("\n", lineStart - 2) + 1;
+          const prev = source.slice(prevStart, Math.max(prevStart, lineStart - 1)).trim();
+          if (/(?:[(,=+\-*/?&|[]|(?<!:):)$/.test(prev)) continue;
+        }
+      }
 
       /*
        * Anchor on the NAME, then back up to the start of ITS line.

@@ -22,6 +22,10 @@
 import { runTool, WORKSPACE_TOOLS, GITHUB_TOOLS, type ToolContext, type ToolDefinition } from "@/lib/tools";
 import { buildWorkspaceContext } from "@/lib/workspace-context";
 import { parseToolArguments } from "@/lib/transcript";
+import { runGitAgentTool } from "@/lib/git-agent";
+
+/** Read-only git tools: dispatched through the git agent, not runTool. */
+const GIT_READ_TOOLS = new Set(["git_status", "git_diff", "git_log"]);
 
 /** Tools a helper may use. Everything here only reads. */
 export const SUBAGENT_TOOLS = new Set([
@@ -130,8 +134,31 @@ export interface SubAgentOptions {
   shouldStop?: () => boolean;
   /** Progress for the UI: round number and the tools just used. */
   onProgress?: (p: { round: number; toolCalls: number; tools: string[] }) => void;
+  /**
+   * Context budget in chars. Derive it from the model's window: a fixed
+   * 420k overflowed an 80K-token local model and lost all the work.
+   */
+  contextCapChars?: number;
   /** Injected for tests. */
   fetchImpl?: typeof fetch;
+}
+
+/** Soft context cap for a model window of `tokens` (about 60% of it). */
+export function helperContextCap(tokens: number): number {
+  return Math.max(40_000, Math.min(CONTEXT_SOFT_CAP_CHARS, Math.floor(tokens * 3.2 * 0.6)));
+}
+
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) return resolve();
+    const t = setTimeout(done, ms);
+    function done() {
+      clearTimeout(t);
+      signal.removeEventListener("abort", done);
+      resolve();
+    }
+    signal.addEventListener("abort", done, { once: true });
+  });
 }
 
 type Msg = {
@@ -158,7 +185,8 @@ async function complete(
   let lastError = "";
   for (let attempt = 0; attempt < 3; attempt++) {
     if (opts.signal.aborted) throw new Error("stopped");
-    if (attempt > 0) await new Promise((r) => setTimeout(r, attempt === 1 ? 1500 : 5000));
+    if (attempt > 0) await sleep(attempt === 1 ? 1500 : 5000, opts.signal);
+    if (opts.signal.aborted) throw new Error("stopped");
     try {
       const res = await doFetch(`${opts.target.baseUrl}/chat/completions`, {
         method: "POST",
@@ -217,6 +245,8 @@ export async function runSubAgent(opts: SubAgentOptions): Promise<SubAgentResult
   let toolCalls = 0;
   let contextChars = messages.reduce((n, m) => n + (m.content?.length ?? 0), 0);
   let stoppedBecause: SubAgentResult["stoppedBecause"];
+  const cap = opts.contextCapChars ?? CONTEXT_SOFT_CAP_CHARS;
+  let salvaged = false;
 
   for (let round = 1; round <= rounds + 1; round++) {
     if (opts.signal.aborted) {
@@ -228,7 +258,7 @@ export async function runSubAgent(opts: SubAgentOptions): Promise<SubAgentResult
       break;
     }
     // The last pass (round budget or context cap) must answer, not explore.
-    const finalPass = round > rounds || contextChars > CONTEXT_SOFT_CAP_CHARS;
+    const finalPass = round > rounds || contextChars > cap;
     if (finalPass) {
       stoppedBecause = round > rounds ? "rounds" : "context";
       messages.push({
@@ -257,6 +287,23 @@ export async function runSubAgent(opts: SubAgentOptions): Promise<SubAgentResult
       if (msg === "stopped") {
         stoppedBecause = "stopped";
         break;
+      }
+      /*
+       * A 4xx after some work is usually the context overflowing the
+       * model's window. Found by review: that threw away everything the
+       * helper had read. Shrink every tool result and ask for the report
+       * once before giving up.
+       */
+      if (/^HTTP 4(?:00|13)/.test(msg) && !salvaged && toolCalls > 0) {
+        salvaged = true;
+        for (const m of messages) {
+          if (m.role === "tool" && typeof m.content === "string" && m.content.length > 1500) {
+            m.content = `${m.content.slice(0, 1500)}\n…[shortened to fit the model's context]`;
+          }
+        }
+        contextChars = messages.reduce((n, m) => n + (m.content?.length ?? 0), 0);
+        round = rounds; // the next pass is the final one
+        continue;
       }
       return {
         ok: false,
@@ -307,6 +354,9 @@ export async function runSubAgent(opts: SubAgentOptions): Promise<SubAgentResult
         if (typeof args.path === "string") filesRead.add(args.path);
         if (Array.isArray(args.paths)) for (const p of args.paths) if (typeof p === "string") filesRead.add(p);
         try {
+          if (GIT_READ_TOOLS.has(name)) {
+            return (await runGitAgentTool(opts.workspaceId, name, args, null)).content;
+          }
           const r = await runTool(opts.workspaceId, name, args, {
             ...opts.toolContext,
             signal: opts.signal,
@@ -318,8 +368,11 @@ export async function runSubAgent(opts: SubAgentOptions): Promise<SubAgentResult
       })
     );
     toolCalls += calls.length;
+    // A round's results share what is left of the budget, so one round of
+    // many large reads cannot blow far past it before the cap is checked.
+    const share = Math.max(2_000, Math.floor((cap - contextChars) / calls.length));
     calls.forEach((call, i) => {
-      const content = clip(results[i], RESULT_MAX_CHARS);
+      const content = clip(results[i], Math.min(RESULT_MAX_CHARS, share));
       contextChars += content.length + (call.function.arguments?.length ?? 0);
       messages.push({ role: "tool", tool_call_id: call.id, content });
     });

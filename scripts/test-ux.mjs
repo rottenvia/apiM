@@ -952,7 +952,7 @@ console.log("\nUI audit — client-side bugs");
     "   the composer gates Send, Enter and the btw note on it, and says why",
     /const attachBusy = attachmentsBlockSend\(attachments\);/.test(chatArea) &&
       /!attachBusy &&/.test(chatArea) &&
-      /\/\/ The button's own gate, applied here too so Enter cannot bypass it\.\s*if \(!canSend\) return;/.test(chatArea) &&
+      /\/\/ The button's own gate, applied here too so Enter cannot bypass it\.\s*if \(!canSend(?: \|\| compacting)?\) return;/.test(chatArea) &&
       /if \(isBtw\) \{\s*\/\/[^\n]*\n\s*if \(attachBusy\) return;/.test(chatArea) &&
       /\{attachBusy && \(\s*<div\s*role="status"/.test(chatArea)
   );

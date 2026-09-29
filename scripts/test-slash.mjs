@@ -182,6 +182,41 @@ try {
   await store.truncateFrom(convId, "a6");
   check("Retry removing the cursor turn drops the summary", !(await store.getConversation(convId)).historySummary);
 
+  // --- review fixes ---
+  const withImages = Array.from({ length: 40 }, (_, i) => ({
+    id: `w${i}`,
+    role: i % 2 ? "assistant" : "user",
+    content: "z".repeat(2800),
+    attachments: i % 2 ? null : Array.from({ length: 4 }, (_, k) => ({ kind: "image", name: `shot-${k}.png`, description: "d".repeat(190) })),
+  }));
+  const { chunks: sized } = HS.compactChunks(withImages);
+  const overflow = sized.map((c) => HS.buildSummaryDigest(c).dropped).reduce((a, b) => a + b, 0);
+  check("compact chunks are sized as rendered, attachments included — no turn falls out", overflow === 0, `${sized.length} chunks, ${overflow} dropped`);
+  check("dropped digest turns are counted, not lost silently", /digestDropped \+= fresh\.droppedTurns/.test(read("src/app/api/conversations/[id]/compact/route.ts")));
+
+  const longId = `slash-long-${Date.now()}`;
+  const many = [];
+  for (let i = 0; i < 15; i++) {
+    many.push({ id: `lu${i}`, role: "user", content: `q${i}`, createdAt: now() });
+    many.push({ id: `la${i}`, role: "assistant", content: `a${i}`, createdAt: now() });
+  }
+  await store.appendMessages(longId, "long", many);
+  const lc = await call(longId);
+  check("a long chat compacts", lc.status === 200 && lc.body.summary.upToId === "la14");
+  await store.truncateFrom(longId, "la14");
+  const moved = (await store.getConversation(longId)).historySummary;
+  check("Retry on a long chat keeps the summary, cursor moved back", moved?.upToId === "lu14" && moved?.revised === true, JSON.stringify(moved && { upToId: moved.upToId, revised: moved.revised }));
+  check("…and the model is told the transcript wins", /the conversation is right/.test(HS.renderHistorySummary(moved)));
+  check("a summary cursor pointing at a deleted turn is refused", (await store.saveHistorySummary(longId, "lu14", { ...moved, upToId: "gone" })) === false);
+
+  check("/budget 0 is refused rather than removing the limit", Number.isNaN(SC.parseBudget("0")) && SC.parseBudget("off") === null);
+  const composerSrc = read("src/components/ChatArea.tsx");
+  check("words after a command that takes none are not thrown away", /if \(!c\.args && arg\) \{/.test(composerSrc));
+  check("sending waits while this chat compacts", /disabled=\{!canSend \|\| compacting\}/.test(composerSrc) && /if \(!canSend \|\| compacting\) return;/.test(composerSrc));
+  check("a compact's result stays with its own chat", /const compacting = compactingKey === draftKey;/.test(composerSrc) && /compactNoticeState\.key === draftKey/.test(composerSrc));
+  check("the message box is announced as the menu's combobox", /role="combobox"/.test(composerSrc) && /aria-activedescendant=/.test(composerSrc));
+  check("/rename reports a rejected rename", /The chat was not renamed/.test(read("src/app/page.tsx")));
+
   const missing = await call(`nope-${Date.now()}`);
   check("unknown chat is a 404", missing.status === 404);
 

@@ -1429,10 +1429,23 @@ export function ChatArea({
    * go to the page, which owns that state.
    */
   const [contextOpen, setContextOpen] = useState(false);
-  const [compacting, setCompacting] = useState(false);
-  const [compactNotice, setCompactNotice] = useState<
-    { tone: "ok" | "error"; text: string } | null
+  /*
+   * Keyed by chat: this composer is one instance for every chat, and a
+   * /compact finishing after a switch used to report (and stay "busy") in
+   * whichever chat was on screen then (found by review).
+   */
+  const [compactingKey, setCompactingKey] = useState<string | null>(null);
+  const compacting = compactingKey === draftKey;
+  const [compactNoticeState, setCompactNoticeState] = useState<
+    { key: string; tone: "ok" | "error"; text: string } | null
   >(null);
+  const compactNotice =
+    compactNoticeState && compactNoticeState.key === draftKey ? compactNoticeState : null;
+  const setCompactNotice = useCallback(
+    (n: { tone: "ok" | "error"; text: string } | null, key = draftKeyRef.current) =>
+      setCompactNoticeState(n ? { ...n, key } : null),
+    []
+  );
   const [commandNotice, setCommandNotice] = useState<
     {
       tone: "ok" | "error";
@@ -1527,16 +1540,16 @@ export function ChatArea({
       setCompactNotice({ tone: "error", text: "Nothing to compact yet — send a message first." });
       return;
     }
-    setCompacting(true);
-    setCompactNotice(null);
+    const key = draftKey;
+    setCompactingKey(key);
+    setCompactNotice(null, key);
     try {
-      setCompactNotice(await onCompact(instructions).then(
-        (r) => ({ tone: r.ok ? ("ok" as const) : ("error" as const), text: r.text })
-      ));
+      const r = await onCompact(instructions);
+      setCompactNotice({ tone: r.ok ? "ok" : "error", text: r.text }, key);
     } catch {
-      setCompactNotice({ tone: "error", text: "Compacting failed — nothing was changed." });
+      setCompactNotice({ tone: "error", text: "Compacting failed — nothing was changed." }, key);
     } finally {
-      setCompacting(false);
+      setCompactingKey((k) => (k === key ? null : k));
     }
   };
 
@@ -1614,6 +1627,19 @@ export function ChatArea({
       note(`/${c.name} needs ${c.args}.`, "error");
       return;
     }
+    // "/clear the npm cache and rebuild" is a message, not /clear with its
+    // words thrown away (found by review) — nothing runs.
+    if (!c.args && arg) {
+      note(
+        `/${c.name} takes nothing after it. To send this as a message, start it with a space.`,
+        "error"
+      );
+      return;
+    }
+    if (compacting && (c.prompt || c.name === "retry" || c.name === "resume" || c.name === "rewind")) {
+      note("Compacting this chat — one moment.", "error");
+      return;
+    }
     if (isLoading && !c.whileRunning) {
       note(`A reply is running — wait for it, or /stop it first.`, "error");
       return;
@@ -1630,6 +1656,7 @@ export function ChatArea({
       if (!hasKeys) return note(`Add your ${missingKeyLabel} key in Settings first.`, "error");
       if (attachBusy) return note(attachBusy, "error");
       if (analyzingImages) return note("Still reading the attached images…", "error");
+      if (blockedVideo) return note(`${modelLabel} can't watch videos — remove the video or switch model.`, "error");
       videoWaitRef.current = attachments.some((a) => a.kind === "video" && !a.frames);
       onSend(
         buildMessageWithAttachments(c.prompt(arg), attachments, getModel(model).vision),
@@ -1693,6 +1720,9 @@ export function ChatArea({
         if (!isLoading || !onAskBtw) {
           return note("Nothing is running — send it as a normal message.", "error");
         }
+        // The same gates the "btw …" send has.
+        if (attachBusy) return note(attachBusy, "error");
+        if (analyzingImages) return note("Still reading the attached images…", "error");
         onAskBtw(
           arg,
           buildMessageWithAttachments(arg, attachments, getModel(model).vision),
@@ -1925,7 +1955,7 @@ export function ChatArea({
     }
     // A message of only attachments is valid — the files are the content.
     // The button's own gate, applied here too so Enter cannot bypass it.
-    if (!canSend) return;
+    if (!canSend || compacting) return;
     // The model receives the file contents and (for blind models) image
     // descriptions; the transcript shows only what the user typed, plus chips.
     videoWaitRef.current = attachments.some(
@@ -2540,6 +2570,20 @@ export function ChatArea({
                 if (commandNotice) setCommandNotice(null);
               }}
               onKeyDown={handleKeyDown}
+              // The slash menu is this box's popup list: announced as such,
+              // with the highlighted command as the active option.
+              role="combobox"
+              aria-multiline="true"
+              aria-autocomplete="list"
+              aria-haspopup="listbox"
+              aria-expanded={slashMenuOpen}
+              aria-controls={slashMenuOpen ? "slash-menu" : undefined}
+              aria-activedescendant={
+                slashMenuOpen
+                  ? `slash-opt-${Math.min(slashActive, slashItems.length - 1)}`
+                  : undefined
+              }
+              aria-label="Message"
               onPaste={(e) => {
                 // Pasting a file (e.g. from a file manager) attaches it.
                 const files = Array.from(e.clipboardData.files ?? []);
@@ -2762,8 +2806,10 @@ export function ChatArea({
               ) : (
                 <button
                   onClick={handleSubmit}
-                  disabled={!canSend}
-                  data-enabled={canSend}
+                  // Not while /compact is rewriting what the next request
+                  // carries: its cursor would point past the new question.
+                  disabled={!canSend || compacting}
+                  data-enabled={canSend && !compacting}
                   className="send-btn"
                   title={attachBusy ?? "Send message"}
                   aria-label="Send message"

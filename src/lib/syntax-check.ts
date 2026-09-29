@@ -283,16 +283,74 @@ import ast, json, sys
 out = []
 for f in json.load(sys.stdin):
     try:
-        with open(f["abs"], encoding="utf-8") as h:
+        with open(f["abs"], encoding="utf-8-sig") as h:
             src = h.read()
     except Exception:
         continue
     try:
         ast.parse(src, filename=f["rel"])
     except SyntaxError as e:
-        out.append({"path": f["rel"], "line": e.lineno or 1, "column": e.offset or 1, "message": e.msg})
+        out.append({"path": f["rel"], "line": e.lineno or 1, "column": e.offset or 1,
+                    "message": e.msg + " (parsed with Python %d.%d)" % sys.version_info[:2]})
 print(json.dumps(out))
 `;
+
+/** Files whose tools read JSON with comments and trailing commas. */
+const JSONC_NAMES =
+  /(?:^|\/)(?:\.eslintrc(?:\.[\w-]+)?\.json|\.babelrc(?:\.json)?|deno\.jsonc?|\.devcontainer\.json|settings\.json|launch\.json|tasks\.json|extensions\.json|[^/]+\.code-workspace|\.swcrc|api-extractor\.json|turbo\.json|biome\.json)$/i;
+
+/**
+ * Parses as JSON with comments: once comments and trailing commas are
+ * removed outside strings. Only for a known JSONC file, or one that really
+ * has comments — a trailing comma alone in package.json is a real error
+ * (npm refuses it), not a dialect.
+ */
+function parsesAsJsonc(text: string, knownJsonc: boolean): boolean {
+  let hadComment = false;
+  let out = "";
+  let i = 0;
+  let quote = false;
+  while (i < text.length) {
+    const c = text[i];
+    if (quote) {
+      out += c;
+      if (c === "\\") {
+        out += text[i + 1] ?? "";
+        i += 2;
+        continue;
+      }
+      if (c === '"') quote = false;
+      i++;
+      continue;
+    }
+    if (c === '"') {
+      quote = true;
+      out += c;
+      i++;
+      continue;
+    }
+    if (c === "/" && text[i + 1] === "/") {
+      hadComment = true;
+      while (i < text.length && text[i] !== "\n") i++;
+      continue;
+    }
+    if (c === "/" && text[i + 1] === "*") {
+      hadComment = true;
+      const end = text.indexOf("*/", i + 2);
+      i = end === -1 ? text.length : end + 2;
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  if (!knownJsonc && !hadComment) return false;
+  try {
+    JSON.parse(out.replace(/,(\s*[}\]])/g, "$1"));
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 async function eligible(
   workspaceId: string,
@@ -333,20 +391,34 @@ export async function checkSyntax(
   if (!files.length) return [];
 
   const problems: SyntaxProblem[] = [];
-  const jsTs = files.filter((f) => JS_TS.test(f.rel));
+  // Flow-typed JavaScript (React Native) is not TypeScript: its type
+  // annotations would all be reported as errors. Skipped, not guessed at.
+  const jsTs: { rel: string; abs: string }[] = [];
+  for (const f of files.filter((x) => JS_TS.test(x.rel))) {
+    if (/\.[cm]?jsx?$/i.test(f.rel)) {
+      const head = await fs.readFile(f.abs, "utf8").then((t) => t.slice(0, 2048)).catch(() => "");
+      if (/@flow\b/.test(head)) continue;
+    }
+    jsTs.push(f);
+  }
   const py = files.filter((f) => PY.test(f.rel));
   const json = files.filter((f) => JSON_FILE.test(f.rel) && !JSON_WITH_COMMENTS.test(f.rel));
 
   for (const f of json) {
+    // A byte-order mark is legal in a file and fatal to JSON.parse (common
+    // in Visual Studio / .NET files) — found by review as a false error.
+    const text = (await fs.readFile(f.abs, "utf8").catch(() => "")).replace(/^\uFEFF/, "");
     try {
-      JSON.parse(await fs.readFile(f.abs, "utf8"));
+      JSON.parse(text);
     } catch (e) {
+      // JSON-with-comments files are everywhere (.eslintrc.json, deno.json,
+      // .devcontainer.json…): only report what fails even as JSONC.
+      if (parsesAsJsonc(text, JSONC_NAMES.test(f.rel))) continue;
       const msg = e instanceof Error ? e.message : String(e);
       const pos = /position (\d+)/.exec(msg);
       let line = 1;
       let column = 1;
       if (pos) {
-        const text = await fs.readFile(f.abs, "utf8").catch(() => "");
         const before = text.slice(0, Number(pos[1]));
         line = before.split("\n").length;
         column = before.length - before.lastIndexOf("\n");
@@ -370,7 +442,13 @@ export async function checkSyntax(
         if (!res) return;
         if (res.stdout.trim() === "NO_TS") {
           // No TypeScript: plain JS still gets node's own parser.
-          for (const f of jsTs.filter((x) => /\.[cm]?js$/i.test(x.rel))) {
+          // node --check knows no JSX: skip anything that looks like it.
+          const plain: typeof jsTs = [];
+          for (const x of jsTs.filter((y) => /\.[cm]?js$/i.test(y.rel))) {
+            const t = await fs.readFile(x.abs, "utf8").catch(() => "");
+            if (!/<[A-Za-z][\w.]*(?:\s[^<>]*)?\/?>/.test(t)) plain.push(x);
+          }
+          for (const f of plain) {
             const r = await run(process.execPath, ["--check", f.abs]);
             if (r && r.code !== 0) {
               const m = /:(\d+)\n[\s\S]*?\n\n?(SyntaxError: .+)/.exec(r.stderr);
@@ -394,6 +472,9 @@ export async function checkSyntax(
         for (const cmd of process.platform === "win32" ? ["python", "py"] : ["python3", "python"]) {
           const res = await run(cmd, ["-c", PY_CHECKER], JSON.stringify(py));
           if (!res) continue;
+          // The Windows Store "python" stub exits non-zero with a message
+          // instead of ENOENT: no JSON answer means try the next command.
+          if (!/^\s*\[/.test(res.stdout)) continue;
           problems.push(...parseProblems(res.stdout));
           return;
         }
