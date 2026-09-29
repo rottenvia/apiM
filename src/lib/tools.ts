@@ -60,7 +60,15 @@ import {
   workspaceDirectory,
   WorkspaceError,
   MAX_FILE_BYTES,
+  resolveInside,
 } from "@/lib/workspace";
+import {
+  DataQueryError,
+  describeData,
+  loadData,
+  query as queryDataPath,
+  renderQuery,
+} from "@/lib/data-query";
 import { applyPatch, formatHunkReport, PatchReportError } from "@/lib/patch";
 import { analyzeLog, formatLogAnalysis } from "@/lib/logs";
 import { formatMarkerReport, verifyMarkers } from "@/lib/markers";
@@ -1593,6 +1601,44 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "query_data",
+      description:
+        "Look inside a JSON, JSON Lines, CSV or TSV file of any size (up to 400MB) without reading it whole — " +
+        "what jq would do. A big JSON export is often ONE line, so read_file cannot reach most of it: use this instead. " +
+        "Without query it returns the structure: every key with its type, how often it appears, array lengths, " +
+        "number ranges and example values. With query (JSONPath) it returns the matches, paged: " +
+        "$.items[0], $.items[-1], $.items[10:20], $.items[*].name, $..id (every id at any depth), " +
+        "$.items[?(@.price > 10 && @.country == 'FR')], $.users[?(@.email =~ /@example\\.com$/)], $.items.length. " +
+        "CSV/TSV rows are objects keyed by the header. count:true returns only how many match; fields picks columns; " +
+        "save_as writes every match to a workspace file as JSON (to hand a subset to a script or to read later).",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Workspace path of the data file." },
+          query: {
+            type: "string",
+            description: "JSONPath, e.g. $.items[?(@.status == 'failed')]. Omit to get the structure.",
+          },
+          limit: { type: "number", description: "Matches per page (default 50)." },
+          offset: { type: "number", description: "Skip this many matches (paging)." },
+          fields: {
+            type: "array",
+            items: { type: "string" },
+            description: 'Only these fields of each matched object, e.g. ["id", "meta.country"].',
+          },
+          count: { type: "boolean", description: "Return only the number of matches." },
+          save_as: {
+            type: "string",
+            description: "Write ALL matches (not just this page) as a JSON array to this workspace path.",
+          },
+        },
+        required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "find_references",
       description:
         "Every place an identifier is used, across all source files: whole-identifier " +
@@ -2480,7 +2526,12 @@ export function truncationNotice(result: ReadResult): string {
     `line(s) were NOT returned; the cut is at a line boundary, so nothing ` +
     `above is half a line. Do NOT plan an edit against text you have not ` +
     `seen. Continue with read_file path="${result.path}" start_line=` +
-    `${result.nextLine ?? result.lastLine + 1}, or narrow with search_files.]`
+    `${result.nextLine ?? result.lastLine + 1}, or narrow with search_files.]` +
+    // Paging through a data export (often one enormous line) is hopeless;
+    // query_data reads its structure and pulls out exactly what is needed.
+    (/\.(?:json|jsonl|ndjson|geojson|csv|tsv|har)$/i.test(result.path)
+      ? ` [This is a data file: query_data path="${result.path}" shows its whole structure and answers JSONPath queries — use that instead of paging.]`
+      : "")
   );
 }
 
@@ -3654,6 +3705,54 @@ async function runToolInner(
             ids.length + classes.length
           } selectors`,
         };
+      }
+
+      case "query_data": {
+        const filePath = str(args, "path");
+        if (!filePath) {
+          return { ok: false, content: "Error: path is required.", summary: "No path given" };
+        }
+        try {
+          const data = await loadData(resolveInside(workspaceId, filePath), filePath);
+          const q = str(args, "query");
+          if (!q) {
+            return {
+              ok: true,
+              content:
+                `${filePath}\n${describeData(data)}\n\n` +
+                `Query it with JSONPath, e.g. query "$${Array.isArray(data.value) ? "[0:5]" : ".<key>"}".`,
+              summary: `Structure of ${filePath}`,
+            };
+          }
+          const saveAs = str(args, "save_as");
+          if (saveAs) {
+            const all = queryDataPath(data.value, q).map((m) => m.value);
+            const text = JSON.stringify(all, null, 2);
+            await writeFile(workspaceId, saveAs, text);
+            return {
+              ok: true,
+              content: `Wrote ${all.length.toLocaleString()} match(es) for ${q} to ${saveAs} (${(text.length / 1024).toFixed(0)}KB).`,
+              summary: `Saved ${all.length} matches to ${saveAs}`,
+              changedPath: saveAs,
+            };
+          }
+          const out = renderQuery(data, q, {
+            limit: num(args, "limit") ?? undefined,
+            offset: num(args, "offset") ?? undefined,
+            count: args.count === true,
+            fields: Array.isArray(args.fields) ? args.fields.map(String) : undefined,
+          });
+          return {
+            ok: true,
+            content: out.text,
+            summary: `${out.matches.toLocaleString()} match(es) in ${filePath}`,
+          };
+        } catch (e) {
+          if (e instanceof DataQueryError || e instanceof WorkspaceError) {
+            return { ok: false, content: `Error: ${e.message}`, summary: e.message.slice(0, 80) };
+          }
+          throw e;
+        }
       }
 
       case "find_references": {
