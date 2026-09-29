@@ -1,0 +1,9 @@
+{
+  "title": "Implement the TLV-X binary format from its spec",
+  "category": "feature",
+  "language": "python",
+  "difficulty": "hard",
+  "prompt": "SPEC.md describes TLV-X, the binary message format our field devices speak. Implement `encode` and `decode` in tlv.py exactly as the spec describes (standard library only), including all of the validation rules: our gateway has to reject anything that isn't a valid, canonical message, and must raise `TLVError` (never any other exception) for every bad input, in both directions. Your implementation will be checked against a set of test vectors from other implementations, valid and malformed, so follow the spec to the letter. tests/test_tlv.py has the worked example from the spec; add more tests as you see fit.",
+  "timeoutMinutes": 30,
+  "budgetUsd": 1.2
+}

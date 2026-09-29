@@ -1,0 +1,21 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8080,
+    "workers": "auto",
+    "debug": false
+  },
+  "database": {
+    "url": "postgres://reports:s3cret@db.internal:5432/reports",
+    "pool_size": 12,
+    "timeout_seconds": 4.5
+  },
+  "features": {
+    "enabled": ["export", "Search", "scheduling", "export"],
+    "beta_users": ["Ana@example.com", "bo@example.com"]
+  },
+  "logging": {
+    "level": "warn",
+    "file": "/var/log/reports/app.log"
+  }
+}
