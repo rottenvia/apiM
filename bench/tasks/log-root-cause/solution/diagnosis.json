@@ -1,0 +1,5 @@
+{
+  "first_failure_request_id": "req-0fe167",
+  "root_cause_component": "ledger-db",
+  "failing_config_key": "ledger.db.pool_max"
+}

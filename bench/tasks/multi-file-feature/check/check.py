@@ -8,7 +8,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 # number of test methods in each suite, so a module that fails to import
 # still counts as all of its tests failing
-EXPECTED = {"orig_tests": 30, "hidden_tests": 8}
+EXPECTED = {"orig_tests": 19, "hidden_tests": 22}
 
 total = got = 0
 all_green = True

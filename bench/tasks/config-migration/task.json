@@ -1,0 +1,9 @@
+{
+  "title": "Migrate INI configuration to JSON",
+  "category": "refactor",
+  "language": "python",
+  "difficulty": "medium",
+  "prompt": "We're retiring INI configuration in the report service. Please migrate it to JSON.\n\nToday `python main.py [--config PATH]` reads settings.ini (see app/settings.py and the modules that read the parsed config). After the change:\n\n- The service reads a JSON file instead: `--config PATH`, else `$APP_CONFIG`, else `./config.json`. Nothing reads settings.ini any more.\n- Convert the current settings.ini into config.json with the same effective settings.\n- The file layout is:\n\n```\n{\n  \"server\":   {\"host\": string, \"port\": integer, \"workers\": integer or \"auto\", \"debug\": boolean},\n  \"database\": {\"url\": string, \"pool_size\": integer, \"timeout_seconds\": number},\n  \"features\": {\"enabled\": [string, ...], \"beta_users\": [string, ...]},\n  \"logging\":  {\"level\": string, \"file\": string or null}\n}\n```\n\n  (`timeout_seconds` is the old `[database] timeout`.) Every key is optional; a missing key or `null` means the built-in default. Values use native JSON types, and a value of the wrong type (e.g. `\"port\": \"8080\"`, `\"debug\": \"yes\"`) is a config error. Invalid JSON is a config error too. Config errors behave like today: `config error: ...` on stderr (name the offending key), exit status 2.\n- Everything else must behave exactly as it does now: the same defaults, validation, normalisation and derived values, the same environment-variable overrides (same variable names, same precedence and parsing rules), the same missing-file behaviour, and byte-for-byte the same output from main.py.\n- Document the new format (keys, types, defaults, env overrides) in CONFIG.md and update the README.",
+  "timeoutMinutes": 20,
+  "budgetUsd": 0.8
+}

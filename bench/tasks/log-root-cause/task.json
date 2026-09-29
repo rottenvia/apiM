@@ -1,0 +1,9 @@
+{
+  "title": "Find the root cause in a noisy incident log",
+  "category": "debug",
+  "language": "text",
+  "difficulty": "medium",
+  "prompt": "Checkout was failing for a while this afternoon. app.log is the combined log from the checkout cluster covering the incident (all services log to it; the component is in [brackets]). Work out what actually happened, then write diagnosis.json in the repo root:\n\n{\n  \"first_failure_request_id\": \"req-xxxxxx\",\n  \"root_cause_component\": \"...\",\n  \"failing_config_key\": \"...\"\n}\n\n- first_failure_request_id: the request id of the first customer request that failed because of this incident.\n- root_cause_component: the component, exactly as it appears in the log's [component] field, where the failure originated.\n- failing_config_key: the configuration key whose change caused the incident.\n\nThe log is noisy and some of the scary-looking lines have nothing to do with this incident, so please check your reasoning against the log rather than going with the first error you find.",
+  "timeoutMinutes": 15,
+  "budgetUsd": 0.6
+}

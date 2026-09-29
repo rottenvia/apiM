@@ -1,0 +1,9 @@
+{
+  "title": "Make the calc test suite green",
+  "category": "debug",
+  "language": "python",
+  "difficulty": "hard",
+  "prompt": "The test suite for our little `calc` expression library is red (run it with `python -m unittest discover -s tests`). Make it green without weakening the tests: don't edit, skip or delete tests, fix the library instead. README.md describes how the language is supposed to behave, and the tests are correct. When you're done the whole suite has to pass, and the behaviour the README describes should hold generally, not only for the exact inputs in the tests.",
+  "timeoutMinutes": 25,
+  "budgetUsd": 1.0
+}

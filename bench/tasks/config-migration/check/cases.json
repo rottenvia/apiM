@@ -1,0 +1,604 @@
+{
+ "cases": [
+  {
+   "name": "defaults, no config file",
+   "expect": {
+    "code": 0,
+    "stdout": "server: host=127.0.0.1 port=8000 workers=2 debug=off\ndatabase: url=sqlite:///reports.db pool=5 timeout=30.0s\nfeatures: none (beta users: 0)\nlogging: level=INFO file=stderr\n"
+   }
+  },
+  {
+   "name": "full config",
+   "json": {
+    "server": {
+     "host": "10.0.0.5",
+     "port": 9000,
+     "workers": 3,
+     "debug": false
+    },
+    "database": {
+     "url": "mysql://u:pw@h/db",
+     "pool_size": 8,
+     "timeout_seconds": 2
+    },
+    "features": {
+     "enabled": [
+      "Beta",
+      " reports ",
+      "beta"
+     ],
+     "beta_users": [
+      "Z@x.io",
+      "a@x.io",
+      "z@x.io"
+     ]
+    },
+    "logging": {
+     "level": "error",
+     "file": null
+    }
+   },
+   "expect": {
+    "code": 0,
+    "stdout": "server: host=10.0.0.5 port=9000 workers=3 debug=off\ndatabase: url=mysql://u:***@h/db pool=8 timeout=2.0s\nfeatures: beta, reports (beta users: 2)\nlogging: level=ERROR file=stderr\n"
+   }
+  },
+  {
+   "name": "env overrides win",
+   "json": {
+    "server": {
+     "host": "10.0.0.5",
+     "port": 9000,
+     "workers": 3,
+     "debug": false
+    },
+    "database": {
+     "url": "mysql://u:pw@h/db",
+     "pool_size": 8,
+     "timeout_seconds": 2
+    },
+    "features": {
+     "enabled": [
+      "Beta",
+      " reports ",
+      "beta"
+     ],
+     "beta_users": [
+      "Z@x.io",
+      "a@x.io",
+      "z@x.io"
+     ]
+    },
+    "logging": {
+     "level": "error",
+     "file": null
+    }
+   },
+   "env": {
+    "APP_PORT": "9090",
+    "DATABASE_URL": "postgres://x:y@z/w",
+    "APP_FEATURES": " Search,EXPORT,,search ",
+    "APP_LOG_FILE": "/tmp/x.log",
+    "APP_HOST": "h.example"
+   },
+   "expect": {
+    "code": 0,
+    "stdout": "server: host=h.example port=9090 workers=3 debug=off\ndatabase: url=postgres://x:***@z/w pool=8 timeout=2.0s\nfeatures: search, export (beta users: 2)\nlogging: level=ERROR file=/tmp/x.log\n"
+   }
+  },
+  {
+   "name": "empty env vars are ignored",
+   "json": {
+    "server": {
+     "host": "10.0.0.5",
+     "port": 9000,
+     "workers": 3,
+     "debug": false
+    },
+    "database": {
+     "url": "mysql://u:pw@h/db",
+     "pool_size": 8,
+     "timeout_seconds": 2
+    },
+    "features": {
+     "enabled": [
+      "Beta",
+      " reports ",
+      "beta"
+     ],
+     "beta_users": [
+      "Z@x.io",
+      "a@x.io",
+      "z@x.io"
+     ]
+    },
+    "logging": {
+     "level": "error",
+     "file": null
+    }
+   },
+   "env": {
+    "APP_PORT": "",
+    "APP_HOST": "",
+    "APP_LOG_LEVEL": ""
+   },
+   "expect": {
+    "code": 0,
+    "stdout": "server: host=10.0.0.5 port=9000 workers=3 debug=off\ndatabase: url=mysql://u:***@h/db pool=8 timeout=2.0s\nfeatures: beta, reports (beta users: 2)\nlogging: level=ERROR file=stderr\n"
+   }
+  },
+  {
+   "name": "debug implies DEBUG level",
+   "json": {
+    "server": {
+     "debug": true
+    }
+   },
+   "expect": {
+    "code": 0,
+    "stdout": "server: host=127.0.0.1 port=8000 workers=2 debug=on\ndatabase: url=sqlite:///reports.db pool=5 timeout=30.0s\nfeatures: none (beta users: 0)\nlogging: level=DEBUG file=stderr\n"
+   }
+  },
+  {
+   "name": "APP_DEBUG=on keeps explicit level",
+   "json": {
+    "logging": {
+     "level": "info"
+    }
+   },
+   "env": {
+    "APP_DEBUG": "on"
+   },
+   "expect": {
+    "code": 0,
+    "stdout": "server: host=127.0.0.1 port=8000 workers=2 debug=on\ndatabase: url=sqlite:///reports.db pool=5 timeout=30.0s\nfeatures: none (beta users: 0)\nlogging: level=INFO file=stderr\n"
+   }
+  },
+  {
+   "name": "APP_DEBUG=off beats file",
+   "json": {
+    "server": {
+     "debug": true
+    }
+   },
+   "env": {
+    "APP_DEBUG": "0"
+   },
+   "expect": {
+    "code": 0,
+    "stdout": "server: host=127.0.0.1 port=8000 workers=2 debug=off\ndatabase: url=sqlite:///reports.db pool=5 timeout=30.0s\nfeatures: none (beta users: 0)\nlogging: level=INFO file=stderr\n"
+   }
+  },
+  {
+   "name": "bad APP_DEBUG",
+   "json": {},
+   "env": {
+    "APP_DEBUG": "maybe"
+   },
+   "expect": {
+    "code": 2,
+    "stdout": "",
+    "stderr_has": "config error"
+   }
+  },
+  {
+   "name": "port out of range",
+   "json": {
+    "server": {
+     "port": 70000
+    }
+   },
+   "expect": {
+    "code": 2,
+    "stdout": "",
+    "stderr_has": "config error"
+   }
+  },
+  {
+   "name": "bad APP_PORT",
+   "env": {
+    "APP_PORT": "80a"
+   },
+   "expect": {
+    "code": 2,
+    "stdout": "",
+    "stderr_has": "config error"
+   }
+  },
+  {
+   "name": "workers auto from pool size",
+   "json": {
+    "server": {
+     "workers": "auto"
+    },
+    "database": {
+     "pool_size": 9
+    }
+   },
+   "expect": {
+    "code": 0,
+    "stdout": "server: host=127.0.0.1 port=8000 workers=4 debug=off\ndatabase: url=sqlite:///reports.db pool=9 timeout=30.0s\nfeatures: none (beta users: 0)\nlogging: level=INFO file=stderr\n"
+   }
+  },
+  {
+   "name": "APP_WORKERS=auto over a number",
+   "json": {
+    "server": {
+     "workers": 7
+    }
+   },
+   "env": {
+    "APP_WORKERS": "auto",
+    "APP_DB_POOL_SIZE": "20"
+   },
+   "expect": {
+    "code": 0,
+    "stdout": "server: host=127.0.0.1 port=8000 workers=10 debug=off\ndatabase: url=sqlite:///reports.db pool=20 timeout=30.0s\nfeatures: none (beta users: 0)\nlogging: level=INFO file=stderr\n"
+   }
+  },
+  {
+   "name": "APP_WORKERS number over auto",
+   "json": {
+    "server": {
+     "workers": "auto"
+    }
+   },
+   "env": {
+    "APP_WORKERS": "7"
+   },
+   "expect": {
+    "code": 0,
+    "stdout": "server: host=127.0.0.1 port=8000 workers=7 debug=off\ndatabase: url=sqlite:///reports.db pool=5 timeout=30.0s\nfeatures: none (beta users: 0)\nlogging: level=INFO file=stderr\n"
+   }
+  },
+  {
+   "name": "--config path",
+   "json": {
+    "server": {
+     "host": "10.0.0.5",
+     "port": 9000,
+     "workers": 3,
+     "debug": false
+    },
+    "database": {
+     "url": "mysql://u:pw@h/db",
+     "pool_size": 8,
+     "timeout_seconds": 2
+    },
+    "features": {
+     "enabled": [
+      "Beta",
+      " reports ",
+      "beta"
+     ],
+     "beta_users": [
+      "Z@x.io",
+      "a@x.io",
+      "z@x.io"
+     ]
+    },
+    "logging": {
+     "level": "error",
+     "file": null
+    }
+   },
+   "args": [
+    "--config",
+    "{cfg}"
+   ],
+   "custom": true,
+   "decoy": true,
+   "expect": {
+    "code": 0,
+    "stdout": "server: host=10.0.0.5 port=9000 workers=3 debug=off\ndatabase: url=mysql://u:***@h/db pool=8 timeout=2.0s\nfeatures: beta, reports (beta users: 2)\nlogging: level=ERROR file=stderr\n"
+   }
+  },
+  {
+   "name": "APP_CONFIG path",
+   "json": {
+    "server": {
+     "host": "10.0.0.5",
+     "port": 9000,
+     "workers": 3,
+     "debug": false
+    },
+    "database": {
+     "url": "mysql://u:pw@h/db",
+     "pool_size": 8,
+     "timeout_seconds": 2
+    },
+    "features": {
+     "enabled": [
+      "Beta",
+      " reports ",
+      "beta"
+     ],
+     "beta_users": [
+      "Z@x.io",
+      "a@x.io",
+      "z@x.io"
+     ]
+    },
+    "logging": {
+     "level": "error",
+     "file": null
+    }
+   },
+   "env": {
+    "APP_CONFIG": "{cfg}"
+   },
+   "custom": true,
+   "decoy": true,
+   "expect": {
+    "code": 0,
+    "stdout": "server: host=10.0.0.5 port=9000 workers=3 debug=off\ndatabase: url=mysql://u:***@h/db pool=8 timeout=2.0s\nfeatures: beta, reports (beta users: 2)\nlogging: level=ERROR file=stderr\n"
+   }
+  },
+  {
+   "name": "--config beats APP_CONFIG",
+   "json": {
+    "server": {
+     "host": "10.0.0.5",
+     "port": 9000,
+     "workers": 3,
+     "debug": false
+    },
+    "database": {
+     "url": "mysql://u:pw@h/db",
+     "pool_size": 8,
+     "timeout_seconds": 2
+    },
+    "features": {
+     "enabled": [
+      "Beta",
+      " reports ",
+      "beta"
+     ],
+     "beta_users": [
+      "Z@x.io",
+      "a@x.io",
+      "z@x.io"
+     ]
+    },
+    "logging": {
+     "level": "error",
+     "file": null
+    }
+   },
+   "env": {
+    "APP_CONFIG": "{decoy}"
+   },
+   "args": [
+    "--config",
+    "{cfg}"
+   ],
+   "custom": true,
+   "decoy": true,
+   "expect": {
+    "code": 0,
+    "stdout": "server: host=10.0.0.5 port=9000 workers=3 debug=off\ndatabase: url=mysql://u:***@h/db pool=8 timeout=2.0s\nfeatures: beta, reports (beta users: 2)\nlogging: level=ERROR file=stderr\n"
+   }
+  },
+  {
+   "name": "--config missing file",
+   "args": [
+    "--config",
+    "nope.{ext}"
+   ],
+   "expect": {
+    "code": 2,
+    "stdout": "",
+    "stderr_has": "config error"
+   }
+  },
+  {
+   "name": "APP_CONFIG missing file",
+   "env": {
+    "APP_CONFIG": "gone.{ext}"
+   },
+   "expect": {
+    "code": 2,
+    "stdout": "",
+    "stderr_has": "config error"
+   }
+  },
+  {
+   "name": "level alias warn",
+   "json": {
+    "logging": {
+     "level": "Warn",
+     "file": "/srv/log.txt"
+    }
+   },
+   "expect": {
+    "code": 0,
+    "stdout": "server: host=127.0.0.1 port=8000 workers=2 debug=off\ndatabase: url=sqlite:///reports.db pool=5 timeout=30.0s\nfeatures: none (beta users: 0)\nlogging: level=WARNING file=/srv/log.txt\n"
+   }
+  },
+  {
+   "name": "invalid level",
+   "json": {
+    "logging": {
+     "level": "verbose"
+    }
+   },
+   "expect": {
+    "code": 2,
+    "stdout": "",
+    "stderr_has": "config error"
+   }
+  },
+  {
+   "name": "nulls mean default",
+   "json": {
+    "server": {
+     "port": null,
+     "host": null
+    },
+    "logging": {
+     "file": null,
+     "level": null
+    }
+   },
+   "expect": {
+    "code": 0,
+    "stdout": "server: host=127.0.0.1 port=8000 workers=2 debug=off\ndatabase: url=sqlite:///reports.db pool=5 timeout=30.0s\nfeatures: none (beta users: 0)\nlogging: level=INFO file=stderr\n"
+   }
+  },
+  {
+   "name": "unknown keys ignored",
+   "json": {
+    "server": {
+     "port": 8081,
+     "colour": "blue"
+    },
+    "extra": {
+     "x": 1
+    }
+   },
+   "expect": {
+    "code": 0,
+    "stdout": "server: host=127.0.0.1 port=8081 workers=2 debug=off\ndatabase: url=sqlite:///reports.db pool=5 timeout=30.0s\nfeatures: none (beta users: 0)\nlogging: level=INFO file=stderr\n"
+   }
+  },
+  {
+   "name": "timeout and pool from env",
+   "json": {
+    "database": {
+     "timeout_seconds": 10,
+     "pool_size": 30
+    }
+   },
+   "env": {
+    "APP_DB_TIMEOUT": "0.25",
+    "APP_DB_POOL_SIZE": "1"
+   },
+   "expect": {
+    "code": 0,
+    "stdout": "server: host=127.0.0.1 port=8000 workers=1 debug=off\ndatabase: url=sqlite:///reports.db pool=1 timeout=0.25s\nfeatures: none (beta users: 0)\nlogging: level=INFO file=stderr\n"
+   }
+  },
+  {
+   "name": "zero timeout",
+   "json": {
+    "database": {
+     "timeout_seconds": 0
+    }
+   },
+   "expect": {
+    "code": 2,
+    "stdout": "",
+    "stderr_has": "config error"
+   }
+  },
+  {
+   "name": "empty feature lists",
+   "json": {
+    "features": {
+     "enabled": [],
+     "beta_users": []
+    }
+   },
+   "expect": {
+    "code": 0,
+    "stdout": "server: host=127.0.0.1 port=8000 workers=2 debug=off\ndatabase: url=sqlite:///reports.db pool=5 timeout=30.0s\nfeatures: none (beta users: 0)\nlogging: level=INFO file=stderr\n"
+   }
+  },
+  {
+   "name": "float timeout",
+   "json": {
+    "database": {
+     "timeout_seconds": 0.75
+    }
+   },
+   "expect": {
+    "code": 0,
+    "stdout": "server: host=127.0.0.1 port=8000 workers=2 debug=off\ndatabase: url=sqlite:///reports.db pool=5 timeout=0.75s\nfeatures: none (beta users: 0)\nlogging: level=INFO file=stderr\n"
+   }
+  },
+  {
+   "name": "missing default file ignores settings.ini",
+   "json": null,
+   "decoy": true,
+   "expect": {
+    "code": 0,
+    "stdout": "server: host=127.0.0.1 port=8000 workers=2 debug=off\ndatabase: url=sqlite:///reports.db pool=5 timeout=30.0s\nfeatures: none (beta users: 0)\nlogging: level=INFO file=stderr\n"
+   }
+  },
+  {
+   "name": "port given as a string",
+   "json": {
+    "server": {
+     "port": "8080"
+    }
+   },
+   "expect": {
+    "code": 2,
+    "stdout": "",
+    "stderr_has": "port"
+   }
+  },
+  {
+   "name": "debug given as a string",
+   "json": {
+    "server": {
+     "debug": "yes"
+    }
+   },
+   "expect": {
+    "code": 2,
+    "stdout": "",
+    "stderr_has": "debug"
+   }
+  },
+  {
+   "name": "pool_size given as a boolean",
+   "json": {
+    "database": {
+     "pool_size": true
+    }
+   },
+   "expect": {
+    "code": 2,
+    "stdout": "",
+    "stderr_has": "pool_size"
+   }
+  },
+  {
+   "name": "features given as a string",
+   "json": {
+    "features": {
+     "enabled": "search,export"
+    }
+   },
+   "expect": {
+    "code": 2,
+    "stdout": "",
+    "stderr_has": "enabled"
+   }
+  },
+  {
+   "name": "malformed JSON",
+   "json": "{\"server\": {\"port\": 8080,}}",
+   "expect": {
+    "code": 2,
+    "stdout": "",
+    "stderr_has": ""
+   }
+  }
+ ],
+ "decoy_json": {
+  "server": {
+   "port": 1111,
+   "host": "decoy"
+  },
+  "database": {
+   "pool_size": 2
+  }
+ },
+ "decoy_ini": "[server]\nport = 1111\nhost = decoy\n[database]\npool_size = 2\n",
+ "shipped": {
+  "code": 0,
+  "stdout": "server: host=0.0.0.0 port=8080 workers=6 debug=off\ndatabase: url=postgres://reports:***@db.internal:5432/reports pool=12 timeout=4.5s\nfeatures: export, search, scheduling (beta users: 2)\nlogging: level=WARNING file=/var/log/reports/app.log\n"
+ }
+}
