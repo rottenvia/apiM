@@ -230,6 +230,26 @@ async function main() {
   }
 
   // ------------------------------------------------------------------
+  console.log(bold("\n2b. Two delegate helpers run side by side and report back"));
+  {
+    const r = await runScenario(appPort, "delegate_pair");
+    const helpers = readFileSync(LOG, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l))
+      .filter((x) => x.scenario === "delegate_pair" && x.event === "helper");
+    check("both helpers ran", helpers.length === 2, `${helpers.length} helper requests`);
+    check("at the same time", helpers.length === 2 && Math.abs(helpers[0].started - helpers[1].started) < 300,
+      helpers.map((h) => h.started).join(" / "));
+    check("helpers are offered read-only tools only",
+      helpers.every((h) => h.tools.includes("read_file") && !h.tools.includes("write_file") && !h.tools.includes("delegate")));
+    const next = r.requests[1];
+    const toolMsgs = (next?.messages ?? []).filter((m) => m.role === "tool").map(text);
+    check("the main agent receives both reports", toolMsgs.filter((t) => /^Helper report/.test(t) && /REPORT: Find where [AB]/.test(t)).length === 2,
+      toolMsgs.map((t) => t.slice(0, 50)).join(" | "));
+    const done = r.frames.find((f) => f.type === "done");
+    check("helper tokens count toward the reply", (done?.usage?.prompt_tokens ?? 0) >= 4000 + 500, `prompt ${done?.usage?.prompt_tokens}`);
+    check("the reply ends cleanly", r.done && r.errors.length === 0, r.errors.join(" | "));
+  }
+
+  // ------------------------------------------------------------------
   console.log(bold("\n3. A drop in the no-thinking round keeps its retry thought-less"));
   {
     const r = await runScenario(appPort, "drop_after_cutover");

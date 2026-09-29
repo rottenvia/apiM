@@ -65,6 +65,15 @@ import { applyPatch, formatHunkReport, PatchReportError } from "@/lib/patch";
 import { analyzeLog, formatLogAnalysis } from "@/lib/logs";
 import { formatMarkerReport, verifyMarkers } from "@/lib/markers";
 import { findSymbols, formatSymbol } from "@/lib/symbols";
+import {
+  bareName,
+  findDefinitionsIn,
+  findReferencesIn,
+  formatReferences,
+  isIdentifier,
+  readSourceFiles,
+} from "@/lib/code-index";
+import { checkSyntax, formatSyntaxProblems, pathsWrittenBy } from "@/lib/syntax-check";
 import { captureWindow } from "@/lib/screenshot";
 import { httpRequest, formatHttpResult } from "@/lib/http";
 import {
@@ -1553,11 +1562,16 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
         "comes back byte for byte with its start_line and end_line, which " +
         "you can hand straight to edit_file — no whitespace to copy, no " +
         "landmark to guess. If the name is defined more than once, every " +
-        "definition is listed so you can pick the right one.",
+        "definition is listed so you can pick the right one. Leave path out " +
+        "to go to the definition wherever it is in the workspace.",
       parameters: {
         type: "object",
         properties: {
-          path: { type: "string", description: "Source file to look in." },
+          path: {
+            type: "string",
+            description:
+              "Source file to look in. Omit to search every source file (go to definition).",
+          },
           name: {
             type: "string",
             description:
@@ -1572,7 +1586,33 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
               "Omit to get a list of all of them plus the first body.",
           },
         },
-        required: ["path", "name"],
+        required: ["name"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "find_references",
+      description:
+        "Every place an identifier is used, across all source files: whole-identifier " +
+        "matches only (save does not match autosave), each labelled definition, import " +
+        "or use, grouped by file with line numbers. Call it BEFORE renaming, deleting or " +
+        "changing the signature of a function, class or variable, so no caller is missed — " +
+        "and use it to answer \"who calls this?\" instead of search_files.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: {
+            type: "string",
+            description: 'Identifier, e.g. "loadConfig". Qualified names ("Cls.method", "ns::fn") use the last segment.',
+          },
+          path: {
+            type: "string",
+            description: "Limit to this directory. Omit for the whole workspace.",
+          },
+        },
+        required: ["name"],
       },
     },
   },
@@ -2509,6 +2549,8 @@ export interface ToolContext {
    * other conversation, which is what keeps recall from becoming a leak.
    */
   conversationId?: string;
+  /** Tests that assert exact tool output switch the post-edit parse off. */
+  skipSyntaxCheck?: boolean;
 }
 
 /**
@@ -2528,8 +2570,40 @@ export async function runTool(
   context: ToolContext = {}
 ): Promise<ToolResult> {
   // One undo-history entry per file per tool call; see withHistoryBatch.
-  return withHistoryBatch(() => runToolInner(workspaceId, name, args, context));
+  const result = await withHistoryBatch(() =>
+    runToolInner(workspaceId, name, args, context)
+  );
+  /*
+   * A parse check on whatever the edit wrote, reported in the same tool
+   * result — the language-server feedback a CLI agent gets from its editor.
+   * See lib/syntax-check. Never fails the call: a checker problem is not
+   * the model's mistake.
+   */
+  if (result.ok && SYNTAX_CHECKED_TOOLS.has(name) && !context.skipSyntaxCheck) {
+    try {
+      const problems = await checkSyntax(workspaceId, pathsWrittenBy(name, args));
+      if (problems.length) {
+        return {
+          ...result,
+          content: result.content + formatSyntaxProblems(problems),
+          summary: `${result.summary} · ${problems.length} syntax error${problems.length === 1 ? "" : "s"}`,
+        };
+      }
+    } catch {
+      /* checker unavailable — the edit itself stands */
+    }
+  }
+  return result;
 }
+
+const SYNTAX_CHECKED_TOOLS = new Set([
+  "write_file",
+  "create_file",
+  "write_files",
+  "edit_file",
+  "edit_files",
+  "apply_patch",
+]);
 
 async function runToolInner(
   workspaceId: string,
@@ -3582,14 +3656,75 @@ async function runToolInner(
         };
       }
 
+      case "find_references": {
+        const symbolName = str(args, "name");
+        if (!symbolName || !isIdentifier(bareName(symbolName))) {
+          return {
+            ok: false,
+            content: "Error: name must be an identifier, e.g. loadConfig.",
+            summary: "No identifier given",
+          };
+        }
+        const { files, skipped } = await readSourceFiles(workspaceId, str(args, "path") || undefined);
+        const { refs, total } = findReferencesIn(files, symbolName);
+        const files_ = new Set(refs.map((r) => r.path)).size;
+        return {
+          ok: true,
+          content: formatReferences(symbolName, refs, total, files.length, skipped),
+          summary: total
+            ? `${total} reference${total === 1 ? "" : "s"} to ${symbolName} in ${files_} file${files_ === 1 ? "" : "s"}`
+            : `No references to ${symbolName}`,
+        };
+      }
+
       case "read_symbol": {
         const filePath = str(args, "path");
         const symbolName = str(args, "name");
-        if (!filePath || !symbolName) {
+        if (!symbolName) {
           return {
             ok: false,
-            content: "Error: both path and name are required.",
-            summary: "Missing path or name",
+            content: "Error: name is required.",
+            summary: "Missing name",
+          };
+        }
+        if (!filePath) {
+          // Go to definition: every source file, not one.
+          const { files } = await readSourceFiles(workspaceId);
+          const defs = findDefinitionsIn(files, symbolName);
+          if (defs.length === 0) {
+            return {
+              ok: false,
+              content:
+                `No definition of "${symbolName}" in ${files.length} source files. ` +
+                `It may be defined by a dependency, generated, or spelled differently — ` +
+                `find_references shows every place the name appears.`,
+              summary: `No definition of ${symbolName}`,
+            };
+          }
+          const pick = num(args, "index");
+          const chosen =
+            pick && pick >= 1 && pick <= defs.length ? defs[pick - 1] : defs[0];
+          const list =
+            defs.length > 1
+              ? `${defs.length} definitions of "${symbolName}":\n` +
+                defs
+                  .map(
+                    (d, i) =>
+                      `  ${i + 1}. ${d.path}:${d.match.startLine}-${d.match.endLine} — ${d.match.signature}`
+                  )
+                  .join("\n") +
+                `\n\nShowing #${defs.indexOf(chosen) + 1}; pass index (or path) to see another.\n\n`
+              : "";
+          return {
+            ok: true,
+            content:
+              list +
+              formatSymbol(
+                chosen.match,
+                chosen.path,
+                numberLines(chosen.match.text, chosen.match.startLine)
+              ),
+            summary: `Read ${symbolName} from ${chosen.path}:${chosen.match.startLine}-${chosen.match.endLine}`,
           };
         }
 

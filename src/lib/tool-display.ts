@@ -37,6 +37,8 @@ const TABLE: Record<string, [ToolKind, string, string]> = {
   read_file: ["read", "Reading", "Read"],
   read_files: ["read", "Reading", "Read"],
   read_symbol: ["read", "Reading", "Read"],
+  find_references: ["search", "Finding uses of", "Found uses of"],
+  delegate: ["search", "Delegating", "Delegated"],
   read_document: ["read", "Reading", "Read"],
   list_files: ["read", "Listing files", "Listed files"],
   verify_file: ["read", "Checking", "Checked"],
@@ -142,6 +144,13 @@ function targetFor(name: string, args: string): { target: string | null; mono: b
   if (typeof a.command === "string") {
     const list = Array.isArray(a.args) ? a.args.map(String) : [];
     return { target: [a.command, ...list].join(" "), mono: true };
+  }
+  if (name === "find_references" && str(a.name)) {
+    return { target: `${a.name}${path ? ` in ${path}` : ""}`, mono: true };
+  }
+  if (name === "delegate" && str(a.task)) {
+    const task = String(a.task).split("\n")[0];
+    return { target: task.length > 90 ? `${task.slice(0, 89)}…` : task, mono: false };
   }
   if (name === "read_symbol" && str(a.name)) {
     return { target: `${a.name}${path ? ` in ${path}` : ""}`, mono: true };
