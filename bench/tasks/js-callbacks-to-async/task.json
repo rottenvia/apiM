@@ -1,0 +1,9 @@
+{
+  "title": "Convert recordkit from callbacks to async/await",
+  "category": "refactor",
+  "language": "javascript",
+  "difficulty": "hard",
+  "prompt": "recordkit (this repo) still uses Node-style error-first callbacks everywhere, and we want to publish a promise-based major version. Please convert the whole package to async/await:\n\n- Every exported function — readRecord, writeRecord, listIds, parseRecord, mapLimit, withRetry, loadAll, buildReport — keeps its name and its other parameters, but no longer takes a callback: it returns a Promise instead. No dual callback/promise APIs; the callback style should be gone entirely.\n- Functions passed INTO the library become promise-based too: mapLimit's iterator is now `(item, index) => Promise | value`, and withRetry's task is now `() => Promise`.\n- Behaviour must stay as documented in the doc comments (concurrency limit, result order, which error types are raised, retry semantics, which files are listed, the report format). Failures must reject the returned promise — never throw synchronously and never settle twice.\n- Update example.js to the new API using async/await; its output should stay the same apart from anything that was a bug. Update the doc comments as you go.\n\nUse Node built-ins only.",
+  "timeoutMinutes": 25,
+  "budgetUsd": 0.8
+}

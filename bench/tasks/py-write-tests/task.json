@@ -1,0 +1,9 @@
+{
+  "title": "Write a test suite for money.py",
+  "category": "tests",
+  "language": "python",
+  "difficulty": "hard",
+  "prompt": "money.py is our billing service's money helper module (parsing amounts to cents, formatting, splitting and allocating). It has almost no tests, and a few past bugs in it cost us real money, so I want a thorough unittest suite in tests/test_money.py (standard library unittest only, no pytest). The documented behaviour in the docstrings is the contract: test the four public functions against what the docstrings promise, including the edge cases, not the implementation details or private helpers. The suite has to pass against the current money.py (assume it is correct; don't change it) and should be good enough to catch any regression that breaks the documented behaviour. It must run with `python -m unittest discover -s tests -t .` and finish in a few seconds.",
+  "timeoutMinutes": 20,
+  "budgetUsd": 0.8
+}
