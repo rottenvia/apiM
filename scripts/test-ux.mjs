@@ -685,10 +685,12 @@ check(
   "copy, edit, delete — one cluster, right-aligned"
 );
 check(
-  "the edit textarea never opens smaller than the message it edits",
-  /rows=\{Math\.max\(/.test(bubble) &&
-    /message\.content\.split\("\\n"\)\.length \+ 1/.test(bubble),
-  "the old editor sized rows from the draft only, collapsing a 3-line message"
+  "the edit box keeps the message's own size",
+  /data-edit-mirror/.test(bubble) &&
+    /invisible col-start-1 row-start-1 whitespace-pre-wrap break-words text-\[15px\] leading-6/.test(bubble) &&
+    /draft\.endsWith\("\\n"\) \? draft \+ " " : draft/.test(bubble) &&
+    /className="col-start-1 row-start-1 [^"]*resize-none/.test(bubble),
+  "reported: Edit collapsed the bubble — an invisible copy of the draft now sizes the cell the textarea fills"
 );
 
 console.log("\n12. switching chats cancels, shows a skeleton, and skips identical swaps");
