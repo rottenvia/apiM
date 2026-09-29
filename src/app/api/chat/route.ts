@@ -68,6 +68,7 @@ import { browserAvailable } from "@/lib/browser-playwright";
 import { recordAsync } from "@/lib/diagnostics";
 import { listFiles, readFileWhole, workspaceDirectory } from "@/lib/workspace";
 import { createSnapshot } from "@/lib/snapshots";
+import { linkRestorePoint } from "@/lib/rewind";
 import {
   runCommand,
   isReadOnlyCommand,
@@ -1352,10 +1353,12 @@ export async function POST(req: NextRequest) {
         // files. Failure here must not block the reply.
         if (workspaceEnabled) {
           try {
-            await createSnapshot(
+            const restorePoint = await createSnapshot(
               workspace,
               (displayContent?.trim() || userText).slice(0, 80)
             );
+            // Rewind: record on the question which restore point precedes it (lib/rewind.ts).
+            await linkRestorePoint(convId, workspace, assistantMsgId, restorePoint);
           } catch (e) {
             console.error("Snapshot failed:", e);
           }

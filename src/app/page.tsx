@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { v4 as uuidv4 } from "uuid";
 import { Sidebar } from "@/components/Sidebar";
 import { ChatArea } from "@/components/ChatArea";
+import type { RewindDone, RewindPreview } from "@/components/RewindPopover";
 import type { BtwEntry } from "@/components/BtwDock";
 import { SettingsModal } from "@/components/SettingsModal";
 import { PluginsModal } from "@/components/PluginsModal";
@@ -4068,6 +4069,128 @@ export default function Home() {
     ]
   );
 
+  /*
+   * Rewind to a question — the chat, and the workspace files if asked.
+   *
+   * Questions sent in this tab carry temp- ids the store never saw, so the
+   * request also names the reply's server id and the question's position
+   * and text; the server finds the stored question from those. `dryRun`
+   * asks what would happen, for the confirm step.
+   */
+  const requestRewind = useCallback(
+    async (messageId: string, restoreFiles: boolean, dryRun: boolean) => {
+      const convId = workspaceIdRef.current;
+      if (!convId) {
+        return { ok: false as const, error: "This chat hasn't been saved yet — send a message first." };
+      }
+      if (getSession(convId).loading) {
+        return { ok: false as const, error: "A reply is running — stop it or wait for it, then rewind." };
+      }
+      const list = messagesRef.current;
+      const index = list.findIndex((m) => m.id === messageId);
+      const question = list[index];
+      if (!question || question.role !== "user") {
+        return { ok: false as const, error: "That message is no longer in this chat." };
+      }
+      const reply = list[index + 1];
+      let res: Response;
+      try {
+        res = await fetch(`/api/conversations/${convId}/rewind`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            messageId,
+            replyId:
+              reply?.role === "assistant" && !reply.id.startsWith("stream-")
+                ? reply.id
+                : undefined,
+            ordinal: list
+              .slice(0, index)
+              .filter((m) => m.role === "user" && !m.isNote).length,
+            content: question.content,
+            restoreFiles,
+            dryRun,
+          }),
+        });
+      } catch {
+        return { ok: false as const, error: "Couldn't reach the server — nothing was changed." };
+      }
+      const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+      if (!res.ok) {
+        return {
+          ok: false as const,
+          error: typeof data.error === "string" ? data.error : "Rewinding failed.",
+        };
+      }
+      return { ok: true as const, convId, data };
+    },
+    []
+  );
+
+  const previewRewind = useCallback(
+    async (messageId: string): Promise<RewindPreview> => {
+      const r = await requestRewind(messageId, false, true);
+      if (!r.ok) return r;
+      const files = r.data.files as Extract<RewindPreview, { ok: true }>["files"] | undefined;
+      return {
+        ok: true,
+        removedMessages: Number(r.data.removedMessages) || 1,
+        files: files ?? { available: false, kind: "none" },
+      };
+    },
+    [requestRewind]
+  );
+
+  const rewindToMessage = useCallback(
+    async (messageId: string, restoreFiles: boolean): Promise<RewindDone> => {
+      const r = await requestRewind(messageId, restoreFiles, false);
+      if (!r.ok) return r;
+      const { convId, data } = r;
+
+      // The cut shows at once; the server's copy (real ids, a dropped
+      // summary) replaces it straight after.
+      writeMessages(convId, (prev) => {
+        const i = prev.findIndex((m) => m.id === messageId);
+        return i === -1 ? prev : prev.slice(0, i);
+      });
+      if (mirroredIdRef.current === convId) void loadConversation(convId);
+      if (restoreFiles) void refreshWorkspaceFiles();
+
+      const removed = Number(data.removedMessages) || 1;
+      const counts = data.filesRestored as { restored: number; removed: number } | null;
+      const safety = typeof data.safetySnapshotId === "string" ? data.safetySnapshotId : null;
+      const text =
+        `Rewound — ${removed} message${removed === 1 ? "" : "s"} removed` +
+        (counts
+          ? `, files put back (${counts.restored} restored, ${counts.removed} removed).`
+          : ", files left as they are.") +
+        " Edit the question and send it again.";
+
+      return {
+        ok: true,
+        question: typeof data.question === "string" ? data.question : "",
+        text,
+        undoFiles: safety
+          ? async () => {
+              try {
+                const res = await fetch(`/api/workspace/${convId}/snapshots`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ snapshot: safety }),
+                });
+                if (!res.ok) throw new Error();
+                if (workspaceIdRef.current === convId) void refreshWorkspaceFiles();
+                return { ok: true, text: "The files are back as they were before the rewind." };
+              } catch {
+                return { ok: false, text: "Couldn't put the files back — use Restore points in the file panel." };
+              }
+            }
+          : undefined,
+      };
+    },
+    [requestRewind, writeMessages, loadConversation, refreshWorkspaceFiles]
+  );
+
   /** Slash commands whose state lives on this page. */
   const runPageCommand = useCallback(
     async (name: string, arg: string): Promise<{ ok: boolean; text?: string } | void> => {
@@ -4298,6 +4421,8 @@ export default function Home() {
         onLoadReasoning={loadReasoning}
         onEdit={editMessage}
         onDeleteMessage={deleteMessage}
+        onRewindPreview={previewRewind}
+        onRewind={rewindToMessage}
         onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}
         onNewChat={startNewChat}
         onSetSearchMode={setWebSearchMode}
