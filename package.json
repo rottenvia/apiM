@@ -82,7 +82,8 @@
     "test:modalities": "tsx scripts/test-modalities.mjs",
     "test:batching": "tsx scripts/test-batching.mjs",
     "test:observability": "tsx scripts/test-observability.mjs",
-    "test:slash": "tsx scripts/test-slash.mjs"
+    "test:slash": "tsx scripts/test-slash.mjs",
+    "test:rewind": "tsx scripts/test-rewind.mjs"
   },
   "dependencies": {
     "@types/cross-spawn": "^6.0.6",

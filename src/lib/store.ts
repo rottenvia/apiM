@@ -124,6 +124,14 @@ export interface StoredMessage {
     /** Verbatim API messages, including reasoning and tool results. */
     messages: unknown[];
   } | null;
+  /**
+   * On a question: the workspace restore point taken at the start of its
+   * first reply — what "rewind to this message" puts the files back to (see
+   * lib/rewind.ts). `snapshotId: null` means the workspace was empty then,
+   * which createSnapshot does not save. Absent on questions asked before
+   * this existed, or with the workspace off.
+   */
+  restorePoint?: { snapshotId: string | null; at: string } | null;
 }
 
 /**
@@ -903,6 +911,64 @@ export async function truncateFrom(
     dropStaleSummary(conv);
     conv.updatedAt = new Date().toISOString();
     return { write: conv, result: true };
+  });
+}
+
+/**
+ * Tie the restore point just taken for a reply to the question it answers.
+ *
+ * Called by the chat route right after the start-of-reply snapshot. At that
+ * moment the question is the newest stored message (a new send appended it,
+ * a regenerate truncated back to it). Only the FIRST reply's point is kept:
+ * a regenerate starts from whatever the earlier reply left behind, and
+ * "rewind to this message" means before any of it. A resume is skipped —
+ * its reply is already stored, and its snapshot is mid-work.
+ */
+export async function recordRestorePoint(
+  conversationId: string,
+  replyId: string,
+  snapshotId: string | null
+): Promise<boolean> {
+  return mutate(conversationId, (conv) => {
+    if (!conv || conv.messages.some((m) => m.id === replyId)) {
+      return { write: null, result: false };
+    }
+    const last = conv.messages[conv.messages.length - 1];
+    if (!last || last.role !== "user" || last.note || last.restorePoint) {
+      return { write: null, result: false };
+    }
+    last.restorePoint = { snapshotId, at: new Date().toISOString() };
+    return { write: conv, result: true };
+  });
+}
+
+/**
+ * Cut a conversation back to just before one of its messages (rewind).
+ *
+ * `decide` runs inside this chat's write slot, with the stored copy, and
+ * returns where to cut (or null to change nothing) — so the message it
+ * located cannot move before the cut lands, and anything it does alongside
+ * (restoring files) is ordered with every other write to this chat.
+ * Resolves to null when the conversation does not exist.
+ */
+export async function rewindConversation<T>(
+  conversationId: string,
+  decide: (
+    conv: StoredConversation
+  ) => Promise<{ cut: number | null; result: T }>
+): Promise<T | null> {
+  return mutate(conversationId, async (conv) => {
+    if (!conv) return { write: null, result: null };
+    const { cut, result } = await decide(conv);
+    if (cut === null || cut < 0 || cut >= conv.messages.length) {
+      return { write: null, result };
+    }
+    conv.messages = conv.messages.slice(0, cut);
+    // Notes queued for a run that no longer has a place in the history.
+    delete conv.btwNotes;
+    dropStaleSummary(conv);
+    conv.updatedAt = new Date().toISOString();
+    return { write: conv, result };
   });
 }
 
