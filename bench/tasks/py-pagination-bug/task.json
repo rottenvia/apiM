@@ -1,0 +1,9 @@
+{
+  "title": "Fix the pagination off-by-one",
+  "category": "bugfix",
+  "language": "python",
+  "difficulty": "easy",
+  "prompt": "Users report that paging through search results skips an item between pages and that the last page is sometimes empty. The code is in pager.py. Find and fix the bug, and make sure page_count is right too. Pages are 1-based.",
+  "timeoutMinutes": 10,
+  "budgetUsd": 0.3
+}
