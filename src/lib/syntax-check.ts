@@ -17,7 +17,7 @@
  * model's syntax mistake.
  */
 
-import { execFile } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { resolveInside } from "@/lib/workspace";
 
@@ -136,6 +136,148 @@ for (const f of files) {
 process.stdout.write(JSON.stringify(out));
 `;
 
+/*
+ * The TypeScript parser, kept warm.
+ *
+ * Loading typescript costs ~250ms, and a one-shot child paid it on every
+ * edit — on a 40-edit task, ten seconds of nothing. One long-lived child
+ * holds it loaded and answers line-delimited requests in a few ms; it exits
+ * after a minute idle, and any failure falls back to the one-shot child.
+ */
+const TS_WORKER = `
+let ts = null;
+try { ts = require(require.resolve("typescript", { paths: [process.cwd()] })); } catch {}
+const fs = require("fs");
+require("readline").createInterface({ input: process.stdin }).on("line", (line) => {
+  let req;
+  try { req = JSON.parse(line); } catch { return; }
+  if (!ts) { process.stdout.write(JSON.stringify({ id: req.id, noTs: true }) + "\\n"); return; }
+  const out = [];
+  for (const f of req.files) {
+    let text;
+    try { text = fs.readFileSync(f.abs, "utf8"); } catch { continue; }
+    try {
+      const r = ts.transpileModule(text, {
+        fileName: f.abs,
+        reportDiagnostics: true,
+        compilerOptions: { jsx: ts.JsxEmit.Preserve, allowJs: true },
+      });
+      for (const d of r.diagnostics || []) {
+        if (d.category !== ts.DiagnosticCategory.Error || !d.file || d.start === undefined) continue;
+        const p = d.file.getLineAndCharacterOfPosition(d.start);
+        out.push({ path: f.rel, line: p.line + 1, column: p.character + 1,
+          message: ts.flattenDiagnosticMessageText(d.messageText, " ") });
+      }
+    } catch {}
+  }
+  process.stdout.write(JSON.stringify({ id: req.id, problems: out }) + "\\n");
+});
+`;
+
+const WORKER_IDLE_MS = 60_000;
+let worker: ChildProcess | null = null;
+let workerBuffer = "";
+let workerIdle: ReturnType<typeof setTimeout> | null = null;
+let nextId = 1;
+const waiting = new Map<number, (r: { noTs?: boolean; problems?: SyntaxProblem[] } | null) => void>();
+
+function stopWorker(): void {
+  const w = worker;
+  worker = null;
+  workerBuffer = "";
+  for (const done of waiting.values()) done(null);
+  waiting.clear();
+  try {
+    w?.kill();
+  } catch {
+    /* already gone */
+  }
+}
+
+function getWorker(): ChildProcess | null {
+  if (worker && worker.exitCode === null && !worker.killed) return worker;
+  try {
+    const w = spawn(process.execPath, ["-e", TS_WORKER], {
+      stdio: ["pipe", "pipe", "ignore"],
+      env: {
+        PATH: process.env.PATH ?? "",
+        SYSTEMROOT: process.env.SYSTEMROOT ?? "",
+      } as unknown as NodeJS.ProcessEnv,
+      windowsHide: true,
+    });
+    w.stdout?.setEncoding("utf8");
+    w.stdout?.on("data", (chunk: string) => {
+      workerBuffer += chunk;
+      let nl: number;
+      while ((nl = workerBuffer.indexOf("\n")) >= 0) {
+        const line = workerBuffer.slice(0, nl);
+        workerBuffer = workerBuffer.slice(nl + 1);
+        try {
+          const msg = JSON.parse(line) as { id: number; noTs?: boolean; problems?: SyntaxProblem[] };
+          waiting.get(msg.id)?.(msg);
+          waiting.delete(msg.id);
+        } catch {
+          /* a stray line */
+        }
+      }
+    });
+    w.on("exit", () => {
+      if (worker === w) stopWorker();
+    });
+    w.on("error", () => {
+      if (worker === w) stopWorker();
+    });
+    worker = w;
+    holdOpen(w, false);
+    return w;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Keep the event loop alive only while a parse is pending: an idle warm
+ * worker must never hold a finished process (or a test) open.
+ */
+function holdOpen(w: ChildProcess, hold: boolean): void {
+  const handles = [w, w.stdin, w.stdout] as unknown as ({ ref?: () => void; unref?: () => void } | null)[];
+  for (const h of handles) {
+    if (hold) h?.ref?.();
+    else h?.unref?.();
+  }
+}
+
+async function parseWithWorker(
+  files: { rel: string; abs: string }[]
+): Promise<{ noTs?: boolean; problems?: SyntaxProblem[] } | null> {
+  const w = getWorker();
+  if (!w?.stdin) return null;
+  if (workerIdle) clearTimeout(workerIdle);
+  const id = nextId++;
+  const answer = new Promise<{ noTs?: boolean; problems?: SyntaxProblem[] } | null>((resolve) => {
+    waiting.set(id, resolve);
+    const t = setTimeout(() => {
+      if (waiting.has(id)) {
+        // A wedged parser is killed; the next edit starts a fresh one.
+        stopWorker();
+      }
+    }, TIMEOUT_MS);
+    t.unref?.();
+  });
+  holdOpen(w, true);
+  try {
+    w.stdin.write(JSON.stringify({ id, files }) + "\n");
+  } catch {
+    stopWorker();
+    return null;
+  }
+  const result = await answer;
+  if (worker === w && waiting.size === 0) holdOpen(w, false);
+  workerIdle = setTimeout(stopWorker, WORKER_IDLE_MS);
+  workerIdle.unref?.();
+  return result;
+}
+
 const PY_CHECKER = `
 import ast, json, sys
 out = []
@@ -217,7 +359,14 @@ export async function checkSyntax(
   if (jsTs.length) {
     tasks.push(
       (async () => {
-        const res = await run(process.execPath, ["-e", TS_CHECKER], JSON.stringify(jsTs));
+        const warm = await parseWithWorker(jsTs);
+        if (warm?.problems) {
+          problems.push(...warm.problems);
+          return;
+        }
+        const res = warm?.noTs
+          ? { code: 0, stdout: "NO_TS", stderr: "" }
+          : await run(process.execPath, ["-e", TS_CHECKER], JSON.stringify(jsTs));
         if (!res) return;
         if (res.stdout.trim() === "NO_TS") {
           // No TypeScript: plain JS still gets node's own parser.
