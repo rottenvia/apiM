@@ -1,0 +1,9 @@
+{
+  "title": "Answer analytics questions from SQLite",
+  "category": "data",
+  "language": "python",
+  "difficulty": "hard",
+  "prompt": "For the quarterly review I need the six questions in questions.md answered from our shop database. build_db.py builds a sample copy of it as shop.db (python3's built-in sqlite3 module is all you need; there may be no sqlite3 command line tool). Please read the schema and the definitions in questions.md carefully, since the numbers go straight into a report, and write the answers to answers.json in exactly the format questions.md shows. Please also leave the queries or script you used in the workspace so I can re-run them later.",
+  "timeoutMinutes": 20,
+  "budgetUsd": 0.8
+}

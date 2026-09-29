@@ -1,0 +1,9 @@
+{
+  "title": "Natural sort for file names",
+  "category": "feature",
+  "language": "javascript",
+  "difficulty": "medium",
+  "prompt": "Our file browser lists file10 before file2, which users hate. Please implement natural (\"human\") ordering in natsort.js: naturalCompare(a, b), usable directly as an Array.prototype.sort comparator, and naturalSort(items, options). The exact ordering rules — how numbers, letter case, leading zeros and version-like names are handled, plus the naturalSort options — are in the comment at the top of natsort.js; please follow them exactly, they're what our other clients already do. No dependencies.",
+  "timeoutMinutes": 15,
+  "budgetUsd": 0.5
+}
