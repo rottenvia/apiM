@@ -86,11 +86,13 @@
     "test:codeintel": "tsx scripts/test-codeintel.mjs",
     "bench": "tsx scripts/bench.mjs",
     "test:bench": "tsx scripts/bench.mjs --self-test",
-    "test:rewind": "tsx scripts/test-rewind.mjs"
+    "test:rewind": "tsx scripts/test-rewind.mjs",
+    "test:ingest": "tsx scripts/test-ingest.mjs"
   },
   "dependencies": {
     "@types/cross-spawn": "^6.0.6",
     "@types/uuid": "^10.0.0",
+    "7z-wasm": "1.2.0",
     "cross-spawn": "^7.0.6",
     "dotenv": "17.3.1",
     "drizzle-orm": "0.45.2",
