@@ -162,7 +162,7 @@ export function ContextMeter({
             style={{ transition: "stroke-dasharray 400ms ease, stroke 400ms ease" }}
           />
         </svg>
-        <span className="hidden tabular-nums sm:inline">{used === null ? "0%" : `${pctLabel}%`}</span>
+        <span className="hidden tabular-nums @lg:inline">{used === null ? "0%" : `${pctLabel}%`}</span>
       </button>
 
       {open && (

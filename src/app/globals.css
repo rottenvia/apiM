@@ -1446,3 +1446,32 @@ input:focus-visible {
     transform: none;
   }
 }
+
+/*
+ * A narrow composer — a phone, or a laptop with the sidebar and the file
+ * panel both open. The chips used to wrap into a column three rows tall.
+ * Queried on the composer itself (it is a container), not the screen,
+ * because the sidebar narrows it just as much. Plain CSS because .chip is
+ * unlayered and would win over a utility class.
+ */
+@container (max-width: 30rem) {
+  .composer-folder,
+  .composer-sep {
+    display: none;
+  }
+  .composer-row {
+    gap: 6px;
+  }
+  .composer-row .chip {
+    padding: 0 7px;
+    gap: 4px;
+  }
+}
+@container (max-width: 22rem) {
+  .composer-row {
+    gap: 4px;
+  }
+  .composer-row .chip {
+    padding: 0 5px;
+  }
+}
