@@ -104,7 +104,9 @@ export function ModelSelector({
             d="M15 2v2M15 20v2M9 2v2M9 20v2M2 15h2M2 9h2M20 15h2M20 9h2"
           />
         </svg>
-        <span>{current.shortLabel}</span>
+        {/* Truncated when the composer is narrow (a container query on
+            the composer, not the screen: the sidebar also narrows it). */}
+        <span className="max-w-[5.5rem] truncate @max-[22rem]:max-w-[4rem] @lg:max-w-none">{current.shortLabel}</span>
         {showPeakHours &&
           (period ? (
           <span

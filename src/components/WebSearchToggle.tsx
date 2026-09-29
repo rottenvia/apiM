@@ -96,7 +96,7 @@ export function WebSearchToggle({
           <path d="M3 12h18" />
           <path d="M12 3a15.3 15.3 0 014 9 15.3 15.3 0 01-4 9 15.3 15.3 0 01-4-9 15.3 15.3 0 014-9z" />
         </svg>
-        <span>Web</span>
+        <span className="hidden @xl:inline">Web</span>
         {/* The rare mode earns a marker, not a whole label. */}
         {value === "always" && (
           <span

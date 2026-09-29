@@ -2338,7 +2338,7 @@ export function ChatArea({
               void addFiles(e.dataTransfer.files);
             }}
             data-dragging={isDragging}
-            className="relative rounded-2xl border border-border bg-bg-tertiary shadow-[0_6px_28px_rgba(0,0,0,0.28)] transition-colors focus-within:border-border-light data-[dragging=true]:border-accent data-[dragging=true]:bg-accent/[0.06]"
+            className="@container relative rounded-2xl border border-border bg-bg-tertiary shadow-[0_6px_28px_rgba(0,0,0,0.28)] transition-colors focus-within:border-border-light data-[dragging=true]:border-accent data-[dragging=true]:bg-accent/[0.06]"
           >
             {isDragging && (
               <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-2xl bg-bg-tertiary/85 backdrop-blur-[1px]">
@@ -2448,7 +2448,7 @@ export function ChatArea({
                       ? "Type \"resume\" to carry on, or ask something new…"
                     : attachments.length > 0
                       ? "Add a question about these files…"
-                      : "Type your message, or / for commands…"
+                      : "Type a message, or / for commands"
                   : "Add your API keys in Settings to start chatting"
               }
               disabled={!hasKeys}
@@ -2499,7 +2499,7 @@ export function ChatArea({
                 
                 The rule is a real separator, not decoration: everything to its
                 right is persistent configuration that outlives the message. */}
-            <div className="flex items-center gap-2 px-2.5 pb-2.5 pt-0.5">
+            <div className="composer-row flex items-center gap-2 px-2.5 pb-2.5 pt-0.5">
               <button
                 onClick={() => fileInputRef.current?.click()}
                 className="chip flex-none"
@@ -2517,7 +2517,7 @@ export function ChatArea({
                   two are genuinely different requests to the OS. */}
               <button
                 onClick={() => folderInputRef.current?.click()}
-                className="chip flex-none"
+                className="chip composer-folder flex-none"
                 title="Attach a whole folder"
                 aria-label="Attach a folder"
               >
@@ -2527,7 +2527,7 @@ export function ChatArea({
               </button>
 
               <span
-                className="h-6 w-px flex-none self-center bg-border"
+                className="composer-sep h-6 w-px flex-none self-center bg-border"
                 aria-hidden="true"
               />
 
@@ -2573,12 +2573,15 @@ export function ChatArea({
                       d="M13.5 16.875h3.375m0 0h3.375m-3.375 0V13.5m0 3.375v3.375M6 10.5h2.25a2.25 2.25 0 002.25-2.25V6a2.25 2.25 0 00-2.25-2.25H6A2.25 2.25 0 003.75 6v2.25A2.25 2.25 0 006 10.5zm0 9.75h2.25A2.25 2.25 0 0010.5 18v-2.25a2.25 2.25 0 00-2.25-2.25H6a2.25 2.25 0 00-2.25 2.25V18A2.25 2.25 0 006 20.25zm9.75-9.75H18a2.25 2.25 0 002.25-2.25V6A2.25 2.25 0 0018 3.75h-2.25A2.25 2.25 0 0013.5 6v2.25a2.25 2.25 0 002.25 2.25z"
                     />
                   </svg>
-                  <span>
+                  <span className="hidden @xl:inline">
                     Plugins
                     {enabledPlugins.length > 0
                       ? ` · ${enabledPlugins.length}`
                       : ""}
                   </span>
+                  {enabledPlugins.length > 0 && (
+                    <span className="@xl:hidden">{enabledPlugins.length}</span>
+                  )}
                 </button>
               </div>
 
@@ -2608,7 +2611,7 @@ export function ChatArea({
               />
 
               <span
-                className="h-6 w-px flex-none self-center bg-border"
+                className="composer-sep h-6 w-px flex-none self-center bg-border"
                 aria-hidden="true"
               />
 

@@ -168,10 +168,11 @@ export function ThinkingEffortSelector({
             d="M18.5 15.5l.75 2 2 .75-2 .75-.75 2-.75-2-2-.75 2-.75.75-2z"
           />
         </svg>
-        <span>{current.label}</span>
+        {/* Icon only when the composer is narrow; the menu names it. */}
+        <span className="hidden @xl:inline">{current.label}</span>
         <svg
           style={{ width: 11, height: 11 }}
-          className={`opacity-60 transition-transform duration-150 ${isOpen ? "rotate-180" : ""}`}
+          className={`hidden opacity-60 transition-transform duration-150 @xl:block ${isOpen ? "rotate-180" : ""}`}
           viewBox="0 0 24 24"
           fill="none"
           stroke="currentColor"
