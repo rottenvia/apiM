@@ -74,6 +74,15 @@ const SCENARIOS = {
     say("Done."),
   ],
   budget_prose: Array.from({ length: 30 }, () => say("More of a very long answer. ", "length")),
+  // Two helpers in one round: they must run side by side, and their
+  // reports must come back as the two tool results.
+  delegate_pair: [
+    tools(
+      tool("delegate", { task: "Find where A is defined [scenario:delegate_pair]" }),
+      tool("delegate", { task: "Find where B is defined [scenario:delegate_pair]" })
+    ),
+    say("Done."),
+  ],
   pathless_edit: [
     tool("write_file", { path: "mod.py", content: "def f():\n    return 1\n" }),
     tool("edit_files", { edits: [{ old_text: "    return 1", new_text: "    return 2" }] }),
@@ -105,6 +114,25 @@ createServer((req, res) => {
     const messages = Array.isArray(body.messages) ? body.messages : [];
     const first = firstUserText(messages);
     const name = /\[scenario:(\w+)\]/.exec(first)?.[1] ?? "";
+
+    // A delegate helper: non-streaming, answered with a one-line report
+    // after a pause long enough to show whether two ran at the same time.
+    if (body.stream === false) {
+      const started = Date.now();
+      await sleep(400);
+      if (LOG) {
+        appendFileSync(
+          LOG,
+          JSON.stringify({ scenario: name, event: "helper", task: first, started, ended: Date.now(), tools: (body.tools ?? []).map((t) => t.function?.name) }) + "\n"
+        );
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        choices: [{ message: { role: "assistant", content: `REPORT: ${first.split(" [")[0]} — found at src/x.ts:1` } }],
+        usage: { prompt_tokens: 2000, completion_tokens: 80, total_tokens: 2080 },
+      }));
+      return;
+    }
     const turns = SCENARIOS[name] ?? [];
     const key = first.slice(0, 200);
     const index = progress.get(key) ?? 0;
