@@ -934,7 +934,9 @@ function MessageBubbleImpl({
             ? // The hover group is the whole bubble, so its actions (which
               // float just below it) stay visible while the pointer moves
               // down onto them.
-              "group/msg relative rounded-2xl bg-bg-elevated px-4 py-2.5 transition-colors duration-150 hover:bg-bg-hover"
+              `group/msg relative rounded-2xl bg-bg-elevated px-4 py-2.5 transition-colors duration-150 hover:bg-bg-hover ${
+                  editing ? "ring-1 ring-accent/50" : ""
+                }`
             : // The reply always fills its column. Shrink-to-fit made a
               // reply with only tools and thinking (no prose yet) collapse to
               // its widest pill — a narrow strip of odd-width boxes.
@@ -996,7 +998,27 @@ function MessageBubbleImpl({
             )}
 
             {editing ? (
-              <div className="space-y-2">
+              /*
+               * Edited in place, at the message's own size.
+               *
+               * Reported: Edit collapsed the bubble to a small box. The old
+               * editor was a w-full textarea inside a shrink-to-fit bubble,
+               * so its width came from the textarea's default columns, not
+               * from the text. Now an invisible copy of the draft sits in
+               * the same grid cell as the textarea: the copy sizes the cell
+               * exactly as the message text would, and the textarea fills
+               * it — same width, same height, same wrapping, growing and
+               * shrinking with what you type.
+               */
+              <div className="grid" data-edit-mirror>
+                <span
+                  aria-hidden="true"
+                  className="invisible col-start-1 row-start-1 whitespace-pre-wrap break-words text-[15px] leading-6"
+                >
+                  {/* A trailing newline needs a character after it to
+                      take up its line; otherwise the copy is exact. */}
+                  {!draft || draft.endsWith("\n") ? draft + " " : draft}
+                </span>
                 <textarea
                   value={draft}
                   onChange={(e) => setDraft(e.target.value)}
@@ -1019,15 +1041,23 @@ function MessageBubbleImpl({
                       }
                     }
                   }}
+                  onFocus={(e) => {
+                    // Caret at the end, like clicking after the last word.
+                    const end = e.currentTarget.value.length;
+                    e.currentTarget.setSelectionRange(end, end);
+                  }}
                   autoFocus
-                  rows={Math.max(
-                    3,
-                    Math.min(12, draft.split("\n").length + 1),
-                    Math.min(12, message.content.split("\n").length + 1)
-                  )}
-                  className="w-full resize-y rounded-lg border border-accent/40 bg-bg-primary px-3 py-2 text-[15px] leading-6 text-text-primary outline-none"
+                  rows={1}
+                  cols={1}
+                  aria-label="Edit message"
+                  className="col-start-1 row-start-1 m-0 block h-full w-full min-w-0 resize-none overflow-hidden whitespace-pre-wrap break-words border-0 bg-transparent p-0 text-[15px] leading-6 text-text-primary outline-none"
                 />
-                <div className="flex items-center justify-end gap-1.5">
+                {/* Floated under the bubble like the hover actions, so the
+                    bubble itself does not change size. */}
+                <div className="absolute right-0 top-full z-10 flex items-center justify-end gap-1.5 pt-1">
+                  <span className="mr-1 hidden text-[11px] text-text-muted sm:inline">
+                    Enter to send · Esc to cancel
+                  </span>
                   <button
                     onClick={() => setEditing(false)}
                     className="rounded-lg px-2 py-1 text-[11px] text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
@@ -1051,7 +1081,7 @@ function MessageBubbleImpl({
             ) : (
               message.content && (
                 <div>
-                  <div className="text-[15px] leading-6 text-text-primary">
+                  <div className="whitespace-pre-wrap break-words text-[15px] leading-6 text-text-primary">
                     <SearchHighlight
                       query={searchQuery}
                       wholeWord={searchWholeWord}
