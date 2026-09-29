@@ -17,6 +17,7 @@ import path from "node:path";
 import { resolveInside, listFiles } from "@/lib/workspace";
 import { describeData, loadData, formatFor, mainCollection, MAX_DATA_BYTES } from "@/lib/data-query";
 import { documentKind, readDocument } from "@/lib/documents";
+import { detectBinaryFormat } from "@/lib/binaries";
 
 /** Text up to this many characters is shown whole (≈28k tokens). */
 export const INLINE_CHARS = 100_000;
@@ -67,16 +68,11 @@ export function imageKind(head: Uint8Array): string | null {
   return null;
 }
 
-/** Executable formats inspect_binary takes apart. */
+/** Executable formats inspect_binary takes apart — the same detector it uses. */
 export function executableKind(head: Uint8Array, name: string): string | null {
   if (head[0] === 0x4d && head[1] === 0x5a) return "Windows PE";
-  if (startsWith(head, [0x7f, 0x45, 0x4c, 0x46])) return "ELF";
-  const m = (head[0] << 24) | (head[1] << 16) | (head[2] << 8) | head[3];
-  if ([0xfeedface, 0xfeedfacf, 0xcefaedfe, 0xcffaedfe].includes(m >>> 0)) return "Mach-O";
-  if ((m >>> 0) === 0xcafebabe) return /\.class$/i.test(name) ? "Java class" : "Mach-O universal / Java class";
-  if (startsWith(head, [0x00, 0x61, 0x73, 0x6d])) return "WebAssembly";
-  if (startsWith(head, [0x64, 0x65, 0x78, 0x0a])) return "Android DEX";
-  return null;
+  const { format } = detectBinaryFormat(head, name);
+  return format === "unknown binary" ? null : format;
 }
 
 /** Same rule as the browser's sniff: a NUL, or ~10% control bytes. */

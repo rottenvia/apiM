@@ -112,6 +112,12 @@ export interface PeInspection {
     | "ELF"
     | "Mach-O"
     | "Mach-O universal"
+    | "Java class"
+    | "Java archive"
+    | "Android package"
+    | "Android DEX"
+    | "WebAssembly"
+    | "Python bytecode"
     | "unknown binary";
   architecture: string;
   machine: number;
@@ -1398,8 +1404,21 @@ async function dependencyChildren(
  * strings, entropy, hashes and carve layers all work on raw bytes, and
  * headless Ghidra auto-detects its own format list on import.
  */
-function detectBinaryFormat(bytes: Uint8Array): {
-  format: "ELF" | "Mach-O" | "Mach-O universal" | "unknown binary";
+export function detectBinaryFormat(
+  bytes: Uint8Array,
+  name = ""
+): {
+  format:
+    | "ELF"
+    | "Mach-O"
+    | "Mach-O universal"
+    | "Java class"
+    | "Java archive"
+    | "Android package"
+    | "Android DEX"
+    | "WebAssembly"
+    | "Python bytecode"
+    | "unknown binary";
   architecture: string;
 } {
   if (
@@ -1452,9 +1471,47 @@ function detectBinaryFormat(bytes: Uint8Array): {
               : `cputype 0x${(cputype >>> 0).toString(16)}`;
     return { format: "Mach-O", architecture: `Mach-O ${arch}` };
   }
-  // FAT_MAGIC — a slice of several Mach-O images in one file.
-  if (u32be === 0xcafebabe || u32le === 0xcafebabe) {
+  /*
+   * 0xCAFEBABE is both a Mach-O fat header and a Java class file. The next
+   * word tells them apart the way `file` does: a fat binary counts its
+   * slices there (a handful), a class file has its version (major ≥ 45).
+   */
+  if (u32be === 0xcafebabe) {
+    const next = bytes.length >= 8
+      ? ((bytes[4] << 24) | (bytes[5] << 16) | (bytes[6] << 8) | bytes[7]) >>> 0
+      : 0;
+    if (next >= 45 && next < 0x10000) {
+      const major = next & 0xffff;
+      const java = major >= 49 ? `Java ${major - 44}` : `JDK 1.${major - 44}`;
+      return { format: "Java class", architecture: `JVM bytecode (class version ${major}, ${java})` };
+    }
     return { format: "Mach-O universal", architecture: "Mach-O universal (multi-arch)" };
+  }
+  if (u32le === 0xcafebabe) {
+    return { format: "Mach-O universal", architecture: "Mach-O universal (multi-arch)" };
+  }
+  // "dex\n035\0" … "dex\n041\0"
+  if (bytes[0] === 0x64 && bytes[1] === 0x65 && bytes[2] === 0x78 && bytes[3] === 0x0a) {
+    const version = String.fromCharCode(bytes[4] ?? 0, bytes[5] ?? 0, bytes[6] ?? 0);
+    return { format: "Android DEX", architecture: `Dalvik bytecode (dex ${version})` };
+  }
+  // "\0asm" + little-endian version
+  if (bytes[0] === 0x00 && bytes[1] === 0x61 && bytes[2] === 0x73 && bytes[3] === 0x6d) {
+    return { format: "WebAssembly", architecture: `WebAssembly module (version ${bytes[4] ?? 0})` };
+  }
+  // .pyc: a 2-byte version magic followed by "\r\n".
+  if (/\.pyc$/i.test(name) && bytes[2] === 0x0d && bytes[3] === 0x0a) {
+    const magic = bytes[0] | (bytes[1] << 8);
+    return { format: "Python bytecode", architecture: `CPython bytecode (magic ${magic})` };
+  }
+  // ZIP-based packages: identified by name, since every zip starts "PK".
+  if (bytes[0] === 0x50 && bytes[1] === 0x4b) {
+    if (/\.(?:apk|aab|aar)$/i.test(name)) {
+      return { format: "Android package", architecture: "ZIP package (classes*.dex, resources, native libs)" };
+    }
+    if (/\.(?:jar|war|ear)$/i.test(name)) {
+      return { format: "Java archive", architecture: "ZIP package of JVM classes" };
+    }
   }
   return { format: "unknown binary", architecture: "unknown" };
 }
@@ -1468,9 +1525,10 @@ function detectBinaryFormat(bytes: Uint8Array): {
  */
 function inspectGenericBinary(
   bytes: Uint8Array,
-  options: InspectBinaryOptions = {}
+  options: InspectBinaryOptions = {},
+  name = ""
 ): PeInspection {
-  const { format, architecture } = detectBinaryFormat(bytes);
+  const { format, architecture } = detectBinaryFormat(bytes, name);
   const hashes = hashBytes(bytes);
   const r = new Reader(bytes);
   const stringResult = extractStrings(r, options);
@@ -1552,7 +1610,7 @@ export async function inspectWorkspaceBinary(
       error instanceof BinaryInspectionError &&
       /MZ header/i.test(error.message)
     ) {
-      inspection = inspectGenericBinary(bytes, options);
+      inspection = inspectGenericBinary(bytes, options, target);
     } else {
       throw error;
     }
@@ -1735,6 +1793,25 @@ function dependencyLines(nodes: DependencyNode[], prefix = ""): string[] {
 }
 
 /** Stable, bounded text for the model. */
+/**
+ * What to do with a format that is not a native executable. Named so the
+ * agent does not try to "decompile" a zip, or read bytecode as text.
+ */
+const FORMAT_NEXT_STEP: Partial<Record<PeInspection["format"], string>> = {
+  "Java archive":
+    "this is a ZIP package — extract_archive it (force:true) to get the .class files, then inspect the classes you need; Ghidra imports JVM class files.",
+  "Android package":
+    "this is a ZIP package — extract_archive it (force:true) to get classes*.dex, lib/<abi>/*.so and resources; inspect the .dex (Ghidra imports Dalvik) or the native .so files.",
+  "Java class":
+    "JVM bytecode — the strings layer shows class, method and constant names; Ghidra (when installed) imports class files for a decompile.",
+  "Android DEX":
+    "Dalvik bytecode — the strings layer shows class and method names; Ghidra (when installed) imports DEX for a decompile.",
+  "WebAssembly":
+    "a WebAssembly module — strings show import/export names; stock Ghidra has no WebAssembly importer, so rely on strings, or a wasm2wat/wasm-decompile install via run_command.",
+  "Python bytecode":
+    "compiled Python — strings show names and constants; the version magic says which Python made it.",
+};
+
 export function formatBinaryInspection(result: WorkspaceBinaryInspection): string {
   const p = result.inspection;
   const lines: string[] = [
@@ -1743,6 +1820,8 @@ export function formatBinaryInspection(result: WorkspaceBinaryInspection): strin
     `Size: ${p.bytes.toLocaleString()} bytes · SHA-256: ${p.hashes.sha256}`,
     `MD5: ${p.hashes.md5} · SHA-1: ${p.hashes.sha1}${p.hashes.imphash ? ` · imphash: ${p.hashes.imphash}` : ""}`,
   ];
+  const next = FORMAT_NEXT_STEP[p.format];
+  if (next) lines.push(`Next step: ${next}`);
 
   if (p.format.startsWith("PE")) {
     lines.push(
