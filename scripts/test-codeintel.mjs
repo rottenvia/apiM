@@ -65,6 +65,10 @@ console.log("\nsyntax check after edits");
   check("write_files checks every file it wrote", /a\.js:1:/.test(batch.content) && !/b\.js:/.test(batch.content));
   const md = await tool("write_file", { path: "README.md", content: "# {{{ not code\n" });
   check("non-code files are not checked", !/Syntax check/.test(md.content));
+  const t0 = performance.now();
+  await SC.checkSyntax(ws, ["src/app.ts"]);
+  const warm = performance.now() - t0;
+  check("the TypeScript parser stays warm between edits", warm < 150, `${Math.round(warm)}ms (a cold start costs ~250ms)`);
   check("paths from apply_patch headers", SC.pathsWrittenBy("apply_patch", { patch: "--- a/x.ts\n+++ b/x.ts\n@@\n" }).join() === "x.ts");
 }
 
