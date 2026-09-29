@@ -62,6 +62,7 @@ import {
   MAX_FILE_BYTES,
   resolveInside,
 } from "@/lib/workspace";
+import { ExtractError, extractArchive, formatExtractSummary } from "@/lib/extract";
 import {
   DataQueryError,
   describeData,
@@ -1595,6 +1596,35 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
           },
         },
         required: ["name"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "extract_archive",
+      description:
+        "Unpack an archive that is in the workspace — zip, rar (incl. RAR5), 7z, tar, tar.gz/tgz, tar.xz, tar.bz2, " +
+        "tar.zst, gz/xz/bz2, cab, iso, split .001 sets — fully and byte-exact, with its folders. " +
+        "Use it for archives inside an unpacked archive, downloads, or anything the user dropped that is still packed. " +
+        "Returns a map of what came out. A JAR, APK or Office file is a zip too: it is unpacked only when you call this on it. " +
+        "Safe by construction: nothing is written outside the destination, links are not created, bombs are refused, nothing is executed. " +
+        "A password-protected archive fails with a message saying so — ask the user for the password, then call again with it.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Workspace path of the archive." },
+          dest: {
+            type: "string",
+            description: "Folder to unpack into. Default: next to the archive, named after it (game.zip → game/).",
+          },
+          password: { type: "string", description: "Only when the archive is encrypted and the user gave you the password." },
+          encoding: {
+            type: "string",
+            description: 'Code page for garbled non-UTF-8 file names (old Windows zips), e.g. "ibm866" or "windows-1251". Usually detected.',
+          },
+        },
+        required: ["path"],
       },
     },
   },
@@ -3705,6 +3735,34 @@ async function runToolInner(
             ids.length + classes.length
           } selectors`,
         };
+      }
+
+      case "extract_archive": {
+        const archive = str(args, "path");
+        if (!archive) {
+          return { ok: false, content: "Error: path is required.", summary: "No path given" };
+        }
+        try {
+          const r = await extractArchive(workspaceId, archive, {
+            dest: str(args, "dest") || undefined,
+            password: str(args, "password") || undefined,
+            encoding: str(args, "encoding") || undefined,
+            maxFiles: 100_000,
+            signal: context.signal,
+          });
+          mem?.invalidateAll();
+          return {
+            ok: true,
+            content: `Unpacked ${archive}.\n${formatExtractSummary(r)}`,
+            summary: `Unpacked ${r.files.toLocaleString()} file${r.files === 1 ? "" : "s"} into ${r.dest}`,
+            changedPath: r.dest,
+          };
+        } catch (e) {
+          if (e instanceof ExtractError || e instanceof WorkspaceError) {
+            return { ok: false, content: `Error: ${e.message}`, summary: e.message.slice(0, 80) };
+          }
+          throw e;
+        }
       }
 
       case "query_data": {
