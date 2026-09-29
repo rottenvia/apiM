@@ -14,6 +14,7 @@
 import {
   DEFAULT_LOCAL_API_MODEL,
   DEFAULT_LOCAL_BASE_URL,
+  SIDECAR_CTX,
 } from "@/lib/local-engine-shared";
 
 export { DEFAULT_LOCAL_API_MODEL, DEFAULT_LOCAL_BASE_URL };
@@ -505,6 +506,30 @@ export function resolveModelInfo(
     if (def) return customToModelInfo(def);
   }
   return MODELS[0];
+}
+
+/** Used when a model publishes no window (a custom added without Verify). */
+export const FALLBACK_CONTEXT_TOKENS = 128_000;
+
+/**
+ * The model's context window, in tokens, for the composer's meter.
+ *
+ * Read from the specs line the catalog already shows ("1M context", "80K
+ * window") so the two can never disagree; customs use the length Verify
+ * stored. Local models get the sidecar's window.
+ */
+export function contextWindowFor(
+  id: string | null | undefined,
+  customs?: CustomModelDef[] | null
+): number {
+  const custom = customs?.find((c) => c.id === id);
+  if (custom) return custom.contextLength ?? FALLBACK_CONTEXT_TOKENS;
+  const info = resolveModelInfo(id, customs);
+  if (info.provider === "local") return SIDECAR_CTX;
+  const m = /(\d+(?:\.\d+)?)\s*([KM])\s*(?:context|ctx|window)/i.exec(info.specs);
+  if (!m) return FALLBACK_CONTEXT_TOKENS;
+  const n = Number(m[1]);
+  return Math.round(m[2].toUpperCase() === "M" ? n * 1_000_000 : n * 1_000);
 }
 
 export function getProviderInfo(id: ProviderId): ProviderInfo {

@@ -58,6 +58,8 @@ export interface StoredMessage {
    * With the breakdown: where the bytes lived, largest first.
    */
   contextChars?: number | null;
+  /** Tokens the final round occupied in the model's context window. */
+  contextTokens?: number | null;
   contextBreakdown?: { label: string; chars: number }[] | null;
   /**
    * How the reply ended: the final round's finish_reason plus what the
@@ -823,6 +825,23 @@ export function turnSlice(
 }
 
 /**
+ * Forget a history summary whose cursor turn no longer exists.
+ *
+ * A summary covers everything up to its cursor. After /compact the cursor is
+ * the newest turn, so Retry or an edit removes it — and the summary would
+ * then describe an answer (or a question) the user just replaced, while
+ * shapeHistory, unable to find the cursor, replays the whole backlog as
+ * well. Dropping it lets the older turns ride verbatim again until the next
+ * refresh summarises them from what is actually there.
+ */
+function dropStaleSummary(conv: StoredConversation): void {
+  const cursor = conv.historySummary?.upToId;
+  if (cursor && !conv.messages.some((m) => m.id === cursor)) {
+    delete conv.historySummary;
+  }
+}
+
+/**
  * Remove one exchange from a saved chat so the next request cannot see it.
  *
  * Client-only delete used to look gone and then come back: history is loaded
@@ -848,6 +867,7 @@ export async function deleteTurn(
       ...conv.messages.slice(0, slice.start),
       ...conv.messages.slice(slice.end),
     ];
+    dropStaleSummary(conv);
     conv.updatedAt = new Date().toISOString();
     return { write: conv, result: { removed } };
   });
@@ -880,6 +900,7 @@ export async function truncateFrom(
       conv.messages[index - 1] = { ...question, content: edited };
     }
     conv.messages = conv.messages.slice(0, index);
+    dropStaleSummary(conv);
     conv.updatedAt = new Date().toISOString();
     return { write: conv, result: true };
   });
