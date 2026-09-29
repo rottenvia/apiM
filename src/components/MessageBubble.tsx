@@ -24,6 +24,11 @@ import remarkGfm from "remark-gfm";
 import type { Message, MessageAttachment } from "@/app/page";
 import { ImageLightbox } from "@/components/ImageLightbox";
 import { CompareVersions } from "@/components/CompareVersions";
+import {
+  RewindIcon,
+  RewindPopover,
+  type RewindHandlers,
+} from "@/components/RewindPopover";
 import { buildSearchRegex } from "@/lib/chat-search";
 import {
   estimateCost,
@@ -311,6 +316,11 @@ interface MessageBubbleProps {
   onEdit?: (messageId: string, newContent: string) => void;
   /** Remove a message and the reply that followed it. */
   onDelete?: (messageId: string) => void;
+  /**
+   * Rewind the chat (and files) to just before this question. Only on
+   * questions, and withheld while the chat is answering.
+   */
+  rewind?: RewindHandlers;
   /** Active in-chat search term, highlighted in the reply text. */
   searchQuery?: string;
   searchWholeWord?: boolean;
@@ -337,6 +347,7 @@ function MessageBubbleImpl({
   onLoadReasoning,
   onEdit,
   onDelete,
+  rewind,
   searchQuery,
   searchWholeWord = true,
   activeMatchIndex = -1,
@@ -549,6 +560,8 @@ function MessageBubbleImpl({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [copied, setCopied] = useState(false);
+  const [rewindOpen, setRewindOpen] = useState(false);
+  const closeRewind = useCallback(() => setRewindOpen(false), []);
   /** A long steering note truncates to one quiet line; this expands it. */
   const [noteExpanded, setNoteExpanded] = useState(false);
   const thinkingRef = useRef<HTMLDivElement>(null);
@@ -1091,7 +1104,7 @@ function MessageBubbleImpl({
                     </SearchHighlight>
                   </div>
 
-                  {(onEdit || onDelete) && (
+                  {(onEdit || onDelete || rewind) && (
                     /*
                      * Floated under the bubble, not expanded inside it.
                      *
@@ -1145,6 +1158,19 @@ function MessageBubbleImpl({
                             </button>
                           )}
 
+                          {rewind && (
+                            <button
+                              onClick={() => setRewindOpen(true)}
+                              title="Go back to before this message — the chat, and the files if you want"
+                              aria-label="Rewind to this message"
+                              aria-expanded={rewindOpen}
+                              className="flex h-6 items-center gap-1 rounded-lg px-1.5 text-[11px] font-medium text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
+                            >
+                              <RewindIcon />
+                              Rewind
+                            </button>
+                          )}
+
                           {onDelete && (
                             <button
                               onClick={() => onDelete(message.id)}
@@ -1161,6 +1187,15 @@ function MessageBubbleImpl({
                         </div>
                       </div>
                     </div>
+                  )}
+                  {/* Outside the hover row, so it stays open when the
+                      pointer leaves the bubble. */}
+                  {rewind && rewindOpen && (
+                    <RewindPopover
+                      messageId={message.id}
+                      handlers={rewind}
+                      onClose={closeRewind}
+                    />
                   )}
                 </div>
               )
@@ -2184,6 +2219,7 @@ export const MessageBubble = memo(MessageBubbleImpl, (prev, next) => {
     prev.onResume === next.onResume &&
     prev.onEdit === next.onEdit &&
     prev.onDelete === next.onDelete &&
+    prev.rewind === next.rewind &&
     prev.searchQuery === next.searchQuery &&
     prev.searchWholeWord === next.searchWholeWord &&
     prev.activeMatchIndex === next.activeMatchIndex &&
