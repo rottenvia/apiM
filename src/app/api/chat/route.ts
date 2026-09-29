@@ -519,6 +519,8 @@ type StreamEvent =
       total: number;
     }
   | { type: "tool_start"; id: string; name: string; args: string }
+  /** A long-running tool's live progress (a delegate helper's rounds). */
+  | { type: "tool_progress"; id: string; text: string }
   | {
       type: "approval_request";
       id: string;
@@ -4631,7 +4633,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               : []
           );
           const runDelegate = async (
-            args: Record<string, unknown>
+            args: Record<string, unknown>,
+            callId: string
           ): Promise<ToolResult> => {
             const task = typeof args.task === "string" ? args.task.trim() : "";
             if (!task) {
@@ -4682,6 +4685,12 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               maxRounds: typeof args.max_rounds === "number" ? args.max_rounds : undefined,
               shouldStop: () =>
                 budget.limitUsd !== null && budget.spentUsd >= budget.limitUsd,
+              onProgress: (p) =>
+                send({
+                  type: "tool_progress",
+                  id: callId,
+                  text: `round ${p.round} · ${p.toolCalls} tool call${p.toolCalls === 1 ? "" : "s"} · ${[...new Set(p.tools)].join(", ")}`,
+                }),
               onUsage: (u) => {
                 totalUsage.prompt_tokens += u.prompt_tokens ?? 0;
                 totalUsage.completion_tokens += u.completion_tokens ?? 0;
@@ -4712,7 +4721,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               if (!parsedArgs.ok) continue;
               prefetched.set(
                 call.id,
-                runDelegate(parsedArgs.value).catch((error) => ({
+                runDelegate(parsedArgs.value, call.id).catch((error) => ({
                   ok: false,
                   content: `Error: ${error instanceof Error ? error.message : "helper failed"}`,
                   summary: "Helper failed",
@@ -5788,7 +5797,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               // Already in flight since the top of the round.
               result = await prefetched.get(call.id)!;
             } else if (call.function.name === "delegate") {
-              result = await runDelegate(parsed.value);
+              result = await runDelegate(parsed.value, call.id);
             } else {
               result = await runTool(
                 workspace,

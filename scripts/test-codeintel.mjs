@@ -190,9 +190,14 @@ console.log("\nwiring");
 {
   const route = read("src/app/api/chat/route.ts");
   check("delegate is offered with the workspace tools", /\[\.\.\.\(dsRequestBody\.tools as ToolDefinition\[\]\), DELEGATE_TOOL\]/.test(route));
-  check("several delegates in a round start together", /if \(call\.function\.name !== "delegate"\) continue;[\s\S]{0,200}runDelegate\(parsedArgs\.value\)/.test(route));
+  check("several delegates in a round start together", /if \(call\.function\.name !== "delegate"\) continue;[\s\S]{0,200}runDelegate\(parsedArgs\.value, call\.id\)/.test(route));
   check("helper usage counts toward the reply and its cap", /onUsage: \(u\) => \{[\s\S]{0,600}chargeRound\(budget/.test(route) && /shouldStop: \(\) =>\s*budget\.limitUsd !== null/.test(route));
   check("the agent is told about delegate and find_references", /call delegate: a read-only helper/.test(route) && /call find_references so no caller is missed/.test(route));
+  check("helper rounds stream to the running row", /onProgress: \(p\) =>\s*send\(\{\s*type: "tool_progress",\s*id: callId/.test(route));
+  const pageSrc = read("src/app/page.tsx");
+  const toolRow = read("src/components/ToolActivity.tsx");
+  check("the page shows the progress on the running tool", /case "tool_progress":[\s\S]{0,900}progress: evt\.text/.test(pageSrc) && /running && event\.progress/.test(toolRow));
+  check("progress frames never stall the text pacer", /"tool_progress",/.test(pageSrc));
   const display = await load("src/lib/tool-display.ts");
   check("delegate reads as a helper in the transcript", display.describeTool("delegate", JSON.stringify({ task: "Trace auth" })).running === "Delegating");
 }
