@@ -295,6 +295,7 @@ type StreamEvent =
       reason: string;
     }
   | { type: "tool_start"; id: string; name: string; args: string }
+  | { type: "tool_progress"; id: string; text: string }
   | {
       type: "approval_request";
       id: string;
@@ -407,6 +408,7 @@ const PACE_THROUGH_EVENTS: ReadonlySet<string> = new Set([
   "usage",
   "request_size",
   "tool_drafting",
+  "tool_progress",
   "retrying",
   "context_pruned",
   "context_compacted",
@@ -2965,6 +2967,22 @@ export default function Home() {
                 );
                 break;
               }
+
+              case "tool_progress":
+                // A helper's rounds, shown on its still-running row.
+                writeMessages(runConvId ?? requestConversationId, (prev) =>
+                  prev.map((m) =>
+                    m.id === streamingId && m.toolEvents?.some((t) => t.id === evt.id)
+                      ? {
+                          ...m,
+                          toolEvents: m.toolEvents.map((t) =>
+                            t.id === evt.id ? { ...t, progress: evt.text } : t
+                          ),
+                        }
+                      : m
+                  )
+                );
+                break;
 
               case "approval_request": {
                 const request: PendingCommand = {

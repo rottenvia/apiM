@@ -14,6 +14,8 @@ export interface ToolEvent {
   ok?: boolean;
   summary?: string;
   changedPath?: string;
+  /** Live progress while running (a delegate helper's rounds). */
+  progress?: string;
 }
 
 /**
@@ -215,6 +217,11 @@ const ToolRow = memo(function ToolRow({
                 {summary && (
                   <span className="hidden min-w-0 max-w-[40%] shrink truncate text-[12px] text-text-muted sm:block">
                     {summary}
+                  </span>
+                )}
+                {running && event.progress && (
+                  <span className="hidden min-w-0 max-w-[45%] shrink truncate text-[12px] tabular-nums text-text-muted sm:block">
+                    {event.progress}
                   </span>
                 )}
 
