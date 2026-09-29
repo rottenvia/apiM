@@ -905,6 +905,7 @@ const CANNOT = new Map([
   ["edit_file", "covered by test-tools2"],
   ["search_conversation", "covered by test-conversation-search against an isolated store"],
   ["find_references", "covered by test-codeintel on a mixed TS/Python workspace"],
+  ["query_data", "covered by test-ingest on multi-megabyte JSON, CSV and JSON Lines"],
 ]);
 
 const unexplained = all.filter((n) => !dispatched.has(n) && !CANNOT.has(n));

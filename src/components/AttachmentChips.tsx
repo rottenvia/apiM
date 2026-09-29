@@ -211,6 +211,14 @@ export function AttachmentChips({
                 <span className="animate-thinking">
                   {STAGE_LABELS[file.stage]}…
                 </span>
+                {file.progress && (
+                  <span className="tabular-nums text-text-muted">{file.progress}</span>
+                )}
+              </span>
+            ) : file.label ? (
+              // Described by the server: what is inside, not just how big.
+              <span className="block max-w-[16rem] truncate text-[11px] leading-3 text-text-muted" title={file.label}>
+                {file.label}
               </span>
             ) : (
               <span className="block text-[11px] leading-3 text-text-muted">

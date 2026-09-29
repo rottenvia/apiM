@@ -459,6 +459,9 @@ check(
 
 const total = WORKSPACE_TOOLS.length;
 const schemaChars = JSON.stringify(WORKSPACE_TOOLS).length;
+// Raised to 16k for the data and code-intelligence set — query_data (the only
+// way into a 35MB one-line JSON), find_references, delegate and
+// extract_archive — each replacing a hand-written script or a blind grep.
 // Raised again to 14k for the observability set — analyze_log,
 // screenshot_window, verify_file and read_symbol — each of which replaces a
 // hand-written script or a round of guessing. The schema is sent once per
@@ -472,7 +475,7 @@ const schemaChars = JSON.stringify(WORKSPACE_TOOLS).length;
 // which 12k still enforces with headroom for the next tool.
 check(
   "the schemas are still a rounding error on the bill",
-  schemaChars / 3.6 < 14_000,
+  schemaChars / 3.6 < 16_000,
   `${total} tools, ~${Math.round(schemaChars / 3.6)} tokens, sent once and cached`
 );
 

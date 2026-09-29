@@ -35,6 +35,7 @@ export const SUBAGENT_TOOLS = new Set([
   "search_files",
   "read_symbol",
   "find_references",
+  "query_data",
   "read_document",
   "analyze_log",
   "git_status",
