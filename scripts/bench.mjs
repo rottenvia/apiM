@@ -188,11 +188,31 @@ async function waitFor(url, ms, dead) {
   return false;
 }
 
+/** Newest modification time under src/ and the config that shapes the build. */
+function newestSourceMtime() {
+  let newest = 0;
+  const walk = (dir) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else newest = Math.max(newest, statSync(p).mtimeMs);
+    }
+  };
+  walk(path.join(ROOT, "src"));
+  for (const f of ["package.json", "next.config.ts", "tsconfig.json"]) {
+    if (existsSync(path.join(ROOT, f))) newest = Math.max(newest, statSync(path.join(ROOT, f)).mtimeMs);
+  }
+  return newest;
+}
+
 async function startApp(dataRoot) {
   if (EXISTING_URL) return { base: EXISTING_URL.replace(/\/$/, ""), dataRoot: null };
-  const built = existsSync(path.join(ROOT, ".next", "BUILD_ID"));
-  if (!built) {
-    console.log(dim("  no production build yet — running next build (a few minutes, once)…"));
+  const buildId = path.join(ROOT, ".next", "BUILD_ID");
+  const built = existsSync(buildId);
+  // A build older than the source measures old code — rebuild it.
+  const stale = built && newestSourceMtime() > statSync(buildId).mtimeMs;
+  if (!built || stale) {
+    console.log(dim(`  ${built ? "the production build is older than the source" : "no production build yet"} — running next build (a few minutes)…`));
     const b = spawnSync(process.execPath, [nextBin(ROOT), "build"], { cwd: ROOT, stdio: "inherit" });
     if (b.status !== 0) throw new Error("next build failed");
   }
