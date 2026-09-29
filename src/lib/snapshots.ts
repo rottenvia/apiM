@@ -81,7 +81,17 @@ function newSnapshotId(): string {
  */
 export async function createSnapshot(
   workspaceId: string,
-  label: string
+  label: string,
+  options: {
+    /**
+     * Snapshots the prune after this one must not delete. A restore takes a
+     * safety snapshot first, and at the cap that prune removed the OLDEST
+     * snapshot — exactly the one being restored when you go far back (a
+     * rewind to an early message). Its objects were swept with it and the
+     * restore silently wrote nothing.
+     */
+    protect?: string[];
+  } = {}
 ): Promise<SnapshotInfo | null> {
   let files;
   try {
@@ -211,7 +221,7 @@ export async function createSnapshot(
     "utf8"
   );
 
-  await pruneSnapshots(workspaceId);
+  await pruneSnapshots(workspaceId, options.protect);
 
   return {
     id,
@@ -267,28 +277,26 @@ export async function listSnapshots(
  */
 export async function restoreSnapshot(
   workspaceId: string,
-  snapshotId: string
-): Promise<{ restored: number; removed: number }> {
+  snapshotId: string,
+  options: { safetyLabel?: string } = {}
+): Promise<{ restored: number; removed: number; safety: SnapshotInfo | null }> {
   const dir = snapshotDir(workspaceId, snapshotId);
 
   const raw = await fs.readFile(path.join(dir, "manifest.json"), "utf8");
   const manifest = JSON.parse(raw) as SnapshotManifest;
 
-  await createSnapshot(workspaceId, "Before restoring");
+  // Returned so a caller can offer "undo" for exactly this restore. The
+  // target is protected from the prune this snapshot triggers.
+  const safety = await createSnapshot(
+    workspaceId,
+    options.safetyLabel ?? "Before restoring",
+    { protect: [snapshotId] }
+  );
 
-  // Delete files that did not exist at snapshot time. Without this a restore
-  // leaves behind anything created since, which is not "how it was".
-  const wanted = new Set(manifest.files.map((f) => f.path));
-  let removed = 0;
-  for (const file of await listFiles(workspaceId)) {
-    if (wanted.has(file.path)) continue;
-    try {
-      await fs.unlink(resolveInside(workspaceId, file.path));
-      removed++;
-    } catch {
-      /* already gone */
-    }
-  }
+  const removed = await removeFilesExcept(
+    workspaceId,
+    new Set(manifest.files.map((f) => f.path))
+  );
 
   let restored = 0;
   for (const file of manifest.files) {
@@ -329,7 +337,71 @@ export async function restoreSnapshot(
     }
   }
 
-  return { restored, removed };
+  return { restored, removed, safety };
+}
+
+/**
+ * Delete files that did not exist at snapshot time. Without this a restore
+ * leaves behind anything created since, which is not "how it was".
+ */
+async function removeFilesExcept(
+  workspaceId: string,
+  wanted: Set<string>
+): Promise<number> {
+  let removed = 0;
+  for (const file of await listFiles(workspaceId)) {
+    if (wanted.has(file.path)) continue;
+    try {
+      await fs.unlink(resolveInside(workspaceId, file.path));
+      removed++;
+    } catch {
+      /* already gone */
+    }
+  }
+  return removed;
+}
+
+/**
+ * Puts the workspace back to "no files at all".
+ *
+ * createSnapshot saves nothing for an empty workspace, so the state before a
+ * chat's first message has no snapshot to restore — yet that is the most
+ * common place to rewind to. Same contract as restoreSnapshot: the current
+ * files are saved first and that safety snapshot is returned.
+ */
+export async function restoreEmpty(
+  workspaceId: string,
+  options: { safetyLabel?: string } = {}
+): Promise<{ restored: number; removed: number; safety: SnapshotInfo | null }> {
+  const safety = await createSnapshot(
+    workspaceId,
+    options.safetyLabel ?? "Before restoring"
+  );
+  const removed = await removeFilesExcept(workspaceId, new Set());
+  return { restored: 0, removed, safety };
+}
+
+/** One snapshot's summary, or null when it does not exist (pruned, bad id). */
+export async function getSnapshot(
+  workspaceId: string,
+  snapshotId: string
+): Promise<SnapshotInfo | null> {
+  try {
+    const raw = await fs.readFile(
+      path.join(snapshotDir(workspaceId, snapshotId), "manifest.json"),
+      "utf8"
+    );
+    const manifest = JSON.parse(raw) as SnapshotManifest;
+    return {
+      id: manifest.id,
+      label: manifest.label,
+      createdAt: manifest.createdAt,
+      fileCount: manifest.files.length,
+      totalBytes: manifest.files.reduce((n, f) => n + f.size, 0),
+    };
+  } catch {
+    return null;
+  }
 }
 
 export async function deleteSnapshot(
@@ -347,10 +419,19 @@ export async function deleteSnapshot(
   }
 }
 
-/** Drops the oldest snapshots once there are too many. */
-export async function pruneSnapshots(workspaceId: string): Promise<void> {
+/**
+ * Drops the oldest snapshots once there are too many.
+ *
+ * `protect` survives this pass even when it is among the oldest; the next
+ * prune, after the restore that needed it, is free to take it.
+ */
+export async function pruneSnapshots(
+  workspaceId: string,
+  protect: string[] = []
+): Promise<void> {
   const all = await listSnapshots(workspaceId);
   for (const snapshot of all.slice(MAX_SNAPSHOTS)) {
+    if (protect.includes(snapshot.id)) continue;
     await deleteSnapshot(workspaceId, snapshot.id);
   }
   await collectGarbage(workspaceId);

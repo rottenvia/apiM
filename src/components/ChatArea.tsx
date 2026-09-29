@@ -56,6 +56,13 @@ import type { Message, MessageAttachment, StatusStage } from "@/app/page";
 import { ContextMeter, type ContextSummaryInfo } from "@/components/ContextMeter";
 import { SlashMenu, type SlashItem } from "@/components/SlashMenu";
 import {
+  laterMessagesPhrase,
+  rewindFilesLine,
+  type RewindDone,
+  type RewindHandlers,
+  type RewindPreview,
+} from "@/components/RewindPopover";
+import {
   findCommand,
   matchCommands,
   matchOptions,
@@ -146,6 +153,13 @@ interface ChatAreaProps {
   onLoadReasoning?: (messageId: string) => void;
   onEdit: (messageId: string, newContent: string) => void;
   onDeleteMessage: (messageId: string) => void;
+  /** What rewinding to a question would do — the confirm popover's text. */
+  onRewindPreview?: (messageId: string) => Promise<RewindPreview>;
+  /**
+   * Rewind the chat (and optionally the files) to just before a question.
+   * ChatArea puts the question's text back into this chat's composer.
+   */
+  onRewind?: (messageId: string, restoreFiles: boolean) => Promise<RewindDone>;
   onToggleSidebar: () => void;
   onNewChat: () => void;
   onSetSearchMode: (mode: "off" | "auto" | "always") => void;
@@ -369,6 +383,8 @@ export function ChatArea({
   onLoadReasoning,
   onEdit,
   onDeleteMessage,
+  onRewindPreview,
+  onRewind,
   onToggleSidebar,
   onNewChat,
   onSetSearchMode,
@@ -1418,7 +1434,12 @@ export function ChatArea({
     { tone: "ok" | "error"; text: string } | null
   >(null);
   const [commandNotice, setCommandNotice] = useState<
-    { tone: "ok" | "error"; text: string } | null
+    {
+      tone: "ok" | "error";
+      text: string;
+      /** One follow-up, e.g. undoing a rewind's file changes. */
+      action?: { label: string; run: () => void };
+    } | null
   >(null);
   const [slashActive, setSlashActive] = useState(0);
   // The input the menu was dismissed on; any edit reopens it.
@@ -1433,7 +1454,8 @@ export function ChatArea({
 
   useEffect(() => {
     if (!commandNotice) return;
-    const t = setTimeout(() => setCommandNotice(null), 8000);
+    // Longer when it offers something to click (a rewind's undo).
+    const t = setTimeout(() => setCommandNotice(null), commandNotice.action ? 30000 : 8000);
     return () => clearTimeout(t);
   }, [commandNotice]);
 
@@ -1517,6 +1539,58 @@ export function ChatArea({
       setCompacting(false);
     }
   };
+
+  /*
+   * Rewind, as the bubble's popover and /rewind both run it: the page cuts
+   * the chat (and restores files), and the question's text comes back into
+   * THIS chat's composer so it can be edited and sent again — ahead of
+   * anything already typed there rather than over it.
+   */
+  const runRewind = useCallback(
+    async (messageId: string, restoreFiles: boolean): Promise<RewindDone> => {
+      if (!onRewind) return { ok: false, error: "Rewind is not available here." };
+      const key = draftKeyRef.current;
+      const result = await onRewind(messageId, restoreFiles);
+      if (!result.ok) return result;
+      updateDraft(key, (d) => {
+        const typed = d.input.trim();
+        const input = typed ? `${result.question}\n\n${d.input}` : result.question;
+        return { ...d, input, error: null };
+      });
+      if (draftKeyRef.current === key) {
+        const undo = result.undoFiles;
+        setCommandNotice({
+          tone: "ok",
+          text: result.text,
+          action: undo
+            ? {
+                label: "Undo file changes",
+                run: () => {
+                  void undo().then((r) =>
+                    setCommandNotice({ tone: r.ok ? "ok" : "error", text: r.text })
+                  );
+                },
+              }
+            : undefined,
+        });
+        window.setTimeout(() => {
+          const el = textareaRef.current;
+          if (!el) return;
+          el.focus();
+          el.setSelectionRange(el.value.length, el.value.length);
+        }, 0);
+      }
+      return result;
+    },
+    [onRewind, updateDraft]
+  );
+  const rewindHandlers = useMemo<RewindHandlers | undefined>(
+    () =>
+      onRewind && onRewindPreview
+        ? { preview: onRewindPreview, run: runRewind }
+        : undefined,
+    [onRewind, onRewindPreview, runRewind]
+  );
 
   const executeSlash = async (text: string) => {
     const parsed = parseSlash(text);
@@ -1631,6 +1705,30 @@ export function ChatArea({
         clearInput();
         onResumeLast?.(arg || undefined);
         return;
+      case "rewind": {
+        // To before the last question: chat and files (chat only when that
+        // question has no restore point), after a confirm.
+        const last = [...messages]
+          .reverse()
+          .find((m) => m.role === "user" && !m.isNote && !m.isStreaming);
+        if (!last) return note("There is no message to rewind to yet.", "error");
+        if (!onRewind || !onRewindPreview) return note("Rewind is not available here.", "error");
+        const preview = await onRewindPreview(last.id);
+        if (!preview.ok) return note(preview.error, "error");
+        const later = laterMessagesPhrase(preview.removedMessages);
+        const quoted = last.content.trim().replace(/\s+/g, " ");
+        const short = quoted.length > 80 ? `${quoted.slice(0, 80)}…` : quoted;
+        const ok = window.confirm(
+          `Rewind to before "${short}"?\n\n` +
+            `Removes that message${later ? ` and ${later}` : ""}; its text goes back in the box.\n` +
+            rewindFilesLine(preview.files)
+        );
+        if (!ok) return;
+        clearInput();
+        const result = await runRewind(last.id, preview.files.available);
+        if (!result.ok) note(result.error, "error");
+        return;
+      }
       case "retry": {
         const last = lastReply();
         if (!last) return note("There is no reply to retry yet.", "error");
@@ -2198,6 +2296,7 @@ export function ChatArea({
                 onLoadReasoning={onLoadReasoning}
                 onEdit={onEdit}
                 onDeleteMessage={onDeleteMessage}
+                rewind={rewindHandlers}
                 searchQuery={findOpen ? deferredFindQuery : undefined}
                 searchWholeWord={findWholeWord}
                 searchIndex={searchIndex}
@@ -2421,6 +2520,15 @@ export function ChatArea({
                 }`}
               >
                 {commandNotice.text}
+                {commandNotice.action && (
+                  <button
+                    type="button"
+                    onClick={commandNotice.action.run}
+                    className="ml-1.5 rounded-lg px-1 font-medium text-accent-light underline-offset-2 hover:underline"
+                  >
+                    {commandNotice.action.label}
+                  </button>
+                )}
               </p>
             )}
 
@@ -2810,6 +2918,7 @@ const MessageList = memo(function MessageList({
   onLoadReasoning,
   onEdit,
   onDeleteMessage,
+  rewind,
   searchQuery,
   searchWholeWord,
   searchIndex,
@@ -2834,6 +2943,7 @@ const MessageList = memo(function MessageList({
   onLoadReasoning?: (messageId: string) => void;
   onEdit: (messageId: string, newContent: string) => void;
   onDeleteMessage: (messageId: string) => void;
+  rewind?: RewindHandlers;
   onOpenWorkspaceFile: (path: string) => void;
   onDecideCommand: (id: string, approved: boolean, remember: boolean) => void;
   onAnswerQuestion: (id: string, answer: string) => void;
@@ -2990,6 +3100,9 @@ const MessageList = memo(function MessageList({
             // on screen (audit). The bubble keeps an open edit box's draft.
             onEdit={msg.role === "user" && !busy ? onEdit : undefined}
             onDelete={msg.isStreaming ? undefined : onDeleteMessage}
+            // Questions only, and not mid-reply: the server refuses a
+            // rewind while a run is reading this history anyway.
+            rewind={msg.role === "user" && !msg.isNote && !busy ? rewind : undefined}
             searchQuery={bubbleSearchQuery}
             searchWholeWord={searchWholeWord}
             activeMatchIndex={localActive}
