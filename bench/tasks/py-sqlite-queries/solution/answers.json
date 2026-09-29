@@ -1,0 +1,22 @@
+{
+  "q1": 1545378,
+  "q2": [
+    "France",
+    "Japan"
+  ],
+  "q3": 8,
+  "q4": 8152.5,
+  "q5": [
+    "Arabica Beans 1kg",
+    "Green Tea 100g",
+    "Chai Mix"
+  ],
+  "q6": {
+    "Uncategorized": 601275,
+    "coffee": 377765,
+    "equipment": 1607255,
+    "merch": 282100,
+    "supplies": 190376,
+    "tea": 190448
+  }
+}

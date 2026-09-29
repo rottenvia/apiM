@@ -1,0 +1,9 @@
+{
+  "title": "Make the range utilities fast",
+  "category": "perf",
+  "language": "python",
+  "difficulty": "medium",
+  "prompt": "ranges.py is used by our nightly coverage job. It's correct, but now that the job feeds it a few hundred thousand ranges (and about as many query points) it never finishes: merge_ranges, count_covering and gaps all need to handle inputs of that size in well under a second each. Please make them fast. The results must stay exactly the same as the current implementation for every input, including the odd cases it handles today, and the function names and signatures must not change. Standard library only.",
+  "timeoutMinutes": 15,
+  "budgetUsd": 0.5
+}

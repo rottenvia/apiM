@@ -1,0 +1,9 @@
+{"id": "SO-501", "status": "shipped", "lines": [{"sku": "A-100", "qty": 6}, {"sku": "D-400", "qty": 3}]}
+{"id": "SO-502", "status": "shipped", "lines": [{"sku": "b-220", "qty": 2}, {"sku": "C-310"}]}
+{"id": "SO-503", "status": "open", "lines": [{"sku": "A-100 ", "qty": 12}]}
+{"id": "SO-504", "status": "cancelled", "lines": [{"sku": "E-510", "qty": 3}, {"sku": "D-400", "qty": 10}]}
+{"id": "SO-505", "status": "shipped", "lines": [{"sku": "B-220", "qty": 5}, {"sku": "z-999", "qty": 2}]}
+
+{"id": "SO-506", "status": "open", "lines": [{"sku": " c-310", "qty": 1}, {"sku": "F-620", "qty": 2}]}
+{"id": "SO-507", "status": "shipped", "lines": [{"sku": "a-100", "qty": 9}, {"sku": "Z-999 ", "qty": 1}]}
+{"id": "SO-508", "status": "open", "lines": [{"sku": "E-510", "qty": 1}]}

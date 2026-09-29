@@ -1,0 +1,8 @@
+{
+  "name": "recordkit",
+  "version": "1.4.2",
+  "description": "Load expense records from a directory of JSON files and build a summary report.",
+  "type": "module",
+  "main": "index.js",
+  "scripts": { "example": "node example.js" }
+}

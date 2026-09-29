@@ -1,0 +1,9 @@
+{
+  "title": "Fix the restock crash",
+  "category": "debug",
+  "language": "python",
+  "difficulty": "medium",
+  "prompt": "Our warehouse restock tool crashes on this morning's order feed. This is what I get:\n\n$ python3 restock.py data/stock.csv data/orders.jsonl\nTraceback (most recent call last):\n  File \"/home/dana/restock/restock.py\", line 22, in <module>\n    sys.exit(main(sys.argv))\n             ^^^^^^^^^^^^^^\n  File \"/home/dana/restock/restock.py\", line 16, in main\n    restock, unknown = plan(stock, tally(orders))\n                       ^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/dana/restock/planner.py\", line 14, in plan\n    remaining[sku] -= qty\n    ~~~~~~~~~^^^^^\nKeyError: 'b-220'\n\nThe files in data/ are copies of the real ones. Please fix the tool properly (don't just edit the data files, tomorrow's feed will look the same) so it produces the right report for feeds like this one. The rules the report should follow are in README.md. Keep the command line and output format as they are.",
+  "timeoutMinutes": 15,
+  "budgetUsd": 0.5
+}

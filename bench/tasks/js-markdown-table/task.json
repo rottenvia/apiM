@@ -1,0 +1,9 @@
+{
+  "title": "Render records as an aligned GitHub markdown table",
+  "category": "data",
+  "language": "javascript",
+  "difficulty": "easy",
+  "prompt": "Our CLI prints results as markdown tables and the output looks ragged, especially with Japanese product names and emoji. Please implement renderTable(rows, options) in table.js; the comment at the top of that file is the spec (column order, alignment defaults, escaping, padding, and how to measure the display width of text). Node built-ins only — no npm packages. report.js shows how it's used.",
+  "timeoutMinutes": 10,
+  "budgetUsd": 0.3
+}

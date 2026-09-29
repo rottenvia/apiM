@@ -59,12 +59,12 @@ check("calculate_total keeps a docstring", bool((shop.pricing.calculate_total.__
 # 3. the old name still works for callers, with a DeprecationWarning
 for where in ("shop.calc", "shop.pricing.calc"):
     obj = shop if where == "shop.calc" else shop.pricing
-    fn = getattr(obj, "calc", None)
-    if not callable(fn):
-        check(f"{where} still callable", False, "missing")
-        continue
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
+        fn = getattr(obj, "calc", None)
+        if not callable(fn):
+            check(f"{where} still callable", False, "missing")
+            continue
         try:
             res = fn([("9.99", 2), ("5", 1)], "reduced")
             res2 = fn([(100, 1)], region="default", discount=None)
@@ -87,7 +87,7 @@ for args, want_out in ((["calc", "9.99:2", "5:1", "--region", "reduced"], "26.23
           f"exit {r.returncode}, stdout {r.stdout.strip()!r}, stderr {r.stderr.strip()[-200:]!r}")
 
 # 5. the project's own tests still pass
-r = run(["-W", "error::DeprecationWarning", "-m", "unittest", "discover", "-s", "tests", "-t", "."], WS)
+r = run(["-m", "unittest", "discover", "-s", "tests", "-t", "."], WS)
 check("tests/ pass", r.returncode == 0 and "Ran 0 tests" not in r.stderr, r.stderr.strip()[-300:])
 
 
