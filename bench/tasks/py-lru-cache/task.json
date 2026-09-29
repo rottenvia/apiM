@@ -1,0 +1,9 @@
+{
+  "title": "Implement an LRU cache with TTL",
+  "category": "feature",
+  "language": "python",
+  "difficulty": "medium",
+  "prompt": "I need the LRUCache class in lru.py implemented. The full spec is in the module docstring at the top of lru.py: capacity and LRU eviction order, get/peek/put/delete/keys/resize, `len()` and `in`, and optional per-item expiry (ttl) driven by an injectable clock so it can be tested without sleeping. Please follow the spec exactly, including the edge cases it spells out; standard library only. Keep the class and method names as they are.",
+  "timeoutMinutes": 15,
+  "budgetUsd": 0.5
+}

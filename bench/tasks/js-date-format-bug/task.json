@@ -1,0 +1,9 @@
+{
+  "title": "Fix time-zone and DST bugs in the date helpers",
+  "category": "bugfix",
+  "language": "javascript",
+  "difficulty": "medium",
+  "prompt": "Our booking app's date helpers in dates.js pass their tests on CI (which runs in UTC) but we keep getting bug reports from real users: people in California see bookings shown one day early, people in Japan say the week view starts on the wrong day and the 'nights' count is sometimes off by one, a customer in London was told their stay around the end of October ended a day early, and a night-shift worker was paid 3 hours for a 00:30-03:30 shift on the night the clocks went forward (it was really 2). All these functions deal with the user's LOCAL calendar and wall-clock time (the doc comments describe each one). Please fix dates.js so every function is correct in any time zone, including across daylight-saving changes. Keep the exported function names and signatures.",
+  "timeoutMinutes": 15,
+  "budgetUsd": 0.5
+}

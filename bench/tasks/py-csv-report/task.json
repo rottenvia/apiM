@@ -1,0 +1,9 @@
+{
+  "title": "Sales report from a messy CSV",
+  "category": "data",
+  "language": "python",
+  "difficulty": "medium",
+  "prompt": "sales.csv is an export from our old shop system and it's messy: quoted fields with commas in them, blank lines, prices written with $ and thousands separators, dates in several different formats, refunds recorded as negative numbers, and some orders were exported more than once. Please produce report.json in the workspace root with exactly these keys:\n\n{\n  \"orders\": <int, number of distinct orders>,\n  \"units\": <int, total quantity>,\n  \"gross_revenue\": <number, sum of quantity * unit_price>,\n  \"refunds\": <number, total refunded, as a positive amount>,\n  \"net_revenue\": <number, gross_revenue - refunds>,\n  \"by_region\": {\"<region>\": <net revenue>, ...},\n  \"by_month\": {\"YYYY-MM\": <net revenue>, ...},\n  \"top_product\": {\"name\": \"<product>\", \"units\": <int>},\n  \"refund_rate\": <number, share of orders that have a non-zero refund, 0..1>\n}\n\nRules:\n- Each row is one order. Order ids are the same order regardless of letter case or surrounding whitespace; when an order appears more than once, keep only its first occurrence in the file and ignore the later copies.\n- Region names should be trimmed and lower-cased (\"north\", not \" North\").\n- Dates with slashes and the year at the end are US-style month/day/year.\n- by_month uses the order date; only include months that have orders.\n- top_product is the product with the most units sold; if there's a tie, the alphabetically first name wins. Use the product name as it appears in the file (trimmed).\n- Round money to 2 decimals and refund_rate to 4 decimals.\n\nWrite whatever script you like to do it (standard library only), but report.json is the deliverable. Don't edit sales.csv.",
+  "timeoutMinutes": 15,
+  "budgetUsd": 0.5
+}

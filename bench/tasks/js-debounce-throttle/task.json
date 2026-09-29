@@ -1,0 +1,9 @@
+{
+  "title": "Debounce and throttle with an injectable clock",
+  "category": "feature",
+  "language": "javascript",
+  "difficulty": "medium",
+  "prompt": "We're dropping lodash from the front-end and need our own debounce and throttle. The stubs are in timing.js and the required behaviour is written up in TIMING.md (leading/trailing edges, maxWait, cancel/flush/pending, return values, and the clock option). The clock option matters: our tests drive time with a fake clock, so the functions must do all their timing through the clock they're given (and fall back to the real timers only when none is passed). Please implement both functions in timing.js exactly to that spec. No dependencies.",
+  "timeoutMinutes": 15,
+  "budgetUsd": 0.5
+}

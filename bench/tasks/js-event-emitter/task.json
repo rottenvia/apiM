@@ -1,0 +1,9 @@
+{
+  "title": "Implement a small EventEmitter",
+  "category": "feature",
+  "language": "javascript",
+  "difficulty": "easy",
+  "prompt": "We want to stop depending on Node's events module in our browser bundle, so I stubbed out our own EventEmitter in emitter.js. Please implement it so it behaves exactly as described in EMITTER_SPEC.md (on, off, once, emit, listenerCount, listeners, removeAllListeners). Keep it an ES module exporting the EventEmitter class, no dependencies. Pay attention to the parts of the spec about adding/removing listeners while an emit is in progress and about the 'error' event.",
+  "timeoutMinutes": 10,
+  "budgetUsd": 0.3
+}
