@@ -1,0 +1,9 @@
+{
+  "title": "Path router with params, wildcards and 404/405",
+  "category": "feature",
+  "language": "javascript",
+  "difficulty": "medium",
+  "prompt": "Our tiny HTTP server (server.js) still dispatches with a big if/else. I started a proper router in router.js — the doc comment at the top of that file describes exactly how matching must work (params, optional params, wildcard, query strings, method matching incl. HEAD, which route wins when several match, and 404 vs 405 vs 400). Please implement createRouter() in router.js to that spec. No dependencies; Node built-ins only. You don't need to rewrite server.js, but it's a handy way to try things out.",
+  "timeoutMinutes": 15,
+  "budgetUsd": 0.5
+}

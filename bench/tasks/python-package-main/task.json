@@ -1,0 +1,9 @@
+{
+  "title": "Give mdstat a command-line entry point",
+  "category": "feature",
+  "language": "python",
+  "difficulty": "easy",
+  "prompt": "The `mdstat` package in this repo has the counting functions but no CLI. Make `python -m mdstat FILE [FILE ...]` work (run from the repo root) with this behaviour:\n\n- For each file print a block: a header line `== <path> ==` (the path exactly as given on the command line), then five lines `lines: N`, `words: N`, `headings: N`, `code_blocks: N`, `links: N`, using the numbers the library already computes (`mdstat.analyze`). Separate blocks with one blank line. Don't change how the library counts.\n- A path of `-` means read the document from standard input; its header is `== <stdin> ==`.\n- `--json` prints a JSON array instead, one object per file in argument order: `{\"file\": ..., \"lines\": ..., \"words\": ..., \"headings\": ..., \"code_blocks\": ..., \"links\": ...}` (`file` is the path as given, or `<stdin>`).\n- If a file can't be read (missing, a directory, not UTF-8...), print `mdstat: cannot read <path>: <reason>` to stderr, keep going with the remaining files, and exit with status 1 at the end. Only readable files appear in the output.\n- No file arguments, or an unknown option, is a usage error: print a usage message to stderr and exit 2. `--help` prints usage to stdout and exits 0.\n- Otherwise exit 0.\n\nThere are sample documents in samples/.",
+  "timeoutMinutes": 10,
+  "budgetUsd": 0.3
+}
