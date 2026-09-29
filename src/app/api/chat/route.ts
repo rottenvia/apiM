@@ -66,7 +66,7 @@ import type { TimelineEntry } from "@/lib/timeline";
 import { BROWSER_POLICY_PROMPT, NO_BROWSER_PROMPT } from "@/lib/browser-policy";
 import { browserAvailable } from "@/lib/browser-playwright";
 import { recordAsync } from "@/lib/diagnostics";
-import { listFiles, workspaceDirectory } from "@/lib/workspace";
+import { listFiles, readFileWhole, workspaceDirectory } from "@/lib/workspace";
 import { createSnapshot } from "@/lib/snapshots";
 import {
   runCommand,
@@ -91,6 +91,9 @@ import { pruneTranscript } from "@/lib/prune";
 
 /** Plugin blocks larger than this ride pinned (cached), never as a tail copy. */
 const PLUGIN_TAIL_MAX_CHARS = 4_000;
+
+/** AGENTS.md beyond this rides as a pointer, not text. */
+const PROJECT_NOTES_MAX_CHARS = 12_000;
 import { compactTranscript } from "@/lib/compact";
 import {
   QWEN_COMPACT,
@@ -175,6 +178,8 @@ import {
 import { extractReasoningDelta } from "@/lib/reasoning-stream";
 import { loadHistoryForRequest } from "@/lib/chat-history";
 import {
+  COMPACT_TEXT_MAX_CHARS,
+  compactSystemPrompt,
   renderHistorySummary,
   runHistorySummary,
   shouldRefreshHistorySummary,
@@ -540,6 +545,8 @@ type StreamEvent =
       spentUsd?: number;
       /** The cap in force, if any. */
       limitUsd?: number;
+      /** Tokens the newest round occupied in the context window. */
+      contextTokens?: number;
     }
   | {
       type: "plan";
@@ -587,6 +594,8 @@ type StreamEvent =
       durationMs: number;
       /** Chars in the final upstream request — the context this reply cost. */
       contextChars?: number;
+      /** Tokens the final round occupied in the context window. */
+      contextTokens?: number;
       /** Where those bytes lived, largest first. */
       contextBreakdown?: { label: string; chars: number }[];
       /** How the reply ended: final finish_reason plus continuations spent. */
@@ -1078,7 +1087,16 @@ export async function POST(req: NextRequest) {
                 model: helper.apiModel,
                 thinkingStyle: helper.thinkingStyle,
               },
-              runSignal
+              runSignal,
+              // A /compact summary stands in for the whole chat; rolling it
+              // with the 300-word prompt would squash it on the next refresh.
+              summary?.manual
+                ? {
+                    system: compactSystemPrompt(),
+                    maxTokens: 2000,
+                    maxChars: COMPACT_TEXT_MAX_CHARS,
+                  }
+                : {}
             );
             if (fresh) {
               summary = {
@@ -1087,6 +1105,13 @@ export async function POST(req: NextRequest) {
                 droppedTurns:
                   (summary?.droppedTurns ?? 0) + fresh.droppedTurns,
                 updatedAt: new Date().toISOString(),
+                ...(summary?.manual
+                  ? {
+                      manual: true,
+                      coveredTurns:
+                        (summary.coveredTurns ?? 0) + full.pending.length,
+                    }
+                  : {}),
               };
               // False means a concurrent request summarised first — its
               // cursor wins the write, ours still applies to this request.
@@ -1383,6 +1408,33 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         }
         const lessonsBlock = formatLessonsForPrompt(existingLessons);
 
+        /*
+         * Project notes: AGENTS.md at the workspace root (CLAUDE.md as the
+         * fallback most repos already carry). /init writes it; the user can
+         * edit it. Read once per reply into the stable system message, so it
+         * sits in the cached prefix instead of costing full price per round.
+         */
+        let projectNotesBlock = "";
+        if (workspaceEnabled) {
+          for (const name of ["AGENTS.md", "CLAUDE.md"]) {
+            try {
+              const { content } = await readFileWhole(workspace, name);
+              const text = content.trim();
+              if (!text) continue;
+              const clipped =
+                text.length > PROJECT_NOTES_MAX_CHARS
+                  ? `${text.slice(0, PROJECT_NOTES_MAX_CHARS)}\n…[${name} continues — read_file it for the rest]`
+                  : text;
+              projectNotesBlock =
+                `\n\nProject notes from ${name} in the workspace — written for whoever works here next. ` +
+                `Follow them. When you learn something durable about this project (a command that works, a trap, a convention), update ${name}.\n\n${clipped}`;
+              break;
+            } catch {
+              // Absent is the normal case.
+            }
+          }
+        }
+
         // Durable record of executables already inspected/decompiled in this
         // workspace, plus any verdict the agent recorded. Survives Stop and
         // compaction so the next message cannot re-run Ghidra on a hash it
@@ -1450,6 +1502,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               workspaceInstruction +
               binaryLedgerBlock +
               findingsBlock +
+              projectNotesBlock +
               lessonsBlock,
           },
         ];
@@ -2068,6 +2121,12 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         // The FINAL round's request size, reported on `done` — the context
         // the reply as a whole cost. Updated per round; last write wins.
         let lastInputChars = 0;
+        /*
+         * Tokens the newest round occupied in the model's window: its prompt
+         * plus what it generated. The composer's context meter reads this —
+         * a summed total over thirty rounds would read as thirty windows.
+         */
+        let lastContextTokens = 0;
         let lastSizeParts: { label: string; chars: number }[] = [];
         // Carried across Resume so the ask-early nudge and plan checks still
         // see how long this reply has already been working.
@@ -3615,6 +3674,10 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 totalUsage.prompt_tokens += u.prompt_tokens ?? 0;
                 totalUsage.completion_tokens += u.completion_tokens ?? 0;
                 totalUsage.total_tokens += u.total_tokens ?? 0;
+                if ((u.prompt_tokens ?? 0) > 0) {
+                  lastContextTokens =
+                    (u.prompt_tokens ?? 0) + (u.completion_tokens ?? 0);
+                }
                 // Kept per round and summed, since each round has its own
                 // split — the first is mostly a miss, later ones mostly hits.
                 // Normalize OpenRouter's prompt_tokens_details.cached_tokens
@@ -3644,6 +3707,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 send({
                   type: "usage",
                   usage: { ...totalUsage },
+                  contextTokens: lastContextTokens || undefined,
                   model,
                   period,
                   // Recompute from the summed split so the live figure always
@@ -6133,6 +6197,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             durationMs: Date.now() - startedAt,
             reasoningMs: currentReasoningMs() || null,
             contextChars: lastInputChars || null,
+            contextTokens: lastContextTokens || null,
             contextBreakdown: lastSizeParts.length
               ? lastSizeParts.slice(0, 6)
               : null,
@@ -6280,6 +6345,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           durationMs: Date.now() - startedAt,
           reasoningMs: currentReasoningMs() || undefined,
           contextChars: lastInputChars || undefined,
+          contextTokens: lastContextTokens || undefined,
           contextBreakdown: lastSizeParts.length
             ? lastSizeParts.slice(0, 6)
             : undefined,

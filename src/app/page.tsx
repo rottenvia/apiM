@@ -27,10 +27,15 @@ import {
   DEFAULT_LOCAL_BASE_URL,
   DEFAULT_MODEL_ID,
   FREE_OPENROUTER_MODEL_ID,
+  MODELS,
+  contextWindowFor,
   hasKeyForModel,
   resolveModelInfo,
   sanitizeCustomModelDef,
 } from "@/lib/models";
+import { EXPORT_FORMATS } from "@/lib/export";
+import { parseBudget, type SlashOption } from "@/lib/slash-commands";
+import type { ContextSummaryInfo } from "@/components/ContextMeter";
 import type { CustomModelDef } from "@/lib/models";
 import type { UsageLike } from "@/lib/pricing";
 import {
@@ -39,6 +44,7 @@ import {
   DEFAULT_THEME_ID,
   getTheme,
   sanitizeSeeds,
+  THEMES,
 } from "@/lib/themes";
 import type { CustomThemeSeeds } from "@/lib/themes";
 import { replyCanContinue } from "@/lib/resume-target";
@@ -122,6 +128,8 @@ export interface Message {
   durationMs?: number;
   /** Chars in the final upstream request — the context this reply cost. */
   contextChars?: number;
+  /** Tokens the final round occupied in the context window. */
+  contextTokens?: number;
   /** Where those bytes lived, largest first. */
   contextBreakdown?: { label: string; chars: number }[];
   /** How the reply ended: final finish_reason plus continuations spent. */
@@ -303,7 +311,7 @@ type StreamEvent =
       context: string;
     }
   | { type: "question_resolved"; id: string; answered: boolean }
-  | { type: "usage"; usage: UsageLike; model: string }
+  | { type: "usage"; usage: UsageLike; model: string; contextTokens?: number }
   | {
       type: "tool_result";
       id: string;
@@ -330,6 +338,7 @@ type StreamEvent =
       durationMs: number;
       reasoningMs?: number;
       contextChars?: number;
+      contextTokens?: number;
       contextBreakdown?: { label: string; chars: number }[];
       ending?: {
         finish: string | null;
@@ -868,6 +877,17 @@ export default function Home() {
    * to the main task and dismissing the note must not touch it.
    */
   const [btwEntry, setBtwEntry] = useState<BtwEntry | null>(null);
+  /*
+   * Per chat: the stored summary standing in for older turns (from the
+   * conversation file, refreshed by /compact), and after /compact the
+   * estimated window until the next reply reports its real size.
+   */
+  const [summaryByConv, setSummaryByConv] = useState<
+    Record<string, (ContextSummaryInfo & { upToId: string }) | null>
+  >({});
+  const [estimateByConv, setEstimateByConv] = useState<
+    Record<string, { tokens: number; afterMessageId: string | null }>
+  >({});
   const btwAbortRef = useRef<AbortController | null>(null);
   // The dock is a confirmation, not a record. A queued note gets its record
   // in the transcript the moment the task reads it, so the popup gets out of
@@ -1732,8 +1752,15 @@ export default function Home() {
         });
         if (!res.ok || seq !== loadSeq.current) return;
 
-      const data = (await res.json()) as { messages?: unknown };
+      const data = (await res.json()) as {
+        messages?: unknown;
+        historySummary?: unknown;
+      };
       if (seq !== loadSeq.current) return;
+      setSummaryByConv((prev) => ({
+        ...prev,
+        [id]: parseHistorySummary(data.historySummary),
+      }));
 
       const list = Array.isArray(data.messages) ? data.messages : [];
       /*
@@ -1787,6 +1814,7 @@ export default function Home() {
           model: m.model as string | undefined,
           durationMs: m.durationMs as number | undefined,
           contextChars: m.contextChars as number | undefined,
+          contextTokens: m.contextTokens as number | undefined,
           contextBreakdown: Array.isArray(m.contextBreakdown)
             ? (m.contextBreakdown as { label: string; chars: number }[])
             : undefined,
@@ -2977,6 +3005,9 @@ export default function Home() {
                           usage: evt.usage,
                           tokenCount: evt.usage.total_tokens,
                           model: evt.model,
+                          ...(evt.contextTokens
+                            ? { contextTokens: evt.contextTokens }
+                            : {}),
                         }
                       : m
                   )
@@ -3115,6 +3146,7 @@ export default function Home() {
                   durationMs: evt.durationMs,
                   reasoningMs: evt.reasoningMs,
                   contextChars: evt.contextChars,
+                  contextTokens: evt.contextTokens,
                   contextBreakdown: evt.contextBreakdown,
                   ending: evt.ending,
                   // A limit-stop must land as Resume on the SAME bubble.
@@ -3937,6 +3969,230 @@ export default function Home() {
     [loadReasoning]
   );
 
+  /**
+   * /compact: fold the whole conversation into its summary, so the next
+   * request carries the summary instead of the turns.
+   */
+  const compactConversation = useCallback(
+    async (instructions?: string): Promise<{ ok: boolean; text: string }> => {
+      const convId = currentConvId;
+      if (!convId) {
+        return { ok: false, text: "Nothing to compact yet — send a message first." };
+      }
+      let res: Response;
+      try {
+        res = await fetch(`/api/conversations/${convId}/compact`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            instructions,
+            model,
+            customModels,
+            deepseekApiKey: deepseekKey,
+            openrouterApiKey: openrouterKey,
+            localBaseUrl,
+            localApiKey,
+            localApiModel,
+          }),
+        });
+      } catch {
+        return { ok: false, text: "Couldn't reach the server — nothing was changed." };
+      }
+      const data = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        summary?: unknown;
+        beforeChars?: number;
+        afterChars?: number;
+        costUsd?: number | null;
+      };
+      if (!res.ok) {
+        return { ok: false, text: data.error ?? "Compacting failed — nothing was changed." };
+      }
+      const summary = parseHistorySummary(data.summary);
+      setSummaryByConv((prev) => ({ ...prev, [convId]: summary }));
+
+      // The meter can't know the real size until the next request, so it
+      // estimates: the last reply's window minus the history just folded.
+      const msgs = sessionsRef.current.get(convId)?.messages ?? [];
+      const last = [...msgs]
+        .reverse()
+        .find((m) => m.role === "assistant" && (m.contextTokens || m.contextChars));
+      const saved = Math.max(0, (data.beforeChars ?? 0) - (data.afterChars ?? 0));
+      if (last) {
+        const was = last.contextTokens ?? Math.round((last.contextChars ?? 0) / 3.6);
+        setEstimateByConv((prev) => ({
+          ...prev,
+          [convId]: {
+            tokens: Math.max(0, Math.round(was - saved / 3.6)),
+            afterMessageId: last.id,
+          },
+        }));
+      }
+      const k = (chars: number) =>
+        chars >= 3600 ? `${Math.round(chars / 3600)}k` : String(Math.round(chars / 3.6));
+      const cost =
+        typeof data.costUsd === "number" && data.costUsd > 0
+          ? ` · ${data.costUsd < 0.01 ? "<$0.01" : `$${data.costUsd.toFixed(2)}`}`
+          : "";
+      return {
+        ok: true,
+        text: `Compacted ${summary?.coveredTurns ?? msgs.length} messages — history went from ~${k(data.beforeChars ?? 0)} to ~${k(data.afterChars ?? 0)} tokens${cost}.`,
+      };
+    },
+    [
+      currentConvId,
+      model,
+      customModels,
+      deepseekKey,
+      openrouterKey,
+      localBaseUrl,
+      localApiKey,
+      localApiModel,
+    ]
+  );
+
+  /** Slash commands whose state lives on this page. */
+  const runPageCommand = useCallback(
+    async (name: string, arg: string): Promise<{ ok: boolean; text?: string } | void> => {
+      const convId = currentConvId;
+      const needChat = () => ({
+        ok: false,
+        text: "This chat hasn't been saved yet — send a message first.",
+      });
+      switch (name) {
+        case "rename": {
+          if (!convId) return needChat();
+          await renameConversation(convId, arg.slice(0, 200));
+          return { ok: true, text: `Renamed to "${arg.slice(0, 200)}".` };
+        }
+        case "archive": {
+          if (!convId) return needChat();
+          await archiveConversation(convId, true);
+          startNewChat();
+          return;
+        }
+        case "delete": {
+          if (!convId) return needChat();
+          const title = conversationsRef.current.find((c) => c.id === convId)?.title;
+          if (!window.confirm(`Delete "${title ?? "this chat"}" and its workspace? This can't be undone.`)) {
+            return { ok: true, text: "Kept the chat." };
+          }
+          await deleteConversation(convId);
+          return;
+        }
+        case "export": {
+          if (!convId) return needChat();
+          const format = EXPORT_FORMATS.find((f) => f.id === (arg || "md").toLowerCase());
+          if (!format) {
+            return { ok: false, text: `Export as ${EXPORT_FORMATS.map((f) => f.id).join(", ")}.` };
+          }
+          const a = document.createElement("a");
+          a.href = `/api/conversations/${convId}/export?format=${format.id}`;
+          a.download = "";
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          return { ok: true, text: `Downloading this chat as ${format.label}.` };
+        }
+        case "mcp":
+          setShowMcp(true);
+          return;
+        case "theme": {
+          const t = THEMES.find(
+            (x) => x.id === arg || x.name.toLowerCase() === arg.toLowerCase()
+          );
+          if (!t && arg !== CUSTOM_THEME_ID) {
+            return { ok: false, text: `No theme called "${arg}".` };
+          }
+          setThemeId(t?.id ?? CUSTOM_THEME_ID);
+          return { ok: true, text: `Theme: ${t?.name ?? "Custom"}` };
+        }
+        case "budget": {
+          if (!arg) {
+            return {
+              ok: true,
+              text:
+                budgetUsd === null
+                  ? "No spending limit. Set one with /budget 2 (dollars per reply)."
+                  : `Limit: $${budgetUsd} per reply. /budget off removes it.`,
+            };
+          }
+          const value = parseBudget(arg);
+          if (Number.isNaN(value)) {
+            return { ok: false, text: 'Give an amount in dollars, like "/budget 2", or "/budget off".' };
+          }
+          setBudgetUsd(value);
+          return {
+            ok: true,
+            text: value === null ? "Spending limit removed." : `Each reply now stops at $${value}.`,
+          };
+        }
+      }
+    },
+    [
+      currentConvId,
+      renameConversation,
+      archiveConversation,
+      deleteConversation,
+      startNewChat,
+      budgetUsd,
+    ]
+  );
+
+  /** Choices the slash menu offers for command arguments. */
+  const slashOptions = useMemo((): Record<string, SlashOption[]> => {
+    const keys = {
+      deepseekKey,
+      openrouterKey,
+      localBaseUrl,
+    };
+    const models: SlashOption[] = [
+      ...MODELS.map((m) => ({ id: m.id, label: m.label, specs: m.specs })),
+      ...customModels.map((c) => ({
+        id: c.id,
+        label: c.label,
+        specs: resolveModelInfo(c.id, customModels).specs,
+      })),
+    ].map((m) => ({
+      value: m.id,
+      label: m.label,
+      description:
+        m.specs + (hasKeyForModel(m.id, keys, customModels) ? "" : " · no key"),
+      current: m.id === model,
+    }));
+    return {
+      model: models,
+      effort: ["auto", "none", "low", "high", "max"].map((e) => ({
+        value: e,
+        label: e[0].toUpperCase() + e.slice(1),
+        current: e === thinkingEffort,
+      })),
+      web: [
+        { value: "auto", label: "On", description: "Searches when it needs to" },
+        { value: "always", label: "Every message", description: "Leans towards looking things up" },
+        { value: "off", label: "Off", description: "No web search" },
+      ].map((o) => ({ ...o, current: o.value === webSearchMode })),
+      theme: [
+        ...THEMES.map((t) => ({ value: t.id, label: t.name, current: t.id === themeId })),
+        { value: CUSTOM_THEME_ID, label: "Custom", current: themeId === CUSTOM_THEME_ID },
+      ],
+      export: EXPORT_FORMATS.map((f) => ({
+        value: f.id,
+        label: f.label,
+        description: f.hint,
+      })),
+    };
+  }, [
+    customModels,
+    model,
+    thinkingEffort,
+    webSearchMode,
+    themeId,
+    deepseekKey,
+    openrouterKey,
+    localBaseUrl,
+  ]);
+
   return (
     <ArtifactProvider>
     <div className="flex h-dvh w-full overflow-hidden bg-bg-primary">
@@ -4040,6 +4296,21 @@ export default function Home() {
         onProcessesChanged={() => void refreshWorkspaceFiles()}
         sidePanelOpen={sidePanelOpen}
         onToggleSidePanel={() => setSidePanelOpen((v) => !v)}
+        contextWindow={contextWindowFor(model, customModels)}
+        modelLabel={activeModelInfo.shortLabel}
+        historySummary={(() => {
+          // Retry or an edit removes a /compact cursor, and the server drops
+          // that summary with it — so must the meter.
+          const summary = currentConvId ? summaryByConv[currentConvId] ?? null : null;
+          return summary &&
+            (!summary.manual || isLoading || messages.some((m) => m.id === summary.upToId))
+            ? summary
+            : null;
+        })()}
+        contextEstimate={currentConvId ? estimateByConv[currentConvId] ?? null : null}
+        onCompact={compactConversation}
+        onCommand={runPageCommand}
+        slashOptions={slashOptions}
       />
 
       {/* Only while the workspace is on: an empty rail beside every ordinary
@@ -4199,4 +4470,20 @@ export default function Home() {
     </div>
     </ArtifactProvider>
   );
+}
+
+/** The conversation file's `historySummary`, validated for the meter. */
+function parseHistorySummary(
+  raw: unknown
+): (ContextSummaryInfo & { upToId: string }) | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.text !== "string" || typeof r.upToId !== "string") return null;
+  return {
+    text: r.text,
+    upToId: r.upToId,
+    manual: r.manual === true,
+    coveredTurns: typeof r.coveredTurns === "number" ? r.coveredTurns : null,
+    updatedAt: typeof r.updatedAt === "string" ? r.updatedAt : new Date().toISOString(),
+  };
 }
