@@ -87,7 +87,8 @@
     "bench": "tsx scripts/bench.mjs",
     "test:bench": "tsx scripts/bench.mjs --self-test",
     "test:rewind": "tsx scripts/test-rewind.mjs",
-    "test:ingest": "tsx scripts/test-ingest.mjs"
+    "test:ingest": "tsx scripts/test-ingest.mjs",
+    "test:extract": "tsx scripts/test-extract.mjs"
   },
   "dependencies": {
     "@types/cross-spawn": "^6.0.6",

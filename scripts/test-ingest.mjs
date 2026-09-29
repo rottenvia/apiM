@@ -137,6 +137,54 @@ console.log("\nbinary formats");
   check("a dropped JAR is described as a Java archive", jar.kind === "binary" && /Java archive/.test(jar.label), jar.label);
 }
 
+// --- archives ---
+console.log("\narchives");
+{
+  const { execFileSync } = await import("node:child_process");
+  const scratch = path.join(process.env.APIM_DATA_ROOT, "scratch");
+  const { mkdirSync, copyFileSync, existsSync } = await import("node:fs");
+  mkdirSync(scratch, { recursive: true });
+  const py = (code) => execFileSync("python3", ["-c", code], { cwd: scratch });
+  py(`
+import zipfile, io
+inner = io.BytesIO()
+with zipfile.ZipFile(inner, "w") as z: z.writestr("deep/secret.txt", "from the nested zip")
+with zipfile.ZipFile("mod.zip", "w", zipfile.ZIP_DEFLATED) as z:
+    z.writestr("mod/README.md", "# mod")
+    z.writestr("mod/src/main.lua", "print('hi')")
+    z.writestr("mod/bin/tool.dll", b"MZ" + bytes(300))
+    z.writestr("mod/assets.zip", inner.getvalue())
+`);
+  const zipBytes = readFileSync(path.join(scratch, "mod.zip"));
+  const up = await post("uploads/mod.zip", zipBytes);
+  const da = await I.ingestUpload(ws, up.body.path, { extract: true });
+  check("a dropped zip is unpacked, not called a binary", da.kind === "archive" && da.fileCount === 4 && /uploads\/mod/.test(da.path), da.label);
+  if (process.env.SHOW) console.log(da.text);
+  check("…and the message maps what came out", /main\.lua/.test(da.text) && /README\.md/.test(da.text) && /assets\.zip/.test(da.text) && /extract_archive/.test(da.text));
+  check("unpacked files are exact", readFileSync(W.resolveInside(ws, `${da.path}/src/main.lua`), "utf8") === "print('hi')");
+
+  const nested = await T.runTool(ws, "extract_archive", { path: `${da.path}/assets.zip` }, {});
+  check("extract_archive unpacks an archive found inside one", nested.ok && readFileSync(W.resolveInside(ws, `${da.path}/assets/deep/secret.txt`), "utf8") === "from the nested zip", nested.summary);
+
+  const rar = ["test_read_format_rar.rar", "test.rar"].map((f) => path.join(ROOT, "scripts/fixtures/extract", f)).find(existsSync) ??
+    (await import("node:fs")).readdirSync(path.join(ROOT, "scripts/fixtures/extract")).filter((f) => /\.rar$/i.test(f)).map((f) => path.join(ROOT, "scripts/fixtures/extract", f))[0];
+  if (rar) {
+    const rb = readFileSync(rar);
+    const ru = await post(`uploads/${path.basename(rar)}`, rb);
+    const dr = await I.ingestUpload(ws, ru.body.path, { extract: true });
+    check("RAR unpacks on drop (no system unrar needed)", dr.kind === "archive" && (dr.fileCount ?? 0) > 0, dr.label);
+  } else check("RAR fixture present", false);
+
+  const locked = readFileSync(path.join(ROOT, "scripts/fixtures/extract/rar5-encrypted-headers.rar"));
+  await post("uploads/locked.rar", locked);
+  const dl = await I.ingestUpload(ws, "uploads/locked.rar", { extract: true });
+  check("a password-protected archive asks for the password", /password-protected/.test(dl.label) && /Ask the user for the password/.test(dl.text), dl.label);
+  const docx = Buffer.from(zipBytes); // a zip wearing a .docx name
+  await post("uploads/report.docx", docx);
+  const dd = await I.ingestUpload(ws, "uploads/report.docx", { extract: true });
+  check("an Office file stays a document, not an unpacked zip", dd.kind === "document", dd.kind);
+}
+
 // --- query_data ---
 console.log("\nquery_data");
 {

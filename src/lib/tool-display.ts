@@ -39,6 +39,7 @@ const TABLE: Record<string, [ToolKind, string, string]> = {
   read_symbol: ["read", "Reading", "Read"],
   find_references: ["search", "Finding uses of", "Found uses of"],
   query_data: ["read", "Querying", "Queried"],
+  extract_archive: ["write", "Unpacking", "Unpacked"],
   delegate: ["search", "Delegating", "Delegated"],
   read_document: ["read", "Reading", "Read"],
   list_files: ["read", "Listing files", "Listed files"],

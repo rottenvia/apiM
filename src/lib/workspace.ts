@@ -677,6 +677,8 @@ export async function listFiles(
     for (const entry of entries) {
       if (out.length >= MAX_FILES_PER_WORKSPACE) return;
       if (IGNORED.has(entry.name)) continue;
+      // In-flight uploads and archive extractions: never half a file.
+      if (entry.name.startsWith(".apim-extract-") || /^\.upload-.*\.tmp$/.test(entry.name)) continue;
       if (atRoot && IGNORED_AT_ROOT.has(entry.name)) continue;
 
       const full = path.join(dir, entry.name);
