@@ -939,7 +939,11 @@ function MessageBubbleImpl({
   return (
     <div
       ref={bubbleRootRef}
-      className={`animate-fade-in ${isUser ? "flex justify-end" : "flex justify-start"}`}
+      className={`animate-fade-in ${isUser ? "flex justify-end" : "flex justify-start"}${
+        // Each bubble's fade-in makes it a stacking context, so the next
+        // message painted over the open rewind popover; lift this one.
+        rewindOpen ? " relative z-20" : ""
+      }`}
     >
       <div
         className={`max-w-[85%] md:max-w-[75%] ${
