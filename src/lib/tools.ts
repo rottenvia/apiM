@@ -1838,6 +1838,84 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "sandbox_run",
+      description:
+        "Run a command inside the private Linux sandbox on the user's own PC — " +
+        "a small WSL2 box, invisible to them (no window, never takes focus, " +
+        "runs fine while they are gaming), with only THIS chat's workspace " +
+        "mounted and Windows cut off from it. Use it when you need a real " +
+        "machine to actually RUN something and see what happens: execute a " +
+        "built binary, trace or debug a sample (gdb, strace), stand up a real " +
+        "GUI under an off-screen display and screenshot it, install Linux " +
+        "packages, or reproduce a bug end-to-end. Unlike run_command this is a " +
+        "full shell (bash -lc) because the box is disposable and isolated, so " +
+        "pipes, &&, and redirects all work. The user approves each command, " +
+        "same as run_command. For a server/watcher/GUI that keeps running, set " +
+        "background:true, then screenshot it with sandbox_screenshot. If the " +
+        "sandbox is not set up, the result says how — ask the user to run " +
+        "/sandbox once. Files you create land in the workspace, visible to your " +
+        "other tools.",
+      parameters: {
+        type: "object",
+        properties: {
+          command: {
+            type: "string",
+            description:
+              'The shell command line, e.g. "python3 solve.py", ' +
+              '"gcc app.c -o app && ./app", "strace -f ./sample 2>trace.txt". ' +
+              "Runs in the workspace root inside the sandbox.",
+          },
+          background: {
+            type: "boolean",
+            description:
+              "Leave it running and return an id, for a server, a watcher or a " +
+              "GUI you will screenshot. Read it later with read_process, stop " +
+              "it with stop_process.",
+          },
+          timeout_ms: {
+            type: "number",
+            description:
+              "How long to allow a foreground command, in ms. Default 120000, " +
+              "capped at 20 minutes. Ignored for background.",
+          },
+          reason: {
+            type: "string",
+            description:
+              "One short line telling the user why this needs to run. Shown on " +
+              "the approval prompt.",
+          },
+        },
+        required: ["command"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "sandbox_screenshot",
+      description:
+        "Screenshot the sandbox's off-screen screen — everything a GUI you " +
+        "started there with sandbox_run (background:true) has drawn. Saves a " +
+        "PNG in the workspace; follow it with view_image to actually see it. " +
+        "This is how you check a Linux GUI, a game, or any window running in " +
+        "the sandbox without it ever appearing on the user's monitor.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description:
+              "Where to save the PNG, relative to the workspace root. Defaults " +
+              "to screenshots/sandbox-<timestamp>.png.",
+          },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "download_file",
       description:
         "Save the exact bytes from a URL straight into the workspace - up " +

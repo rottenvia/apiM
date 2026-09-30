@@ -1,0 +1,367 @@
+/**
+ * Tests for the WSL2 sandbox bridge — the pure, host-independent logic.
+ *
+ * The live probes (probeWsl, ensureWslSandbox) only mean anything on Windows,
+ * so they are not exercised here; what IS tested is every function that has
+ * ever produced a wrong invocation: path translation, the UTF-16 status
+ * decode, distro-table parsing, argv assembly, and the environment wiring.
+ *
+ * Run with: node --experimental-strip-types scripts/test-wsl.mjs
+ */
+
+import assert from "node:assert/strict";
+import {
+  decodeWslOutput,
+  parseWslDistros,
+  winPathToWsl,
+  shQuote,
+  buildWslInvocation,
+  pickDisplay,
+  xvfbLaunchArgs,
+  captureArgs,
+  chooseDistro,
+  wrapForSandbox,
+  sandboxCaptureInvocation,
+  wslSetupScript,
+  SANDBOX_DISTRO,
+  ROOTFS_FILE,
+  expectedSha256,
+  importArgs,
+  sandboxWslConf,
+  sandboxMountPoint,
+  mountAndRunScript,
+} from "../src/lib/wsl.ts";
+
+let passed = 0;
+let failed = 0;
+function test(name, fn) {
+  try {
+    fn();
+    passed += 1;
+  } catch (err) {
+    failed += 1;
+    console.error(`FAIL: ${name}`);
+    console.error(`      ${err instanceof Error ? err.message : err}`);
+  }
+}
+
+// --- winPathToWsl -----------------------------------------------------------
+
+test("drive path → /mnt with lowercase drive", () => {
+  assert.equal(winPathToWsl("C:\\Users\\me\\ws"), "/mnt/c/Users/me/ws");
+});
+
+test("forward-slash drive path works too", () => {
+  assert.equal(winPathToWsl("D:/data/set"), "/mnt/d/data/set");
+});
+
+test("trailing separators are trimmed", () => {
+  assert.equal(winPathToWsl("C:\\ws\\"), "/mnt/c/ws");
+});
+
+test("already-POSIX path is returned unchanged", () => {
+  assert.equal(winPathToWsl("/home/me/x"), "/home/me/x");
+});
+
+test("UNC \\\\wsl$ path collapses to its Linux view", () => {
+  assert.equal(winPathToWsl("\\\\wsl$\\Ubuntu\\home\\me"), "/home/me");
+});
+
+test("bare wsl$ root becomes /", () => {
+  assert.equal(winPathToWsl("\\\\wsl$\\Ubuntu"), "/");
+});
+
+test("spaces in a path survive translation", () => {
+  assert.equal(
+    winPathToWsl("C:\\Users\\A B\\My Ws"),
+    "/mnt/c/Users/A B/My Ws"
+  );
+});
+
+test("empty path → empty string", () => {
+  assert.equal(winPathToWsl(""), "");
+});
+
+// --- decodeWslOutput --------------------------------------------------------
+
+test("UTF-16LE with BOM decodes to readable text", () => {
+  const buf = Buffer.from("\ufeffUbuntu", "utf16le");
+  assert.equal(decodeWslOutput(buf), "Ubuntu");
+});
+
+test("UTF-16LE without BOM is detected by NUL density", () => {
+  const buf = Buffer.from("  NAME            STATE           VERSION", "utf16le");
+  const out = decodeWslOutput(buf);
+  assert.ok(out.includes("NAME"));
+  assert.ok(!out.includes("\u0000"));
+});
+
+test("plain UTF-8 passes through", () => {
+  assert.equal(decodeWslOutput(Buffer.from("hello", "utf8")), "hello");
+});
+
+// --- parseWslDistros --------------------------------------------------------
+
+const SAMPLE = [
+  "  NAME            STATE           VERSION",
+  "* Ubuntu          Running         2",
+  "  Debian          Stopped         2",
+  "  legacy          Stopped         1",
+].join("\r\n");
+
+test("parses the standard verbose table", () => {
+  const rows = parseWslDistros(SAMPLE);
+  assert.equal(rows.length, 3);
+  assert.deepEqual(rows[0], {
+    name: "Ubuntu",
+    state: "Running",
+    version: 2,
+    isDefault: true,
+  });
+  assert.equal(rows[1].isDefault, false);
+  assert.equal(rows[2].version, 1);
+});
+
+test("distro name containing a space is kept whole", () => {
+  const table = [
+    "  NAME            STATE    VERSION",
+    "* Ubuntu 22.04    Running  2",
+  ].join("\n");
+  const rows = parseWslDistros(table);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].name, "Ubuntu 22.04");
+  assert.equal(rows[0].version, 2);
+});
+
+test("empty / header-only output yields no rows", () => {
+  assert.deepEqual(parseWslDistros(""), []);
+  assert.deepEqual(parseWslDistros("NAME STATE VERSION"), []);
+});
+
+test("stray NULs in the table are tolerated", () => {
+  const dirty = "N\u0000A\u0000M\u0000E\n* Ubuntu Running 2";
+  const rows = parseWslDistros(dirty);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].name, "Ubuntu");
+});
+
+// --- shQuote ----------------------------------------------------------------
+
+test("safe tokens are left bare", () => {
+  assert.equal(shQuote("app.py"), "app.py");
+  assert.equal(shQuote("DISPLAY=:99"), "DISPLAY=:99");
+});
+
+test("spaces and quotes are single-quoted safely", () => {
+  assert.equal(shQuote("a b"), "'a b'");
+  assert.equal(shQuote("it's"), `'it'\\''s'`);
+});
+
+test("empty token quotes to ''", () => {
+  assert.equal(shQuote(""), "''");
+});
+
+// --- buildWslInvocation -----------------------------------------------------
+
+test("assembles -d, --cd, env and the inner argv in order", () => {
+  const inv = buildWslInvocation({
+    distro: "Ubuntu",
+    cwdWsl: "/mnt/c/ws",
+    env: { DISPLAY: ":99", HOME: "/mnt/c/ws" },
+    command: "python3",
+    args: ["app.py", "--flag"],
+  });
+  assert.equal(inv.command, "wsl.exe");
+  assert.deepEqual(inv.args, [
+    "-d",
+    "Ubuntu",
+    "--cd",
+    "/mnt/c/ws",
+    "--exec",
+    "env",
+    "DISPLAY=:99",
+    "HOME=/mnt/c/ws",
+    "python3",
+    "app.py",
+    "--flag",
+  ]);
+});
+
+test("no distro / no cwd / no env degrades to a bare inner call", () => {
+  const inv = buildWslInvocation({ command: "ls", args: ["-la"] });
+  assert.deepEqual(inv.args, ["--exec", "ls", "-la"]);
+});
+
+test("the inner command after --exec is never re-split by us", () => {
+  const inv = buildWslInvocation({
+    command: "bash",
+    args: ["-c", "echo hi && sleep 1"],
+  });
+  // "-c" and the whole script are separate argv entries, preserved verbatim.
+  assert.equal(inv.args[inv.args.length - 2], "-c");
+  assert.equal(inv.args[inv.args.length - 1], "echo hi && sleep 1");
+});
+
+// --- display / xvfb / capture args -----------------------------------------
+
+test("pickDisplay avoids used numbers", () => {
+  assert.equal(pickDisplay([]), ":99");
+  assert.equal(pickDisplay([99]), ":100");
+  assert.equal(pickDisplay([99, 100, 101]), ":102");
+});
+
+test("xvfb args request an in-memory 24-bit screen, no tcp", () => {
+  assert.deepEqual(xvfbLaunchArgs(":99"), [
+    ":99",
+    "-screen",
+    "0",
+    "1600x1000x24",
+    "-nolisten",
+    "tcp",
+  ]);
+});
+
+test("capture args grab the root window of the display", () => {
+  assert.deepEqual(captureArgs(":99", "/mnt/c/ws/shot.png"), [
+    "-display",
+    ":99",
+    "-window",
+    "root",
+    "/mnt/c/ws/shot.png",
+  ]);
+});
+
+// --- chooseDistro -----------------------------------------------------------
+
+test("uses only the sandbox's own distro", () => {
+  const r = chooseDistro({
+    installed: true,
+    defaultDistro: "Ubuntu",
+    distros: [
+      { name: "Ubuntu", state: "Running", version: 2, isDefault: true },
+      { name: SANDBOX_DISTRO, state: "Stopped", version: 2, isDefault: false },
+    ],
+  });
+  assert.ok(r.ok && r.distro === SANDBOX_DISTRO);
+});
+
+test("never falls back to the user's own distro", () => {
+  const r = chooseDistro({
+    installed: true,
+    defaultDistro: "Ubuntu",
+    distros: [{ name: "Ubuntu", state: "Running", version: 2, isDefault: true }],
+  });
+  assert.ok(!r.ok && r.needsSetup === true);
+});
+
+test("refuses a WSL 1 sandbox distro", () => {
+  const r = chooseDistro({
+    installed: true,
+    defaultDistro: null,
+    distros: [{ name: SANDBOX_DISTRO, state: "Stopped", version: 1, isDefault: false }],
+  });
+  assert.ok(!r.ok && /set-version/.test(r.reason));
+});
+
+test("refuses when WSL is not installed", () => {
+  const r = chooseDistro({
+    installed: false,
+    defaultDistro: null,
+    distros: [],
+    reason: "not installed",
+  });
+  assert.ok(!r.ok && /not installed/.test(r.reason));
+});
+
+// --- wrapForSandbox / capture invocation -----------------------------------
+
+const SB = { distro: SANDBOX_DISTRO, display: ":99", xvfb: null };
+
+test("wrapForSandbox runs bash in the per-chat mount with DISPLAY set", () => {
+  const inv = wrapForSandbox({
+    sandbox: SB,
+    workspaceId: "abc-123",
+    workspaceWinDir: "C:\\Users\\me\\ws",
+    script: "node server.js",
+  });
+  assert.equal(inv.command, "wsl.exe");
+  assert.deepEqual(inv.args.slice(0, 5), ["-d", SANDBOX_DISTRO, "-u", "root", "--exec"]);
+  assert.ok(inv.args.includes("DISPLAY=:99"));
+  const i = inv.args.indexOf("bash");
+  assert.equal(inv.args[i + 1], "-lc");
+  const script = inv.args[i + 2];
+  assert.ok(script.includes("mount -t drvfs 'C:\\Users\\me\\ws' /ws/abc-123"));
+  assert.ok(script.includes("mountpoint -q /ws/abc-123 ||"));
+  assert.ok(script.endsWith("cd /ws/abc-123 && node server.js"));
+});
+
+test("mount point sanitises odd workspace ids", () => {
+  assert.equal(sandboxMountPoint("a/../b c"), "/ws/a____b_c");
+});
+
+test("mountAndRunScript quotes a path with spaces and quotes", () => {
+  const s = mountAndRunScript("C:\\A B\\it's", "/ws/x", "ls");
+  assert.ok(s.includes(`'C:\\A B\\it'\\''s'`));
+});
+
+test("extraEnv is merged and can override defaults", () => {
+  const inv = wrapForSandbox({
+    sandbox: SB,
+    workspaceId: "w",
+    workspaceWinDir: "C:\\ws",
+    script: "true",
+    extraEnv: { NO_COLOR: "0", CUSTOM: "1" },
+  });
+  assert.ok(inv.args.includes("NO_COLOR=0"));
+  assert.ok(inv.args.includes("CUSTOM=1"));
+});
+
+test("capture writes the PNG into the workspace mount", () => {
+  const { invocation, hostPath } = sandboxCaptureInvocation({
+    sandbox: SB,
+    workspaceId: "w1",
+    workspaceWinDir: "C:\\ws",
+    outFileName: "sandbox-1.png",
+  });
+  assert.ok(hostPath.endsWith("sandbox-1.png"));
+  const script = invocation.args[invocation.args.length - 1];
+  assert.ok(script.endsWith("cd /ws/w1 && import -display :99 -window root sandbox-1.png"));
+});
+
+// --- setup helpers -----------------------------------------------------------
+
+test("expectedSha256 finds the right line", () => {
+  const sums =
+    "aa".repeat(32) + "  other.tar.gz\n" + "bb".repeat(32) + " *" + ROOTFS_FILE + "\n";
+  assert.equal(expectedSha256(sums, ROOTFS_FILE), "bb".repeat(32));
+  assert.equal(expectedSha256(sums, "missing"), null);
+});
+
+test("import argv targets the sandbox distro on WSL 2", () => {
+  assert.deepEqual(importArgs("D:\\d", "D:\\r.tar.gz"), [
+    "--import", SANDBOX_DISTRO, "D:\\d", "D:\\r.tar.gz", "--version", "2",
+  ]);
+});
+
+test("wsl.conf keeps the sandbox off other drives and Windows programs", () => {
+  const c = sandboxWslConf();
+  assert.ok(/\[automount\]\nenabled = false/.test(c));
+  assert.ok(/\[interop\]\nenabled = false/.test(c));
+  assert.ok(/default = root/.test(c));
+});
+
+// --- setup script -----------------------------------------------------------
+
+test("setup script installs xvfb and a capture tool, without sudo", () => {
+  const s = wslSetupScript();
+  assert.ok(/apt-get install .* xvfb/.test(s));
+  assert.ok(!/sudo/.test(s));
+  assert.ok(/imagemagick/.test(s));
+  assert.ok(/apim-wsl-setup-ok/.test(s));
+  assert.ok(/set -e/.test(s));
+});
+
+// ---------------------------------------------------------------------------
+
+console.log(`\n${passed + failed} checks · ${passed} passed${failed ? ` · ${failed} failed` : ""}`);
+process.exit(failed === 0 ? 0 : 1);

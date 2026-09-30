@@ -11,6 +11,7 @@ import { PluginsModal } from "@/components/PluginsModal";
 import { ArtifactProvider } from "@/components/ArtifactContext";
 import { SearchModal } from "@/components/SearchModal";
 import { McpConsole } from "@/components/McpConsole";
+import { SandboxPanel } from "@/components/SandboxPanel";
 import { WorkspacePanel } from "@/components/WorkspacePanel";
 import { WorkspaceSidePanel } from "@/components/WorkspaceSidePanel";
 import type { WorkspaceFileInfo } from "@/components/WorkspaceBar";
@@ -728,6 +729,7 @@ export default function Home() {
 
   const [showSettings, setShowSettings] = useState(false);
   const [showMcp, setShowMcp] = useState(false);
+  const [showSandbox, setShowSandbox] = useState(false);
   const [showPlugins, setShowPlugins] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -4242,6 +4244,9 @@ export default function Home() {
         case "mcp":
           setShowMcp(true);
           return;
+        case "sandbox":
+          setShowSandbox(true);
+          return;
         case "search":
           setShowSearch(true);
           return;
@@ -4540,6 +4545,7 @@ export default function Home() {
       )}
 
       {showMcp && <McpConsole onClose={() => setShowMcp(false)} />}
+      {showSandbox && <SandboxPanel onClose={() => setShowSandbox(false)} />}
 
       {renameError && (
         <div

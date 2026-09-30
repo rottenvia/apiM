@@ -282,6 +282,8 @@ export function adoptProcess(opts: {
   display: string;
   child: ChildProcess;
   kind?: ProcessKind;
+  /** Set for a sandbox process, so the dock and capture know where it lives. */
+  hidden?: HiddenPlacement;
 }): TrackedProcess {
   registerShutdownCleanup();
   const proc: TrackedProcess = {
@@ -300,6 +302,7 @@ export function adoptProcess(opts: {
     truncated: false,
     child: opts.child,
     kind: opts.kind ?? "user",
+    hidden: opts.hidden,
   };
   opts.child.stdout?.on("data", (d) => append(proc, d.toString()));
   opts.child.stderr?.on("data", (d) => append(proc, d.toString()));

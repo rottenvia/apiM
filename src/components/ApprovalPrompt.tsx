@@ -52,7 +52,11 @@ export function ApprovalPrompt({
         </span>
         <div className="min-w-0 flex-1">
           <p className="text-[13px] font-medium leading-5 text-text-primary">
-            {pending.command === "mcp" ? "Call this MCP tool?" : "Run this command?"}
+            {pending.command === "mcp"
+              ? "Call this MCP tool?"
+              : pending.command === "sandbox"
+                ? "Run this in the sandbox?"
+                : "Run this command?"}
           </p>
           {pending.reason && (
             <p className="mt-0.5 text-[12px] leading-4 text-text-muted">

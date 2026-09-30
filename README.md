@@ -328,6 +328,35 @@ name with its exact line range, ready to hand to `edit_file` as
 `start_line`/`end_line`. A complete `read_file` is stamped `EXACT` with its
 character count and a hash of the bytes handed over.
 
+## The sandbox — running things invisibly on your PC
+
+The hidden-launch route above puts a window on a second desktop. The **sandbox**
+goes further: a whole private Linux (WSL2) on your own machine that the agent
+runs work inside, and that you never see — no window, no taskbar entry, no focus
+stolen, fine to leave running while you game. It is what lets the agent actually
+*run and test* — execute a build, trace a sample under `gdb`/`strace`, stand a
+real GUI up under an off-screen X server and screenshot it — the way a cloud
+agent can, but on hardware you own.
+
+**No Docker.** It uses WSL2 directly. Set it up once from **`/sandbox`** (or
+Settings → Sandbox): it turns WSL on if needed, downloads the official Ubuntu
+24.04 image, **verifies it against Ubuntu's published SHA256**, imports it as a
+dedicated distro called `apim-sandbox`, and installs the toolset (Xvfb, xdotool,
+ImageMagick, Python, Node, compilers, gdb, strace). Your own WSL distros are
+never touched.
+
+**Sealed off.** The sandbox distro has Windows interop turned off and no drives
+auto-mounted (`/etc/wsl.conf`); the only thing it can see is the **current
+chat's workspace**, mounted per chat under `/ws/<id>`. Two chats never share
+files, and nothing the sandbox does can reach the rest of your PC.
+
+**Two tools, both approved.** `sandbox_run` runs a shell command inside it
+(foreground, or `background: true` for a server/watcher/GUI); `sandbox_screenshot`
+grabs the off-screen display into the workspace for `view_image`. Each command
+still shows you the approval prompt, exactly like `run_command` — the sandbox
+changes *where* things run, never *whether* you said yes. Remove it any time
+from the same panel (`wsl --unregister`) to reclaim the space.
+
 ## Batching and long agent runs
 
 Models with open tool ceilings — Ox Alpha and GLM 5.3 Flash — are meant to
