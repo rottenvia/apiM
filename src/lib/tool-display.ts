@@ -81,6 +81,8 @@ const TABLE: Record<string, [ToolKind, string, string]> = {
   ask_user: ["ask", "Asking", "Asked"],
   view_image: ["image", "Viewing", "Viewed"],
   screenshot_window: ["image", "Capturing", "Captured"],
+  sandbox_run: ["run", "Running in sandbox", "Ran in sandbox"],
+  sandbox_screenshot: ["image", "Capturing sandbox", "Captured sandbox"],
   finish: ["done", "Finishing", "Finished"],
   github_push: ["git", "Pushing", "Pushed"],
   github_create_pr: ["git", "Opening pull request", "Opened pull request"],

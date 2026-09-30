@@ -118,6 +118,12 @@ import { runRefine } from "@/lib/refine";
 import { beginRun, endRun, touchRun } from "@/lib/runs";
 import { listProcesses, isRunning } from "@/lib/processes";
 import {
+  runSandboxCommand,
+  startSandboxProcess,
+  screenshotSandbox,
+} from "@/lib/sandbox-run";
+import { activeWslSandbox } from "@/lib/wsl";
+import {
   rebuildResumeFromStored,
   rebuiltResumeInstruction,
 } from "@/lib/rebuild-resume";
@@ -5573,6 +5579,121 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                       summary: "GitHub push failed",
                     };
                   }
+                }
+              }
+            } else if (call.function.name === "sandbox_screenshot") {
+              // Read-only: it looks at the off-screen display, changes
+              // nothing, so no approval — same posture as screenshot_window.
+              const shotArgs = parsed.value as { path?: unknown };
+              const rel =
+                typeof shotArgs.path === "string" && shotArgs.path.trim()
+                  ? shotArgs.path.trim()
+                  : undefined;
+              const shot = await screenshotSandbox(
+                workspace,
+                rel ? rel.replace(/^\/+/, "").split("/").pop() : undefined
+              );
+              result = shot.ok
+                ? {
+                    ok: true,
+                    content:
+                      `Saved a screenshot of the sandbox display (${shot.display}) ` +
+                      `to ${shot.fileName}. Open it with view_image to see it.`,
+                    summary: "Sandbox screenshot saved",
+                  }
+                : {
+                    ok: false,
+                    content: shot.needsSetup
+                      ? `${shot.error} Ask the user to run /sandbox and set it up once.`
+                      : shot.error,
+                    summary: "Sandbox screenshot failed",
+                  };
+            } else if (call.function.name === "sandbox_run") {
+              const sbArgs = parsed.value as {
+                command?: unknown;
+                background?: unknown;
+                timeout_ms?: unknown;
+                reason?: unknown;
+              };
+              const script =
+                typeof sbArgs.command === "string" ? sbArgs.command.trim() : "";
+              if (!script) {
+                result = {
+                  ok: false,
+                  content:
+                    'No command was given. Pass command as a shell line, e.g. ' +
+                    '{"command":"python3 solve.py"}.',
+                  summary: "Missing command",
+                };
+              } else {
+                const background = sbArgs.background === true;
+                const display = `sandbox${background ? " (background)" : ""}: ${script.slice(0, 80)}`;
+                const reason =
+                  typeof sbArgs.reason === "string" ? sbArgs.reason.trim() : "";
+                // Approved like run_command; the key "sandbox" + script lets
+                // "always allow" remember a specific sandbox command.
+                const preApproved =
+                  autoRunCommands || isRemembered(workspace, "sandbox", [script]);
+                let approved = true;
+                let declineReason = "";
+                if (!preApproved) {
+                  send({
+                    type: "approval_request",
+                    id: call.id,
+                    command: "sandbox",
+                    args: [script],
+                    display,
+                    reason,
+                  });
+                  const decision = await requestApproval(
+                    { id: call.id, workspaceId: workspace, command: "sandbox", args: [script], reason },
+                    AbortSignal.any([req.signal, runSignal])
+                  );
+                  approved = decision.approved;
+                  if (!decision.approved) declineReason = decision.reason;
+                  send({ type: "approval_resolved", id: call.id, approved });
+                }
+                if (!approved) {
+                  result = {
+                    ok: false,
+                    content:
+                      `The sandbox command was not run. ${declineReason} ` +
+                      `Do not retry it — explain what you were trying to do.`,
+                    summary: `Skipped: ${display}`,
+                  };
+                } else if (background) {
+                  const started = await startSandboxProcess(
+                    workspace,
+                    script,
+                    activeWslSandbox()?.display ?? ":99"
+                  );
+                  fileMemory.invalidateAll();
+                  result = started.ok
+                    ? {
+                        ok: !started.diedImmediately,
+                        content: started.diedImmediately
+                          ? `The sandbox process exited immediately.\n${started.process.log.slice(0, 2000) || "(no output)"}`
+                          : `Started in the sandbox as ${started.process.id}. ` +
+                            `First output:\n${started.process.log.slice(0, 1500) || "(none yet)"}\n` +
+                            `Screenshot it with sandbox_screenshot; read it with read_process ${started.process.id}.`,
+                        summary: started.diedImmediately
+                          ? "Sandbox process exited at once"
+                          : `Sandbox process ${started.process.id}`,
+                      }
+                    : {
+                        ok: false,
+                        content: started.needsSetup
+                          ? `${started.error} Ask the user to run /sandbox and set it up once.`
+                          : started.error,
+                        summary: "Sandbox start failed",
+                      };
+                } else {
+                  result = await runSandboxCommand(workspace, script, {
+                    timeoutMs:
+                      typeof sbArgs.timeout_ms === "number" ? sbArgs.timeout_ms : null,
+                    signal: runSignal,
+                  });
+                  fileMemory.invalidateAll();
                 }
               }
             } else if (

@@ -907,6 +907,8 @@ const CANNOT = new Map([
   ["find_references", "covered by test-codeintel on a mixed TS/Python workspace"],
   ["query_data", "covered by test-ingest on multi-megabyte JSON, CSV and JSON Lines"],
   ["extract_archive", "covered by test-extract (every format, hostile archives) and test-ingest"],
+  ["sandbox_run", "lives in the chat route (needs approval) and needs WSL2 on Windows; the pure bridge is covered by test-wsl"],
+  ["sandbox_screenshot", "lives in the chat route and needs a running WSL2 sandbox; the capture argv is covered by test-wsl"],
 ]);
 
 const unexplained = all.filter((n) => !dispatched.has(n) && !CANNOT.has(n));
