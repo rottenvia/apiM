@@ -218,6 +218,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "settings", aliases: ["config"], description: "Open Settings", group: "App", whileRunning: true },
   { name: "plugins", description: "Open plugins", group: "App", whileRunning: true },
   { name: "mcp", description: "Open the MCP servers console", group: "App", whileRunning: true },
+  { name: "sandbox", description: "Set up the private Linux sandbox (run things invisibly)", group: "App", whileRunning: true },
   {
     name: "theme",
     args: "[name]",
