@@ -345,6 +345,14 @@ dedicated distro called `apim-sandbox`, and installs the toolset (Xvfb, xdotool,
 ImageMagick, Python, Node, compilers, gdb, strace). Your own WSL distros are
 never touched.
 
+**Where it lives.** The sandbox disk goes in `%LOCALAPPDATA%\apiM\sandbox`
+(about 4 GB once set up), not in the project folder: Windows cannot create a
+WSL disk in a compressed or encrypted folder, inside OneDrive, or on a non-NTFS
+drive (`Wsl/Service/RegisterDistro/0xc03a0014`). Setup checks the folder first,
+turns compression/encryption off for that folder only, and keeps the verified
+download if a later step fails, so a retry does not download it again. Set
+`APIM_SANDBOX_DIR` to put it on another NTFS drive.
+
 **Sealed off.** The sandbox distro has Windows interop turned off and no drives
 auto-mounted (`/etc/wsl.conf`); the only thing it can see is the **current
 chat's workspace**, mounted per chat under `/ws/<id>`. Two chats never share

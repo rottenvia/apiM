@@ -179,6 +179,11 @@ export function SandboxPanel({ onClose }: { onClose: () => void }) {
                 {status?.reason && !setUp && (
                   <p className="mt-1.5 text-[13px] text-text-muted">{status.reason}</p>
                 )}
+                {status?.dir && (
+                  <p className="mt-1.5 break-all text-[12px] text-text-muted">
+                    Disk location: <span className="font-mono">{status.dir}</span>
+                  </p>
+                )}
                 {setUp && (
                   <p className="mt-1.5 text-[13px] text-text-muted">
                     The agent can now use <span className="font-mono">sandbox_run</span>{" "}
