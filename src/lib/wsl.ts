@@ -809,7 +809,7 @@ export function diagnoseVhdStack(probe: VhdProbe): VhdFinding[] {
             ? `recreate its registration step by step: ${doc}, Steps 1-4 (make a restore point first)`
             : name === "vmcompute"
               ? "turn on 'Virtual Machine Platform' in Windows Features, then restart"
-              : `its registration is missing; see ${doc}, "If FsDepends loads but VHDX creation still fails"`,
+              : `a boot driver's registration cannot be safely rebuilt by hand; use ${WINDOWS_REPAIR_SHORT}`,
       });
       continue;
     }
@@ -833,6 +833,26 @@ export function diagnoseVhdStack(probe: VhdProbe): VhdFinding[] {
   return out;
 }
 
+/**
+ * Windows' own repair install: reinstalls the current Windows build in place,
+ * keeping files, apps and settings, and restores every in-box driver and its
+ * registration. The right tool once more than a setting is broken.
+ */
+export const WINDOWS_REPAIR_SHORT =
+  "Settings -> System -> Recovery -> \"Fix problems using Windows Update\" -> Reinstall now (keeps your files and apps)";
+
+export function windowsRepairAdvice(): string {
+  return (
+    "Windows' own driver registrations are missing on this PC, which no app " +
+    "setting can restore safely. The reliable fix is Windows' repair install: " +
+    WINDOWS_REPAIR_SHORT + ". On Windows 10, run the Media Creation Tool and " +
+    "choose \"Upgrade this PC now\" - same effect. It restores vdrvroot, " +
+    "FsDepends and the WSL drivers together, which also fixes Docker Desktop. " +
+    "If an anti-cheat or a debloat tool removed them, reinstalling that tool " +
+    "afterwards can remove them again."
+  );
+}
+
 /** One paragraph for the log and the error line. */
 export function formatVhdFindings(findings: VhdFinding[]): string {
   if (!findings.length) {
@@ -843,5 +863,161 @@ export function formatVhdFindings(findings: VhdFinding[]): string {
       "diskpart test in docs/restore-fsdepends.md, Step 4."
     );
   }
-  return findings.map((f) => `- ${f.problem}. Fix: ${f.fix}.`).join("\n");
+  const lines = findings.map((f) => `- ${f.problem}. Fix: ${f.fix}.`);
+  if (findings.some((f) => /not registered|is missing/.test(f.problem))) {
+    lines.push(windowsRepairAdvice());
+  }
+  return lines.join("\n");
 }
+
+// ---------------------------------------------------------------------------
+// WSL 1: why "WSL1 is not supported" can survive clicking Turn on.
+//
+// Reported: the fallback import said WSL1 was not supported, and clicking
+// "Turn on WSL 1 support" changed nothing. Three different states give that
+// one message, with three different fixes:
+//   - the feature was enabled but Windows has not restarted yet;
+//   - the feature really is off (its driver file is not installed);
+//   - the driver file is there but not registered: the same damage as
+//     vdrvroot, which no feature toggle repairs.
+// ---------------------------------------------------------------------------
+
+export const WSL1_DRIVER_FILES = ["lxcore.sys", "lxss.sys"] as const;
+export const WSL1_SERVICES = ["lxcore", "lxss"] as const;
+
+export interface Wsl1Probe {
+  rebootPending: boolean;
+  files: Partial<Record<(typeof WSL1_DRIVER_FILES)[number], boolean>>;
+  services: Partial<Record<(typeof WSL1_SERVICES)[number], string>>;
+}
+
+export type Wsl1State = "reboot-pending" | "feature-off" | "driver-unregistered" | "unknown";
+
+export function diagnoseWsl1(probe: Wsl1Probe): { state: Wsl1State; message: string } {
+  if (probe.rebootPending) {
+    return {
+      state: "reboot-pending",
+      message:
+        "Windows is waiting for a restart to finish turning features on. Use " +
+        "Start -> Power -> Restart (Shut down does not finish it), then click " +
+        "Set up again.",
+    };
+  }
+  if (probe.files["lxcore.sys"] === false) {
+    return {
+      state: "feature-off",
+      message:
+        "The WSL 1 driver (lxcore.sys) is not installed, so the 'Windows " +
+        "Subsystem for Linux' feature is off. Click 'Turn on WSL 1 support', " +
+        "approve the prompt, restart Windows, then click Set up.",
+    };
+  }
+  const unregistered = WSL1_SERVICES.filter(
+    (name) => probe.services[name] !== undefined && !parseScQc(probe.services[name] ?? "").exists
+  );
+  if (probe.files["lxcore.sys"] && unregistered.includes("lxcore")) {
+    return {
+      state: "driver-unregistered",
+      message:
+        "The WSL 1 driver file is installed but Windows has no registration " +
+        "for it (lxcore) - the same kind of damage as vdrvroot, so turning the " +
+        "feature on again cannot fix it. " + windowsRepairAdvice(),
+    };
+  }
+  return {
+    state: "unknown",
+    message:
+      "WSL 1's driver looks installed and registered, yet Windows still " +
+      "refuses it. If you have not restarted since turning it on, restart " +
+      "first. Otherwise: " + windowsRepairAdvice(),
+  };
+}
+
+/** Exit code DISM printed into the elevated log ("dism-exit=3010"), or null. */
+export function parseDismExit(log: string): number | null {
+  const m = /dism-exit=(-?\d+)/.exec(String(log ?? ""));
+  return m ? Number(m[1]) : null;
+}
+
+/** What a DISM exit code means for turning the WSL feature on. */
+export function explainDismExit(code: number | null): { ok: boolean; restart: boolean; message: string } {
+  if (code === 0) {
+    return { ok: true, restart: false, message: "The WSL 1 feature is on." };
+  }
+  if (code === 3010) {
+    return {
+      ok: true,
+      restart: true,
+      message: "The WSL 1 feature was turned on. Restart Windows (Start -> Power -> Restart), then click Set up.",
+    };
+  }
+  if (code === null) {
+    return {
+      ok: false,
+      restart: false,
+      message: "The administrator prompt was declined or closed, so nothing changed.",
+    };
+  }
+  const hex = (code >>> 0).toString(16);
+  if (["800f081f", "800f0906", "800f0907", "800f0922", "800f0950"].includes(hex)) {
+    return {
+      ok: false,
+      restart: false,
+      message:
+        `DISM could not find or install the feature's files (0x${hex}): the ` +
+        `Windows component store is damaged. ` + windowsRepairAdvice(),
+    };
+  }
+  return {
+    ok: false,
+    restart: false,
+    message: `DISM failed (exit ${formatExitCode(code)}); see the log above.`,
+  };
+}
+
+/**
+ * The elevated half of "Turn on WSL 1 support": runs DISM and wsl --install
+ * as administrator and writes everything, exit codes included, to $Log so the
+ * app can read the real outcome back. ASCII only.
+ */
+export function enableWslElevatedScript(): string {
+  return [
+    "param([string]$Log)",
+    '$ErrorActionPreference = "Continue"',
+    'function Note($t) { $t | Out-File -LiteralPath $Log -Append -Encoding utf8 }',
+    '"apim-enable-wsl" | Out-File -LiteralPath $Log -Encoding utf8',
+    'Note "== dism: enable Microsoft-Windows-Subsystem-Linux"',
+    // Reset first: if dism.exe cannot start, $LASTEXITCODE would otherwise
+    // be stale or empty and the result would be misread.
+    "$global:LASTEXITCODE = -1",
+    "$out = & dism.exe /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart 2>&1",
+    "Note ($out | Out-String)",
+    'Note ("dism-exit=" + $LASTEXITCODE)',
+    'Note "== wsl --install --no-distribution"',
+    "$global:LASTEXITCODE = -1",
+    "$w = & wsl.exe --install --no-distribution 2>&1",
+    'Note (($w | Out-String) -replace "`0", "")',
+    'Note ("wsl-exit=" + $LASTEXITCODE)',
+    "",
+  ].join("\r\n");
+}
+
+/**
+ * The unelevated launcher: asks Windows for administrator rights and waits.
+ * Paths are passed quoted so a user folder with a space still works.
+ */
+export function enableWslLauncherScript(): string {
+  return [
+    "param([string]$Inner, [string]$Log)",
+    '$ErrorActionPreference = "Stop"',
+    "$argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('\"' + $Inner + '\"'), '-Log', ('\"' + $Log + '\"'))",
+    "try {",
+    "  Start-Process -FilePath powershell.exe -Verb RunAs -Wait -ArgumentList $argList",
+    "} catch {",
+    '  Write-Output "apim-uac-declined"',
+    "  exit 1223",
+    "}",
+    "",
+  ].join("\r\n");
+}
+
