@@ -394,6 +394,14 @@ test("the hex code alone is enough (localised Windows)", () => {
   assert.ok(explainWslError("Fehlercode: Wsl/Service/RegisterDistro/0xc03a0014"));
 });
 
+test("the reported CreateVm socket error points at a Winsock reset", () => {
+  const why = explainWslError(
+    "An address incompatible with the requested protocol was used.\r\n" +
+      "Error code: Wsl/InstallDistro/Service/RegisterDistro/CreateVm/0x8007273f"
+  );
+  assert.ok(why && /netsh winsock reset/.test(why) && /Docker/.test(why));
+});
+
 test("virtualization-off and feature-off errors get their own fixes", () => {
   assert.ok(/BIOS/.test(explainWslError("Error code: 0x80370102") ?? ""));
   assert.ok(/Turn on WSL/.test(explainWslError("Error code: 0x8007019e") ?? ""));

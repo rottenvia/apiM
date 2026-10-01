@@ -617,6 +617,15 @@ export function explainWslError(text: string): string | null {
       "Windows, then click Set up again."
     );
   }
+  if (t.includes("0x8007273f") || t.includes("address incompatible with the requested protocol")) {
+    return (
+      "Windows refused the socket type WSL 2 uses to talk to its VM (Winsock " +
+      "error 10047). The Winsock catalog is damaged, usually by a VPN, " +
+      "antivirus or network tool that hooks it. As administrator run: " +
+      "netsh winsock reset   then restart Windows. A VPN may need " +
+      "reconnecting afterwards. The same fault breaks Docker Desktop."
+    );
+  }
   if (t.includes("0x80370102")) {
     return (
       "Virtualization is not available to WSL 2. Turn on 'Virtual Machine " +
