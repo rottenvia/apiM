@@ -39,6 +39,12 @@ import {
   parseScQuery,
   diagnoseVhdStack,
   formatVhdFindings,
+  diagnoseWsl1,
+  parseDismExit,
+  explainDismExit,
+  windowsRepairAdvice,
+  enableWslElevatedScript,
+  enableWslLauncherScript,
 } from "../src/lib/wsl.ts";
 
 let passed = 0;
@@ -528,6 +534,93 @@ test("WSL 1 switched off is explained with the one-click fix", () => {
       "Error code: Wsl/Service/RegisterDistro/WSL_E_WSL1_NOT_SUPPORTED"
   );
   assert.ok(why && /Turn on WSL 1 support/.test(why));
+});
+
+
+// --- WSL 1: why "not supported" can survive clicking Turn on ------------------
+
+const LX_OK = QC("lxcore", 3, "DEMAND_START");
+
+test("the reported PC: vdrvroot unregistered -> Windows repair install advised", () => {
+  const f = diagnoseVhdStack({
+    ...HEALTHY,
+    services: { ...HEALTHY.services, vdrvroot: { qc: MISSING, query: MISSING } },
+  });
+  assert.equal(f.length, 1);
+  assert.ok(/vdrvroot is not registered/.test(f[0].problem));
+  assert.ok(/Fix problems using Windows Update/.test(f[0].fix));
+  const text = formatVhdFindings(f);
+  assert.ok(/keeps your files and apps/.test(text) && /Docker/.test(text));
+});
+
+test("a disabled-only fault does not push a reinstall", () => {
+  const f = diagnoseVhdStack({
+    ...HEALTHY,
+    services: { ...HEALTHY.services, vhdmp: { qc: QC("vhdmp", 4, "DISABLED"), query: QUERY(1) } },
+  });
+  assert.ok(!/Reinstall now/.test(formatVhdFindings(f)));
+});
+
+test("a pending restart wins: the fix is to restart, not to click again", () => {
+  const r = diagnoseWsl1({ rebootPending: true, files: { "lxcore.sys": false }, services: {} });
+  assert.equal(r.state, "reboot-pending");
+  assert.ok(/Restart/.test(r.message) && /Shut down does not finish it/.test(r.message));
+});
+
+test("no lxcore.sys means the feature really is off", () => {
+  const r = diagnoseWsl1({ rebootPending: false, files: { "lxcore.sys": false }, services: {} });
+  assert.equal(r.state, "feature-off");
+  assert.ok(/Turn on WSL 1 support/.test(r.message));
+});
+
+test("lxcore.sys present but unregistered is driver damage, not a toggle", () => {
+  const r = diagnoseWsl1({
+    rebootPending: false,
+    files: { "lxcore.sys": true },
+    services: { lxcore: MISSING },
+  });
+  assert.equal(r.state, "driver-unregistered");
+  assert.ok(/cannot fix it/.test(r.message) && /Reinstall now/.test(r.message));
+});
+
+test("everything present still refused -> restart, then repair", () => {
+  const r = diagnoseWsl1({ rebootPending: false, files: { "lxcore.sys": true }, services: { lxcore: LX_OK } });
+  assert.equal(r.state, "unknown");
+  assert.ok(/restart first/.test(r.message));
+});
+
+test("DISM results: 0 and 3010 succeed, the restart is called out", () => {
+  assert.equal(parseDismExit("apim-enable-wsl\r\n...\r\ndism-exit=3010\r\nwsl-exit=0"), 3010);
+  assert.equal(parseDismExit("nothing"), null);
+  assert.deepEqual(explainDismExit(0).ok, true);
+  const r = explainDismExit(3010);
+  assert.ok(r.ok && r.restart && /Restart Windows/.test(r.message));
+});
+
+test("DISM: a declined prompt is not reported as success", () => {
+  const r = explainDismExit(null);
+  assert.ok(!r.ok && /declined/.test(r.message));
+});
+
+test("DISM: a damaged component store points at the repair install", () => {
+  const r = explainDismExit(0x800f081f);
+  assert.ok(!r.ok && /0x800f081f/.test(r.message) && /Reinstall now/.test(r.message));
+  assert.ok(/exit -1/.test(explainDismExit(-1).message));
+});
+
+test("repair advice names the safe, built-in route", () => {
+  const a = windowsRepairAdvice();
+  assert.ok(/Settings -> System -> Recovery/.test(a) && /Media Creation Tool/.test(a));
+});
+
+test("elevated scripts are ASCII, reset the exit code, and quote paths", () => {
+  const inner = enableWslElevatedScript();
+  const launch = enableWslLauncherScript();
+  for (const ps of [inner, launch]) assert.ok(/^[\x09\x0a\x0d\x20-\x7e]*$/.test(ps));
+  assert.ok(/\$global:LASTEXITCODE = -1\r\n\$out = & dism\.exe/.test(inner));
+  assert.ok(/dism-exit=/.test(inner) && /Microsoft-Windows-Subsystem-Linux/.test(inner));
+  assert.ok(/-Verb RunAs -Wait/.test(launch) && /apim-uac-declined/.test(launch));
+  assert.ok(launch.includes(`('"' + $Inner + '"')`));
 });
 
 // ---------------------------------------------------------------------------

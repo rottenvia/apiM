@@ -362,6 +362,15 @@ on **WSL 1** instead, which keeps its files in a plain folder and needs no
 virtual disk or Hyper-V VM. Everything the sandbox uses works there. Once the
 drivers are fixed, **Upgrade to WSL 2** in the panel converts it in place.
 
+If WSL 1 is refused too, setup tells apart the three causes behind that one
+message: Windows is waiting for a restart (use Restart, not Shut down), the
+feature is really off (one click turns it on; the result is read back from
+DISM's own exit code instead of assumed), or the WSL 1 driver is on disk but
+unregistered. A missing in-box driver registration (`vdrvroot`, `FsDepends`,
+`lxcore`) cannot be rebuilt safely by an app; the fix is Windows' repair
+install: **Settings → System → Recovery → Fix problems using Windows Update →
+Reinstall now**, which keeps files, apps and settings.
+
 **Sealed off.** The sandbox distro has Windows interop turned off and no drives
 auto-mounted (`/etc/wsl.conf`); the only thing it can see is the **current
 chat's workspace**, mounted per chat under `/ws/<id>`. Two chats never share
