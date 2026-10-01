@@ -23,16 +23,24 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createWriteStream, promises as fs } from "node:fs";
+import { createReadStream, createWriteStream, promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
+import { writePowerShellScript } from "@/lib/hidden-display";
 import {
   ROOTFS_BASE,
   ROOTFS_FILE,
   SANDBOX_DISTRO,
+  assessInstallDir,
   closeWslSandbox,
   expectedSha256,
+  explainWslError,
+  formatExitCode,
   importArgs,
+  installDirProbeScript,
+  sandboxBaseDir,
+  type InstallDirInfo,
   probeWsl,
   sandboxWslConf,
   wslSetupScript,
@@ -43,8 +51,14 @@ const DATA_DIR = process.env.APIM_DATA_ROOT
   ? path.resolve(process.env.APIM_DATA_ROOT)
   : path.resolve(process.cwd(), "data");
 
-/** Where the sandbox's virtual disk lives. */
-export const SANDBOX_DIR = path.join(DATA_DIR, "sandbox");
+/**
+ * Where the sandbox's virtual disk and download live: %LOCALAPPDATA%\apiM\sandbox
+ * on Windows (see sandboxBaseDir in lib/wsl for why not the data folder).
+ */
+export const SANDBOX_DIR = sandboxBaseDir(process.env, process.platform, DATA_DIR);
+
+/** The first release put the disk here; an empty leftover is tidied away. */
+const LEGACY_SANDBOX_DIR = path.join(DATA_DIR, "sandbox");
 
 export type SandboxJobKind = "setup" | "remove" | "enable-wsl";
 
@@ -107,20 +121,26 @@ function begin(kind: SandboxJobKind): { ok: true } | { ok: false; error: string 
   return { ok: true };
 }
 
-/** Run a program to completion, streaming its output into the job log. */
+/**
+ * Run a program to completion, streaming its output into the job log. The
+ * output is also returned, so a failure can be explained from what it said.
+ */
 function runLogged(
   command: string,
   args: string[],
   options: { input?: string; timeoutMs?: number } = {}
-): Promise<number> {
+): Promise<{ code: number | null; output: string }> {
   return new Promise((resolve) => {
+    let output = "";
     const child = spawn(command, args, {
       windowsHide: true,
       stdio: [options.input != null ? "pipe" : "ignore", "pipe", "pipe"],
     });
     const onData = (d: Buffer) => {
       // wsl.exe's own messages are UTF-16; Linux programs' output is UTF-8.
-      log(d.toString(d.includes(0) ? "utf16le" : "utf8").replace(/\u0000/g, ""));
+      const text = d.toString(d.includes(0) ? "utf16le" : "utf8").replace(/\u0000/g, "");
+      if (output.length < 200_000) output += text;
+      log(text);
     };
     child.stdout?.on("data", onData);
     child.stderr?.on("data", onData);
@@ -134,11 +154,12 @@ function runLogged(
         }, options.timeoutMs)
       : null;
     child.on("error", (err) => {
+      output += `could not start ${command}: ${err.message}`;
       log(`could not start ${command}: ${err.message}`);
     });
     child.on("close", (code) => {
       if (timer) clearTimeout(timer);
-      resolve(code ?? -1);
+      resolve({ code, output });
     });
   });
 }
@@ -166,6 +187,91 @@ async function download(url: string, dest: string): Promise<string> {
   }
   await new Promise<void>((resolve, reject) => out.end((err?: Error | null) => (err ? reject(err) : resolve())));
   return hash.digest("hex");
+}
+
+/** SHA-256 of a file on disk, or null when it does not exist. */
+async function hashFile(file: string): Promise<string | null> {
+  try {
+    await fs.access(file);
+  } catch {
+    return null;
+  }
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(file)) hash.update(chunk as Buffer);
+  return hash.digest("hex");
+}
+
+/** A failed step, explained in plain words when the error is one we know. */
+function failure(step: string, run: { code: number | null; output: string }): Error {
+  const known = explainWslError(run.output);
+  return new Error(
+    known
+      ? `${step} failed: ${known}`
+      : `${step} failed (exit ${formatExitCode(run.code)}); see the log above.`
+  );
+}
+
+/**
+ * Make sure the folder can hold a WSL disk before 340 MB is spent on it.
+ *
+ * Compression and encryption on OUR folder are cleared (that only changes how
+ * new files in apiM's own folder are stored); anything about the drive itself
+ * is reported, because that is the user's call. A preflight that cannot run is
+ * logged and skipped rather than blocking setup.
+ */
+async function preflightInstallDir(dir: string, base: string): Promise<void> {
+  const script = path.join(os.tmpdir(), "apim-sandbox-probe.ps1");
+  await writePowerShellScript(script, installDirProbeScript());
+  const probe = async (): Promise<InstallDirInfo | null> => {
+    const run = spawnSync(
+      "powershell.exe",
+      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-Dir", dir],
+      { windowsHide: true, timeout: 30_000, encoding: "utf8" }
+    );
+    const json = /\{[\s\S]*\}/.exec(String(run.stdout ?? ""));
+    if (!json) return null;
+    try {
+      return JSON.parse(json[0]) as InstallDirInfo;
+    } catch {
+      return null;
+    }
+  };
+
+  let info = await probe();
+  if (!info) {
+    log("  (could not inspect the folder; continuing)");
+    return;
+  }
+  log(`  ${dir}: ${info.fs}, ${info.freeGB} GB free`);
+  const oneDrive = [process.env.OneDrive, process.env.OneDriveConsumer, process.env.OneDriveCommercial]
+    .filter((v): v is string => Boolean(v));
+  let verdict = assessInstallDir(dir, info, oneDrive);
+
+  // Each folder's own "compress/encrypt new files" flag is what a new file
+  // inherits, so both folders are cleared by name, then everything inside.
+  const quiet = { windowsHide: true, timeout: 60_000 };
+  if (verdict.fixCompression) {
+    log("  The folder is NTFS-compressed; turning compression off for apiM's folder.");
+    for (const d of [base, dir]) spawnSync("compact.exe", ["/u", "/i", "/q", d], quiet);
+    spawnSync("compact.exe", ["/u", "/i", "/q", "/s:" + base], quiet);
+  }
+  if (verdict.fixEncryption) {
+    log("  The folder is encrypted (EFS); turning encryption off for apiM's folder.");
+    for (const d of [base, dir]) spawnSync("cipher.exe", ["/d", d], quiet);
+    spawnSync("cipher.exe", ["/d", "/s:" + base], quiet);
+  }
+  if (verdict.fixCompression || verdict.fixEncryption) {
+    info = (await probe()) ?? info;
+    verdict = assessInstallDir(dir, info, oneDrive);
+    if (verdict.fixCompression || verdict.fixEncryption) {
+      verdict.problems.push(
+        `${dir} is still ${verdict.fixCompression ? "compressed" : "encrypted"}. ` +
+          `Right-click it -> Properties -> Advanced and untick that option, or ` +
+          `set APIM_SANDBOX_DIR to another folder.`
+      );
+    }
+  }
+  if (verdict.problems.length) throw new Error(verdict.problems.join(" "));
 }
 
 export function sandboxStatus(): WslStatus & { setUp: boolean; dir: string } {
@@ -200,57 +306,85 @@ async function runSetup(): Promise<void> {
 
   const installDir = path.join(SANDBOX_DIR, "distro");
   const tarball = path.join(SANDBOX_DIR, ROOTFS_FILE);
-  await fs.mkdir(installDir, { recursive: true });
 
   if (!status.distros.some((d) => d.name === SANDBOX_DISTRO)) {
-    phase("Downloading Ubuntu 24.04 (about 350 MB)");
+    phase("Checking where the sandbox disk will go");
+    await fs.mkdir(installDir, { recursive: true });
+    await preflightInstallDir(installDir, SANDBOX_DIR);
+    await tidyLegacyDir();
+
     const sumsRes = await fetch(`${ROOTFS_BASE}/SHA256SUMS`);
     if (!sumsRes.ok) throw new Error(`could not fetch SHA256SUMS: HTTP ${sumsRes.status}`);
     const expected = expectedSha256(await sumsRes.text(), ROOTFS_FILE);
     if (!expected) throw new Error(`${ROOTFS_FILE} is not listed in SHA256SUMS`);
 
-    const actual = await download(`${ROOTFS_BASE}/${ROOTFS_FILE}`, tarball);
-    phase("Verifying download");
-    if (actual !== expected) {
-      await fs.rm(tarball, { force: true });
-      throw new Error(
-        `checksum mismatch (expected ${expected.slice(0, 12)}…, got ${actual.slice(0, 12)}…). ` +
-          `The file was deleted; nothing was installed.`
-      );
+    // A verified download from a failed attempt is reused, not fetched again.
+    const kept = await hashFile(tarball);
+    if (kept === expected) {
+      phase("Reusing the Ubuntu image downloaded last time");
+      log("  SHA256 matches Ubuntu's published checksum.");
+    } else {
+      phase("Downloading Ubuntu 24.04 (about 350 MB)");
+      const actual = await download(`${ROOTFS_BASE}/${ROOTFS_FILE}`, tarball);
+      phase("Verifying download");
+      if (actual !== expected) {
+        await fs.rm(tarball, { force: true });
+        throw new Error(
+          `checksum mismatch (expected ${expected.slice(0, 12)}…, got ${actual.slice(0, 12)}…). ` +
+            `The file was deleted; nothing was installed.`
+        );
+      }
+      log("  SHA256 matches Ubuntu's published checksum.");
     }
-    log("  SHA256 matches Ubuntu's published checksum.");
 
     phase(`Importing as "${SANDBOX_DISTRO}"`);
-    const code = await runLogged("wsl.exe", importArgs(installDir, tarball), {
+    log(`  disk: ${installDir}`);
+    const run = await runLogged("wsl.exe", importArgs(installDir, tarball), {
       timeoutMs: 10 * 60_000,
     });
+    // Kept on failure so the next attempt skips the download.
+    if (run.code !== 0) throw failure("wsl --import", run);
     await fs.rm(tarball, { force: true });
-    if (code !== 0) throw new Error(`wsl --import failed (exit ${code})`);
   } else {
     log(`  "${SANDBOX_DISTRO}" already exists; reusing it.`);
   }
 
   phase("Locking down the sandbox (wsl.conf)");
-  let code = await runLogged(
+  const conf = await runLogged(
     "wsl.exe",
     ["-d", SANDBOX_DISTRO, "-u", "root", "--exec", "sh", "-c", "cat > /etc/wsl.conf"],
     { input: sandboxWslConf(), timeoutMs: 60_000 }
   );
-  if (code !== 0) throw new Error(`could not write /etc/wsl.conf (exit ${code})`);
+  if (conf.code !== 0) throw failure("Writing /etc/wsl.conf", conf);
   closeWslSandbox();
   spawnSync("wsl.exe", ["--terminate", SANDBOX_DISTRO], { windowsHide: true, timeout: 30_000 });
 
   phase("Installing tools (apt-get, a few minutes)");
-  code = await runLogged(
+  const apt = await runLogged(
     "wsl.exe",
     ["-d", SANDBOX_DISTRO, "-u", "root", "--exec", "bash", "-c", wslSetupScript()],
     { timeoutMs: 30 * 60_000 }
   );
-  if (code !== 0 || !job?.log.includes("apim-wsl-setup-ok")) {
-    throw new Error(`package install failed (exit ${code}); see the log above`);
+  if (apt.code !== 0 || !apt.output.includes("apim-wsl-setup-ok")) {
+    throw failure("Installing the tools", apt);
   }
 
   finish(true);
+}
+
+/**
+ * The first release created <data>\sandbox\distro and, when the import failed
+ * there, left it empty. Remove it only if it is empty: a disk inside means a
+ * distro was really registered there, and that is not ours to delete.
+ */
+async function tidyLegacyDir(): Promise<void> {
+  if (path.resolve(LEGACY_SANDBOX_DIR) === path.resolve(SANDBOX_DIR)) return;
+  try {
+    await fs.rmdir(path.join(LEGACY_SANDBOX_DIR, "distro"));
+    await fs.rmdir(LEGACY_SANDBOX_DIR);
+  } catch {
+    /* not there, or not empty — leave it */
+  }
 }
 
 /** Unregister the sandbox distro and delete its disk. */
@@ -263,11 +397,15 @@ export function startSandboxRemove(): { ok: true } | { ok: false; error: string 
   void (async () => {
     phase(`Removing "${SANDBOX_DISTRO}"`);
     closeWslSandbox();
-    const code = await runLogged("wsl.exe", ["--unregister", SANDBOX_DISTRO], {
+    const run = await runLogged("wsl.exe", ["--unregister", SANDBOX_DISTRO], {
       timeoutMs: 5 * 60_000,
     });
     await fs.rm(path.join(SANDBOX_DIR, "distro"), { recursive: true, force: true });
-    finish(code === 0, code === 0 ? undefined : `wsl --unregister exited ${code}`);
+    await fs.rm(path.join(SANDBOX_DIR, ROOTFS_FILE), { force: true });
+    finish(
+      run.code === 0,
+      run.code === 0 ? undefined : `wsl --unregister exited ${formatExitCode(run.code)}`
+    );
   })().catch((err) => finish(false, err instanceof Error ? err.message : String(err)));
   return { ok: true };
 }
@@ -284,7 +422,7 @@ export function startEnableWsl(): { ok: true } | { ok: false; error: string } {
   if (!started.ok) return started;
   void (async () => {
     phase("Asking Windows for administrator rights");
-    const code = await runLogged("powershell.exe", [
+    const { code } = await runLogged("powershell.exe", [
       "-NoProfile",
       "-Command",
       "Start-Process wsl.exe -ArgumentList '--install','--no-distribution' -Verb RunAs -Wait",

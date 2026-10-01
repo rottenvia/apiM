@@ -548,3 +548,168 @@ export function sandboxCaptureInvocation(opts: {
     hostPath: path.join(opts.workspaceWinDir, opts.outFileName),
   };
 }
+
+// ---------------------------------------------------------------------------
+// Where the sandbox disk may live, and what WSL's errors mean.
+//
+// Reported from the first real setup: `wsl --import` failed with
+//   "A virtual disk support provider for the specified file was not found.
+//    Error code: Wsl/Service/RegisterDistro/0xc03a0014"
+// The disk was being created inside the app's own data folder — wherever the
+// project was cloned — and Windows cannot create a WSL virtual disk (.vhdx) in
+// a compressed or encrypted folder, inside OneDrive, or on a drive that is not
+// NTFS/ReFS. So the disk now lives under %LOCALAPPDATA% by default, and the
+// folder is checked (and its compression/encryption cleared) before import.
+// ---------------------------------------------------------------------------
+
+/**
+ * Where the sandbox keeps its disk and download.
+ *
+ * APIM_SANDBOX_DIR wins. On Windows the default is %LOCALAPPDATA%\apiM\sandbox:
+ * always on the system drive, always NTFS, never synced by OneDrive. Elsewhere
+ * (only reachable in tests) it falls back to the app's data folder.
+ */
+export function sandboxBaseDir(
+  env: Record<string, string | undefined>,
+  platform: string,
+  dataDir: string
+): string {
+  if (env.APIM_SANDBOX_DIR?.trim()) return env.APIM_SANDBOX_DIR.trim();
+  if (platform === "win32" && env.LOCALAPPDATA?.trim()) {
+    return path.win32.join(env.LOCALAPPDATA.trim(), "apiM", "sandbox");
+  }
+  return path.join(dataDir, "sandbox");
+}
+
+/**
+ * Windows exit codes arrive as unsigned 32-bit numbers, so WSL's -1 shows up
+ * as 4294967295. Report the signed value, and the hex for anything that is
+ * really an NTSTATUS/HRESULT.
+ */
+export function formatExitCode(code: number | null): string {
+  if (code === null) return "no exit code";
+  const signed = code > 0x7fffffff ? code - 0x100000000 : code;
+  return Math.abs(signed) > 0xffff
+    ? `${signed} (0x${(code >>> 0).toString(16)})`
+    : String(signed);
+}
+
+/**
+ * Turn WSL's error output into what to do about it. Matched on the hex code,
+ * which is the same in every Windows language; null when it is not one we know.
+ */
+export function explainWslError(text: string): string | null {
+  const t = String(text ?? "").toLowerCase();
+  if (t.includes("0xc03a0014") || t.includes("virtual disk support provider")) {
+    return (
+      "Windows could not create the sandbox's virtual disk in that folder. " +
+      "This happens when the folder is compressed or encrypted, is inside " +
+      "OneDrive, or is on a drive that is not NTFS (a USB/exFAT drive). Click " +
+      "Set up again: the disk now goes to %LOCALAPPDATA%\\apiM\\sandbox, which " +
+      "avoids all of these. To choose another place, set APIM_SANDBOX_DIR to a " +
+      "folder on an NTFS drive."
+    );
+  }
+  if (t.includes("0x80370102")) {
+    return (
+      "Virtualization is not available to WSL 2. Turn on 'Virtual Machine " +
+      "Platform' (Windows Features), and make sure virtualization (Intel VT-x / " +
+      "AMD SVM) is enabled in the BIOS, then restart."
+    );
+  }
+  if (t.includes("0x8007019e") || t.includes("0x8000000d")) {
+    return (
+      "The Windows Subsystem for Linux feature is not enabled. Click 'Turn on " +
+      "WSL' in this panel (or run: wsl --install --no-distribution as " +
+      "administrator), then restart Windows."
+    );
+  }
+  if (t.includes("0x800701bc") || t.includes("kernel")) {
+    return "WSL 2 needs its kernel updated. Run: wsl --update   then click Set up again.";
+  }
+  if (t.includes("0x80070070") || t.includes("not enough space")) {
+    return "The drive is out of space. The sandbox needs about 4 GB free.";
+  }
+  if (t.includes("0x80070005") || t.includes("access is denied")) {
+    return (
+      "Windows denied access to the sandbox folder. Pick a folder you own " +
+      "with APIM_SANDBOX_DIR, or check antivirus 'controlled folder access'."
+    );
+  }
+  return null;
+}
+
+/** What a PowerShell preflight reports about the install folder. */
+export interface InstallDirInfo {
+  fs: string;
+  driveType: string;
+  freeGB: number;
+  compressed: boolean;
+  encrypted: boolean;
+}
+
+/**
+ * Decide whether a folder can hold the sandbox disk, and what we may fix on
+ * our own folder (compression, encryption) versus what the user must change.
+ */
+export function assessInstallDir(
+  dir: string,
+  info: InstallDirInfo,
+  oneDriveRoots: string[]
+): { fixCompression: boolean; fixEncryption: boolean; problems: string[] } {
+  const problems: string[] = [];
+  const fsName = String(info.fs ?? "").toUpperCase();
+  if (fsName && fsName !== "NTFS" && fsName !== "REFS") {
+    problems.push(
+      `${dir} is on a ${info.fs} drive. A WSL disk needs NTFS (or ReFS); use a ` +
+        `folder on your C: drive or set APIM_SANDBOX_DIR.`
+    );
+  }
+  if (/network|cdrom|removable/i.test(info.driveType)) {
+    problems.push(
+      `${dir} is on a ${info.driveType.toLowerCase()} drive. Use a local fixed drive.`
+    );
+  }
+  const lowered = dir.toLowerCase().replace(/\//g, "\\");
+  const synced = oneDriveRoots
+    .filter(Boolean)
+    .map((r) => r.toLowerCase().replace(/\//g, "\\").replace(/\\+$/, ""))
+    .find((r) => lowered === r || lowered.startsWith(r + "\\"));
+  if (synced) {
+    problems.push(
+      `${dir} is inside OneDrive (${synced}). OneDrive cannot hold a WSL disk; ` +
+        `set APIM_SANDBOX_DIR to a folder outside it.`
+    );
+  }
+  if (Number.isFinite(info.freeGB) && info.freeGB < 4) {
+    problems.push(`Only ${info.freeGB} GB free on that drive; the sandbox needs about 4 GB.`);
+  }
+  return {
+    fixCompression: info.compressed,
+    fixEncryption: info.encrypted,
+    problems,
+  };
+}
+
+/**
+ * PowerShell that creates the folder and reports its drive and attributes as
+ * one line of JSON. ASCII only, for the reason documented in hidden-display.
+ */
+export function installDirProbeScript(): string {
+  return [
+    "param([string]$Dir)",
+    '$ErrorActionPreference = "Stop"',
+    "New-Item -ItemType Directory -Force -Path $Dir | Out-Null",
+    "$item = Get-Item -LiteralPath $Dir -Force",
+    "$attrs = $item.Attributes",
+    "$drive = New-Object System.IO.DriveInfo([System.IO.Path]::GetPathRoot($item.FullName))",
+    "[ordered]@{",
+    "  fs = $drive.DriveFormat",
+    "  driveType = [string]$drive.DriveType",
+    "  freeGB = [math]::Round($drive.AvailableFreeSpace / 1GB, 1)",
+    "  compressed = [bool]($attrs -band [System.IO.FileAttributes]::Compressed)",
+    "  encrypted = [bool]($attrs -band [System.IO.FileAttributes]::Encrypted)",
+    "} | ConvertTo-Json -Compress",
+    "",
+  ].join("\r\n");
+}

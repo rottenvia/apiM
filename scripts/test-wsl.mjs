@@ -30,6 +30,11 @@ import {
   sandboxWslConf,
   sandboxMountPoint,
   mountAndRunScript,
+  sandboxBaseDir,
+  formatExitCode,
+  explainWslError,
+  assessInstallDir,
+  installDirProbeScript,
 } from "../src/lib/wsl.ts";
 
 let passed = 0;
@@ -359,6 +364,80 @@ test("setup script installs xvfb and a capture tool, without sudo", () => {
   assert.ok(/imagemagick/.test(s));
   assert.ok(/apim-wsl-setup-ok/.test(s));
   assert.ok(/set -e/.test(s));
+});
+
+
+// --- where the disk goes, and what WSL errors mean --------------------------
+
+const REPORTED =
+  "A virtual disk support provider for the specified file was not found. \r\n" +
+  "Error code: Wsl/Service/RegisterDistro/0xc03a0014";
+
+test("the reported import error is explained, not just echoed", () => {
+  const why = explainWslError(REPORTED);
+  assert.ok(why && /compressed or encrypted/.test(why) && /OneDrive/.test(why) && /LOCALAPPDATA/.test(why));
+});
+
+test("the hex code alone is enough (localised Windows)", () => {
+  assert.ok(explainWslError("Fehlercode: Wsl/Service/RegisterDistro/0xc03a0014"));
+});
+
+test("virtualization-off and feature-off errors get their own fixes", () => {
+  assert.ok(/BIOS/.test(explainWslError("Error code: 0x80370102") ?? ""));
+  assert.ok(/Turn on WSL/.test(explainWslError("Error code: 0x8007019e") ?? ""));
+  assert.equal(explainWslError("something new"), null);
+});
+
+test("WSL's -1 is shown as -1, not 4294967295", () => {
+  assert.equal(formatExitCode(4294967295), "-1");
+  assert.equal(formatExitCode(0), "0");
+  assert.equal(formatExitCode(null), "no exit code");
+  assert.equal(formatExitCode(0xc03a0014), "-1069940716 (0xc03a0014)");
+});
+
+test("disk defaults to LOCALAPPDATA on Windows, not the project folder", () => {
+  assert.equal(
+    sandboxBaseDir({ LOCALAPPDATA: "C:\\Users\\me\\AppData\\Local" }, "win32", "D:\\proj\\data"),
+    "C:\\Users\\me\\AppData\\Local\\apiM\\sandbox"
+  );
+});
+
+test("APIM_SANDBOX_DIR overrides the default", () => {
+  assert.equal(
+    sandboxBaseDir({ APIM_SANDBOX_DIR: "E:\\wsl", LOCALAPPDATA: "C:\\x" }, "win32", "/d"),
+    "E:\\wsl"
+  );
+});
+
+const GOOD = { fs: "NTFS", driveType: "Fixed", freeGB: 120, compressed: false, encrypted: false };
+
+test("a plain NTFS folder passes with nothing to fix", () => {
+  const v = assessInstallDir("C:\\x", GOOD, []);
+  assert.deepEqual(v, { fixCompression: false, fixEncryption: false, problems: [] });
+});
+
+test("compression and encryption are fixable, not fatal", () => {
+  const v = assessInstallDir("C:\\x", { ...GOOD, compressed: true, encrypted: true }, []);
+  assert.ok(v.fixCompression && v.fixEncryption && v.problems.length === 0);
+});
+
+test("exFAT, removable, low space and OneDrive are reported", () => {
+  assert.ok(/NTFS/.test(assessInstallDir("F:\\x", { ...GOOD, fs: "exFAT" }, []).problems[0]));
+  assert.ok(/removable/.test(assessInstallDir("F:\\x", { ...GOOD, driveType: "Removable" }, []).problems[0]));
+  assert.ok(/4 GB/.test(assessInstallDir("C:\\x", { ...GOOD, freeGB: 2 }, []).problems[0]));
+  const od = assessInstallDir("C:\\Users\\me\\OneDrive\\Desktop\\apiM\\data\\sandbox", GOOD, ["C:\\Users\\me\\OneDrive"]);
+  assert.ok(/OneDrive/.test(od.problems[0]));
+});
+
+test("a folder merely named like OneDrive is not flagged", () => {
+  const v = assessInstallDir("C:\\Users\\me\\OneDriveBackup\\x", GOOD, ["C:\\Users\\me\\OneDrive"]);
+  assert.equal(v.problems.length, 0);
+});
+
+test("the folder probe script is pure ASCII and emits JSON", () => {
+  const ps = installDirProbeScript();
+  assert.ok(/^[\x09\x0a\x0d\x20-\x7e]*$/.test(ps));
+  assert.ok(/ConvertTo-Json -Compress/.test(ps) && /Compressed/.test(ps) && /Encrypted/.test(ps));
 });
 
 // ---------------------------------------------------------------------------
