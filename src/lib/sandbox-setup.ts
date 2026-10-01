@@ -23,7 +23,7 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream, createWriteStream, promises as fs } from "node:fs";
+import { createReadStream, createWriteStream, existsSync, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
@@ -32,15 +32,20 @@ import {
   ROOTFS_BASE,
   ROOTFS_FILE,
   SANDBOX_DISTRO,
+  VHD_DRIVER_FILES,
+  VHD_SERVICES,
   assessInstallDir,
   closeWslSandbox,
+  diagnoseVhdStack,
   expectedSha256,
   explainWslError,
   formatExitCode,
+  formatVhdFindings,
   importArgs,
   installDirProbeScript,
   sandboxBaseDir,
   type InstallDirInfo,
+  type VhdProbe,
   probeWsl,
   sandboxWslConf,
   wslSetupScript,
@@ -60,7 +65,7 @@ export const SANDBOX_DIR = sandboxBaseDir(process.env, process.platform, DATA_DI
 /** The first release put the disk here; an empty leftover is tidied away. */
 const LEGACY_SANDBOX_DIR = path.join(DATA_DIR, "sandbox");
 
-export type SandboxJobKind = "setup" | "remove" | "enable-wsl";
+export type SandboxJobKind = "setup" | "remove" | "enable-wsl" | "upgrade";
 
 export interface SandboxJob {
   kind: SandboxJobKind;
@@ -72,6 +77,8 @@ export interface SandboxJob {
   finishedAt: number | null;
   ok: boolean | null;
   error?: string;
+  /** A button the panel should offer next, when the fix is one click. */
+  hint?: "enable-wsl1";
 }
 
 let job: SandboxJob | null = null;
@@ -274,6 +281,32 @@ async function preflightInstallDir(dir: string, base: string): Promise<void> {
   if (verdict.problems.length) throw new Error(verdict.problems.join(" "));
 }
 
+/** Read the virtual-disk drivers' registration with sc.exe (no admin needed). */
+function probeVhdStack(): VhdProbe {
+  const probe: VhdProbe = { services: {}, files: {} };
+  const run = (args: string[]) => {
+    try {
+      const r = spawnSync("sc.exe", args, { windowsHide: true, timeout: 10_000, encoding: "latin1" });
+      return `${r.stdout ?? ""}${r.stderr ?? ""}`;
+    } catch {
+      return "";
+    }
+  };
+  for (const name of VHD_SERVICES) {
+    probe.services[name] = { qc: run(["qc", name]), query: run(["query", name]) };
+  }
+  const drivers = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "drivers");
+  for (const file of VHD_DRIVER_FILES) {
+    probe.files[file] = existsSync(path.join(drivers, file));
+  }
+  return probe;
+}
+
+/** Was this failure Windows being unable to make a virtual disk at all? */
+function isVirtualDiskFailure(output: string): boolean {
+  return /0xc03a0014|virtual disk support provider/i.test(output);
+}
+
 export function sandboxStatus(): WslStatus & { setUp: boolean; dir: string } {
   const status = probeWsl();
   return {
@@ -337,13 +370,42 @@ async function runSetup(): Promise<void> {
       log("  SHA256 matches Ubuntu's published checksum.");
     }
 
-    phase(`Importing as "${SANDBOX_DISTRO}"`);
+    phase(`Importing as "${SANDBOX_DISTRO}" (WSL 2)`);
     log(`  disk: ${installDir}`);
-    const run = await runLogged("wsl.exe", importArgs(installDir, tarball), {
+    const run = await runLogged("wsl.exe", importArgs(installDir, tarball, 2), {
       timeoutMs: 10 * 60_000,
     });
-    // Kept on failure so the next attempt skips the download.
-    if (run.code !== 0) throw failure("wsl --import", run);
+    if (run.code !== 0) {
+      // The download is kept on any failure so the next attempt skips it.
+      if (!isVirtualDiskFailure(run.output)) throw failure("wsl --import", run);
+
+      /*
+       * The folder passed its check, so Windows itself cannot make virtual
+       * disks. Say exactly which driver is at fault, then fall back to WSL 1,
+       * which keeps its files in a plain folder and needs no virtual disk.
+       */
+      phase("Windows cannot create virtual disks; checking its drivers");
+      const findings = diagnoseVhdStack(probeVhdStack());
+      log(formatVhdFindings(findings));
+      log("  This is also what breaks Docker Desktop and Hyper-V on this PC.");
+
+      phase(`Importing as "${SANDBOX_DISTRO}" (WSL 1, no virtual disk needed)`);
+      await fs.rm(installDir, { recursive: true, force: true });
+      await fs.mkdir(installDir, { recursive: true });
+      const v1 = await runLogged("wsl.exe", importArgs(installDir, tarball, 1), {
+        timeoutMs: 20 * 60_000,
+      });
+      if (v1.code !== 0) {
+        if (/WSL1_NOT_SUPPORTED|WSL1|optional component/i.test(v1.output) && job) {
+          job.hint = "enable-wsl1";
+        }
+        throw failure("wsl --import (WSL 1 fallback)", v1);
+      }
+      log(
+        "  Running on WSL 1. Everything the sandbox uses works on it. Once the " +
+          "drivers above are fixed, click Upgrade to WSL 2 in this panel."
+      );
+    }
     await fs.rm(tarball, { force: true });
   } else {
     log(`  "${SANDBOX_DISTRO}" already exists; reusing it.`);
@@ -410,6 +472,31 @@ export function startSandboxRemove(): { ok: true } | { ok: false; error: string 
   return { ok: true };
 }
 
+/** Move the sandbox from WSL 1 to WSL 2 once virtual disks work again. */
+export function startSandboxUpgrade(): { ok: true } | { ok: false; error: string } {
+  if (process.platform !== "win32") {
+    return { ok: false, error: "The WSL sandbox needs the app to run on Windows." };
+  }
+  const started = begin("upgrade");
+  if (!started.ok) return started;
+  void (async () => {
+    phase(`Converting "${SANDBOX_DISTRO}" to WSL 2`);
+    closeWslSandbox();
+    const run = await runLogged("wsl.exe", ["--set-version", SANDBOX_DISTRO, "2"], {
+      timeoutMs: 30 * 60_000,
+    });
+    if (run.code === 0) {
+      finish(true);
+      return;
+    }
+    if (isVirtualDiskFailure(run.output)) {
+      log(formatVhdFindings(diagnoseVhdStack(probeVhdStack())));
+    }
+    finish(false, failure("Converting to WSL 2", run).message + " The sandbox stays on WSL 1 and keeps working.");
+  })().catch((err) => finish(false, err instanceof Error ? err.message : String(err)));
+  return { ok: true };
+}
+
 /**
  * Turn WSL on. Needs administrator rights, so this asks Windows to show its
  * own elevation prompt; the user decides there. A restart is needed after.
@@ -425,7 +512,12 @@ export function startEnableWsl(): { ok: true } | { ok: false; error: string } {
     const { code } = await runLogged("powershell.exe", [
       "-NoProfile",
       "-Command",
-      "Start-Process wsl.exe -ArgumentList '--install','--no-distribution' -Verb RunAs -Wait",
+      // Both halves: the WSL optional component (needed for WSL 1, the
+      // fallback when virtual disks are broken) and WSL itself.
+      "Start-Process powershell.exe -Verb RunAs -Wait -ArgumentList " +
+        "'-NoProfile','-Command','dism.exe /online /enable-feature " +
+        "/featurename:Microsoft-Windows-Subsystem-Linux /all /norestart; " +
+        "wsl.exe --install --no-distribution'",
     ]);
     if (code === 0) {
       log("WSL was installed. Restart Windows once, then click Set up.");

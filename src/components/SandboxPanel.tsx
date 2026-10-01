@@ -26,7 +26,7 @@ interface SandboxStatus {
   dir: string;
 }
 interface SandboxJob {
-  kind: "setup" | "remove" | "enable-wsl";
+  kind: "setup" | "remove" | "enable-wsl" | "upgrade";
   phase: string;
   progress: number | null;
   log: string;
@@ -34,6 +34,7 @@ interface SandboxJob {
   finishedAt: number | null;
   ok: boolean | null;
   error?: string;
+  hint?: "enable-wsl1";
 }
 interface SandboxState {
   platform: string;
@@ -84,7 +85,7 @@ export function SandboxPanel({ onClose }: { onClose: () => void }) {
   }, [state?.job?.log]);
 
   const act = useCallback(
-    async (action: "setup" | "remove" | "enable-wsl") => {
+    async (action: "setup" | "remove" | "enable-wsl" | "upgrade") => {
       setBusy(true);
       setError("");
       try {
@@ -109,6 +110,8 @@ export function SandboxPanel({ onClose }: { onClose: () => void }) {
   const job = state?.job;
   const onWindows = state?.platform === "win32";
   const setUp = status?.setUp ?? false;
+  const sandboxVersion =
+    status?.distros.find((d) => d.name === "apim-sandbox")?.version ?? null;
 
   return (
     <div
@@ -170,7 +173,7 @@ export function SandboxPanel({ onClose }: { onClose: () => void }) {
                   />
                   <span className="font-medium text-text-primary">
                     {setUp
-                      ? "Sandbox ready"
+                      ? `Sandbox ready${sandboxVersion ? ` (WSL ${sandboxVersion})` : ""}`
                       : status?.installed
                         ? "WSL is on — sandbox not set up yet"
                         : "WSL is not turned on"}
@@ -182,6 +185,13 @@ export function SandboxPanel({ onClose }: { onClose: () => void }) {
                 {status?.dir && (
                   <p className="mt-1.5 break-all text-[12px] text-text-muted">
                     Disk location: <span className="font-mono">{status.dir}</span>
+                  </p>
+                )}
+                {setUp && sandboxVersion === 1 && (
+                  <p className="mt-1.5 text-[13px] text-text-muted">
+                    Running on WSL 1 because this PC cannot create virtual disks
+                    right now. Fix the drivers named in the log (see
+                    docs/restore-fsdepends.md), then click Upgrade to WSL 2.
                   </p>
                 )}
                 {setUp && (
@@ -263,6 +273,26 @@ export function SandboxPanel({ onClose }: { onClose: () => void }) {
                     className="rounded-lg bg-accent px-3.5 py-2 text-[13px] font-medium text-white transition-colors hover:bg-accent-light disabled:opacity-50"
                   >
                     {jobRunning ? "Setting up…" : "Set up sandbox"}
+                  </button>
+                )}
+                {job?.hint === "enable-wsl1" && !jobRunning && (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => act("enable-wsl")}
+                    className="rounded-lg bg-accent px-3.5 py-2 text-[13px] font-medium text-white transition-colors hover:bg-accent-light disabled:opacity-50"
+                  >
+                    Turn on WSL 1 support
+                  </button>
+                )}
+                {setUp && sandboxVersion === 1 && (
+                  <button
+                    type="button"
+                    disabled={busy || jobRunning}
+                    onClick={() => act("upgrade")}
+                    className="rounded-lg border border-border px-3.5 py-2 text-[13px] font-medium text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary disabled:opacity-50"
+                  >
+                    {jobRunning && job?.kind === "upgrade" ? "Upgrading…" : "Upgrade to WSL 2"}
                   </button>
                 )}
                 {setUp && (

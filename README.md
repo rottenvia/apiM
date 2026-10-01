@@ -353,6 +353,15 @@ turns compression/encryption off for that folder only, and keeps the verified
 download if a later step fails, so a retry does not download it again. Set
 `APIM_SANDBOX_DIR` to put it on another NTFS drive.
 
+**When Windows cannot make virtual disks at all.** The same `0xc03a0014` also
+means Windows' own virtual-disk drivers (`FsDepends`, `vhdmp`, `vdrvroot`) are
+missing or disabled — which also breaks Docker Desktop, Hyper-V and mounting
+ISOs. Setup then reads those drivers with `sc.exe` (no admin), names the one at
+fault with its fix (see `docs/restore-fsdepends.md`), and installs the sandbox
+on **WSL 1** instead, which keeps its files in a plain folder and needs no
+virtual disk or Hyper-V VM. Everything the sandbox uses works there. Once the
+drivers are fixed, **Upgrade to WSL 2** in the panel converts it in place.
+
 **Sealed off.** The sandbox distro has Windows interop turned off and no drives
 auto-mounted (`/etc/wsl.conf`); the only thing it can see is the **current
 chat's workspace**, mounted per chat under `/ws/<id>`. Two chats never share
