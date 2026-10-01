@@ -501,6 +501,22 @@ check("finish is offered", names.includes("finish"));
 const { readFile } = await import("node:fs/promises");
 const route = (await readFile(path.join(ROOT, "src/app/api/chat/route.ts"), "utf8")).replace(/\r\n/g, "\n");
 const toolsSrc = await readFile(path.join(ROOT, "src/lib/tools.ts"), "utf8");
+{
+  // Reported: every reply ending in `finish` showed "This reply stopped
+  // before it finished". The lessons pass (a helper-model call, 5-60s) ran
+  // between the final save and `done`, so a finished answer kept its Stop
+  // button; pressing it marked a complete reply interrupted.
+  const doneAt = route.indexOf('type: "done",');
+  const passAt = route.indexOf("void runLessonsPass()");
+  const refineAt = route.indexOf("await runRefine(");
+  const closeBeforePass = route.lastIndexOf("close();", passAt);
+  check(
+    "nothing slow sits between the final save and done",
+    doneAt > 0 && passAt > doneAt && closeBeforePass > doneAt &&
+      refineAt > 0 && route.indexOf("const runLessonsPass", 0) < refineAt,
+    "the lessons pass runs after done and after the stream closes"
+  );
+}
 check(
   "the route bounces a finish with open steps, once",
   /call.function.name === "finish"/.test(route) &&

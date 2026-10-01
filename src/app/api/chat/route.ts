@@ -6526,7 +6526,17 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          * transcript: the whole pass is a fraction of a cent, which has to
          * stay true or the learning costs more than the mistakes it avoids.
          */
-        if (
+        /*
+         * Runs AFTER `done` and after the stream is closed, never before.
+         *
+         * Reported: every reply that ended with `finish` showed "This reply
+         * stopped before it finished". The pass is a helper-model call that
+         * took 5-60s, and it sat between the final save and `done`, so the
+         * finished answer still had a Stop button. Pressing it (the reply
+         * looked stuck) marked a complete, saved reply interrupted. The
+         * reply is already on disk, so nothing here needs the user waiting.
+         */
+        const lessonsPassWanted =
           workspaceEnabled &&
           lessonsEnabled &&
           helper !== null &&
@@ -6537,8 +6547,9 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           // the run is half-finished anyway, so anything learned from it
           // would be drawn from incomplete evidence.
           !stopped() &&
-          toolSummaries.length > 0
-        ) {
+          toolSummaries.length > 0;
+        const runLessonsPass = async () => {
+          if (!lessonsPassWanted || helper === null) return;
           try {
             /*
              * Paired by id, not by position.
@@ -6565,7 +6576,9 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               existingLessons,
               helper.apiKey,
               helper.baseUrl,
-              runSignal,
+              // The run is over (endRun) by the time this runs; bound it
+              // on its own instead.
+              AbortSignal.timeout(120_000),
               {
                 model: helper.apiModel,
                 thinkingStyle: helper.thinkingStyle,
@@ -6573,25 +6586,15 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             );
 
             if (refined.lessons.length > 0 || refined.confirms.length > 0) {
-              const applied = await applyLessons(
-                workspace,
-                refined.lessons,
-                refined.confirms
-              );
-              if (applied.added || applied.revised) {
-                send({
-                  type: "lessons_updated",
-                  added: applied.added,
-                  revised: applied.revised,
-                  total: applied.total,
-                });
-              }
+              // Saved for the next run; nothing in the UI listened for a
+              // live notice, and the stream is closed by now anyway.
+              await applyLessons(workspace, refined.lessons, refined.confirms);
             }
           } catch (e) {
             // Never allowed to affect the reply — it has already been sent.
             console.error("Refine pass failed:", e);
           }
-        }
+        };
 
         if (thinkingEnabled && !reasoningContent) {
           recordAsync({
@@ -6661,6 +6664,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           },
         });
         close();
+        void runLessonsPass().catch((e) => console.error("Refine pass failed:", e));
       } catch (error) {
         endRun(assistantMsgId, runSignal);
 
