@@ -34,6 +34,13 @@ import {
   SANDBOX_DISTRO,
   VHD_DRIVER_FILES,
   VHD_SERVICES,
+  WSL1_DRIVER_FILES,
+  WSL1_SERVICES,
+  diagnoseWsl1,
+  enableWslElevatedScript,
+  enableWslLauncherScript,
+  explainDismExit,
+  parseDismExit,
   assessInstallDir,
   closeWslSandbox,
   diagnoseVhdStack,
@@ -46,6 +53,7 @@ import {
   sandboxBaseDir,
   type InstallDirInfo,
   type VhdProbe,
+  type Wsl1Probe,
   probeWsl,
   sandboxWslConf,
   wslSetupScript,
@@ -302,6 +310,40 @@ function probeVhdStack(): VhdProbe {
   return probe;
 }
 
+/**
+ * Is Windows waiting for a restart to finish installing something? Both keys
+ * are readable without admin rights; either one existing means yes.
+ */
+function rebootPending(): boolean {
+  const keys = [
+    "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Component Based Servicing\\RebootPending",
+    "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\WindowsUpdate\\Auto Update\\RebootRequired",
+  ];
+  return keys.some((key) => {
+    try {
+      return spawnSync("reg.exe", ["query", key], { windowsHide: true, timeout: 10_000 }).status === 0;
+    } catch {
+      return false;
+    }
+  });
+}
+
+/** Read what WSL 1 needs: its driver files, their registration, a pending restart. */
+function probeWsl1(): Wsl1Probe {
+  const drivers = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "drivers");
+  const probe: Wsl1Probe = { rebootPending: rebootPending(), files: {}, services: {} };
+  for (const file of WSL1_DRIVER_FILES) probe.files[file] = existsSync(path.join(drivers, file));
+  for (const name of WSL1_SERVICES) {
+    try {
+      const r = spawnSync("sc.exe", ["qc", name], { windowsHide: true, timeout: 10_000, encoding: "latin1" });
+      probe.services[name] = `${r.stdout ?? ""}${r.stderr ?? ""}`;
+    } catch {
+      /* unknown; diagnoseWsl1 treats a missing entry as "not checked" */
+    }
+  }
+  return probe;
+}
+
 /** Was this failure Windows being unable to make a virtual disk at all? */
 function isVirtualDiskFailure(output: string): boolean {
   return /0xc03a0014|virtual disk support provider/i.test(output);
@@ -331,6 +373,12 @@ export function startSandboxSetup(): { ok: true } | { ok: false; error: string }
 
 async function runSetup(): Promise<void> {
   phase("Checking WSL");
+  if (rebootPending()) {
+    log(
+      "  Windows is waiting for a restart to finish installing something. If " +
+        "you just turned WSL on, restart first (Start -> Power -> Restart)."
+    );
+  }
   const status = probeWsl();
   if (!status.installed) {
     finish(false, status.reason ?? "WSL is not turned on.");
@@ -396,10 +444,14 @@ async function runSetup(): Promise<void> {
         timeoutMs: 20 * 60_000,
       });
       if (v1.code !== 0) {
-        if (/WSL1_NOT_SUPPORTED|WSL1|optional component/i.test(v1.output) && job) {
-          job.hint = "enable-wsl1";
+        if (!/WSL1_NOT_SUPPORTED|optional component/i.test(v1.output)) {
+          throw failure("wsl --import (WSL 1 fallback)", v1);
         }
-        throw failure("wsl --import (WSL 1 fallback)", v1);
+        // One message, three causes; find out which before suggesting a fix.
+        phase("Checking why WSL 1 is unavailable");
+        const wsl1 = diagnoseWsl1(probeWsl1());
+        if (wsl1.state === "feature-off" && job) job.hint = "enable-wsl1";
+        throw new Error(`WSL 1 is not available: ${wsl1.message}`);
       }
       log(
         "  Running on WSL 1. Everything the sandbox uses works on it. Once the " +
@@ -509,22 +561,44 @@ export function startEnableWsl(): { ok: true } | { ok: false; error: string } {
   if (!started.ok) return started;
   void (async () => {
     phase("Asking Windows for administrator rights");
-    const { code } = await runLogged("powershell.exe", [
-      "-NoProfile",
-      "-Command",
-      // Both halves: the WSL optional component (needed for WSL 1, the
-      // fallback when virtual disks are broken) and WSL itself.
-      "Start-Process powershell.exe -Verb RunAs -Wait -ArgumentList " +
-        "'-NoProfile','-Command','dism.exe /online /enable-feature " +
-        "/featurename:Microsoft-Windows-Subsystem-Linux /all /norestart; " +
-        "wsl.exe --install --no-distribution'",
-    ]);
-    if (code === 0) {
-      log("WSL was installed. Restart Windows once, then click Set up.");
-      finish(true);
-    } else {
-      finish(false, "The administrator prompt was declined or failed.");
+    /*
+     * The elevated process cannot hand its output back directly, so it writes
+     * DISM's output and exit codes to a log that is read here. Before this the
+     * button said "WSL was installed" whatever happened, which is how a
+     * declined prompt or a failed DISM looked like success.
+     */
+    const dir = path.join(os.tmpdir(), "apim-enable-wsl");
+    const inner = path.join(dir, "enable.ps1");
+    const launcher = path.join(dir, "launch.ps1");
+    const logFile = path.join(dir, "result.log");
+    await writePowerShellScript(inner, enableWslElevatedScript());
+    await writePowerShellScript(launcher, enableWslLauncherScript());
+    await fs.rm(logFile, { force: true });
+
+    const run = await runLogged(
+      "powershell.exe",
+      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", launcher, "-Inner", inner, "-Log", logFile],
+      { timeoutMs: 30 * 60_000 }
+    );
+    const result = await fs
+      .readFile(logFile, "utf8")
+      .then((t) => t.replace(/^\ufeff/, "").replace(/\u0000/g, ""))
+      .catch(() => "");
+    if (result) log(result.trim());
+
+    const declined = run.output.includes("apim-uac-declined") || !result;
+    const dism = explainDismExit(declined ? null : parseDismExit(result));
+    if (!dism.ok) {
+      finish(false, dism.message);
+      return;
     }
+    const restart = dism.restart || rebootPending();
+    log(
+      restart
+        ? "Restart Windows now (Start -> Power -> Restart), then click Set up."
+        : "Done. Click Set up."
+    );
+    finish(true);
   })().catch((err) => finish(false, err instanceof Error ? err.message : String(err)));
   return { ok: true };
 }
