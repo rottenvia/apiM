@@ -216,8 +216,12 @@ export function expectedSha256(sums: string, file: string): string | null {
 }
 
 /** `wsl.exe --import` argv for the sandbox distro. */
-export function importArgs(installDir: string, tarball: string): string[] {
-  return ["--import", SANDBOX_DISTRO, installDir, tarball, "--version", "2"];
+export function importArgs(
+  installDir: string,
+  tarball: string,
+  version: 1 | 2 = 2
+): string[] {
+  return ["--import", SANDBOX_DISTRO, installDir, tarball, "--version", String(version)];
 }
 
 /**
@@ -419,12 +423,9 @@ export function chooseDistro(
         "/sandbox) and click Set up.",
     };
   }
-  if (own.version < 2) {
-    return {
-      ok: false,
-      reason: `${SANDBOX_DISTRO} is on WSL 1; run: wsl --set-version ${SANDBOX_DISTRO} 2`,
-    };
-  }
+  // WSL 1 is accepted: it is the fallback for a Windows whose virtual-disk
+  // drivers are broken (see diagnoseVhdStack), and everything the sandbox
+  // uses works on it.
   return { ok: true, distro: own.name };
 }
 
@@ -602,12 +603,18 @@ export function explainWslError(text: string): string | null {
   const t = String(text ?? "").toLowerCase();
   if (t.includes("0xc03a0014") || t.includes("virtual disk support provider")) {
     return (
-      "Windows could not create the sandbox's virtual disk in that folder. " +
-      "This happens when the folder is compressed or encrypted, is inside " +
-      "OneDrive, or is on a drive that is not NTFS (a USB/exFAT drive). Click " +
-      "Set up again: the disk now goes to %LOCALAPPDATA%\\apiM\\sandbox, which " +
-      "avoids all of these. To choose another place, set APIM_SANDBOX_DIR to a " +
-      "folder on an NTFS drive."
+      "Windows could not create a virtual disk. Either the folder cannot hold " +
+      "one (compressed or encrypted, inside OneDrive, or not NTFS), or Windows' " +
+      "own virtual-disk drivers (FsDepends, vhdmp, vdrvroot) are missing or " +
+      "disabled. The second also breaks Docker Desktop, Hyper-V and mounting " +
+      "ISOs; see docs/restore-fsdepends.md."
+    );
+  }
+  if (t.includes("wsl1_not_supported") || /wsl ?1 is not supported/.test(t)) {
+    return (
+      "WSL 1 is switched off on this PC. Click 'Turn on WSL 1 support' in " +
+      "this panel (it asks Windows for administrator rights), restart " +
+      "Windows, then click Set up again."
     );
   }
   if (t.includes("0x80370102")) {
@@ -712,4 +719,129 @@ export function installDirProbeScript(): string {
     "} | ConvertTo-Json -Compress",
     "",
   ].join("\r\n");
+}
+
+// ---------------------------------------------------------------------------
+// The virtual-disk driver stack.
+//
+// The folder check above passed on the reporting machine (NTFS, local, not
+// compressed) and the import still failed with 0xc03a0014. The other cause of
+// that code is Windows itself: VHDX files are created by the vhdmp driver,
+// which needs FsDepends (a minifilter) and vdrvroot (the virtual drive
+// enumerator); vmcompute must be startable too. A missing or disabled one
+// breaks every virtual disk on the machine, which is also why Docker Desktop
+// fails there. These are read with sc.exe, which needs no admin rights.
+// ---------------------------------------------------------------------------
+
+export const VHD_SERVICES = ["FsDepends", "vhdmp", "vdrvroot", "vmcompute"] as const;
+export type VhdService = (typeof VHD_SERVICES)[number];
+
+/** Driver files that must exist under System32\drivers. */
+export const VHD_DRIVER_FILES = ["FsDepends.sys", "vhdmp.sys", "vdrvroot.sys"] as const;
+
+const START_NAMES: Record<number, string> = {
+  0: "boot",
+  1: "system",
+  2: "automatic",
+  3: "on demand",
+  4: "DISABLED",
+};
+
+/**
+ * Read `sc.exe qc <name>`. Field names and numbers are the same in every
+ * Windows language; only the trailing words are translated, so only the
+ * numbers are used. 1060 means the service is not registered at all.
+ */
+export function parseScQc(text: string): { exists: boolean; startType: number | null } {
+  const t = String(text ?? "");
+  // "FAILED 1060:" in English, "FEHLER 1060:" in German: match the number.
+  if (/\s1060:/.test(t)) return { exists: false, startType: null };
+  const m = /START_TYPE\s*:\s*(\d+)/.exec(t);
+  return { exists: Boolean(m) || /SERVICE_NAME/.test(t), startType: m ? Number(m[1]) : null };
+}
+
+/** Read `sc.exe query <name>`: 1 stopped, 4 running. */
+export function parseScQuery(text: string): { state: number | null } {
+  const m = /STATE\s*:\s*(\d+)/.exec(String(text ?? ""));
+  return { state: m ? Number(m[1]) : null };
+}
+
+export interface VhdProbe {
+  services: Partial<Record<VhdService, { qc: string; query: string }>>;
+  /** Whether each driver file exists. */
+  files: Partial<Record<(typeof VHD_DRIVER_FILES)[number], boolean>>;
+}
+
+export interface VhdFinding {
+  component: string;
+  problem: string;
+  fix: string;
+}
+
+/**
+ * Turn the raw probe into what is broken and how to fix it. Only real faults
+ * are reported: a demand-start driver that is merely stopped is normal.
+ */
+export function diagnoseVhdStack(probe: VhdProbe): VhdFinding[] {
+  const out: VhdFinding[] = [];
+  const doc = "docs/restore-fsdepends.md";
+
+  for (const file of VHD_DRIVER_FILES) {
+    if (probe.files[file] === false) {
+      out.push({
+        component: file,
+        problem: `the driver file C:\\Windows\\System32\\drivers\\${file} is missing`,
+        fix: `no setting can bring it back; copy it from the Windows ISO (${doc}, "If the driver file is missing")`,
+      });
+    }
+  }
+
+  for (const name of VHD_SERVICES) {
+    const raw = probe.services[name];
+    if (!raw) continue;
+    const qc = parseScQc(raw.qc);
+    if (!qc.exists) {
+      out.push({
+        component: name,
+        problem: `${name} is not registered with Windows`,
+        fix:
+          name === "FsDepends"
+            ? `recreate its registration step by step: ${doc}, Steps 1-4 (make a restore point first)`
+            : name === "vmcompute"
+              ? "turn on 'Virtual Machine Platform' in Windows Features, then restart"
+              : `its registration is missing; see ${doc}, "If FsDepends loads but VHDX creation still fails"`,
+      });
+      continue;
+    }
+    if (qc.startType === 4) {
+      const restore = name === "vdrvroot" ? 0 : 3;
+      out.push({
+        component: name,
+        problem: `${name} is DISABLED`,
+        fix:
+          `as administrator: sc.exe config ${name} start= ${restore === 0 ? "boot" : "demand"}` +
+          ` then restart (${START_NAMES[restore]} is the Windows default)`,
+      });
+    } else if (name === "vdrvroot" && qc.startType !== null && qc.startType !== 0) {
+      out.push({
+        component: name,
+        problem: `vdrvroot starts "${START_NAMES[qc.startType] ?? qc.startType}" instead of at boot`,
+        fix: `as administrator: reg add HKLM\\SYSTEM\\CurrentControlSet\\Services\\vdrvroot /v Start /t REG_DWORD /d 0 /f   then restart`,
+      });
+    }
+  }
+  return out;
+}
+
+/** One paragraph for the log and the error line. */
+export function formatVhdFindings(findings: VhdFinding[]): string {
+  if (!findings.length) {
+    return (
+      "The virtual-disk drivers all look registered and enabled, so the fault " +
+      "is deeper (often an anti-cheat driver or a damaged VHD stack). Try " +
+      "`sc.exe start vhdmp` as administrator and see what it says, and the " +
+      "diskpart test in docs/restore-fsdepends.md, Step 4."
+    );
+  }
+  return findings.map((f) => `- ${f.problem}. Fix: ${f.fix}.`).join("\n");
 }

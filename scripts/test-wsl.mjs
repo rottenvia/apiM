@@ -35,6 +35,10 @@ import {
   explainWslError,
   assessInstallDir,
   installDirProbeScript,
+  parseScQc,
+  parseScQuery,
+  diagnoseVhdStack,
+  formatVhdFindings,
 } from "../src/lib/wsl.ts";
 
 let passed = 0;
@@ -259,13 +263,13 @@ test("never falls back to the user's own distro", () => {
   assert.ok(!r.ok && r.needsSetup === true);
 });
 
-test("refuses a WSL 1 sandbox distro", () => {
+test("accepts a WSL 1 sandbox distro (the no-virtual-disk fallback)", () => {
   const r = chooseDistro({
     installed: true,
     defaultDistro: null,
     distros: [{ name: SANDBOX_DISTRO, state: "Stopped", version: 1, isDefault: false }],
   });
-  assert.ok(!r.ok && /set-version/.test(r.reason));
+  assert.ok(r.ok && r.distro === SANDBOX_DISTRO);
 });
 
 test("refuses when WSL is not installed", () => {
@@ -375,7 +379,9 @@ const REPORTED =
 
 test("the reported import error is explained, not just echoed", () => {
   const why = explainWslError(REPORTED);
-  assert.ok(why && /compressed or encrypted/.test(why) && /OneDrive/.test(why) && /LOCALAPPDATA/.test(why));
+  assert.ok(why && /compressed or encrypted/.test(why) && /OneDrive/.test(why));
+  // The second cause, seen on the reporting PC once the folder was ruled out.
+  assert.ok(/FsDepends/.test(why) && /vhdmp/.test(why) && /Docker/.test(why));
 });
 
 test("the hex code alone is enough (localised Windows)", () => {
@@ -438,6 +444,90 @@ test("the folder probe script is pure ASCII and emits JSON", () => {
   const ps = installDirProbeScript();
   assert.ok(/^[\x09\x0a\x0d\x20-\x7e]*$/.test(ps));
   assert.ok(/ConvertTo-Json -Compress/.test(ps) && /Compressed/.test(ps) && /Encrypted/.test(ps));
+});
+
+
+// --- the virtual-disk drivers (the real cause on the reporting PC) ----------
+
+const QC = (name, start, label) =>
+  `[SC] QueryServiceConfig SUCCESS\r\n\r\nSERVICE_NAME: ${name}\r\n` +
+  `        TYPE               : 1  KERNEL_DRIVER\r\n` +
+  `        START_TYPE         : ${start}   ${label}\r\n` +
+  `        ERROR_CONTROL      : 1   NORMAL\r\n`;
+const MISSING =
+  "[SC] OpenService FAILED 1060:\r\n\r\nThe specified service does not exist as an installed service.\r\n";
+const QUERY = (state) => `SERVICE_NAME: x\r\n        STATE              : ${state}  STOPPED\r\n`;
+
+test("sc.exe qc: start type and a missing service are read by number", () => {
+  assert.deepEqual(parseScQc(QC("vhdmp", 3, "DEMAND_START")), { exists: true, startType: 3 });
+  assert.deepEqual(parseScQc(MISSING), { exists: false, startType: null });
+  // German Windows: the words change, the numbers do not.
+  assert.deepEqual(parseScQc("[SC] OpenService FEHLER 1060:\r\n"), { exists: false, startType: null });
+  assert.deepEqual(parseScQc("[SC] OpenService ÉCHEC 1060 :\r\n".replace(" :", ":")), { exists: false, startType: null });
+  assert.deepEqual(parseScQuery(QUERY(4)), { state: 4 });
+});
+
+const HEALTHY = {
+  services: {
+    FsDepends: { qc: QC("FsDepends", 3, "DEMAND_START"), query: QUERY(1) },
+    vhdmp: { qc: QC("vhdmp", 3, "DEMAND_START"), query: QUERY(1) },
+    vdrvroot: { qc: QC("vdrvroot", 0, "BOOT_START"), query: QUERY(4) },
+    vmcompute: { qc: QC("vmcompute", 3, "DEMAND_START"), query: QUERY(1) },
+  },
+  files: { "FsDepends.sys": true, "vhdmp.sys": true, "vdrvroot.sys": true },
+};
+
+test("a healthy driver stack has no findings (stopped on-demand is normal)", () => {
+  assert.deepEqual(diagnoseVhdStack(HEALTHY), []);
+  assert.ok(/deeper/.test(formatVhdFindings([])));
+});
+
+test("a missing FsDepends registration points at the restore guide", () => {
+  const f = diagnoseVhdStack({
+    ...HEALTHY,
+    services: { ...HEALTHY.services, FsDepends: { qc: MISSING, query: MISSING } },
+  });
+  assert.equal(f.length, 1);
+  assert.ok(/not registered/.test(f[0].problem) && /restore-fsdepends\.md, Steps 1-4/.test(f[0].fix));
+});
+
+test("a DISABLED vhdmp gets the exact command to restore its default", () => {
+  const f = diagnoseVhdStack({
+    ...HEALTHY,
+    services: { ...HEALTHY.services, vhdmp: { qc: QC("vhdmp", 4, "DISABLED"), query: QUERY(1) } },
+  });
+  assert.ok(/DISABLED/.test(f[0].problem) && /sc\.exe config vhdmp start= demand/.test(f[0].fix));
+});
+
+test("vdrvroot must start at boot", () => {
+  const f = diagnoseVhdStack({
+    ...HEALTHY,
+    services: { ...HEALTHY.services, vdrvroot: { qc: QC("vdrvroot", 3, "DEMAND_START"), query: QUERY(1) } },
+  });
+  assert.ok(/instead of at boot/.test(f[0].problem) && /\/d 0/.test(f[0].fix));
+});
+
+test("a missing driver file is reported as such, not as a setting", () => {
+  const f = diagnoseVhdStack({ ...HEALTHY, files: { ...HEALTHY.files, "FsDepends.sys": false } });
+  assert.ok(/FsDepends\.sys is missing/.test(f[0].problem) && /ISO/.test(f[0].fix));
+});
+
+test("findings render as one line each", () => {
+  const text = formatVhdFindings([{ component: "x", problem: "p", fix: "f" }]);
+  assert.equal(text, "- p. Fix: f.");
+});
+
+test("import can target WSL 1 for the fallback", () => {
+  assert.deepEqual(importArgs("D:\\d", "D:\\r.tgz", 1).slice(-2), ["--version", "1"]);
+  assert.deepEqual(importArgs("D:\\d", "D:\\r.tgz").slice(-2), ["--version", "2"]);
+});
+
+test("WSL 1 switched off is explained with the one-click fix", () => {
+  const why = explainWslError(
+    "WSL1 is not supported with your current machine configuration.\r\n" +
+      "Error code: Wsl/Service/RegisterDistro/WSL_E_WSL1_NOT_SUPPORTED"
+  );
+  assert.ok(why && /Turn on WSL 1 support/.test(why));
 });
 
 // ---------------------------------------------------------------------------

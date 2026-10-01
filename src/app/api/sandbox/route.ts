@@ -5,6 +5,7 @@ import {
   startEnableWsl,
   startSandboxRemove,
   startSandboxSetup,
+  startSandboxUpgrade,
 } from "@/lib/sandbox-setup";
 
 export const dynamic = "force-dynamic";
@@ -32,7 +33,9 @@ export async function POST(req: NextRequest) {
         ? startSandboxRemove()
         : action === "enable-wsl"
           ? startEnableWsl()
-          : { ok: false as const, error: "action must be setup, remove or enable-wsl" };
+          : action === "upgrade"
+            ? startSandboxUpgrade()
+            : { ok: false as const, error: "action must be setup, remove, upgrade or enable-wsl" };
   if (!started.ok) {
     return NextResponse.json({ error: started.error }, { status: 409 });
   }
