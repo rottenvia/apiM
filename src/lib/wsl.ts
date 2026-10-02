@@ -626,6 +626,13 @@ export function explainWslError(text: string): string | null {
       "reconnecting afterwards. The same fault breaks Docker Desktop."
     );
   }
+  if (t.includes("hcs_e_service_not_available") || t.includes("required feature is not installed")) {
+    return (
+      "WSL 2's virtual machine service is not installed (Virtual Machine " +
+      "Platform is off or did not finish installing). The sandbox uses WSL 1 " +
+      "instead, which needs neither."
+    );
+  }
   if (t.includes("0x80370102")) {
     return (
       "Virtualization is not available to WSL 2. Turn on 'Virtual Machine " +
@@ -1043,7 +1050,13 @@ export function enableWslLauncherScript(): string {
 export function wsl2CannotRunHere(output: string): "virtual-disk" | "vm" | null {
   const t = String(output ?? "").toLowerCase();
   if (/0xc03a0014|virtual disk support provider/.test(t)) return "virtual-disk";
-  if (/0x8007273f|address incompatible with the requested protocol|0x80370102|0x80370114/.test(t)) {
+  if (
+    /0x8007273f|address incompatible with the requested protocol|0x80370102|0x80370114/.test(t) ||
+    // Any failure while creating the VM: HCS_E_SERVICE_NOT_AVAILABLE (Virtual
+    // Machine Platform not installed), HCS_E_HYPERV_NOT_INSTALLED, and the
+    // ones not yet seen. Reported: "a required feature is not installed".
+    /\/createvm\/|\bhcs_e_|hcs\/|required feature is not installed/.test(t)
+  ) {
     return "vm";
   }
   return null;
