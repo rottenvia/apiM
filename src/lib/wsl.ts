@@ -919,8 +919,19 @@ export function formatVhdFindings(findings: VhdFinding[]): string {
 //     vdrvroot, which no feature toggle repairs.
 // ---------------------------------------------------------------------------
 
-export const WSL1_DRIVER_FILES = ["lxcore.sys", "lxss.sys", "p9rdr.sys"] as const;
-export const WSL1_SERVICES = ["lxcore", "lxss", "P9Rdr"] as const;
+export const WSL1_DRIVER_FILES = ["lxcore.sys", "lxss.sys", "p9rdr.sys", "rdbss.sys"] as const;
+export const WSL1_SERVICES = ["lxcore", "lxss", "P9Rdr", "Rdbss"] as const;
+
+/**
+ * Re-registers RDBSS, the redirector library P9Rdr is built on, which the
+ * same clean-up deleted (P9Rdr then fails to start with 1075). Start on
+ * demand, so the service manager loads it when P9Rdr needs it and boot is
+ * unchanged. Undo: sc.exe delete Rdbss
+ */
+export const RDBSS_REPAIR_COMMAND =
+  'sc.exe create Rdbss type= filesys start= demand error= normal ' +
+  'binPath= \\SystemRoot\\System32\\drivers\\rdbss.sys group= Network depend= Mup ' +
+  'DisplayName= "Redirected Buffering Sub System"';
 
 /**
  * Re-registers Windows' Plan 9 redirector with its stock settings (kernel
@@ -949,17 +960,24 @@ export function diagnoseWsl1(probe: Wsl1Probe): { state: Wsl1State; message: str
   // start registers the distro with the Plan 9 redirector, and when its
   // service entry is gone the device never exists, so CreateInstance fails
   // with 0xd0000034. No restart or feature toggle brings the entry back.
-  const p9 = probe.services.P9Rdr;
-  if (probe.files["p9rdr.sys"] && p9 !== undefined && !parseScQc(p9).exists) {
+  const missing = (name: (typeof WSL1_SERVICES)[number]) =>
+    probe.services[name] !== undefined && !parseScQc(probe.services[name] ?? "").exists;
+  const fixes = [
+    probe.files["rdbss.sys"] && missing("Rdbss") ? RDBSS_REPAIR_COMMAND : null,
+    probe.files["p9rdr.sys"] && missing("P9Rdr") ? P9RDR_REPAIR_COMMAND : null,
+  ].filter((c): c is string => c !== null);
+  if (fixes.length) {
+    const names = fixes.map((c) => (c === RDBSS_REPAIR_COMMAND ? "Rdbss" : "P9Rdr"));
     return {
       state: "redirector-unregistered",
       message:
-        "p9rdr.sys (Windows' Plan 9 redirector, which WSL opens on every " +
-        "start) is installed but its service entry was deleted, so Linux " +
-        "cannot start. In an administrator PowerShell run:  " +
-        P9RDR_REPAIR_COMMAND +
+        "Windows' Plan 9 redirector, which WSL opens on every start, cannot " +
+        `load: the service entry for ${names.join(" and ")} was deleted (the ` +
+        "driver files are still installed), so Linux cannot start. In an " +
+        "administrator PowerShell run:  " +
+        fixes.join("  then  ") +
         "  then  sc.exe start P9Rdr  and  Restart-Service WSLService -Force  " +
-        "and click Set up again. (Undo: sc.exe delete P9Rdr)",
+        `and click Set up again. (Undo: ${names.map((n) => `sc.exe delete ${n}`).join(", ")})`,
     };
   }
   if (probe.rebootPending) {
