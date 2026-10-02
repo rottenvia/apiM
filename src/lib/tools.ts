@@ -1841,7 +1841,7 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
       name: "sandbox_run",
       description:
         "Run a command inside the private Linux sandbox on the user's own PC — " +
-        "a small WSL2 box, invisible to them (no window, never takes focus, " +
+        "a small WSL Linux box (WSL 1 or 2, whichever this PC supports), invisible to them (no window, never takes focus, " +
         "runs fine while they are gaming), with only THIS chat's workspace " +
         "mounted and Windows cut off from it. Use it when you need a real " +
         "machine to actually RUN something and see what happens: execute a " +

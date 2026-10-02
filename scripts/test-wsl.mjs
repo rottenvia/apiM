@@ -673,6 +673,12 @@ test("no sandbox command inherits the Windows working directory", () => {
   }
 });
 
+
+test("0xd0000034 (Linux cannot start) is explained as WSL 1's driver / pending restart", () => {
+  const why = explainWslError("Error: 0xd0000034\r\nError code: Wsl/Service/CreateInstance/0xd0000034");
+  assert.ok(why && /lxcore/.test(why) && /Restart/.test(why));
+});
+
 // ---------------------------------------------------------------------------
 
 console.log(`\n${passed + failed} checks · ${passed} passed${failed ? ` · ${failed} failed` : ""}`);

@@ -640,6 +640,15 @@ export function explainWslError(text: string): string | null {
       "reconnecting afterwards. The same fault breaks Docker Desktop."
     );
   }
+  if (t.includes("0xd0000034")) {
+    return (
+      "Linux could not start: WSL 1's kernel driver (lxcore) is not loaded. " +
+      "Usually Windows is still waiting for the restart that finishes " +
+      "turning WSL on - restart with Start -> Power -> Restart (not Shut " +
+      "down) and click Set up again. If it persists, lxcore's registration " +
+      "is missing, the same damage as vdrvroot and hvsocket on this PC."
+    );
+  }
   if (t.includes("hcs_e_service_not_available") || t.includes("required feature is not installed")) {
     return (
       "WSL 2's virtual machine service is not installed (Virtual Machine " +
