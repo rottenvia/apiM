@@ -89,7 +89,8 @@
     "test:rewind": "tsx scripts/test-rewind.mjs",
     "test:ingest": "tsx scripts/test-ingest.mjs",
     "test:extract": "tsx scripts/test-extract.mjs",
-    "test:wsl": "tsx scripts/test-wsl.mjs"
+    "test:wsl": "tsx scripts/test-wsl.mjs",
+    "test:mdblocks": "tsx scripts/test-markdown-blocks.mjs"
   },
   "dependencies": {
     "@types/cross-spawn": "^6.0.6",

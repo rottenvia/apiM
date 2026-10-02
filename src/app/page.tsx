@@ -800,6 +800,8 @@ export default function Home() {
    */
   const [customModels, setCustomModels] = useState<CustomModelDef[]>([]);
   const [themeId, setThemeId] = useState<string>(DEFAULT_THEME_ID);
+  /** Reply layout: Claude's single column (default) or the classic split. */
+  const [replyLayout, setReplyLayout] = useState<"claude" | "split">("claude");
   const [customTheme, setCustomTheme] = useState<CustomThemeSeeds>(() =>
     sanitizeSeeds(null)
   );
@@ -1087,6 +1089,7 @@ export default function Home() {
               setThemeId(s.themeId);
             }
             if (s.customTheme) setCustomTheme(sanitizeSeeds(s.customTheme));
+            if (s.replyLayout === "split") setReplyLayout("split");
             if (typeof s.localBaseUrl === "string" && s.localBaseUrl.trim()) {
               setLocalBaseUrl(s.localBaseUrl);
             }
@@ -1167,6 +1170,7 @@ export default function Home() {
           customModels,
           themeId,
           customTheme,
+          replyLayout,
           localBaseUrl,
           localApiKey,
           localApiModel,
@@ -1195,6 +1199,7 @@ export default function Home() {
     customModels,
     themeId,
     customTheme,
+    replyLayout,
     localBaseUrl,
     localApiKey,
     localApiModel,
@@ -1221,6 +1226,12 @@ export default function Home() {
   useEffect(() => {
     applyThemeById(themeId, customTheme);
   }, [themeId, customTheme]);
+
+  // Like the palette: an attribute on <html>, so switching is instant and
+  // pure CSS (the split: variant in globals.css), with no re-render.
+  useEffect(() => {
+    document.documentElement.dataset.layout = replyLayout;
+  }, [replyLayout]);
 
   /** Sends the user's Run / Skip answer back to the waiting request. */
   const decideCommand = useCallback(
@@ -4493,6 +4504,8 @@ export default function Home() {
           onCustomModelsChange={setCustomModels}
           themeId={themeId}
           onThemeChange={setThemeId}
+          replyLayout={replyLayout}
+          onReplyLayoutChange={setReplyLayout}
           customTheme={customTheme}
           onCustomThemeChange={setCustomTheme}
           localBaseUrl={localBaseUrl}
