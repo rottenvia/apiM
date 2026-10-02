@@ -199,10 +199,8 @@ export function buildWslInvocation(opts: {
  * Every sandbox command starts in a Linux folder, never the caller's.
  *
  * Without --cd, wsl.exe opens the Windows working directory inside Linux
- * (C:\Windows\System32 -> /mnt/c/Windows/System32). The sandbox has drive
- * auto-mounting turned off, so that folder does not exist and WSL 1 fails
- * with Wsl/Service/CreateInstance/0xd0000034 (object name not found) before
- * the command even starts. Reported on the first real WSL 1 sandbox.
+ * (C:\Windows\System32 -> /mnt/c/Windows/System32), and the sandbox has drive
+ * auto-mounting turned off, so that folder does not exist there.
  */
 export const LINUX_CWD = "/root";
 
@@ -642,11 +640,11 @@ export function explainWslError(text: string): string | null {
   }
   if (t.includes("0xd0000034")) {
     return (
-      "Linux could not start: WSL 1's kernel driver (lxcore) is not loaded. " +
-      "Usually Windows is still waiting for the restart that finishes " +
-      "turning WSL on - restart with Start -> Power -> Restart (not Shut " +
-      "down) and click Set up again. If it persists, lxcore's registration " +
-      "is missing, the same damage as vdrvroot and hvsocket on this PC."
+      "Linux could not start: a Windows driver WSL opens on every start was " +
+      "not found. Seen on a cleaned-up Windows: the Plan 9 redirector " +
+      "(P9Rdr, behind \\\\wsl$) had its registration deleted while " +
+      "p9rdr.sys stayed. Click Set up again to check which one; if Windows " +
+      "only just turned WSL on, restart first (Start -> Power -> Restart)."
     );
   }
   if (t.includes("hcs_e_service_not_available") || t.includes("required feature is not installed")) {
@@ -921,8 +919,17 @@ export function formatVhdFindings(findings: VhdFinding[]): string {
 //     vdrvroot, which no feature toggle repairs.
 // ---------------------------------------------------------------------------
 
-export const WSL1_DRIVER_FILES = ["lxcore.sys", "lxss.sys"] as const;
-export const WSL1_SERVICES = ["lxcore", "lxss"] as const;
+export const WSL1_DRIVER_FILES = ["lxcore.sys", "lxss.sys", "p9rdr.sys"] as const;
+export const WSL1_SERVICES = ["lxcore", "lxss", "P9Rdr"] as const;
+
+/**
+ * Re-registers Windows' Plan 9 redirector with its stock settings (kernel
+ * driver, start on demand, needs RDBSS). Undo: sc.exe delete P9Rdr
+ */
+export const P9RDR_REPAIR_COMMAND =
+  'sc.exe create P9Rdr type= kernel start= demand error= normal ' +
+  'binPath= \\SystemRoot\\System32\\drivers\\p9rdr.sys depend= Rdbss ' +
+  'DisplayName= "Plan 9 Redirector Driver"';
 
 export interface Wsl1Probe {
   rebootPending: boolean;
@@ -930,9 +937,31 @@ export interface Wsl1Probe {
   services: Partial<Record<(typeof WSL1_SERVICES)[number], string>>;
 }
 
-export type Wsl1State = "reboot-pending" | "feature-off" | "driver-unregistered" | "unknown";
+export type Wsl1State =
+  | "redirector-unregistered"
+  | "reboot-pending"
+  | "feature-off"
+  | "driver-unregistered"
+  | "unknown";
 
 export function diagnoseWsl1(probe: Wsl1Probe): { state: Wsl1State; message: string } {
+  // Reported, and traced to filesystem.cpp "Path: \Device\P9Rdr": every WSL 1
+  // start registers the distro with the Plan 9 redirector, and when its
+  // service entry is gone the device never exists, so CreateInstance fails
+  // with 0xd0000034. No restart or feature toggle brings the entry back.
+  const p9 = probe.services.P9Rdr;
+  if (probe.files["p9rdr.sys"] && p9 !== undefined && !parseScQc(p9).exists) {
+    return {
+      state: "redirector-unregistered",
+      message:
+        "p9rdr.sys (Windows' Plan 9 redirector, which WSL opens on every " +
+        "start) is installed but its service entry was deleted, so Linux " +
+        "cannot start. In an administrator PowerShell run:  " +
+        P9RDR_REPAIR_COMMAND +
+        "  then  sc.exe start P9Rdr  and  Restart-Service WSLService -Force  " +
+        "and click Set up again. (Undo: sc.exe delete P9Rdr)",
+    };
+  }
   if (probe.rebootPending) {
     return {
       state: "reboot-pending",
