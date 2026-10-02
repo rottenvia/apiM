@@ -302,7 +302,7 @@ test("wrapForSandbox runs bash in the per-chat mount with DISPLAY set", () => {
     script: "node server.js",
   });
   assert.equal(inv.command, "wsl.exe");
-  assert.deepEqual(inv.args.slice(0, 5), ["-d", SANDBOX_DISTRO, "-u", "root", "--exec"]);
+  assert.deepEqual(inv.args.slice(0, 7), ["-d", SANDBOX_DISTRO, "-u", "root", "--cd", "/root", "--exec"]);
   assert.ok(inv.args.includes("DISPLAY=:99"));
   const i = inv.args.indexOf("bash");
   assert.equal(inv.args[i + 1], "-lc");
@@ -656,6 +656,21 @@ test("setup tries WSL 1 after any WSL 2 failure, not only listed codes", () => {
   const src = readFileSync(new URL("../src/lib/sandbox-setup.ts", import.meta.url), "utf8");
   assert.ok(!/if \(!cause\) throw failure\("wsl --import"/.test(src));
   assert.ok(/WSL 2 cannot run on this PC; using WSL 1/.test(src));
+});
+
+
+test("no sandbox command inherits the Windows working directory", () => {
+  // Reported: run from C:\\Windows\\System32, WSL 1 failed with 0xd0000034
+  // because the sandbox does not mount Windows drives.
+  const src = readFileSync(new URL("../src/lib/wsl.ts", import.meta.url), "utf8");
+  const calls = src.match(/buildWslInvocation\(\{[\s\S]*?\}\)/g) ?? [];
+  const sandboxCalls = calls.filter((c) => /user: "root"/.test(c));
+  assert.ok(sandboxCalls.length >= 3);
+  for (const c of sandboxCalls) assert.ok(/cwdWsl: LINUX_CWD/.test(c), c.slice(0, 80));
+  const setup = readFileSync(new URL("../src/lib/sandbox-setup.ts", import.meta.url), "utf8");
+  for (const line of setup.split("\n").filter((l) => /SANDBOX_DISTRO, "-u", "root"/.test(l))) {
+    assert.ok(/"--cd", "\/"/.test(line), line.trim());
+  }
 });
 
 // ---------------------------------------------------------------------------

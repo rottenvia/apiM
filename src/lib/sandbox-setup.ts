@@ -471,7 +471,7 @@ async function runSetup(): Promise<void> {
   phase("Locking down the sandbox (wsl.conf)");
   const conf = await runLogged(
     "wsl.exe",
-    ["-d", SANDBOX_DISTRO, "-u", "root", "--exec", "sh", "-c", "cat > /etc/wsl.conf"],
+    ["-d", SANDBOX_DISTRO, "-u", "root", "--cd", "/", "--exec", "sh", "-c", "cat > /etc/wsl.conf"],
     { input: sandboxWslConf(), timeoutMs: 60_000 }
   );
   if (conf.code !== 0) throw failure("Writing /etc/wsl.conf", conf);
@@ -481,7 +481,7 @@ async function runSetup(): Promise<void> {
   phase("Installing tools (apt-get, a few minutes)");
   const apt = await runLogged(
     "wsl.exe",
-    ["-d", SANDBOX_DISTRO, "-u", "root", "--exec", "bash", "-c", wslSetupScript()],
+    ["-d", SANDBOX_DISTRO, "-u", "root", "--cd", "/", "--exec", "bash", "-c", wslSetupScript()],
     { timeoutMs: 30 * 60_000 }
   );
   if (apt.code !== 0 || !apt.output.includes("apim-wsl-setup-ok")) {
