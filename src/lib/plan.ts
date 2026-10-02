@@ -1237,3 +1237,123 @@ export function reopenBlockedSteps(plan: Plan): Plan {
     revision: plan.revision + 1,
   };
 }
+
+/* ------------------------------------------------------------------
+ * Step budget: one plan step running for hours.
+ *
+ * Reported: a low-effort run spent two hours on step 2 of 5 of a VM
+ * deobfuscation. No guard fired, because every round edited a file or ran
+ * the emitter, which is what the stall meters count as progress. It was
+ * fixing syntax errors in output that could never meet the step's own
+ * check (readable code), and changed its model of the VM three times.
+ *
+ * So time on ONE step is watched too. At 40 rounds or 45 minutes the model
+ * must stop and hold the work against the step's check; at twice that it
+ * must also tell the user where it stands; at three times the run pauses
+ * for the user. Rewording the step does not reset the clock (judged by
+ * stepSimilarity); finishing or genuinely moving on does.
+ * ------------------------------------------------------------------ */
+
+export const STEP_BUDGET_MARKER = "[Harness: step budget]";
+export const STEP_BUDGET_ROUNDS = 40;
+export const STEP_BUDGET_MS = 45 * 60_000;
+/** Checkpoints before the run pauses for the user. */
+export const STEP_BUDGET_HALT_AT = 3;
+
+export interface StepWatch {
+  text: string;
+  id: number;
+  sinceRound: number;
+  sinceMs: number;
+  checkpoints: number;
+}
+
+export interface StepBudgetDue {
+  level: number;
+  rounds: number;
+  minutes: number;
+  step: { id: number; text: string };
+  halt: boolean;
+}
+
+/** The step the run is on: the first one in progress, else the first not started. */
+export function currentStep(plan: Plan | null): PlanStep | null {
+  if (!plan) return null;
+  return (
+    plan.steps.find((s) => s.state === "doing") ??
+    plan.steps.find((s) => s.state === "todo") ??
+    null
+  );
+}
+
+/**
+ * Advance the watch by one round. Returns the new watch and, when a
+ * checkpoint is due this round, what it is about.
+ */
+export function watchStep(
+  watch: StepWatch | null,
+  plan: Plan | null,
+  round: number,
+  now: number
+): { watch: StepWatch | null; due: StepBudgetDue | null } {
+  const step = currentStep(plan);
+  if (!step) return { watch: null, due: null };
+  const same =
+    watch !== null &&
+    (watch.text === step.text || stepSimilarity(watch.text, step.text) >= 0.6);
+  if (!same) {
+    return {
+      watch: { text: step.text, id: step.id, sinceRound: round, sinceMs: now, checkpoints: 0 },
+      due: null,
+    };
+  }
+  const rounds = round - watch.sinceRound;
+  const ms = now - watch.sinceMs;
+  const level = watch.checkpoints + 1;
+  if (rounds < STEP_BUDGET_ROUNDS * level && ms < STEP_BUDGET_MS * level) {
+    return { watch: { ...watch, text: step.text, id: step.id }, due: null };
+  }
+  return {
+    watch: { ...watch, text: step.text, id: step.id, checkpoints: level },
+    due: {
+      level,
+      rounds,
+      minutes: Math.round(ms / 60_000),
+      step: { id: step.id, text: step.text },
+      halt: level >= STEP_BUDGET_HALT_AT,
+    },
+  };
+}
+
+/** What the model is told at a checkpoint (levels 1 and 2). */
+export function stepBudgetNudge(due: StepBudgetDue): string {
+  const head =
+    `${STEP_BUDGET_MARKER}\n` +
+    `Step ${due.step.id} ("${due.step.text.slice(0, 160)}") has taken ` +
+    `${due.rounds} tool rounds (${due.minutes} min) without being completed. ` +
+    `Before another round, hold the work against that step's own check: ` +
+    `(1) what does the check require, (2) what is verified so far, (3) is ` +
+    `this approach converging on the check, or fixing symptoms of a wrong ` +
+    `model? Proxy wins (valid syntax, a clean parse, a run with exit 0) do ` +
+    `not complete a step whose check asks for something else. If it is not ` +
+    `converging, change approach or split the step into smaller steps whose ` +
+    `checks you can meet — and do not switch hypotheses again without a ` +
+    `test that decides between them.`;
+  return due.level >= 2
+    ? head +
+        ` This is the second checkpoint: in your next message, tell the user ` +
+        `in a few lines what works, what is left, and how you will finish — ` +
+        `then continue. The next checkpoint pauses the run for them.`
+    : head;
+}
+
+/** What the user is shown when the run pauses at the last checkpoint. */
+export function stepBudgetUserNote(due: StepBudgetDue): string {
+  return (
+    `Paused: step ${due.step.id} ("${due.step.text.slice(0, 120)}") ran ` +
+    `${due.rounds} tool rounds (${due.minutes} min) through ` +
+    `${due.level} checkpoints without being completed. Read where it got ` +
+    `to above, then press Resume to let it carry on, or tell it which way ` +
+    `to go.`
+  );
+}

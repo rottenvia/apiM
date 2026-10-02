@@ -55,6 +55,10 @@ import {
   replanBudgetMessage,
   nextStepLine,
   MAX_REPLANS_PER_RUN,
+  watchStep,
+  stepBudgetNudge,
+  stepBudgetUserNote,
+  type StepWatch,
 } from "@/lib/plan";
 import {
   GOAL_PIN_MARKER,
@@ -164,6 +168,7 @@ import {
   ChurnTracker,
   churnNudgeText,
   isWorldChanging,
+  createPreviewTracker,
   shouldExtendRoundCap,
   CODE_DRAFT_NUDGE_MARKER,
   CODE_DRAFT_LINES,
@@ -1764,6 +1769,9 @@ Ask before you build the wrong thing. If a choice would change what you produce 
          * pin: a mid-run redirect becomes the pinned goal next round.
          */
         let lastPlanUpdateToolRound: number | null = null;
+        /** How long the run has been on its current plan step (see watchStep). */
+        let stepWatch: StepWatch | null = null;
+        const previewTracker = createPreviewTracker();
         let lastSteeringText: string | null = null;
         /*
          * A leftover unfinished plan from a previous message must not lock
@@ -6070,6 +6078,12 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               if (result.ok && isWorldChanging(call.function.name)) {
                 worldChanges += 1;
               }
+              const previewNote = previewTracker.observe(
+                call.function.name,
+                result.ok,
+                result.summary
+              );
+              if (previewNote) result.content += previewNote;
               const churn = churnTracker.observe(
                 call.function.name,
                 parsed.ok ? parsed.value : null,
@@ -6369,6 +6383,35 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                 role: "system",
                 content: buildStalePlanNudge(roundsSincePlanUpdate, claimed),
               });
+            }
+          }
+
+          /*
+           * Step budget: every round can "make progress" (an edit, a run)
+           * while one step grinds for hours on output that can never meet
+           * its check. Checkpoints at 40 rounds / 45 min, and multiples;
+           * the third pauses the run for the user.
+           */
+          {
+            const watched = watchStep(stepWatch, plan, toolRounds, Date.now());
+            stepWatch = watched.watch;
+            const due = watched.due;
+            if (due && !due.halt) {
+              transcript.push({ role: "system", content: stepBudgetNudge(due) });
+              recordAsync({
+                kind: "run_stopped",
+                subject: "step budget checkpoint",
+                detail: `Step ${due.step.id}: ${due.rounds} rounds, ${due.minutes} min (checkpoint ${due.level}).`,
+                context: { rounds: toolRounds },
+              });
+            } else if (due && due.halt && !runHalted) {
+              const note =
+                (assistantContent.trim() ? "\n\n" : "") + stepBudgetUserNote(due);
+              assistantContent += note;
+              send({ type: "content", delta: note });
+              appendTimelineText(note);
+              stoppedPrematurely = "step_budget";
+              runHalted = true;
             }
           }
 
