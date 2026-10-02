@@ -1883,8 +1883,14 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
         "other tools (if the folder cannot be mounted, the result says so and " +
         "you work in /root/work instead). An off-screen X server is ALREADY " +
         "running and DISPLAY is set: just start the GUI. Never start your own " +
-        "Xvfb and never kill Xvfb (that blanks sandbox_screenshot). Heredocs " +
-        "and multi-line scripts work.",
+        "Xvfb and never kill Xvfb (that blanks sandbox_screenshot). To use " +
+        "the GUI like a person would, drive it with xdotool (installed), then " +
+        "screenshot again: \"xdotool search --name '^Calculator$' windowfocus " +
+        "--sync; xdotool mousemove 120 300 click 1; xdotool type 12+3\". " +
+        "There is no window manager: use windowfocus, not windowactivate; " +
+        "windows have no title bars; mouse coordinates are screen pixels (the " +
+        "screenshot result says where it cropped). Heredocs and multi-line " +
+        "scripts work.",
       parameters: {
         type: "object",
         properties: {
@@ -1924,11 +1930,14 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
     function: {
       name: "sandbox_screenshot",
       description:
-        "Screenshot the sandbox's off-screen screen — everything a GUI you " +
-        "started there with sandbox_run (background:true) has drawn. Saves a " +
-        "PNG in the workspace; follow it with view_image to actually see it. " +
-        "This is how you check a Linux GUI, a game, or any window running in " +
-        "the sandbox without it ever appearing on the user's monitor.",
+        "Screenshot what a GUI you started with sandbox_run (background:true) " +
+        "has drawn on the sandbox's off-screen display. By default it waits a " +
+        "few seconds for a window to appear and crops to the visible " +
+        "window(s), so the picture is the app, not a mostly-black screen. " +
+        "Saves a PNG in the workspace and shows it to the user in the chat; " +
+        "follow it with view_image to look at it yourself. This is how you " +
+        "check a Linux GUI, a game, or any window running in the sandbox " +
+        "without it ever appearing on the user's monitor.",
       parameters: {
         type: "object",
         properties: {
@@ -1937,6 +1946,16 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
             description:
               "Where to save the PNG, relative to the workspace root. Defaults " +
               "to screenshots/sandbox-<timestamp>.png.",
+          },
+          full_screen: {
+            type: "boolean",
+            description:
+              "Capture the whole 1600x1000 screen instead of cropping to the windows (e.g. to see where a window was placed).",
+          },
+          wait_seconds: {
+            type: "number",
+            description:
+              "How long to wait for a window to appear before capturing, 0-30. Default 5; raise it for a slow-starting app.",
           },
         },
         required: [],

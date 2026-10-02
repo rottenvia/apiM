@@ -26,7 +26,7 @@ interface SandboxStatus {
   dir: string;
 }
 interface SandboxJob {
-  kind: "setup" | "remove" | "enable-wsl" | "upgrade";
+  kind: "setup" | "remove" | "enable-wsl" | "upgrade" | "check";
   phase: string;
   progress: number | null;
   log: string;
@@ -85,7 +85,7 @@ export function SandboxPanel({ onClose }: { onClose: () => void }) {
   }, [state?.job?.log]);
 
   const act = useCallback(
-    async (action: "setup" | "remove" | "enable-wsl" | "upgrade") => {
+    async (action: "setup" | "remove" | "enable-wsl" | "upgrade" | "check") => {
       setBusy(true);
       setError("");
       try {
@@ -299,10 +299,21 @@ export function SandboxPanel({ onClose }: { onClose: () => void }) {
                   <button
                     type="button"
                     disabled={busy || jobRunning}
+                    onClick={() => act("check")}
+                    title="Run one real command the way the agent does and report what works"
+                    className="rounded-lg border border-border px-3.5 py-2 text-[13px] font-medium text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary disabled:opacity-50"
+                  >
+                    {jobRunning && job?.kind === "check" ? "Checking…" : "Check it works"}
+                  </button>
+                )}
+                {setUp && (
+                  <button
+                    type="button"
+                    disabled={busy || jobRunning}
                     onClick={() => act("remove")}
                     className="rounded-lg border border-border px-3.5 py-2 text-[13px] font-medium text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary disabled:opacity-50"
                   >
-                    {jobRunning ? "Removing…" : "Remove sandbox"}
+                    {jobRunning && job?.kind === "remove" ? "Removing…" : "Remove sandbox"}
                   </button>
                 )}
                 <button

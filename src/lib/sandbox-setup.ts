@@ -59,6 +59,11 @@ import {
   sandboxWslConf,
   wslSetupScript,
   type WslStatus,
+  SELF_CHECK_MARKER,
+  interpretSelfCheck,
+  pickDisplay,
+  selfCheckScript,
+  wrapForSandbox,
 } from "@/lib/wsl";
 
 const DATA_DIR = process.env.APIM_DATA_ROOT
@@ -74,7 +79,7 @@ export const SANDBOX_DIR = sandboxBaseDir(process.env, process.platform, DATA_DI
 /** The first release put the disk here; an empty leftover is tidied away. */
 const LEGACY_SANDBOX_DIR = path.join(DATA_DIR, "sandbox");
 
-export type SandboxJobKind = "setup" | "remove" | "enable-wsl" | "upgrade";
+export type SandboxJobKind = "setup" | "remove" | "enable-wsl" | "upgrade" | "check";
 
 export interface SandboxJob {
   kind: SandboxJobKind;
@@ -496,7 +501,37 @@ async function runSetup(): Promise<void> {
     throw failure("Installing the tools", apt);
   }
 
+  await selfCheck();
   finish(true);
+}
+
+/**
+ * Run one real command the way the agent will (same runner, a real Windows
+ * folder mounted), and say plainly what works. Never fails setup: a sandbox
+ * that cannot see the folder still runs things, and the log says so.
+ */
+async function selfCheck(): Promise<void> {
+  phase("Checking the sandbox works");
+  const dir = path.join(SANDBOX_DIR, "selfcheck");
+  try {
+    await fs.rm(dir, { recursive: true, force: true });
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, "apim-selfcheck.txt"), SELF_CHECK_MARKER);
+    const inv = wrapForSandbox({
+      sandbox: { distro: SANDBOX_DISTRO, display: pickDisplay(), xvfb: null },
+      workspaceId: "selfcheck",
+      workspaceWinDir: dir,
+      script: selfCheckScript(),
+    });
+    const run = await runLogged(inv.command, inv.args, { timeoutMs: 120_000 });
+    const wroteBack = existsSync(path.join(dir, "from-sandbox.txt"));
+    const result = interpretSelfCheck(run.output, wroteBack);
+    log(result.lines.map((l) => `  ${l}`).join("\n"));
+  } catch (err) {
+    log(`  !!  the check could not run: ${err instanceof Error ? err.message : String(err)}`);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
 /**
@@ -538,6 +573,19 @@ export function startSandboxRemove(): { ok: true } | { ok: false; error: string 
 }
 
 /** Move the sandbox from WSL 1 to WSL 2 once virtual disks work again. */
+/** Run only the end-of-setup self-check, on a sandbox that is already set up. */
+export function startSandboxCheck(): { ok: true } | { ok: false; error: string } {
+  if (process.platform !== "win32") {
+    return { ok: false, error: "The WSL sandbox needs the app to run on Windows." };
+  }
+  const started = begin("check");
+  if (!started.ok) return started;
+  void selfCheck()
+    .then(() => finish(true))
+    .catch((err) => finish(false, err instanceof Error ? err.message : String(err)));
+  return { ok: true };
+}
+
 export function startSandboxUpgrade(): { ok: true } | { ok: false; error: string } {
   if (process.platform !== "win32") {
     return { ok: false, error: "The WSL sandbox needs the app to run on Windows." };

@@ -235,7 +235,8 @@ export async function startSandboxProcess(
  */
 export async function screenshotSandbox(
   workspaceId: string,
-  outFileName = `sandbox-${Date.now()}.png`
+  outFileName = `sandbox-${Date.now()}.png`,
+  options: { fullScreen?: boolean; waitSeconds?: number } = {}
 ): Promise<
   | { ok: true; fileName: string; display: string; note: string }
   | { ok: false; error: string; needsSetup?: boolean }
@@ -252,7 +253,13 @@ export async function screenshotSandbox(
   if (!up.ok) return { ok: false, error: `${up.error}\n${WINDOWS_FALLBACK}`, needsSetup: up.needsSetup };
   const sandbox = up.sandbox;
   const dir = workspaceDirectory(workspaceId);
-  const inv = sandboxCaptureInvocation({ sandbox, workspaceId, workspaceWinDir: dir });
+  const inv = sandboxCaptureInvocation({
+    sandbox,
+    workspaceId,
+    workspaceWinDir: dir,
+    fullScreen: options.fullScreen,
+    waitSeconds: options.waitSeconds,
+  });
   const run = await new Promise<{ code: number | null; out: string; err: string }>((resolve) => {
     const child = spawn(inv.command, inv.args, {
       windowsHide: true,
@@ -260,7 +267,7 @@ export async function screenshotSandbox(
     });
     const out: Buffer[] = [];
     let err = "";
-    const timer = setTimeout(() => child.kill(), 60_000);
+    const timer = setTimeout(() => child.kill(), 90_000);
     child.stdout?.on("data", (d: Buffer) => out.push(d));
     child.stderr?.on("data", (d: Buffer) => (err += d.toString("utf8")));
     child.on("error", (e) => {
@@ -282,11 +289,13 @@ export async function screenshotSandbox(
         : `The capture failed: ${why}`,
     };
   }
-  await fs.mkdir(dir, { recursive: true });
-  await fs.writeFile(path.join(dir, safeName), png);
+  // Where the tool description says it goes, next to screenshot_window's.
+  const rel = `screenshots/${safeName}`;
+  await fs.mkdir(path.join(dir, "screenshots"), { recursive: true });
+  await fs.writeFile(path.join(dir, "screenshots", safeName), png);
   const note = run.err
     .split(/\r?\n/)
     .filter((l) => l.startsWith("[sandbox]"))
     .join("\n");
-  return { ok: true, fileName: safeName, display: sandbox.display, note };
+  return { ok: true, fileName: rel, display: sandbox.display, note };
 }

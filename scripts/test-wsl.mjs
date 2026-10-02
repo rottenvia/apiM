@@ -11,7 +11,7 @@
 
 import assert from "node:assert/strict";
 import { readFileSync, mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { wslCannotStart, WINDOWS_FALLBACK } from "../src/lib/sandbox-run.ts";
@@ -52,6 +52,10 @@ import {
   wsl2CannotRunHere,
   P9RDR_REPAIR_COMMAND,
   SANDBOX_RUNNER,
+  SANDBOX_CAPTURE_SCRIPT,
+  SELF_CHECK_MARKER,
+  interpretSelfCheck,
+  selfCheckScript,
   SANDBOX_ARGV_LIMIT,
   encodeSandboxScript,
   decodeCapture,
@@ -354,11 +358,55 @@ test("capture streams the PNG over stdout, not through the mount", () => {
   const inv = sandboxCaptureInvocation({ sandbox: SB, workspaceId: "w1", workspaceWinDir: "C:\\ws" });
   const i = inv.args.indexOf("bash");
   const script = Buffer.from(inv.args[i + 4], "base64").toString("utf8");
-  assert.ok(/import -display "\$DISPLAY" -window root png:- \| base64 -w0/.test(script));
+  assert.equal(script, SANDBOX_CAPTURE_SCRIPT);
+  assert.ok(/png:- \| base64 -w0/.test(script));
+  assert.ok(!script.includes("\\${"), "no template escapes left in the bash");
+  assert.ok(inv.args.includes("APIM_SHOT_WAIT=5") && inv.args.includes("APIM_SHOT_FULL=0"));
+  const full = sandboxCaptureInvocation({
+    sandbox: SB, workspaceId: "w1", workspaceWinDir: "C:\\ws", fullScreen: true, waitSeconds: 99,
+  });
+  assert.ok(full.args.includes("APIM_SHOT_FULL=1") && full.args.includes("APIM_SHOT_WAIT=30"));
   const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
   assert.deepEqual(decodeCapture(png.toString("base64").replace(/(.{4})/g, "$1\n")), png);
   assert.equal(decodeCapture("[sandbox] could not\nnot base64"), null);
   assert.equal(decodeCapture(""), null);
+});
+
+// Reported: the shot was the whole 1600x1000 screen with the app a small box
+// in one corner. Run for real where an X server and the tools exist.
+const hasX = ["Xvfb", "xdotool", "import", "xmessage", "identify"].every(
+  (t) => spawnSync("sh", ["-c", `command -v ${t}`]).status === 0
+);
+test("capture crops to the visible window, and says so; an empty screen says why", () => {
+  if (!hasX) return;
+  const display = ":73";
+  const env = { ...process.env, DISPLAY: display };
+  const x = spawn("Xvfb", [display, "-screen", "0", "1600x1000x24", "-nolisten", "tcp"], { stdio: "ignore" });
+  try {
+    spawnSync("sh", ["-c", "for i in $(seq 30); do xdpyinfo >/dev/null 2>&1 && exit 0; sleep 0.1; done"], { env });
+    const shoot = (extra) => {
+      const r = spawnSync("bash", ["-c", SANDBOX_CAPTURE_SCRIPT], { env: { ...env, ...extra }, encoding: "latin1", maxBuffer: 64 << 20 });
+      const png = decodeCapture(r.stdout);
+      const size = png
+        ? spawnSync("identify", ["-format", "%wx%h", "png:-"], { input: png, encoding: "utf8" }).stdout
+        : null;
+      return { size, note: r.stderr };
+    };
+    const empty = shoot({ APIM_SHOT_WAIT: "0" });
+    assert.equal(empty.size, "1600x1000");
+    assert.ok(/no window is visible/.test(empty.note), empty.note);
+    const win = spawn("xmessage", ["-geometry", "320x140+60+80", "hello"], { env, stdio: "ignore" });
+    try {
+      const shot = shoot({ APIM_SHOT_WAIT: "5" });
+      assert.equal(shot.size, "320x140", shot.note);
+      assert.ok(/cropped to the visible window\(s\), 320x140\+60\+80/.test(shot.note), shot.note);
+      assert.equal(shoot({ APIM_SHOT_FULL: "1" }).size, "1600x1000");
+    } finally {
+      win.kill();
+    }
+  } finally {
+    x.kill();
+  }
 });
 
 // The runner itself, run by real bash (skipped where there is none). Mount
@@ -433,6 +481,47 @@ test("runner: a long command via stdin does not leave stdin to the command", () 
   if (!hasBash) return;
   const r = runRunner("read -r line || echo stdin-empty", { viaStdin: true });
   assert.ok(r.stdout.includes("stdin-empty"));
+});
+
+// --- end-of-setup self-check ------------------------------------------------
+
+test("self-check: everything working reads as four OKs", () => {
+  const out = `check-folder: ${SELF_CHECK_MARKER}\ncheck-python: Python 3.12.3\ncheck-node: v18.19.1\ncheck-display: ok\n`;
+  const r = interpretSelfCheck(out, true);
+  assert.equal(r.folder, true);
+  assert.equal(r.lines.filter((l) => l.startsWith("OK")).length, 4, r.lines.join("\n"));
+});
+
+// The two things the user's first real run hit, said up front.
+test("self-check: no folder and a broken node are named, with the mount's own error", () => {
+  const out =
+    "[sandbox] the chat folder could not be mounted at /ws/selfcheck: [mount C:\\x: wrong fs type]. Working in /root/work instead\n" +
+    "check-folder: MISSING\ncheck-python: Python 3.12.3\n" +
+    "check-node: bash: line 1: /usr/bin/node: cannot execute binary file: Exec format error\ncheck-display: ok\n";
+  const r = interpretSelfCheck(out, false);
+  assert.equal(r.folder, false);
+  const text = r.lines.join("\n");
+  assert.ok(/cannot see the chat folder/.test(text) && /wrong fs type/.test(text), text);
+  assert.ok(/Exec format error/.test(text) && /not a Linux program/.test(text), text);
+});
+
+test("self-check: a check that never ran says so instead of passing", () => {
+  const r = interpretSelfCheck("Error code: Wsl/Service/CreateInstance/0xd0000034", false);
+  assert.ok(/did not run/.test(r.lines[0]) && /0xd0000034/.test(r.lines[0]));
+});
+
+test("self-check: the real script through the real runner sees a folder reached via the drive", () => {
+  if (!hasBash) return;
+  const r = runRunner(selfCheckScript(), {
+    winDir: "C:\\ws\\chat",
+    prepare: (drives) => {
+      mkdirSync(path.join(drives, "C", "ws", "chat"), { recursive: true });
+      writeFileSync(path.join(drives, "C", "ws", "chat", "apim-selfcheck.txt"), SELF_CHECK_MARKER);
+    },
+  });
+  const res = interpretSelfCheck(r.stdout + r.stderr, true);
+  assert.ok(res.lines[0].startsWith("OK"), res.lines.join("\n"));
+  assert.ok(/^OK  Python 3/m.test(res.lines.join("\n")));
 });
 
 // --- setup helpers -----------------------------------------------------------
