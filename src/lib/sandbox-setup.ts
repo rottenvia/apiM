@@ -54,6 +54,7 @@ import {
   type InstallDirInfo,
   type VhdProbe,
   type Wsl1Probe,
+  wsl2CannotRunHere,
   probeWsl,
   sandboxWslConf,
   wslSetupScript,
@@ -344,10 +345,6 @@ function probeWsl1(): Wsl1Probe {
   return probe;
 }
 
-/** Was this failure Windows being unable to make a virtual disk at all? */
-function isVirtualDiskFailure(output: string): boolean {
-  return /0xc03a0014|virtual disk support provider/i.test(output);
-}
 
 export function sandboxStatus(): WslStatus & { setUp: boolean; dir: string } {
   const status = probeWsl();
@@ -425,19 +422,25 @@ async function runSetup(): Promise<void> {
     });
     if (run.code !== 0) {
       // The download is kept on any failure so the next attempt skips it.
-      if (!isVirtualDiskFailure(run.output)) throw failure("wsl --import", run);
+      const cause = wsl2CannotRunHere(run.output);
+      if (!cause) throw failure("wsl --import", run);
 
       /*
-       * The folder passed its check, so Windows itself cannot make virtual
-       * disks. Say exactly which driver is at fault, then fall back to WSL 1,
-       * which keeps its files in a plain folder and needs no virtual disk.
+       * WSL 2 cannot run its VM on this PC. Say why, then fall back to WSL 1,
+       * which runs Linux programs directly on Windows: no VM, no virtual
+       * disk, no Hyper-V socket. Reported second cause: 0x8007273f, Winsock
+       * refusing the AF_HYPERV socket, after the disk drivers were repaired.
        */
-      phase("Windows cannot create virtual disks; checking its drivers");
-      const findings = diagnoseVhdStack(probeVhdStack());
-      log(formatVhdFindings(findings));
+      if (cause === "virtual-disk") {
+        phase("Windows cannot create virtual disks; checking its drivers");
+        log(formatVhdFindings(diagnoseVhdStack(probeVhdStack())));
+      } else {
+        phase("Windows cannot start the WSL 2 virtual machine");
+        log(`  ${explainWslError(run.output) ?? "WSL 2's VM failed to start."}`);
+      }
       log("  This is also what breaks Docker Desktop and Hyper-V on this PC.");
 
-      phase(`Importing as "${SANDBOX_DISTRO}" (WSL 1, no virtual disk needed)`);
+      phase(`Importing as "${SANDBOX_DISTRO}" (WSL 1, no virtual machine needed)`);
       await fs.rm(installDir, { recursive: true, force: true });
       await fs.mkdir(installDir, { recursive: true });
       const v1 = await runLogged("wsl.exe", importArgs(installDir, tarball, 1), {
@@ -541,7 +544,7 @@ export function startSandboxUpgrade(): { ok: true } | { ok: false; error: string
       finish(true);
       return;
     }
-    if (isVirtualDiskFailure(run.output)) {
+    if (wsl2CannotRunHere(run.output) === "virtual-disk") {
       log(formatVhdFindings(diagnoseVhdStack(probeVhdStack())));
     }
     finish(false, failure("Converting to WSL 2", run).message + " The sandbox stays on WSL 1 and keeps working.");
