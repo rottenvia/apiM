@@ -687,3 +687,51 @@ export const DROPPED_THINK_TEXT =
   "The connection dropped while you were still thinking, before you had " +
   "answered or called a tool. Your reasoning so far is above, verbatim. " +
   "Carry on from where it stopped — do not start the analysis over.";
+
+/*
+ * A preview mistaken for an edit.
+ *
+ * Reported: a run sent ten edits with preview:true, got "PREVIEW — nothing
+ * was written" back, then ran its emitter and spent a round puzzling over
+ * output that had not changed. The result said so; a low-effort model read
+ * past it. So the next RUN after an unapplied preview carries the reminder,
+ * at the moment the stale result would otherwise mislead.
+ */
+const PREVIEWING_TOOLS = new Set(["edit_file", "edit_files", "replace_in_files"]);
+const WRITING_TOOLS = new Set([
+  "edit_file", "edit_files", "replace_in_files", "apply_patch", "write_file", "write_files",
+]);
+const RUNNING_TOOLS = new Set([
+  "run_command", "sandbox_run", "run_tests", "build_project", "start_process",
+]);
+
+export function isPreviewSummary(summary: string | undefined): boolean {
+  return /^Preview(?:ed)?\b/.test(String(summary ?? ""));
+}
+
+export function createPreviewTracker() {
+  let pending: string | null = null;
+  return {
+    /** Returns a note to append to this result, or null. */
+    observe(name: string, ok: boolean, summary: string | undefined): string | null {
+      if (PREVIEWING_TOOLS.has(name) && ok && isPreviewSummary(summary)) {
+        pending = String(summary);
+        return null;
+      }
+      if (WRITING_TOOLS.has(name) && ok) {
+        pending = null;
+        return null;
+      }
+      if (pending && RUNNING_TOOLS.has(name)) {
+        const was = pending;
+        pending = null;
+        return (
+          `\n\n[Harness: your last edit call was a PREVIEW (${was}) — nothing ` +
+          `was written, so this run used the files as they were before it. ` +
+          `Re-send that edit without preview to apply it.]`
+        );
+      }
+      return null;
+    },
+  };
+}

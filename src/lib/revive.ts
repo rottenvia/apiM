@@ -26,7 +26,8 @@ export type PrematureStopReason =
   | "round_cap"
   | "thinking_cut"
   | "loop_breaker"
-  | "no_progress";
+  | "no_progress"
+  | "step_budget";
 
 export interface PrematureStopInput {
   /** The whole reply so far, including earlier rounds. */
@@ -296,6 +297,9 @@ export function prematureStopNotice(reason: PrematureStopReason): string {
   }
   if (reason === "no_progress") {
     return "The run stalled: tool calls kept coming but nothing advanced — Resume to steer it another way";
+  }
+  if (reason === "step_budget") {
+    return "One plan step ran a long time without finishing — check where it got to, then Resume or steer it";
   }
   if (reason === "dangling_next") {
     return "The model kept describing its next action instead of doing it";
