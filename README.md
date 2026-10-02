@@ -301,6 +301,13 @@ demands administrator rights, since the app cannot elevate. On a model with
 native vision the PNG is attached to the same round, so the model actually
 looks at the pixels instead of reading OCR of them.
 
+**Showing you.** Every screenshot (`screenshot_window`, `sandbox_screenshot`,
+`browse`) also appears in the chat under its step, and the agent can send you
+any workspace image with a caption via `show_image`, the way a person pastes
+one in. Click it for full size. Images load from
+`/api/workspace/<id>/image`, which serves png/jpg/webp/gif/bmp only (never
+SVG or anything outside the workspace), so they survive a reload.
+
 **Finding the project.** `build_project` searches the workspace up to four
 directories deep (shallowest `.sln` wins, `.sln` over `.vcxproj`) instead of
 only looking in the root, resolves MSBuild through `vswhere` including

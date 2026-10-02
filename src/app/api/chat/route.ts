@@ -1,3 +1,4 @@
+import { shownImageUrl, type ShownImage } from "@/lib/tool-display";
 import { rememberSelfHost } from "@/lib/web";
 import { NextRequest, NextResponse } from "next/server";
 import { v4 as uuidv4 } from "uuid";
@@ -590,6 +591,7 @@ type StreamEvent =
       ok: boolean;
       summary: string;
       changedPath?: string;
+      shownImage?: ShownImage;
     }
   | {
       type: "web_search";
@@ -2389,6 +2391,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           ok?: boolean;
           summary?: string;
           changedPath?: string;
+          shownImage?: ShownImage;
         }[] = [...resumedToolEvents];
 
         // Memory of the files THIS run has written. A model that writes a
@@ -5601,6 +5604,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                       `to ${shot.fileName}. Open it with view_image to see it.` +
                       (shot.note ? `\n${shot.note}` : ""),
                     summary: "Sandbox screenshot saved",
+                    changedPath: shot.fileName,
+                    display: { path: shot.fileName },
                   }
                 : {
                     ok: false,
@@ -6151,6 +6156,17 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             }
 
             touchRun(assistantMsgId);
+            // A picture the tool means the user to see goes to the chat as a
+            // URL (the bytes stay in the workspace), so it also survives a
+            // reload in the saved tool events.
+            const shownImage: ShownImage | undefined =
+              result.ok && result.display
+                ? {
+                    url: shownImageUrl(workspace, result.display.path),
+                    path: result.display.path,
+                    ...(result.display.caption ? { caption: result.display.caption } : {}),
+                  }
+                : undefined;
             send({
               type: "tool_result",
               id: call.id,
@@ -6158,6 +6174,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               ok: result.ok,
               summary: result.summary,
               changedPath: result.changedPath,
+              ...(shownImage ? { shownImage } : {}),
             });
 
             const recorded = toolEvents.find((e) => e.id === call.id);
@@ -6165,6 +6182,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               recorded.ok = result.ok;
               recorded.summary = result.summary;
               recorded.changedPath = result.changedPath;
+              if (shownImage) recorded.shownImage = shownImage;
             }
 
             // A failing tool is the highest-value signal there is: it is the

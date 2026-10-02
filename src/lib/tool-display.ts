@@ -8,6 +8,20 @@
  * mapping is tested without rendering anything.
  */
 
+/** An image a tool showed the user in the chat (show_image, screenshots). */
+export interface ShownImage {
+  /** Same-origin URL the chat loads it from. */
+  url: string;
+  /** Workspace-relative path, shown as its name. */
+  path: string;
+  caption?: string;
+}
+
+/** Where the chat loads a workspace image from (images only; see api/workspace/[id]/image). */
+export function shownImageUrl(workspaceId: string, relative: string): string {
+  return `/api/workspace/${encodeURIComponent(workspaceId)}/image?path=${encodeURIComponent(relative)}`;
+}
+
 export type ToolKind =
   | "read"
   | "write"
@@ -81,6 +95,7 @@ const TABLE: Record<string, [ToolKind, string, string]> = {
   ask_user: ["ask", "Asking", "Asked"],
   view_image: ["image", "Viewing", "Viewed"],
   screenshot_window: ["image", "Capturing", "Captured"],
+  show_image: ["image", "Showing", "Showed"],
   sandbox_run: ["run", "Running in sandbox", "Ran in sandbox"],
   sandbox_screenshot: ["image", "Capturing sandbox", "Captured sandbox"],
   finish: ["done", "Finishing", "Finished"],

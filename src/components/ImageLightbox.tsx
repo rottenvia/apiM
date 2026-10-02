@@ -83,10 +83,22 @@ export function ImageLightbox({
     setExtracting(true);
     setExtractError(null);
     try {
+      // An image the agent showed comes as a URL, not an attachment's data
+      // URL; the vision route takes data URLs only.
+      let dataUrl = src;
+      if (!src.startsWith("data:")) {
+        const blob = await (await fetch(src)).blob();
+        dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result));
+          reader.onerror = () => reject(reader.error);
+          reader.readAsDataURL(blob);
+        });
+      }
       const res = await fetch("/api/vision", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ dataUrl: src }),
+        body: JSON.stringify({ dataUrl }),
       });
       const body: { description?: string; error?: string } = await res.json();
       if (body.description) setExtracted(tidyExtractedText(body.description));
