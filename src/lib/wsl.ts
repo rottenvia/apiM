@@ -195,6 +195,17 @@ export function buildWslInvocation(opts: {
   return { command: "wsl.exe", args };
 }
 
+/**
+ * Every sandbox command starts in a Linux folder, never the caller's.
+ *
+ * Without --cd, wsl.exe opens the Windows working directory inside Linux
+ * (C:\Windows\System32 -> /mnt/c/Windows/System32). The sandbox has drive
+ * auto-mounting turned off, so that folder does not exist and WSL 1 fails
+ * with Wsl/Service/CreateInstance/0xd0000034 (object name not found) before
+ * the command even starts. Reported on the first real WSL 1 sandbox.
+ */
+export const LINUX_CWD = "/root";
+
 /** The sandbox's own distro. Never the user's everyday Linux. */
 export const SANDBOX_DISTRO = "apim-sandbox";
 
@@ -458,6 +469,7 @@ export function ensureWslSandbox():
     const inv = buildWslInvocation({
       distro: chosen.distro,
       user: "root",
+      cwdWsl: LINUX_CWD,
       command: "Xvfb",
       args: xvfbLaunchArgs(display),
     });
@@ -481,6 +493,7 @@ export function closeWslSandbox(): void {
       const inv = buildWslInvocation({
         distro: sandbox.distro,
         user: "root",
+        cwdWsl: LINUX_CWD,
         command: "pkill",
         args: ["-f", `Xvfb ${sandbox.display}`],
       });
@@ -513,6 +526,7 @@ export function wrapForSandbox(opts: {
   return buildWslInvocation({
     distro: opts.sandbox.distro,
     user: "root",
+    cwdWsl: LINUX_CWD,
     env: {
       DISPLAY: opts.sandbox.display,
       HOME: "/root",
