@@ -1971,9 +1971,10 @@ function MessageBubbleImpl({
                 }`}
               >
                 <MarkdownBody content={liveContent} regex={searchRegex} plain={deferred} />
-                {message.isStreaming && displayContent && !hasPendingCode && (
-                  <span className="stream-caret" aria-hidden="true" />
-                )}
+                {/* No typing caret: rendered after the last markdown block
+                    it sat alone on a line of its own under the text, above
+                    the "Preparing…" row (reported). The text growing and
+                    the activity rows below already show it is live. */}
               </div>
             )}
 
