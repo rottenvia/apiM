@@ -49,6 +49,7 @@ import {
   enableWslLauncherScript,
   wsl2CannotRunHere,
   P9RDR_REPAIR_COMMAND,
+  RDBSS_REPAIR_COMMAND,
 } from "../src/lib/wsl.ts";
 
 let passed = 0;
@@ -615,6 +616,34 @@ test("the P9Rdr repair matches Windows' stock entry and is plain ASCII", () => {
     assert.ok(P9RDR_REPAIR_COMMAND.includes(part), part);
   }
   assert.ok(/^[\x20-\x7e]+$/.test(P9RDR_REPAIR_COMMAND));
+});
+
+// Reported next: after sc create P9Rdr, sc start P9Rdr failed 1075 because
+// Rdbss (its dependency) had been deleted the same way.
+test("Rdbss deleted as well -> both entries recreated, Rdbss first", () => {
+  const r = diagnoseWsl1({
+    rebootPending: false,
+    files: { "lxcore.sys": true, "p9rdr.sys": true, "rdbss.sys": true },
+    services: { lxcore: LX_OK, P9Rdr: MISSING, Rdbss: MISSING },
+  });
+  assert.equal(r.state, "redirector-unregistered");
+  const a = r.message.indexOf(RDBSS_REPAIR_COMMAND);
+  const b = r.message.indexOf(P9RDR_REPAIR_COMMAND);
+  assert.ok(a >= 0 && b > a);
+  assert.ok(/sc\.exe delete Rdbss/.test(r.message) && /sc\.exe delete P9Rdr/.test(r.message));
+  for (const part of ["type= filesys", "start= demand", "depend= Mup", "group= Network"]) {
+    assert.ok(RDBSS_REPAIR_COMMAND.includes(part), part);
+  }
+});
+
+test("only Rdbss missing (P9Rdr already recreated) -> just Rdbss", () => {
+  const r = diagnoseWsl1({
+    rebootPending: false,
+    files: { "lxcore.sys": true, "p9rdr.sys": true, "rdbss.sys": true },
+    services: { lxcore: LX_OK, P9Rdr: QC("P9Rdr", 3, "DEMAND_START"), Rdbss: MISSING },
+  });
+  assert.equal(r.state, "redirector-unregistered");
+  assert.ok(r.message.includes(RDBSS_REPAIR_COMMAND) && !r.message.includes(P9RDR_REPAIR_COMMAND));
 });
 
 test("a registered P9Rdr is not blamed", () => {
