@@ -435,6 +435,81 @@ check("route checks progress before stopping at the cap",
   /if \(round > roundCap\)/.test(route) && /shouldExtendRoundCap\(\{/.test(route) &&
     /stoppedPrematurely = "round_cap"/.test(route));
 
+// --- step budget: one plan step grinding for hours ---
+// Reported: two hours on step 2 of 5; every round edited or ran something,
+// so no stall meter fired.
+{
+  const P = await load("src/lib/plan.ts");
+  const mk = (steps) => ({ goal: "g", revision: 1, history: [], steps });
+  const plan = mk([
+    { id: 1, text: "Probe opcode semantics", state: "done", verified: "x" },
+    { id: 2, text: "Write the lifter and recover control flow", state: "doing" },
+    { id: 3, text: "Emit restored.lua", state: "todo" },
+  ]);
+  const t0 = 1_000_000;
+  let w = P.watchStep(null, plan, 10, t0);
+  check("a new step starts the clock, nothing due", w.watch && w.due === null && w.watch.sinceRound === 10);
+  let r39 = P.watchStep(w.watch, plan, 10 + P.STEP_BUDGET_ROUNDS - 1, t0 + 60_000);
+  check("under budget: nothing due", r39.due === null);
+  let c1 = P.watchStep(r39.watch, plan, 10 + P.STEP_BUDGET_ROUNDS, t0 + 60_000);
+  check("at 40 rounds: first checkpoint, not a halt",
+    c1.due && c1.due.level === 1 && !c1.due.halt && c1.due.step.id === 2);
+  const n1 = P.stepBudgetNudge(c1.due);
+  check("the nudge names the step, the count, and proxy wins",
+    n1.startsWith(P.STEP_BUDGET_MARKER) && /Step 2/.test(n1) && /40 tool rounds/.test(n1) && /Proxy wins/.test(n1));
+  let again = P.watchStep(c1.watch, plan, 10 + P.STEP_BUDGET_ROUNDS + 1, t0 + 61_000);
+  check("it does not fire again on the next round", again.due === null);
+  // Rewording the step must not reset the clock.
+  const reworded = mk([
+    plan.steps[0],
+    { id: 2, text: "Write the lifter and recover the control flow", state: "doing" },
+    plan.steps[2],
+  ]);
+  let c2 = P.watchStep(again.watch, reworded, 10 + 2 * P.STEP_BUDGET_ROUNDS, t0 + 120_000);
+  check("a reworded step keeps its clock; second checkpoint asks for a user status",
+    c2.due && c2.due.level === 2 && /tell the user/.test(P.stepBudgetNudge(c2.due)));
+  let c3 = P.watchStep(c2.watch, reworded, 10 + 3 * P.STEP_BUDGET_ROUNDS, t0 + 180_000);
+  check("third checkpoint halts, and the user note says Resume",
+    c3.due && c3.due.halt && /Resume/.test(P.stepBudgetUserNote(c3.due)));
+  // Time alone counts too: 45 minutes with few rounds.
+  let tw = P.watchStep(null, plan, 0, t0);
+  let tdue = P.watchStep(tw.watch, plan, 5, t0 + P.STEP_BUDGET_MS);
+  check("45 minutes on one step is a checkpoint even with few rounds", tdue.due && tdue.due.level === 1 && tdue.due.minutes === 45);
+  // Finishing the step resets.
+  const moved = mk([
+    plan.steps[0],
+    { id: 2, text: plan.steps[1].text, state: "done", verified: "coverage 11078/11078" },
+    { id: 3, text: "Emit restored.lua", state: "doing" },
+  ]);
+  let mv = P.watchStep(c2.watch, moved, 200, t0 + 999_999);
+  check("moving to the next step resets the clock", mv.due === null && mv.watch.id === 3 && mv.watch.sinceRound === 200);
+  check("no plan, nothing watched", P.watchStep(c1.watch, null, 500, t0).watch === null);
+  check("route runs the watch, nudges, and halts with step_budget",
+    /watchStep\(stepWatch, plan, toolRounds, Date\.now\(\)\)/.test(route) &&
+      /stepBudgetNudge\(due\)/.test(route) && /stoppedPrematurely = "step_budget"/.test(route));
+  check("the stop reason has a user-facing notice", /plan step ran a long time/.test(R.prematureStopNotice("step_budget")));
+}
+
+// --- a preview mistaken for an edit ---
+{
+  const t = S.createPreviewTracker();
+  check("a preview alone says nothing", t.observe("edit_files", true, "Previewed 10 edit(s)") === null);
+  const note = t.observe("run_command", true, "Ran python tools/emit.py");
+  check("the next run is told nothing was written", /PREVIEW/.test(note ?? "") && /nothing was written/.test(note ?? ""));
+  check("only once", t.observe("run_command", true, "Ran again") === null);
+  const t2 = S.createPreviewTracker();
+  t2.observe("edit_file", true, "Preview: exact match at a.py:1-3");
+  t2.observe("edit_file", true, "Edited a.py");
+  check("a real edit after the preview clears it", t2.observe("run_command", true, "Ran") === null);
+  const t3 = S.createPreviewTracker();
+  t3.observe("replace_in_files", true, "Previewed 4 replacement(s)");
+  t3.observe("read_file", true, "Read a.py");
+  check("reads in between do not clear it; sandbox runs are covered too",
+    /PREVIEW/.test(t3.observe("sandbox_run", true, "Sandbox exit 0") ?? ""));
+  check("route appends the note to the run's result",
+    /previewTracker\.observe\(/.test(route) && /if \(previewNote\) result\.content \+= previewNote/.test(route));
+}
+
 console.log(
   `\n${pass + fail} checks · ${g(pass + " passed")}${fail ? " · " + r(fail + " failed") : ""}\n`
 );

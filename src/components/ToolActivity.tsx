@@ -237,7 +237,12 @@ const ToolRow = memo(function ToolRow({
                 */}
                 <span className="flex min-w-0 flex-initial items-baseline gap-1.5 overflow-hidden">
                   <span className={`flex-none font-medium ${running ? "thinking-shimmer" : ""}`}>
-                    {running ? display.running : display.done}
+                    {running
+                      ? display.running
+                      : // A preview wrote nothing; "Edited" said otherwise.
+                        /^Preview(?:ed)?\b/.test(event.summary ?? "")
+                        ? "Previewed"
+                        : display.done}
                   </span>
                   {filePath && (
                     /*
