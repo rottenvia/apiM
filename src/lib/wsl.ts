@@ -287,27 +287,65 @@ export function sandboxMountPoint(workspaceId: string): string {
 }
 
 /**
- * Bash that mounts one Windows folder (drvfs) at `mountPoint` if it is not
- * mounted yet, then runs the rest of the command there. Every token is quoted.
+ * Bash that every sandbox command runs through: $1 is the command (base64,
+ * or "-" for "read it from stdin"), $2 the mount point, $3 the Windows folder.
+ *
+ * Reported on the first real WSL 1 run, three ways a command died before it
+ * did anything, all fixed here:
+ *   - the chat folder mount failed and, chained with &&, took every command
+ *     down with it (exit 32 is mount's own code, read by the agent as "the
+ *     disk is read-only"). Now a failed mount says why on stderr and the
+ *     command still runs, in /root/work.
+ *   - `pkill -f 'Xvfb :99'` in the agent's command matched the command's own
+ *     bash, which carried the script as its argument, so it killed itself.
+ *     The script now travels base64-encoded and runs from a file, so nothing
+ *     in a process list contains its text.
+ *   - the agent killed the off-screen display; it is restarted here, before
+ *     the command, whenever it is gone.
  */
-export function mountAndRunScript(
-  winDir: string,
-  mountPoint: string,
-  inner: string
-): string {
-  return [
-    `mkdir -p ${shQuote(mountPoint)}`,
-    `mountpoint -q ${shQuote(mountPoint)} || mount -t drvfs ${shQuote(winDir)} ${shQuote(mountPoint)}`,
-    `cd ${shQuote(mountPoint)}`,
-    inner,
-  ].join(" && ");
+export const SANDBOX_RUNNER = [
+  'm="$2"; w="$3"',
+  'work="${APIM_WORK:-/root/work}"',
+  'mkdir -p "$m" "$work"',
+  'if ! grep -qsF " $m " /proc/mounts; then',
+  '  if ! err=$(mount -t drvfs "$w" "$m" 2>&1); then',
+  '    echo "[sandbox] the chat folder could not be mounted at $m (mount: ${err:-failed}). Working in $work instead: files there are NOT visible to your other tools." >&2',
+  '    m="$work"',
+  '  fi',
+  'fi',
+  'if [ -n "$DISPLAY" ] && command -v xdpyinfo >/dev/null && ! xdpyinfo -display "$DISPLAY" >/dev/null 2>&1; then',
+  '  n="${DISPLAY#:}"; rm -f "/tmp/.X$n-lock" "/tmp/.X11-unix/X$n"',
+  '  setsid Xvfb "$DISPLAY" -screen 0 1600x1000x24 -nolisten tcp </dev/null >/dev/null 2>&1 &',
+  '  for i in 1 2 3 4 5 6 7 8 9 10; do xdpyinfo -display "$DISPLAY" >/dev/null 2>&1 && break; sleep 0.2; done',
+  '  echo "[sandbox] the off-screen display $DISPLAY had been stopped; started a fresh, empty one. Do not start or kill Xvfb yourself." >&2',
+  'fi',
+  'cd "$m" 2>/dev/null || cd /root',
+  'f=$(mktemp /tmp/apim-cmd.XXXXXX) || exit 125',
+  'if [ "$1" = "-" ]; then cat > "$f"; exec </dev/null; else printf %s "$1" | base64 -d > "$f"; fi',
+  'bash -l "$f"; s=$?',
+  'rm -f "$f"',
+  'exit $s',
+].join("\n");
+
+/**
+ * Longest base64 command passed on the wsl.exe command line (Windows caps a
+ * whole command line at 32767 characters); longer ones go through stdin.
+ */
+export const SANDBOX_ARGV_LIMIT = 24_000;
+
+/** The runner's $1 for `script`, and the stdin to send when it is "-". */
+export function encodeSandboxScript(script: string): { arg: string; stdin: string | null } {
+  const b64 = Buffer.from(String(script ?? ""), "utf8").toString("base64");
+  return b64.length > SANDBOX_ARGV_LIMIT ? { arg: "-", stdin: script } : { arg: b64, stdin: null };
 }
 
 /** A free X display number, chosen the same way the Linux surface does. */
 export function pickDisplay(used: number[] = []): string {
+  // Not :99 (or :0/:1): that is the number agents reach for when they start
+  // their own Xvfb, and then kill, which took the sandbox's display with it.
   const taken = new Set(used);
-  for (let n = 99; n < 130; n += 1) if (!taken.has(n)) return `:${n}`;
-  return ":129";
+  for (let n = 57; n < 90; n += 1) if (!taken.has(n)) return `:${n}`;
+  return ":89";
 }
 
 /**
@@ -511,7 +549,8 @@ export function closeWslSandbox(): void {
 /**
  * The `wsl.exe` argv that runs a bash command in the sandbox, inside this
  * chat's workspace (mounted on first use), with DISPLAY on the sandbox's
- * off-screen X server.
+ * off-screen X server. `stdin`, when set, must be written to the process and
+ * closed: the command was too long for the command line.
  */
 export function wrapForSandbox(opts: {
   sandbox: WslSandbox;
@@ -519,9 +558,10 @@ export function wrapForSandbox(opts: {
   workspaceWinDir: string;
   script: string;
   extraEnv?: Record<string, string>;
-}): WslInvocation {
+}): WslInvocation & { stdin: string | null } {
   const mount = sandboxMountPoint(opts.workspaceId);
-  return buildWslInvocation({
+  const encoded = encodeSandboxScript(opts.script);
+  const inv = buildWslInvocation({
     distro: opts.sandbox.distro,
     user: "root",
     cwdWsl: LINUX_CWD,
@@ -534,32 +574,34 @@ export function wrapForSandbox(opts: {
       ...(opts.extraEnv ?? {}),
     },
     command: "bash",
-    args: ["-lc", mountAndRunScript(opts.workspaceWinDir, mount, opts.script)],
+    args: ["-c", SANDBOX_RUNNER, "apim-sandbox", encoded.arg, mount, opts.workspaceWinDir],
   });
+  return { ...inv, stdin: encoded.stdin };
 }
 
 /**
- * Screenshot the sandbox display into the workspace, where view_image can
- * read it. Returns the host path of the PNG.
+ * Screenshot the sandbox display. The PNG comes back base64 on stdout, so it
+ * does not depend on the chat folder being mounted (reported: the mount had
+ * failed, so every capture failed with it).
  */
 export function sandboxCaptureInvocation(opts: {
   sandbox: WslSandbox;
   workspaceId: string;
   workspaceWinDir: string;
-  outFileName: string;
-}): { invocation: WslInvocation; hostPath: string } {
-  const capture = ["import", ...captureArgs(opts.sandbox.display, opts.outFileName)]
-    .map(shQuote)
-    .join(" ");
-  return {
-    invocation: wrapForSandbox({
-      sandbox: opts.sandbox,
-      workspaceId: opts.workspaceId,
-      workspaceWinDir: opts.workspaceWinDir,
-      script: capture,
-    }),
-    hostPath: path.join(opts.workspaceWinDir, opts.outFileName),
-  };
+}): WslInvocation & { stdin: string | null } {
+  return wrapForSandbox({
+    sandbox: opts.sandbox,
+    workspaceId: opts.workspaceId,
+    workspaceWinDir: opts.workspaceWinDir,
+    script: 'import -display "$DISPLAY" -window root png:- | base64 -w0',
+  });
+}
+
+/** The PNG in a capture's stdout, or null when it is not one. */
+export function decodeCapture(stdout: string): Buffer | null {
+  const png = Buffer.from(String(stdout ?? "").replace(/\s+/g, ""), "base64");
+  const magic = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  return png.length > 8 && magic.every((b, i) => png[i] === b) ? png : null;
 }
 
 // ---------------------------------------------------------------------------
