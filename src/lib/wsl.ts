@@ -1030,3 +1030,21 @@ export function enableWslLauncherScript(): string {
   ].join("\r\n");
 }
 
+
+/**
+ * Did WSL 2 fail because this PC cannot run its lightweight VM at all? Then
+ * WSL 1 (no VM, no virtual disk) is the way forward, not an error to stop on.
+ *
+ *   0xc03a0014  no virtual disk support (vdrvroot / FsDepends / vhdmp)
+ *   0x8007273f  Winsock refuses AF_HYPERV, the socket WSL 2 talks to its VM on
+ *   0x80370102  virtualization off in the BIOS / Virtual Machine Platform off
+ *   0x80370114  a Hyper-V component WSL 2 needs is not running
+ */
+export function wsl2CannotRunHere(output: string): "virtual-disk" | "vm" | null {
+  const t = String(output ?? "").toLowerCase();
+  if (/0xc03a0014|virtual disk support provider/.test(t)) return "virtual-disk";
+  if (/0x8007273f|address incompatible with the requested protocol|0x80370102|0x80370114/.test(t)) {
+    return "vm";
+  }
+  return null;
+}

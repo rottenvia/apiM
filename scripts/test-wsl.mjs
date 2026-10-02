@@ -45,6 +45,7 @@ import {
   windowsRepairAdvice,
   enableWslElevatedScript,
   enableWslLauncherScript,
+  wsl2CannotRunHere,
 } from "../src/lib/wsl.ts";
 
 let passed = 0;
@@ -629,6 +630,18 @@ test("elevated scripts are ASCII, reset the exit code, and quote paths", () => {
   assert.ok(/dism-exit=/.test(inner) && /Microsoft-Windows-Subsystem-Linux/.test(inner));
   assert.ok(/-Verb RunAs -Wait/.test(launch) && /apim-uac-declined/.test(launch));
   assert.ok(launch.includes(`('"' + $Inner + '"')`));
+});
+
+
+test("WSL 2 VM failures fall back to WSL 1; ordinary errors do not", () => {
+  assert.equal(wsl2CannotRunHere(REPORTED), "virtual-disk");
+  assert.equal(
+    wsl2CannotRunHere("An address incompatible with the requested protocol was used.\r\nError code: Wsl/Service/RegisterDistro/CreateVm/0x8007273f"),
+    "vm"
+  );
+  assert.equal(wsl2CannotRunHere("Error code: Wsl/Service/CreateInstance/0x80370102"), "vm");
+  assert.equal(wsl2CannotRunHere("The distribution name already exists"), null);
+  assert.equal(wsl2CannotRunHere("Error code: 0x80070070 not enough space"), null);
 });
 
 // ---------------------------------------------------------------------------
