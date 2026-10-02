@@ -1854,7 +1854,11 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
         "background:true, then screenshot it with sandbox_screenshot. If the " +
         "sandbox is not set up, the result says how — ask the user to run " +
         "/sandbox once. Files you create land in the workspace, visible to your " +
-        "other tools.",
+        "other tools (if the folder cannot be mounted, the result says so and " +
+        "you work in /root/work instead). An off-screen X server is ALREADY " +
+        "running and DISPLAY is set: just start the GUI. Never start your own " +
+        "Xvfb and never kill Xvfb (that blanks sandbox_screenshot). Heredocs " +
+        "and multi-line scripts work.",
       parameters: {
         type: "object",
         properties: {

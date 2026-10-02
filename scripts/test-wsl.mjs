@@ -10,7 +10,10 @@
  */
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import os from "node:os";
+import path from "node:path";
 import { wslCannotStart, WINDOWS_FALLBACK } from "../src/lib/sandbox-run.ts";
 import {
   decodeWslOutput,
@@ -31,7 +34,6 @@ import {
   importArgs,
   sandboxWslConf,
   sandboxMountPoint,
-  mountAndRunScript,
   sandboxBaseDir,
   formatExitCode,
   explainWslError,
@@ -49,6 +51,10 @@ import {
   enableWslLauncherScript,
   wsl2CannotRunHere,
   P9RDR_REPAIR_COMMAND,
+  SANDBOX_RUNNER,
+  SANDBOX_ARGV_LIMIT,
+  encodeSandboxScript,
+  decodeCapture,
   RDBSS_REPAIR_COMMAND,
 } from "../src/lib/wsl.ts";
 
@@ -225,9 +231,10 @@ test("the inner command after --exec is never re-split by us", () => {
 // --- display / xvfb / capture args -----------------------------------------
 
 test("pickDisplay avoids used numbers", () => {
-  assert.equal(pickDisplay([]), ":99");
-  assert.equal(pickDisplay([99]), ":100");
-  assert.equal(pickDisplay([99, 100, 101]), ":102");
+  assert.equal(pickDisplay([]), ":57");
+  assert.equal(pickDisplay([57]), ":58");
+  assert.equal(pickDisplay([57, 58, 59]), ":60");
+  assert.notEqual(pickDisplay([]), ":99"); // the number agents start their own Xvfb on
 });
 
 test("xvfb args request an in-memory 24-bit screen, no tcp", () => {
@@ -297,7 +304,7 @@ test("refuses when WSL is not installed", () => {
 
 const SB = { distro: SANDBOX_DISTRO, display: ":99", xvfb: null };
 
-test("wrapForSandbox runs bash in the per-chat mount with DISPLAY set", () => {
+test("wrapForSandbox sends the command base64-encoded through the runner", () => {
   const inv = wrapForSandbox({
     sandbox: SB,
     workspaceId: "abc-123",
@@ -308,20 +315,27 @@ test("wrapForSandbox runs bash in the per-chat mount with DISPLAY set", () => {
   assert.deepEqual(inv.args.slice(0, 7), ["-d", SANDBOX_DISTRO, "-u", "root", "--cd", "/root", "--exec"]);
   assert.ok(inv.args.includes("DISPLAY=:99"));
   const i = inv.args.indexOf("bash");
-  assert.equal(inv.args[i + 1], "-lc");
-  const script = inv.args[i + 2];
-  assert.ok(script.includes("mount -t drvfs 'C:\\Users\\me\\ws' /ws/abc-123"));
-  assert.ok(script.includes("mountpoint -q /ws/abc-123 ||"));
-  assert.ok(script.endsWith("cd /ws/abc-123 && node server.js"));
+  assert.deepEqual(inv.args.slice(i + 1), [
+    "-c", SANDBOX_RUNNER, "apim-sandbox",
+    Buffer.from("node server.js").toString("base64"), "/ws/abc-123", "C:\\Users\\me\\ws",
+  ]);
+  assert.equal(inv.stdin, null);
+  // Nothing in the process list carries the command's text.
+  assert.ok(!inv.args.some((a) => a.includes("server.js")));
 });
 
 test("mount point sanitises odd workspace ids", () => {
   assert.equal(sandboxMountPoint("a/../b c"), "/ws/a____b_c");
 });
 
-test("mountAndRunScript quotes a path with spaces and quotes", () => {
-  const s = mountAndRunScript("C:\\A B\\it's", "/ws/x", "ls");
-  assert.ok(s.includes(`'C:\\A B\\it'\\''s'`));
+test("a command too long for the Windows command line goes through stdin", () => {
+  const big = "echo " + "x".repeat(SANDBOX_ARGV_LIMIT);
+  const enc = encodeSandboxScript(big);
+  assert.equal(enc.arg, "-");
+  assert.equal(enc.stdin, big);
+  const inv = wrapForSandbox({ sandbox: SB, workspaceId: "w", workspaceWinDir: "C:\\ws", script: big });
+  assert.equal(inv.stdin, big);
+  assert.ok(inv.args.join(" ").length < 32_000);
 });
 
 test("extraEnv is merged and can override defaults", () => {
@@ -336,16 +350,60 @@ test("extraEnv is merged and can override defaults", () => {
   assert.ok(inv.args.includes("CUSTOM=1"));
 });
 
-test("capture writes the PNG into the workspace mount", () => {
-  const { invocation, hostPath } = sandboxCaptureInvocation({
-    sandbox: SB,
-    workspaceId: "w1",
-    workspaceWinDir: "C:\\ws",
-    outFileName: "sandbox-1.png",
-  });
-  assert.ok(hostPath.endsWith("sandbox-1.png"));
-  const script = invocation.args[invocation.args.length - 1];
-  assert.ok(script.endsWith("cd /ws/w1 && import -display :99 -window root sandbox-1.png"));
+test("capture streams the PNG over stdout, not through the mount", () => {
+  const inv = sandboxCaptureInvocation({ sandbox: SB, workspaceId: "w1", workspaceWinDir: "C:\\ws" });
+  const i = inv.args.indexOf("bash");
+  const script = Buffer.from(inv.args[i + 4], "base64").toString("utf8");
+  assert.ok(/import -display "\$DISPLAY" -window root png:- \| base64 -w0/.test(script));
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+  assert.deepEqual(decodeCapture(png.toString("base64").replace(/(.{4})/g, "$1\n")), png);
+  assert.equal(decodeCapture("[sandbox] could not\nnot base64"), null);
+  assert.equal(decodeCapture(""), null);
+});
+
+// The runner itself, run by real bash (skipped where there is none). Mount
+// always fails here (no drvfs), which is exactly the reported WSL 1 state.
+const hasBash = (() => {
+  try { return spawnSync("bash", ["-c", "true"]).status === 0; } catch { return false; }
+})();
+function runRunner(script, { viaStdin = false } = {}) {
+  const tmp = mkdtempSync(path.join(os.tmpdir(), "apim-runner-"));
+  const work = path.join(tmp, "work");
+  const r = spawnSync(
+    "bash",
+    ["-c", SANDBOX_RUNNER, "apim-sandbox", viaStdin ? "-" : Buffer.from(script).toString("base64"),
+     path.join(tmp, "mnt"), "C:\\nowhere"],
+    { input: viaStdin ? script : "", encoding: "utf8", env: { ...process.env, APIM_WORK: work, DISPLAY: "" } }
+  );
+  rmSync(tmp, { recursive: true, force: true });
+  return { ...r, work };
+}
+
+test("runner: a failed mount explains itself and the command still runs", () => {
+  if (!hasBash) return;
+  const r = runRunner("pwd; echo hi > x.txt; cat x.txt");
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(/could not be mounted/.test(r.stderr) && /NOT visible/.test(r.stderr));
+  assert.ok(r.stdout.includes(r.work) && /\nhi\n/.test(r.stdout));
+});
+
+test("runner: heredocs, quotes and the command's own exit code survive", () => {
+  if (!hasBash) return;
+  const r = runRunner(`cat > a.py <<'PY'\nprint("it's \\"ok\\"", $HOME)\nPY\ncat a.py\nexit 7`);
+  assert.equal(r.status, 7);
+  assert.ok(r.stdout.includes(`print("it's \\"ok\\"", $HOME)`));
+});
+
+test("runner: pkill -f on a pattern in the command does not kill the command", () => {
+  if (!hasBash) return;
+  const r = runRunner("pkill -f 'Xvfb :99'; pkill -f calc.py; echo survived");
+  assert.ok(r.stdout.includes("survived"), `status ${r.status} signal ${r.signal}`);
+});
+
+test("runner: a long command via stdin does not leave stdin to the command", () => {
+  if (!hasBash) return;
+  const r = runRunner("read -r line || echo stdin-empty", { viaStdin: true });
+  assert.ok(r.stdout.includes("stdin-empty"));
 });
 
 // --- setup helpers -----------------------------------------------------------
