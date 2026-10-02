@@ -10,6 +10,7 @@
  */
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   decodeWslOutput,
   parseWslDistros,
@@ -640,8 +641,21 @@ test("WSL 2 VM failures fall back to WSL 1; ordinary errors do not", () => {
     "vm"
   );
   assert.equal(wsl2CannotRunHere("Error code: Wsl/Service/CreateInstance/0x80370102"), "vm");
+  // Reported third: Virtual Machine Platform not installed.
+  assert.equal(
+    wsl2CannotRunHere("The operation could not be started because a required feature is not installed.\r\nError code: Wsl/Service/RegisterDistro/CreateVm/HCS/HCS_E_SERVICE_NOT_AVAILABLE"),
+    "vm"
+  );
+  assert.ok(/WSL 1/.test(explainWslError("Error code: Wsl/Service/RegisterDistro/CreateVm/HCS/HCS_E_SERVICE_NOT_AVAILABLE") ?? ""));
   assert.equal(wsl2CannotRunHere("The distribution name already exists"), null);
   assert.equal(wsl2CannotRunHere("Error code: 0x80070070 not enough space"), null);
+});
+
+
+test("setup tries WSL 1 after any WSL 2 failure, not only listed codes", () => {
+  const src = readFileSync(new URL("../src/lib/sandbox-setup.ts", import.meta.url), "utf8");
+  assert.ok(!/if \(!cause\) throw failure\("wsl --import"/.test(src));
+  assert.ok(/WSL 2 cannot run on this PC; using WSL 1/.test(src));
 });
 
 // ---------------------------------------------------------------------------
