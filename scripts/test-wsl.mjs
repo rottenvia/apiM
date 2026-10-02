@@ -48,6 +48,7 @@ import {
   enableWslElevatedScript,
   enableWslLauncherScript,
   wsl2CannotRunHere,
+  P9RDR_REPAIR_COMMAND,
 } from "../src/lib/wsl.ts";
 
 let passed = 0;
@@ -594,6 +595,37 @@ test("lxcore.sys present but unregistered is driver damage, not a toggle", () =>
   assert.ok(/cannot fix it/.test(r.message) && /Reinstall now/.test(r.message));
 });
 
+// Reported and traced: wslservice failed at filesystem.cpp "Path: \Device\P9Rdr";
+// p9rdr.sys was on disk, sc qc P9Rdr said 1060. A pending restart does not
+// matter there, so it must win over the restart advice.
+test("p9rdr.sys present but P9Rdr unregistered -> the exact sc create, before anything else", () => {
+  const r = diagnoseWsl1({
+    rebootPending: true,
+    files: { "lxcore.sys": true, "p9rdr.sys": true },
+    services: { lxcore: LX_OK, P9Rdr: MISSING },
+  });
+  assert.equal(r.state, "redirector-unregistered");
+  assert.ok(r.message.includes(P9RDR_REPAIR_COMMAND));
+  assert.ok(/sc\.exe delete P9Rdr/.test(r.message) && /Restart-Service WSLService/.test(r.message));
+});
+
+test("the P9Rdr repair matches Windows' stock entry and is plain ASCII", () => {
+  for (const part of ["create P9Rdr", "type= kernel", "start= demand", "depend= Rdbss",
+                      "binPath= \\SystemRoot\\System32\\drivers\\p9rdr.sys"]) {
+    assert.ok(P9RDR_REPAIR_COMMAND.includes(part), part);
+  }
+  assert.ok(/^[\x20-\x7e]+$/.test(P9RDR_REPAIR_COMMAND));
+});
+
+test("a registered P9Rdr is not blamed", () => {
+  const r = diagnoseWsl1({
+    rebootPending: false,
+    files: { "lxcore.sys": true, "p9rdr.sys": true },
+    services: { lxcore: LX_OK, P9Rdr: QC("P9Rdr", 3, "DEMAND_START") },
+  });
+  assert.notEqual(r.state, "redirector-unregistered");
+});
+
 test("everything present still refused -> restart, then repair", () => {
   const r = diagnoseWsl1({ rebootPending: false, files: { "lxcore.sys": true }, services: { lxcore: LX_OK } });
   assert.equal(r.state, "unknown");
@@ -675,9 +707,9 @@ test("no sandbox command inherits the Windows working directory", () => {
 });
 
 
-test("0xd0000034 (Linux cannot start) is explained as WSL 1's driver / pending restart", () => {
+test("0xd0000034 (Linux cannot start) points at the missing driver, not the folder", () => {
   const why = explainWslError("Error: 0xd0000034\r\nError code: Wsl/Service/CreateInstance/0xd0000034");
-  assert.ok(why && /lxcore/.test(why) && /Restart/.test(why));
+  assert.ok(why && /P9Rdr/.test(why) && /Set up again/.test(why) && /Restart/.test(why));
 });
 
 
