@@ -474,7 +474,15 @@ async function runSetup(): Promise<void> {
     ["-d", SANDBOX_DISTRO, "-u", "root", "--cd", "/", "--exec", "sh", "-c", "cat > /etc/wsl.conf"],
     { input: sandboxWslConf(), timeoutMs: 60_000 }
   );
-  if (conf.code !== 0) throw failure("Writing /etc/wsl.conf", conf);
+  if (conf.code !== 0) {
+    // The first command in a fresh distro: when it cannot start at all, say
+    // whether WSL 1's driver is missing or a restart is pending.
+    if (/0xd0000034/i.test(conf.output)) {
+      phase("Linux could not start; checking WSL 1's driver");
+      log(`  ${diagnoseWsl1(probeWsl1()).message}`);
+    }
+    throw failure("Starting the sandbox", conf);
+  }
   closeWslSandbox();
   spawnSync("wsl.exe", ["--terminate", SANDBOX_DISTRO], { windowsHide: true, timeout: 30_000 });
 
