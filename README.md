@@ -435,6 +435,19 @@ work in batches, and the app now makes that hard to get wrong:
 | 🧠 High | Deep reasoning |
 | 🔥 Max | Maximum depth (50K+ tokens) |
 
+## Reply layout
+
+Replies use Claude's layout by default: one column, each stretch of text
+followed by the steps it led to, with icons and no dividers. The older
+side-by-side split (text left, steps right) is one click away in
+**Settings → Theme → Reply layout**; it is a CSS switch on `<html
+data-layout>`, so changing it is instant and nothing is lost either way.
+
+Long replies stay smooth while they stream: markdown is rendered block by
+block, so only the block still being written is re-parsed, and replies off
+screen skip style and layout (`content-visibility`). On a 4x-throttled CPU a
+45-second stream went from frames over 100 ms to a steady 60 fps.
+
 ## Data Storage
 
 Settings and chat history are stored locally at:

@@ -132,6 +132,8 @@ interface SettingsModalProps {
   onCustomModelsChange: (next: CustomModelDef[]) => void;
   themeId: string;
   onThemeChange: (id: string) => void;
+  replyLayout: "claude" | "split";
+  onReplyLayoutChange: (layout: "claude" | "split") => void;
   customTheme: CustomThemeSeeds;
   onCustomThemeChange: (seeds: CustomThemeSeeds) => void;
   localBaseUrl: string;
@@ -257,6 +259,8 @@ export function SettingsModal({
   onCustomModelsChange,
   themeId,
   onThemeChange,
+  replyLayout,
+  onReplyLayoutChange,
   customTheme,
   onCustomThemeChange,
   localBaseUrl,
@@ -991,6 +995,38 @@ export function SettingsModal({
 
             {tab === "theme" && (
               <>
+              <div>
+                <label className="block text-sm font-semibold text-text-primary mb-2">
+                  Reply layout
+                </label>
+                <p className="mb-2.5 text-[12px] leading-relaxed text-text-secondary">
+                  How the agent&apos;s text and its steps sit together. Applies instantly.
+                </p>
+                <div className="grid grid-cols-2 gap-2">
+                  {(
+                    [
+                      ["claude", "Claude", "One column: text, then its steps. No dividers."],
+                      ["split", "Split (classic)", "Text on the left, steps on the right."],
+                    ] as const
+                  ).map(([value, label, hint]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      onClick={() => onReplyLayoutChange(value)}
+                      aria-pressed={replyLayout === value}
+                      className={`rounded-xl border px-3 py-2.5 text-left transition-colors ${
+                        replyLayout === value
+                          ? "border-accent bg-accent/10"
+                          : "border-border hover:bg-bg-hover"
+                      }`}
+                    >
+                      <span className="block text-[13px] font-medium text-text-primary">{label}</span>
+                      <span className="mt-0.5 block text-[12px] leading-snug text-text-secondary">{hint}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               <div>
                 <label className="block text-sm font-semibold text-text-primary mb-2">
                   Theme

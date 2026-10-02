@@ -38,6 +38,7 @@ import {
 } from "@/lib/pricing";
 import { CodeBlock } from "@/components/CodeBlock";
 import { PlanPanel } from "@/components/PlanPanel";
+import { BlockMarkdown } from "@/components/BlockMarkdown";
 import type { PlanView } from "@/components/PlanPanel";
 import { normalisePlanStepText } from "@/lib/plan-view";
 import { MODELS } from "@/lib/models";
@@ -84,11 +85,7 @@ const MarkdownBody = memo(function MarkdownBody({
   if (plain) {
     return <div className="whitespace-pre-wrap">{content}</div>;
   }
-  return (
-    <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
-      {content}
-    </ReactMarkdown>
-  );
+  return <BlockMarkdown text={content} components={components} />;
 });
 
 /**
@@ -1965,7 +1962,7 @@ function MessageBubbleImpl({
                 by line is noisy, and half-written markup renders as garbage. */}
             {!useTimeline && (displayContent || !message.isStreaming) && (
               <div
-                className={`prose-chat text-[15px] leading-relaxed ${
+                className={`prose-chat cv-body text-[15px] leading-relaxed ${
                   message.isError
                     ? "text-danger"
                     : message.incomplete
