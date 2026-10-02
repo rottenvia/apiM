@@ -235,7 +235,7 @@ const ToolRow = memo(function ToolRow({
                   overflows, and with the path set to `dir="rtl"` the overflow
                   renders back across the verb.
                 */}
-                <span className="flex min-w-0 flex-1 items-baseline gap-1.5 overflow-hidden">
+                <span className="flex min-w-0 flex-initial items-baseline gap-1.5 overflow-hidden">
                   <span className={`flex-none font-medium ${running ? "thinking-shimmer" : ""}`}>
                     {running ? display.running : display.done}
                   </span>
@@ -247,7 +247,7 @@ const ToolRow = memo(function ToolRow({
                     <span
                       dir={display.mono ? "rtl" : undefined}
                       title={filePath}
-                      className={`min-w-0 flex-1 shrink truncate text-left opacity-75 ${
+                      className={`min-w-0 shrink truncate text-left opacity-75 ${
                         display.mono ? "font-mono text-[12px]" : "text-[13px]"
                       }`}
                     >
@@ -264,8 +264,11 @@ const ToolRow = memo(function ToolRow({
                   </span>
                 )}
                 {summary && (
-                  <span className="hidden min-w-0 max-w-[40%] shrink truncate text-[12px] text-text-muted sm:block">
-                    {summary}
+                  // Right after the label, like Claude's step rows. It used to
+                  // be pushed to the far edge, which read as text floating
+                  // in from nowhere (reported).
+                  <span className="hidden min-w-0 max-w-[45%] shrink truncate text-[12px] text-text-muted sm:block">
+                    · {summary}
                   </span>
                 )}
                 {running && event.progress && (
