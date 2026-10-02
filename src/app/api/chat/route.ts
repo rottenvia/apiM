@@ -5594,14 +5594,23 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             } else if (call.function.name === "sandbox_screenshot") {
               // Read-only: it looks at the off-screen display, changes
               // nothing, so no approval — same posture as screenshot_window.
-              const shotArgs = parsed.value as { path?: unknown };
+              const shotArgs = parsed.value as {
+                path?: unknown;
+                full_screen?: unknown;
+                wait_seconds?: unknown;
+              };
               const rel =
                 typeof shotArgs.path === "string" && shotArgs.path.trim()
                   ? shotArgs.path.trim()
                   : undefined;
               const shot = await screenshotSandbox(
                 workspace,
-                rel ? rel.replace(/^\/+/, "").split("/").pop() : undefined
+                rel ? rel.replace(/^\/+/, "").split("/").pop() : undefined,
+                {
+                  fullScreen: shotArgs.full_screen === true,
+                  waitSeconds:
+                    typeof shotArgs.wait_seconds === "number" ? shotArgs.wait_seconds : undefined,
+                }
               );
               result = shot.ok
                 ? {

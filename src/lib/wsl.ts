@@ -302,45 +302,60 @@ export function sandboxMountPoint(workspaceId: string): string {
  *     in a process list contains its text.
  *   - the agent killed the off-screen display; it is restarted here, before
  *     the command, whenever it is gone.
+ *
+ * Mounting, in order, each error kept for the message: the folder itself;
+ * then (WSL 1 mounts whole drives only, as WSL does with "C:\") the drive
+ * at a private path with the folder bound or used in place. Each mount is
+ * tried with LIBMOUNT_FORCE_MOUNT2=always, because Ubuntu 24.04's mount(8)
+ * prefers the new fsopen() API, and then as a direct mount(2) call from
+ * Python, so libmount cannot be what fails. Reported: both earlier forms
+ * failed on the user's WSL 1 with "wrong fs type, bad option".
  */
-export const SANDBOX_RUNNER = [
-  'm="$2"; w="$3"',
-  'work="${APIM_WORK:-/root/work}"',
-  'mkdir -p "$m" "$work"',
-  'if ! grep -qsF " $m " /proc/mounts; then',
-  '  if ! err=$(mount -t drvfs "$w" "$m" 2>&1); then',
-  // WSL 1 mounts whole drives only ("C:\", as WSL itself does); a folder
-  // fails with "wrong fs type". Mount the drive privately and attach the
-  // folder from there: bound onto $m, or used in place if binding fails.
-  '    d="${w%%:*}"; rest="${w#?:}"; rest="${rest//\\\\//}"; rest="${rest#/}"',
-  '    r="${APIM_DRIVES:-/mnt/.apim}/$d"',
-  '    if [ "${#d}" = 1 ]; then',
-  '      mkdir -p "$r"',
-  '      grep -qsF " $r " /proc/mounts || err2=$(mount -t drvfs "$d:\\\\" "$r" 2>&1) || err="$err; drive: $err2"',
-  '      if [ -d "$r/$rest" ]; then',
-  '        mount --bind "$r/$rest" "$m" 2>/dev/null || m="$r/$rest"',
-  '        err=""',
-  '      fi',
-  '    fi',
-  '    if [ -n "$err" ]; then',
-  '      echo "[sandbox] the chat folder could not be mounted at $m (mount: $err). Working in $work instead: files there are NOT visible to your other tools." >&2',
-  '      m="$work"',
-  '    fi',
-  '  fi',
-  'fi',
-  'if [ -n "$DISPLAY" ] && command -v xdpyinfo >/dev/null && ! xdpyinfo -display "$DISPLAY" >/dev/null 2>&1; then',
-  '  n="${DISPLAY#:}"; rm -f "/tmp/.X$n-lock" "/tmp/.X11-unix/X$n"',
-  '  setsid Xvfb "$DISPLAY" -screen 0 1600x1000x24 -nolisten tcp </dev/null >/dev/null 2>&1 &',
-  '  for i in 1 2 3 4 5 6 7 8 9 10; do xdpyinfo -display "$DISPLAY" >/dev/null 2>&1 && break; sleep 0.2; done',
-  '  echo "[sandbox] the off-screen display $DISPLAY had been stopped; started a fresh, empty one. Do not start or kill Xvfb yourself." >&2',
-  'fi',
-  'cd "$m" 2>/dev/null || cd /root',
-  'f=$(mktemp /tmp/apim-cmd.XXXXXX) || exit 125',
-  'if [ "$1" = "-" ]; then cat > "$f"; exec </dev/null; else printf %s "$1" | base64 -d > "$f"; fi',
-  'bash -l "$f"; s=$?',
-  'rm -f "$f"',
-  'exit $s',
-].join("\n");
+export const SANDBOX_RUNNER = String.raw`m="$2"; w="$3"
+work="\${APIM_WORK:-/root/work}"
+mkdir -p "$m" "$work"
+errs=""
+drvfs() {
+  local e
+  e=$(LIBMOUNT_FORCE_MOUNT2=always mount -t drvfs "$1" "$2" 2>&1) && return 0
+  errs="$errs [mount $1: $e]"
+  e=$(python3 -c 'import ctypes, os, sys
+libc = ctypes.CDLL(None, use_errno=True)
+if libc.mount(sys.argv[1].encode(), sys.argv[2].encode(), b"drvfs", 0, b"") != 0:
+    sys.exit("mount(2) " + sys.argv[1] + ": " + os.strerror(ctypes.get_errno()))' "$1" "$2" 2>&1) && return 0
+  errs="$errs [$e]"
+  return 1
+}
+if ! grep -qsF " $m " /proc/mounts; then
+  if ! drvfs "$w" "$m"; then
+    d="\${w%%:*}"; rest="\${w#?:}"; rest="\${rest//\\//}"; rest="\${rest#/}"
+    r="\${APIM_DRIVES:-/mnt/.apim}/$d"
+    if [ "\${#d}" = 1 ]; then
+      mkdir -p "$r"
+      grep -qsF " $r " /proc/mounts || drvfs "$d:\\" "$r"
+      if [ -d "$r/$rest" ]; then
+        LIBMOUNT_FORCE_MOUNT2=always mount --bind "$r/$rest" "$m" 2>/dev/null || m="$r/$rest"
+        errs=""
+      fi
+    fi
+    if [ -n "$errs" ]; then
+      echo "[sandbox] the chat folder could not be mounted at $m:$errs. Working in $work instead: files there are NOT visible to your other tools." >&2
+      m="$work"
+    fi
+  fi
+fi
+if [ -n "$DISPLAY" ] && command -v xdpyinfo >/dev/null && ! xdpyinfo -display "$DISPLAY" >/dev/null 2>&1; then
+  n="\${DISPLAY#:}"; rm -f "/tmp/.X$n-lock" "/tmp/.X11-unix/X$n"
+  setsid Xvfb "$DISPLAY" -screen 0 1600x1000x24 -nolisten tcp </dev/null >/dev/null 2>&1 &
+  for i in 1 2 3 4 5 6 7 8 9 10; do xdpyinfo -display "$DISPLAY" >/dev/null 2>&1 && break; sleep 0.2; done
+  echo "[sandbox] the off-screen display $DISPLAY had been stopped; started a fresh, empty one. Do not start or kill Xvfb yourself." >&2
+fi
+cd "$m" 2>/dev/null || cd /root
+f=$(mktemp /tmp/apim-cmd.XXXXXX) || exit 125
+if [ "$1" = "-" ]; then cat > "$f"; exec </dev/null; else printf %s "$1" | base64 -d > "$f"; fi
+bash -l "$f"; s=$?
+rm -f "$f"
+exit $s`.replaceAll("\\${", "${"); // a template literal cannot hold a bare \${
 
 /**
  * Longest base64 command passed on the wsl.exe command line (Windows caps a
@@ -595,6 +610,44 @@ export function wrapForSandbox(opts: {
 }
 
 /**
+ * Bash that captures the sandbox display as base64 PNG on stdout.
+ *
+ * Reported: the screenshot was the whole 1600x1000 screen with a 300px app
+ * in one corner and the rest black, unreadable once shrunk into the chat. It
+ * now waits (APIM_SHOT_WAIT seconds, for a GUI still starting) for a visible
+ * top-level window and crops to the box around all of them; with no window,
+ * or APIM_SHOT_FULL=1, it takes the whole screen and says why on stderr.
+ */
+export const SANDBOX_CAPTURE_SCRIPT = String.raw`wait_s="\${APIM_SHOT_WAIT:-5}"; full="\${APIM_SHOT_FULL:-0}"
+box=""
+if [ "$full" != 1 ] && command -v xdotool >/dev/null; then
+  end=$(( $(date +%s) + wait_s ))
+  while :; do
+    box=$(for id in $(xdotool search --onlyvisible --maxdepth 1 . 2>/dev/null); do
+        xdotool getwindowgeometry --shell "$id" 2>/dev/null
+      done | awk -F= '
+        /^X=/ { x = $2 } /^Y=/ { y = $2 } /^WIDTH=/ { w = $2 }
+        /^HEIGHT=/ { h = $2
+          if (w > 1 && h > 1) {
+            if (!n || x < x0) x0 = x; if (!n || y < y0) y0 = y
+            if (!n || x + w > x1) x1 = x + w; if (!n || y + h > y1) y1 = y + h
+            n++
+          } }
+        END { if (n) { if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0
+          printf "%dx%d+%d+%d", x1 - x0, y1 - y0, x0, y0 } }')
+    if [ -n "$box" ] || [ "$(date +%s)" -ge "$end" ]; then break; fi
+    sleep 0.3
+  done
+fi
+if [ -n "$box" ]; then
+  echo "[sandbox] cropped to the visible window(s), $box of the screen. full_screen:true captures everything." >&2
+  import -display "$DISPLAY" -window root -crop "$box" +repage png:- | base64 -w0
+else
+  [ "$full" = 1 ] || echo "[sandbox] no window is visible on $DISPLAY after \${wait_s}s, so this is the whole, empty screen. Check the program is still running (read_process) and did not change DISPLAY." >&2
+  import -display "$DISPLAY" -window root png:- | base64 -w0
+fi`.replaceAll("\\${", "${");
+
+/**
  * Screenshot the sandbox display. The PNG comes back base64 on stdout, so it
  * does not depend on the chat folder being mounted (reported: the mount had
  * failed, so every capture failed with it).
@@ -603,13 +656,75 @@ export function sandboxCaptureInvocation(opts: {
   sandbox: WslSandbox;
   workspaceId: string;
   workspaceWinDir: string;
+  /** The whole screen instead of the box around the visible windows. */
+  fullScreen?: boolean;
+  /** How long to wait for a window to appear, 0-30 s (default 5). */
+  waitSeconds?: number;
 }): WslInvocation & { stdin: string | null } {
+  const wait = Math.max(0, Math.min(30, Math.round(opts.waitSeconds ?? 5)));
   return wrapForSandbox({
     sandbox: opts.sandbox,
     workspaceId: opts.workspaceId,
     workspaceWinDir: opts.workspaceWinDir,
-    script: 'import -display "$DISPLAY" -window root png:- | base64 -w0',
+    script: SANDBOX_CAPTURE_SCRIPT,
+    extraEnv: { APIM_SHOT_WAIT: String(wait), APIM_SHOT_FULL: opts.fullScreen ? "1" : "0" },
   });
+}
+
+/** Marker the self-check puts in a Windows folder for the sandbox to read. */
+export const SELF_CHECK_MARKER = "apim-selfcheck-7f3a";
+
+/**
+ * What the end-of-setup self-check runs inside the sandbox, through the same
+ * runner every agent command uses. Reported: setup said "ready" while the
+ * sandbox could not see the chat folder and node failed with "Exec format
+ * error"; the agent found both out the slow way.
+ */
+export function selfCheckScript(): string {
+  return [
+    `echo "check-folder: $(cat apim-selfcheck.txt 2>/dev/null || echo MISSING)"`,
+    `echo written > from-sandbox.txt`,
+    `echo "check-python: $(python3 --version 2>&1 | head -1)"`,
+    `echo "check-node: $(node --version 2>&1 | head -1)"`,
+    `echo "check-display: $(xdpyinfo -display "$DISPLAY" >/dev/null 2>&1 && echo ok || echo none)"`,
+  ].join("\n");
+}
+
+export interface SelfCheckResult {
+  folder: boolean;
+  lines: string[];
+}
+
+/** Turn the self-check's output into one plain line per thing checked. */
+export function interpretSelfCheck(output: string, wroteBack: boolean): SelfCheckResult {
+  const text = String(output ?? "");
+  const field = (k: string) => (new RegExp(`^check-${k}: (.*)$`, "m").exec(text)?.[1] ?? "").trim();
+  const seen = field("folder") === SELF_CHECK_MARKER;
+  const folder = seen && wroteBack;
+  const mountNote = /^\[sandbox\] the chat folder could not be mounted[^\n]*/m.exec(text)?.[0];
+  const lines: string[] = [];
+  lines.push(
+    folder
+      ? "OK  the sandbox sees the chat folder and its files reach Windows"
+      : seen
+        ? "!!  the sandbox can read the chat folder but what it writes does not reach Windows"
+        : `!!  the sandbox cannot see the chat folder, so the agent works on copies in /root/work${mountNote ? `\n    ${mountNote}` : ""}`
+  );
+  const py = field("python");
+  lines.push(/^Python 3/.test(py) ? `OK  ${py}` : `!!  python3: ${py || "no answer"}`);
+  const node = field("node");
+  lines.push(
+    /^v\d+/.test(node)
+      ? `OK  node ${node}`
+      : /exec format error/i.test(node)
+        ? `!!  node fails with "Exec format error": the node it finds is not a Linux program (${node})`
+        : `!!  node: ${node || "no answer"}`
+  );
+  lines.push(field("display") === "ok" ? "OK  the off-screen display is up" : "!!  the off-screen display did not start");
+  if (!/^check-folder:/m.test(text)) {
+    lines.unshift(`!!  the check itself did not run: ${text.trim().slice(0, 300) || "no output"}`);
+  }
+  return { folder, lines };
 }
 
 /** The PNG in a capture's stdout, or null when it is not one. */
