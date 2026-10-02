@@ -1295,26 +1295,29 @@ export async function readFileBytes(
   return new Uint8Array(await fs.readFile(target));
 }
 
-export async function readImageAsDataUrl(
+/** MIME type of an image the UI and the vision path accept; null otherwise. SVG is left out on purpose: it can carry script. */
+export function imageMimeType(relative: string): string | null {
+  const ext = path.extname(String(relative ?? "")).toLowerCase();
+  return ext === ".png"
+    ? "image/png"
+    : ext === ".jpg" || ext === ".jpeg"
+      ? "image/jpeg"
+      : ext === ".webp"
+        ? "image/webp"
+        : ext === ".gif"
+          ? "image/gif"
+          : ext === ".bmp"
+            ? "image/bmp"
+            : null;
+}
+
+/** An image file in the workspace, checked: inside it, really an image type, not too big. */
+export async function readImageBytes(
   workspaceId: string,
   relative: string
-): Promise<{ path: string; dataUrl: string; bytes: number }> {
+): Promise<{ path: string; mime: string; buffer: Buffer; bytes: number }> {
   const target = resolveInside(workspaceId, relative);
-
-  const ext = path.extname(relative).toLowerCase();
-  const mime =
-    ext === ".png"
-      ? "image/png"
-      : ext === ".jpg" || ext === ".jpeg"
-        ? "image/jpeg"
-        : ext === ".webp"
-          ? "image/webp"
-          : ext === ".gif"
-            ? "image/gif"
-            : ext === ".bmp"
-              ? "image/bmp"
-              : null;
-
+  const mime = imageMimeType(relative);
   if (!mime) {
     throw new WorkspaceError(
       `${relative} is not an image (expected .png, .jpg, .webp, .gif or .bmp)`
@@ -1333,12 +1336,18 @@ export async function readImageAsDataUrl(
       `${relative} is too large to read (${Math.round(stat.size / 1024)}KB)`
     );
   }
+  return { path: relative, mime, buffer: await fs.readFile(target), bytes: stat.size };
+}
 
-  const buffer = await fs.readFile(target);
+export async function readImageAsDataUrl(
+  workspaceId: string,
+  relative: string
+): Promise<{ path: string; dataUrl: string; bytes: number }> {
+  const image = await readImageBytes(workspaceId, relative);
   return {
     path: relative,
-    dataUrl: `data:${mime};base64,${buffer.toString("base64")}`,
-    bytes: stat.size,
+    dataUrl: `data:${image.mime};base64,${image.buffer.toString("base64")}`,
+    bytes: image.bytes,
   };
 }
 

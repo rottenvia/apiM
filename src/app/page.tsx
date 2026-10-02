@@ -16,6 +16,7 @@ import { WorkspacePanel } from "@/components/WorkspacePanel";
 import { WorkspaceSidePanel } from "@/components/WorkspaceSidePanel";
 import type { WorkspaceFileInfo } from "@/components/WorkspaceBar";
 import type { ToolEvent } from "@/components/ToolActivity";
+import type { ShownImage } from "@/lib/tool-display";
 import type { PendingCommand } from "@/components/ApprovalPrompt";
 import type { PendingQuestion } from "@/components/QuestionPrompt";
 import type { PlanView, PlanStepView } from "@/components/PlanPanel";
@@ -323,6 +324,7 @@ type StreamEvent =
       ok: boolean;
       summary: string;
       changedPath?: string;
+      shownImage?: ShownImage;
     }
   | {
       type: "web_search";
@@ -3105,6 +3107,7 @@ export default function Home() {
                                   ok: evt.ok,
                                   summary: evt.summary,
                                   changedPath: evt.changedPath,
+                                  ...(evt.shownImage ? { shownImage: evt.shownImage } : {}),
                                 }
                               : t
                           ),

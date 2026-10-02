@@ -1,3 +1,4 @@
+import type { ShownImage } from "@/lib/tool-display";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { slugify, uniqueSlug } from "@/lib/slug";
@@ -100,6 +101,8 @@ export interface StoredMessage {
     ok?: boolean;
     summary?: string;
     changedPath?: string;
+    /** An image the tool showed the user, so it is still there on reload. */
+    shownImage?: ShownImage;
   }[] | null;
   /**
    * The exact API turns this reply was built from.

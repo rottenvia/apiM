@@ -3,7 +3,8 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { mcpDisplayName, MCP_TOOL_PREFIX } from "@/lib/mcp";
 import { describeTool } from "@/lib/tool-display";
-import type { ToolKind } from "@/lib/tool-display";
+import type { ShownImage, ToolKind } from "@/lib/tool-display";
+import { ImageLightbox } from "@/components/ImageLightbox";
 
 /** One tool the model ran, as shown in the transcript. */
 export interface ToolEvent {
@@ -16,6 +17,54 @@ export interface ToolEvent {
   changedPath?: string;
   /** Live progress while running (a delegate helper's rounds). */
   progress?: string;
+  /** An image the tool showed the user (show_image, screenshots). */
+  shownImage?: ShownImage;
+}
+
+/**
+ * A picture the agent showed the user, inline under its step, the way one
+ * pasted into a chat looks. Click for full size.
+ */
+function ShownImageCard({ image }: { image: ShownImage }) {
+  const [open, setOpen] = useState(false);
+  const [broken, setBroken] = useState(false);
+  const name = image.path.split("/").pop() || image.path;
+  if (broken) {
+    return (
+      <p className="mb-1 ml-8 mt-1 text-[12px] text-text-muted">
+        {name} is no longer in the workspace.
+      </p>
+    );
+  }
+  return (
+    <figure className="mb-2 ml-8 mt-1.5 max-w-[min(100%,560px)]">
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        title="Open full size"
+        className="block overflow-hidden rounded-xl border border-border bg-bg-primary transition-colors hover:border-accent-light/60 focus-visible:border-accent-light"
+      >
+        {/* eslint-disable-next-line @next/next/no-img-element -- a same-origin API image, not a static asset */}
+        <img
+          src={image.url}
+          alt={image.caption || name}
+          loading="lazy"
+          onError={() => setBroken(true)}
+          className="block max-h-[360px] w-auto max-w-full object-contain"
+        />
+      </button>
+      <figcaption className="mt-1 truncate text-[12px] text-text-muted">
+        {image.caption ? `${image.caption} · ${name}` : name}
+      </figcaption>
+      {open && (
+        <ImageLightbox
+          src={image.url}
+          name={image.caption || name}
+          onClose={() => setOpen(false)}
+        />
+      )}
+    </figure>
+  );
 }
 
 /**
@@ -260,6 +309,10 @@ const ToolRow = memo(function ToolRow({
               <pre className="tool-body mb-1 ml-8 mt-1 max-h-72 overflow-auto rounded-lg border border-border bg-bg-primary p-3 font-mono text-[12px] leading-relaxed text-text-secondary">
                 {body}
               </pre>
+            )}
+
+            {!running && !failed && event.shownImage && (
+              <ShownImageCard image={event.shownImage} />
             )}
           </div>
         );
