@@ -426,6 +426,14 @@ Settings and chat history are stored locally at:
 - Windows: `C:\Users\<you>\.nohomo\`
 - Mac/Linux: `~/.nohomo/`
 
+**Each chat remembers only its own work.** What the agent concludes with
+`note_finding` is kept in that chat's workspace and never shown to another
+chat. Sharing facts about your PC across chats is opt-in: set
+`APIM_SHARED_FINDINGS=1`, and even then only notes the agent explicitly files
+as machine-wide are shared (nothing is promoted automatically). An older
+shared file, `data/machine-findings.json`, is ignored unless sharing is on
+and can be deleted.
+
 ## License
 
 MIT License - Feel free to modify and distribute!
