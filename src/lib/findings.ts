@@ -72,23 +72,19 @@ const emptyStore = (): FindingsStore => ({ version: 1, findings: [] });
 export const MACHINE_SCOPE = "__machine__";
 
 /**
- * Does this claim describe the machine's toolchain rather than the project?
+ * Whether findings may be shared between chats at all. Off by default.
  *
- * Measured on real runs: the model recorded "Luau CLI (tools/luau/luau)
- * sandboxes every chunk: each main file and each require'd module gets its
- * own fresh global table" — the fact every run spent ~20 minutes probing
- * for — as a plain workspace finding, so the next chat would probe it all
- * over again. The model does not reach for scope 'machine' on its own, so a
- * claim that names a tool AND describes tool behaviour is also kept
- * machine-wide. Deliberately two-part: "the CLI" alone, or "sandbox" in a
- * game-design sense, is not enough.
+ * Reported as a cross-chat memory leak: a new chat opened already "knowing"
+ * another chat's conclusions ("WSL cannot start on this PC", long after it
+ * was fixed), because notes were promoted to the machine store by a keyword
+ * guess and that store rode every chat's prompt. Each chat now remembers
+ * only its own work. APIM_SHARED_FINDINGS=1 brings the shared store back,
+ * and even then only for notes the agent deliberately files as machine-wide.
  */
-export function looksLikeToolchainFact(claim: string): boolean {
-  const tool =
-    /\b(CLI|command[- ]line|interpreter|compiler|binary|executable|runtime|toolchain|luau(?:-analyze)?|python3?|node(?:\.js)?|npm|pip|gcc|clang|cargo|rustc|go toolchain|dotnet|java|powershell|cmd\.exe|bash|git)\b/i;
-  const behaviour =
-    /\b(sandbox(?:es|ed)?|readonly|read-only|not available|unavailable|is nil|no `?io`?|lacks?|supports?|does(?:n't| not) support|flag|option|version|requires?|installed|on PATH|env(?:ironment)?|global table|exit code|stdout|stderr)\b/i;
-  return tool.test(claim) && behaviour.test(claim);
+export function sharedFindingsEnabled(
+  env: Record<string, string | undefined> = process.env
+): boolean {
+  return env.APIM_SHARED_FINDINGS === "1";
 }
 
 /** Most machine findings shown per prompt: facts, not a diary. */
