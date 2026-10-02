@@ -11,6 +11,7 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { wslCannotStart, WINDOWS_FALLBACK } from "../src/lib/sandbox-run.ts";
 import {
   decodeWslOutput,
   parseWslDistros,
@@ -677,6 +678,15 @@ test("no sandbox command inherits the Windows working directory", () => {
 test("0xd0000034 (Linux cannot start) is explained as WSL 1's driver / pending restart", () => {
   const why = explainWslError("Error: 0xd0000034\r\nError code: Wsl/Service/CreateInstance/0xd0000034");
   assert.ok(why && /lxcore/.test(why) && /Restart/.test(why));
+});
+
+
+test("a sandbox that cannot start sends the agent to the hidden Windows desktop", () => {
+  assert.ok(wslCannotStart("Error: 0xd0000034\r\nError code: Wsl/Service/CreateInstance/0xd0000034"));
+  assert.ok(wslCannotStart("Error code: Wsl/Service/RegisterDistro/CreateVm/HCS/HCS_E_SERVICE_NOT_AVAILABLE"));
+  assert.ok(!wslCannotStart("python3: can't open file 'x.py': [Errno 2] No such file or directory"));
+  assert.ok(/start_process \(hidden=true/.test(WINDOWS_FALLBACK) && /screenshot_window/.test(WINDOWS_FALLBACK));
+  assert.ok(/do not ask the user to repair Windows/i.test(WINDOWS_FALLBACK));
 });
 
 // ---------------------------------------------------------------------------

@@ -43,15 +43,37 @@ function bringUp():
 }
 
 /** A sentence the model can act on when the sandbox is not ready. */
+/**
+ * What to do instead when the Linux sandbox cannot run. Testing a GUI out of
+ * the user's sight does not need Linux: start_process with hidden=true puts it
+ * on a hidden Windows desktop and screenshot_window captures it there.
+ */
+export const WINDOWS_FALLBACK =
+  "Do not retry the sandbox and do not ask the user to repair Windows. " +
+  "Work on Windows directly instead: run code with run_command, start a GUI " +
+  "with start_process (hidden=true, so it opens on a hidden desktop the user " +
+  "never sees), then capture it with screenshot_window (process_id) and look " +
+  "with view_image. Use Windows builds of tools (Python, Node, Lua) there.";
+
+/**
+ * WSL failing to start an instance at all, as opposed to the command inside
+ * it failing. Reported: Wsl/Service/CreateInstance/0xd0000034 on a PC whose
+ * Windows cannot start WSL 1 or WSL 2 - every sandbox_run then failed the
+ * same way, and the agent kept retrying it.
+ */
+export function wslCannotStart(output: string): boolean {
+  return /Wsl\/Service\/CreateInstance\/|Wsl\/Service\/CreateVm\/|0xd0000034|HCS_E_/i.test(
+    String(output ?? "")
+  );
+}
+
 function notReady(error: string, needsSetup?: boolean): SandboxRunResult {
   return {
     ok: false,
     content: needsSetup
-      ? `The sandbox is not set up yet. Ask the user to open the Sandbox ` +
-        `panel (the /sandbox command) and click Set up — it installs a small ` +
-        `private Linux once. ${error}`
-      : `The sandbox is not available: ${error}`,
-    summary: "Sandbox not ready",
+      ? `The Linux sandbox is not set up on this PC. ${error}\n${WINDOWS_FALLBACK}`
+      : `The Linux sandbox is not available on this PC: ${error}\n${WINDOWS_FALLBACK}`,
+    summary: "Sandbox not available",
   };
 }
 
@@ -136,6 +158,16 @@ export async function runSandboxCommand(
         return;
       }
       const label = up.sandbox.distro;
+      if (code !== 0 && wslCannotStart(trimmed)) {
+        done({
+          ok: false,
+          content:
+            `The Linux sandbox cannot start on this PC (WSL failed before ` +
+            `running anything):\n${trimmed.trim()}\n${WINDOWS_FALLBACK}`,
+          summary: "Sandbox cannot start on this PC",
+        });
+        return;
+      }
       done({
         ok: code === 0,
         content:
