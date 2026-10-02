@@ -20,7 +20,7 @@ import {
   buildPluginDirectives,
   pinPluginDirectivesOnFirstSystem,
 } from "@/lib/plugins";
-import { workspaceToolsFor, runTool, WORK_LOOP_PROMPT, GITHUB_TOOLS } from "@/lib/tools";
+import { workspaceToolsFor, withSharedFindingsScope, runTool, WORK_LOOP_PROMPT, GITHUB_TOOLS } from "@/lib/tools";
 import { callMcpTool, parseMcpToolName, MCP_TOOL_PREFIX } from "@/lib/mcp";
 import { getMcpServer, mcpToolsForModel } from "@/lib/mcp-store";
 import { RunFileMemory } from "@/lib/run-memory";
@@ -110,7 +110,7 @@ import {
   formatBinaryLedgerForPrompt,
   replaceBinaryLedger,
 } from "@/lib/binary-ledger";
-import { MACHINE_SCOPE, formatMachineFindingsForPrompt,
+import { MACHINE_SCOPE, formatMachineFindingsForPrompt, sharedFindingsEnabled,
   readFindings,
   formatFindingsForPrompt,
   replaceFindings,
@@ -1499,9 +1499,13 @@ Ask before you build the wrong thing. If a choice would change what you produce 
         let findingsBlock = "";
         if (workspaceEnabled) {
           try {
+            // Only this chat's own findings, unless the user opted in to
+            // sharing (see sharedFindingsEnabled): another chat's
+            // conclusions must not steer this one.
             findingsBlock =
-              formatMachineFindingsForPrompt(await readFindings(MACHINE_SCOPE)) +
-              formatFindingsForPrompt(await readFindings(workspace));
+              (sharedFindingsEnabled()
+                ? formatMachineFindingsForPrompt(await readFindings(MACHINE_SCOPE))
+                : "") + formatFindingsForPrompt(await readFindings(workspace));
           } catch (e) {
             console.error("Could not read findings:", e);
           }
@@ -2864,7 +2868,9 @@ Ask before you build the wrong thing. If a choice would change what you produce 
              * Tavily or Exa key.
              */
             dsRequestBody.tools = [
-              ...workspaceToolsFor(model, target.model.openToolLimits),
+              ...(sharedFindingsEnabled()
+                ? withSharedFindingsScope(workspaceToolsFor(model, target.model.openToolLimits))
+                : workspaceToolsFor(model, target.model.openToolLimits)),
               // Git/PR tools exist only for a workspace connected to GitHub.
               ...(githubConnection ? GITHUB_TOOLS : []),
             ].filter((t) => {

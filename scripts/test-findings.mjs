@@ -174,48 +174,81 @@ await rm(path.join(DATA_ROOT, "workspaces", WS), { recursive: true, force: true 
   await rm(path.join(DATA_ROOT, "workspaces", A), { recursive: true, force: true });
 }
 
-// Machine-wide findings: toolchain facts proven once, shown in every chat.
+// Reported: "older findings in another chat show up in a new chat — a cross
+// memory leak". Findings were copied to a machine-wide store by a keyword
+// guess, and that store rode every chat's prompt. Chats are isolated now;
+// sharing is opt-in (APIM_SHARED_FINDINGS=1) and never automatic.
 {
   const F = await load("src/lib/findings.ts");
-  const { runTool } = await load("src/lib/tools.ts");
+  const T = await load("src/lib/tools.ts");
+  const { runTool } = T;
+  const OTHER = "findtest-other-chat";
+  const pass = (label, ok) => {
+    console.log(`${ok ? "PASS" : "FAIL"}  ${label}`);
+    if (!ok) failures++;
+  };
+  const saved = process.env.APIM_SHARED_FINDINGS;
+  delete process.env.APIM_SHARED_FINDINGS;
   await rm(path.join(DATA_ROOT, "machine-findings.json"), { force: true });
-  const r = await runTool(WS, "note_finding", {
-    claim: "This Luau CLI build has no io library and _G is readonly; inject mocks with loadstring+setfenv.",
-    evidence: "probe_io.luau printed io=nil; writing _G raised 'readonly table'",
+
+  // The exact kinds of note that used to leak.
+  const r1 = await runTool(WS, "note_finding", {
+    claim: "WSL is unavailable on this PC: wsl.exe exits with 0xd0000034, so the sandbox cannot run",
+    evidence: "sandbox_run returned Wsl/Service/CreateInstance/0xd0000034",
+  });
+  await runTool(WS, "note_finding", {
+    claim: "Luau CLI (tools/luau/luau) sandboxes every chunk: each module gets its own fresh global table",
+    evidence: "rawset on _G raised 'attempt to modify a readonly table'",
+  });
+  // Even asking for machine scope does nothing unless the user opted in.
+  const r3 = await runTool(WS, "note_finding", {
+    claim: "node on PATH is version 18 and lacks fetch",
     scope: "machine",
   });
   const machine = await F.readFindings(F.MACHINE_SCOPE);
-  const block = F.formatMachineFindingsForPrompt(machine);
-  const ok1 = r.ok && /EVERY chat/.test(r.content) && machine.findings.length === 1 &&
-    /<machine-findings>/.test(block) && /no io library/.test(block);
-  console.log(`${ok1 ? "PASS" : "FAIL"}  a machine-scoped finding is stored once and rendered for every chat`);
-  if (!ok1) failures++;
-  const local = await F.readFindings(WS);
-  const ok2 = !local.findings.some((f) => /no io library/.test(f.claim));
-  console.log(`${ok2 ? "PASS" : "FAIL"}  it does not land in the project's own findings`);
-  if (!ok2) failures++;
-  const id = machine.findings[0].id;
-  const rev = await runTool(WS, "note_finding", { id, status: "disproved", claim: "io exists after all" });
-  const after = await F.readFindings(F.MACHINE_SCOPE);
-  const ok3 = rev.ok && after.findings.find((f) => f.id === id)?.status === "disproved";
-  console.log(`${ok3 ? "PASS" : "FAIL"}  a machine finding can be retired by id from any chat`);
-  if (!ok3) failures++;
+  pass("by default nothing is written to the shared store, not even with scope 'machine'",
+    machine.findings.length === 0);
+  pass("and the agent is told the note stays in this chat",
+    /in this chat/.test(r1.content) && !/EVERY chat/.test(r1.content + r3.content));
+  const other = await F.readFindings(OTHER);
+  pass("a brand-new chat starts with none of them", other.findings.length === 0);
+
   const route = readFileSync(path.join(ROOT, "src/app/api/chat/route.ts"), "utf8");
-  const ok4 = /formatMachineFindingsForPrompt\(await readFindings\(MACHINE_SCOPE\)\)/.test(route);
-  console.log(`${ok4 ? "PASS" : "FAIL"}  every chat's prompt carries the machine findings`);
-  if (!ok4) failures++;
-  // The model never picks scope 'machine' itself (measured on real runs):
-  // a toolchain fact filed as a project finding is kept machine-wide too.
-  await runTool(WS, "note_finding", {
-    claim: "Luau CLI (tools/luau/luau) sandboxes every chunk: each main file and each require'd module gets its own fresh global table",
-    evidence: "_probe_shared_a.luau: rawset on _G raised 'attempt to modify a readonly table'",
+  pass("the prompt only carries the shared store when sharing is on",
+    /sharedFindingsEnabled\(\)\s*\?\s*formatMachineFindingsForPrompt\(await readFindings\(MACHINE_SCOPE\)\)\s*:\s*""/.test(route));
+  const note = (tools) => tools.find((t) => t.function.name === "note_finding").function.parameters.properties;
+  pass("the agent is not offered scope 'machine' by default", !("scope" in note(T.WORKSPACE_TOOLS)));
+  pass("but is when sharing is on", "scope" in note(T.withSharedFindingsScope(T.WORKSPACE_TOOLS)));
+  pass("sharing is off unless APIM_SHARED_FINDINGS is exactly 1",
+    !F.sharedFindingsEnabled({}) && !F.sharedFindingsEnabled({ APIM_SHARED_FINDINGS: "true" }) &&
+      F.sharedFindingsEnabled({ APIM_SHARED_FINDINGS: "1" }));
+
+  // Opted in: an explicit machine note is shared and retirable; nothing is
+  // promoted on its own.
+  process.env.APIM_SHARED_FINDINGS = "1";
+  const r4 = await runTool(WS, "note_finding", {
+    claim: "This Luau CLI build has no io library and _G is readonly; inject mocks with loadstring+setfenv.",
+    scope: "machine",
   });
-  await runTool(WS, "note_finding", { claim: "The panel's drag handler must use InputChanged, not MouseMoved." });
-  const auto = F.formatMachineFindingsForPrompt(await F.readFindings(F.MACHINE_SCOPE));
-  const ok5 = /sandboxes every chunk/.test(auto) && !/drag handler/.test(auto);
-  console.log(`${ok5 ? "PASS" : "FAIL"}  a toolchain fact is kept machine-wide automatically; a project fact is not`);
-  if (!ok5) failures++;
+  await runTool(WS, "note_finding", {
+    claim: "python3 on this PC lacks tkinter and is not on PATH as python",
+  });
+  const shared = await F.readFindings(F.MACHINE_SCOPE);
+  pass("with sharing on, an explicit machine note is shared",
+    r4.ok && /EVERY chat/.test(r4.content) && shared.findings.length === 1 &&
+      /no io library/.test(F.formatMachineFindingsForPrompt(shared)));
+  pass("and a note without scope is still never promoted",
+    !shared.findings.some((f) => /tkinter/.test(f.claim)));
+  const id = shared.findings[0].id;
+  const rev = await runTool(OTHER, "note_finding", { id, status: "disproved", claim: "io exists after all" });
+  const after = await F.readFindings(F.MACHINE_SCOPE);
+  pass("a shared note can be retired by id from another chat",
+    rev.ok && after.findings.find((f) => f.id === id)?.status === "disproved");
+
+  if (saved === undefined) delete process.env.APIM_SHARED_FINDINGS;
+  else process.env.APIM_SHARED_FINDINGS = saved;
   await rm(path.join(DATA_ROOT, "machine-findings.json"), { force: true });
+  await rm(path.join(DATA_ROOT, "workspaces", OTHER), { recursive: true, force: true });
 }
 
 if (failures) {

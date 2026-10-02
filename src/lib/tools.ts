@@ -27,7 +27,7 @@ import {
   inspectWorkspaceBinary,
 } from "@/lib/binaries";
 import { noteBinaryInspection } from "@/lib/binary-ledger";
-import { looksLikeToolchainFact, MACHINE_SCOPE,
+import { MACHINE_SCOPE, sharedFindingsEnabled,
   addFinding,
   reviseFinding,
 } from "@/lib/findings";
@@ -1507,12 +1507,6 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
             description:
               "Id [f...] of an existing finding to correct; with status, marks it wrong instead of adding a new one.",
           },
-          scope: {
-            type: "string",
-            enum: ["workspace", "machine"],
-            description:
-              "'machine' for a fact about this computer or its tools that holds in ANY project (a CLI's quirks, what is installed, what an OS command does) — kept once and shown in every chat, so later chats do not re-probe it. Default 'workspace' for anything about this project.",
-          },
           status: {
                       type: "string",
                       enum: ["active", "disproved"],
@@ -2187,6 +2181,38 @@ export const WORK_LOOP_PROMPT =
  * option on) gets the same tools with the per-call ceilings removed
  * from the descriptions, so it does not self-limit to 60 files.
  */
+/**
+ * note_finding's `scope` parameter, offered only when the user turned shared
+ * findings on (APIM_SHARED_FINDINGS=1). Without it every finding stays in
+ * the chat that made it.
+ */
+export function withSharedFindingsScope(tools: ToolDefinition[]): ToolDefinition[] {
+  return tools.map((tool) => {
+    if (tool.function.name !== "note_finding") return tool;
+    const parameters = tool.function.parameters as {
+      properties: Record<string, unknown>;
+    } & Record<string, unknown>;
+    return {
+      ...tool,
+      function: {
+        ...tool.function,
+        parameters: {
+          ...parameters,
+          properties: {
+            ...parameters.properties,
+            scope: {
+              type: "string",
+              enum: ["workspace", "machine"],
+              description:
+                "'machine' only for a fact about this computer or its tools that holds in ANY project (a CLI's quirks, what is installed) — shown in every chat. Default 'workspace': anything about this project, this task, or a state that can change (a service down, a feature broken).",
+            },
+          },
+        },
+      },
+    };
+  });
+}
+
 export function workspaceToolsFor(
   modelId?: string | null,
   openLimits?: boolean
@@ -5680,7 +5706,9 @@ async function runToolInner(
         }
         const id = str(args, "id");
         const status = str(args, "status");
-        const machine = str(args, "scope") === "machine";
+        // Shared only when the user opted in, and only when asked for.
+        const shared = sharedFindingsEnabled();
+        const machine = shared && str(args, "scope") === "machine";
         const store = machine ? MACHINE_SCOPE : workspaceId;
         if (id && status === "disproved") {
           const reason = str(args, "evidence") || "Corrected by later analysis.";
@@ -5697,7 +5725,7 @@ async function runToolInner(
             { id, reason, status: "disproved" },
             replacement
           );
-          if (!revised.updated && !revised.alreadyRetired) {
+          if (shared && !revised.updated && !revised.alreadyRetired) {
             revised = await reviseFinding(
               machine ? workspaceId : MACHINE_SCOPE,
               { id, reason, status: "disproved" },
@@ -5731,16 +5759,12 @@ async function runToolInner(
           refs,
           evidence,
         });
-        // A toolchain fact filed as a project finding is also kept
-        // machine-wide, so the next chat does not re-probe it.
-        const alsoMachine =
-          !machine && str(args, "scope") !== "workspace" && looksLikeToolchainFact(claim);
-        if (alsoMachine) {
-          await addFinding(MACHINE_SCOPE, { claim, refs, evidence }).catch(() => undefined);
-        }
+        // Never promoted behind the agent's back: a keyword guess copying
+        // "a tool + unavailable" into every chat is how one chat's stale
+        // conclusions leaked into new ones.
         return {
           ok: true,
-          content: `Finding recorded [${finding.id}]. It will be shown on every later turn ${machine || alsoMachine ? "in EVERY chat on this machine" : "in this workspace"} so you do not re-derive it. If it turns out wrong, note_finding again with id=${finding.id} and status='disproved'. When the work it describes is DONE, retire it the same way (id=${finding.id}, status='disproved', claim 'done — shipped in <commit/fix>') so finished items stop riding later prompts.`,
+          content: `Finding recorded [${finding.id}]. It will be shown on every later turn ${machine ? "in EVERY chat on this machine" : "in this chat"} so you do not re-derive it. If it turns out wrong, note_finding again with id=${finding.id} and status='disproved'. When the work it describes is DONE, retire it the same way (id=${finding.id}, status='disproved', claim 'done — shipped in <commit/fix>') so finished items stop riding later prompts.`,
           summary: "Finding recorded",
         };
       }
