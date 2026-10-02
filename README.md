@@ -338,7 +338,8 @@ character count and a hash of the bytes handed over.
 ## The sandbox — running things invisibly on your PC
 
 The hidden-launch route above puts a window on a second desktop. The **sandbox**
-goes further: a whole private Linux (WSL2) on your own machine that the agent
+goes further: a whole private Linux (WSL 2, or WSL 1 where WSL 2 cannot run)
+on your own machine that the agent
 runs work inside, and that you never see — no window, no taskbar entry, no focus
 stolen, fine to leave running while you game. It is what lets the agent actually
 *run and test* — execute a build, trace a sample under `gdb`/`strace`, stand a
@@ -369,26 +370,40 @@ on **WSL 1** instead, which keeps its files in a plain folder and needs no
 virtual disk or Hyper-V VM. Everything the sandbox uses works there. Once the
 drivers are fixed, **Upgrade to WSL 2** in the panel converts it in place.
 
-If WSL 1 is refused too, setup tells apart the three causes behind that one
+If WSL 1 is refused too, setup tells apart the causes behind that one
 message: Windows is waiting for a restart (use Restart, not Shut down), the
 feature is really off (one click turns it on; the result is read back from
-DISM's own exit code instead of assumed), or the WSL 1 driver is on disk but
-unregistered. A missing in-box driver registration (`vdrvroot`, `FsDepends`,
-`lxcore`) cannot be rebuilt safely by an app; the fix is Windows' repair
-install: **Settings → System → Recovery → Fix problems using Windows Update →
-Reinstall now**, which keeps files, apps and settings.
+DISM's own exit code instead of assumed), or a driver's registration was
+deleted. A common one on cleaned-up ("debloated") Windows is
+`Wsl/Service/CreateInstance/0xd0000034`: the Plan 9 redirector (`P9Rdr`) and
+`Rdbss`, which WSL opens on every start, had their service entries removed
+while the driver files stayed. Setup detects that and prints the exact
+`sc.exe create` commands (and the `sc.exe delete` that undoes them).
 
-**Sealed off.** The sandbox distro has Windows interop turned off and no drives
-auto-mounted (`/etc/wsl.conf`); the only thing it can see is the **current
-chat's workspace**, mounted per chat under `/ws/<id>`. Two chats never share
-files, and nothing the sandbox does can reach the rest of your PC.
+**Workspace, not isolation.** Interop is off and no drives are auto-mounted
+(`/etc/wsl.conf`); the current chat's workspace is mounted under `/ws/<id>`.
+On WSL 1, which can only mount whole drives, that means mounting the drive at a
+hidden path and attaching the folder from there. Treat the sandbox as a place
+to run things *out of your sight*, not as a security boundary: it runs as
+root, and root in any WSL distro can reach your drives. If the folder cannot
+be mounted at all, commands still run (in `/root/work`) and the result says
+why, with every mount attempt's own error.
 
 **Two tools, both approved.** `sandbox_run` runs a shell command inside it
-(foreground, or `background: true` for a server/watcher/GUI); `sandbox_screenshot`
-grabs the off-screen display into the workspace for `view_image`. Each command
-still shows you the approval prompt, exactly like `run_command` — the sandbox
-changes *where* things run, never *whether* you said yes. Remove it any time
+(foreground, or `background: true` for a server/watcher/GUI). The agent drives
+a GUI with `xdotool` (click, type) the way a person would; there is no window
+manager, so it uses `windowfocus`. `sandbox_screenshot` waits for a window to
+appear and **crops to the visible windows**, so the picture is the app rather
+than a mostly black 1600x1000 screen (`full_screen: true` for everything); it
+lands in `screenshots/` and shows up in the chat. Each command still shows you
+the approval prompt, exactly like `run_command`. Remove the sandbox any time
 from the same panel (`wsl --unregister`) to reclaim the space.
+
+**Check it works.** The end of setup, and the **Check it works** button, run
+one real command the way the agent does and report each part: whether the
+sandbox sees the chat folder and its writes reach Windows, the Python and
+Node versions (a `node` that fails with "Exec format error" is named), and
+whether the off-screen display starts.
 
 ## Batching and long agent runs
 
