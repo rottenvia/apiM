@@ -4855,6 +4855,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
               changedPath?: string;
               image?: { path: string; dataUrl: string };
               search?: ToolResult["search"];
+              display?: ToolResult["display"];
             };
 
             if (!parsed.ok) {
