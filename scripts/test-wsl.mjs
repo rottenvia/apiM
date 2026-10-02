@@ -10,7 +10,7 @@
  */
 
 import assert from "node:assert/strict";
-import { readFileSync, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
@@ -366,18 +366,47 @@ test("capture streams the PNG over stdout, not through the mount", () => {
 const hasBash = (() => {
   try { return spawnSync("bash", ["-c", "true"]).status === 0; } catch { return false; }
 })();
-function runRunner(script, { viaStdin = false } = {}) {
+function runRunner(script, { viaStdin = false, winDir = "C:\\nowhere", prepare } = {}) {
   const tmp = mkdtempSync(path.join(os.tmpdir(), "apim-runner-"));
   const work = path.join(tmp, "work");
+  const drives = path.join(tmp, "drives");
+  prepare?.(drives);
+  const mnt = path.join(tmp, "mnt");
   const r = spawnSync(
     "bash",
-    ["-c", SANDBOX_RUNNER, "apim-sandbox", viaStdin ? "-" : Buffer.from(script).toString("base64"),
-     path.join(tmp, "mnt"), "C:\\nowhere"],
-    { input: viaStdin ? script : "", encoding: "utf8", env: { ...process.env, APIM_WORK: work, DISPLAY: "" } }
+    ["-c", SANDBOX_RUNNER, "apim-sandbox", viaStdin ? "-" : Buffer.from(script).toString("base64"), mnt, winDir],
+    {
+      input: viaStdin ? script : "",
+      encoding: "utf8",
+      env: { ...process.env, APIM_WORK: work, APIM_DRIVES: drives, DISPLAY: "" },
+    }
   );
+  const after = (rel) => {
+    try { return readFileSync(path.join(drives, rel), "utf8"); } catch { return null; }
+  };
+  const result = { ...r, work, after: { newFile: after("C/ws/chat/new.txt") } };
+  spawnSync("umount", [mnt], { stdio: "ignore" }); // only if the bind worked here
   rmSync(tmp, { recursive: true, force: true });
-  return { ...r, work };
+  return result;
 }
+
+// Reported: "wrong fs type, bad option, bad superblock" for the chat folder on
+// WSL 1, which mounts whole drives only. Here the direct mount fails (no
+// drvfs) and the drive "is mounted" already, like it is after the first run.
+test("runner: on WSL 1 the chat folder is reached through the drive root", () => {
+  if (!hasBash) return;
+  const r = runRunner("cat marker.txt; echo made > new.txt", {
+    winDir: "C:\\ws\\chat",
+    prepare: (drives) => {
+      mkdirSync(path.join(drives, "C", "ws", "chat"), { recursive: true });
+      writeFileSync(path.join(drives, "C", "ws", "chat", "marker.txt"), "marker-ok\n");
+    },
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(r.stdout.includes("marker-ok"), r.stdout + r.stderr);
+  assert.ok(!/could not be mounted/.test(r.stderr), r.stderr);
+  assert.equal(r.after.newFile, "made\n");
+});
 
 test("runner: a failed mount explains itself and the command still runs", () => {
   if (!hasBash) return;
