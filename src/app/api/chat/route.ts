@@ -5598,7 +5598,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
                     ok: true,
                     content:
                       `Saved a screenshot of the sandbox display (${shot.display}) ` +
-                      `to ${shot.fileName}. Open it with view_image to see it.`,
+                      `to ${shot.fileName}. Open it with view_image to see it.` +
+                      (shot.note ? `\n${shot.note}` : ""),
                     summary: "Sandbox screenshot saved",
                   }
                 : {

@@ -16,8 +16,10 @@
  */
 
 import { spawn } from "node:child_process";
+import { promises as fs } from "node:fs";
+import path from "node:path";
 import {
-  activeWslSandbox,
+  decodeCapture,
   ensureWslSandbox,
   sandboxCaptureInvocation,
   wrapForSandbox,
@@ -106,8 +108,9 @@ export async function runSandboxCommand(
   return new Promise<SandboxRunResult>((resolve) => {
     const child = spawn(inv.command, inv.args, {
       windowsHide: true,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [inv.stdin === null ? "ignore" : "pipe", "pipe", "pipe"],
     });
+    if (inv.stdin !== null) child.stdin?.end(inv.stdin);
     let out = "";
     let timedOut = false;
     let settled = false;
@@ -205,6 +208,9 @@ export async function startSandboxProcess(
     windowsHide: true,
     stdio: ["pipe", "pipe", "pipe"],
   });
+  // Too long for the command line: the script goes through stdin, which then
+  // has to close, so this one process cannot take input later.
+  if (inv.stdin !== null) child.stdin?.end(inv.stdin);
 
   // Adopt it into the same registry the host processes live in, marked hidden
   // so the dock shows "sandbox" and screenshot_window knows where to look.
@@ -224,42 +230,63 @@ export async function startSandboxProcess(
 
 /**
  * Screenshot the sandbox's off-screen display into the workspace and return
- * the file name view_image should open.
+ * the file name view_image should open. The PNG travels over stdout, so this
+ * works even when the chat folder could not be mounted in the sandbox.
  */
 export async function screenshotSandbox(
   workspaceId: string,
   outFileName = `sandbox-${Date.now()}.png`
 ): Promise<
-  { ok: true; fileName: string; display: string } | { ok: false; error: string; needsSetup?: boolean }
+  | { ok: true; fileName: string; display: string; note: string }
+  | { ok: false; error: string; needsSetup?: boolean }
 > {
-  const sandbox = activeWslSandbox();
-  if (!sandbox) {
-    return {
-      ok: false,
-      error:
-        "Nothing is running in the sandbox yet. Start something with " +
-        "sandbox_run (background:true) first, then screenshot it.",
-    };
-  }
-  const { invocation } = sandboxCaptureInvocation({
-    sandbox,
-    workspaceId,
-    workspaceWinDir: workspaceDirectory(workspaceId),
-    outFileName,
-  });
-  return new Promise((resolve) => {
-    const child = spawn(invocation.command, invocation.args, {
+  // Written on the Windows side now, so the name must not climb out of the
+  // workspace ("..\\x.png" survives a split on "/").
+  const base = path.win32.basename(path.posix.basename(String(outFileName)));
+  const safeName = /\.png$/i.test(base)
+    ? base.replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "") || `sandbox-${Date.now()}.png`
+    : `sandbox-${Date.now()}.png`;
+  // Not only after a sandbox_run: after an app restart the display is
+  // brought up here, and the runner restarts it if something killed it.
+  const up = bringUp();
+  if (!up.ok) return { ok: false, error: `${up.error}\n${WINDOWS_FALLBACK}`, needsSetup: up.needsSetup };
+  const sandbox = up.sandbox;
+  const dir = workspaceDirectory(workspaceId);
+  const inv = sandboxCaptureInvocation({ sandbox, workspaceId, workspaceWinDir: dir });
+  const run = await new Promise<{ code: number | null; out: string; err: string }>((resolve) => {
+    const child = spawn(inv.command, inv.args, {
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
+    const out: Buffer[] = [];
     let err = "";
-    child.stderr?.on("data", (d) => (err += d.toString()));
-    child.on("error", (e) =>
-      resolve({ ok: false, error: `capture failed: ${e.message}` })
-    );
+    const timer = setTimeout(() => child.kill(), 60_000);
+    child.stdout?.on("data", (d: Buffer) => out.push(d));
+    child.stderr?.on("data", (d: Buffer) => (err += d.toString("utf8")));
+    child.on("error", (e) => {
+      clearTimeout(timer);
+      resolve({ code: null, out: "", err: e.message });
+    });
     child.on("close", (code) => {
-      if (code === 0) resolve({ ok: true, fileName: outFileName, display: sandbox.display });
-      else resolve({ ok: false, error: `capture exited ${code}: ${err.slice(0, 300)}` });
+      clearTimeout(timer);
+      resolve({ code, out: Buffer.concat(out).toString("latin1"), err });
     });
   });
+  const png = decodeCapture(run.out);
+  if (!png) {
+    const why = `${run.err}\n${run.out}`.trim().slice(0, 600) || `exit ${run.code}`;
+    return {
+      ok: false,
+      error: wslCannotStart(why)
+        ? `The Linux sandbox cannot start on this PC:\n${why}\n${WINDOWS_FALLBACK}`
+        : `The capture failed: ${why}`,
+    };
+  }
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(path.join(dir, safeName), png);
+  const note = run.err
+    .split(/\r?\n/)
+    .filter((l) => l.startsWith("[sandbox]"))
+    .join("\n");
+  return { ok: true, fileName: safeName, display: sandbox.display, note };
 }
