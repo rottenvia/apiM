@@ -3,6 +3,10 @@
 
 @import "tailwindcss";
 
+/* Classic side-by-side reply layout, opt-in from Settings
+   (<html data-layout="split">). The default is Claude's single column. */
+@custom-variant split (&:where([data-layout="split"], [data-layout="split"] *));
+
 /* ---------------------------------------------------------------------------
    Design tokens — warm, neutral dark palette (Claude-inspired).
    One restrained terracotta accent. No rainbow gradients.
@@ -407,6 +411,17 @@ input:focus-visible {
 --------------------------------------------------------------------------- */
 .prose-chat {
   line-height: 1.7;
+}
+
+/* A reply's body skips style and layout entirely while it is off screen.
+   Reported: streaming got laggier the longer a chat was; every update
+   restyled and re-laid out the whole transcript (style recalc per update
+   grew 3x across one reply). "auto" remembers each body's real height once
+   drawn, so scrolling back up does not jump; until then 320px stands in.
+   Still found by the browser's Ctrl+F. */
+.cv-body {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 320px;
 }
 
 .prose-chat p {

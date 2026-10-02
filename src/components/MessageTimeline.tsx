@@ -4,6 +4,7 @@ import { memo, useDeferredValue, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ToolActivity } from "@/components/ToolActivity";
+import { BlockMarkdown } from "@/components/BlockMarkdown";
 import type { ToolEvent } from "@/components/ToolActivity";
 import { buildTimelineRows, textHasTable } from "@/lib/timeline";
 import type { TimelineEntry } from "@/lib/timeline";
@@ -11,7 +12,15 @@ import type { TimelineEntry } from "@/lib/timeline";
 export type { TimelineEntry } from "@/lib/timeline";
 
 /**
- * Narration on the left, actions on the right, in the order they happened.
+ * Narration and the actions it led to, in the order they happened.
+ *
+ * Default is Claude's layout: one column, each stretch of prose followed by
+ * its tool rows, no rules. Reported: the side-by-side split appeared only
+ * while a row had both prose and tools, so a paragraph jumped into a narrow
+ * column with a divider beside it the moment a tool started, and back out
+ * for a table ("from normal to lines, from lines to normal"), leaving
+ * lopsided gaps. The split is kept as an opt-in (Settings, html
+ * data-layout="split"), styled through the `split:` variant.
  *
  * The model talks between tool calls, so "I'll create the file" and the write
  * that followed belong together. Concatenating all the prose into one block
@@ -25,11 +34,7 @@ const RowMarkdown = memo(function RowMarkdown({
   text: string;
   components?: React.ComponentProps<typeof ReactMarkdown>["components"];
 }) {
-  return (
-    <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
-      {text}
-    </ReactMarkdown>
-  );
+  return <BlockMarkdown text={text} components={components} />;
 });
 
 /**
@@ -91,8 +96,10 @@ const TimelineRow = memo(function TimelineRow({
               // Only split when there is something on both sides. A row that
               // is only prose uses the full width, so ordinary paragraphs
               // don't end up in a narrow column beside nothing.
+              // Claude layout (the default): always one column, prose then its
+              // tools. The classic side-by-side split is opt-in (split:).
               split
-                ? "gap-x-0 md:grid-cols-[minmax(0,1fr)_auto_minmax(0,20rem)]"
+                ? "grid-cols-1 gap-x-0 split:md:grid-cols-[minmax(0,1fr)_auto_minmax(0,20rem)]"
                 : "grid-cols-1"
               /*
                * A rule between rows, not just above the first.
@@ -108,7 +115,7 @@ const TimelineRow = memo(function TimelineRow({
               afterThink
                 ? "mt-1.5"
                 : !first
-                  ? "mt-4 border-t border-border/60 pt-4"
+                  ? "mt-3 split:mt-4 split:border-t split:border-border/60 split:pt-4"
                   : ""
             }`}
           >
@@ -119,7 +126,7 @@ const TimelineRow = memo(function TimelineRow({
                   // line ends clear of the rule instead of touching it, and
                   // break-words so an unbroken token wraps rather than
                   // spilling across it.
-                  split ? "md:pr-6" : ""
+                  split ? "split:md:pr-6" : ""
                 }`}
               >
                 <RowMarkdown text={shown} components={markdownComponents} />
@@ -133,13 +140,13 @@ const TimelineRow = memo(function TimelineRow({
                 the content. */}
             {split && (
               <span
-                className="hidden w-px self-stretch bg-border md:block"
+                className="hidden w-px self-stretch bg-border split:md:block"
                 aria-hidden="true"
               />
             )}
 
             {hasTools && (
-              <div className={`min-w-0 ${split ? "md:pl-6" : ""}`}>
+              <div className={`min-w-0 ${split ? "split:md:pl-6" : ""}`}>
                 <ToolActivity events={tools} onOpenFile={onOpenFile} />
               </div>
             )}
@@ -236,7 +243,7 @@ const ThinkRow = memo(function ThinkRow({
   return (
     // The round's divider sits above its thinking, so the thought and the
     // narration and tools it led to read as one group.
-    <div className={!first ? "mt-3 border-t border-border/40 pt-3" : ""}>
+    <div className={!first ? "mt-3 split:border-t split:border-border/40 split:pt-3" : ""}>
       {/* A finished thought is one quiet line in the same grammar as the
           tool rows under it — icon square, label, detail — not a bordered
           box of its own width. Only the live thought is a box. */}
@@ -404,7 +411,7 @@ export function MessageTimeline({
      * line looked exactly like a collapsed/broken thinking box. Rows after the
      * first still separate themselves below; the first needs no page break.
      */
-    <div className="flex flex-col">
+    <div className="cv-body flex flex-col">
       {rows.map((row, i) =>
         row.think ? (
           <ThinkRow
