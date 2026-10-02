@@ -47,6 +47,7 @@ import {
   looksLikeGlob,
   readFile,
   readImageAsDataUrl,
+  readImageBytes,
   readFileBytes,
   moveFile,
   previousVersionBytes,
@@ -416,6 +417,37 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
             description:
               "Optional: what you specifically need to know about it, so the " +
               "description focuses there.",
+          },
+        },
+        required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "show_image",
+      description:
+        "Show the user an image from the workspace, right in the chat, the " +
+        "way a person pastes a screenshot. Use it whenever seeing beats " +
+        "describing: the app or page you built running, a screenshot that " +
+        "proves a fix, a chart or diagram you made, a before/after. Do it " +
+        "unprompted when you have something visual to report, and always " +
+        "when the user asks to see something. Screenshots from " +
+        "screenshot_window, sandbox_screenshot and browse are already shown " +
+        "to the user automatically; use this to point at the one that " +
+        "matters, with a caption.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description:
+              'Workspace path of the image (.png, .jpg, .webp, .gif, .bmp), e.g. "screenshots/app.png".',
+          },
+          caption: {
+            type: "string",
+            description: "One short line telling the user what they are looking at.",
           },
         },
         required: ["path"],
@@ -2325,6 +2357,12 @@ export interface ToolResult {
    */
   image?: { path: string; dataUrl: string };
   /**
+   * An image in the workspace to SHOW THE USER in the chat (show_image, and
+   * every screenshot tool), the way a person would paste one in. Separate
+   * from `image`, which is what the model looks at.
+   */
+  display?: { path: string; caption?: string };
+  /**
    * Structured search data, only from web_search.
    *
    * Search used to run BEFORE the agent (a separate judge call decided
@@ -3387,6 +3425,22 @@ async function runToolInner(
         };
       }
 
+      case "show_image": {
+        const imagePath = str(args, "path");
+        const shown = await readImageBytes(workspaceId, imagePath);
+        const caption =
+          typeof args.caption === "string" ? args.caption.trim().slice(0, 300) : "";
+        return {
+          ok: true,
+          content:
+            `Shown to the user in the chat: ${shown.path}` +
+            (caption ? ` ("${caption}")` : "") +
+            `. Do not describe it again at length; they can see it.`,
+          summary: `Showed ${shown.path}`,
+          display: { path: shown.path, ...(caption ? { caption } : {}) },
+        };
+      }
+
       case "view_image": {
         const imagePath = str(args, "path");
         const image = await readImageAsDataUrl(workspaceId, imagePath);
@@ -4231,6 +4285,7 @@ async function runToolInner(
               summary: `Captured ${relative}`,
               changedPath: relative,
               image: { path: relative, dataUrl: shown.dataUrl },
+              display: { path: relative },
             };
           } catch {
             /* fall through to the text-only receipt */
@@ -4247,6 +4302,7 @@ async function runToolInner(
             `as you having looked at it.`,
           summary: `Captured ${relative}`,
           changedPath: relative,
+          display: { path: relative },
         };
       }
 
@@ -5111,6 +5167,9 @@ async function runToolInner(
           summary: failed
             ? `Browsed with ${failed} step(s) failing`
             : `Browsed ${result.title || "page"}`,
+          ...(result.screenshots.length
+            ? { display: { path: result.screenshots[result.screenshots.length - 1] } }
+            : {}),
         };
       }
 

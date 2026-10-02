@@ -860,6 +860,46 @@ check(
   /not the one you were about to describe/.test(res.content)
 );
 
+// ------------------------------------------------------- showing the user
+
+console.log("\n10d. show_image puts a picture in the chat");
+{
+  const { shownImageUrl } = await load("src/lib/tool-display.ts");
+  const PNG = Buffer.from(
+    "89504e470d0a1a0a0000000d4948445200000001000000010806000000" +
+      "1f15c4890000000d4944415478da63f8ffff3f0005fe02fea7d6a4e70000000049454e44ae426082",
+    "hex"
+  );
+  await mkdir(path.join(WS_DIR, "shots"), { recursive: true });
+  await writeFile(path.join(WS_DIR, "shots", "app run.png"), PNG);
+  await writeFile(path.join(WS_DIR, "evil.svg"), "<svg onload='alert(1)'/>");
+
+  res = await call("show_image", { path: "shots/app run.png", caption: "  the calculator running  " });
+  check(
+    "a workspace image is shown, with its caption trimmed",
+    res.ok &&
+      res.display?.path === "shots/app run.png" &&
+      res.display?.caption === "the calculator running",
+    res.summary
+  );
+  check(
+    "the model is told the user can already see it",
+    /Shown to the user/.test(res.content) && /they can see it/.test(res.content)
+  );
+  check(
+    "the chat loads it from the images-only route, path encoded",
+    shownImageUrl(WS, "shots/app run.png") ===
+      `/api/workspace/${WS}/image?path=shots%2Fapp%20run.png`
+  );
+
+  res = await call("show_image", { path: "evil.svg" });
+  check("an SVG (which can carry script) is refused", !res.ok && !res.display, res.content);
+  res = await call("show_image", { path: "../other/x.png" });
+  check("a path outside the workspace is refused", !res.ok && !res.display, res.content);
+  res = await call("show_image", { path: "shots/missing.png" });
+  check("a missing image says so", !res.ok && /no such file/i.test(res.content), res.content);
+}
+
 // --------------------------------------------------------------- the audit
 
 console.log("\n11. The audit this suite exists to satisfy");
