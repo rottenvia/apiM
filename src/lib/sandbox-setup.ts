@@ -422,23 +422,25 @@ async function runSetup(): Promise<void> {
     });
     if (run.code !== 0) {
       // The download is kept on any failure so the next attempt skips it.
-      const cause = wsl2CannotRunHere(run.output);
-      if (!cause) throw failure("wsl --import", run);
-
       /*
-       * WSL 2 cannot run its VM on this PC. Say why, then fall back to WSL 1,
-       * which runs Linux programs directly on Windows: no VM, no virtual
-       * disk, no Hyper-V socket. Reported second cause: 0x8007273f, Winsock
-       * refusing the AF_HYPERV socket, after the disk drivers were repaired.
+       * Any WSL 2 failure falls back to WSL 1, which runs Linux programs
+       * directly on Windows: no VM, no virtual disk, no Hyper-V socket.
+       *
+       * This used to fall back only for error codes on a list, and each new
+       * code from the same broken Hyper-V stopped setup instead: 0xc03a0014,
+       * then 0x8007273f, then HCS_E_SERVICE_NOT_AVAILABLE. If the cause was
+       * not the VM at all (name taken, disk full), WSL 1 fails the same way
+       * and that error is reported, so trying costs nothing.
        */
+      const cause = wsl2CannotRunHere(run.output);
       if (cause === "virtual-disk") {
         phase("Windows cannot create virtual disks; checking its drivers");
         log(formatVhdFindings(diagnoseVhdStack(probeVhdStack())));
+        log("  This is also what breaks Docker Desktop and Hyper-V on this PC.");
       } else {
-        phase("Windows cannot start the WSL 2 virtual machine");
-        log(`  ${explainWslError(run.output) ?? "WSL 2's VM failed to start."}`);
+        phase("WSL 2 cannot run on this PC; using WSL 1");
+        log(`  ${explainWslError(run.output) ?? "WSL 2's virtual machine failed to start."}`);
       }
-      log("  This is also what breaks Docker Desktop and Hyper-V on this PC.");
 
       phase(`Importing as "${SANDBOX_DISTRO}" (WSL 1, no virtual machine needed)`);
       await fs.rm(installDir, { recursive: true, force: true });
