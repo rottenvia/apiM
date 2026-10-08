@@ -89,3 +89,6 @@ report.txt
 /prism-ui/tools/*.zip
 # ...except the shippable single-file bundle (negates root dist/ rule).
 !/prism-ui/dist/
+
+# Desktop (Rust) build output.
+/desktop/target/
