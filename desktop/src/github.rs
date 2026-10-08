@@ -18,7 +18,7 @@ use std::time::Duration;
 pub const API: &str = "https://api.github.com";
 
 /// One chat's workspace: its id (the folder name both apps use), its folder, and the data root the connection file lives under.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Ws {
     pub id: String,
     pub root: PathBuf,
@@ -543,7 +543,7 @@ pub(crate) mod tests {
 
     /// A temp folder holding a bare "remote" with one commit on main, and an empty workspace to connect to it.
     pub(crate) async fn fixture(name: &str) -> (Ws, String) {
-        let dir = std::env::temp_dir().join(format!("apim-gh-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("apim-gh-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("seed")).unwrap();
         let remote = dir.join("remote.git").to_string_lossy().replace('\\', "/");

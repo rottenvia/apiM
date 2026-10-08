@@ -25,6 +25,7 @@ mod slash_menu;
 pub mod theme;
 mod widgets;
 mod docks;
+mod github;
 mod import_files;
 mod workspace;
 mod workspace_panel;

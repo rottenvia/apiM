@@ -854,6 +854,9 @@ impl Conversation {
                 let old = if self.slug.is_empty() { self.id.clone() } else { self.slug.clone() };
                 let _ = std::fs::rename(data_dir().join("workspaces").join(&old), data_dir().join("workspaces").join(&wanted));
                 let _ = std::fs::rename(data_dir().join("state").join(&old), data_dir().join("state").join(&wanted));
+                // A connected GitHub repository is keyed by the same folder name, so it follows too.
+                let links = data_dir().join("github").join("workspaces");
+                let _ = std::fs::rename(links.join(format!("{old}.json")), links.join(format!("{wanted}.json")));
                 self.slug = wanted;
             }
         }

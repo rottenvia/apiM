@@ -3,7 +3,7 @@
 //! Everything else that shows the workspace hangs off the state kept here.
 
 use super::theme::{self, W, alpha, p};
-use super::{App, chat, docks, icons, import_files, widgets, workspace_panel};
+use super::{App, chat, docks, github, icons, import_files, widgets, workspace_panel};
 use crate::filetree::{self, Node};
 use crate::snapshots::{self, SnapshotInfo};
 use crate::store::Part;
@@ -32,6 +32,8 @@ pub struct State {
     pub panel: workspace_panel::State,
     pub docks: docks::State,
     pub import: Option<import_files::State>,
+    /// The GitHub connector, while it is open.
+    pub github: Option<github::State>,
 }
 
 impl State {
@@ -145,6 +147,7 @@ pub fn open(app: &mut App, path: String) {
 pub fn overlays(app: &mut App, ctx: &egui::Context) {
     workspace_panel::show(app, ctx);
     import_files::show(app, ctx);
+    github::show(app, ctx);
 }
 
 /// The self-portrait's states (`APIM_SHOT_STATE`) for the rail, the slide-over, the header chips and the copy dialog.
@@ -161,6 +164,7 @@ pub fn stage(app: &mut App, token: &str) {
     workspace_panel::stage(app, token);
     docks::stage(app, token);
     import_files::stage(app, token);
+    github::stage(app, token);
 }
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
@@ -274,8 +278,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         Some(Act::History) => (app.ws.history_on, app.ws.snapshots_for) = (!app.ws.history_on, None),
         Some(Act::Import) => app.ws.import = Some(Default::default()),
         Some(Act::Download) => download(app),
-        // ponytail: the GitHub connector (GitHubConnector.tsx) is not ported; the button only says so.
-        Some(Act::Github) => app.toast("Connecting a GitHub repository is not in the desktop app yet. Use the web app for that."),
+        Some(Act::Github) => app.ws.github = Some(github::open(&app.conv)),
         Some(Act::ToggleAll(true)) => app.ws.open.clear(),
         Some(Act::ToggleAll(false)) => app.ws.open = app.ws.dirs.iter().cloned().collect(),
         Some(Act::Toggle(path)) => {
