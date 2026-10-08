@@ -713,30 +713,24 @@ impl App {
             self.draft.clear();
             return;
         }
-        // Pictures go to the model; any other file is copied into the workspace for the tools to read.
-        let workspace = self.conv.workspace();
-        let (attached, notes) = attachments::take(std::mem::take(&mut self.attachments), &workspace);
+        // A picture still being described, on a model that cannot see, holds the message back until it is ready.
+        if let Some(why) = attachments::waiting(&self.attachments) {
+            slash_menu::say(self, why, false);
+            return;
+        }
         // " /fix x" keeps its space: that is what makes it a message and not a command, now and on a retry.
         let shown = if text.starts_with('/') { self.draft.trim_end().to_string() } else { text };
         self.draft.clear();
-        self.send(ctx, format!("{shown}{notes}"), attached);
+        let (wire, attached) = attachments::message(&shown, std::mem::take(&mut self.attachments), attachments::model_vision(&self.settings));
+        self.send(ctx, wire, attached);
     }
 
     /// Hands a note to the reply being written without stopping it ("btw …", `/btw`).
     /// It joins the transcript once the reply has read it.
     fn pass_note(&mut self, note: String) {
         let Some(run) = &self.run else { return };
-        let workspace = self.conv.workspace();
-        // ponytail: a picture attached to a note is saved in the workspace like any other file and the
-        // model is told where; it is not shown the pixels. Send it as an image part if notes with screenshots matter.
-        let pending = std::mem::take(&mut self.attachments).into_iter().map(|mut a| {
-            if a.kind == attachments::Kind::Image {
-                a.kind = attachments::Kind::File;
-            }
-            a
-        });
-        let (attached, lines) = attachments::take(pending.collect(), &workspace);
-        let wire = format!("{note}{lines}");
+        // ponytail: a picture on a note is described (or, on a native model, left out) rather than sent as pixels. Send it as a picture part if notes with screenshots matter.
+        let (wire, attached) = attachments::message(&note, std::mem::take(&mut self.attachments), attachments::model_vision(&self.settings));
         run.notes.lock().unwrap().push(wire.clone());
         let mut chip = Message::new(Role::User, &note);
         chip.note = true;
@@ -756,7 +750,7 @@ impl App {
         // The transcript keeps a prompt shortcut as typed ("/review auth"); the agent gets what it stands for.
         let wire = crate::slash::wire(&text).into_owned();
         let shape = summary::shape(&self.conv.messages, self.conv.summary.as_ref());
-        let history: Vec<(Role, String)> = shape.verbatim.iter().map(|m| (m.role, m.history_text())).collect();
+        let history: Vec<(Role, String, Vec<Attachment>)> = shape.verbatim.iter().map(|m| (m.role, m.history_text(), m.attachments.clone())).collect();
         let stored = self.conv.summary.as_ref().filter(|s| self.conv.messages.iter().any(|m| m.id == s.up_to_id)).map(summary::render);
         let history_last_user = self.conv.messages.iter().rev().filter(|m| m.role == Role::User && !m.note).map(|m| m.text().trim().to_string()).find(|t| !t.is_empty());
         if self.conv.messages.is_empty() {
@@ -849,7 +843,7 @@ impl App {
         let shape = summary::shape(earlier, self.conv.summary.as_ref());
         let request = agent::Request {
             settings: self.settings.clone(),
-            history: shape.verbatim.iter().map(|m| (m.role, m.history_text())).collect(),
+            history: shape.verbatim.iter().map(|m| (m.role, m.history_text(), m.attachments.clone())).collect(),
             summary: self.conv.summary.as_ref().filter(|s| earlier.iter().any(|m| m.id == s.up_to_id)).map(summary::render),
             history_last_user: earlier.iter().rev().filter(|m| m.role == Role::User && !m.note).map(|m| m.text().trim().to_string()).find(|t| !t.is_empty()),
             text: crate::slash::wire(&question.text()).into_owned(),

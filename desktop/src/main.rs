@@ -13,6 +13,7 @@ mod find;
 mod git_agent;
 mod github;
 mod lessons;
+mod media;
 mod mcp;
 mod models;
 mod plugins;
@@ -37,6 +38,13 @@ fn runtime() -> tokio::runtime::Runtime {
 
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--pdf-pages") {
+        // A PDF on stdin, its pages as JSON on stdout: the app parses PDFs in a child of itself so a crash stays out of it.
+        let mut pdf = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut std::io::stdin(), &mut pdf);
+        println!("{}", serde_json::to_string(&media::documents::pdf_pages_here(&pdf)).unwrap_or_default());
+        return Ok(());
+    }
     if args.first().map(String::as_str) == Some("--ask") {
         headless(&args[1..]);
         return Ok(());
