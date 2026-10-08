@@ -23,6 +23,7 @@ mod prompt;
 mod provider;
 mod refusal;
 mod run;
+mod sandbox;
 mod search;
 mod search_usage;
 mod slash;

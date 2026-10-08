@@ -13,6 +13,7 @@ pub mod git;
 pub mod github;
 pub mod plan;
 pub mod recall;
+pub mod sandbox;
 pub mod testing;
 pub mod web;
 
@@ -118,7 +119,7 @@ const IMPLEMENTED: &[&str] = &[
     "web_search", "make_plan", "update_plan", "ask_user", "finish", "note_finding", "view_image", "show_image", "browse", "inspect_page", "screenshot_window",
     "git_status", "git_diff", "git_log", "git_commit", "git_branch", "apply_patch", "verify_file", "read_symbol", "find_references",
     "analyze_log", "extract_archive", "query_data", "list_snapshots", "restore_snapshot", "search_conversation",
-    "git_pull_base", "github_push", "github_create_pr", "github_pr_status", "read_document", "build_project", "inspect_binary", "note_binary",
+    "git_pull_base", "github_push", "github_create_pr", "github_pr_status", "read_document", "build_project", "inspect_binary", "note_binary", "sandbox_run", "sandbox_screenshot",
 ];
 
 static SCHEMAS: LazyLock<Vec<Value>> = LazyLock::new(|| {
@@ -221,6 +222,8 @@ pub async fn run(name: &str, args: &Value, ctx: &Ctx) -> Output {
         "build_project" => build::build_project(ctx, args).await,
         "inspect_binary" => binary::inspect_binary(&ctx.root, args).await,
         "note_binary" => at_root(binary::note_binary),
+        "sandbox_run" => sandbox::sandbox_run(ctx, args).await,
+        "sandbox_screenshot" => sandbox::sandbox_screenshot(ctx, args).await,
         "start_process" => exec::start_process(ctx, args).await,
         "read_process" => exec::read_process(ctx, args),
         "write_process" => exec::write_process(ctx, args).await,
