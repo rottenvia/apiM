@@ -399,6 +399,7 @@ impl App {
                 }
                 tab if tab.starts_with("tab") => self.settings_ui.tab = tab[3..].parse().unwrap_or(0),
                 t if t.starts_with("sandbox") => sandbox_panel::stage(self, t),
+                t if t.starts_with("local") => settings_panels::stage(self, t),
                 other => workspace::stage(self, other),
             }
         }

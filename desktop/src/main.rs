@@ -15,6 +15,7 @@ mod find;
 mod git_agent;
 mod github;
 mod lessons;
+mod local;
 mod media;
 mod mcp;
 mod models;
