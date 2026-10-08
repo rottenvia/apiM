@@ -4,6 +4,7 @@
 
 mod agent;
 mod compact;
+mod context;
 mod diagnostics;
 mod diff;
 mod export;
