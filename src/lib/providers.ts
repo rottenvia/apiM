@@ -22,6 +22,7 @@ import {
   type ProviderId,
   type ThinkingStyle,
 } from "@/lib/models";
+import { isProviderContentBlock, providerContentBlockMessage } from "@/lib/refusal-source";
 
 export {
   DEFAULT_LOCAL_API_MODEL,
@@ -423,6 +424,11 @@ export function providerHttpError(
   providerName: string,
   detail: string
 ): string {
+  // Checked first: a content filter answers 400 or 403, and both would
+  // otherwise read as a broken key or a bug in apiM.
+  if (isProviderContentBlock(detail)) {
+    return providerContentBlockMessage(providerName, detail);
+  }
   if (status === 401) {
     return `Your ${providerName} API key was rejected. Check it in Settings.`;
   }
