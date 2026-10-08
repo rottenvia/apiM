@@ -126,6 +126,12 @@ fn decode_data_url(url: &str) -> Option<Vec<u8>> {
 }
 
 /// A text action under a bubble: 24 high, 11px, an 11px icon.
+/// True when the text holds a Markdown table: a row of cells with a row of dashes under it.
+fn has_table(text: &str) -> bool {
+    let lines: Vec<&str> = text.lines().collect();
+    lines.windows(2).any(|pair| pair[0].contains('|') && pair[1].contains('-') && pair[1].contains('|') && pair[1].chars().all(|c| matches!(c, '|' | '-' | ':' | ' ' | '\t')))
+}
+
 /// "Compare 3" in the reply's action row: accent text, and the count in grey.
 fn compare_btn(ui: &mut Ui, versions: usize) -> Response {
     let p = p();
@@ -1154,10 +1160,19 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
                 },
             }
         }
+        // The classic layout (Settings → Theme): prose on the left, its steps on the right, a rule between rows.
+        let split = env.settings.reply_layout == "split";
         let mut after_think = false;
         for (i, (texts, tools, think, notice)) in rows.iter().enumerate() {
             if i > 0 {
-                ui.add_space(if after_think && think.is_none() { 6.0 } else { 12.0 });
+                let after = after_think && think.is_none();
+                let space = if after { 6.0 } else if split && think.is_none() { 16.0 } else { 12.0 };
+                ui.add_space(space);
+                if split && !after {
+                    let (line, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
+                    ui.painter().rect_filled(line, 0.0, alpha(p.border, if think.is_some() { 40.0 } else { 60.0 }));
+                    ui.add_space(space);
+                }
             }
             after_think = think.is_some();
             ui.push_id(i, |ui| {
@@ -1167,14 +1182,27 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
                     ui.add(egui::Label::new(widgets::lines(*notice, 12.0, 19.5, W::Regular, p.muted)).wrap().selectable(false));
                 } else {
                     let said = texts.join("\n\n");
-                    if !said.trim().is_empty() {
-                        prose(ui, &said, colour, env);
-                        if !tools.is_empty() {
-                            ui.add_space(8.0);
+                    let has_text = !said.trim().is_empty();
+                    // Side by side only with something on both sides, room for it, and no table to squeeze.
+                    if split && has_text && !tools.is_empty() && !has_table(&said) && ui.ctx().content_rect().width() >= 768.0 {
+                        let full = Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), 0.0));
+                        let mut left = ui.new_child(egui::UiBuilder::new().max_rect(full.with_max_x(full.right() - 321.0 - 24.0)).layout(egui::Layout::top_down(egui::Align::Min)));
+                        prose(&mut left, &said, colour, env);
+                        let mut right = ui.new_child(egui::UiBuilder::new().max_rect(full.with_min_x(full.right() - 320.0 + 24.0)).layout(egui::Layout::top_down(egui::Align::Min)));
+                        steps(&mut right, tools, env, &mut open);
+                        let bottom = left.min_rect().bottom().max(right.min_rect().bottom());
+                        ui.painter().rect_filled(Rect::from_min_max(pos2(full.right() - 321.0, full.top()), pos2(full.right() - 320.0, bottom)), 0.0, p.border);
+                        ui.allocate_rect(full.with_max_y(bottom), Sense::hover());
+                    } else {
+                        if has_text {
+                            prose(ui, &said, colour, env);
+                            if !tools.is_empty() {
+                                ui.add_space(8.0);
+                            }
                         }
-                    }
-                    if !tools.is_empty() {
-                        steps(ui, tools, env, &mut open);
+                        if !tools.is_empty() {
+                            steps(ui, tools, env, &mut open);
+                        }
                     }
                 }
             });
