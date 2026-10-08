@@ -18,6 +18,7 @@ mod plan_panel;
 mod plugin_modal;
 mod prompts;
 mod rewind;
+mod sandbox_panel;
 mod settings;
 mod settings_panels;
 mod sidebar;
@@ -202,6 +203,8 @@ pub struct App {
     files_stale: bool,
     /// The workspace rail and what hangs off it: the files slide-over, the header chips, the copy dialog.
     ws: workspace::State,
+    /// The Sandbox dialog, while it is open.
+    sandbox: Option<sandbox_panel::State>,
     toast: Option<(String, Instant)>,
     /// The toast is shown without its warning sign (the web's delete toast has none).
     toast_bare: bool,
@@ -263,6 +266,7 @@ impl App {
             files: Vec::new(),
             files_stale: true,
             ws: Default::default(),
+            sandbox: None,
             toast: None,
             toast_bare: false,
             focus_composer: true,
@@ -394,6 +398,7 @@ impl App {
                     self.conv.plan = Some(store::Plan { goal: "Ship the importer with tests".into(), steps: vec![step(1, "Read the current parser", "done", "read src/parser.rs in full"), step(2, "Add the CSV path", "done", ""), step(3, "Cover it with tests", "doing", ""), last] });
                 }
                 tab if tab.starts_with("tab") => self.settings_ui.tab = tab[3..].parse().unwrap_or(0),
+                t if t.starts_with("sandbox") => sandbox_panel::stage(self, t),
                 other => workspace::stage(self, other),
             }
         }
@@ -1274,6 +1279,7 @@ impl eframe::App for App {
         overlay::artifact(self, &ctx);
         workspace::overlays(self, &ctx);
         dialogs::show(self, &ctx);
+        sandbox_panel::show(self, &ctx);
         overlay::lightbox(self, &ctx);
         if let Some(mut state) = self.compare.take() {
             if compare::show(&mut state, &ctx) {
