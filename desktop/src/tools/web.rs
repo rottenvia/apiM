@@ -3,7 +3,7 @@
 use super::{Ctx, Output, bool_arg, clip, files, str_arg};
 use futures_util::StreamExt;
 use regex::Regex;
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::net::IpAddr;
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -12,14 +12,11 @@ const FETCH_CHARS: usize = 200_000;
 const FETCH_BYTES: usize = 5 * 1024 * 1024;
 const DOWNLOAD_BYTES: u64 = 200 * 1024 * 1024;
 const FIND_MATCHES: usize = 20;
-const SEARCH_RESULTS: usize = 8;
-const SEARCH_SNIPPET: usize = 700;
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) apiM/0.1";
 
 /// Refuses addresses on this machine and the local network, so a page or a model
 /// cannot use these tools to reach a router, a NAS or a cloud metadata service.
 /// `allow_loopback` opens only localhost, for testing a development server.
-// ponytail: checks the literal host only. Resolve and re-check the IP if DNS rebinding becomes a concern.
 fn check_url(raw: &str, allow_loopback: bool) -> Result<reqwest::Url, String> {
     let url = reqwest::Url::parse(raw.trim()).map_err(|_| format!("Not a valid URL: {raw}. Include https://"))?;
     if !matches!(url.scheme(), "http" | "https") {
@@ -40,6 +37,13 @@ fn check_url(raw: &str, allow_loopback: bool) -> Result<reqwest::Url, String> {
         return Err(format!("{host} is this machine. Use http_request with allow_local: true to test a development server here."));
     }
     Ok(url)
+}
+
+/// `check_url`, then the same question asked of the addresses the name really resolves to,
+/// so a public-looking name that points at this machine or the LAN is refused too.
+async fn public_url(raw: &str, allow_loopback: bool) -> Result<reqwest::Url, String> {
+    check_url(raw, allow_loopback)?;
+    crate::search::assert_public_url_resolved(raw, allow_loopback).await
 }
 
 /// Reads a response body up to `max` bytes. Returns the bytes and whether more was left.
@@ -117,7 +121,7 @@ fn find_lines(text: &str, find: &str) -> String {
 }
 
 pub async fn fetch_url(ctx: &Ctx, args: &Value) -> Output {
-    let url = match check_url(str_arg(args, "url"), false) {
+    let url = match public_url(str_arg(args, "url"), false).await {
         Ok(u) => u,
         Err(e) => return Output::fail(e),
     };
@@ -141,7 +145,7 @@ pub async fn fetch_url(ctx: &Ctx, args: &Value) -> Output {
 }
 
 pub async fn http_request(ctx: &Ctx, args: &Value) -> Output {
-    let url = match check_url(str_arg(args, "url"), bool_arg(args, "allow_local")) {
+    let url = match public_url(str_arg(args, "url"), bool_arg(args, "allow_local")).await {
         Ok(u) => u,
         Err(e) => return Output::fail(e),
     };
@@ -184,7 +188,7 @@ pub async fn http_request(ctx: &Ctx, args: &Value) -> Output {
 
 pub async fn download_file(ctx: &Ctx, args: &Value) -> Output {
     let rel = str_arg(args, "path");
-    let url = match check_url(str_arg(args, "url"), bool_arg(args, "allow_local")) {
+    let url = match public_url(str_arg(args, "url"), bool_arg(args, "allow_local")).await {
         Ok(u) => u,
         Err(e) => return Output::fail(e),
     };
@@ -230,46 +234,12 @@ pub async fn download_file(ctx: &Ctx, args: &Value) -> Output {
     Output::ok(format!("Saved {url} to {rel}: {size} bytes, sha256 {hash}."), format!("Downloaded {rel} ({} KB)", size / 1024)).changed(rel)
 }
 
-/// (title, url, snippet) from Tavily, or from Exa when Tavily is not set up or refuses.
-async fn search(ctx: &Ctx, query: &str) -> Result<Vec<(String, String, String)>, String> {
-    let pick = |items: &Value, text_key: &str| -> Vec<(String, String, String)> {
-        items.as_array().into_iter().flatten().map(|r| (str_arg(r, "title").to_string(), str_arg(r, "url").to_string(), str_arg(r, text_key).chars().take(SEARCH_SNIPPET).collect())).collect()
-    };
-    let mut problem = String::from("No search key is set. Add a Tavily or Exa key in Settings.");
-    let tavily = ctx.settings.tavily();
-    if !tavily.is_empty() {
-        let body = json!({ "api_key": tavily, "query": query, "max_results": SEARCH_RESULTS, "search_depth": "basic" });
-        match ctx.client.post("https://api.tavily.com/search").bearer_auth(&tavily).json(&body).timeout(Duration::from_secs(30)).send().await {
-            Ok(r) if r.status().is_success() => return Ok(pick(&r.json::<Value>().await.unwrap_or_default()["results"], "content")),
-            Ok(r) => problem = format!("Tavily refused the search ({}). Check the key and its credit in Settings.", r.status()),
-            Err(e) => problem = format!("Could not reach Tavily: {e}"),
-        }
-    }
-    let exa = ctx.settings.exa();
-    if !exa.is_empty() {
-        let body = json!({ "query": query, "numResults": SEARCH_RESULTS, "contents": { "text": { "maxCharacters": SEARCH_SNIPPET } } });
-        match ctx.client.post("https://api.exa.ai/search").header("x-api-key", &exa).json(&body).timeout(Duration::from_secs(30)).send().await {
-            Ok(r) if r.status().is_success() => return Ok(pick(&r.json::<Value>().await.unwrap_or_default()["results"], "text")),
-            Ok(r) => problem = format!("Exa refused the search ({}). Check the key in Settings.", r.status()),
-            Err(e) => problem = format!("Could not reach Exa: {e}"),
-        }
-    }
-    Err(problem)
-}
-
 pub async fn web_search(ctx: &Ctx, args: &Value) -> Output {
-    let query = str_arg(args, "query").trim();
-    if query.is_empty() {
-        return Output::fail("query is required.");
-    }
-    match search(ctx, query).await {
-        Ok(results) if results.is_empty() => Output::ok(format!("No results for `{query}`. Try other words."), "0 results"),
-        Ok(results) => {
-            let text: String = results.iter().enumerate().map(|(i, (title, url, snippet))| format!("{}. {title}\n   {url}\n   {snippet}\n\n", i + 1)).collect();
-            Output::ok(format!("Results for `{query}`:\n\n{text}Open one with fetch_url when you need the full page."), format!("Searched: {query}"))
-        }
-        Err(e) => Output::fail(e),
-    }
+    let s = &ctx.settings;
+    let keys = crate::search::Keys { tavily: s.tavily(), exa: s.exa(), tavily_enabled: s.tavily_enabled, exa_enabled: s.exa_enabled };
+    // ponytail: the search's own cost (Reply::search.estimated_usd) is not added to the chat total yet.
+    let reply = crate::search::web_search(&ctx.client, str_arg(args, "query"), &s.search_profile, &keys, ctx.planner.as_ref()).await;
+    Output { ok: reply.ok, text: reply.content, summary: reply.summary, ..Default::default() }
 }
 
 #[cfg(test)]

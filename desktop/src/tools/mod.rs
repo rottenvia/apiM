@@ -35,6 +35,8 @@ pub struct Ctx {
     pub emit: Emitter,
     pub chat: Arc<Mutex<ChatState>>,
     pub procs: Arc<exec::Procs>,
+    /// The cheap model that plans web searches, when there is one.
+    pub planner: Option<crate::search::Planner>,
 }
 
 /// What a tool hands back.
@@ -138,9 +140,23 @@ pub fn definitions(web_search: bool, native_vision: bool, git_repo: bool) -> Vec
         .collect()
 }
 
+/// A tool lent by an MCP server: every call asks first, unless commands run automatically.
+async fn mcp_call(name: &str, args: &Value, ctx: &Ctx) -> Output {
+    use crate::mcp;
+    let result = match mcp::bridged(&crate::store::data_dir(), name, args) {
+        None => mcp::unavailable(),
+        Some(call) if ctx.settings.approval == crate::store::Approval::Auto || ctx.emit.approve_mcp(&call.display, &call.remember_key).await => mcp::call_bridged(&ctx.client, &call).await,
+        Some(call) => mcp::declined(&call.display, "The user declined this call."),
+    };
+    Output { ok: result.ok, text: result.content, summary: result.summary, ..Default::default() }
+}
+
 pub async fn run(name: &str, args: &Value, ctx: &Ctx) -> Output {
     // File work is plain blocking I/O; tell the runtime so other tasks keep moving.
     let sync = |f: fn(&Ctx, &Value) -> Output| tokio::task::block_in_place(|| f(ctx, args));
+    if name.starts_with("mcp__") {
+        return mcp_call(name, args, ctx).await;
+    }
     match name {
         "list_files" => sync(files::list_files),
         "read_file" => sync(files::read_file),

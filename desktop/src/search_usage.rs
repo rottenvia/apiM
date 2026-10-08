@@ -46,6 +46,8 @@ struct Counts {
     requests: u64,
     /// Requests answered from cache, which billed nothing.
     cached: u64,
+    // ponytail: serde_json reads a long float to within one unit in the last place, so a total both apps
+    // add to can differ from the web's in the 17th digit. Turn on its `float_roundtrip` feature if they must match exactly.
     usd: f64,
 }
 

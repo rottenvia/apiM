@@ -64,6 +64,10 @@ pub enum Dialog {
 struct PendingApproval {
     command: String,
     reason: String,
+    /// What "Always allow this" remembers.
+    key: String,
+    /// A call to an MCP server rather than a command.
+    mcp: bool,
     reply: oneshot::Sender<bool>,
 }
 
@@ -743,11 +747,11 @@ impl App {
                     }
                     self.files_stale = true;
                 }
-                Event::Approval { command, reason, reply } if self.always_allow.get(&run.conv_id).is_some_and(|allowed| allowed.contains(&command)) => {
-                    let _ = (reason, reply.send(true));
+                Event::Approval { key, reply, .. } if self.always_allow.get(&run.conv_id).is_some_and(|allowed| allowed.contains(&key)) => {
+                    let _ = reply.send(true);
                 }
-                Event::Approval { command, reason, reply } => {
-                    run.approval = Some(PendingApproval { command, reason, reply });
+                Event::Approval { command, reason, key, mcp, reply } => {
+                    run.approval = Some(PendingApproval { command, reason, key, mcp, reply });
                     ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
                 }
                 Event::Question { question, options, context, reply } => {
