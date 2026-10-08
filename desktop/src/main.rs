@@ -4,12 +4,22 @@
 
 mod agent;
 mod compact;
+mod diagnostics;
+mod diff;
 mod export;
+mod filetree;
+mod find;
+mod lessons;
+mod mcp;
 mod models;
 mod plugins;
 mod prompt;
 mod provider;
 mod refusal;
+mod search;
+mod search_usage;
+mod slash;
+mod snapshots;
 mod store;
 mod summary;
 mod tools;

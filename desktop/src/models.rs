@@ -43,6 +43,11 @@ pub struct ModelInfo {
     pub description: String,
     pub specs: String,
     pub vision: Vision,
+    #[serde(default)]
+    pub video: bool,
+    /// The line under the name on the Settings model cards.
+    #[serde(default)]
+    pub settings_subtitle: String,
     pub max_output_tokens: u32,
 }
 
@@ -63,6 +68,9 @@ pub struct CustomModel {
     pub input_price: Option<f64>,
     #[serde(default)]
     pub output_price: Option<f64>,
+    /// Uncapped tools: whole-file reads, no batch ceilings.
+    #[serde(default)]
+    pub open_limits: bool,
 }
 
 fn default_max_output() -> u32 {
@@ -99,13 +107,15 @@ impl CustomModel {
         format!("{CUSTOM_PREFIX}{}", self.api_model)
     }
 
-    fn specs(&self) -> String {
+    /// "128K ctx · $0.15/$0.6 per 1M · custom" (`customSpecs` in src/lib/models.ts).
+    pub fn specs(&self) -> String {
         let mut bits = Vec::new();
-        if let Some(ctx) = self.context_length {
+        if let Some(ctx) = self.context_length.filter(|c| *c > 0) {
             bits.push(if ctx >= 1_000_000 {
-                format!("{}M ctx", ctx as f64 / 1_000_000.0)
+                // Two decimals at most, trailing zeros dropped: 1.05M, 2M.
+                format!("{}M ctx", (ctx as f64 / 10_000.0).round() / 100.0)
             } else {
-                format!("{}K ctx", ctx / 1000)
+                format!("{}K ctx", (ctx as f64 / 1000.0).round())
             });
         }
         if self.input_price.is_some() || self.output_price.is_some() {
@@ -131,6 +141,8 @@ impl CustomModel {
             description: format!("Custom OpenRouter model ({}).", self.api_model),
             specs: self.specs(),
             vision: self.vision,
+            video: false,
+            settings_subtitle: format!("OpenRouter · {}", self.specs()),
             max_output_tokens: self.max_output_tokens.clamp(1_000, 1_000_000),
         }
     }
@@ -275,6 +287,7 @@ mod tests {
             context_length: Some(200_000),
             input_price: Some(3.0),
             output_price: Some(15.0),
+            open_limits: false,
         };
         let customs = [c];
         assert_eq!(resolve("custom:a/b", &customs).max_output_tokens, 1_000);

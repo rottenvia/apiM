@@ -332,7 +332,7 @@ fn welcome(app: &mut App, ui: &mut egui::Ui) {
             ui.add_space(24.0);
             if widgets::btn_primary(ui, Some(icons::KEY), "Add API keys").clicked() {
                 app.dialog = Dialog::Settings;
-                app.settings_tab = 0;
+                app.settings_ui.tab = 0;
             }
         }
     });

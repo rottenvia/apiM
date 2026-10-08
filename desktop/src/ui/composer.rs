@@ -474,7 +474,7 @@ fn popovers(app: &mut App, ctx: &egui::Context) {
                     if option(ui, "＋ Add any OpenRouter model…", false, Some(p.accent_light), &[("Paste an id in Settings → Model and it lands here.", 12.0, 20.0, p.text2, false)]) {
                         app.popover = Popover::None;
                         app.dialog = Dialog::Settings;
-                        app.settings_tab = 1;
+                        app.settings_ui.tab = 1;
                     }
                     if let Some(id) = pick {
                         app.settings.model = id;

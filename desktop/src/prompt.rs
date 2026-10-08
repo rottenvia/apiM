@@ -48,8 +48,9 @@ Browser use:
 }
 
 /// The first system message: persona, optional search nudge, workspace rules.
-pub fn system(web_search: bool, native_vision: bool, git_repo: bool) -> String {
-    format!("{}{}", PROMPTS.base, workspace_rules(web_search, native_vision, git_repo))
+/// `legacy` is the classic plugins' text, which rides right after the persona as it always did.
+pub fn system(legacy: &str, web_search: bool, native_vision: bool, git_repo: bool) -> String {
+    format!("{}{legacy}{}", PROMPTS.base, workspace_rules(web_search, native_vision, git_repo))
 }
 
 /// "Auto" effort: a greeting needs no reasoning, a debugging session needs a lot.
@@ -92,7 +93,7 @@ mod tests {
 
     #[test]
     fn prompt_only_names_tools_that_exist() {
-        let p = system(false, false, false);
+        let p = system("", false, false, false);
         assert!(p.starts_with(&PROMPTS.base));
         assert!(p.contains("There is no web_search tool"));
         // Every `snake_case` tool the rules mention must have a handler.

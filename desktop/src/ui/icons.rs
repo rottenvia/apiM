@@ -171,3 +171,21 @@ pub const DOWNLOAD_TRAY: Icon = line(path!("M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2
 pub const UNDO: Icon = line(path!("M3 10h11a4 4 0 010 8h-1M3 10l4-4M3 10l4 4"), 1.7);
 pub const CHEVRON_LEFT: Icon = line(path!("M15 19l-7-7 7-7"), 2.2);
 pub const TOOL_FAILED: Icon = line(concat!(path!("M12 21a9 9 0 100-18 9 9 0 000 18z"), path!("M12 8v4M12 16h.01")), 1.9);
+
+// ---- settings and the other dialogs
+pub const EYE: Icon = line(concat!(path!("M15 12a3 3 0 11-6 0 3 3 0 016 0z"), path!("M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z")), 1.5);
+pub const EYE_OFF: Icon = line(
+    path!("M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21"),
+    1.5,
+);
+pub const TAB_KEYS: Icon = line(path!("M15 7a4 4 0 11-4 4m0 0L4 18v3h3l1-1v-2h2v-2h2l1.5-1.5"), 1.7);
+pub const TAB_MODEL: Icon = line(path!("M12 3l2.2 5 5.3.5-4 3.5 1.2 5.2L12 14.5 7.3 17.2l1.2-5.2-4-3.5L9.8 8z"), 1.7);
+pub const TAB_THEME: Icon = line(
+    concat!(
+        path!("M12 3a9 9 0 100 18c1.5 0 2-.9 2-2 0-1.4 1-2.2 2.4-2.2H18a4 4 0 004-4c0-4.97-4.5-9-10-9z"),
+        r#"<circle cx="7.5" cy="11.5" r="1.3" fill="white" stroke="none"/><circle cx="10.5" cy="7.5" r="1.3" fill="white" stroke="none"/><circle cx="15" cy="7.5" r="1.3" fill="white" stroke="none"/>"#
+    ),
+    1.7,
+);
+pub const TAB_REPORTS: Icon = line(concat!(path!("M9 3h6l4 4v14H5V3h4zM9 3v5h6"), r#"<path stroke-linecap="round" d="M8.5 13h7M8.5 16.5h4.5"/>"#), 1.7);
+pub const TAB_SAFETY: Icon = line(path!("M12 3l7 3v6c0 4.2-2.9 7.6-7 9-4.1-1.4-7-4.8-7-9V6z"), 1.7);

@@ -182,8 +182,9 @@ async fn run_inner(req: Request, emit: &Emitter, procs: Arc<Procs>) -> Result<En
         procs,
     };
 
-    let directives = plugins::directives(&plugins::all(&s.custom_plugins), &s.enabled_plugins);
-    let mut system = prompt::system(web_search, native_vision, git_repo);
+    let every = plugins::all(&s.custom_plugins);
+    let directives = plugins::directives(&every, &s.enabled_plugins);
+    let mut system = prompt::system(&plugins::legacy_prompt(&every, &s.enabled_plugins), web_search, native_vision, git_repo);
     // Standing orders go at the start of the first system message: some lanes only honour that one.
     if !directives.is_empty() {
         system = format!("{directives}\n\n{system}");
