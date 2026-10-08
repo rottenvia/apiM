@@ -107,7 +107,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let left = ui.max_rect().left() + (ui.available_width() - width) / 2.0;
 
     ui.add_space(8.0);
+    super::btw::dock(app, ui, left, width);
     let top = ui.cursor().top();
+    let mut menu: (&'static str, Vec<crate::slash::MenuItem>) = ("", Vec::new());
     let focused = ui.memory(|m| m.has_focus(egui::Id::new("composer-text")));
     let dragging = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
     let frame = egui::Frame::new()
@@ -126,13 +128,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 });
             }
 
-            if let Some(note) = &app.composer_note {
-                ui.horizontal(|ui| {
-                    ui.add_space(16.0);
-                    ui.add_space(0.0);
-                    ui.label(widgets::lines(note.as_str(), 11.0, 16.0, W::Regular, p.text2));
-                });
-            }
+            super::slash_menu::notice(app, ui);
 
             // The text itself: 15px on a 24px line, growing with what is typed.
             let hint = if !has_keys {
@@ -149,6 +145,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 job.sections.iter_mut().for_each(|s| s.format.line_height = Some(24.0));
                 ui.painter().layout_job(job)
             };
+            // The command menu takes its keys before the text does.
+            menu = super::slash_menu::rows(app);
+            super::slash_menu::keys(app, ui.ctx(), &menu.1);
             let edit = egui::Frame::new()
                 .inner_margin(egui::Margin { left: 16, right: 16, top: 14, bottom: 6 })
                 .show(ui, |ui| {
@@ -173,11 +172,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 edit.request_focus();
             }
             let enter = edit.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
-            if edit.changed() {
-                app.composer_note = None;
-            }
+            super::slash_menu::after_edit(app, ui, &edit, !menu.1.is_empty());
 
-            let is_note = running && is_btw(&app.draft);
+            let is_note = running && btw_note(&app.draft).is_some();
             if is_note {
                 ui.horizontal(|ui| {
                     ui.add_space(16.0);
@@ -191,7 +188,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             ui.add_space(2.0);
             let send = row(app, ui, running, is_note, has_keys);
             ui.add_space(10.0);
-            if send || (enter && !running) || (enter && is_note) {
+            // While a reply runs Enter still runs a command or passes a note; `submit` lets anything else wait.
+            if send || enter {
                 app.submit(ui.ctx());
             }
         })
@@ -210,12 +208,16 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     ui.advance_cursor_after_rect(Rect::from_min_max(pos2(left, top), pos2(left + width, app.composer_rect.bottom() + 16.0)));
 
     popovers(app, ui.ctx());
+    super::slash_menu::show(app, ui.ctx(), menu.0, &menu.1);
 }
 
-/// "btw fix the header too": a note for the running task instead of a new message.
-pub fn is_btw(text: &str) -> bool {
-    let t = text.trim_start().to_lowercase();
-    t.strip_prefix("btw").is_some_and(|rest| rest.starts_with([' ', ',', ':', '\n']) && !rest.trim().is_empty())
+/// "btw fix the header too": the note in it, for the running task instead of a new message.
+/// None when the text is not one (the web's `^btw[\s,:]+(.+)`, any letter case).
+pub fn btw_note(text: &str) -> Option<&str> {
+    let text = text.trim();
+    let rest = text.get(3..).filter(|_| text[..3].eq_ignore_ascii_case("btw"))?;
+    let note = rest.trim_start_matches(|c: char| c.is_whitespace() || c == ',' || c == ':');
+    (note.len() < rest.len() && !note.is_empty()).then_some(note)
 }
 
 /// The teal dot that breathes beside a note (`.btw-pulse`).
@@ -715,4 +717,18 @@ fn context_panel(app: &mut App, ui: &mut egui::Ui) {
         ui.add_space(6.0);
         ui.add(egui::Label::new(small("Compact replaces the conversation with a summary for the model — your transcript stays on screen. Also: /compact in the message box.".into(), p.muted)).wrap());
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn btw_notes() {
+        assert_eq!(btw_note("btw fix the header too"), Some("fix the header too"));
+        assert_eq!(btw_note("  BTW, : use tabs\nnot spaces "), Some("use tabs\nnot spaces"));
+        for not_one in ["btw", "btw ", "btwfix it", "by the way fix it", "bt", "б btw x"] {
+            assert_eq!(btw_note(not_one), None, "{not_one}");
+        }
+    }
 }

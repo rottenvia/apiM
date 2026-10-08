@@ -33,8 +33,12 @@ pub enum Event {
     Status(&'static str),
     Reasoning(String),
     Content(String),
-    /// A tool call still streaming its arguments.
-    ToolDraft { name: String, chars: usize },
+    /// A tool call still streaming its arguments. `path` is the file it names, once that much has arrived.
+    ToolDraft { name: String, chars: usize, path: Option<String> },
+    /// The reply took in a "btw" note before round `round` (counted from 1).
+    NoteRead { note: String, round: usize },
+    /// A request failed and try `attempt` of `attempts` starts after `wait`.
+    Retry { reason: String, attempt: usize, attempts: usize, wait: Duration },
     ToolStart(ToolEvent),
     ToolDone { id: String, ok: bool, summary: String, image: Option<PathBuf>, changed: Option<String> },
     /// `key` is what "Always allow this" remembers; `mcp` titles the card for a remote tool.
@@ -234,6 +238,7 @@ async fn run_inner(req: Request, emit: &Emitter, procs: Arc<Procs>) -> Result<En
     for round in 0..MAX_ROUNDS {
         // Anything the user said in passing joins the conversation before the next request.
         for note in std::mem::take(&mut *req.notes.lock().unwrap()) {
+            emit.send(Event::NoteRead { note: note.clone(), round: round + 1 });
             messages.push(json!({ "role": "user", "content": format!("[Note from the user while you work. Take it into account and carry on; do not start over.]
 {note}") }));
         }
@@ -401,7 +406,7 @@ async fn stream_with_retries(
                 }
                 emit.send(Event::Content(t.to_string()));
             }
-            Delta::ToolDraft { name, chars } => emit.send(Event::ToolDraft { name: name.to_string(), chars }),
+            Delta::ToolDraft { name, chars, args } => emit.send(Event::ToolDraft { name: name.to_string(), chars, path: draft_path(args) }),
         })
         .await;
         let RoundError { message, status, detail, retryable } = match result {
@@ -426,9 +431,16 @@ async fn stream_with_retries(
             return Err(message);
         }
         let wait = Duration::from_secs(2 << attempt);
-        emit.send(Event::Notice(format!("{message} Retrying in {}s ({attempt}/{})", wait.as_secs(), MAX_RETRIES - 1)));
+        emit.send(Event::Retry { reason: message, attempt: attempt + 1, attempts: MAX_RETRIES, wait });
         tokio::time::sleep(wait).await;
     }
+}
+
+/// The file a tool call still streaming in is about, once its whole "path" has arrived.
+fn draft_path(args: &str) -> Option<String> {
+    static PATH: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r#""path"\s*:\s*"([^"]+)""#).unwrap());
+    // The path leads the arguments: the file content after it is not searched again on every chunk.
+    PATH.captures(&args[..args.floor_char_boundary(400)]).map(|c| c[1].replace("\\\\", "/"))
 }
 
 /// Measures how long a stretch of thinking took, for "Thought for 12s".

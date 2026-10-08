@@ -190,7 +190,7 @@ pub enum Delta<'a> {
     Content(&'a str),
     Reasoning(&'a str),
     /// A tool call still streaming its arguments (a file being written).
-    ToolDraft { name: &'a str, chars: usize },
+    ToolDraft { name: &'a str, chars: usize, args: &'a str },
 }
 
 #[derive(Debug)]
@@ -330,7 +330,7 @@ pub async fn stream_round(client: &reqwest::Client, target: &Target, body: &Valu
                     acc.add(tc);
                 }
                 if let Some(last) = acc.calls.last() {
-                    on(Delta::ToolDraft { name: &last.name, chars: last.args.len() });
+                    on(Delta::ToolDraft { name: &last.name, chars: last.args.len(), args: &last.args });
                 }
             }
             if let Some(text) = delta["content"].as_str().filter(|t| !t.is_empty()) {

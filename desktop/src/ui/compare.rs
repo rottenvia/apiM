@@ -100,7 +100,7 @@ fn pane(ui: &mut Ui, rect: Rect, version: &Version, newer: bool) {
     egui::ScrollArea::vertical().id_salt(("scroll", newer)).auto_shrink(false).show(&mut ui, |ui| {
         egui::Frame::new().inner_margin(egui::Margin { left: 16, right: 16, top: 0, bottom: 16 }).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            let _ = markdown::show(ui, &version.content, p.text);
+            let _ = markdown::show(ui, &version.content, p.text, &mut None);
         });
     });
 }

@@ -3,10 +3,10 @@
 
 use super::theme::{self, W, mix, p};
 use super::widgets;
-use super::{App, Dialog, bubble, composer, icons};
-use crate::store::Role;
+use super::{App, Dialog, bubble, composer, icons, markdown};
+use crate::store::{Bucket, Role};
 use eframe::egui::{self, Color32, Rect, Sense, Stroke, pos2, vec2};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// `toLocaleString()` for whole numbers: 1,234,567.
 pub fn thousands(n: u64) -> String {
@@ -111,6 +111,7 @@ pub fn header(app: &mut App, ui: &mut egui::Ui) {
 
 pub fn messages(app: &mut App, ui: &mut egui::Ui) {
     let area = ui.max_rect();
+    super::find_bar::show(app, ui, area);
     if app.conv.messages.is_empty() {
         welcome(app, ui);
         return;
@@ -124,9 +125,30 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
     let mut action = None;
     let jump = std::mem::take(&mut app.jump_to_latest);
 
+    // Find in this chat: how many matches each message holds, and which of them is the focused one.
+    // ponytail: counted again every frame the bar is open; cache per (chat, query) if a long chat stutters.
+    let matcher = if app.find_open { crate::find::Matcher::new(&app.find, app.finder.whole_word) } else { None };
+    let counts: Vec<usize> = matcher.as_ref().map_or(Vec::new(), |m| app.conv.messages.iter().map(|msg| if msg.note { 0 } else { m.ranges(&msg.text()).len() }).collect());
+    let total: usize = counts.iter().sum();
+    app.finder.active = app.finder.active.min(total.saturating_sub(1));
+    let located = crate::find::locate(&counts, app.finder.active);
+    // Not on the frame that jumps to the end: the two would pull the view apart.
+    let reveal = !jump && std::mem::take(&mut app.finder.reveal) && located.is_some();
+    if app.finder.total != total {
+        app.finder.total = total;
+        ui.ctx().request_repaint();
+    }
+
+    // Only the newest messages are laid out; a search shows everything from its first match on.
+    let hidden = app.conv.messages.len().saturating_sub(app.mounted);
+    let start = counts.iter().position(|n| *n > 0).map_or(hidden, |first| first.min(hidden));
+    let mut more = false;
+
     // Each chat keeps its own place, and a chat opened for the first time starts at its end.
     let mut scroll = egui::ScrollArea::vertical().id_salt(("transcript", &app.conv.id)).auto_shrink(false).stick_to_bottom(true);
-    if jump {
+    if app.staged("top") {
+        scroll = scroll.vertical_scroll_offset(0.0);
+    } else if jump {
         // Past the end: clamped to it, and the view then follows the reply as it grows.
         scroll = scroll.vertical_scroll_offset(1e9);
     }
@@ -168,33 +190,56 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
 
         let last = app.conv.messages.len() - 1;
         let workspace = app.conv.workspace();
+        // The line under the last message a manual /compact covered.
+        let compacted = app.conv.summary.as_ref().filter(|s| s.manual).map(|s| (s.up_to_id.clone(), s.covered_turns));
+        let has_output = app.conv.messages.last().is_some_and(|m| m.role == Role::Assistant && (!m.text().trim().is_empty() || !m.reasoning().trim().is_empty()));
+        // Until something comes back the rows sit close together (`space-y-1`), then at the usual 24.
+        let gap = if running && !has_output { 4.0 } else { 24.0 };
+        if start > 0 {
+            column_ui(ui, &mut |ui| more = earlier_pill(ui, start));
+            ui.add_space(8.0 + gap);
+        }
+
         let App { conv, heights, run, settings, editing, rewind, .. } = app;
         let (plan, rewind) = (conv.plan.as_ref(), rewind.as_ref());
         // Bubbles stop at three quarters of the column; a narrow window gives them a little more.
         let cap = column * if ui.ctx().content_rect().width() < 768.0 { 0.85 } else { 0.75 };
         let thinking_secs = run.as_ref().and_then(|r| r.thinking.secs());
-        let has_output = conv.messages.last().is_some_and(|m| m.role == Role::Assistant && !m.parts.is_empty());
-        for (i, msg) in conv.messages.iter().enumerate() {
+        for (i, msg) in conv.messages.iter().enumerate().skip(start) {
             let live = running && i == last;
-            // An empty reply that is still on its way is the status row's job.
-            if live && !has_output {
-                continue;
-            }
+            let hits = counts.get(i).copied().unwrap_or(0);
+            let focused = located.filter(|at| at.0 == i).map(|at| at.1);
+            let wanted = reveal && focused.is_some();
+            // A message with matches is laid out differently, so it is measured apart.
+            let key: std::borrow::Cow<str> = if hits > 0 { format!("{}#find", msg.id).into() } else { msg.id.as_str().into() };
             // Replies off screen are not laid out at all: they keep their measured height.
-            if let Some(&(w, h)) = heights.get(&msg.id) {
-                let rect = Rect::from_min_size(ui.cursor().min, vec2(area.width(), h));
-                if !live && w == column && !ui.is_rect_visible(rect) {
-                    ui.allocate_space(vec2(area.width(), h));
-                    continue;
+            let kept = heights.get(key.as_ref()).copied().filter(|&(w, h)| !live && !wanted && w == column && !ui.is_rect_visible(Rect::from_min_size(ui.cursor().min, vec2(area.width(), h))));
+            if let Some((_, h)) = kept {
+                ui.allocate_space(vec2(area.width(), h));
+            } else {
+                let top = ui.cursor().top();
+                let mut marks = matcher.as_ref().filter(|_| hits > 0).map(|matcher| markdown::Marks { matcher, active: focused, seen: 0, reveal: wanted, shown: false });
+                column_ui(ui, &mut |ui| {
+                    let mut env = bubble::Env { settings, workspace: &workspace, live, newest: i == last, busy: running, cap, thinking_secs, editing, action: &mut action, plan, rewind, marks: marks.take() };
+                    ui.push_id(&msg.id, |ui| bubble::show(ui, msg, &mut env));
+                    marks = env.marks.take();
+                });
+                let used = Rect::from_min_max(pos2(left, top), pos2(left + column, ui.cursor().top()));
+                // The match sits where nothing marks it (inside code): show its message at least.
+                if wanted && !marks.is_some_and(|m| m.shown) {
+                    ui.scroll_to_rect(used, Some(egui::Align::Center));
                 }
+                heights.insert(key.into_owned(), (column, used.height()));
             }
-            let top = ui.cursor().top();
-            column_ui(ui, &mut |ui| {
-                let mut env = bubble::Env { settings, workspace: &workspace, live, newest: i == last, busy: running, cap, thinking_secs, editing, action: &mut action, plan, rewind };
-                ui.push_id(&msg.id, |ui| bubble::show(ui, msg, &mut env));
-            });
-            ui.add_space(24.0);
-            heights.insert(msg.id.clone(), (column, ui.cursor().top() - top));
+            match compacted.as_ref().filter(|(id, _)| *id == msg.id && !live) {
+                Some((_, turns)) => {
+                    let text = format!("Context compacted{}", turns.filter(|n| *n > 0).map_or(String::new(), |n| format!(" · {n} messages summarised")));
+                    ui.add_space(gap.max(16.0));
+                    column_ui(ui, &mut |ui| divider(ui, &text, "Everything above is summarised for the model. It sees the summary plus what comes after this line."));
+                    ui.add_space(16.0);
+                }
+                None => ui.add_space(gap),
+            }
         }
 
         // Whatever the reply is waiting on the user for sits right under it, at its width.
@@ -215,6 +260,9 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
         }
         ui.add_space(24.0);
     });
+    if more {
+        app.mounted += 60;
+    }
 
     // Jump to latest: only when scrolled away from the end.
     let distance = out.content_size.y - out.state.offset.y - out.inner_rect.height();
@@ -249,48 +297,151 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-/// The lines under a reply that is still on its way: "✻ Thinking… · 12s".
+/// "Show 60 earlier of 212": older messages stay out of the layout until asked for. True when clicked.
+fn earlier_pill(ui: &mut egui::Ui, hidden: usize) -> bool {
+    let p = p();
+    let mut text = format!("Show {} earlier", hidden.min(60));
+    if hidden > 60 {
+        text += &format!(" of {hidden}");
+    }
+    let label = widgets::galley(ui, &text, theme::font(12.0, W::Medium), Color32::WHITE);
+    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
+    let rect = Rect::from_center_size(row.center(), vec2(13.0 + 12.0 + 6.0 + label.size().x + 13.0, 30.0));
+    let response = ui.interact(rect, ui.id().with("earlier"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+    let t = widgets::fade(ui, response.id, response.hovered());
+    ui.painter().rect(rect, 15.0, widgets::lerp(Color32::TRANSPARENT, p.hover, t), Stroke::new(1.0, widgets::lerp(p.border, p.border_light, t)), egui::StrokeKind::Inside);
+    let colour = widgets::lerp(p.text2, p.text, t);
+    icons::paint(ui, icons::CHEVRON_UP.stroke(2.0), pos2(rect.left() + 13.0 + 6.0, rect.center().y), 12.0, colour);
+    ui.painter().galley_with_override_text_color(pos2(rect.left() + 13.0 + 12.0 + 6.0, (rect.center().y - label.size().y / 2.0).round()), label, colour);
+    response.clicked()
+}
+
+/// A rule across the column with a few words in its middle: "Context compacted".
+pub fn divider(ui: &mut egui::Ui, text: &str, tip: &str) {
+    let p = p();
+    let room = ui.available_width();
+    let label = widgets::clipped(ui, text, theme::font(11.0, W::Regular), p.muted, (room - 88.0).max(40.0));
+    let (rect, response) = ui.allocate_exact_size(vec2(room, 16.5), Sense::hover());
+    let (x, width) = (rect.center().x - label.size().x / 2.0, label.size().x);
+    let line = Stroke::new(1.0, p.border);
+    ui.painter().hline(egui::Rangef::new(rect.left() + 16.0, x - 12.0), rect.center().y, line);
+    ui.painter().hline(egui::Rangef::new(x + width + 12.0, rect.right() - 16.0), rect.center().y, line);
+    widgets::text_at(ui, x, rect.center().y, label);
+    response.on_hover_text(tip);
+}
+
+/// 1234 is "1k", 812 is "812": sizes in the wait rows.
+fn k(n: u64) -> String {
+    if n >= 1000 { format!("{}k", (n as f64 / 1000.0).round()) } else { n.to_string() }
+}
+
+/// What a request carries, and its characters of text: "415k in (history 310k · tool results 96k) + media 2.0 MB".
+fn describe_request(buckets: &[Bucket]) -> (u64, String) {
+    let media: u64 = buckets.iter().filter(|b| b.label == "media").map(|b| b.chars).sum();
+    let mut text: Vec<&Bucket> = buckets.iter().filter(|b| b.label != "media" && b.chars > 0).collect();
+    let chars: u64 = text.iter().map(|b| b.chars).sum();
+    text.sort_by(|a, b| b.chars.cmp(&a.chars));
+    let top: Vec<String> = text.iter().take(2).map(|b| format!("{} {}", b.label, k(b.chars))).collect();
+    let mut out = format!("{} in", k(chars));
+    if !top.is_empty() {
+        out += &format!(" ({})", top.join(" · "));
+    }
+    if media > 0 {
+        // Media is counted in base64 characters: three bytes for every four.
+        out += &format!(" + media {:.1} MB", media as f64 * 0.75 / 1048576.0);
+    }
+    (chars, out)
+}
+
+/// The lines under a reply that is still on its way (StatusRow, RetryBanner, RequestSizeLine, WaitRow
+/// and DraftRow in ChatArea.tsx): "✻ Thinking… · 12s" and its kin.
 fn wait_rows(ui: &mut egui::Ui, run: &super::Run, has_output: bool) {
     let p = p();
-    let seconds = run.started.elapsed().as_secs();
-    let line = |ui: &mut egui::Ui, label: String, detail: String| {
+    let row = |ui: &mut egui::Ui, top: f32, add: &mut dyn FnMut(&mut egui::Ui)| {
+        ui.add_space(top);
         ui.horizontal(|ui| {
             ui.add_space(16.0);
             ui.spacing_mut().item_spacing.x = 8.0;
-            ui.label(widgets::lines("✻", 13.0, 20.0, W::Regular, p.accent));
-            let job = shimmer(ui, &label, 13.0);
-            ui.label(job);
-            ui.label(widgets::text(detail, 11.0, W::Regular, p.muted));
+            add(ui);
         });
+        ui.add_space(8.0);
     };
-    match &run.drafting {
-        Some((name, chars)) if *chars > 0 => {
-            let size = if *chars >= 1000 { format!("{:.1}k chars", *chars as f64 / 1000.0) } else { format!("{chars} chars") };
-            ui.add_space(if has_output { 0.0 } else { 8.0 });
-            line(ui, format!("{}…", drafting_label(name)), format!("· {size} · {seconds}s"));
+    let mark = |ui: &mut egui::Ui| {
+        ui.label(widgets::lines("✻", 13.0, 20.0, W::Regular, p.accent));
+    };
+    let small = |text: String, colour| widgets::lines(text, 11.0, 16.0, W::Regular, colour);
+    let glow = |ui: &mut egui::Ui, text: String| {
+        let job = shimmer(ui, &text, 13.0);
+        ui.label(job);
+    };
+    // A failed request counts down to its next try.
+    let retry = run.retry.as_ref().map(|(text, until)| format!("{text} in {}s", until.saturating_duration_since(Instant::now()).as_secs_f32().ceil()));
+    let sent = run.request.as_ref().map(|r| (r, describe_request(&r.buckets)));
+    let body = |r: &super::Round| r.buckets.iter().map(|b| format!("{} {}", b.label, k(b.chars))).collect::<Vec<_>>().join(" · ");
+    let heavy = |chars: u64| if chars >= 400_000 { " — big context, first token may take a while" } else { "" };
+
+    if !has_output {
+        let stage = match run.status {
+            "Writing" => "Writing",
+            "Working" => "Working on your files",
+            "Searching" => "Searching the web",
+            _ => "Thinking",
+        };
+        row(ui, 8.0, &mut |ui| {
+            mark(ui);
+            // A retry takes the word's place rather than adding a line.
+            match &retry {
+                Some(text) => {
+                    let said = ui.label(widgets::lines(text.as_str(), 13.0, 20.0, W::Regular, p.warning));
+                    if let Some((r, _)) = &sent {
+                        said.on_hover_text(format!("Request body: {}", body(r)));
+                    }
+                }
+                None => glow(ui, format!("{stage}…")),
+            }
+            ui.label(widgets::text(format!("· {}s", run.started.elapsed().as_secs()), 11.0, W::Regular, p.muted));
+        });
+        if let Some((r, (chars, described))) = sent.as_ref().filter(|(_, (chars, _))| *chars >= 100_000) {
+            row(ui, 4.0, &mut |ui| {
+                let tip = format!("Request {} body: {}{}", r.number, body(r), if *chars >= 400_000 { "\nBig context — the first token can take a while" } else { "" });
+                ui.label(small(format!("Request {} · {described}{}", r.number, heavy(*chars)), p.muted)).on_hover_text(tip);
+            });
         }
-        _ if !has_output => {
-            ui.add_space(8.0);
-            let stage = match run.status {
-                "Writing" => "Writing",
-                "Working" => "Working on your files",
-                "Searching" => "Searching the web",
-                _ => "Thinking",
-            };
-            line(ui, format!("{stage}…"), format!("· {seconds}s"));
-        }
-        _ => {}
+        return;
     }
-    ui.add_space(8.0);
+    if let Some(text) = retry {
+        row(ui, 0.0, &mut |ui| {
+            ui.label(small(text.clone(), p.warning));
+        });
+    }
+    if let Some(draft) = run.drafting.as_ref().filter(|d| d.chars > 0) {
+        let size = if draft.chars >= 1000 { format!("{:.1}k chars", draft.chars as f64 / 1000.0) } else { format!("{} chars", draft.chars) };
+        row(ui, 0.0, &mut |ui| {
+            mark(ui);
+            glow(ui, format!("{}…", drafting_label(&draft.name, draft.path.as_deref())));
+            ui.label(widgets::text(format!("· {size} · {}s", draft.since.elapsed().as_secs()), 11.0, W::Regular, p.muted));
+        });
+    } else if let Some((r, (chars, described))) = sent.as_ref().filter(|(r, _)| !r.answered) {
+        row(ui, 0.0, &mut |ui| {
+            mark(ui);
+            glow(ui, "Waiting for the model…".into());
+            ui.label(widgets::text(format!("· {}s · {described}{}", r.fired.elapsed().as_secs(), heavy(*chars)), 11.0, W::Regular, p.muted))
+                .on_hover_text("The next round was sent. The provider is reading it (a big request can take a while) before the first token comes back.");
+        });
+    }
 }
 
-/// "Writing files", "Preparing edits", "Planning": what a tool call still streaming in is doing.
-fn drafting_label(name: &str) -> String {
-    match name {
-        "write_file" | "write_files" | "create_file" => "Writing files".into(),
-        "edit_file" | "edit_files" | "replace_in_files" => "Preparing edits".into(),
-        n if n.contains("plan") => "Planning".into(),
-        n => format!("Preparing {}", n.replace('_', " ")),
+/// "Writing ui/chat.rs", "Preparing edits", "Planning": what a tool call still streaming in is doing.
+fn drafting_label(name: &str, path: Option<&str>) -> String {
+    // The last two parts of the path say which file without the whole way to it.
+    let file = path.map(|p| p.split('/').filter(|part| !part.is_empty()).collect::<Vec<_>>()).filter(|parts| !parts.is_empty()).map(|parts| parts[parts.len().saturating_sub(2)..].join("/"));
+    match (name, file) {
+        ("write_file" | "write_files" | "create_file", Some(file)) => format!("Writing {file}"),
+        ("write_file" | "write_files" | "create_file", None) => "Writing files".into(),
+        ("edit_file" | "edit_files" | "replace_in_files", Some(file)) => format!("Editing {file}"),
+        ("edit_file" | "edit_files" | "replace_in_files", None) => "Preparing edits".into(),
+        (n, _) if n.contains("plan") => "Planning".into(),
+        (n, _) => format!("Preparing {}", n.replace('_', " ")),
     }
 }
 
@@ -337,4 +488,24 @@ fn welcome(app: &mut App, ui: &mut egui::Ui) {
         }
     });
     ui.data_mut(|d| d.insert_temp(id, used.response.rect.height()));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wait_row_words() {
+        let bucket = |label: &str, chars| Bucket { label: label.into(), chars };
+        let request = [bucket("instructions", 9_400), bucket("history", 310_000), bucket("media", 2_800_000), bucket("tool results", 96_500), bucket("plugins", 0)];
+        assert_eq!(describe_request(&request), (415_900, "416k in (history 310k · tool results 97k) + media 2.0 MB".into()));
+        assert_eq!(describe_request(&[bucket("your message", 812)]), (812, "812 in (your message 812)".into()));
+        assert_eq!(describe_request(&[]), (0, "0 in".into()));
+        assert_eq!((k(999), k(1000), k(2500)), ("999".into(), "1k".into(), "3k".into()));
+
+        assert_eq!(drafting_label("write_file", Some("desktop/src/ui/chat.rs")), "Writing ui/chat.rs");
+        assert_eq!(drafting_label("edit_file", Some("main.rs")), "Editing main.rs");
+        assert_eq!((drafting_label("write_files", None), drafting_label("replace_in_files", None)), ("Writing files".into(), "Preparing edits".into()));
+        assert_eq!((drafting_label("make_plan", Some("x")), drafting_label("run_command", None)), ("Planning".into(), "Preparing run command".into()));
+    }
 }

@@ -268,6 +268,15 @@ pub fn expand(cmd: Cmd, arg: &str) -> Option<String> {
     })
 }
 
+/// What the agent is sent for a message the transcript shows as typed: a prompt shortcut
+/// ("/review auth") becomes its full instruction, anything else goes as it is.
+pub fn wire(shown: &str) -> std::borrow::Cow<'_, str> {
+    match parse(shown) {
+        Some(Parsed::Command(c, arg)) => expand(c.cmd, arg).map_or(shown.into(), Into::into),
+        _ => shown.into(),
+    }
+}
+
 /// What a submitted line turns out to be.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Submit {
@@ -456,6 +465,9 @@ mod tests {
         assert!(text(Cmd::Commit, "").contains("a clear commit message that says what changed and why. Then show what was committed."));
         assert!(text(Cmd::Commit, "fix login").ends_with("a clear commit message based on: fix login. Then show what was committed."));
         assert_eq!(expand(Cmd::Stop, "x"), None);
+        // The transcript keeps the short form; the agent gets the instruction. A leading space sends it as typed.
+        assert_eq!(wire("/fix login 500s"), fix);
+        assert_eq!((wire(" /fix login").as_ref(), wire("/stop").as_ref(), wire("fix /it").as_ref()), (" /fix login", "/stop", "fix /it"));
     }
 
     #[test]
