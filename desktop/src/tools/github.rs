@@ -106,6 +106,8 @@ mod tests {
             chat: Arc::new(Mutex::new(ChatState::default())),
             procs: Arc::new(Procs::default()),
             planner: None,
+            limits: crate::context::tool_limits::tool_limits_for(false),
+            memory: Default::default(),
         }
     }
 
