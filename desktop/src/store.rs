@@ -75,6 +75,8 @@ pub struct Settings {
     pub openrouter_key: String,
     pub tavily_key: String,
     pub exa_key: String,
+    /// GitHub Personal Access Token typed into the GitHub dialog. `GITHUB_TOKEN` / `GITHUB_PAT` stand in when empty.
+    pub github_token: String,
     /// A provider switched off keeps its key but is not searched.
     pub tavily_enabled: bool,
     pub exa_enabled: bool,
@@ -121,6 +123,7 @@ impl Default for Settings {
             openrouter_key: String::new(),
             tavily_key: String::new(),
             exa_key: String::new(),
+            github_token: String::new(),
             tavily_enabled: true,
             exa_enabled: true,
             vision_key: String::new(),

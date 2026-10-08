@@ -23,6 +23,10 @@ async fn git(ctx: &Ctx, args: &[&str]) -> (bool, String) {
 
 /// The branch new work must not be committed to directly.
 async fn base_branch(ctx: &Ctx) -> String {
+    // A repository connected through GitHub has the base the user picked.
+    if let Some(c) = crate::github::read_connection(&super::github::ws(ctx)) {
+        return c.base_branch;
+    }
     let (ok, head) = git(ctx, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]).await;
     if ok {
         return head.trim().trim_start_matches("origin/").to_string();
@@ -116,6 +120,10 @@ pub async fn run(ctx: &Ctx, name: &str, args: &Value) -> Output {
                         return Output::fail("The user declined the branch change.");
                     }
                     let (ok, out) = if action == "create" { git(ctx, &["switch", "-c", &full]).await } else { git(ctx, &["switch", &full]).await };
+                    if ok {
+                        // github_push and github_create_pr target the branch now checked out.
+                        crate::git_agent::follow_branch(&super::github::ws(ctx), &full);
+                    }
                     Output { ok, ..Output::ok(out, format!("Now on {full}")) }
                 }
                 other => Output::fail(format!("Unknown action `{other}`. Use list, create or switch.")),

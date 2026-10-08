@@ -6,7 +6,7 @@ use crate::plugins::PROMPTS;
 
 /// Standing instructions for working in the chat's folder. Only tools that exist are named:
 /// a model told about a tool it does not have will call it and waste the round.
-pub fn workspace_rules(web_search: bool, native_vision: bool, git_repo: bool) -> String {
+pub fn workspace_rules(web_search: bool, native_vision: bool, git_repo: bool, github: Option<&crate::github::Connection>) -> String {
     let mut p = String::from(
         "\n\nYou have a workspace on the user's machine and tools to work in it. Prefer creating real files over printing code in chat: the user wants working files, not snippets to copy. List or read before editing so your replacements match exactly.\n\n\
 You can also run code with run_command. After writing something runnable, run it and check the output rather than assuming it works. If it fails, read the error, fix the file, and run it again. Commands may need the user's approval, so keep them few and purposeful, and say briefly why in the reason field. There is no shell: pass the program and its arguments as a list. run_command waits for the program to finish, so use it only for things that exit: scripts, tests, installs. For anything that keeps running, such as a dev server or a watcher, use start_process instead: it returns straight away, and you can read its output with read_process, wait for a line with wait_for_output, and stop it with stop_process. Always stop what you started once you are done with it. For tests, prefer run_tests. \
@@ -30,7 +30,13 @@ Batch the changes that belong together. move_file renames in one step instead of
     if native_vision {
         p.push_str(" You can also view_image to look at a screenshot or mockup saved in the workspace.");
     }
-    if git_repo {
+    if let Some(c) = github {
+        // The web app's paragraph for a workspace connected to GitHub, under the same condition: a stored connection.
+        p.push_str(&format!(
+            "\n\nThis workspace is connected to GitHub repository {}. The selected base is {}; your working branch is {} — a real clone, so work like a developer on it. Check git_status and git_diff, then commit each logical change with git_commit and a clear message. If git_status shows the branch behind the base, run git_pull_base and resolve any conflicts it reports. When the work is done and verified, call github_create_pr with a title and a body saying what changed and how it was tested (it pushes the branch); github_pr_status shows checks and reviews. Never commit to or push the base branch, and never force-push.",
+            c.repo, c.base_branch, c.working_branch
+        ));
+    } else if git_repo {
         p.push_str(
             "\n\nThis workspace is a git repository, so work like a developer on it. Check git_status and git_diff, create a working branch with git_branch before your first commit, then commit each logical change with git_commit and a clear message. Never commit to the base branch. Nothing is pushed from here: say when the work is ready so the user can push it.",
         );
@@ -49,8 +55,8 @@ Browser use:
 
 /// The first system message: persona, optional search nudge, workspace rules.
 /// `legacy` is the classic plugins' text, which rides right after the persona as it always did.
-pub fn system(legacy: &str, web_search: bool, native_vision: bool, git_repo: bool) -> String {
-    format!("{}{legacy}{}", PROMPTS.base, workspace_rules(web_search, native_vision, git_repo))
+pub fn system(legacy: &str, web_search: bool, native_vision: bool, git_repo: bool, github: Option<&crate::github::Connection>) -> String {
+    format!("{}{legacy}{}", PROMPTS.base, workspace_rules(web_search, native_vision, git_repo, github))
 }
 
 /// "Auto" effort: a greeting needs no reasoning, a debugging session needs a lot.
@@ -93,12 +99,17 @@ mod tests {
 
     #[test]
     fn prompt_only_names_tools_that_exist() {
-        let p = system("", false, false, false);
+        let p = system("", false, false, false, None);
         assert!(p.starts_with(&PROMPTS.base));
         assert!(p.contains("There is no web_search tool"));
+        // A connected repository gets the web app's paragraph in place of the plain git one.
+        let c = crate::github::Connection { repo: "octo/demo".into(), base_branch: "main".into(), working_branch: "apim/fix-1".into(), ..Default::default() };
+        let connected = workspace_rules(true, true, true, Some(&c));
+        assert!(connected.contains("\n\nThis workspace is connected to GitHub repository octo/demo. The selected base is main; your working branch is apim/fix-1 — a real clone, so work like a developer on it."));
+        assert!(connected.contains("Never commit to or push the base branch, and never force-push.\n\nBrowser use:") && !connected.contains("Nothing is pushed from here"));
         // Every `snake_case` tool the rules mention must have a handler.
         let re = regex::Regex::new(r"\b[a-z]+(?:_[a-z]+)+\b").unwrap();
-        for name in re.find_iter(&workspace_rules(true, true, true)).map(|m| m.as_str()) {
+        for name in re.find_iter(&format!("{connected}{}", workspace_rules(true, true, true, None))).map(|m| m.as_str()) {
             let is_tool_shaped = crate::tools::implemented(name) || !include_str!("../assets/tools.json").contains(&format!("\"name\": \"{name}\""));
             assert!(is_tool_shaped, "the prompt mentions {name}, which this build does not have");
         }

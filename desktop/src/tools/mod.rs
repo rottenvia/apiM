@@ -6,6 +6,7 @@ pub mod data;
 pub mod exec;
 pub mod files;
 pub mod git;
+pub mod github;
 pub mod plan;
 pub mod recall;
 pub mod web;
@@ -112,6 +113,7 @@ const IMPLEMENTED: &[&str] = &[
     "web_search", "make_plan", "update_plan", "ask_user", "finish", "note_finding", "view_image", "show_image",
     "git_status", "git_diff", "git_log", "git_commit", "git_branch", "apply_patch", "verify_file", "read_symbol", "find_references",
     "analyze_log", "extract_archive", "query_data", "list_snapshots", "restore_snapshot", "search_conversation",
+    "git_pull_base", "github_push", "github_create_pr", "github_pr_status",
 ];
 
 static SCHEMAS: LazyLock<Vec<Value>> = LazyLock::new(|| {
@@ -135,12 +137,16 @@ pub fn implemented(name: &str) -> bool {
 
 /// The tool list for one request. A tool that cannot work is withheld rather than
 /// offered: a model given one calls it, gets an error, and tries something worse.
-pub fn definitions(web_search: bool, native_vision: bool, git_repo: bool) -> Vec<Value> {
+/// `github` is None for a workspace with no connected repository, else whether a GitHub token is at hand.
+pub fn definitions(web_search: bool, native_vision: bool, git_repo: bool, github: Option<bool>) -> Vec<Value> {
     SCHEMAS
         .iter()
         .filter(|t| match t["function"]["name"].as_str().unwrap_or("") {
             "web_search" => web_search,
             "view_image" => native_vision,
+            "git_pull_base" => github.is_some(),
+            // Push and pull requests need the token as well as the connection.
+            n if n.starts_with("github_") => github == Some(true),
             n if n.starts_with("git_") => git_repo,
             _ => true,
         })
@@ -212,6 +218,7 @@ pub async fn run(name: &str, args: &Value, ctx: &Ctx) -> Output {
         "http_request" => web::http_request(ctx, args).await,
         "download_file" => web::download_file(ctx, args).await,
         "web_search" => web::web_search(ctx, args).await,
+        "git_pull_base" | "github_push" | "github_create_pr" | "github_pr_status" => github::run(ctx, name, args).await,
         n if n.starts_with("git_") => git::run(ctx, n, args).await,
         _ => Output::fail(format!("Unknown tool: {name}. Use one of the tools you were given.")),
     }
@@ -241,7 +248,12 @@ mod tests {
         for name in IMPLEMENTED {
             assert!(SCHEMAS.iter().any(|t| t["function"]["name"] == *name), "{name} is missing from assets/tools.json");
         }
-        assert!(definitions(false, false, false).iter().all(|t| t["function"]["name"] != "web_search"));
+        assert!(definitions(false, false, false, None).iter().all(|t| t["function"]["name"] != "web_search"));
+        // GitHub tools: none without a connected repository, the remote ones only with a token as well.
+        let offered = |github| definitions(false, false, true, github).iter().filter_map(|t| t["function"]["name"].as_str().map(str::to_string)).filter(|n| n == "git_pull_base" || n.starts_with("github_")).collect::<Vec<_>>();
+        assert!(offered(None).is_empty());
+        assert_eq!(offered(Some(false)), ["git_pull_base"]);
+        assert_eq!(offered(Some(true)).len(), 4);
         let start = SCHEMAS.iter().find(|t| t["function"]["name"] == "start_process").unwrap();
         assert!(start["function"]["parameters"]["properties"].get("hidden").is_none());
     }

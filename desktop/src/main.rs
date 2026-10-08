@@ -10,6 +10,8 @@ mod diff;
 mod export;
 mod filetree;
 mod find;
+mod git_agent;
+mod github;
 mod lessons;
 mod mcp;
 mod models;
