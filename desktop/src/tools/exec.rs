@@ -539,6 +539,8 @@ fn tail_chars(text: &str, n: usize) -> String {
 impl Drop for Procs {
     fn drop(&mut self) {
         self.stop_all();
+        // The sandbox's off-screen display goes with the app; a no-op when it was never started.
+        crate::sandbox::run::close(std::path::Path::new("wsl.exe"));
     }
 }
 
