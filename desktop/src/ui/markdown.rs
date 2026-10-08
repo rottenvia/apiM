@@ -46,6 +46,81 @@ enum Block {
     Table { head: Vec<Vec<Span>>, rows: Vec<Vec<Vec<Span>>> },
 }
 
+// ------------------------------------------------------------------ find in chat
+
+/// The find bar's query being highlighted in one message (`.search-hit`).
+///
+/// Hits are numbered in reading order across the message, so the bar's "3/7" can point at one.
+// ponytail: the bar counts matches in the message as stored, like the web; code blocks are counted
+// but never marked, so a number can land on a hit that is not drawn. Count the drawn text if that bites.
+pub struct Marks<'a> {
+    pub matcher: &'a crate::find::Matcher,
+    /// Which hit of this message is the focused one.
+    pub active: Option<usize>,
+    /// Hits met so far in this message.
+    pub seen: usize,
+    /// Bring the focused hit into view.
+    pub reveal: bool,
+    /// The focused hit was drawn (and scrolled to, when asked).
+    pub shown: bool,
+}
+
+impl Marks<'_> {
+    /// Gives every hit in `job` its own text colour and 2px of room each side (the web's `px-0.5`).
+    /// Returns where they are, as character ranges, and which one is the focused hit.
+    pub fn apply(&mut self, job: &mut LayoutJob) -> Vec<(std::ops::Range<usize>, bool)> {
+        let found = self.matcher.ranges(&job.text);
+        if found.is_empty() {
+            return Vec::new();
+        }
+        let focused = self.active.and_then(|n| n.checked_sub(self.seen)).filter(|n| *n < found.len());
+        self.seen += found.len();
+        let mut sections = Vec::new();
+        for section in std::mem::take(&mut job.sections) {
+            let (start, end) = (usize::from(section.byte_range.start), usize::from(section.byte_range.end));
+            // The section falls apart where a hit starts or ends inside it.
+            let mut cuts: Vec<usize> = found.iter().flat_map(|r| [r.start, r.end]).filter(|at| *at > start && *at < end).collect();
+            cuts.push(end);
+            cuts.dedup();
+            let mut from = start;
+            for to in cuts {
+                let mut piece = section.clone();
+                piece.byte_range = egui::text::ByteIndex(from)..egui::text::ByteIndex(to);
+                piece.leading_space = if from == start { section.leading_space } else { 0.0 };
+                piece.leading_space += 2.0 * found.iter().filter(|r| r.start == from || r.end == from).count() as f32;
+                if let Some(hit) = found.iter().position(|r| r.contains(&from)) {
+                    piece.format.color = if focused == Some(hit) { Color32::WHITE } else { Color32::from_rgb(0xed, 0xe9, 0xe2) };
+                }
+                sections.push(piece);
+                from = to;
+            }
+        }
+        job.sections = sections;
+        let chars = |byte: usize| job.text[..byte].chars().count();
+        found.iter().enumerate().map(|(i, r)| (chars(r.start)..chars(r.end), focused == Some(i))).collect()
+    }
+
+    /// Paints the boxes behind the hits of a galley drawn at `origin`, into the slot kept for them
+    /// under the text, and scrolls to the focused one when that was asked for.
+    pub fn paint(&mut self, ui: &Ui, under: egui::layers::ShapeIdx, galley: &egui::Galley, hits: &[(std::ops::Range<usize>, bool)], origin: egui::Vec2) {
+        // The box is the font's own height around the baseline, as an inline `<mark>` is.
+        let (ascent, height) = galley.rows.iter().find_map(|r| r.row.glyphs.first()).map_or((14.0, 18.0), |g| (g.font_ascent, g.font_height));
+        let boxes = |focused: bool| {
+            let ranges: Vec<_> = hits.iter().filter(|h| h.1 == focused).map(|h| h.0.clone()).collect();
+            runs(galley, &ranges).into_iter().map(move |[left, right, _, baseline]| Rect::from_min_max(pos2(left - 2.0, baseline - ascent), pos2(right + 2.0, baseline - ascent + height)).translate(origin))
+        };
+        let mut shapes: Vec<egui::Shape> = boxes(false).map(|rect| egui::Shape::rect_filled(rect, 3.0, Color32::from_rgba_unmultiplied(201, 100, 66, 64))).collect();
+        for rect in boxes(true) {
+            shapes.push(egui::Shape::rect_filled(rect, 3.0, Color32::from_rgb(0xc9, 0x64, 0x42)));
+            if self.reveal && !self.shown {
+                ui.scroll_to_rect(rect, Some(egui::Align::Center));
+            }
+            self.shown = true;
+        }
+        ui.painter().set(under, egui::Shape::Vec(shapes));
+    }
+}
+
 // ------------------------------------------------------------------ parsing
 
 type Events<'a> = Peekable<Parser<'a>>;
@@ -247,21 +322,21 @@ fn margins(block: &Block) -> (f32, f32) {
 }
 
 /// Draws `text`. Returns what was clicked in it, if anything.
-pub fn show(ui: &mut Ui, text: &str, color: Color32) -> Option<Click> {
+pub fn show(ui: &mut Ui, text: &str, color: Color32, marks: &mut Option<Marks>) -> Option<Click> {
     // ponytail: parsed again every frame it is on screen. Cache per message if long replies stutter.
     let parsed = parse(text);
     let mut click = None;
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
         // The prose box keeps its first and last margins inside itself.
-        flow(ui, &parsed, color, false, &mut click);
+        flow(ui, &parsed, color, false, &mut click, marks);
     });
     click
 }
 
 /// Blocks one under another with collapsed margins. `hoisted` means the outer
 /// margins were already given to the parent.
-fn flow(ui: &mut Ui, blocks: &[Block], color: Color32, hoisted: bool, click: &mut Option<Click>) {
+fn flow(ui: &mut Ui, blocks: &[Block], color: Color32, hoisted: bool, click: &mut Option<Click>, marks: &mut Option<Marks>) {
     let mut below = 0.0_f32;
     for (i, block) in blocks.iter().enumerate() {
         let (top, bottom) = margins(block);
@@ -270,7 +345,7 @@ fn flow(ui: &mut Ui, blocks: &[Block], color: Color32, hoisted: bool, click: &mu
             0 => ui.add_space(top),
             _ => ui.add_space(below.max(top)),
         }
-        ui.push_id(i, |ui| draw(ui, block, color, click));
+        ui.push_id(i, |ui| draw(ui, block, color, click, marks));
         below = bottom;
     }
     if !hoisted {
@@ -291,11 +366,11 @@ pub fn indented(ui: &mut Ui, indent: f32, add: impl FnOnce(&mut Ui)) -> Rect {
     .rect
 }
 
-fn draw(ui: &mut Ui, block: &Block, color: Color32, click: &mut Option<Click>) {
+fn draw(ui: &mut Ui, block: &Block, color: Color32, click: &mut Option<Click>, marks: &mut Option<Marks>) {
     let p = p();
     match block {
-        Block::Para(spans) => text(ui, spans, color, 400.0, click),
-        Block::Heading(level, spans) => text(ui, spans, color, if *level <= 3 { 650.0 } else { 400.0 }, click),
+        Block::Para(spans) => text(ui, spans, color, 400.0, click, marks),
+        Block::Heading(level, spans) => text(ui, spans, color, if *level <= 3 { 650.0 } else { 400.0 }, click, marks),
         Block::Code { lang, code } => code_block(ui, lang, code, click),
         Block::Rule => {
             let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
@@ -303,7 +378,7 @@ fn draw(ui: &mut Ui, block: &Block, color: Color32, click: &mut Option<Click>) {
         }
         Block::Quote(inner) => {
             let left = ui.cursor().left();
-            let used = indented(ui, 18.0, |ui| flow(ui, inner, p.text2, true, click));
+            let used = indented(ui, 18.0, |ui| flow(ui, inner, p.text2, true, click, marks));
             ui.painter().rect_filled(Rect::from_min_max(pos2(left, used.top()), pos2(left + 3.0, used.bottom())), 0.0, p.accent);
         }
         Block::List(items) => {
@@ -313,11 +388,11 @@ fn draw(ui: &mut Ui, block: &Block, color: Color32, click: &mut Option<Click>) {
                 if i > 0 {
                     ui.add_space(below.max(top));
                 }
-                ui.push_id(i, |ui| indented(ui, SIZE * 1.5, |ui| flow(ui, item, color, true, click)));
+                ui.push_id(i, |ui| indented(ui, SIZE * 1.5, |ui| flow(ui, item, color, true, click, marks)));
                 below = item.last().map_or(GAP / 2.0, |b| margins(b).1.max(GAP / 2.0));
             }
         }
-        Block::Table { head, rows } => table(ui, head, rows, color),
+        Block::Table { head, rows } => table(ui, head, rows, color, marks),
     }
 }
 
@@ -448,12 +523,18 @@ fn decorations(galley: &egui::Galley, spans: &[Span], origin: egui::Vec2) -> Vec
 }
 
 /// A run of inline text. Selectable; links open in the browser.
-fn text(ui: &mut Ui, spans: &[Span], color: Color32, weight: f32, click: &mut Option<Click>) {
-    let galley = ui.painter().layout_job(job(spans, color, weight, ui.available_width()));
+fn text(ui: &mut Ui, spans: &[Span], color: Color32, weight: f32, click: &mut Option<Click>, marks: &mut Option<Marks>) {
+    let mut job = job(spans, color, weight, ui.available_width());
+    let hits = marks.as_mut().map_or(Vec::new(), |m| m.apply(&mut job));
+    let galley = ui.painter().layout_job(job);
     // Reserved now so the boxes end up under the text.
     let under = ui.painter().add(egui::Shape::Noop);
+    let found = ui.painter().add(egui::Shape::Noop);
     let response = ui.add(egui::Label::new(galley.clone()).selectable(true));
     ui.painter().set(under, egui::Shape::Vec(decorations(&galley, spans, response.rect.min.to_vec2())));
+    if let Some(marks) = marks.as_mut().filter(|_| !hits.is_empty()) {
+        marks.paint(ui, found, &galley, &hits, response.rect.min.to_vec2());
+    }
     pictures(ui, &galley, spans, response.rect.min.to_vec2(), color);
     if !spans.iter().any(|s| s.link.is_some()) {
         return;
@@ -603,7 +684,7 @@ fn title_of(code: &str) -> Option<String> {
 
 // ponytail: columns share the width in proportion to their longest cell, and a
 // table wider than the column wraps instead of overflowing like the web app's.
-fn table(ui: &mut Ui, head: &[Vec<Span>], rows: &[Vec<Vec<Span>>], color: Color32) {
+fn table(ui: &mut Ui, head: &[Vec<Span>], rows: &[Vec<Vec<Span>>], color: Color32, marks: &mut Option<Marks>) {
     let p = p();
     const PAD: egui::Vec2 = vec2(11.25, 7.5);
     let columns = rows.iter().map(Vec::len).chain([head.len()]).max().unwrap_or(0);
@@ -626,14 +707,24 @@ fn table(ui: &mut Ui, head: &[Vec<Span>], rows: &[Vec<Vec<Span>>], color: Color3
         if row.is_empty() {
             continue;
         }
-        let galleys: Vec<_> = (0..columns).map(|i| ui.painter().layout_job(job(row.get(i).map_or(&[][..], Vec::as_slice), color, if is_head { 600.0 } else { 400.0 }, (widths[i] - PAD.x * 2.0).max(8.0)))).collect();
-        let height = galleys.iter().map(|g| g.size().y).fold(LINE, f32::max) + PAD.y * 2.0 + 1.0;
+        let cells: Vec<_> = (0..columns)
+            .map(|i| {
+                let mut job = job(row.get(i).map_or(&[][..], Vec::as_slice), color, if is_head { 600.0 } else { 400.0 }, (widths[i] - PAD.x * 2.0).max(8.0));
+                let hits = marks.as_mut().map_or(Vec::new(), |m| m.apply(&mut job));
+                (ui.painter().layout_job(job), hits)
+            })
+            .collect();
+        let height = cells.iter().map(|(g, _)| g.size().y).fold(LINE, f32::max) + PAD.y * 2.0 + 1.0;
         let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
         let mut x = rect.left();
-        for (i, galley) in galleys.into_iter().enumerate() {
+        for (i, (galley, hits)) in cells.into_iter().enumerate() {
             // Borders overlap by a pixel, as `border-collapse` draws them.
             let cell = Rect::from_min_size(pos2(x, rect.top()), vec2(widths[i] + if i + 1 < columns { 1.0 } else { 0.0 }, height + 1.0));
             ui.painter().rect(cell, 0.0, if is_head { p.elevated } else { Color32::TRANSPARENT }, border, StrokeKind::Inside);
+            if let Some(marks) = marks.as_mut().filter(|_| !hits.is_empty()) {
+                let found = ui.painter().add(egui::Shape::Noop);
+                marks.paint(ui, found, &galley, &hits, vec2(x + PAD.x, rect.top() + PAD.y));
+            }
             ui.painter().galley(pos2(x + PAD.x, rect.top() + PAD.y), galley, color);
             x += widths[i];
         }
@@ -664,6 +755,20 @@ mod tests {
         assert_eq!(parsed[5], Block::Code { lang: "rust".into(), code: "fn main() {}".into() });
         let Block::Table { head, rows } = &parsed[6] else { panic!("{:?}", parsed[6]) };
         assert_eq!((head.len(), rows.len(), &rows[0][1]), (2, 1, &vec![plain("2")]));
+    }
+
+    #[test]
+    fn marks_split_the_job_at_every_hit() {
+        let matcher = crate::find::Matcher::new("ab", false).unwrap();
+        let mut marks = Marks { matcher: &matcher, active: Some(2), seen: 1, reveal: false, shown: false };
+        let mut job = job(&[plain("xab "), Span { text: "abab".into(), bold: true, ..Default::default() }], Color32::GRAY, 400.0, 100.0);
+        let hits = marks.apply(&mut job);
+        // Three hits; the second of this text is the message's third, the focused one.
+        assert_eq!(hits, [(1..3, false), (4..6, true), (6..8, false)]);
+        assert_eq!(marks.seen, 4);
+        let pieces: Vec<(&str, f32, Color32)> = job.sections.iter().map(|s| (&job.text[usize::from(s.byte_range.start)..usize::from(s.byte_range.end)], s.leading_space, s.format.color)).collect();
+        let hit = Color32::from_rgb(0xed, 0xe9, 0xe2);
+        assert_eq!(pieces, [("x", 0.0, Color32::GRAY), ("ab", 2.0, hit), (" ", 2.0, Color32::GRAY), ("ab", 2.0, Color32::WHITE), ("ab", 4.0, hit)]);
     }
 
     #[test]

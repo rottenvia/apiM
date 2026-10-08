@@ -39,7 +39,7 @@ pub enum Action {
 }
 
 /// What a bubble needs to know about its surroundings.
-pub struct Env<'a> {
+pub struct Env<'a, 'm> {
     pub settings: &'a Settings,
     pub workspace: &'a Path,
     /// This reply is being written right now.
@@ -59,6 +59,8 @@ pub struct Env<'a> {
     pub rewind: Option<&'a super::rewind::Preview>,
     /// The chat's plan, drawn in the newest reply.
     pub plan: Option<&'a crate::store::Plan>,
+    /// Find in this chat: the query to mark in this message, when it has matches.
+    pub marks: Option<markdown::Marks<'m>>,
 }
 
 pub fn show(ui: &mut Ui, msg: &Message, env: &mut Env) {
@@ -113,6 +115,13 @@ fn note(ui: &mut Ui, msg: &Message) {
                     open = !open;
                     ui.data_mut(|d| d.insert_temp(id, open));
                 }
+            }
+            // What was attached to the note, by name.
+            for file in &msg.attachments {
+                let name = widgets::galley(ui, &file.name, theme::font(11.0, W::Regular), p.text2);
+                let (rect, _) = ui.allocate_exact_size(vec2(name.size().x + 14.0, 22.5), Sense::hover());
+                ui.painter().rect(rect, 8.0, alpha(p.bg2, 60.0), Stroke::new(1.0, p.border), StrokeKind::Inside);
+                widgets::text_at(ui, rect.left() + 7.0, rect.center().y, name);
             }
         });
     });
@@ -173,12 +182,16 @@ fn user(ui: &mut Ui, msg: &Message, env: &mut Env) {
     let body = msg.text();
 
     let font = theme::font(15.0, W::Regular);
-    let layout = |ui: &Ui, text: &str| {
+    let job_of = |text: &str| {
         let mut job = egui::text::LayoutJob::simple(text.to_string(), font.clone(), p.text, room);
         job.sections.iter_mut().for_each(|s| s.format.line_height = Some(24.0));
-        ui.painter().layout_job(job)
+        job
     };
-    let galley = layout(ui, &body);
+    let layout = |ui: &Ui, text: &str| ui.painter().layout_job(job_of(text));
+    // Find in this chat marks its matches in a question as it does in a reply.
+    let mut body_job = job_of(&body);
+    let hits = env.marks.as_mut().filter(|_| !editing).map_or(Vec::new(), |marks| marks.apply(&mut body_job));
+    let galley = ui.painter().layout_job(body_job);
 
     // Thumbnails are 96 tall and as wide as the picture wants, up to 192.
     let pictures: Vec<(String, egui::Vec2, &str)> = msg
@@ -255,7 +268,11 @@ fn user(ui: &mut Ui, msg: &Message, env: &mut Env) {
                         if !first {
                             ui.add_space(8.0);
                         }
-                        ui.add(egui::Label::new(galley).selectable(true));
+                        let under = ui.painter().add(egui::Shape::Noop);
+                        let label = ui.add(egui::Label::new(galley.clone()).selectable(true));
+                        if let Some(marks) = env.marks.as_mut().filter(|_| !hits.is_empty()) {
+                            marks.paint(ui, under, &galley, &hits, label.rect.min.to_vec2());
+                        }
                     }
                 })
                 .response
@@ -1024,13 +1041,22 @@ fn pending_code(ui: &mut Ui, lang: &str, lines: usize) {
     });
 }
 
+/// A line the agent left in the reply. Folding the context mid-run is drawn as the divider it is.
+fn notice_line(ui: &mut Ui, text: &str) {
+    if text.starts_with("Context compacted") {
+        chat::divider(ui, text, "Older steps of this reply are summarised for the model. It sees the summary plus what comes after this line.");
+    } else {
+        ui.add(egui::Label::new(widgets::lines(text, 12.0, 19.5, W::Regular, p().muted)).wrap().selectable(false));
+    }
+}
+
 /// Markdown, with what was clicked in it passed on.
 fn prose(ui: &mut Ui, text: &str, colour: Color32, env: &mut Env) {
     let (shown, pending) = match pending_fence(text).filter(|_| env.live) {
         Some((before, lang, lines)) => (before, Some((lang, lines))),
         None => (text, None),
     };
-    match markdown::show(ui, shown, colour) {
+    match markdown::show(ui, shown, colour, &mut env.marks) {
         Some(Click::Link(url)) => *env.action = Some(Action::Link(url)),
         Some(Click::Copy(code)) => *env.action = Some(Action::Copy(code)),
         Some(Click::Open(title, lang, code)) => *env.action = Some(Action::OpenCode(title, lang, code)),
@@ -1063,7 +1089,8 @@ fn assistant(ui: &mut Ui, msg: &Message, env: &mut Env) {
 fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
     let p = p();
     let has_tools = msg.parts.iter().any(|part| matches!(part, Part::Tool(_)));
-    let timeline = msg.parts.len() > 1 && has_tools;
+    // A reply with find matches is drawn flat, as the web draws it while a query is on.
+    let timeline = msg.parts.len() > 1 && has_tools && env.marks.is_none();
     let text = msg.text();
     let failed = msg.error.is_some();
     let colour = if msg.incomplete && !env.live { p.text2 } else { p.text };
@@ -1179,7 +1206,7 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
                 if let Some((thought, live)) = think {
                     think_row(ui, thought, *live, env);
                 } else if let Some(notice) = notice {
-                    ui.add(egui::Label::new(widgets::lines(*notice, 12.0, 19.5, W::Regular, p.muted)).wrap().selectable(false));
+                    notice_line(ui, notice);
                 } else {
                     let said = texts.join("\n\n");
                     let has_text = !said.trim().is_empty();
@@ -1220,7 +1247,7 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
         for part in &msg.parts {
             if let Part::Notice(notice) = part {
                 gap(ui, 12.0);
-                ui.add(egui::Label::new(widgets::lines(notice.as_str(), 12.0, 19.5, W::Regular, p.muted)).wrap().selectable(false));
+                notice_line(ui, notice);
             }
         }
     }

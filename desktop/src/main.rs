@@ -97,6 +97,7 @@ fn headless(args: &[String]) {
                 let _ = reply.send(String::new());
             }
             Notice(n) => println!("\n[{n}]"),
+            Retry { reason, wait, .. } => println!("\n[{reason} Retrying in {}s]", wait.as_secs()),
             Usage(u) => eprintln!("\n[tokens in {} out {} cached {}]", u.prompt, u.completion, u.cache_hit),
             Done { finish, incomplete, stop_reason } => {
                 println!("\n[done: {finish:?}{}{}]", if incomplete { ", incomplete" } else { "" }, stop_reason.map(|r| format!(", {r}")).unwrap_or_default());
@@ -106,7 +107,7 @@ fn headless(args: &[String]) {
                 println!("\n[error: {e}]");
                 break;
             }
-            Status(_) | Reasoning(_) | ToolDraft { .. } | State(_) | Context(_) => {}
+            Status(_) | Reasoning(_) | ToolDraft { .. } | NoteRead { .. } | State(_) | Context(_) => {}
         }
     }
 }

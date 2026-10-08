@@ -2,12 +2,14 @@
 //! is no web view anywhere. The layout follows the web app's src/app/page.tsx.
 
 mod attachments;
+mod btw;
 mod bubble;
 mod chat;
 mod compare;
 mod composer;
 mod dialogs;
 mod emoji;
+mod find_bar;
 mod form;
 mod icons;
 mod markdown;
@@ -19,6 +21,7 @@ mod rewind;
 mod settings;
 mod settings_panels;
 mod sidebar;
+mod slash_menu;
 pub mod theme;
 mod widgets;
 mod docks;
@@ -84,14 +87,36 @@ struct PendingQuestion {
     reply: oneshot::Sender<String>,
 }
 
+/// A tool call still streaming its arguments.
+struct Drafting {
+    name: String,
+    /// Characters of arguments so far.
+    chars: usize,
+    /// The file it is about, once that much has arrived.
+    path: Option<String>,
+    /// When its first byte came in.
+    since: Instant,
+}
+
+/// One request to the model: which it is, what it carried, when it left, and whether anything has come back.
+struct Round {
+    number: usize,
+    buckets: Vec<Bucket>,
+    fired: Instant,
+    answered: bool,
+}
+
 /// A reply being generated.
 struct Run {
     rx: mpsc::Receiver<Event>,
     handle: tokio::task::JoinHandle<()>,
     conv_id: String,
     status: &'static str,
-    /// A tool call still streaming its arguments: (name, characters so far).
-    drafting: Option<(String, usize)>,
+    drafting: Option<Drafting>,
+    /// The request now with the model.
+    request: Option<Round>,
+    /// A failed request waiting to be tried again: what to say, and when the next try starts.
+    retry: Option<(String, Instant)>,
     approval: Option<PendingApproval>,
     question: Option<PendingQuestion>,
     /// "btw" notes typed while it works, picked up before its next round.
@@ -157,8 +182,14 @@ pub struct App {
     fullscreen: bool,
     /// Where the composer sat last frame: its popovers hang above it.
     composer_rect: Rect,
-    /// A line above the message box: why something was not sent.
-    composer_note: Option<String>,
+    /// The command menu above the message box, and the line a command leaves there.
+    slash: slash_menu::State,
+    /// Find in this chat. `find_open` and `find` hold whether it is open and what is typed.
+    finder: find_bar::State,
+    /// "btw" notes on their way to the reply being written.
+    btw: btw::State,
+    /// How many of the newest messages are laid out; "Show earlier" raises it.
+    mounted: usize,
     compact_focus: String,
     compact_note: Option<(bool, String)>,
     show_summary: bool,
@@ -171,6 +202,8 @@ pub struct App {
     /// The workspace rail and what hangs off it: the files slide-over, the header chips, the copy dialog.
     ws: workspace::State,
     toast: Option<(String, Instant)>,
+    /// The toast is shown without its warning sign (the web's delete toast has none).
+    toast_bare: bool,
     focus_composer: bool,
     /// The theme the window is drawn in right now, to notice a change in Settings.
     applied_theme: (String, [String; 4]),
@@ -181,8 +214,6 @@ pub struct App {
     carried_versions: Option<serde_json::Value>,
     /// The rewind popover that is open, if one is.
     rewind: Option<rewind::Preview>,
-    /// The files as they were before the last rewind, to undo it.
-    rewind_undo: Option<String>,
     // What the dialogs remember while they are open.
     settings_ui: settings::State,
     plugin_ui: plugin_modal::State,
@@ -218,7 +249,10 @@ impl App {
             popover: Popover::None,
             fullscreen: false,
             composer_rect: Rect::NOTHING,
-            composer_note: None,
+            slash: Default::default(),
+            finder: Default::default(),
+            btw: Default::default(),
+            mounted: 60,
             compact_focus: String::new(),
             compact_note: None,
             show_summary: false,
@@ -229,13 +263,13 @@ impl App {
             files_stale: true,
             ws: Default::default(),
             toast: None,
+            toast_bare: false,
             focus_composer: true,
             applied_theme: (settings.theme.clone(), settings.custom_theme.clone()),
             shot,
             compare: None,
             carried_versions: None,
             rewind: None,
-            rewind_undo: None,
             settings_ui: Default::default(),
             plugin_ui: Default::default(),
             console: Default::default(),
@@ -281,7 +315,49 @@ impl App {
                 }
                 "artifact" => self.artifact = Some(overlay::Artifact { title: "main.rs".into(), language: "rust".into(), code: include_str!("../main.rs").into(), copied: None }),
                 "lightbox" => self.lightbox = Some(("b1.png".into(), file_uri(&shot.path.with_file_name("b1.png")))),
-                "toast" => self.toast("That chat couldn't be deleted. Please try again."),
+                "toast" => {
+                    self.toast("That chat couldn't be deleted. Please try again.");
+                    self.toast_bare = true;
+                }
+                "toast-rename" => self.toast("Couldn't rename that chat."),
+                "slash" => self.draft = "/".into(),
+                "slash-co" => self.draft = "/co".into(),
+                "slash-model" => self.draft = "/model ".into(),
+                "slash-theme" => self.draft = "/theme ".into(),
+                "notice" => slash_menu::say(self, "Copied the last reply.", false),
+                "notice-error" => slash_menu::say(self, "Unknown command /frob. Type / to see them all — or start with a space to send it as a message.", true),
+                "notice-action" => {
+                    let text = "Rewound — 2 messages removed, files put back (3 restored, 1 removed). Edit the question and send it again.".to_string();
+                    self.slash.notice = Some(slash_menu::Notice { text, error: false, action: Some(("Undo file changes", slash_menu::Act::UndoFiles(String::new()))), since: Instant::now() });
+                }
+                "find" | "find-partial" => {
+                    let query = std::env::var("APIM_SHOT_QUERY").unwrap_or_else(|_| "the".into());
+                    let active = std::env::var("APIM_SHOT_MATCH").ok().and_then(|n| n.parse().ok()).unwrap_or(0);
+                    find_bar::stage(self, query, part == "find", active);
+                }
+                "earlier" => self.mounted = 1,
+                "compacted" => {
+                    let covered = self.conv.messages.iter().rev().find(|m| m.role == Role::Assistant).map(|m| m.id.clone());
+                    self.conv.summary = covered.map(|up_to_id| HistorySummary { text: String::new(), up_to_id, dropped_turns: 0, updated_at: String::new(), covered_turns: Some(12), manual: true, revised: false });
+                }
+                "wait-row" => self.fake_run(false),
+                "wait-retry" => {
+                    self.fake_run(false);
+                    self.run.as_mut().unwrap().retry = Some(("The provider is overloaded (503) — retrying, try 2 of 3".into(), Instant::now() + Duration::from_secs(8)));
+                }
+                "wait-size" | "wait-model" => {
+                    self.fake_run(part == "wait-model");
+                    let buckets = [("history", 310_000), ("tool results", 96_000), ("instructions", 9_400), ("media", 2_800_000)].map(|(label, chars)| Bucket { label: label.into(), chars });
+                    self.run.as_mut().unwrap().request = Some(Round { number: if part == "wait-model" { 3 } else { 1 }, buckets: buckets.to_vec(), fired: Instant::now(), answered: false });
+                }
+                "draft-row" => {
+                    self.fake_run(true);
+                    self.run.as_mut().unwrap().drafting = Some(Drafting { name: "write_file".into(), chars: 4210, path: Some("desktop/src/ui/chat.rs".into()), since: Instant::now() });
+                }
+                "btw" | "btw-read" => {
+                    self.fake_run(true);
+                    self.btw = btw::sample(part == "btw-read");
+                }
                 "draft" => self.draft = "Explain how the context meter decides when to compact, and show me where that lives in the code.".into(),
                 "search" => {
                     self.dialog = Dialog::Search;
@@ -315,10 +391,50 @@ impl App {
                 other => workspace::stage(self, other),
             }
         }
+        if let Ok(text) = std::env::var("APIM_SHOT_DRAFT") {
+            self.draft = text;
+        }
+    }
+
+    /// A self-portrait state was asked for by name.
+    fn staged(&self, token: &str) -> bool {
+        self.shot.as_ref().is_some_and(|shot| shot.state.split(',').any(|part| part == token))
+    }
+
+    /// A reply that never arrives, for self-portraits of the rows that wait on one.
+    /// Nothing is sent and nothing is saved: the messages it adds live in memory only.
+    fn fake_run(&mut self, with_output: bool) {
+        if self.run.is_some() {
+            return;
+        }
+        if !with_output {
+            self.conv.messages.push(Message::new(Role::User, "Explain how the context meter decides when to compact."));
+            let mut reply = Message::new(Role::Assistant, "");
+            reply.effort = Some("high".into());
+            self.conv.messages.push(reply);
+        }
+        let (_tx, rx) = mpsc::channel();
+        self.run = Some(Run {
+            rx,
+            handle: self.rt.spawn(std::future::pending::<()>()),
+            conv_id: self.conv.id.clone(),
+            status: "Thinking",
+            drafting: None,
+            request: None,
+            retry: None,
+            approval: None,
+            question: None,
+            notes: Default::default(),
+            thinking: Stopwatch::new(),
+            started: Instant::now(),
+            // Far enough ahead that the checkpoint never writes this chat to disk.
+            saved: Instant::now() + Duration::from_secs(3600),
+        });
     }
 
     fn toast(&mut self, text: impl Into<String>) {
         self.toast = Some((text.into(), Instant::now()));
+        self.toast_bare = false;
     }
 
     fn running_here(&self) -> bool {
@@ -358,6 +474,7 @@ impl App {
         self.compact_note = None;
         self.show_summary = false;
         self.jump_to_latest = true;
+        self.mounted = 60;
     }
 
     fn new_chat(&mut self) {
@@ -492,7 +609,7 @@ impl App {
     /// `/compact`: one summary replaces the conversation for the model. The transcript stays on screen.
     fn compact(&mut self, ctx: &egui::Context, focus: String) {
         if self.running_here() {
-            self.compact_note = Some((false, "A reply is still running in this chat. Stop it or wait for it to finish, then compact.".into()));
+            self.compact_note = Some((false, "Wait for the reply to finish, then compact.".into()));
             return;
         }
         if let Some(why) = summary::compact_blocker(&self.conv) {
@@ -564,35 +681,22 @@ impl App {
 
     /// The Send button and Enter.
     fn submit(&mut self, ctx: &egui::Context) {
+        if slash_menu::submit(self, ctx) {
+            return;
+        }
         let text = self.draft.trim().to_string();
         if self.running_here() {
             // "btw …" while a reply runs is handed to it; anything else waits.
-            if composer::is_btw(&text) {
-                if let Some(run) = &self.run {
-                    run.notes.lock().unwrap().push(text.clone());
-                }
-                let mut note = Message::new(Role::User, &text);
-                note.note = true;
-                let at = self.conv.messages.len().saturating_sub(1);
-                self.conv.messages.insert(at, note);
-                self.heights.clear();
-                self.draft.clear();
+            if let Some(note) = composer::btw_note(&text) {
+                self.pass_note(note.to_string());
             }
             return;
-        }
-        if let Some(rest) = text.strip_prefix("/compact") {
-            if rest.is_empty() || rest.starts_with(' ') {
-                self.draft.clear();
-                self.popover = Popover::Context;
-                self.compact(ctx, rest.trim().to_string());
-                return;
-            }
         }
         if text.is_empty() && self.attachments.is_empty() {
             return;
         }
         if self.run.is_some() {
-            self.composer_note = Some("Another chat is still being answered. Stop it or wait for it to finish.".into());
+            slash_menu::say(self, "Another chat is still being answered. Stop it or wait for it to finish.", false);
             return;
         }
         if self.compacting() {
@@ -601,8 +705,33 @@ impl App {
         // Pictures go to the model; any other file is copied into the workspace for the tools to read.
         let workspace = self.conv.workspace();
         let (attached, notes) = attachments::take(std::mem::take(&mut self.attachments), &workspace);
+        // " /fix x" keeps its space: that is what makes it a message and not a command, now and on a retry.
+        let shown = if text.starts_with('/') { self.draft.trim_end().to_string() } else { text };
         self.draft.clear();
-        self.send(ctx, format!("{text}{notes}"), attached);
+        self.send(ctx, format!("{shown}{notes}"), attached);
+    }
+
+    /// Hands a note to the reply being written without stopping it ("btw …", `/btw`).
+    /// It joins the transcript once the reply has read it.
+    fn pass_note(&mut self, note: String) {
+        let Some(run) = &self.run else { return };
+        let workspace = self.conv.workspace();
+        // ponytail: a picture attached to a note is saved in the workspace like any other file and the
+        // model is told where; it is not shown the pixels. Send it as an image part if notes with screenshots matter.
+        let pending = std::mem::take(&mut self.attachments).into_iter().map(|mut a| {
+            if a.kind == attachments::Kind::Image {
+                a.kind = attachments::Kind::File;
+            }
+            a
+        });
+        let (attached, lines) = attachments::take(pending.collect(), &workspace);
+        let wire = format!("{note}{lines}");
+        run.notes.lock().unwrap().push(wire.clone());
+        let mut chip = Message::new(Role::User, &note);
+        chip.note = true;
+        chip.attachments = attached;
+        self.btw.pass(wire, chip);
+        self.draft.clear();
     }
 
     fn send(&mut self, ctx: &egui::Context, text: String, attached: Vec<Attachment>) {
@@ -613,6 +742,8 @@ impl App {
             self.draft = text;
             return;
         }
+        // The transcript keeps a prompt shortcut as typed ("/review auth"); the agent gets what it stands for.
+        let wire = crate::slash::wire(&text).into_owned();
         let shape = summary::shape(&self.conv.messages, self.conv.summary.as_ref());
         let history: Vec<(Role, String)> = shape.verbatim.iter().map(|m| (m.role, m.history_text())).collect();
         let stored = self.conv.summary.as_ref().filter(|s| self.conv.messages.iter().any(|m| m.id == s.up_to_id)).map(summary::render);
@@ -635,7 +766,7 @@ impl App {
             reply.other.insert("previousVersions".into(), versions);
         }
         // "auto" is settled per message, and the reply is labelled with what it got.
-        reply.effort = Some(if self.settings.effort == "auto" { crate::prompt::auto_effort(&text).to_string() } else { self.settings.effort.clone() });
+        reply.effort = Some(if self.settings.effort == "auto" { crate::prompt::auto_effort(&wire).to_string() } else { self.settings.effort.clone() });
         reply.plugins_used = self.settings.enabled_plugins.clone();
         self.conv.messages.push(reply);
         self.conv.updated_at = store::now_ms();
@@ -649,7 +780,7 @@ impl App {
             settings: self.settings.clone(),
             history,
             summary: stored,
-            text,
+            text: wire,
             images: attached.into_iter().filter(|a| a.kind == "image").collect(),
             workspace: self.conv.workspace(),
             state_dir: self.conv.state_dir(),
@@ -664,6 +795,8 @@ impl App {
             conv_id: self.conv.id.clone(),
             status: "Thinking",
             drafting: None,
+            request: None,
+            retry: None,
             approval: None,
             question: None,
             notes,
@@ -673,7 +806,7 @@ impl App {
         });
         self.focus_composer = true;
         self.jump_to_latest = true;
-        self.composer_note = None;
+        self.slash.notice = None;
     }
 
     /// Drops the last reply and asks the same question again.
@@ -731,13 +864,13 @@ impl App {
         let (Some(preview), Some(files)) = (self.rewind.take(), files) else { return };
         let Some(at) = self.conv.messages.iter().position(|m| m.id == preview.id).filter(|_| !self.running_here()) else { return };
         let question = self.conv.messages[at].text();
-        let mut counts = None;
+        let (mut counts, mut undo) = (None, None);
         if files {
             // Before the cut, so an error leaves the chat as it was.
             match crate::snapshots::rewind_files(&self.conv.workspace(), &preview.point, &question) {
                 Ok(restored) => {
                     counts = Some((restored.restored, restored.removed));
-                    self.rewind_undo = restored.safety.map(|s| s.id);
+                    undo = restored.safety.map(|s| ("Undo file changes", slash_menu::Act::UndoFiles(s.id)));
                 }
                 Err(error) => {
                     self.rewind = Some(rewind::Preview { error, ..preview });
@@ -760,8 +893,7 @@ impl App {
 
 {}", self.draft) };
         self.focus_composer = true;
-        // ponytail: the "Undo file changes" button is not on this line yet; Restore points in the file panel does it.
-        self.composer_note = Some(rewind::done_text(removed, counts));
+        self.slash.notice = Some(slash_menu::Notice { text: rewind::done_text(removed, counts), error: false, action: undo, since: std::time::Instant::now() });
     }
 
     /// The plan card's footer: clear the plan, or put its blocked steps back to "todo".
@@ -800,6 +932,10 @@ impl App {
             Some(parked) => parked,
             None => &mut self.conv,
         };
+        // Notes the reply never got to read still show where they were said.
+        let at = conv.messages.len().saturating_sub(1);
+        conv.messages.splice(at..at, self.btw.flush());
+        self.heights.clear();
         if let Some(msg) = conv.messages.last_mut() {
             finish_message(msg, run.started);
             for part in &mut msg.parts {
@@ -830,8 +966,26 @@ impl App {
         };
         let mut finished = false;
         for event in events {
+            // The reply read a "btw": from here on it is part of the conversation, just before the reply.
+            if let Event::NoteRead { note, round } = &event {
+                if let Some(chip) = self.btw.read(note, *round) {
+                    let at = conv.messages.len().saturating_sub(1);
+                    conv.messages.insert(at, chip);
+                    self.heights.clear();
+                }
+                continue;
+            }
+            // Anything coming back answers the request that was waiting, and ends a retry's countdown.
+            if matches!(event, Event::Reasoning(_) | Event::Content(_) | Event::ToolDraft { .. } | Event::ToolStart(_)) {
+                run.retry = None;
+                if let Some(request) = &mut run.request {
+                    request.answered = true;
+                }
+            }
             let Some(msg) = conv.messages.last_mut() else { break };
             match event {
+                Event::NoteRead { .. } => {}
+                Event::Retry { reason, attempt, attempts, wait } => run.retry = Some((format!("{reason} — retrying, try {} of {attempts}", attempt.min(attempts)), Instant::now() + wait)),
                 Event::Status(status) => run.status = status,
                 Event::Reasoning(text) => {
                     run.thinking.start();
@@ -847,7 +1001,11 @@ impl App {
                         _ => msg.parts.push(Part::Text(text)),
                     }
                 }
-                Event::ToolDraft { name, chars } => run.drafting = Some((name, chars)),
+                Event::ToolDraft { name, chars, path } => {
+                    // The clock runs from the call's first byte; a new call starts it again.
+                    let since = run.drafting.as_ref().filter(|d| d.name == name && d.chars <= chars).map_or_else(Instant::now, |d| d.since);
+                    run.drafting = Some(Drafting { name, chars, path, since });
+                }
                 Event::ToolStart(tool) => {
                     close_thinking(msg, &mut run.thinking);
                     run.drafting = None;
@@ -881,7 +1039,11 @@ impl App {
                     msg.raw_usage = None;
                     msg.cost = usage.cost(&msg.model, &self.settings.custom_models);
                 }
-                Event::Context(breakdown) => msg.context_breakdown = breakdown,
+                Event::Context(breakdown) => {
+                    let number = run.request.as_ref().map_or(1, |r| r.number + 1);
+                    run.request = Some(Round { number, buckets: breakdown.clone(), fired: Instant::now(), answered: false });
+                    msg.context_breakdown = breakdown;
+                }
                 Event::State(state) => {
                     conv.plan = state.plan;
                     conv.findings = state.findings;
@@ -904,6 +1066,12 @@ impl App {
                     finished = true;
                 }
             }
+        }
+        if finished {
+            // Notes the reply never got to read still show where they were said.
+            let at = conv.messages.len().saturating_sub(1);
+            conv.messages.splice(at..at, self.btw.flush());
+            self.heights.clear();
         }
         if finished || run.saved.elapsed() > CHECKPOINT {
             run.saved = Instant::now();
@@ -941,14 +1109,18 @@ impl App {
         dropped.into_iter().for_each(|p| attachments::add(self, p));
     }
 
-    /// The web app has exactly two global shortcuts, so this does too.
+    /// The web app has exactly two global shortcuts, so this does too; F11 is the browser's own.
     fn shortcuts(&mut self, ctx: &egui::Context) {
         let pressed = |key| ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, key));
         if pressed(egui::Key::F) {
-            self.find_open = true;
+            find_bar::open(self, None);
         }
         if pressed(egui::Key::K) {
             self.dialog = Dialog::Search;
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F11)) {
+            self.fullscreen = !self.fullscreen;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
         }
     }
 
@@ -981,6 +1153,13 @@ impl App {
 }
 
 impl eframe::App for App {
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        // The self-portrait of a file held over the window: nothing is really dragged.
+        if self.staged("drop") {
+            raw_input.hovered_files = vec![egui::HoveredFile { path: Some("project.zip".into()), ..Default::default() }];
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.pump(&ctx);
@@ -1039,6 +1218,7 @@ impl App {
     fn show_toast(&mut self, ctx: &egui::Context) {
         let Some((text, _)) = &self.toast else { return };
         let p = theme::p();
+        let bare = self.toast_bare;
         let mut dismiss = false;
         egui::Area::new(egui::Id::new("toast")).anchor(egui::Align2::CENTER_BOTTOM, [0.0, -20.0]).order(egui::Order::Tooltip).show(ctx, |ui| {
             let shadow = egui::Shadow { offset: [0, 25], blur: 50, spread: 0, color: egui::Color32::from_black_alpha(64) };
@@ -1046,7 +1226,9 @@ impl App {
                 ui.set_max_width(560.0);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 12.0;
-                    icons::show(ui, icons::WARNING.stroke(1.8), 15.0, p.danger);
+                    if !bare {
+                        icons::show(ui, icons::WARNING.stroke(1.8), 15.0, p.danger);
+                    }
                     ui.add(egui::Label::new(widgets::lines(text.as_str(), 13.0, 19.5, theme::W::Regular, p.text)).wrap().selectable(false));
                     let label = widgets::galley(ui, "Dismiss", theme::font(12.0, theme::W::Regular), egui::Color32::WHITE);
                     let (rect, response) = ui.allocate_exact_size(vec2(label.size().x + 16.0, 22.0), egui::Sense::click());
