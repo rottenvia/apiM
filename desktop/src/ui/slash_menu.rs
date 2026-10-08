@@ -4,7 +4,7 @@
 
 use super::composer::Popover;
 use super::theme::{self, W, p};
-use super::{App, Dialog, attachments, find_bar, widgets};
+use super::{App, Dialog, attachments, find_bar, sandbox_panel, widgets};
 use crate::slash::{self, Cmd, Submit};
 use crate::snapshots::{self, RestorePoint};
 use crate::store::{self, Role};
@@ -454,8 +454,7 @@ fn perform(app: &mut App, ctx: &egui::Context, cmd: Cmd, arg: &str) -> Result<Op
         Cmd::Settings => app.dialog = Dialog::Settings,
         Cmd::Plugins => app.dialog = Dialog::Plugins,
         Cmd::Mcp => app.dialog = Dialog::Mcp,
-        // ponytail: there is no sandbox in the desktop app yet; say so rather than open nothing.
-        Cmd::Sandbox => return Err("The Linux sandbox is not in the desktop app yet.".into()),
+        Cmd::Sandbox => sandbox_panel::open(app),
         Cmd::Sidebar => {
             app.settings.sidebar_open = !app.settings.sidebar_open;
             app.settings.save();
