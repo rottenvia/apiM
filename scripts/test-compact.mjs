@@ -249,7 +249,7 @@ check(
 );
 check(
   "resume replays the full attempt and only folds as a safety valve",
-  /const folded = compactTranscript\(resumed\.messages\)/.test(route),
+  /const folded = compactTranscript\(resumed\.messages, \{\s*thresholdChars: compactThresholdChars\(/.test(route),
   "the high-threshold compactor leaves ordinary transcripts untouched"
 );
 check(
@@ -266,10 +266,19 @@ check(
   "a reasoning-heavy 8-round resume folds at the new valve",
   (() => {
     const fat = build(8); // ~324k chars, mostly replayed reasoning
-    const out = C.compactTranscript(fat); // default threshold
-    return out.stats.rounds === 4 && out.stats.reasoningChars > 100_000;
+    // The valve is 65% of the window: a 128K model folds this, a 1M one
+    // replays it whole.
+    const out = C.compactTranscript(fat, {
+      thresholdChars: C.compactThresholdChars(128_000),
+    });
+    const whole = C.compactTranscript(fat);
+    return (
+      out.stats.rounds === 4 &&
+      out.stats.reasoningChars > 100_000 &&
+      whole.messages === fat
+    );
   })(),
-  `the valve caps the prefill (~44k tokens) instead of replaying minutes of old thinking`
+  `a 128K model folds at ~83k tokens; a 1M model keeps the same attempt verbatim`
 );
 check(
   "a very long resume is folded to fit",
