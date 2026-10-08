@@ -200,6 +200,17 @@ fn prepare(ctx: &Ctx, command: &str, argv: Vec<String>) -> Result<Launch, String
     if SHELLS.contains(&name.as_str()) {
         return Err("Shells are not available. Run the interpreter directly, e.g. `python app.py` rather than `sh -c \"python app.py\"`.".into());
     }
+    // The web's browser rules: the user's own browser is never driven, closed or pointed at their profile.
+    let verdict = crate::browser::policy::check_browser_policy(command, &argv, &ctx.root.to_string_lossy());
+    let argv = match verdict.action {
+        crate::browser::policy::Action::Refuse => {
+            let reason = verdict.reason.unwrap_or_default();
+            crate::diagnostics::record("browser_blocked", command, &reason);
+            return Err(reason);
+        }
+        crate::browser::policy::Action::Rewrite => verdict.args,
+        crate::browser::policy::Action::Allow => argv,
+    };
     // On Windows `python3` is a Store stub; the real interpreter is `python`.
     let lookup = if cfg!(windows) && command.eq_ignore_ascii_case("python3") { "python" } else { command };
     let found = find_program(&ctx.root, lookup);
