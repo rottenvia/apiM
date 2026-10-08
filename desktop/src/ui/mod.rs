@@ -549,24 +549,31 @@ impl App {
         }
     }
 
+    /// Imports the chats in the picked files, worded as the web's "Import chats" does.
     fn import_chats(&mut self) {
         let Some(paths) = rfd::FileDialog::new().add_filter("apiM chat export", &["json"]).pick_files() else { return };
-        let mut imported = 0;
+        let (mut imported, mut errors, mut not_json) = (0, Vec::new(), 0);
         for path in &paths {
-            let Some(mut conv) = std::fs::read(path).ok().and_then(|b| Conversation::from_json(&b)) else { continue };
-            conv.save();
-            imported += 1;
+            let Some(raw) = std::fs::read(path).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()) else {
+                not_json += 1;
+                continue;
+            };
+            let (chats, problems) = Conversation::import_chats(&raw);
+            errors.extend(problems);
+            for mut conv in chats {
+                conv.save();
+                imported += 1;
+            }
         }
         self.refresh_chats();
-        self.side.note = Some((
-            match (imported, paths.len()) {
-                (0, _) => "That file is not an apiM chat export".to_string(),
-                (1, 1) => "Imported 1 chat".to_string(),
-                (n, total) if n == total => format!("Imported {n} chats"),
-                (n, total) => format!("Imported {n} of {total} files"),
-            },
-            Instant::now(),
-        ));
+        let note = if imported > 0 {
+            format!("Imported {imported} chat{}", if imported == 1 { "" } else { "s" })
+        } else if not_json == paths.len() {
+            "That file isn't valid JSON".to_string()
+        } else {
+            errors.first().cloned().unwrap_or_else(|| "No conversations found in that file. Expected a chat exported as JSON.".to_string())
+        };
+        self.side.note = Some((note, Instant::now()));
     }
 
     fn refresh_chats(&mut self) {
@@ -584,7 +591,7 @@ impl App {
         if self.conv.messages.is_empty() {
             return (None, false);
         }
-        let chars: usize = self.conv.messages.iter().map(|m| m.history_text().len()).sum();
+        let chars: usize = self.conv.messages.iter().map(|m| m.text().len()).sum();
         (Some((chars as f64 / 3.6) as u64), true)
     }
 
@@ -653,12 +660,12 @@ impl App {
             _ => &self.conv,
         };
         let shape = summary::shape(&conv.messages, conv.summary.as_ref());
-        if conv.id != conv_id || !summary::should_refresh(shape.pending) {
+        if conv.id != conv_id || !summary::should_refresh(&shape.pending) {
             return;
         }
         let (tx, rx) = mpsc::channel();
         let wake = ctx.clone();
-        let (stored, pending, settings) = (conv.summary.clone(), shape.pending.to_vec(), self.settings.clone());
+        let (stored, pending, settings) = (conv.summary.clone(), shape.pending.iter().map(|m| (*m).clone()).collect::<Vec<_>>(), self.settings.clone());
         self.rt.spawn(async move {
             let _ = tx.send(summary::refresh(stored, pending, settings).await.ok_or_else(String::new));
             wake.request_repaint();
@@ -755,9 +762,9 @@ impl App {
         }
         // The transcript keeps a prompt shortcut as typed ("/review auth"); the agent gets what it stands for.
         let wire = crate::slash::wire(&text).into_owned();
-        let shape = summary::shape(&self.conv.messages, self.conv.summary.as_ref());
-        let history: Vec<(Role, String, Vec<Attachment>)> = shape.verbatim.iter().map(|m| (m.role, m.history_text(), m.attachments.clone())).collect();
-        let stored = self.conv.summary.as_ref().filter(|s| self.conv.messages.iter().any(|m| m.id == s.up_to_id)).map(summary::render);
+        // The stored summary rides whenever there is one, as the web's `loadHistoryForRequest` sends it: a stale cursor only re-covers the overflow.
+        let history: Vec<(Role, String, Vec<Attachment>)> = crate::context::transcript::history(&self.conv.messages, self.conv.summary.as_ref());
+        let stored = self.conv.summary.as_ref().map(summary::render);
         let history_last_user = self.conv.messages.iter().rev().filter(|m| m.role == Role::User && !m.note).map(|m| m.text().trim().to_string()).find(|t| !t.is_empty());
         if self.conv.messages.is_empty() {
             self.conv.title = store::derive_title(if text.trim().is_empty() { "Attached files" } else { &text });
@@ -846,11 +853,10 @@ impl App {
         provider::resolve_target(&self.settings.model, &self.settings)?;
         // The request is rebuilt as it was asked: the turns before the question, then the question.
         let (earlier, question) = (&self.conv.messages[..start], &self.conv.messages[start]);
-        let shape = summary::shape(earlier, self.conv.summary.as_ref());
         let request = agent::Request {
             settings: self.settings.clone(),
-            history: shape.verbatim.iter().map(|m| (m.role, m.history_text(), m.attachments.clone())).collect(),
-            summary: self.conv.summary.as_ref().filter(|s| earlier.iter().any(|m| m.id == s.up_to_id)).map(summary::render),
+            history: crate::context::transcript::history(earlier, self.conv.summary.as_ref()),
+            summary: self.conv.summary.as_ref().map(summary::render),
             history_last_user: earlier.iter().rev().filter(|m| m.role == Role::User && !m.note).map(|m| m.text().trim().to_string()).find(|t| !t.is_empty()),
             text: crate::slash::wire(&question.text()).into_owned(),
             images: question.attachments.iter().filter(|a| a.kind == "image").cloned().collect(),
@@ -1085,6 +1091,7 @@ impl App {
                     }
                     self.files_stale = true;
                 }
+                Event::WebSearch(found) => crate::search::record_on(msg, &found),
                 Event::ToolProgress { id, text } => {
                     // A helper's rounds, on its still-running row.
                     if let Some(tool) = msg.parts.iter_mut().rev().find_map(|p| match p {

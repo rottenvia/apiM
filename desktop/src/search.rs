@@ -185,6 +185,22 @@ pub struct SearchOutcome {
     pub provider_errors: Vec<String>,
 }
 
+/// Puts a search's sources, queries and cost on the reply it ran for, as the web's chat route does: each source and query
+/// once, and the search's cost added to the reply's search total.
+pub fn record_on(msg: &mut crate::store::Message, found: &SearchOutcome) {
+    for r in &found.results {
+        if !msg.search_results.iter().any(|have| have.url == r.url) {
+            msg.search_results.push(crate::store::SearchResult { title: r.title.clone(), url: r.url.clone(), domain: r.domain.clone() });
+        }
+    }
+    for q in &found.queries {
+        if !msg.search_queries.contains(q) {
+            msg.search_queries.push(q.clone());
+        }
+    }
+    msg.search_usd += found.estimated_usd;
+}
+
 /// What the `web_search` tool hands back.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Reply {

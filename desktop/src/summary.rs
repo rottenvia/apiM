@@ -3,6 +3,7 @@
 
 use crate::models::ProviderId;
 use crate::provider::{self, Target};
+use crate::context::transcript;
 use crate::store::{Conversation, HistorySummary, Message, Role, Settings};
 use serde_json::{Map, Value, json};
 
@@ -58,21 +59,23 @@ Keep exact identifiers (paths, function names, versions, error strings) verbatim
 /// What a request carries of the chat so far.
 pub struct Shape<'a> {
     /// Sent word for word.
-    pub verbatim: &'a [Message],
+    pub verbatim: Vec<&'a Message>,
     /// Older than that and not yet summarised.
-    pub pending: &'a [Message],
+    pub pending: Vec<&'a Message>,
 }
 
 /// Splits the turns after the stored summary into the tail sent verbatim and what should be summarised.
+/// Only turns that replay count, as in the web's `shapeHistory`: an interrupted or errored reply is not in the window.
 pub fn shape<'a>(messages: &'a [Message], stored: Option<&HistorySummary>) -> Shape<'a> {
-    let covered = stored.and_then(|s| messages.iter().position(|m| m.id == s.up_to_id));
-    let open = &messages[covered.map_or(0, |i| i + 1)..];
+    let kept: Vec<&'a Message> = messages.iter().filter(|m| transcript::replays(m)).collect();
+    let covered = stored.and_then(|s| kept.iter().position(|m| m.id == s.up_to_id));
+    let open = &kept[covered.map_or(0, |i| i + 1)..];
     let pending = &open[..open.len().saturating_sub(VERBATIM_TURNS)];
-    Shape { verbatim: &open[open.len().saturating_sub(VERBATIM_MAX)..], pending }
+    Shape { verbatim: open[open.len().saturating_sub(VERBATIM_MAX)..].to_vec(), pending: pending.to_vec() }
 }
 
-pub fn should_refresh(pending: &[Message]) -> bool {
-    !pending.is_empty() && (pending.len() >= TRIGGER_TURNS || pending.iter().map(|m| m.history_text().len()).sum::<usize>() >= TRIGGER_CHARS)
+pub fn should_refresh(pending: &[&Message]) -> bool {
+    !pending.is_empty() && (pending.len() >= TRIGGER_TURNS || pending.iter().map(|m| m.text().len()).sum::<usize>() >= TRIGGER_CHARS)
 }
 
 fn cut(text: &str, chars: usize) -> &str {
@@ -81,7 +84,7 @@ fn cut(text: &str, chars: usize) -> &str {
 
 fn digest_turn(m: &Message) -> String {
     let who = if m.role == Role::User { "USER" } else { "ASSISTANT" };
-    let full = m.history_text();
+    let full = m.text();
     let count = full.chars().count();
     let text = if count > TURN_MAX_CHARS { format!("{}\n…[turn truncated, {} more chars]…", cut(&full, TURN_MAX_CHARS), count - TURN_MAX_CHARS) } else { full };
     let media: Vec<String> = m
@@ -96,7 +99,7 @@ fn digest_turn(m: &Message) -> String {
 }
 
 /// The newest turns that fit, oldest first, and how many older ones were left out.
-fn digest(pending: &[Message]) -> (String, usize) {
+fn digest(pending: &[&Message]) -> (String, usize) {
     let mut kept: Vec<String> = Vec::new();
     let mut chars = 0;
     for m in pending.iter().rev() {
@@ -118,7 +121,7 @@ fn digest(pending: &[Message]) -> (String, usize) {
 
 /// One summarising call. None when the provider gave nothing usable.
 async fn run(previous: Option<&str>, pending: &[Message], target: &Target, system: &str, max_tokens: u32, max_chars: usize) -> Option<(String, usize)> {
-    let (text, dropped) = digest(pending);
+    let (text, dropped) = digest(&pending.iter().collect::<Vec<_>>());
     let mut body = Map::new();
     body.insert("model".into(), json!(target.api_model));
     body.insert("stream".into(), json!(true));
@@ -234,19 +237,20 @@ mod tests {
         let all = turns(20, 10);
         let s = shape(&all, None);
         assert_eq!((s.verbatim.len(), s.pending.len()), (20, 12));
-        assert!(should_refresh(s.pending));
+        assert!(should_refresh(&s.pending));
         // A stored summary covers up to turn 9: ten turns stay open, eight of them verbatim.
         let stored = HistorySummary { up_to_id: "9".into(), ..Default::default() };
         let s = shape(&all, Some(&stored));
         assert_eq!((s.verbatim.len(), s.pending.len(), s.pending[0].id.as_str()), (10, 2, "10"));
-        assert!(!should_refresh(s.pending));
-        assert!(should_refresh(&turns(1, 4_000)));
+        assert!(!should_refresh(&s.pending));
+        assert!(should_refresh(&turns(1, 4_000).iter().collect::<Vec<_>>()));
         assert!(!should_refresh(&[]));
     }
 
     #[test]
     fn digest_keeps_the_newest_turns() {
-        let (text, dropped) = digest(&turns(5, 25_000));
+        let five = turns(5, 25_000);
+        let (text, dropped) = digest(&five.iter().collect::<Vec<_>>());
         // Each turn is cut to 20k plus its label: two fit whole in 60k, a third would not.
         assert_eq!(dropped, 3);
         assert!(text.chars().count() <= DIGEST_MAX_CHARS + 4);

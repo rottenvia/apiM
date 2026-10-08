@@ -300,6 +300,8 @@ pub struct Message {
     pub effort: Option<String>,
     pub search_results: Vec<SearchResult>,
     pub search_queries: Vec<String>,
+    /// Estimated spend on the web searches this reply ran, in USD.
+    pub search_usd: f64,
     pub plugins_used: Vec<String>,
     pub context_breakdown: Vec<Bucket>,
     /// A "btw" note added while a reply was running: shown as a chip, not a bubble.
@@ -323,20 +325,10 @@ impl Message {
         Message { id: new_id(), role, parts: if text.is_empty() { Vec::new() } else { vec![Part::Text(text.to_string())] }, created_at: now_ms(), ..Default::default() }
     }
 
-    /// What later turns are told this message said: the prose, plus one line per
-    /// step so the model remembers what it already did in this chat.
-    pub fn history_text(&self) -> String {
-        let steps: Vec<String> = self
-            .parts
-            .iter()
-            .filter_map(|p| match p {
-                Part::Tool(t) if !t.summary.is_empty() => Some(t.summary.chars().take(120).collect()),
-                _ => None,
-            })
-            .take(30)
-            .collect();
-        let text = self.text();
-        if steps.is_empty() { text } else { format!("{text}\n\n[Steps taken in this reply: {}]", steps.join("; ")) }
+    /// A message from the web app's stored JSON, for tests that replay saved chats.
+    #[cfg(test)]
+    pub fn from_web(v: &serde_json::Value) -> Message {
+        serde_json::from_value::<wire::Msg>(v.clone()).expect("a stored web message").into()
     }
 
     /// The prose of the message, without thinking or steps.
@@ -498,6 +490,8 @@ mod wire {
         pub search_results: Option<Vec<SearchResult>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub search_queries: Option<Vec<String>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub search_usd: Option<f64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub plugins_used: Option<Vec<String>>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -681,6 +675,7 @@ impl From<wire::Msg> for Message {
             effort: w.thinking_effort,
             search_results: w.search_results.unwrap_or_default(),
             search_queries: w.search_queries.unwrap_or_default(),
+            search_usd: w.search_usd.unwrap_or(0.0),
             plugins_used: w.plugins_used.unwrap_or_default(),
             context_breakdown: w.context_breakdown.unwrap_or_default(),
             note: w.note,
@@ -731,6 +726,7 @@ impl From<&Message> for wire::Msg {
             thinking_effort: m.effort.clone(),
             search_results: (!m.search_results.is_empty()).then(|| m.search_results.clone()),
             search_queries: (!m.search_queries.is_empty()).then(|| m.search_queries.clone()),
+            search_usd: (m.search_usd > 0.0).then_some(m.search_usd),
             plugins_used: (!m.plugins_used.is_empty()).then(|| m.plugins_used.clone()),
             token_count: used.then_some(u.prompt + u.completion),
             usage: m.raw_usage.clone().or_else(|| used.then(|| {
@@ -833,14 +829,49 @@ impl Conversation {
         serde_json::to_string_pretty(&self.to_wire()).unwrap_or_default()
     }
 
-    /// A chat from an export. It gets a fresh id when that one is already taken, so nothing is overwritten.
-    pub fn from_json(bytes: &[u8]) -> Option<Conversation> {
-        let w: wire::Conv = serde_json::from_slice(bytes).ok()?;
-        let mut conv = Self::from_wire(w, String::new());
-        if conv.id.is_empty() || Self::list().iter().any(|c| c.id == conv.id) {
-            conv.id = new_id();
+    /// The chats in an export, cleaned the way the web's `importConversations` cleans them: one chat or an array of them,
+    /// only user and assistant messages with text, a fresh id for each chat and message, and no chat without a usable
+    /// message. The second list is the web's error line for each chat that was left out for that reason.
+    pub fn import_chats(raw: &serde_json::Value) -> (Vec<Conversation>, Vec<String>) {
+        let candidates: Vec<&serde_json::Value> = match raw {
+            serde_json::Value::Array(list) => list.iter().collect(),
+            single => vec![single],
+        };
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let (mut chats, mut errors) = (Vec::new(), Vec::new());
+        for candidate in candidates {
+            let Some(conv) = candidate.as_object() else { continue };
+            let messages: Vec<serde_json::Value> = conv
+                .get("messages")
+                .and_then(|m| m.as_array())
+                .into_iter()
+                .flatten()
+                .filter(|m| matches!(m["role"].as_str(), Some("user" | "assistant")) && m["content"].is_string())
+                .map(|m| {
+                    let mut m = m.clone();
+                    m["id"] = serde_json::json!(new_id());
+                    if m["createdAt"].is_null() {
+                        m["createdAt"] = serde_json::json!(now);
+                    }
+                    m
+                })
+                .collect();
+            if messages.is_empty() {
+                let title: String = conv.get("title").and_then(|t| t.as_str()).unwrap_or("untitled").chars().take(40).collect();
+                errors.push(format!("\"{title}\" had no usable messages"));
+                continue;
+            }
+            let title: String = match conv.get("title").and_then(|t| t.as_str()).filter(|t| !t.trim().is_empty()) {
+                Some(t) => t.chars().take(200).collect(),
+                None => "Imported chat".into(),
+            };
+            let created = conv.get("createdAt").and_then(|c| c.as_str()).map_or(now.clone(), String::from);
+            let wire_json = serde_json::json!({ "id": new_id(), "title": title, "archived": false, "createdAt": created, "updatedAt": now, "messages": messages });
+            if let Ok(w) = serde_json::from_value::<wire::Conv>(wire_json) {
+                chats.push(Self::from_wire(w, String::new()));
+            }
         }
-        (!conv.messages.is_empty() || !conv.title.is_empty()).then_some(conv)
+        (chats, errors)
     }
 
     pub fn load(id: &str) -> Option<Conversation> {
@@ -926,6 +957,21 @@ pub fn derive_title(message: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// The web's import cleaning: one chat or many, partial records kept, fresh ids, and nothing without a usable message.
+    #[test]
+    fn an_export_imports_the_way_the_web_app_reads_it() {
+        let raw = serde_json::json!([
+            { "id": "old", "title": "  ", "messages": [{ "role": "user", "content": "hi" }, { "role": "system", "content": "x" }, { "role": "assistant", "content": 5 }, { "role": "assistant", "content": "hello", "createdAt": "2026-10-01T10:01:00.000Z" }] },
+            { "title": "Empty", "messages": [{ "role": "system", "content": "x" }] },
+            7
+        ]);
+        let (chats, errors) = Conversation::import_chats(&raw);
+        assert_eq!(chats.len(), 1);
+        assert_eq!((chats[0].title.as_str(), chats[0].id == "old"), ("Imported chat", false));
+        assert_eq!(chats[0].messages.iter().map(|m| m.text()).collect::<Vec<_>>(), ["hi", "hello"]);
+        assert_eq!(errors, ["\"Empty\" had no usable messages"]);
+    }
+
     use super::*;
 
     #[test]

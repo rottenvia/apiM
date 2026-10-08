@@ -1,0 +1,719 @@
+[
+ [
+  {
+   "name": "tool_work_stays_out",
+   "chat": {
+    "messages": [
+     {
+      "id": "u1",
+      "role": "user",
+      "content": "List the files in src"
+     },
+     {
+      "id": "a1",
+      "role": "assistant",
+      "content": "There are three files.",
+      "reasoningContent": "I should call list_files first.",
+      "toolEvents": [
+       {
+        "id": "t1",
+        "name": "list_files",
+        "args": "{\"path\":\"src\"}",
+        "ok": true,
+        "summary": "Listed src"
+       }
+      ]
+     },
+     {
+      "id": "u2",
+      "role": "user",
+      "content": "Open the first one"
+     },
+     {
+      "id": "a2",
+      "role": "assistant",
+      "content": "",
+      "toolEvents": [
+       {
+        "id": "t2",
+        "name": "read_file",
+        "args": "{\"path\":\"src/a.ts\"}",
+        "ok": true,
+        "summary": "Read a.ts"
+       }
+      ]
+     },
+     {
+      "id": "u3",
+      "role": "user",
+      "content": "Good. Now fix it."
+     },
+     {
+      "id": "a3",
+      "role": "assistant",
+      "content": "Fixed."
+     }
+    ]
+   },
+   "text": "Run the tests",
+   "vision": "none"
+  },
+  [
+   {
+    "role": "user",
+    "content": "List the files in src"
+   },
+   {
+    "role": "assistant",
+    "content": "There are three files."
+   },
+   {
+    "role": "user",
+    "content": "Open the first one"
+   },
+   {
+    "role": "user",
+    "content": "Good. Now fix it."
+   },
+   {
+    "role": "assistant",
+    "content": "Fixed."
+   },
+   {
+    "role": "user",
+    "content": "Run the tests"
+   }
+  ]
+ ],
+ [
+  {
+   "name": "interrupted_and_error_replies_drop_out",
+   "chat": {
+    "messages": [
+     {
+      "id": "u1",
+      "role": "user",
+      "content": "Write a poem"
+     },
+     {
+      "id": "a1",
+      "role": "assistant",
+      "content": "Roses are",
+      "incomplete": true
+     },
+     {
+      "id": "u2",
+      "role": "user",
+      "content": "Try again"
+     },
+     {
+      "id": "a2",
+      "role": "assistant",
+      "content": "",
+      "incomplete": true,
+      "error": "Timeout"
+     },
+     {
+      "id": "u3",
+      "role": "user",
+      "content": "Keep going"
+     },
+     {
+      "id": "a3",
+      "role": "assistant",
+      "content": "Done."
+     }
+    ]
+   },
+   "text": "Thanks",
+   "vision": "none"
+  },
+  [
+   {
+    "role": "user",
+    "content": "Write a poem"
+   },
+   {
+    "role": "user",
+    "content": "Try again"
+   },
+   {
+    "role": "user",
+    "content": "Keep going"
+   },
+   {
+    "role": "assistant",
+    "content": "Done."
+   },
+   {
+    "role": "user",
+    "content": "Thanks"
+   }
+  ]
+ ],
+ [
+  {
+   "name": "notes_and_pictures_native",
+   "chat": {
+    "messages": [
+     {
+      "id": "u1",
+      "role": "user",
+      "content": "Look at this",
+      "attachments": [
+       {
+        "name": "cat.png",
+        "kind": "image",
+        "dataUrl": "data:image/png;base64,AAAA"
+       }
+      ]
+     },
+     {
+      "id": "a1",
+      "role": "assistant",
+      "content": "It is a cat."
+     },
+     {
+      "id": "n1",
+      "role": "user",
+      "content": "use the blue one",
+      "note": true
+     },
+     {
+      "id": "u2",
+      "role": "user",
+      "content": "Next",
+      "attachments": [
+       {
+        "name": "clip.mp4",
+        "kind": "video",
+        "frames": [
+         {
+          "dataUrl": "data:image/jpeg;base64,BBBB",
+          "t": 0
+         }
+        ],
+        "durationSec": 4,
+        "frameIntervalSec": 2
+       }
+      ]
+     },
+     {
+      "id": "a2",
+      "role": "assistant",
+      "content": "The clip shows a dog."
+     },
+     {
+      "id": "u3",
+      "role": "user",
+      "content": "Another",
+      "attachments": [
+       {
+        "name": "dog.png",
+        "kind": "image",
+        "dataUrl": "data:image/png;base64,CCCC"
+       }
+      ]
+     },
+     {
+      "id": "a3",
+      "role": "assistant",
+      "content": "A dog."
+     },
+     {
+      "id": "u4",
+      "role": "user",
+      "content": "Third",
+      "attachments": [
+       {
+        "name": "old.png",
+        "kind": "image",
+        "dataUrl": "data:image/png;base64,DDDD"
+       }
+      ]
+     },
+     {
+      "id": "a4",
+      "role": "assistant",
+      "content": "An old photo."
+     }
+    ]
+   },
+   "text": "Compare them",
+   "vision": "native"
+  },
+  [
+   {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "Look at this"
+     },
+     {
+      "type": "text",
+      "text": "[Earlier attachment: cat.png (image) — kept in the conversation, not re-sent in later turns]"
+     }
+    ]
+   },
+   {
+    "role": "assistant",
+    "content": "It is a cat."
+   },
+   {
+    "role": "user",
+    "content": "use the blue one"
+   },
+   {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "Next"
+     },
+     {
+      "type": "text",
+      "text": "[Earlier attachment: clip.mp4 (video as frames) — kept in the conversation, not re-sent in later turns]"
+     }
+    ]
+   },
+   {
+    "role": "assistant",
+    "content": "The clip shows a dog."
+   },
+   {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "Another"
+     },
+     {
+      "type": "image_url",
+      "image_url": {
+       "url": "data:image/png;base64,CCCC"
+      }
+     }
+    ]
+   },
+   {
+    "role": "assistant",
+    "content": "A dog."
+   },
+   {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "Third"
+     },
+     {
+      "type": "image_url",
+      "image_url": {
+       "url": "data:image/png;base64,DDDD"
+      }
+     }
+    ]
+   },
+   {
+    "role": "assistant",
+    "content": "An old photo."
+   },
+   {
+    "role": "user",
+    "content": "Compare them"
+   }
+  ]
+ ],
+ [
+  {
+   "name": "notes_and_pictures_no_vision",
+   "chat": {
+    "messages": [
+     {
+      "id": "u1",
+      "role": "user",
+      "content": "Look at this",
+      "attachments": [
+       {
+        "name": "cat.png",
+        "kind": "image",
+        "dataUrl": "data:image/png;base64,AAAA"
+       }
+      ]
+     },
+     {
+      "id": "a1",
+      "role": "assistant",
+      "content": "It is a cat."
+     },
+     {
+      "id": "n1",
+      "role": "user",
+      "content": "use the blue one",
+      "note": true
+     },
+     {
+      "id": "u2",
+      "role": "user",
+      "content": "Next",
+      "attachments": [
+       {
+        "name": "clip.mp4",
+        "kind": "video",
+        "frames": [
+         {
+          "dataUrl": "data:image/jpeg;base64,BBBB",
+          "t": 0
+         }
+        ],
+        "durationSec": 4,
+        "frameIntervalSec": 2
+       }
+      ]
+     },
+     {
+      "id": "a2",
+      "role": "assistant",
+      "content": "The clip shows a dog."
+     },
+     {
+      "id": "u3",
+      "role": "user",
+      "content": "Another",
+      "attachments": [
+       {
+        "name": "dog.png",
+        "kind": "image",
+        "dataUrl": "data:image/png;base64,CCCC"
+       }
+      ]
+     },
+     {
+      "id": "a3",
+      "role": "assistant",
+      "content": "A dog."
+     },
+     {
+      "id": "u4",
+      "role": "user",
+      "content": "Third",
+      "attachments": [
+       {
+        "name": "old.png",
+        "kind": "image",
+        "dataUrl": "data:image/png;base64,DDDD"
+       }
+      ]
+     },
+     {
+      "id": "a4",
+      "role": "assistant",
+      "content": "An old photo."
+     }
+    ]
+   },
+   "text": "Compare them",
+   "vision": "none"
+  },
+  [
+   {
+    "role": "user",
+    "content": "Look at this"
+   },
+   {
+    "role": "assistant",
+    "content": "It is a cat."
+   },
+   {
+    "role": "user",
+    "content": "use the blue one"
+   },
+   {
+    "role": "user",
+    "content": "Next"
+   },
+   {
+    "role": "assistant",
+    "content": "The clip shows a dog."
+   },
+   {
+    "role": "user",
+    "content": "Another"
+   },
+   {
+    "role": "assistant",
+    "content": "A dog."
+   },
+   {
+    "role": "user",
+    "content": "Third"
+   },
+   {
+    "role": "assistant",
+    "content": "An old photo."
+   },
+   {
+    "role": "user",
+    "content": "Compare them"
+   }
+  ]
+ ],
+ [
+  {
+   "name": "long_chat_with_summary",
+   "chat": {
+    "messages": [
+     {
+      "id": "m1",
+      "role": "user",
+      "content": "Turn 1."
+     },
+     {
+      "id": "m2",
+      "role": "assistant",
+      "content": "Turn 2."
+     },
+     {
+      "id": "m3",
+      "role": "user",
+      "content": "Turn 3."
+     },
+     {
+      "id": "m4",
+      "role": "assistant",
+      "content": "Turn 4."
+     },
+     {
+      "id": "m5",
+      "role": "user",
+      "content": "Turn 5."
+     },
+     {
+      "id": "m6",
+      "role": "assistant",
+      "content": "Turn 6."
+     },
+     {
+      "id": "m7",
+      "role": "user",
+      "content": "Turn 7."
+     },
+     {
+      "id": "m8",
+      "role": "assistant",
+      "content": "Turn 8."
+     },
+     {
+      "id": "m9",
+      "role": "user",
+      "content": "Turn 9."
+     },
+     {
+      "id": "m10",
+      "role": "assistant",
+      "content": "Turn 10."
+     },
+     {
+      "id": "m11",
+      "role": "user",
+      "content": "Turn 11."
+     },
+     {
+      "id": "m12",
+      "role": "assistant",
+      "content": "Turn 12."
+     },
+     {
+      "id": "m13",
+      "role": "user",
+      "content": "Turn 13."
+     },
+     {
+      "id": "m14",
+      "role": "assistant",
+      "content": "Turn 14."
+     },
+     {
+      "id": "m15",
+      "role": "user",
+      "content": "Turn 15."
+     },
+     {
+      "id": "m16",
+      "role": "assistant",
+      "content": "Turn 16."
+     },
+     {
+      "id": "m17",
+      "role": "user",
+      "content": "Turn 17."
+     },
+     {
+      "id": "m18",
+      "role": "assistant",
+      "content": "Turn 18."
+     },
+     {
+      "id": "m19",
+      "role": "user",
+      "content": "Turn 19."
+     },
+     {
+      "id": "m20",
+      "role": "assistant",
+      "content": "Turn 20."
+     },
+     {
+      "id": "m21",
+      "role": "user",
+      "content": "Turn 21."
+     },
+     {
+      "id": "m22",
+      "role": "assistant",
+      "content": "Turn 22."
+     },
+     {
+      "id": "m23",
+      "role": "user",
+      "content": "Turn 23."
+     },
+     {
+      "id": "m24",
+      "role": "assistant",
+      "content": "Turn 24."
+     },
+     {
+      "id": "m25",
+      "role": "user",
+      "content": "Turn 25."
+     },
+     {
+      "id": "m26",
+      "role": "assistant",
+      "content": "Turn 26."
+     },
+     {
+      "id": "m27",
+      "role": "user",
+      "content": "Turn 27."
+     },
+     {
+      "id": "m28",
+      "role": "assistant",
+      "content": "Turn 28."
+     },
+     {
+      "id": "m29",
+      "role": "user",
+      "content": "Turn 29."
+     },
+     {
+      "id": "m30",
+      "role": "assistant",
+      "content": "Turn 30."
+     }
+    ],
+    "historySummary": {
+     "text": "Earlier the user set up the build.",
+     "upToId": "m5",
+     "droppedTurns": 0,
+     "updatedAt": "2026-10-01T10:00:00.000Z"
+    }
+   },
+   "text": "Continue",
+   "vision": "none"
+  },
+  [
+   {
+    "role": "system",
+    "content": "[Conversation summary — older turns]\nEarlier the user set up the build."
+   },
+   {
+    "role": "user",
+    "content": "Turn 11."
+   },
+   {
+    "role": "assistant",
+    "content": "Turn 12."
+   },
+   {
+    "role": "user",
+    "content": "Turn 13."
+   },
+   {
+    "role": "assistant",
+    "content": "Turn 14."
+   },
+   {
+    "role": "user",
+    "content": "Turn 15."
+   },
+   {
+    "role": "assistant",
+    "content": "Turn 16."
+   },
+   {
+    "role": "user",
+    "content": "Turn 17."
+   },
+   {
+    "role": "assistant",
+    "content": "Turn 18."
+   },
+   {
+    "role": "user",
+    "content": "Turn 19."
+   },
+   {
+    "role": "assistant",
+    "content": "Turn 20."
+   },
+   {
+    "role": "user",
+    "content": "Turn 21."
+   },
+   {
+    "role": "assistant",
+    "content": "Turn 22."
+   },
+   {
+    "role": "user",
+    "content": "Turn 23."
+   },
+   {
+    "role": "assistant",
+    "content": "Turn 24."
+   },
+   {
+    "role": "user",
+    "content": "Turn 25."
+   },
+   {
+    "role": "assistant",
+    "content": "Turn 26."
+   },
+   {
+    "role": "user",
+    "content": "Turn 27."
+   },
+   {
+    "role": "assistant",
+    "content": "Turn 28."
+   },
+   {
+    "role": "user",
+    "content": "Turn 29."
+   },
+   {
+    "role": "assistant",
+    "content": "Turn 30."
+   },
+   {
+    "role": "user",
+    "content": "Continue"
+   }
+  ]
+ ]
+]

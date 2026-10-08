@@ -896,8 +896,16 @@ fn meta_row(ui: &mut Ui, msg: &Message, env: &Env, sources_open: &mut bool) -> b
             }
             plain(ui, small(format!("{} tokens", chat::thousands(used)), W::Regular)).on_hover_text(tip);
         }
-        if let Some(cost) = msg.usage.shown_cost(&msg.model, &env.settings.custom_models, crate::provider::deepseek_off_peak()).filter(|_| used > 0) {
-            plain(ui, small(chat::format_cost(cost), W::Medium)).on_hover_text(format!("Model: {}\nEstimated from published rates", chat::format_cost(cost)));
+        // The reply's cost is the model's plus what its web searches cost (the web's `searchUsd`), the search on its own tooltip line.
+        let model = msg.usage.shown_cost(&msg.model, &env.settings.custom_models, crate::provider::deepseek_off_peak()).filter(|_| used > 0);
+        let search = msg.search_usd;
+        if let Some(cost) = model.map(|c| c + search).or((search > 0.0).then_some(search)) {
+            let tip = if search > 0.0 {
+                format!("Model: {}\nWeb search: {}\nEstimated from published rates", chat::format_cost(model.unwrap_or(0.0)), chat::format_cost(search))
+            } else {
+                format!("Model: {}\nEstimated from published rates", chat::format_cost(cost))
+            };
+            plain(ui, small(chat::format_cost(cost), W::Medium)).on_hover_text(tip);
         }
         let with_icon = |ui: &mut Ui, icon: Icon, text: String, tip: String| {
             ui.horizontal(|ui| {
@@ -1111,6 +1119,40 @@ fn assistant(ui: &mut Ui, msg: &Message, env: &mut Env) {
     let _ = p;
 }
 
+/// One timeline row: its prose fragments, the tools it ran, its reasoning (and whether that is still streaming), its notice.
+type TimelineRow<'a> = (Vec<&'a str>, Vec<&'a ToolEvent>, Option<(String, bool)>, Option<&'a str>);
+
+/// Groups a reply's parts into timeline rows, as the web's `buildTimelineRows` does: prose keeps adding to its row until a
+/// tool or reasoning comes, a tool joins the row above it unless reasoning came last, and reasoning split across parts reads
+/// as one thought in one row.
+pub fn timeline_rows(parts: &[Part], live: bool) -> Vec<TimelineRow<'_>> {
+    let mut rows: Vec<TimelineRow> = Vec::new();
+    for (i, part) in parts.iter().enumerate() {
+        match part {
+            Part::Thinking { text, ms } => {
+                let streaming = live && *ms == 0 && i + 1 == parts.len();
+                match rows.last_mut() {
+                    Some((_, _, Some((thought, flag)), None)) => {
+                        thought.push_str(text);
+                        *flag = streaming;
+                    }
+                    _ => rows.push((Vec::new(), Vec::new(), Some((text.clone(), streaming)), None)),
+                }
+            }
+            Part::Notice(text) => rows.push((Vec::new(), Vec::new(), None, Some(text.as_str()))),
+            Part::Text(text) => match rows.last_mut() {
+                Some((texts, tools, None, None)) if tools.is_empty() => texts.push(text.as_str()),
+                _ => rows.push((vec![text.as_str()], Vec::new(), None, None)),
+            },
+            Part::Tool(tool) => match rows.last_mut() {
+                Some((_, tools, None, None)) => tools.push(tool),
+                _ => rows.push((Vec::new(), vec![tool], None, None)),
+            },
+        }
+    }
+    rows
+}
+
 fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
     let p = p();
     let has_tools = msg.parts.iter().any(|part| matches!(part, Part::Tool(_)));
@@ -1197,21 +1239,7 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
     if timeline {
         gap(ui, 12.0);
         // A row is a stretch of prose and the steps it led to; thinking sits between rows where it happened.
-        let mut rows: Vec<(Vec<&str>, Vec<&ToolEvent>, Option<(&str, bool)>, Option<&str>)> = Vec::new();
-        for (i, part) in msg.parts.iter().enumerate() {
-            match part {
-                Part::Thinking { text, ms } => rows.push((Vec::new(), Vec::new(), Some((text.as_str(), env.live && *ms == 0 && i + 1 == msg.parts.len())), None)),
-                Part::Notice(text) => rows.push((Vec::new(), Vec::new(), None, Some(text.as_str()))),
-                Part::Text(text) => match rows.last_mut() {
-                    Some((texts, tools, None, None)) if tools.is_empty() => texts.push(text),
-                    _ => rows.push((vec![text], Vec::new(), None, None)),
-                },
-                Part::Tool(tool) => match rows.last_mut() {
-                    Some((_, tools, None, None)) => tools.push(tool),
-                    _ => rows.push((Vec::new(), vec![tool], None, None)),
-                },
-            }
-        }
+        let rows = timeline_rows(&msg.parts, env.live);
         // The classic layout (Settings → Theme): prose on the left, its steps on the right, a rule between rows.
         let split = env.settings.reply_layout == "split";
         let mut after_think = false;
@@ -1233,7 +1261,7 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
                 } else if let Some(notice) = notice {
                     notice_line(ui, notice);
                 } else {
-                    let said = texts.join("\n\n");
+                    let said = texts.concat();
                     let has_text = !said.trim().is_empty();
                     // Side by side only with something on both sides, room for it, and no table to squeeze.
                     if split && has_text && !tools.is_empty() && !has_table(&said) && ui.ctx().content_rect().width() >= 768.0 {
@@ -1344,6 +1372,23 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::Message;
+
+    /// The web's timeline rows (`timeline_fixtures.json`, dumped from src/lib/timeline.ts): each stored reply goes through
+    /// the desktop's own timeline conversion and grouping, and must come out as the same rows.
+    #[test]
+    fn timeline_rows_match_the_web_app() {
+        let cases: Vec<(serde_json::Value, serde_json::Value)> = serde_json::from_str(include_str!("timeline_fixtures.json")).unwrap();
+        assert_eq!(cases.len(), 5);
+        for (input, expected) in cases {
+            let msg = Message::from_web(&input["message"]);
+            let rows: Vec<serde_json::Value> = timeline_rows(&msg.parts, false)
+                .iter()
+                .map(|(texts, tools, think, _)| serde_json::json!({ "text": texts.concat(), "tools": tools.iter().map(|t| t.id.clone()).collect::<Vec<_>>(), "think": think.as_ref().map(|(t, _)| t.clone()) }))
+                .collect();
+            assert_eq!(serde_json::Value::Array(rows), expected, "{}", input["name"]);
+        }
+    }
 
     #[test]
     fn step_words_and_targets() {
