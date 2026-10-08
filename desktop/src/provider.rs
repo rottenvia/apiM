@@ -393,3 +393,38 @@ mod tests {
         assert_eq!(http_error(400, "X", r#"{"error":{"message":"bad"}}"#), "X API error (400): bad");
     }
 }
+
+/// DeepSeek bills cached tokens at about half price from 16:30 to 00:30 Beijing time.
+fn deepseek_clock(now_ms: u64) -> (bool, u32) {
+    const PEAK_START: u32 = 30;
+    const OFF_PEAK_START: u32 = 16 * 60 + 30;
+    let beijing = ((now_ms / 60_000) as u32 + 8 * 60) % (24 * 60);
+    let peak = (PEAK_START..OFF_PEAK_START).contains(&beijing);
+    let next = if peak { OFF_PEAK_START } else { PEAK_START };
+    (!peak, (next + 24 * 60 - beijing - 1) % (24 * 60) + 1)
+}
+
+pub fn deepseek_off_peak() -> bool {
+    deepseek_clock(crate::store::now_ms()).0
+}
+
+/// When the price period next flips: the user's local wall-clock time, and minutes until then.
+pub fn deepseek_next_change() -> (String, u32) {
+    let minutes = deepseek_clock(crate::store::now_ms()).1;
+    let at = chrono::Local::now() + chrono::Duration::minutes(minutes as i64);
+    (at.format("%H:%M").to_string(), minutes)
+}
+
+#[cfg(test)]
+mod hours_tests {
+    use super::deepseek_clock;
+
+    #[test]
+    fn peak_and_off_peak() {
+        let at = |h: u64, m: u64| (h * 60 + m) * 60_000; // UTC
+        assert_eq!(deepseek_clock(at(0, 0)), (false, 8 * 60 + 30)); // 08:00 Beijing: peak, off-peak at 16:30
+        assert_eq!(deepseek_clock(at(8, 30)), (true, 8 * 60)); // 16:30 Beijing: off-peak begins
+        assert_eq!(deepseek_clock(at(16, 29)), (true, 1)); // 00:29 Beijing: last off-peak minute
+        assert_eq!(deepseek_clock(at(16, 30)), (false, 16 * 60)); // 00:30 Beijing: peak again
+    }
+}

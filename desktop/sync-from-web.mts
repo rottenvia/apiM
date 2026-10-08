@@ -6,6 +6,7 @@ import { WORKSPACE_TOOLS, GITHUB_TOOLS, WORK_LOOP_PROMPT } from "@/lib/tools";
 import { AVAILABLE_PLUGINS, BASE_PROMPT, PLUGIN_DIRECTIVES_MARKER } from "@/lib/plugins";
 import { MODELS, PROVIDER_INFO } from "@/lib/models";
 import { BROWSER_POLICY_PROMPT, NO_BROWSER_PROMPT } from "@/lib/browser-policy";
+import { THEMES } from "@/lib/themes";
 
 const out = (name: string, data: unknown) =>
   writeFileSync(new URL(`./assets/${name}`, import.meta.url), JSON.stringify(data, null, 1) + "\n");
@@ -20,4 +21,5 @@ out("prompts.json", {
   noBrowser: NO_BROWSER_PROMPT,
   pluginMarker: PLUGIN_DIRECTIVES_MARKER,
 });
+out("themes.json", THEMES);
 console.log("synced");
