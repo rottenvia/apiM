@@ -42,6 +42,7 @@ import { BlockMarkdown } from "@/components/BlockMarkdown";
 import type { PlanView } from "@/components/PlanPanel";
 import { normalisePlanStepText } from "@/lib/plan-view";
 import { MODELS } from "@/lib/models";
+import { modelDisplayName, refusalSource } from "@/lib/refusal-source";
 
 /**
  * Render fenced code blocks with a language label and copy button.
@@ -579,6 +580,14 @@ function MessageBubbleImpl({
    * message bubble: a wall of old note bubbles buries the real conversation.
    */
   const isNote = isUser && message.isNote === true;
+
+  /*
+   * A finished reply that is a refusal, or that the provider's content filter
+   * cut. Named under the reply so nobody reads it as apiM blocking them: the
+   * app adds no content rules, and without a name on it the app gets blamed.
+   */
+  const refusal =
+    !isUser && !message.isStreaming && !message.isError ? refusalSource(message) : null;
 
   /*
    * The step the plan is on, for the pill in the meta row.
@@ -1889,6 +1898,24 @@ function MessageBubbleImpl({
                   )}
                 </div>
               </div>
+            )}
+
+            {refusal && (
+              <p
+                className="flex items-start gap-1.5 text-[12px] leading-relaxed text-text-muted"
+                title="apiM sends your message to the model as written and adds no content rules of its own."
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true" className="mt-[3px] flex-none">
+                  <circle cx="12" cy="12" r="9" />
+                  <path strokeLinecap="round" d="M12 11v5m0-8h.01" />
+                </svg>
+                <span>
+                  {refusal === "content_filter"
+                    ? `The provider behind ${modelDisplayName(message.model, MODELS)} stopped this reply with its own content filter.`
+                    : `This refusal came from ${modelDisplayName(message.model, MODELS)}, not from apiM.`}{" "}
+                  apiM adds no content rules. Try again, rephrase, or pick another model.
+                </span>
+              </p>
             )}
 
             {/* File operations, above the reply: they happen before the
