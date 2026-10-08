@@ -27,6 +27,8 @@ pub enum Action {
     Delete(String),
     /// Send message `id` again with new text.
     Edit(String, String),
+    /// Show reply `id` next to its earlier versions.
+    Compare(String),
     /// Open the rewind popover on question `id`.
     RewindOpen(String),
     /// The popover's answer; None closes it.
@@ -124,6 +126,22 @@ fn decode_data_url(url: &str) -> Option<Vec<u8>> {
 }
 
 /// A text action under a bubble: 24 high, 11px, an 11px icon.
+/// "Compare 3" in the reply's action row: accent text, and the count in grey.
+fn compare_btn(ui: &mut Ui, versions: usize) -> Response {
+    let p = p();
+    let label = widgets::galley(ui, "Compare", theme::font(11.0, W::Medium), p.accent_light);
+    let count = widgets::galley(ui, &versions.to_string(), theme::font(11.0, W::Medium), p.muted);
+    let (rect, response) = ui.allocate_exact_size(vec2(8.0 + 12.0 + 6.0 + label.size().x + 6.0 + count.size().x + 8.0, 28.0), Sense::click());
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Compare with the previous reply");
+    let t = widgets::fade(ui, response.id, response.hovered());
+    ui.painter().rect_filled(rect, 8.0, alpha(p.accent, 12.0 * t));
+    icons::paint(ui, icons::COMPARE, pos2(rect.left() + 8.0 + 6.0, rect.center().y), 12.0, p.accent_light);
+    let x = rect.left() + 26.0;
+    let label_width = widgets::text_at(ui, x, rect.center().y, label);
+    widgets::text_at(ui, x + label_width + 6.0, rect.center().y, count);
+    response
+}
+
 fn action_btn(ui: &mut Ui, icon: Icon, label: &str, tip: &str, height: f32, danger: bool, tint: Option<Color32>) -> Response {
     let p = p();
     let icon_size = if height > 24.0 { 12.0 } else { 11.0 };
@@ -1210,6 +1228,10 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
                 let now = ui.input(|i| i.time);
                 ui.data_mut(|d| d.insert_temp(copied_id, now));
                 *env.action = Some(Action::Copy(text.clone()));
+            }
+            let earlier = msg.other.get("previousVersions").and_then(|v| v.as_array()).map_or(0, Vec::len);
+            if earlier > 0 && compare_btn(ui, earlier + 1).clicked() {
+                *env.action = Some(Action::Compare(msg.id.clone()));
             }
             if !env.busy && action_btn(ui, icons::REGENERATE, "Regenerate", "Generate a different reply", 28.0, false, None).clicked() {
                 *env.action = Some(Action::Retry);

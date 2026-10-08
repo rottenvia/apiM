@@ -4,6 +4,7 @@
 mod attachments;
 mod bubble;
 mod chat;
+mod compare;
 mod composer;
 mod dialogs;
 mod emoji;
@@ -171,6 +172,10 @@ pub struct App {
     /// The theme the window is drawn in right now, to notice a change in Settings.
     applied_theme: (String, [String; 4]),
     shot: Option<Shot>,
+    /// The reply versions being compared, while that dialog is open.
+    compare: Option<compare::State>,
+    /// Earlier versions a reply being regenerated hands to the one that replaces it.
+    carried_versions: Option<serde_json::Value>,
     /// The rewind popover that is open, if one is.
     rewind: Option<rewind::Preview>,
     /// The files as they were before the last rewind, to undo it.
@@ -223,6 +228,8 @@ impl App {
             focus_composer: true,
             applied_theme: (settings.theme.clone(), settings.custom_theme.clone()),
             shot,
+            compare: None,
+            carried_versions: None,
             rewind: None,
             rewind_undo: None,
             settings_ui: Default::default(),
@@ -278,6 +285,17 @@ impl App {
                 }
                 "plugin-editor" => self.plugin_ui = plugin_modal::State::writing(),
                 "auto-run" => self.settings.approval = store::Approval::Auto,
+                "compare" => {
+                    let old = |text: &str| serde_json::json!({ "content": text, "model": "deepseek-v4-flash" });
+                    let versions = serde_json::json!([old("First try.
+
+- one
+- two"), old("**Second** try, a little longer, with `code` in it.
+
+1. alpha
+2. beta")]);
+                    self.compare = self.conv.messages.last().and_then(|m| compare::open(Some(&versions), &m.text(), &m.model));
+                }
                 "rewind" => {
                     if let Some(id) = self.conv.messages.iter().rev().find(|m| m.role == Role::User && !m.note).map(|m| m.id.clone()) {
                         self.rewind_open(&id);
@@ -608,6 +626,9 @@ impl App {
         self.conv.messages.push(user);
         let mut reply = Message::new(Role::Assistant, "");
         reply.model = self.settings.model.clone();
+        if let Some(versions) = self.carried_versions.take() {
+            reply.other.insert("previousVersions".into(), versions);
+        }
         // "auto" is settled per message, and the reply is labelled with what it got.
         reply.effort = Some(if self.settings.effort == "auto" { crate::prompt::auto_effort(&text).to_string() } else { self.settings.effort.clone() });
         reply.plugins_used = self.settings.enabled_plugins.clone();
@@ -655,7 +676,10 @@ impl App {
         if self.run.is_some() || self.conv.messages.last().is_none_or(|m| m.role != Role::Assistant) {
             return;
         }
-        self.conv.messages.pop();
+        // The reply being replaced stays on the new one, to compare the two.
+        if let Some(old) = self.conv.messages.pop() {
+            self.carried_versions = compare::carried(old.other.get("previousVersions"), &old.text(), &old.model, &store::iso(old.created_at));
+        }
         // Notes passed to that reply go with it.
         while self.conv.messages.last().is_some_and(|m| m.note) {
             self.conv.messages.pop();
@@ -994,6 +1018,11 @@ impl eframe::App for App {
         overlay::artifact(self, &ctx);
         dialogs::show(self, &ctx);
         overlay::lightbox(self, &ctx);
+        if let Some(mut state) = self.compare.take() {
+            if compare::show(&mut state, &ctx) {
+                self.compare = Some(state);
+            }
+        }
         self.show_toast(&ctx);
         self.take_shot(&ctx);
     }
