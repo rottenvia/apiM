@@ -7,8 +7,9 @@ use crate::refusal;
 use crate::store::Settings;
 use futures_util::StreamExt;
 use serde_json::{Map, Value, json};
-use std::collections::HashMap;
-use std::time::Duration;
+use crate::run::{reasoning_stream, retry, stall};
+use std::collections::{BTreeSet, HashMap};
+use std::time::{Duration, Instant};
 
 pub const DEFAULT_LOCAL_BASE_URL: &str = "http://127.0.0.1:18765/v1";
 
@@ -162,7 +163,12 @@ pub fn http_error(status: u16, provider: &str, detail: &str) -> String {
         402 => format!("Your {provider} account has insufficient balance. Everything done so far is saved. Add credit and press Try again."),
         429 if provider == "OpenRouter" => "OpenRouter is rate limiting this model right now (429). This is their capacity, not your key. Wait a bit, or pick another model.".into(),
         429 => format!("Rate limited by {provider}. Please wait a moment and try again."),
-        502..=504 => format!("{provider} is temporarily unavailable ({status}). This is their servers, not your API key. Wait a minute and try again."),
+        502..=504 => {
+            // The host's own words ride along, unless all they say is "retrying" or the status again.
+            let said = detail.split_whitespace().collect::<Vec<_>>().join(" ");
+            let noisy = matches!(said.strip_suffix(['.', '!']).unwrap_or(&said).to_lowercase().as_str(), "" | "retrying" | "inference is temporarily unavailable" | "bad gateway" | "gateway timeout" | "gateway time-out");
+            format!("{provider} is temporarily unavailable ({status}). This is their servers, not your API key.{} Wait a minute and try again.", if noisy { String::new() } else { format!(" {said}") })
+        }
         _ if detail.is_empty() => format!("{provider} API error ({status})"),
         _ => format!("{provider} API error ({status}): {detail}"),
     }
@@ -184,6 +190,10 @@ pub struct Round {
     pub tool_calls: Vec<ToolCall>,
     pub finish: Option<String>,
     pub usage: Option<Usage>,
+    /// Every field name the stream's deltas carried, for the "thinking was on but none arrived" report.
+    pub fields: BTreeSet<String>,
+    /// Set when the think was stopped for drafting a whole program: the code lines counted in it.
+    pub draft_cut: Option<usize>,
 }
 
 pub enum Delta<'a> {
@@ -202,6 +212,22 @@ pub struct RoundError {
     pub detail: String,
     /// Safe to retry: nothing was shown to the user yet.
     pub retryable: bool,
+    /// The Retry-After header, in milliseconds.
+    pub retry_after: Option<u64>,
+    pub kind: Failure,
+}
+
+/// How a round failed before any of it arrived.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Failure {
+    /// The provider answered with an error status, or an error frame in place of a reply.
+    Http,
+    Unreachable,
+    TimedOut,
+    /// The stream opened and stayed silent past the first-token budget.
+    NoFirstToken,
+    /// The stream ended without a word and without a finish reason.
+    Empty,
 }
 
 /// Collects streamed tool calls. Parallel calls are kept separate even when the
@@ -237,8 +263,8 @@ impl ToolAcc {
     }
 }
 
-/// Before the first byte of the body; a silent 503 fails fast.
-const FIRST_TOKEN: Duration = Duration::from_secs(120);
+/// OpenRouter's budget from the start of the stream to its first sign of life: a silent pool fails fast and is asked again.
+const OPENROUTER_FIRST_TOKEN: Duration = Duration::from_secs(45);
 /// Between chunks once the stream is alive. Five minutes of nothing is a dead connection, not a deep think.
 const STREAM_IDLE: Duration = Duration::from_secs(300);
 
@@ -246,32 +272,62 @@ pub fn client() -> reqwest::Client {
     reqwest::Client::builder().connect_timeout(Duration::from_secs(20)).build().expect("HTTP client")
 }
 
-/// Streams one round. `on` sees text as it arrives.
-pub async fn stream_round(client: &reqwest::Client, target: &Target, body: &Value, mut on: impl FnMut(Delta)) -> Result<Round, RoundError> {
-    let provider = target.provider.name();
-    let fail = |message: String, retryable: bool| RoundError { message, status: 0, detail: String::new(), retryable };
+/// How long one try may wait for the response headers. OpenRouter fails fast (45 seconds, plus one per 8,000
+/// characters sent, 90 at most), because another try usually lands on a healthy host.
+pub fn attempt_timeout(provider: ProviderId, input_chars: usize) -> Duration {
+    match provider {
+        ProviderId::Openrouter => Duration::from_millis((45_000 + input_chars.div_ceil(8_000) as u64 * 1_000).min(90_000)),
+        _ => Duration::from_secs(280),
+    }
+}
 
-    let mut req = client.post(format!("{}/chat/completions", target.base_url)).bearer_auth(&target.api_key).json(body);
+/// The error once every try failed without reaching the provider.
+pub fn unreachable_message(provider: &str, attempts: u32) -> String {
+    format!("Couldn't reach the {provider} API after {attempts} attempt(s). Check the network connection and try again.")
+}
+
+/// The error once every try ran out of time waiting for the provider.
+pub fn timed_out_message(provider: &str, attempts: u32) -> String {
+    format!("The {provider} API took too long to respond, after {attempts} attempt(s).")
+}
+
+/// Streams one round. `on` sees text as it arrives.
+pub async fn stream_round(client: &reqwest::Client, target: &Target, body: &Value, on: impl FnMut(Delta)) -> Result<Round, RoundError> {
+    stream(client, target, body, false, on).await
+}
+
+/// `stream_round` for the agent loop. With `cut_drafts`, a think that drafts a whole program (150 code lines
+/// and no tool call yet) is stopped there and comes back with `draft_cut` set.
+pub async fn stream(client: &reqwest::Client, target: &Target, body: &Value, cut_drafts: bool, mut on: impl FnMut(Delta)) -> Result<Round, RoundError> {
+    let provider = target.provider.name();
+    let fail = |message: String, retryable: bool, kind: Failure| RoundError { message, status: 0, detail: String::new(), retryable, retry_after: None, kind };
+
+    let payload = body.to_string();
+    let budget = attempt_timeout(target.provider, payload.len());
+    let mut req = client.post(format!("{}/chat/completions", target.base_url)).bearer_auth(&target.api_key).header("Content-Type", "application/json").body(payload);
     if target.provider == ProviderId::Openrouter {
         req = req.header("HTTP-Referer", "https://github.com/rottenvia/apiM").header("X-Title", "apiM");
     }
-    let resp = match tokio::time::timeout(FIRST_TOKEN, req.send()).await {
-        Err(_) => return Err(fail(format!("The {provider} API took too long to respond."), true)),
+    let resp = match tokio::time::timeout(budget, req.send()).await {
+        Err(_) => return Err(fail(format!("The {provider} API took too long to respond."), true, Failure::TimedOut)),
         Ok(Err(e)) if target.provider == ProviderId::Local => {
-            return Err(fail(format!("Couldn't reach the local model at {} ({e}). Start it, or check the address in Settings.", target.base_url), false));
+            return Err(fail(format!("Couldn't reach the local model at {} ({e}). Start it, or check the address in Settings.", target.base_url), false, Failure::Unreachable));
         }
-        Ok(Err(e)) => return Err(fail(format!("Couldn't reach the {provider} API ({e}). Check the network connection and try again."), true)),
+        Ok(Err(e)) => return Err(fail(format!("Couldn't reach the {provider} API ({e}). Check the network connection and try again."), true, Failure::Unreachable)),
         Ok(Ok(r)) => r,
     };
 
     let status = resp.status().as_u16();
     if status != 200 {
+        let retry_after = resp.headers().get("retry-after").and_then(|v| v.to_str().ok()).and_then(retry::retry_after_ms);
         let detail = resp.text().await.unwrap_or_default();
         return Err(RoundError {
             message: http_error(status, provider, &detail),
             status,
-            retryable: matches!(status, 408 | 429 | 500..=599) && !refusal::is_provider_content_block(&detail),
+            retryable: retry::is_retryable_status(status) && !refusal::is_provider_content_block(&detail),
             detail,
+            retry_after,
+            kind: Failure::Http,
         });
     }
 
@@ -280,13 +336,20 @@ pub async fn stream_round(client: &reqwest::Client, target: &Target, body: &Valu
     let mut stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::new();
     let mut alive = false;
+    let mut next_draft_check = 1_500;
+    let started = Instant::now();
+    let silent_pool = target.provider == ProviderId::Openrouter;
 
-    loop {
-        let wait = if alive { STREAM_IDLE } else { FIRST_TOKEN };
+    'stream: loop {
+        // OpenRouter gets 45 seconds from the start of the stream to its first sign of life. After that, and elsewhere, only five minutes of silence end it.
+        let wait = if silent_pool && !alive { OPENROUTER_FIRST_TOKEN.saturating_sub(started.elapsed()) } else { STREAM_IDLE };
         let chunk = match tokio::time::timeout(wait, stream.next()).await {
-            Err(_) => return Err(fail(format!("{provider} stopped sending data mid-reply."), !alive)),
-            Ok(None) => break,
-            Ok(Some(Err(e))) => return Err(fail(format!("The connection to {provider} dropped ({e})."), !alive)),
+            Err(_) if !alive && silent_pool => return Err(fail(format!("{provider} opened the reply and then sent nothing."), true, Failure::NoFirstToken)),
+            Err(_) if !alive => return Err(fail(format!("The {provider} API took too long to respond."), true, Failure::TimedOut)),
+            Ok(Some(Err(e))) if !alive => return Err(fail(format!("The connection to {provider} dropped ({e})."), true, Failure::Unreachable)),
+            // ponytail: mid-reply, what has arrived goes back without a finish reason and the loop continues it as a cut reply.
+            // The web ends such a reply with an error and lets the client's auto-resume pick it up; do the same once resume exists here.
+            Err(_) | Ok(Some(Err(_))) | Ok(None) => break,
             Ok(Some(Ok(c))) => c,
         };
         buf.extend_from_slice(&chunk);
@@ -303,25 +366,38 @@ pub async fn stream_round(client: &reqwest::Client, target: &Target, body: &Valu
             let Ok(frame) = serde_json::from_str::<Value>(payload) else { continue };
 
             if let Some(err) = frame.get("error").filter(|e| !e.is_null()) {
+                // Once output has arrived this is a cut reply; before that it is the request failing.
+                if alive {
+                    break 'stream;
+                }
                 let detail = err["message"].as_str().map(str::to_string).unwrap_or_else(|| err.to_string());
                 let code = err["code"].as_u64().unwrap_or(0) as u16;
-                return Err(RoundError { message: http_error(if code == 0 { 500 } else { code }, provider, &detail), status: code, detail, retryable: !alive });
+                let retryable = (code == 0 || retry::is_retryable_status(code)) && !refusal::is_provider_content_block(&detail);
+                return Err(RoundError { message: http_error(if code == 0 { 500 } else { code }, provider, &detail), status: code, detail, retryable, retry_after: None, kind: Failure::Http });
             }
             if frame["usage"].is_object() {
                 round.usage = Some(Usage::from_wire(&frame["usage"]));
             }
             let choice = &frame["choices"][0];
             if let Some(reason) = choice["finish_reason"].as_str() {
+                alive = true;
                 round.finish = Some(reason.to_string());
             }
             let delta = &choice["delta"];
-            // Providers disagree on where thinking goes.
-            for key in ["reasoning_content", "reasoning", "thinking", "reasoningContent"] {
-                if let Some(text) = delta[key].as_str().filter(|t| !t.is_empty()) {
-                    alive = true;
-                    round.reasoning.push_str(text);
-                    on(Delta::Reasoning(text));
-                    break;
+            round.fields.extend(delta.as_object().into_iter().flatten().filter(|(_, value)| !value.is_null()).map(|(key, _)| key.clone()));
+            // Providers disagree on where thinking goes, and on its shape.
+            if let Some((text, _)) = reasoning_stream::extract(delta) {
+                alive = true;
+                round.reasoning.push_str(&text);
+                on(Delta::Reasoning(&text));
+                // Checked every 1,500 characters: a whole program drafted in thought is paid for twice and delays every action.
+                if cut_drafts && round.content.is_empty() && acc.calls.is_empty() && round.reasoning.len() >= next_draft_check {
+                    next_draft_check = round.reasoning.len() + 1_500;
+                    let lines = stall::drafted_code_lines(&round.reasoning);
+                    if lines >= stall::DRAFT_CUTOVER_LINES {
+                        round.draft_cut = Some(lines);
+                        break 'stream;
+                    }
                 }
             }
             if let Some(calls) = delta["tool_calls"].as_array() {
@@ -348,7 +424,7 @@ pub async fn stream_round(client: &reqwest::Client, target: &Target, body: &Valu
         }
     }
     if !alive && round.finish.is_none() {
-        return Err(fail(format!("{provider} answered with an empty reply."), true));
+        return Err(fail(format!("{provider} answered with an empty reply."), true, Failure::Empty));
     }
     Ok(round)
 }
@@ -532,5 +608,36 @@ mod verify_tests {
         // No parameter list means tools are assumed; no pricing means unknown, not free.
         let bare = shape_verified(&json!({ "id": "a/b" }), "a/b");
         assert!(bare.supports_tools && !bare.supports_vision && bare.input_price.is_none() && bare.name == "a/b");
+    }
+}
+
+#[cfg(test)]
+mod web_tests {
+    use super::*;
+    use crate::run::cases;
+
+    #[test]
+    fn waits_and_wording_match_the_web() {
+        for (i, o) in cases("attempt_timeout_ms") {
+            let provider = match i[0].as_str().unwrap() {
+                "openrouter" => ProviderId::Openrouter,
+                "local" => ProviderId::Local,
+                _ => ProviderId::Deepseek,
+            };
+            assert_eq!(attempt_timeout(provider, i[1].as_u64().unwrap() as usize).as_millis() as u64, o.as_u64().unwrap(), "{i}");
+        }
+        for (i, o) in cases("provider_http_error") {
+            let (status, name, detail) = (i[0].as_u64().unwrap() as u16, i[1].as_str().unwrap(), i[2].as_str().unwrap());
+            // 402, OpenRouter's 429, the local engine's context message and the content filter keep this app's own wording:
+            // the web's name buttons and an engine this app does not have.
+            if status == 402 || (status == 429 && name == "OpenRouter") || name == "On this PC" || detail.contains("Content Exists") {
+                continue;
+            }
+            assert_eq!(http_error(status, name, detail), o.as_str().unwrap(), "{i}");
+        }
+        for (i, o) in cases("provider_unreachable").into_iter().filter(|(i, _)| i[0] != "On this PC") {
+            let (name, attempts) = (i[0].as_str().unwrap(), i[1].as_u64().unwrap() as u32);
+            assert_eq!((unreachable_message(name, attempts), timed_out_message(name, attempts)), (o[0].as_str().unwrap().to_string(), o[1].as_str().unwrap().to_string()));
+        }
     }
 }
