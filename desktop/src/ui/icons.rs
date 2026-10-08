@@ -57,6 +57,12 @@ pub fn paint(ui: &egui::Ui, icon: Icon, center: Pos2, size: f32, color: Color32)
     egui::Image::from_uri(uri(ui.ctx(), icon)).tint(color).fit_to_exact_size(rect.size()).paint_at(ui, rect);
 }
 
+/// The same, turned `angle` radians clockwise about its centre (a chevron swinging open).
+pub fn paint_turned(ui: &egui::Ui, icon: Icon, center: Pos2, size: f32, color: Color32, angle: f32) {
+    let rect = Rect::from_center_size(center, Vec2::splat(size));
+    egui::Image::from_uri(uri(ui.ctx(), icon)).tint(color).fit_to_exact_size(rect.size()).rotate(angle, Vec2::splat(0.5)).paint_at(ui, rect);
+}
+
 /// The icon as a widget, for use inside ordinary layouts.
 pub fn show(ui: &mut egui::Ui, icon: Icon, size: f32, color: Color32) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), egui::Sense::hover());

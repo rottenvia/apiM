@@ -25,7 +25,8 @@ pub enum State {
 
 /// The shared mechanics: a dimmed window, something on top that animates in and
 /// out, closed by Esc or a click on the dimmed part. `place` gets how far in it
-/// is (0..1) and returns where the content goes; `add` may set its flag to close.
+/// is (0..1) and returns where the content goes; `add` may set its flag to close, or
+/// clear it to stay open when Esc or a click outside asked.
 fn overlay(ctx: &egui::Context, name: &str, secs: f32, dim: u8, esc: bool, place: impl FnOnce(Rect, f32) -> Rect, add: impl FnOnce(&mut egui::Ui, &mut bool)) -> State {
     overlay_with(ctx, name, secs, dim, esc, true, place, add)
 }
@@ -39,24 +40,28 @@ fn overlay_with(ctx: &egui::Context, name: &str, secs: f32, dim: u8, esc: bool, 
     let open_id = id.with("open");
     if !ctx.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false) {
         ctx.animate_bool_with_time(id.with("in"), false, 0.0);
+        ctx.animate_bool_with_time(id.with("dim"), false, 0.0);
         ctx.data_mut(|d| d.insert_temp(open_id, true));
     }
     let t = ctx.animate_bool_with_time_and_easing(id.with("in"), !closing, secs, egui::emath::easing::cubic_out);
+    // The dimming takes the web's 150 ms however long the content travels (the code viewer slides for 300).
+    let dimmed = ctx.animate_bool_with_time(id.with("dim"), !closing, 0.15);
     let screen = ctx.content_rect();
     let mut close = esc && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
     egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(screen.min).show(ctx, |ui| {
         let scrim = ui.allocate_rect(screen, Sense::click());
-        ui.painter().rect_filled(screen, 0.0, Color32::from_black_alpha((dim as f32 * if exit { t } else { 1.0 }) as u8));
+        ui.painter().rect_filled(screen, 0.0, Color32::from_black_alpha((dim as f32 * if exit { dimmed } else { 1.0 }) as u8));
         let content = place(screen, t);
+        // Asked before the content is drawn, so the content can refuse by clearing the flag (unsaved edits).
+        if scrim.clicked() && scrim.interact_pointer_pos().is_some_and(|at| !content.contains(at)) {
+            close = true;
+        }
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(content).layout(egui::Layout::top_down(egui::Align::Min)));
         child.set_clip_rect(content.intersect(screen));
         child.set_opacity(t.max(0.01));
         // Clicks on the content's own empty parts must not count as clicks outside it.
         child.interact(content, id.with("body"), Sense::click());
         add(&mut child, &mut close);
-        if scrim.clicked() && scrim.interact_pointer_pos().is_some_and(|at| !content.contains(at)) {
-            close = true;
-        }
     });
     if close && !closing && exit {
         closing = true;

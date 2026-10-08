@@ -100,13 +100,7 @@ pub fn header(app: &mut App, ui: &mut egui::Ui) {
             app.files_stale = true;
             app.settings.save();
         }
-        let running = app.procs.running();
-        if running > 0 {
-            let label = format!("{running} running");
-            if widgets::small_btn(ui, &label, p.warning, Color32::TRANSPARENT, p.border).on_hover_text("Background processes the agent started. Click to stop them all.").clicked() {
-                app.procs.stop_all();
-            }
-        }
+        super::docks::header(app, ui);
         let totals = app.totals();
         if totals.priced > 0 {
             ui.add_space(4.0);

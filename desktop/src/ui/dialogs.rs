@@ -1,10 +1,9 @@
 //! The dialogs that are not Settings or Plugins: the delete confirmation
-//! (DeleteChatDialog.tsx), search across chats (SearchModal.tsx), the MCP console
-//! (McpConsole.tsx) and the plain file preview.
+//! (DeleteChatDialog.tsx), search across chats (SearchModal.tsx) and the MCP console
+//! (McpConsole.tsx).
 
 use super::form::{self, Btn, Input};
 use super::overlay::{self, Card};
-use super::settings::part;
 use super::theme::{self, W, alpha, p};
 use super::{App, Dialog, icons, widgets};
 use crate::mcp::{self, McpServerPublic, McpTool};
@@ -22,7 +21,6 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         Dialog::Mcp => console(app, ctx),
         Dialog::Delete { ids, opened } => delete(app, ctx, ids, *opened),
         Dialog::Search => search(app, ctx),
-        Dialog::Preview(path, text) => preview(ctx, path, text),
     };
     if keep && app.dialog == Dialog::None {
         app.dialog = dialog;
@@ -36,46 +34,6 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         Dialog::Search => app.search = Default::default(),
         _ => {}
     }
-}
-
-/// A workspace file opened for reading.
-// ponytail: stands in for the Workspace files slide-over until that panel is ported.
-fn preview(ctx: &egui::Context, path: &str, text: &str) -> bool {
-    let p = p();
-    let screen = ctx.content_rect().size();
-    let shown = Card::new("preview", 860.0, screen.y - 64.0).show(ctx, |ui, close| {
-        let rect = ui.max_rect();
-        let (head, body) = rect.split_top_bottom_at_y(rect.top() + 53.0);
-        ui.painter().hline(head.x_range(), head.bottom() - 0.5, Stroke::new(1.0, p.border));
-        part(ui, head, |ui| {
-            egui::Frame::new().inner_margin(egui::Margin::symmetric(16, 10)).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
-                        if overlay::head_btn(ui, icons::CLOSE, 32.0, 15.0, true, "Close (Esc)").clicked() {
-                            *close = true;
-                        }
-                        if overlay::outline_btn(ui, icons::COPY_SMALL.stroke(1.7), "Copy", None).clicked() {
-                            ui.ctx().copy_text(text.to_string());
-                        }
-                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            ui.add(egui::Label::new(RichText::new(path).font(theme::mono(13.0)).color(p.text)).truncate().selectable(false));
-                        });
-                    });
-                });
-            });
-        });
-        part(ui, body, |ui| {
-            egui::ScrollArea::both().id_salt("preview").auto_shrink(false).show(ui, |ui| {
-                egui::Frame::new().inner_margin(egui::Margin::symmetric(16, 14)).show(ui, |ui| {
-                    let mut job = egui::text::LayoutJob::simple(text.replace('\t', "  "), theme::mono(13.0), p.text, f32::INFINITY);
-                    job.sections[0].format.line_height = Some(21.125);
-                    ui.add(egui::Label::new(job).selectable(true).extend());
-                });
-            });
-        });
-    });
-    shown == overlay::State::Open
 }
 
 // ------------------------------------------------------------------ delete
