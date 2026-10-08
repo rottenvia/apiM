@@ -1,6 +1,8 @@
 //! The agent's tools. Schemas come from assets/tools.json (synced from the web
 //! app); only tools with a handler here are offered to the model.
 
+pub mod binary;
+pub mod build;
 pub mod code;
 pub mod data;
 pub mod documents;
@@ -10,6 +12,7 @@ pub mod git;
 pub mod github;
 pub mod plan;
 pub mod recall;
+pub mod testing;
 pub mod web;
 
 use crate::agent::Emitter;
@@ -114,7 +117,7 @@ const IMPLEMENTED: &[&str] = &[
     "web_search", "make_plan", "update_plan", "ask_user", "finish", "note_finding", "view_image", "show_image",
     "git_status", "git_diff", "git_log", "git_commit", "git_branch", "apply_patch", "verify_file", "read_symbol", "find_references",
     "analyze_log", "extract_archive", "query_data", "list_snapshots", "restore_snapshot", "search_conversation",
-    "git_pull_base", "github_push", "github_create_pr", "github_pr_status", "read_document",
+    "git_pull_base", "github_push", "github_create_pr", "github_pr_status", "read_document", "build_project", "inspect_binary", "note_binary",
 ];
 
 static SCHEMAS: LazyLock<Vec<Value>> = LazyLock::new(|| {
@@ -174,7 +177,7 @@ pub async fn run(name: &str, args: &Value, ctx: &Ctx) -> Output {
         return mcp_call(name, args, ctx).await;
     }
     // A command may rewrite, reformat or generate anything: after one the disk is the only truth.
-    if matches!(name, "run_command" | "run_tests" | "start_process") {
+    if matches!(name, "run_command" | "run_tests" | "start_process" | "build_project") {
         ctx.memory.invalidate_all();
     }
     match name {
@@ -210,6 +213,9 @@ pub async fn run(name: &str, args: &Value, ctx: &Ctx) -> Output {
         "ask_user" => plan::ask_user(ctx, args).await,
         "run_command" => exec::run_command(ctx, args).await,
         "run_tests" => exec::run_tests(ctx, args).await,
+        "build_project" => build::build_project(ctx, args).await,
+        "inspect_binary" => binary::inspect_binary(&ctx.root, args).await,
+        "note_binary" => at_root(binary::note_binary),
         "start_process" => exec::start_process(ctx, args).await,
         "read_process" => exec::read_process(ctx, args),
         "write_process" => exec::write_process(ctx, args).await,

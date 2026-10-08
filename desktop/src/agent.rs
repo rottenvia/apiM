@@ -128,6 +128,10 @@ impl Emitter {
     pub async fn approve(&self, command: &str, reason: &str) -> bool {
         self.ask(command, reason, command, false).await
     }
+    /// Like approve, but "always allow" remembers `key` instead of the command line shown.
+    pub async fn approve_keyed(&self, command: &str, reason: &str, key: &str) -> bool {
+        self.ask(command, reason, key, false).await
+    }
     /// The same card for a call to an MCP server: `display` is shown, `key` is remembered.
     pub async fn approve_mcp(&self, display: &str, key: &str) -> bool {
         self.ask(display, "", key, true).await
@@ -549,6 +553,8 @@ async fn run_inner(mut req: Request, emit: &Emitter, procs: Arc<Procs>) -> Resul
     }
     let findings_block = findings::format_findings_for_prompt(&findings::read_store(&findings_path));
     system.push_str(&findings_block);
+    // Binaries already inspected in this workspace, so the model does not analyse them again.
+    system.push_str(&crate::binary::ledger::format_binary_ledger_for_prompt(&crate::binary::ledger::read_binary_ledger(&req.workspace)));
     // What earlier work in this workspace proved, when lessons are switched on.
     let known_lessons = if s.lessons_enabled { lessons::read_lessons(&req.workspace) } else { Vec::new() };
     system.push_str(&lessons::format_lessons_for_prompt(&known_lessons));
