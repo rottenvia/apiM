@@ -1,0 +1,220 @@
+[
+ [
+  {
+   "name": "prose_tool_prose",
+   "message": {
+    "id": "a1",
+    "role": "assistant",
+    "content": "I'll read it. Done.",
+    "reasoningContent": "",
+    "timeline": [
+     {
+      "kind": "text",
+      "text": "I'll read it. "
+     },
+     {
+      "kind": "tool",
+      "id": "t1"
+     },
+     {
+      "kind": "text",
+      "text": "Done."
+     }
+    ],
+    "toolEvents": [
+     {
+      "id": "t1",
+      "name": "read_file",
+      "args": "{\"path\":\"a.ts\"}",
+      "ok": true,
+      "summary": "Read t1"
+     }
+    ]
+   }
+  },
+  [
+   {
+    "text": "I'll read it. ",
+    "tools": [
+     "t1"
+    ],
+    "think": null
+   },
+   {
+    "text": "Done.",
+    "tools": [],
+    "think": null
+   }
+  ]
+ ],
+ [
+  {
+   "name": "fragments_are_one_paragraph",
+   "message": {
+    "id": "a1",
+    "role": "assistant",
+    "content": "Hello world",
+    "reasoningContent": "",
+    "timeline": [
+     {
+      "kind": "text",
+      "text": "Hel"
+     },
+     {
+      "kind": "text",
+      "text": "lo"
+     },
+     {
+      "kind": "text",
+      "text": " world"
+     }
+    ],
+    "toolEvents": []
+   }
+  },
+  [
+   {
+    "text": "Hello world",
+    "tools": [],
+    "think": null
+   }
+  ]
+ ],
+ [
+  {
+   "name": "reasoning_between_steps",
+   "message": {
+    "id": "a1",
+    "role": "assistant",
+    "content": "Ok",
+    "reasoningContent": "Plan first. Then act.",
+    "timeline": [
+     {
+      "kind": "think",
+      "start": 0,
+      "end": 11
+     },
+     {
+      "kind": "tool",
+      "id": "t1"
+     },
+     {
+      "kind": "think",
+      "start": 11,
+      "end": 21
+     },
+     {
+      "kind": "text",
+      "text": "Ok"
+     }
+    ],
+    "toolEvents": [
+     {
+      "id": "t1",
+      "name": "read_file",
+      "args": "{\"path\":\"a.ts\"}",
+      "ok": true,
+      "summary": "Read t1"
+     }
+    ]
+   }
+  },
+  [
+   {
+    "text": "",
+    "tools": [],
+    "think": "Plan first."
+   },
+   {
+    "text": "",
+    "tools": [
+     "t1"
+    ],
+    "think": null
+   },
+   {
+    "text": "",
+    "tools": [],
+    "think": " Then act."
+   },
+   {
+    "text": "Ok",
+    "tools": [],
+    "think": null
+   }
+  ]
+ ],
+ [
+  {
+   "name": "adjacent_reasoning_is_one_row",
+   "message": {
+    "id": "a1",
+    "role": "assistant",
+    "content": "Ok",
+    "reasoningContent": "Plan first. Then act.",
+    "timeline": [
+     {
+      "kind": "think",
+      "start": 0,
+      "end": 11
+     },
+     {
+      "kind": "think",
+      "start": 11,
+      "end": 21
+     },
+     {
+      "kind": "text",
+      "text": "Ok"
+     }
+    ],
+    "toolEvents": []
+   }
+  },
+  [
+   {
+    "text": "",
+    "tools": [],
+    "think": "Plan first. Then act."
+   },
+   {
+    "text": "Ok",
+    "tools": [],
+    "think": null
+   }
+  ]
+ ],
+ [
+  {
+   "name": "missing_result_is_skipped",
+   "message": {
+    "id": "a1",
+    "role": "assistant",
+    "content": "AB",
+    "reasoningContent": "",
+    "timeline": [
+     {
+      "kind": "text",
+      "text": "A"
+     },
+     {
+      "kind": "tool",
+      "id": "gone"
+     },
+     {
+      "kind": "text",
+      "text": "B"
+     }
+    ],
+    "toolEvents": []
+   }
+  },
+  [
+   {
+    "text": "AB",
+    "tools": [],
+    "think": null
+   }
+  ]
+ ]
+]

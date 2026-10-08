@@ -234,9 +234,8 @@ pub async fn download_file(ctx: &Ctx, args: &Value) -> Output {
 pub async fn web_search(ctx: &Ctx, args: &Value) -> Output {
     let s = &ctx.settings;
     let keys = crate::search::Keys { tavily: s.tavily(), exa: s.exa(), tavily_enabled: s.tavily_enabled, exa_enabled: s.exa_enabled };
-    // ponytail: the search's own cost (Reply::search.estimated_usd) is not added to the chat total yet.
     let reply = crate::search::web_search(&ctx.client, str_arg(args, "query"), &s.search_profile, &keys, ctx.planner.as_ref()).await;
-    Output { ok: reply.ok, text: reply.content, summary: reply.summary, ..Default::default() }
+    Output { ok: reply.ok, text: reply.content, summary: reply.summary, search: reply.search, ..Default::default() }
 }
 
 #[cfg(test)]
@@ -259,5 +258,18 @@ mod tests {
         let html = "<html><head><title>T</title><style>p{}</style></head><body><h1>Hi &amp; bye</h1><script>x()</script><p>One<br>two&nbsp;&#33;</p><!-- c --></body></html>";
         assert_eq!(html_to_text(html), "Hi & bye\n\nOne\ntwo !");
         assert!(find_lines("a\nversion: 2\nb", "version", 20).contains("2: version: 2"));
+    }
+
+    /// A search lands on the reply it ran for: each source and query once, and its cost.
+    #[test]
+    fn a_search_lands_on_its_reply_once_per_source_and_query() {
+        let source = |url: &str| crate::search::SearchResult { title: url.into(), url: url.into(), domain: "example.com".into(), ..Default::default() };
+        let mut reply = crate::store::Message::new(crate::store::Role::Assistant, "");
+        let found = crate::search::SearchOutcome { results: vec![source("https://a"), source("https://b")], queries: vec!["rust".into(), "rust".into()], estimated_usd: 0.008, ..Default::default() };
+        crate::search::record_on(&mut reply, &found);
+        crate::search::record_on(&mut reply, &found);
+        assert_eq!(reply.search_results.iter().map(|r| r.url.as_str()).collect::<Vec<_>>(), ["https://a", "https://b"]);
+        assert_eq!(reply.search_queries, ["rust"]);
+        assert!((reply.search_usd - 0.016).abs() < 1e-9);
     }
 }

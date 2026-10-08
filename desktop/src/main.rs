@@ -103,6 +103,7 @@ fn headless(args: &[String]) {
             Content(t) => print!("{t}"),
             ToolStart(t) => println!("\n> {} {}", t.name, t.args.chars().take(200).collect::<String>()),
             ToolDone { ok, summary, .. } => println!("  {} {summary}", if ok { "ok" } else { "FAILED" }),
+            WebSearch(_) => {}
             // Nobody is here to click: decline, and the model is told so.
             Approval { command, reply, .. } => {
                 println!("\n  (declined, pass --auto to allow: {command})");

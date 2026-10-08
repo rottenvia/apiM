@@ -23,7 +23,7 @@ use crate::diagnostics;
 use crate::lessons::{self, Lesson};
 use crate::local;
 use crate::mcp;
-use crate::media::multimodal::{Media, MediaWindow, build_user_content, strip_ride_along_videos, user_has_content};
+use crate::media::multimodal::strip_ride_along_videos;
 use crate::models::{self, ProviderId, Usage, Vision};
 use crate::plugins;
 use crate::prompt;
@@ -57,8 +57,6 @@ const MAX_RATE_LIMIT_WAITS: u32 = 6;
 const MAX_REFUSAL_REOPENS: u32 = 2;
 /// What a request rejected for its size is folded down to before the retry.
 const FOLD_RETRY_TARGET_CHARS: usize = 350_000;
-/// Earlier turns sent verbatim with each request.
-const HISTORY_TURNS: usize = 40;
 /// Newest tool results that are never collapsed.
 const KEEP_RECENT_RESULTS: usize = 6;
 
@@ -86,6 +84,8 @@ pub enum Event {
     Retry { reason: String, attempt: usize, attempts: usize, wait: Duration },
     ToolStart(ToolEvent),
     ToolDone { id: String, ok: bool, summary: String, image: Option<PathBuf>, changed: Option<String> },
+    /// A web search a tool call ran: its sources, queries and cost, for the reply it belongs to.
+    WebSearch(crate::search::SearchOutcome),
     /// A helper's rounds so far, for its still-running `delegate` row.
     ToolProgress { id: String, text: String },
     /// `key` is what "Always allow this" remembers; `mcp` titles the card for a remote tool.
@@ -572,7 +572,7 @@ async fn run_inner(mut req: Request, emit: &Emitter, procs: Arc<Procs>) -> Resul
     if let Some(summary) = req.summary.as_deref().filter(|s| !s.trim().is_empty()) {
         messages.push(json!({ "role": "system", "content": summary }));
     }
-    messages.extend(user_turns(&req.history, &req.text, &req.images, target.model.vision));
+    messages.extend(crate::context::transcript::wire_turns(&req.history, &req.text, &req.images, target.model.vision));
 
     let mut start = Start { user_text: req.text.clone(), history_last_user: req.history_last_user.clone(), ..Default::default() };
     if let Some(resume) = resume {
@@ -593,55 +593,6 @@ async fn run_inner(mut req: Request, emit: &Emitter, procs: Arc<Procs>) -> Resul
         tokio::spawn(learn(ctx.client.clone(), helper, req.workspace.clone(), outcomes, known_lessons));
     }
     Ok(end)
-}
-
-/// The conversation the model reads for this turn: the newest earlier turns, then the message being answered (the web's
-/// `buildUserContent` for each). A model that cannot see keeps the one-line note; the others get the media-aware builder.
-fn user_turns(history: &[(Role, String, Vec<Attachment>)], text: &str, images: &[Attachment], vision: Vision) -> Vec<Value> {
-    let skip = history.len().saturating_sub(HISTORY_TURNS);
-    let turns = &history[skip..];
-    let mut out = Vec::new();
-    for ((role, past, attached), window) in turns.iter().zip(history_windows(turns, vision == Vision::Native)) {
-        if *role == Role::User {
-            let media: Vec<Media> = attached.iter().map(Media::from).collect();
-            let content = build_user_content(past, &media, vision, window);
-            if user_has_content(&content) {
-                out.push(json!({ "role": "user", "content": content }));
-            }
-        } else if !past.trim().is_empty() {
-            out.push(json!({ "role": "assistant", "content": past }));
-        }
-    }
-    if vision == Vision::None {
-        let note = if images.is_empty() { String::new() } else { format!("\n\n[The user attached {} image(s), but this model cannot see images.]", images.len()) };
-        out.push(user(format!("{text}{note}")));
-    } else {
-        let media: Vec<Media> = images.iter().map(Media::from).collect();
-        out.push(json!({ "role": "user", "content": build_user_content(text, &media, vision, None) }));
-    }
-    out
-}
-
-/// The web's `mediaWindowFor`: on a native model the two newest pictures in the history ride in full, and a clip never
-/// replays from history. Other models get no window: their history carries descriptions, not pixels.
-fn history_windows(turns: &[(Role, String, Vec<Attachment>)], native: bool) -> Vec<Option<MediaWindow>> {
-    let mut windows = vec![None; turns.len()];
-    if !native {
-        return windows;
-    }
-    let mut pictures = 0;
-    for (i, (role, _, attached)) in turns.iter().enumerate().rev() {
-        if *role != Role::User {
-            continue;
-        }
-        let picture = attached.iter().any(|a| a.kind == "image" && a.data_url.as_deref().is_some_and(|u| !u.is_empty()));
-        let clip = attached.iter().any(|a| a.kind == "video" && (a.data_url.is_some() || !a.frames.is_empty()));
-        if picture || clip {
-            windows[i] = Some(MediaWindow { images: Some(picture && pictures < 2), videos: Some(false) });
-        }
-        pictures += usize::from(picture);
-    }
-    windows
 }
 
 /// The loop itself, once the endpoint, the tools and the opening messages are settled.
@@ -1028,6 +979,9 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, tool_defs: 
                 log("tool_failed", &call.name, if out.summary.is_empty() { &out.text } else { &out.summary });
             }
             emit.send(Event::ToolDone { id: call.id.clone(), ok: out.ok, summary: out.summary.clone(), image: out.image.clone(), changed: out.changed.clone() });
+            if let Some(found) = out.search.as_ref().filter(|_| out.ok) {
+                emit.send(Event::WebSearch(found.clone()));
+            }
             if s.lessons_enabled {
                 outcomes.push(Outcome { name: call.name.clone(), args: args_text.to_string(), ok: out.ok, summary: out.summary.clone() });
             }
@@ -1672,7 +1626,7 @@ mod tests {
         let question = "What does the button say?";
         let ran = run_with(vec![sse(&[says("It says Save.", Some("stop"))])], "none", None, |dir| {
             let mut messages = vec![json!({ "role": "system", "content": "rules" })];
-            messages.extend(user_turns(&[], question, std::slice::from_ref(&picture), Vision::Helper));
+            messages.extend(crate::context::transcript::wire_turns(&[], question, std::slice::from_ref(&picture), Vision::Helper));
             let tree = Tree::open(dir, &mut messages);
             (messages, Start { tree, user_text: question.into(), ..Default::default() })
         })
@@ -1686,9 +1640,29 @@ mod tests {
     fn only_the_two_newest_pictures_in_history_ride_in_full() {
         let turn = |text: &str, data: &str| (Role::User, text.to_string(), vec![Attachment { name: "p.png".into(), kind: "image".into(), data_url: Some(data.into()), ..Default::default() }]);
         let history = vec![turn("one", "data:a"), turn("two", "data:b"), turn("three", "data:c")];
-        let sent = Value::Array(user_turns(&history, "now", &[], Vision::Native)).to_string();
+        let sent = Value::Array(crate::context::transcript::wire_turns(&history, "now", &[], Vision::Native)).to_string();
         assert!(sent.contains("data:b") && sent.contains("data:c") && !sent.contains("data:a"), "{sent}");
         assert!(sent.contains("kept in the conversation, not re-sent"), "{sent}");
+    }
+
+    /// An earlier reply's tool work is not sent with the next request: its prose is, and nothing the run did with it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_earlier_replys_tool_work_stays_out_of_the_request() {
+        let earlier = [crate::store::Message::from_web(&json!({
+            "id": "a1", "role": "assistant", "content": "There are three files.", "reasoningContent": "list first",
+            "toolEvents": [{ "id": "t1", "name": "list_files", "args": "{}", "ok": true, "summary": "Listed src" }]
+        }))];
+        let history = crate::context::transcript::history(&earlier, None);
+        let ran = run_with(vec![sse(&[says("Done.", Some("stop"))])], "none", None, move |dir| {
+            let mut messages = vec![json!({ "role": "system", "content": "rules" })];
+            messages.extend(crate::context::transcript::wire_turns(&history, "next", &[], Vision::None));
+            let tree = Tree::open(dir, &mut messages);
+            (messages, Start { tree, user_text: "next".into(), ..Default::default() })
+        })
+        .await;
+        let sent = ran.sent[0]["messages"].to_string();
+        assert!(sent.contains("There are three files."), "{sent}");
+        assert!(!sent.contains("list_files") && !sent.contains("Listed src") && !sent.contains("list first") && !sent.contains("Steps taken"), "{sent}");
     }
 
     /// The newest tool result in a request.

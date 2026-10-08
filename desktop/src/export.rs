@@ -21,7 +21,8 @@ pub fn render(conv: &Conversation, format: &str) -> String {
     match format {
         "json" => conv.to_json(),
         "txt" => {
-            let mut lines = vec![conv.title.clone(), "=".repeat(conv.title.chars().count()), format!("Exported {now}"), String::new()];
+            // The underline is as long as the title in the web's UTF-16 units, not in chars.
+            let mut lines = vec![conv.title.clone(), "=".repeat(conv.title.encode_utf16().count()), format!("Exported {now}"), String::new()];
             for m in &conv.messages {
                 lines.push(format!("[{}] {}", if m.role == Role::User { "USER" } else { "ASSISTANT" }, date(m.created_at)));
                 lines.extend([m.text(), String::new()]);
@@ -70,6 +71,7 @@ pub fn render(conv: &Conversation, format: &str) -> String {
 <title>{title}</title>
 <style>
 :root{{--bg:#191715;--card:#141210;--line:#2c2924;--fg:#ede9e2;--dim:#a29d92;--muted:#6d685d;--accent:#c96442}}
+*{{box-sizing:border-box}}
 body{{margin:0;padding:2.5rem 1rem;background:var(--bg);color:var(--fg);
 font:15px/1.7 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}}
 main{{max-width:52rem;margin:0 auto}}
@@ -106,7 +108,8 @@ font-weight:600;font-size:.8rem;letter-spacing:.04em;text-transform:uppercase;co
 
 /// "My chat: notes!" becomes "my-chat-notes.md".
 pub fn filename(title: &str, format: &str) -> String {
-    let kept: String = title.chars().filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-' || c.is_whitespace()).collect();
+    // The web's `[^\w\s-]`: its word characters are ASCII, so an accented letter goes with the punctuation.
+    let kept: String = title.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-' || c.is_whitespace()).collect();
     let safe: String = kept.split_whitespace().collect::<Vec<_>>().join("-").chars().take(60).collect::<String>().to_lowercase();
     format!("{}.{format}", if safe.is_empty() { "conversation" } else { &safe })
 }
@@ -129,5 +132,25 @@ mod tests {
         let html = render(&conv, "html");
         assert!(html.contains("<title>My chat: &lt;notes&gt;!</title>") && html.contains("<pre>hi &lt;b&gt;</pre>"));
         assert!(render(&conv, "json").contains("\"role\": \"user\""));
+    }
+
+    /// Dates and the export moment depend on the clock and the locale, so both sides mask them the same way.
+    fn masked(text: &str) -> String {
+        regex::Regex::new(r"\d{1,2}/\d{1,2}/\d{4}, \d{1,2}:\d{2}:\d{2}(?: [AP]M)?").unwrap().replace_all(text, "DATE").into_owned()
+    }
+
+    /// The web's exports and filenames for one chat (`export_fixtures.json`, dumped from src/lib/export.ts).
+    #[test]
+    fn exports_and_filenames_match_the_web_app() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!("export_fixtures.json")).unwrap();
+        let mut conv = Conversation::new();
+        conv.title = fixture["conv"]["title"].as_str().unwrap().into();
+        conv.messages = fixture["conv"]["messages"].as_array().unwrap().iter().map(Message::from_web).collect();
+        for (format, expected) in fixture["exports"].as_object().unwrap() {
+            assert_eq!(masked(&render(&conv, format)), masked(expected.as_str().unwrap()), "{format}");
+        }
+        for pair in fixture["filenames"].as_array().unwrap() {
+            assert_eq!(filename(pair[0].as_str().unwrap(), "md"), pair[1].as_str().unwrap());
+        }
     }
 }

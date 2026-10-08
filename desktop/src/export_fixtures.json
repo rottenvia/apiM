@@ -1,0 +1,53 @@
+{
+ "conv": {
+  "id": "c1",
+  "title": "My chat: <notes>! — café",
+  "createdAt": "2026-10-01T10:00:00.000Z",
+  "updatedAt": "2026-10-01T10:05:00.000Z",
+  "messages": [
+   {
+    "id": "m1",
+    "role": "user",
+    "content": "hi <b> & \"you\"",
+    "createdAt": "2026-10-01T10:00:00.000Z"
+   },
+   {
+    "id": "m2",
+    "role": "assistant",
+    "content": "Here are two sources.",
+    "reasoningContent": "Search first.",
+    "createdAt": "2026-10-01T10:01:00.000Z",
+    "searchResults": [
+     {
+      "title": "Rust & you",
+      "url": "https://www.rust-lang.org/?a=1&b=2",
+      "domain": "rust-lang.org"
+     }
+    ]
+   }
+  ]
+ },
+ "exports": {
+  "md": "# My chat: <notes>! — café\n\n*Exported 10/8/2026, 10:30:40 PM · 2 messages*\n\n## You\n\nhi <b> & \"you\"\n\n---\n\n## Assistant\n\n<details><summary>Thinking</summary>\n\n```\nSearch first.\n```\n\n</details>\n\nHere are two sources.\n\n**Sources**\n\n1. [Rust & you](https://www.rust-lang.org/?a=1&b=2) — rust-lang.org\n\n---\n",
+  "txt": "My chat: <notes>! — café\n========================\nExported 10/8/2026, 10:30:40 PM\n\n[USER] 10/1/2026, 1:00:00 PM\nhi <b> & \"you\"\n\n[ASSISTANT] 10/1/2026, 1:01:00 PM\nHere are two sources.\n",
+  "html": "<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>My chat: &lt;notes&gt;! — café</title>\n<style>\n:root{--bg:#191715;--card:#141210;--line:#2c2924;--fg:#ede9e2;--dim:#a29d92;--muted:#6d685d;--accent:#c96442}\n*{box-sizing:border-box}\nbody{margin:0;padding:2.5rem 1rem;background:var(--bg);color:var(--fg);\nfont:15px/1.7 ui-sans-serif,system-ui,-apple-system,\"Segoe UI\",sans-serif}\nmain{max-width:52rem;margin:0 auto}\nh1{font-size:1.6rem;margin:0 0 .25rem}\n.meta{color:var(--muted);font-size:.8rem;margin-bottom:2rem}\n.msg{border:1px solid var(--line);border-radius:14px;padding:1rem 1.15rem;margin-bottom:1rem;background:var(--card)}\n.msg.user{background:#201e1b}\n.msg header{display:flex;justify-content:space-between;align-items:baseline;\nfont-weight:600;font-size:.8rem;letter-spacing:.04em;text-transform:uppercase;color:var(--accent);margin-bottom:.6rem}\n.msg.user header{color:var(--dim)}\n.msg time{font-weight:400;text-transform:none;letter-spacing:0;color:var(--muted);font-size:.72rem}\n.body pre{white-space:pre-wrap;word-wrap:break-word;margin:0;font:inherit}\n.thinking{margin-bottom:.75rem;border:1px solid #cfa25a33;border-radius:10px;padding:.5rem .75rem}\n.thinking summary{cursor:pointer;color:#cfa25a;font-size:.8rem;font-weight:600}\n.thinking pre{white-space:pre-wrap;color:var(--dim);font-size:.85rem;margin:.5rem 0 0}\n.sources{margin-top:.85rem;padding-top:.7rem;border-top:1px solid var(--line);font-size:.85rem}\n.sources strong{color:#6ba3a0;font-size:.75rem;text-transform:uppercase;letter-spacing:.05em}\n.sources ol{margin:.4rem 0 0;padding-left:1.2rem;color:var(--dim)}\n.sources a{color:#d97f5d}\n.sources span{color:var(--muted);font-size:.78rem}\n</style></head>\n<body><main>\n<h1>My chat: &lt;notes&gt;! — café</h1>\n<p class=\"meta\">2 messages · exported 10/8/2026, 10:30:40 PM</p>\n<article class=\"msg user\"><header>You<time>10/1/2026, 1:00:00 PM</time></header><div class=\"body\"><pre>hi &lt;b&gt; &amp; &quot;you&quot;</pre></div></article>\n<article class=\"msg assistant\"><header>Assistant<time>10/1/2026, 1:01:00 PM</time></header><details class=\"thinking\"><summary>Thinking</summary><pre>Search first.</pre></details><div class=\"body\"><pre>Here are two sources.</pre></div><div class=\"sources\"><strong>Sources</strong><ol><li><a href=\"https://www.rust-lang.org/?a=1&amp;b=2\">Rust &amp; you</a> <span>rust-lang.org</span></li></ol></div></article>\n</main></body></html>"
+ },
+ "filenames": [
+  [
+   "My chat: <notes>! — café",
+   "my-chat-notes-caf.md"
+  ],
+  [
+   "!!!",
+   "conversation.md"
+  ],
+  [
+   "  spaced   out  ",
+   "spaced-out.md"
+  ],
+  [
+   "a-b_c d",
+   "a-b_c-d.md"
+  ]
+ ]
+}

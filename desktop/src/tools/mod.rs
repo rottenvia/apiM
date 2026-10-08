@@ -67,6 +67,8 @@ pub struct Output {
     pub look: Option<PathBuf>,
     /// A workspace file this call changed.
     pub changed: Option<String>,
+    /// A web search this call ran: its sources, queries and cost, for the reply it belongs to.
+    pub search: Option<crate::search::SearchOutcome>,
     /// The run ends after this call.
     pub finish: bool,
 }

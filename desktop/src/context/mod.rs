@@ -16,6 +16,7 @@ pub mod run_memory;
 pub mod runs;
 pub mod subagent;
 pub mod tool_limits;
+pub mod transcript;
 pub mod tree_delta;
 pub mod workspace_context;
 

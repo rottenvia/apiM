@@ -60,6 +60,19 @@ impl Pending {
     }
 }
 
+/// What a clip's chip says under its name: its size, and how many stills it rides as when it rides as frames (the web's
+/// "N frames" badge). A native clip has no stills and says only its size.
+// ponytail: nothing samples stills yet, so every clip rides native. `media::video::extract_video_frames` is ready; the
+// missing pieces are a background job per clip (it can take seconds on a long clip), a progress stage on the chip, and the
+// native/frames switch the web's chip offers on a model that can watch video.
+pub fn clip_detail(clip: &Video) -> String {
+    let size = format_bytes(clip.size);
+    match clip.frames.len() {
+        0 => size,
+        n => format!("{size} · {n} frame{}", if n == 1 { "" } else { "s" }),
+    }
+}
+
 /// "12 KB", "3.4 MB": the size under a chip.
 pub fn format_bytes(size: u64) -> String {
     match size {
@@ -196,6 +209,7 @@ pub fn chips(app: &mut App, ui: &mut egui::Ui) {
                 // What `ingest` says is inside a file or folder replaces its size, as the web's chip does.
                 let detail = match &a.body {
                     Body::Saved(d) if !d.label.is_empty() => d.label.clone(),
+                    Body::Clip(clip) => clip_detail(clip),
                     _ => format_bytes(a.size),
                 };
                 let size = widgets::clipped(ui, &detail, theme::font(11.0, W::Regular), p.text2, 220.0);
@@ -263,6 +277,15 @@ pub fn message(text: &str, pending: Vec<Pending>, vision: Vision) -> (String, Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_clip_says_its_size_and_how_many_stills_it_rides_as() {
+        use crate::media::video::Frame;
+        let clip = |stills: usize| Video { name: "clip.mp4".into(), size: 2048, data_url: None, frames: (0..stills).map(|i| Frame { data_url: format!("data:image/jpeg;base64,{i}"), t: i as f64 }).collect(), duration_sec: 4.0, frame_interval_sec: 2.0 };
+        assert_eq!(clip_detail(&clip(0)), "2 KB");
+        assert_eq!(clip_detail(&clip(1)), "2 KB · 1 frame");
+        assert_eq!(clip_detail(&clip(3)), "2 KB · 3 frames");
+    }
 
     #[test]
     fn attachments_are_copied_once_and_read_into_the_message() {
