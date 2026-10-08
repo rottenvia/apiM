@@ -1,0 +1,202 @@
+//! The agent's tools. Schemas come from assets/tools.json (synced from the web
+//! app); only tools with a handler here are offered to the model.
+
+pub mod exec;
+pub mod files;
+pub mod git;
+pub mod plan;
+pub mod web;
+
+use crate::agent::Emitter;
+use crate::store::{Finding, Plan, Settings};
+use serde_json::Value;
+use std::path::PathBuf;
+use std::sync::{Arc, LazyLock, Mutex};
+
+/// Plan and findings of the chat being worked on. The UI saves them with the chat.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ChatState {
+    pub plan: Option<Plan>,
+    pub findings: Vec<Finding>,
+    /// `finish` was already bounced once for open plan steps.
+    pub finish_bounced: bool,
+}
+
+/// Everything a tool may touch.
+pub struct Ctx {
+    /// The chat's workspace folder. File tools cannot leave it.
+    pub root: PathBuf,
+    /// Undo history and other per-chat files kept out of the workspace.
+    pub state_dir: PathBuf,
+    pub settings: Settings,
+    pub client: reqwest::Client,
+    /// Character budget for one read, sized to the model's context window.
+    pub read_chars: usize,
+    pub emit: Emitter,
+    pub chat: Arc<Mutex<ChatState>>,
+    pub procs: Arc<exec::Procs>,
+}
+
+/// What a tool hands back.
+#[derive(Debug, Default)]
+pub struct Output {
+    pub ok: bool,
+    /// For the model.
+    pub text: String,
+    /// One line for the step row in the chat.
+    pub summary: String,
+    /// An image to show the user under the step.
+    pub image: Option<PathBuf>,
+    /// An image the model itself should look at (native vision only).
+    pub look: Option<PathBuf>,
+    /// A workspace file this call changed.
+    pub changed: Option<String>,
+    /// The run ends after this call.
+    pub finish: bool,
+}
+
+impl Output {
+    pub fn ok(text: impl Into<String>, summary: impl Into<String>) -> Output {
+        Output { ok: true, text: text.into(), summary: summary.into(), ..Default::default() }
+    }
+    pub fn fail(text: impl Into<String>) -> Output {
+        let text = text.into();
+        Output { ok: false, summary: text.lines().next().unwrap_or("").chars().take(160).collect(), text, ..Default::default() }
+    }
+    pub fn changed(mut self, rel: &str) -> Output {
+        self.changed = Some(rel.to_string());
+        self
+    }
+}
+
+pub fn str_arg<'a>(args: &'a Value, key: &str) -> &'a str {
+    args[key].as_str().unwrap_or("")
+}
+pub fn bool_arg(args: &Value, key: &str) -> bool {
+    args[key].as_bool().unwrap_or_else(|| args[key].as_str() == Some("true"))
+}
+/// Numbers sometimes arrive as strings or floats; accept both.
+pub fn num_arg(args: &Value, key: &str) -> Option<u64> {
+    let v = &args[key];
+    v.as_u64().or_else(|| v.as_f64().filter(|f| *f >= 0.0).map(|f| f as u64)).or_else(|| v.as_str()?.trim().parse().ok())
+}
+pub fn list_arg(args: &Value, key: &str) -> Vec<String> {
+    args[key].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default()
+}
+
+/// Keeps the head and tail of long output: errors are usually at the end, the command at the start.
+pub fn clip(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(max / 4).collect();
+    let tail_start = text.len() - (max * 3 / 4);
+    let tail_start = (tail_start..text.len()).find(|&i| text.is_char_boundary(i)).unwrap_or(text.len());
+    format!("{head}\n… [{} characters left out] …\n{}", text.len() - head.len() - (text.len() - tail_start), &text[tail_start..])
+}
+
+/// Tools with a handler in this build.
+const IMPLEMENTED: &[&str] = &[
+    "list_files", "read_file", "read_files", "write_file", "write_files", "edit_file", "edit_files", "replace_in_files",
+    "search_files", "delete_file", "move_file", "undo_file", "run_command", "run_tests", "start_process", "read_process",
+    "write_process", "stop_process", "list_processes", "wait_for_output", "fetch_url", "http_request", "download_file",
+    "web_search", "make_plan", "update_plan", "ask_user", "finish", "note_finding", "view_image", "show_image",
+    "git_status", "git_diff", "git_log", "git_commit", "git_branch",
+];
+
+static SCHEMAS: LazyLock<Vec<Value>> = LazyLock::new(|| {
+    let mut all: Vec<Value> = serde_json::from_str(include_str!("../../assets/tools.json")).expect("assets/tools.json is valid");
+    all.retain(|t| IMPLEMENTED.contains(&t["function"]["name"].as_str().unwrap_or("")));
+    for t in &mut all {
+        // Options this build cannot honour are removed, so the model never asks for them.
+        if t["function"]["name"] == "start_process" {
+            if let Some(props) = t["function"]["parameters"]["properties"].as_object_mut() {
+                props.remove("hidden");
+            }
+        }
+    }
+    all
+});
+
+#[cfg(test)]
+pub fn implemented(name: &str) -> bool {
+    IMPLEMENTED.contains(&name)
+}
+
+/// The tool list for one request. A tool that cannot work is withheld rather than
+/// offered: a model given one calls it, gets an error, and tries something worse.
+pub fn definitions(web_search: bool, native_vision: bool, git_repo: bool) -> Vec<Value> {
+    SCHEMAS
+        .iter()
+        .filter(|t| match t["function"]["name"].as_str().unwrap_or("") {
+            "web_search" => web_search,
+            "view_image" => native_vision,
+            n if n.starts_with("git_") => git_repo,
+            _ => true,
+        })
+        .cloned()
+        .collect()
+}
+
+pub async fn run(name: &str, args: &Value, ctx: &Ctx) -> Output {
+    // File work is plain blocking I/O; tell the runtime so other tasks keep moving.
+    let sync = |f: fn(&Ctx, &Value) -> Output| tokio::task::block_in_place(|| f(ctx, args));
+    match name {
+        "list_files" => sync(files::list_files),
+        "read_file" => sync(files::read_file),
+        "read_files" => sync(files::read_files),
+        "write_file" => sync(files::write_file),
+        "write_files" => sync(files::write_files),
+        "edit_file" => sync(files::edit_file),
+        "edit_files" => sync(files::edit_files),
+        "replace_in_files" => sync(files::replace_in_files),
+        "search_files" => sync(files::search_files),
+        "delete_file" => sync(files::delete_file),
+        "move_file" => sync(files::move_file),
+        "undo_file" => sync(files::undo_file),
+        "make_plan" => sync(plan::make_plan),
+        "update_plan" => sync(plan::update_plan),
+        "note_finding" => sync(plan::note_finding),
+        "finish" => sync(plan::finish),
+        "view_image" => sync(plan::view_image),
+        "show_image" => sync(plan::show_image),
+        "ask_user" => plan::ask_user(ctx, args).await,
+        "run_command" => exec::run_command(ctx, args).await,
+        "run_tests" => exec::run_tests(ctx, args).await,
+        "start_process" => exec::start_process(ctx, args).await,
+        "read_process" => exec::read_process(ctx, args),
+        "write_process" => exec::write_process(ctx, args).await,
+        "stop_process" => exec::stop_process(ctx, args),
+        "list_processes" => exec::read_process(ctx, &Value::Null),
+        "wait_for_output" => exec::wait_for_output(ctx, args).await,
+        "fetch_url" => web::fetch_url(ctx, args).await,
+        "http_request" => web::http_request(ctx, args).await,
+        "download_file" => web::download_file(ctx, args).await,
+        "web_search" => web::web_search(ctx, args).await,
+        n if n.starts_with("git_") => git::run(ctx, n, args).await,
+        _ => Output::fail(format!("Unknown tool: {name}. Use one of the tools you were given.")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_implemented_tool_has_a_schema() {
+        for name in IMPLEMENTED {
+            assert!(SCHEMAS.iter().any(|t| t["function"]["name"] == *name), "{name} is missing from assets/tools.json");
+        }
+        assert!(definitions(false, false, false).iter().all(|t| t["function"]["name"] != "web_search"));
+        let start = SCHEMAS.iter().find(|t| t["function"]["name"] == "start_process").unwrap();
+        assert!(start["function"]["parameters"]["properties"].get("hidden").is_none());
+    }
+
+    #[test]
+    fn clip_keeps_both_ends() {
+        let long = format!("START{}END", "x".repeat(10_000));
+        let c = clip(&long, 1_000);
+        assert!(c.starts_with("START") && c.ends_with("END") && c.len() < 1_200);
+        assert_eq!(clip("short", 100), "short");
+    }
+}

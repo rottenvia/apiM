@@ -5,6 +5,15 @@ The smartest API manager with intelligent web search, thinking effort control, a
 ![Python](https://img.shields.io/badge/Python-3.10+-blue)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
+## Two versions
+
+| | Where | What it runs on |
+| --- | --- | --- |
+| **Web** | this folder | Next.js, opens in your browser |
+| **Desktop** | [`desktop/`](desktop) | Rust, a native window, no browser engine at all |
+
+The desktop one is newer and does not have everything yet. See [desktop/README.md](desktop/README.md).
+
 ## Features
 
 - 🚀 **DeepSeek V4 Pro & Flash** - Switch between models instantly

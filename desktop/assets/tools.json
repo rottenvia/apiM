@@ -1,0 +1,1702 @@
+[
+ {
+  "type": "function",
+  "function": {
+   "name": "list_files",
+   "description": "List every file in the workspace with its size. Call this first when you need to know what already exists before creating or editing anything.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "path": {
+      "type": "string",
+      "description": "Optional subdirectory to list, relative to the workspace root. Omit to list everything."
+     }
+    },
+    "required": []
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "read_file",
+   "description": "Read one file in the workspace. Every read states which lines you got out of how many the file has, and a read that is cut short says so loudly and gives the exact call that continues it — so you never have to guess whether you saw the whole thing. Line ranges are resolved against the WHOLE file, so start_line 4000 works on a file whose first 4000 lines exceed the read budget.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "path": {
+      "type": "string",
+      "description": "File path relative to the workspace root, e.g. 'src/app.py'."
+     },
+     "start_line": {
+      "type": "number",
+      "description": "First line to read, 1-based. Omit to start at the beginning."
+     },
+     "end_line": {
+      "type": "number",
+      "description": "Last line to read, inclusive. Omit to read to the end."
+     },
+     "line_numbers": {
+      "type": "boolean",
+      "description": "Prefix every line with its real number (a 'NNN | ' gutter). Use it when you need to talk about positions or plan a start_line/end_line edit. The gutter is display only — if you paste numbered text back as old_text it is stripped automatically, so a copy-paste can no longer silently fail."
+     }
+    },
+    "required": [
+     "path"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "write_file",
+   "description": "Create a new file, or completely replace an existing one. Parent directories are created automatically. Use edit_file instead when changing part of a large existing file.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "path": {
+      "type": "string",
+      "description": "File path relative to the workspace root, e.g. 'src/app.py'."
+     },
+     "content": {
+      "type": "string",
+      "description": "The complete file contents."
+     }
+    },
+    "required": [
+     "path",
+     "content"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "edit_file",
+   "description": "Replace part of an existing file, leaving the rest untouched. Name the region in whichever way is cheapest for you: old_text (a snippet; indentation differences are tolerated), start_anchor plus end_anchor (replace the whole block between two landmark lines — you do not have to reproduce anything in between), or start_line plus end_line. Set preview to true to see exactly what would be replaced without writing anything. A failed match tells you the nearest candidate line and the first line that differs, so you can correct it without another read.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "path": {
+      "type": "string",
+      "description": "File path to edit."
+     },
+     "old_text": {
+      "type": "string",
+      "description": "Exact text to replace. Indentation and inner spacing differences are tolerated, and a copied 'NNN | ' line-number gutter is stripped. Must match one place only."
+     },
+     "start_anchor": {
+      "type": "string",
+      "description": "Landmark mode: the first line of the block to replace, matched ignoring indentation. Use this instead of old_text when you know where the block is but not its exact whitespace. Must identify one line."
+     },
+     "end_anchor": {
+      "type": "string",
+      "description": "Landmark mode: the last line of the block, searched after start_anchor. Omit to replace just the start_anchor line."
+     },
+     "include_anchors": {
+      "type": "boolean",
+      "description": "Replace the anchor lines themselves. Defaults to true; set false to replace only what sits strictly between them."
+     },
+     "start_line": {
+      "type": "number",
+      "description": "Line mode: first line to replace, 1-based inclusive. Pair with end_line. Read with line_numbers first so the numbers are real."
+     },
+     "end_line": {
+      "type": "number",
+      "description": "Line mode: last line to replace, inclusive."
+     },
+     "new_text": {
+      "type": "string",
+      "description": "Replacement text. Use an empty string to delete."
+     },
+     "preview": {
+      "type": "boolean",
+      "description": "Show exactly which lines would be replaced and write nothing. Cheaper than a wrong edit plus an undo."
+     }
+    },
+    "required": [
+     "path",
+     "new_text"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "search_files",
+   "description": "Find text across every file in the workspace at once, with the file and line number of each match. Use this to locate where something is defined or used, instead of reading files one by one — it is far cheaper than guessing which file to open. Query is PLAIN TEXT by default. Only set regex:true when you intentionally want a pattern; an ordinary word or a symbol like '.', '(', '+' or '?' is NOT a regex and will error if you mark it one - leave regex off for normal searches.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "query": {
+      "type": "string",
+      "description": "Text to find, or a regular expression if regex is true."
+     },
+     "regex": {
+      "type": "boolean",
+      "description": "Treat query as a regular expression. Defaults to false."
+     },
+     "case_sensitive": {
+      "type": "boolean",
+      "description": "Match case exactly. Defaults to false."
+     },
+     "glob": {
+      "type": "string",
+      "description": "Only search matching paths, e.g. \"*.py\" or \"src/*\"."
+     },
+     "context": {
+      "type": "number",
+      "description": "Lines of surrounding code to show around each match, up to 40 (more for open-ceiling models). This is the cheapest substitute for a read there is: ask for 25-30 and a whole function body comes back with the match, so you can edit straight from the search result instead of spending a round opening the file."
+     }
+    },
+    "required": [
+     "query"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "read_files",
+   "description": "Read several files in one step. Prefer this over calling read_file repeatedly — each separate call costs a full round trip, and you usually know up front which files you need. Paths may be glob patterns: \"src/lib/*.ts\" or \"src/app/api/*\" reads the whole directory in one call, so you never have to list and then read.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "paths": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "description": "File paths to read, up to 60. A path may be a glob such as \"src/**\" or \"*.ts\"."
+     }
+    },
+    "required": [
+     "paths"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "view_image",
+   "description": "Look at an image file in the workspace — a screenshot, a mockup, a diagram. Uses the OpenAI vision key when one is set; otherwise scrapes visible text with free local OCR (no funds needed). Use this when the user refers to an image they saved, or when you have generated or downloaded one and need to check it.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "path": {
+      "type": "string",
+      "description": "Path to the image, e.g. \"mockup.png\"."
+     },
+     "question": {
+      "type": "string",
+      "description": "Optional: what you specifically need to know about it, so the description focuses there."
+     }
+    },
+    "required": [
+     "path"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "show_image",
+   "description": "Show the user an image from the workspace, right in the chat, the way a person pastes a screenshot. Use it whenever seeing beats describing: the app or page you built running, a screenshot that proves a fix, a chart or diagram you made, a before/after. Do it unprompted when you have something visual to report, and always when the user asks to see something. Screenshots from screenshot_window, sandbox_screenshot and browse are already shown to the user automatically; use this to point at the one that matters, with a caption.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "path": {
+      "type": "string",
+      "description": "Workspace path of the image (.png, .jpg, .webp, .gif, .bmp), e.g. \"screenshots/app.png\"."
+     },
+     "caption": {
+      "type": "string",
+      "description": "One short line telling the user what they are looking at."
+     }
+    },
+    "required": [
+     "path"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "run_command",
+   "description": "Run a program in the workspace and get its output back, so you can check whether your code actually works. Use this after writing code: run it, read any error, fix the file, run it again. The user has to approve each command before it runs. Only real interpreters are available (python, node, npm, pip and similar) — there is no shell, so pass arguments as a list rather than one string. Commands are stopped after 60 seconds by default (5 minutes for installs and builds); pass timeout_ms if you know a job is slower. Never start a server or anything that waits for input — use start_process for those, then wait_for_output. For tests, prefer run_tests.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "command": {
+      "type": "string",
+      "description": "Program to run, e.g. \"python3\", \"node\", \"npm\". Not a shell."
+     },
+     "args": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "description": "Arguments as separate items, e.g. [\"app.py\"] or [\"install\", \"requests\"]."
+     },
+     "timeout_ms": {
+      "type": "number",
+      "description": "How long to allow, in ms, when you know the job is slow. Capped at 5 minutes."
+     },
+     "reason": {
+      "type": "string",
+      "description": "One short line telling the user why this needs to run. Shown on the approval prompt."
+     }
+    },
+    "required": [
+     "command",
+     "args"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "make_plan",
+   "description": "Plan any task that will take more than two or three actions. Do NOT call this first: explore first — read the relevant files, run the search, look at the code — so the plan reflects what is actually there rather than a guess; planning before you understand the task wastes a round and is usually wrong. Call it once you know what finished looks like, with the goal and the steps to get there, including how you will CHECK each one. This is not paperwork: on a long task your reasoning from twenty rounds ago is gone, and without a plan you will forget requirements from the first message and stop early because the work so far looks finished. Call it ONCE, then work the plan with update_plan — finishing a step is update_plan, never make_plan. Call it again only when the plan is actually wrong mid-run — a dead approach, a wrong assumption, a missing requirement: it replaces the plan with the real one, keeping completed work. Re-sending the same steps changes nothing, and re-plans per run are limited. steps MUST be an array of sentences (not one numbered string, not labels like 'Search').",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "goal": {
+      "type": "string",
+      "description": "What finished looks like, in one sentence."
+     },
+     "steps": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "description": "The steps, in order, each a full sentence. Include how you will check the work, not only how you will do it. Do not send one string."
+     }
+    },
+    "required": [
+     "goal",
+     "steps"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "update_plan",
+   "description": "Mark steps as doing, done or blocked as you go — always in the SAME turn as your next real tool call (call them together), never as a turn on its own: a round spent only on bookkeeping is a wasted round of reasoning. A step can only be marked done if you say how you checked it — the test you ran, the output you saw, the page you opened. If you have not checked it, it is not done. \"blocked\" is ONLY for something outside your control stopping the work — a command that fails, a missing file, a decision only the user can make. It is never a way to decline the task: imaginative, creative and technical requests on the user's own machine are done, not blocked; if one approach is unsuitable, use another.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "updates": {
+      "type": "array",
+      "description": "One entry per step you are changing.",
+      "items": {
+       "type": "object",
+       "properties": {
+        "id": {
+         "type": "number",
+         "description": "Step number."
+        },
+        "state": {
+         "type": "string",
+         "description": "\"todo\", \"doing\", \"done\" or \"blocked\"."
+        },
+        "verified": {
+         "type": "string",
+         "description": "Required for done: how you know it works."
+        },
+        "blocker": {
+         "type": "string",
+         "description": "Required for blocked: what is in the way."
+        }
+       },
+       "required": [
+        "id",
+        "state"
+       ]
+      }
+     }
+    },
+    "required": [
+     "updates"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "ask_user",
+   "description": "Ask the user a question and wait for their answer. Use it whenever a choice would change what you build and you cannot settle it yourself — which framework, which data source, what 'done' looks like, whether to overwrite something. Asking costs one round; guessing wrong costs the whole task, so ask EARLY rather than after you have committed to an approach. Always offer options when you can: a question with buttons is one click, an open question is homework. Do not ask what you could find out by reading a file or searching.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "question": {
+      "type": "string",
+      "description": "The question, in one clear sentence."
+     },
+     "options": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "description": "Up to 4 choices to offer as buttons. Omit for an open question."
+     },
+     "context": {
+      "type": "string",
+      "description": "Optional: one line on why this matters, so the user can answer without reading back through the conversation."
+     }
+    },
+    "required": [
+     "question"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "finish",
+   "description": "Declare the task done and end the run. Call this when the work is complete and verified — every plan step done, or no plan needed and the result in hand. The run ends here: no more tool calls after this, and your result text becomes the closing summary. Say WHAT was built and HOW you verified it; a verified claim naming a check no tool performed is bounced. If the plan still has open steps, the first call is bounced with the list — call again to finish anyway. For plain answers that needed no tools, just answer; finish is for task work.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "result": {
+      "type": "string",
+      "description": "What was built, fixed, or found — the closing summary, in your own words."
+     },
+     "verified": {
+      "type": "string",
+      "description": "How each claim above was checked: what you ran, read, or opened, and what it showed. Must not claim a check no tool performed."
+     }
+    },
+    "required": [
+     "result",
+     "verified"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "start_process",
+   "description": "Start something that keeps running — a dev server, a watcher, a GUI you just built, a bot. Use this instead of run_command for anything that does not exit on its own, because run_command waits for the process to finish and will kill it. Returns immediately with an id and the first few seconds of output, so you can tell whether it actually started. Read its output later with read_process, and stop it with stop_process.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "command": {
+      "type": "string",
+      "description": "Program to run, e.g. \"npm\", \"python3\", \"node\" — or the path to a program you built yourself, e.g. \"build/x64/Release/app.exe\". A binary inside the workspace is allowed by its path even though its name is on no list."
+     },
+     "args": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "description": "Arguments as separate items, e.g. [\"run\", \"dev\"]."
+     },
+     "hidden": {
+      "type": "boolean",
+      "description": "Run a GUI where the user cannot see it but you can still screenshot it: a separate Windows desktop, or an off-screen X display. No window appears on their screen and focus is never taken. Use this for every UI check so you are not throwing windows onto someone's desktop. Then call screenshot_window with process_id — it finds the hidden surface on its own."
+     },
+     "reason": {
+      "type": "string",
+      "description": "One short line explaining why, shown to the user."
+     }
+    },
+    "required": [
+     "command",
+     "args"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "read_process",
+   "description": "Read the output a background process has produced so far, and whether it is still running. Use this after start_process to check for startup errors, and after making a change to see what a watcher reported. If you only need to know what just happened, pass tail — re-reading a long log costs you those tokens on every later round. To WAIT for something specific rather than polling, use wait_for_output.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string",
+      "description": "Process id from start_process. Omit to list every process in this workspace."
+     },
+     "tail": {
+      "type": "number",
+      "description": "Show only the last N lines. Use it when polling a server or a watcher."
+     }
+    },
+    "required": []
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "write_process",
+   "description": "Type a line into a running background process, as if at its keyboard. Use it when read_process shows something waiting for input: an installer asking to confirm, `npm init` asking for a package name, a migration asking [y/N], a REPL. A newline is added for you. Read the output again afterwards to see what it did with the answer — the prompt is not always the last line.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string",
+      "description": "Process id from start_process."
+     },
+     "input": {
+      "type": "string",
+      "description": "The line to send. Just the answer — 'y', a name, a path — not the whole question."
+     }
+    },
+    "required": [
+     "id",
+     "input"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "stop_process",
+   "description": "Stop a background process. Always stop anything you started once you are finished with it, so it does not keep running and holding a port. Use id leftover or ghidra to kill leftover Ghidra/ILSpy from a closed or refreshed tab — those have no chat UI.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string",
+      "description": "Process id, \"all\" for this workspace, or \"leftover\"/\"ghidra\" for orphaned decompilers."
+     }
+    },
+    "required": [
+     "id"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "delete_file",
+   "description": "Delete a file from the workspace. Only use when the user explicitly asks for it.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "path": {
+      "type": "string",
+      "description": "File path to delete."
+     }
+    },
+    "required": [
+     "path"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "fetch_url",
+   "description": "Open a web page and read it. Use this whenever the answer depends on what is actually on a site — its wording, its data, or its markup — rather than on what articles say about it. Set raw to true to get the HTML, which is what you need before writing anything that targets a page, such as a userscript or an extension content script. Never guess a selector you have not seen.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "url": {
+      "type": "string",
+      "description": "Full URL, including https://"
+     },
+     "raw": {
+      "type": "boolean",
+      "description": "Return the HTML source instead of readable text. Use for anything that inspects or modifies a page's structure."
+     },
+     "find": {
+      "type": "string",
+      "description": "Return only the lines matching this text or regular expression, with a little surrounding context. Use it when you want one fact out of a large page or JSON API — asking for \"\"version\"\" beats pulling a 477KB document to read one line. The header always reports the full size, so you can tell whether you narrowed a big page or a small one."
+     }
+    },
+    "required": [
+     "url"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "inspect_page",
+   "description": "List the ids, classes and data-attributes on a page, so you can target it precisely. Far cheaper than reading the whole HTML and usually the only thing you need before writing a content script, a userscript, or a scraper. Prefer this over fetch_url with raw when you only need selectors.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "url": {
+      "type": "string",
+      "description": "Full URL, including https://"
+     },
+     "contains": {
+      "type": "string",
+      "description": "Optional filter — only return selectors containing this text, e.g. \"score\" or \"match\"."
+     }
+    },
+    "required": [
+     "url"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "move_file",
+   "description": "Rename or move a file in one step. Use this instead of reading, rewriting and deleting — that is three round trips for one operation. Refuses if the destination already exists.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "from": {
+      "type": "string",
+      "description": "Current path."
+     },
+     "to": {
+      "type": "string",
+      "description": "New path."
+     }
+    },
+    "required": [
+     "from",
+     "to"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "edit_files",
+   "description": "Make several replacements in one step, across one file or many. Prefer this over repeated edit_file whenever a change touches more than one place — each separate call costs a whole round. Each edit may use old_text, start_anchor/end_anchor landmarks, or start_line/end_line, exactly like edit_file. Edits are independent: the ones that match are applied even if others miss, and the result names every edit by number — where it landed, or which line it expected and what the file has there instead. Set preview to true to check the whole volley before any of it is written.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "edits": {
+      "type": "array",
+      "description": "Replacements to apply, up to 40.",
+      "items": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string",
+         "description": "File to change, e.g. 'src/app.py'. Every edit carries its own path (a single top-level path, or {path, edits:[…]} groups, are also accepted)."
+        },
+        "old_text": {
+         "type": "string",
+         "description": "Exact text to replace. Indentation differences are tolerated and a copied line-number gutter is stripped."
+        },
+        "start_anchor": {
+         "type": "string",
+         "description": "Landmark mode: first line of the block, matched ignoring indentation."
+        },
+        "end_anchor": {
+         "type": "string",
+         "description": "Landmark mode: last line of the block."
+        },
+        "include_anchors": {
+         "type": "boolean",
+         "description": "Replace the anchor lines too. Default true."
+        },
+        "start_line": {
+         "type": "number",
+         "description": "Line mode: first line to replace, 1-based."
+        },
+        "end_line": {
+         "type": "number",
+         "description": "Line mode: last line to replace, inclusive."
+        },
+        "new_text": {
+         "type": "string",
+         "description": "Replacement text for this edit."
+        }
+       },
+       "required": [
+        "path",
+        "new_text"
+       ]
+      }
+     },
+     "preview": {
+      "type": "boolean",
+      "description": "Resolve every edit and report what each one would replace, without writing anything."
+     }
+    },
+    "required": [
+     "edits"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "replace_in_files",
+   "description": "Replace the same text everywhere it appears across the workspace — renaming a function, changing an import path, updating a constant. Doing this by hand costs one search plus one edit per file, so a rename touching a dozen files is a dozen rounds. Reports every file it changed. Set preview to true first if you are unsure how many matches there are.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "find": {
+      "type": "string",
+      "description": "Text to find. Exact by default; set regex to true to treat it as a regular expression."
+     },
+     "regex": {
+      "type": "boolean",
+      "description": "Treat find as a JavaScript regular expression, and allow $1, $2 in replace for captured groups. Use this when the text varies — whitespace, a changing identifier, an optional argument — which is where an exact match fails and costs you a round. Run with preview first: a loose pattern matches more than you meant."
+     },
+     "replace": {
+      "type": "string",
+      "description": "What to put in its place."
+     },
+     "glob": {
+      "type": "string",
+      "description": "Optional filter, e.g. \"*.ts\" or \"src/*\"."
+     },
+     "preview": {
+      "type": "boolean",
+      "description": "Report what would change without writing anything. Use when the text might appear somewhere you did not intend."
+     }
+    },
+    "required": [
+     "find",
+     "replace"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "web_search",
+   "description": "Search the web from inside the task. Use this the moment you hit something you do not know — an unfamiliar error, a library's current API, whether a service still works the way you remember. Do not guess and carry on: a wrong assumption compounds over the rounds that follow. Returns titles, URLs and extracts; follow up with fetch_url when you need the full page.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "query": {
+      "type": "string",
+      "description": "What to look up, phrased as you would type it into a search engine. Be specific — include the error text or version."
+     }
+    },
+    "required": [
+     "query"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "undo_file",
+   "description": "Put one file back the way it was before your last write. Use this when an edit turns out to be wrong: reverting is exact, whereas patching your own mistake by hand tends to make it worse. Up to 10 previous versions are kept, so you can step further back with `steps` if the version before this one was also wrong.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "path": {
+      "type": "string",
+      "description": "File to revert."
+     },
+     "steps": {
+      "type": "number",
+      "description": "How many writes to go back. 1 is the last write (the default), 2 the one before it."
+     }
+    },
+    "required": [
+     "path"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "http_request",
+   "description": "Call an HTTP API directly and see the status code, headers and body. Use this to test an endpoint you or someone else built — it is the API equivalent of run_tests. Prefer it over run_command with curl: no approval prompt, no shell quoting to get wrong, and JSON comes back parsed. Public URLs are the default; set allow_local only for a development server on this machine.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "url": {
+      "type": "string",
+      "description": "Full URL, including https://"
+     },
+     "method": {
+      "type": "string",
+      "description": "GET, POST, PUT, PATCH, DELETE, HEAD or OPTIONS. Defaults to GET."
+     },
+     "headers": {
+      "type": "object",
+      "description": "Request headers, e.g. {\"authorization\": \"Bearer ...\"}. Content-Type becomes application/json when the body looks like JSON."
+     },
+     "body": {
+      "type": "string",
+      "description": "Request body, for POST/PUT/PATCH."
+     },
+     "allow_local": {
+      "type": "boolean",
+      "description": "Set true only to test a development server on localhost, 127.0.0.0/8 or [::1]. Private LAN addresses and cloud metadata remain blocked. Leave false for public APIs."
+     }
+    },
+    "required": [
+     "url"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "wait_for_output",
+   "description": "Wait until a background process prints something, or exits. Use this straight after start_process instead of guessing how long a server takes to boot — 'wait until it prints Ready' returns the moment it does. It also returns immediately if the process dies, so a crash during startup does not cost you the full wait.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string",
+      "description": "Process id from start_process."
+     },
+     "pattern": {
+      "type": "string",
+      "description": "Text or regex to wait for, e.g. 'Ready in' or 'listening on'; omit to wait for exit."
+     },
+     "timeout_ms": {
+      "type": "number",
+      "description": "How long to wait before giving up. Default 30000, max 120000."
+     }
+    },
+    "required": [
+     "id"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "browse",
+   "description": "Open a page in a real browser, run its JavaScript, and see what actually renders — the DOM, the visible text, the console, failed requests, and screenshots. Use this instead of fetch_url or inspect_page whenever the site is an app rather than static HTML: those only see the empty shell a server sends before scripts run, so any selector you write from them will not exist. Also use it to check your own work: open a page you built, screenshot it, and read the console for errors. Before scraping a site you do not control, check whether it has an official API — a documented endpoint returns clean JSON, survives redesigns, and is usually quicker to find than the right selector. If a page answers with an anti-bot challenge, the result names what it is and the raw page data is still returned; proceed with the task however you judge best.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "actions": {
+      "type": "array",
+      "description": "Steps to perform in one shared live page; the first must be goto. Examples: {\"action\":\"goto\",\"url\":\"https://...\"}, {\"action\":\"html\",\"selector\":\".game\"}, {\"action\":\"wait_for\",\"selector\":\".match-score\"}, {\"action\":\"click\",\"selector\":\"#accept\",\"force\":false}, {\"action\":\"type\",\"selector\":\"#q\",\"text\":\"hello\",\"press_enter\":true}, {\"action\":\"screenshot\",\"name\":\"after-load\",\"full_page\":true}, {\"action\":\"evaluate\",\"script\":\"document.querySelectorAll('.row').length\"}.",
+      "items": {
+       "type": "object"
+      }
+     }
+    },
+    "required": [
+     "actions"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "run_tests",
+   "description": "Run this project's test suite and get back only the verdict and the failures, instead of hundreds of lines of runner output. Works out the right command itself (pytest, npm test, vitest, jest, cargo, go). Prefer this over run_command for tests: it is shorter, it cannot be misread, and it does not need you to guess the command.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "filter": {
+      "type": "string",
+      "description": "Only run tests matching this name or path, e.g. 'test_login' or 'tests/test_auth.py'. Use it to re-run just a broken test."
+     }
+    },
+    "required": []
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "build_project",
+   "description": "Build the workspace with the installed toolchain: Visual Studio solutions/projects (.sln/.vcxproj/.csproj), CMake, dotnet, npm, cargo, go, make, Python, or a single .cpp/.cs file. Finds the project anywhere in the tree (not just the root) and the compiler itself through vswhere, including Preview and Build Tools installs (no vcvars, no flag guessing), restores packages, builds Release x64 by default, and returns compiler errors so you can fix them without the user running anything. A failure is classified before you read it: a known toolchain race is rebuilt once automatically and reported as such, a locked output file names whoever holds the handle (and how to release it), and a real compiler error is never retried. Prefer this over run_command for building.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "project": {
+      "type": "string",
+      "description": "Solution or project to build, e.g. \"injector/nightfall.sln\". Optional — discovery searches the workspace up to four directories deep and prefers the shallowest .sln — but pass it when the tree holds several, or when discovery picked the wrong one."
+     },
+     "config": {
+      "type": "string",
+      "enum": [
+       "Release",
+       "Debug"
+      ],
+      "description": "Build configuration. Defaults to Release."
+     },
+     "platform": {
+      "type": "string",
+      "description": "Target platform, e.g. x64 (default), Win32, Any CPU, ARM64."
+     },
+     "restore": {
+      "type": "boolean",
+      "description": "Restore NuGet/packages before building. Defaults to true for MSBuild/dotnet."
+     },
+     "extra_args": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "description": "Additional raw arguments appended to the build command (e.g. ['/t:Rebuild', '/p:WarningLevel=0'])."
+     },
+     "dry_run": {
+      "type": "boolean",
+      "description": "If true, only report which command would run without executing it."
+     },
+     "no_retry": {
+      "type": "boolean",
+      "description": "Turn off the automatic single retry. A failure whose signature is a known toolchain race (MSBuild node death, PDB contention, a copy step losing a handle race) is rebuilt once and the report says so; real compiler errors are never retried. Set this only when you want the raw first result."
+     }
+    },
+    "required": []
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "apply_patch",
+   "description": "Apply a unified diff to one file — the same format as `git diff`. Use this instead of edit_file when you are changing several separate places in one file: a patch carries its own line context, so it applies cleanly where a series of edits can drift as each one shifts the lines below it. Every hunk is reported by number: where it landed, or the closest candidate line and the first line that differs. Line numbers in @@ headers are a hint, and a hunk that differs only in indentation still applies (and is reported as such). By default nothing is written unless every hunk matches; set partial to true to land the ones that do and be told which to rebuild.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "path": {
+      "type": "string",
+      "description": "File to patch, relative to the workspace root."
+     },
+     "patch": {
+      "type": "string",
+      "description": "A unified diff body: lines starting with ' ' for context, '-' to remove and '+' to add, in @@ hunks. File headers are optional."
+     },
+     "partial": {
+      "type": "boolean",
+      "description": "Apply the hunks that match instead of refusing the whole patch. Use it for a big surgery where landing 18 of 19 and fixing one is better than starting over."
+     }
+    },
+    "required": [
+     "path",
+     "patch"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "list_snapshots",
+   "description": "List the restore points taken before each of the user's messages. Use before restore_snapshot so you pick the right one.",
+   "parameters": {
+    "type": "object",
+    "properties": {},
+    "required": []
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "restore_snapshot",
+   "description": "Put the whole workspace back to a restore point. This is a large step: it reverts every file and deletes anything created since, so prefer undo_file for a single mistake. Say what you are about to undo before calling it.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string",
+      "description": "Snapshot id, from list_snapshots."
+     }
+    },
+    "required": [
+     "id"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "read_document",
+   "description": "Read a PDF, Word, Excel, PowerPoint, EPUB or ODT file in the workspace as text. read_file cannot open any of these — they are binary or zipped XML, not plain text — so use this for any .pdf, .docx, .xlsx, .pptx, .epub or .odt.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "path": {
+      "type": "string",
+      "description": "Path to the document."
+     }
+    },
+    "required": [
+     "path"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "inspect_binary",
+   "description": "Statically inspect and decompile executables and libraries without running them. Works on Windows PE files (.exe, .dll, .sys, .ocx, .scr, .cpl, .drv, .efi) and other native binaries: Linux ELF (.so, stripped executables, kernel modules) and macOS Mach-O. PE files return architecture, headers, sections/entropy, hashes, Authenticode envelope, imports with function names, exports, PDB paths, selected strings, .NET metadata and a recursive graph of DLLs supplied in the workspace. ELF/Mach-O return the detected format, hashes, selected strings, the entropy map and carved embedded blobs (no imports, exports or DLL graph). It writes a full offset-labelled ASCII/UTF-16 strings dump, a 4KB-window entropy map, explicit packing assessment, carved embedded PE/Lua/ZIP/PNG/PDF blobs plus opaque high-entropy sections/overlays with their own strings, highlighted Lua/process-memory/library-loading/process-creation imports, and an optional FLARE capa report (PE files only). Managed code uses ILSpy when installed; native code and all non-PE formats use headless Ghidra, which auto-detects the file format. Decompile ONLY the functions/strings you name in focus_terms — there is no default hook list and no automatic full-binary decompile. Pick the analyzer set yourself: the default 'fast' preset already turns OFF the expensive analyzers the decompiled output does not surface (Decompiler Parameter ID, Decompiler Switch Analysis, Stack), so keep it for quick checks and pay for an analyzer only when you need its output — e.g. enable_analyzers: [\"Decompiler Parameter ID\"] when you need real parameter names instead of param_1 placeholders, or analyzer_preset: \"full\" when switch-case analysis matters. The exact available analyzer names are listed in analyzers.txt in the output folder. Leftover Ghidra after a closed tab is listed by list_processes and killed with stop_process id=leftover. Availability is resolved by the apiM server; do not use run_command/where/environment probes to second-guess it because agent commands intentionally receive a scrubbed environment. Outputs are cached under analysis/. Packed, encrypted or obfuscated files may only be partially recoverable, and the result says so.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "path": {
+      "type": "string",
+      "description": "Executable/library path relative to the workspace."
+     },
+     "analyses": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "enum": [
+        "summary",
+        "strings",
+        "entropy",
+        "carve",
+        "dependencies",
+        "capa",
+        "decompile",
+        "all"
+       ]
+      },
+      "description": "Only the layers the request needs; omitted = cheap summary. Examples: test Ghidra = [\"decompile\"]; dump strings = [\"strings\"]; dependencies + capa = [\"dependencies\",\"capa\"]; everything = [\"all\"]."
+     },
+     "deep": {
+      "type": "boolean",
+      "description": "Legacy override; prefer analyses:[\"decompile\"]."
+     },
+     "force_decompile": {
+      "type": "boolean",
+      "description": "Rerun decompilation, ignoring only its hash cache — completed strings, entropy, carving and capa artifacts stay cached."
+     },
+     "artifacts": {
+      "type": "boolean",
+      "description": "Legacy override: true = all static artifact layers, false = none. Prefer analyses."
+     },
+     "run_capa": {
+      "type": "boolean",
+      "description": "Legacy override; prefer analyses:[\"capa\"]."
+     },
+     "focus_terms": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "description": "Functions/strings to decompile on THIS binary. Required before Ghidra starts. Pick them from a summary/strings pass or from exports — do not invent game-specific names."
+     },
+     "focused_only": {
+      "type": "boolean",
+      "description": "Decompile only functions that reference focus_terms. Defaults to true. Set false only to dump the whole binary."
+     },
+     "allow_full_fallback": {
+      "type": "boolean",
+      "description": "If focus_terms miss, also try loader/process-memory APIs and then a bounded full dump. Defaults to false. Do not enable on a huge downloaded DLL unless the user asked."
+     },
+     "analyzer_preset": {
+      "type": "string",
+      "enum": [
+       "fast",
+       "full"
+      ],
+      "description": "Ghidra auto-analyzers to run: 'fast' (default) turns OFF the expensive analyzers the decompiled output does not surface (Decompiler Parameter ID, Decompiler Switch Analysis, Stack) — much faster, no loss of reported information; 'full' keeps every analyzer on (much slower — only when parameter names or switch-case analysis are actually needed)."
+     },
+     "disable_analyzers": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "description": "Exact Ghidra analyzer names to turn OFF in addition to the preset; analyzers.txt in the output folder lists the available names."
+     },
+     "enable_analyzers": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "description": "Exact Ghidra analyzer names to turn ON, overriding the preset. 'Decompiler Parameter ID' recovers real parameter names (otherwise param_1… placeholders); 'Decompiler Switch Analysis' resolves switch tables. analyzers.txt in the output folder lists the available names."
+     },
+     "dependencies": {
+      "type": "boolean",
+      "description": "Legacy override; prefer analyses:[\"dependencies\"]."
+     },
+     "max_depth": {
+      "type": "number",
+      "description": "Local DLL recursion depth, 0-8 (default 4). System DLLs are named but not read from outside the workspace."
+     },
+     "include_strings": {
+      "type": "boolean",
+      "description": "Extract and rank readable ASCII/UTF-16 strings. Defaults to true."
+     },
+     "string_filter": {
+      "type": "string",
+      "description": "Only return strings containing this text. Useful for URLs, errors, paths, product names or a suspected runtime-loaded DLL."
+     },
+     "min_string_length": {
+      "type": "number",
+      "description": "Minimum string length, 4-64 (default 6)."
+     },
+     "max_strings": {
+      "type": "number",
+      "description": "Maximum selected strings to return, 1-300 (default 160)."
+     }
+    },
+    "required": [
+     "path"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "note_binary",
+   "description": "Record your verdict about an executable you inspected - works, flawed, where the good build is, what a hook does. Persists across messages and after Stop, shown every later turn, so you do not re-decompile the same DLL. Call it the moment you conclude: one short specific sentence.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "path": {
+      "type": "string",
+      "description": "Workspace path of the executable/DLL."
+     },
+     "note": {
+      "type": "string",
+      "description": "The verdict, e.g. 'Works but CreateMove reads a stale cmd pointer; fixed build is cleanroom_bhop.dll.' Max 500 chars."
+     },
+     "sha256": {
+      "type": "string",
+      "description": "Optional hash (or 12-char prefix) pinning the note to one build."
+     }
+    },
+    "required": [
+     "path",
+     "note"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "note_finding",
+   "description": "Record a conclusion you reached so you do not re-derive or forget it after context is compacted. Use it for anything established by reading files, running commands or decompiling: a dead approach, what a function actually does, which option works and why, what an error meant. One specific, factual line with the evidence. Shown to you every later turn; if it turns out wrong, call note_finding again with status 'disproved'. RETIRE finished work: when the task a finding describes is DONE and shipped, call note_finding with that finding's id and status 'disproved' and a claim like 'done — shipped in <commit/fix>' — completed items must not ride later prompts or re-steer a run that already fixed them. Record findings as you go, not only at the end. Keep every finding SHORT: a one-sentence claim and evidence under ~300 characters (oversized text is sliced, never shipped whole). Never paste file contents, logs, command output or data blobs into a finding — save those to a file with write_file and reference the path in refs; the finding itself only carries the conclusion and where the details live.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "claim": {
+      "type": "string",
+      "description": "The conclusion, one sentence. e.g. 'bar.dll is the correct build: its CreateMove reads the live cmd pointer, unlike foo.dll which reads a stale copy.'"
+     },
+     "refs": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "description": "Files, functions, symbols or addresses this is about, e.g. ['bar.dll', 'CreateMove'] or ['src/hook.cpp:42']."
+     },
+     "evidence": {
+      "type": "string",
+      "description": "What established it - a command, a file/line read, a decompiled function. Short."
+     },
+     "id": {
+      "type": "string",
+      "description": "Id [f...] of an existing finding to correct; with status, marks it wrong instead of adding a new one."
+     },
+     "status": {
+      "type": "string",
+      "enum": [
+       "active",
+       "disproved"
+      ],
+      "description": "Use 'disproved' with an id to retire a prior finding — either because it turned out wrong (give the corrected claim in claim), or because the work it describes is DONE and shipped (claim 'done — shipped in <commit/fix>')."
+     }
+    },
+    "required": [
+     "claim"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "list_processes",
+   "description": "List the background processes you started, plus leftover Ghidra/ILSpy from a closed or refreshed tab (those have no inspect UI). Use leftover ids with stop_process, or id leftover to kill every orphaned decompiler.",
+   "parameters": {
+    "type": "object",
+    "properties": {},
+    "required": []
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "write_files",
+   "description": "Create several files in one step. Prefer this when scaffolding — each separate write_file costs a whole round trip, so a ten-file skeleton written one call at a time is ten times slower and dearer.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "files": {
+      "type": "array",
+      "description": "Files to write, up to 30.",
+      "items": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string",
+         "description": "File to create, relative to the workspace root, e.g. 'src/app.py'."
+        },
+        "content": {
+         "type": "string",
+         "description": "Complete contents of this file."
+        }
+       },
+       "required": [
+        "path",
+        "content"
+       ]
+      }
+     }
+    },
+    "required": [
+     "files"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "github_push",
+   "description": "Push the working branch to GitHub. Commit with git_commit first. Never pushes the base branch and never force-pushes. Requires user approval.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "reason": {
+      "type": "string",
+      "description": "One short line explaining what is ready to publish."
+     }
+    },
+    "required": [
+     "reason"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "read_symbol",
+   "description": "Read ONE function, class or struct by name, with its exact line range. This is the right way into a big file: main.cpp at 109KB cannot be read whole, and reading it in slices is how you end up with an anchor that spans a boundary and matches nothing. The span comes back byte for byte with its start_line and end_line, which you can hand straight to edit_file — no whitespace to copy, no landmark to guess. If the name is defined more than once, every definition is listed so you can pick the right one. Leave path out to go to the definition wherever it is in the workspace.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "path": {
+      "type": "string",
+      "description": "Source file to look in. Omit to search every source file (go to definition)."
+     },
+     "name": {
+      "type": "string",
+      "description": "Symbol name, e.g. \"OnPaint\" or \"InjectorWindow\". Qualified C++ names match on the last segment, so \"OnPaint\" finds \"void InjectorWindow::OnPaint(...)\"."
+     },
+     "index": {
+      "type": "number",
+      "description": "Which definition to return when there are several (1-based). Omit to get a list of all of them plus the first body."
+     }
+    },
+    "required": [
+     "name"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "extract_archive",
+   "description": "Unpack an archive that is in the workspace — zip, rar (incl. RAR5), 7z, tar, tar.gz/tgz, tar.xz, tar.bz2, tar.zst, gz/xz/bz2, cab, iso, split .001 sets — fully and byte-exact, with its folders. Use it for archives inside an unpacked archive, downloads, or anything the user dropped that is still packed. Returns a map of what came out. A JAR, APK or Office file is a zip too: it is unpacked only when you call this on it. Safe by construction: nothing is written outside the destination, links are not created, bombs are refused, nothing is executed. A password-protected archive fails with a message saying so — ask the user for the password, then call again with it.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "path": {
+      "type": "string",
+      "description": "Workspace path of the archive."
+     },
+     "dest": {
+      "type": "string",
+      "description": "Folder to unpack into. Default: next to the archive, named after it (game.zip → game/)."
+     },
+     "password": {
+      "type": "string",
+      "description": "Only when the archive is encrypted and the user gave you the password."
+     },
+     "encoding": {
+      "type": "string",
+      "description": "Code page for garbled non-UTF-8 file names (old Windows zips), e.g. \"ibm866\" or \"windows-1251\". Usually detected."
+     }
+    },
+    "required": [
+     "path"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "query_data",
+   "description": "Look inside a JSON, JSON Lines, CSV or TSV file of any size (up to 400MB) without reading it whole — what jq would do. A big JSON export is often ONE line, so read_file cannot reach most of it: use this instead. Without query it returns the structure: every key with its type, how often it appears, array lengths, number ranges and example values. With query (JSONPath) it returns the matches, paged: $.items[0], $.items[-1], $.items[10:20], $.items[*].name, $..id (every id at any depth), $.items[?(@.price > 10 && @.country == 'FR')], $.users[?(@.email =~ /@example\\.com$/)], $.items.length. CSV/TSV rows are objects keyed by the header. count:true returns only how many match; fields picks columns; save_as writes every match to a workspace file as JSON (to hand a subset to a script or to read later).",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "path": {
+      "type": "string",
+      "description": "Workspace path of the data file."
+     },
+     "query": {
+      "type": "string",
+      "description": "JSONPath, e.g. $.items[?(@.status == 'failed')]. Omit to get the structure."
+     },
+     "limit": {
+      "type": "number",
+      "description": "Matches per page (default 50)."
+     },
+     "offset": {
+      "type": "number",
+      "description": "Skip this many matches (paging)."
+     },
+     "fields": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "description": "Only these fields of each matched object, e.g. [\"id\", \"meta.country\"]."
+     },
+     "count": {
+      "type": "boolean",
+      "description": "Return only the number of matches."
+     },
+     "save_as": {
+      "type": "string",
+      "description": "Write ALL matches (not just this page) as a JSON array to this workspace path."
+     }
+    },
+    "required": [
+     "path"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "find_references",
+   "description": "Every place an identifier is used, across all source files: whole-identifier matches only (save does not match autosave), each labelled definition, import or use, grouped by file with line numbers. Call it BEFORE renaming, deleting or changing the signature of a function, class or variable, so no caller is missed — and use it to answer \"who calls this?\" instead of search_files.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "name": {
+      "type": "string",
+      "description": "Identifier, e.g. \"loadConfig\". Qualified names (\"Cls.method\", \"ns::fn\") use the last segment."
+     },
+     "path": {
+      "type": "string",
+      "description": "Limit to this directory. Omit for the whole workspace."
+     }
+    },
+    "required": [
+     "name"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "verify_file",
+   "description": "Prove a built artifact is the one you think it is, without writing a verify script. Give it required literals (strings that must be in the new build) and absent literals (strings you deleted), and it searches BOTH UTF-8 and UTF-16LE — a wide string literal is the usual reason a marker looks missing from a binary that contains it. Reports size and sha256 every time, and can assert them. Use it after every build instead of trusting the compiler's exit code: a successful link of a stale source tree exits 0 and lies to you.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "path": {
+      "type": "string",
+      "description": "File to verify, e.g. \"build/Release/app.exe\"."
+     },
+     "required": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "description": "Literals that must be present, e.g. [\"v17\", \"the compact law\"]."
+     },
+     "absent": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "description": "Literals that must NOT be present — the text this build was supposed to remove."
+     },
+     "sha256": {
+      "type": "string",
+      "description": "Expected sha256 (a prefix is fine). The real one is always reported either way."
+     },
+     "bytes": {
+      "type": "number",
+      "description": "Exact expected size in bytes."
+     },
+     "min_bytes": {
+      "type": "number",
+      "description": "Lower size bound."
+     },
+     "max_bytes": {
+      "type": "number",
+      "description": "Upper size bound."
+     }
+    },
+    "required": [
+     "path"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "analyze_log",
+   "description": "Turn a wall of console output into receipts. Give it pasted text (or a log file in the workspace) and it returns level counts, the ratio of whatever tokens you name in count, the repeated lines clustered with their frequencies, a distribution for every numeric key=value field, and the fault sequence in order with the lines around the first one. Use it instead of eyeballing sixty lines: it is one call, it is repeatable, and the numbers can be quoted back to the user as evidence.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "text": {
+      "type": "string",
+      "description": "The log text itself, e.g. output the user pasted."
+     },
+     "path": {
+      "type": "string",
+      "description": "A log file in the workspace to read instead of text."
+     },
+     "count": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "description": "Tokens whose counts and ratio matter for this project, e.g. [\"phase\", \"backstop\"]. Counted per line, case-insensitively."
+     }
+    },
+    "required": []
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "screenshot_window",
+   "description": "Look at a native window that is ALREADY running — normally something you launched with start_process (use hidden=true there and it never touches the user's screen). Can also capture a window the USER started, by pid: that is the route for a program that demands administrator rights, which this app cannot launch. Saves a PNG in the workspace and reports its size; follow it with view_image to actually see the pixels. Use it after building a GUI instead of reasoning about coordinates in your head: a colour that leaks, a control that lands 20px off, a window that opens minimised are all invisible to a compiler and obvious in one image. Requires a real desktop session — on a headless machine it says so plainly rather than returning a blank image.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "title": {
+      "type": "string",
+      "description": "Window title, or a distinctive part of it. Matched loosely."
+     },
+     "process_id": {
+      "type": "string",
+      "description": "The id from start_process, e.g. \"proc-3-lx9\". Best option: it knows the pid AND the off-screen surface the window is on, so a hidden launch captures with no extra arguments."
+     },
+     "pid": {
+      "type": "number",
+      "description": "Raw process id — use this for a program the USER launched (one that needs administrator rights, say). Ask them for the pid, or find it with list_processes."
+     },
+     "path": {
+      "type": "string",
+      "description": "Where to save the PNG, relative to the workspace root. Defaults to screenshots/window-<timestamp>.png."
+     },
+     "full_screen": {
+      "type": "boolean",
+      "description": "Capture the whole desktop instead of one window. Use when the app draws outside its own window (menus, tooltips, overlays)."
+     }
+    },
+    "required": []
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "sandbox_run",
+   "description": "Run a command inside the private Linux sandbox on the user's own PC — a small WSL Linux box (WSL 1 or 2, whichever this PC supports), invisible to them (no window, never takes focus, runs fine while they are gaming), with only THIS chat's workspace mounted and Windows cut off from it. Use it when you need a real machine to actually RUN something and see what happens: execute a built binary, trace or debug a sample (gdb, strace), stand up a real GUI under an off-screen display and screenshot it, install Linux packages, or reproduce a bug end-to-end. Unlike run_command this is a full shell (bash -lc) because the box is disposable and isolated, so pipes, &&, and redirects all work. The user approves each command, same as run_command. For a server/watcher/GUI that keeps running, set background:true, then screenshot it with sandbox_screenshot. If the sandbox is not set up, the result says how — ask the user to run /sandbox once. Files you create land in the workspace, visible to your other tools (if the folder cannot be mounted, the result says so and you work in /root/work instead). An off-screen X server is ALREADY running and DISPLAY is set: just start the GUI. Never start your own Xvfb and never kill Xvfb (that blanks sandbox_screenshot). To use the GUI like a person would, drive it with xdotool (installed), then screenshot again: \"xdotool search --name '^Calculator$' windowfocus --sync; xdotool mousemove 120 300 click 1; xdotool type 12+3\". There is no window manager: use windowfocus, not windowactivate; windows have no title bars; mouse coordinates are screen pixels (the screenshot result says where it cropped). Heredocs and multi-line scripts work.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "command": {
+      "type": "string",
+      "description": "The shell command line, e.g. \"python3 solve.py\", \"gcc app.c -o app && ./app\", \"strace -f ./sample 2>trace.txt\". Runs in the workspace root inside the sandbox."
+     },
+     "background": {
+      "type": "boolean",
+      "description": "Leave it running and return an id, for a server, a watcher or a GUI you will screenshot. Read it later with read_process, stop it with stop_process."
+     },
+     "timeout_ms": {
+      "type": "number",
+      "description": "How long to allow a foreground command, in ms. Default 120000, capped at 20 minutes. Ignored for background."
+     },
+     "reason": {
+      "type": "string",
+      "description": "One short line telling the user why this needs to run. Shown on the approval prompt."
+     }
+    },
+    "required": [
+     "command"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "sandbox_screenshot",
+   "description": "Screenshot what a GUI you started with sandbox_run (background:true) has drawn on the sandbox's off-screen display. By default it waits a few seconds for a window to appear and crops to the visible window(s), so the picture is the app, not a mostly-black screen. Saves a PNG in the workspace and shows it to the user in the chat; follow it with view_image to look at it yourself. This is how you check a Linux GUI, a game, or any window running in the sandbox without it ever appearing on the user's monitor.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "path": {
+      "type": "string",
+      "description": "Where to save the PNG, relative to the workspace root. Defaults to screenshots/sandbox-<timestamp>.png."
+     },
+     "full_screen": {
+      "type": "boolean",
+      "description": "Capture the whole 1600x1000 screen instead of cropping to the windows (e.g. to see where a window was placed)."
+     },
+     "wait_seconds": {
+      "type": "number",
+      "description": "How long to wait for a window to appear before capturing, 0-30. Default 5; raise it for a slow-starting app."
+     }
+    },
+    "required": []
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "download_file",
+   "description": "Save the exact bytes from a URL straight into the workspace - up to 200MB by default (PDFs, images, archives, installers, DLLs, datasets). A downloaded PDF can be passed to read_document and an image to view_image. Use this instead of curl in run_command, and instead of asking the user to download and attach the file.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "url": {
+      "type": "string",
+      "description": "Full URL, including https://"
+     },
+     "path": {
+      "type": "string",
+      "description": "Where to save it, relative to the workspace root."
+     },
+     "allow_local": {
+      "type": "boolean",
+      "description": "Set true only when downloading from a development server on localhost/127.0.0.1/[::1]. Private LAN and metadata addresses remain blocked."
+     }
+    },
+    "required": [
+     "url",
+     "path"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "search_conversation",
+   "description": "Search the FULL stored text of THIS conversation for exact earlier wording. Only the newest turns stay in your context — older ones survive only as a summary, which keeps meaning but drops verbatim commands, paths, errors, and pasted snippets. Call this when the user asks what was said, decided, or pasted before, or when you need an exact string from an older turn. Searches this chat only, never other chats. Whole-word matching by default; set whole_word false for substring matching.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "query": {
+      "type": "string",
+      "description": "Words to find, e.g. 'pnpm', 'out of memory', 'docker-compose.yml'."
+     },
+     "whole_word": {
+      "type": "boolean",
+      "description": "Match whole words only (default true, so 'calc' skips 'calculator'). Set false to match inside words."
+     },
+     "limit": {
+      "type": "number",
+      "description": "How many matching turns to return, 1-10 (default 5)."
+     }
+    },
+    "required": [
+     "query"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "git_status",
+   "description": "Git status of the connected repo: current branch, ahead/behind origin/<base>, whether the branch is pushed, and staged/unstaged/untracked files.",
+   "parameters": {
+    "type": "object",
+    "properties": {}
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "git_diff",
+   "description": "Unified diff of the connected repo (capped). Default: unstaged changes. staged=true: staged changes. base=true: everything this branch changes vs the base.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "path": {
+      "type": "string",
+      "description": "Limit to one file or directory."
+     },
+     "staged": {
+      "type": "boolean",
+      "description": "Diff the index instead of the working tree."
+     },
+     "base": {
+      "type": "boolean",
+      "description": "Diff the branch against origin/<base>."
+     }
+    }
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "git_log",
+   "description": "Recent commits on the current branch (hash, date, author, subject).",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "count": {
+      "type": "number",
+      "description": "How many commits, 1-50. Default 10."
+     }
+    }
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "git_commit",
+   "description": "Stage and commit locally on the working branch (no push). Commit each logical change separately. Refused on the base branch and when there is nothing to commit.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "message": {
+      "type": "string",
+      "description": "Commit message: an imperative summary line, optional body after a blank line."
+     },
+     "paths": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "description": "Only commit these paths. Default: all changes."
+     }
+    },
+    "required": [
+     "message"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "git_branch",
+   "description": "List, create (from HEAD, under apim/) or switch local branches. The branch you create or switch to becomes the working branch that github_push and github_create_pr target. Switching to the base branch is refused.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "action": {
+      "type": "string",
+      "enum": [
+       "list",
+       "create",
+       "switch"
+      ]
+     },
+     "name": {
+      "type": "string",
+      "description": "Branch name for create/switch."
+     }
+    },
+    "required": [
+     "action"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "git_pull_base",
+   "description": "Fetch origin and merge the latest base branch into the working branch. Needs a clean tree (commit first). On conflict the merge is aborted and the conflicted files listed.",
+   "parameters": {
+    "type": "object",
+    "properties": {}
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "github_create_pr",
+   "description": "Open a pull request from the working branch into the base, pushing the branch first if needed. Returns the existing PR if one is already open. Requires user approval.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "title": {
+      "type": "string",
+      "description": "PR title, one line."
+     },
+     "body": {
+      "type": "string",
+      "description": "PR description in Markdown: what changed, why, and how it was tested."
+     },
+     "draft": {
+      "type": "boolean",
+      "description": "Open as a draft PR."
+     }
+    },
+    "required": [
+     "title",
+     "body"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "github_pr_status",
+   "description": "State of this branch's pull request: open/merged/closed, mergeable, CI check results and review comment count.",
+   "parameters": {
+    "type": "object",
+    "properties": {}
+   }
+  }
+ }
+]
