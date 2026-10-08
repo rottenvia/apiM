@@ -246,6 +246,7 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
         Some(bubble::Action::OpenFile(path)) => super::workspace::open(app, path),
         Some(bubble::Action::Delete(id)) => app.delete_exchange(&id),
         Some(bubble::Action::Edit(id, text)) => app.resend_edited(ui.ctx(), &id, text),
+        Some(bubble::Action::Compare(id)) => app.compare = app.conv.messages.iter().find(|m| m.id == id).and_then(|m| super::compare::open(m.other.get("previousVersions"), &m.text(), &m.model)),
         Some(bubble::Action::RewindOpen(id)) => app.rewind_open(&id),
         Some(bubble::Action::Rewind(files)) => app.rewind_run(files),
         Some(bubble::Action::PlanUnblock) => app.edit_plan(false),
