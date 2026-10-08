@@ -21,7 +21,10 @@ mod settings_panels;
 mod sidebar;
 pub mod theme;
 mod widgets;
+mod docks;
+mod import_files;
 mod workspace;
+mod workspace_panel;
 
 use crate::agent::{self, Emitter, Event, Stopwatch};
 use crate::store::{self, Attachment, Bucket, ChatMeta, Conversation, HistorySummary, Message, Part, Role, Settings};
@@ -59,8 +62,6 @@ pub enum Dialog {
         ids: Vec<String>,
         opened: Instant,
     },
-    /// A workspace file opened for reading: (path, contents).
-    Preview(String, String),
     /// Search across every chat (Ctrl+K).
     Search,
 }
@@ -167,6 +168,8 @@ pub struct App {
     /// Files of the workspace on screen, refreshed when a tool changes something.
     files: Vec<(String, u64)>,
     files_stale: bool,
+    /// The workspace rail and what hangs off it: the files slide-over, the header chips, the copy dialog.
+    ws: workspace::State,
     toast: Option<(String, Instant)>,
     focus_composer: bool,
     /// The theme the window is drawn in right now, to notice a change in Settings.
@@ -224,6 +227,7 @@ impl App {
             jump_to_latest: false,
             files: Vec::new(),
             files_stale: true,
+            ws: Default::default(),
             toast: None,
             focus_composer: true,
             applied_theme: (settings.theme.clone(), settings.custom_theme.clone()),
@@ -308,7 +312,7 @@ impl App {
                     self.conv.plan = Some(store::Plan { goal: "Ship the importer with tests".into(), steps: vec![step(1, "Read the current parser", "done", "read src/parser.rs in full"), step(2, "Add the CSV path", "done", ""), step(3, "Cover it with tests", "doing", ""), last] });
                 }
                 tab if tab.starts_with("tab") => self.settings_ui.tab = tab[3..].parse().unwrap_or(0),
-                _ => {}
+                other => workspace::stage(self, other),
             }
         }
     }
@@ -1017,6 +1021,7 @@ impl eframe::App for App {
         });
 
         overlay::artifact(self, &ctx);
+        workspace::overlays(self, &ctx);
         dialogs::show(self, &ctx);
         overlay::lightbox(self, &ctx);
         if let Some(mut state) = self.compare.take() {
@@ -1075,14 +1080,6 @@ fn finish_message(msg: &mut Message, started: Instant) {
     }
     msg.reasoning_ms = thought;
     msg.duration_ms = started.elapsed().as_millis() as u64;
-}
-
-fn human_size(size: u64) -> String {
-    match size {
-        s if s >= 1 << 20 => format!("{:.1} MB", s as f64 / (1u64 << 20) as f64),
-        s if s >= 1024 => format!("{:.0} KB", s as f64 / 1024.0),
-        s => format!("{s} B"),
-    }
 }
 
 /// Where egui loads a file on disk from. Windows paths need the third slash, or the drive reads as a host name.

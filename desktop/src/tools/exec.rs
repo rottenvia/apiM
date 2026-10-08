@@ -284,6 +284,32 @@ impl Procs {
     pub fn running(&self) -> usize {
         self.map.lock().unwrap().values().filter(|p| p.exit.lock().unwrap().is_none()).count()
     }
+
+    /// Every process started so far, oldest first, for the header's process list.
+    pub fn list(&self) -> Vec<ProcInfo> {
+        let mut out: Vec<ProcInfo> = self.map.lock().unwrap().iter().map(|(id, p)| ProcInfo { id: id.clone(), display: p.display.clone(), pid: p.pid, exit: *p.exit.lock().unwrap(), log_tail: tail_chars(&p.log.lock().unwrap(), 2000) }).collect();
+        // Ids are "p1", "p2", … "p10": by number, not by text.
+        out.sort_by_key(|p| p.id[1..].parse::<u32>().unwrap_or(u32::MAX));
+        out
+    }
+}
+
+/// One background process as the header shows it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProcInfo {
+    pub id: String,
+    pub display: String,
+    pub pid: u32,
+    /// None while it is still running.
+    pub exit: Option<i32>,
+    /// The last 2000 characters it printed.
+    pub log_tail: String,
+}
+
+/// The last `n` characters of `text`.
+fn tail_chars(text: &str, n: usize) -> String {
+    let start = text.char_indices().rev().nth(n.saturating_sub(1)).map_or(0, |(at, _)| at);
+    text[start..].to_string()
 }
 
 impl Drop for Procs {
