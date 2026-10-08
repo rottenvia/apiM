@@ -367,6 +367,11 @@ impl App {
                 "plugin-editor" => self.plugin_ui = plugin_modal::State::writing(),
                 "auto-run" => self.settings.approval = store::Approval::Auto,
                 "split" => self.settings.reply_layout = "split".into(),
+                "interrupted" => {
+                    if let Some(last) = self.conv.messages.last_mut().filter(|m| m.role == Role::Assistant) {
+                        last.incomplete = true;
+                    }
+                }
                 "compare" => {
                     let old = |text: &str| serde_json::json!({ "content": text, "model": "deepseek-v4-flash" });
                     let versions = serde_json::json!([old("First try.
