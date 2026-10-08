@@ -1,0 +1,617 @@
+{
+ "policy": [
+  [
+   {
+    "command": "chrome",
+    "args": [
+     "--headless=new",
+     "https://x.test"
+    ],
+    "workspaceDir": "C:\\Users\\Marsel\\Work\\proj"
+   },
+   {
+    "action": "rewrite",
+    "args": [
+     "--headless=new",
+     "https://x.test",
+     "--user-data-dir=C:\\Users\\Marsel\\Work\\proj\\.agent-browser"
+    ],
+    "reason": "Adjusted so the agent's browser stays separate from the user's: using the workspace's own browser profile."
+   }
+  ],
+  [
+   {
+    "command": "chrome",
+    "args": [
+     "https://x.test"
+    ],
+    "workspaceDir": "C:\\Users\\Marsel\\Work\\proj"
+   },
+   {
+    "action": "rewrite",
+    "args": [
+     "https://x.test",
+     "--user-data-dir=C:\\Users\\Marsel\\Work\\proj\\.agent-browser",
+     "--headless=new"
+    ],
+    "reason": "Adjusted so the agent's browser stays separate from the user's: using the workspace's own browser profile; headless, so it cannot take focus from what the user is doing."
+   }
+  ],
+  [
+   {
+    "command": "chrome",
+    "args": [
+     "--user-data-dir=C:\\Users\\Marsel\\AppData\\Local\\Google\\Chrome\\User Data"
+    ],
+    "workspaceDir": "C:\\Users\\Marsel\\Work\\proj"
+   },
+   {
+    "action": "refuse",
+    "args": [
+     "--user-data-dir=C:\\Users\\Marsel\\AppData\\Local\\Google\\Chrome\\User Data"
+    ],
+    "reason": "Refused: that is the user's own browser profile, with their logged-in sessions in it. Driving it would interfere with the browser they are using. Use `--user-data-dir=C:\\Users\\Marsel\\Work\\proj\\.agent-browser` instead — a separate profile that belongs to this workspace. If the task genuinely needs the user to be signed in, stop and ask them; do not take their session."
+   }
+  ],
+  [
+   {
+    "command": "msedge.exe",
+    "args": [
+     "--user-data-dir",
+     "C:\\Users\\Marsel\\AppData\\Local\\Microsoft\\Edge\\User Data"
+    ],
+    "workspaceDir": "C:\\Users\\Marsel\\Work\\proj"
+   },
+   {
+    "action": "refuse",
+    "args": [
+     "--user-data-dir",
+     "C:\\Users\\Marsel\\AppData\\Local\\Microsoft\\Edge\\User Data"
+    ],
+    "reason": "Refused: that is the user's own browser profile, with their logged-in sessions in it. Driving it would interfere with the browser they are using. Use `--user-data-dir=C:\\Users\\Marsel\\Work\\proj\\.agent-browser` instead — a separate profile that belongs to this workspace. If the task genuinely needs the user to be signed in, stop and ask them; do not take their session."
+   }
+  ],
+  [
+   {
+    "command": "chromium",
+    "args": [
+     "--user-data-dir=C:\\Users\\Marsel\\Work\\proj\\.agent-browser",
+     "--headed"
+    ],
+    "workspaceDir": "C:\\Users\\Marsel\\Work\\proj"
+   },
+   {
+    "action": "allow",
+    "args": [
+     "--user-data-dir=C:\\Users\\Marsel\\Work\\proj\\.agent-browser",
+     "--headed"
+    ]
+   }
+  ],
+  [
+   {
+    "command": "google-chrome",
+    "args": [
+     "--profile-directory=Default"
+    ],
+    "workspaceDir": "C:\\Users\\Marsel\\Work\\proj"
+   },
+   {
+    "action": "rewrite",
+    "args": [
+     "--profile-directory=Default",
+     "--headless=new"
+    ],
+    "reason": "Adjusted so the agent's browser stays separate from the user's: headless, so it cannot take focus from what the user is doing."
+   }
+  ],
+  [
+   {
+    "command": "taskkill",
+    "args": [
+     "/IM",
+     "chrome.exe",
+     "/F"
+    ],
+    "workspaceDir": "C:\\Users\\Marsel\\Work\\proj"
+   },
+   {
+    "action": "refuse",
+    "args": [
+     "/IM",
+     "chrome.exe",
+     "/F"
+    ],
+    "reason": "Refused: this would close a browser that is running on the user's desktop, which may be in the middle of their own work. You do not need to close their browser — launch your own with `--headless` and `--user-data-dir=.agent-browser`, which is a separate profile inside the workspace. If the page needs a logged-in session, say so and ask the user rather than taking over the browser they are using."
+   }
+  ],
+  [
+   {
+    "command": "taskkill",
+    "args": [
+     "/PID",
+     "1234",
+     "/F"
+    ],
+    "workspaceDir": "C:\\Users\\Marsel\\Work\\proj"
+   },
+   {
+    "action": "allow",
+    "args": [
+     "/PID",
+     "1234",
+     "/F"
+    ]
+   }
+  ],
+  [
+   {
+    "command": "killall",
+    "args": [
+     "Google Chrome"
+    ],
+    "workspaceDir": "C:\\Users\\Marsel\\Work\\proj"
+   },
+   {
+    "action": "refuse",
+    "args": [
+     "Google Chrome"
+    ],
+    "reason": "Refused: this would close a browser that is running on the user's desktop, which may be in the middle of their own work. You do not need to close their browser — launch your own with `--headless` and `--user-data-dir=.agent-browser`, which is a separate profile inside the workspace. If the page needs a logged-in session, say so and ask the user rather than taking over the browser they are using."
+   }
+  ],
+  [
+   {
+    "command": "pkill",
+    "args": [
+     "firefox"
+    ],
+    "workspaceDir": "C:\\Users\\Marsel\\Work\\proj"
+   },
+   {
+    "action": "refuse",
+    "args": [
+     "firefox"
+    ],
+    "reason": "Refused: this would close a browser that is running on the user's desktop, which may be in the middle of their own work. You do not need to close their browser — launch your own with `--headless` and `--user-data-dir=.agent-browser`, which is a separate profile inside the workspace. If the page needs a logged-in session, say so and ask the user rather than taking over the browser they are using."
+   }
+  ],
+  [
+   {
+    "command": "stop-process",
+    "args": [
+     "-Name",
+     "msedge"
+    ],
+    "workspaceDir": "C:\\Users\\Marsel\\Work\\proj"
+   },
+   {
+    "action": "refuse",
+    "args": [
+     "-Name",
+     "msedge"
+    ],
+    "reason": "Refused: this would close a browser that is running on the user's desktop, which may be in the middle of their own work. You do not need to close their browser — launch your own with `--headless` and `--user-data-dir=.agent-browser`, which is a separate profile inside the workspace. If the page needs a logged-in session, say so and ask the user rather than taking over the browser they are using."
+   }
+  ],
+  [
+   {
+    "command": "Stop-Process",
+    "args": [
+     "-Name",
+     "brave"
+    ],
+    "workspaceDir": "C:\\Users\\Marsel\\Work\\proj"
+   },
+   {
+    "action": "refuse",
+    "args": [
+     "-Name",
+     "brave"
+    ],
+    "reason": "Refused: this would close a browser that is running on the user's desktop, which may be in the middle of their own work. You do not need to close their browser — launch your own with `--headless` and `--user-data-dir=.agent-browser`, which is a separate profile inside the workspace. If the page needs a logged-in session, say so and ask the user rather than taking over the browser they are using."
+   }
+  ],
+  [
+   {
+    "command": "kill",
+    "args": [
+     "4321"
+    ],
+    "workspaceDir": "C:\\Users\\Marsel\\Work\\proj"
+   },
+   {
+    "action": "allow",
+    "args": [
+     "4321"
+    ]
+   }
+  ],
+  [
+   {
+    "command": "npx",
+    "args": [
+     "playwright",
+     "open",
+     "https://x.test"
+    ],
+    "workspaceDir": "C:\\Users\\Marsel\\Work\\proj"
+   },
+   {
+    "action": "rewrite",
+    "args": [
+     "playwright",
+     "open",
+     "https://x.test",
+     "--user-data-dir=C:\\Users\\Marsel\\Work\\proj\\.agent-browser",
+     "--headless=new"
+    ],
+    "reason": "Adjusted so the agent's browser stays separate from the user's: using the workspace's own browser profile; headless, so it cannot take focus from what the user is doing."
+   }
+  ],
+  [
+   {
+    "command": "node",
+    "args": [
+     "script.js"
+    ],
+    "workspaceDir": "C:\\Users\\Marsel\\Work\\proj"
+   },
+   {
+    "action": "allow",
+    "args": [
+     "script.js"
+    ]
+   }
+  ],
+  [
+   {
+    "command": "cargo",
+    "args": [
+     "test"
+    ],
+    "workspaceDir": "C:\\Users\\Marsel\\Work\\proj"
+   },
+   {
+    "action": "allow",
+    "args": [
+     "test"
+    ]
+   }
+  ],
+  [
+   {
+    "command": "firefox",
+    "args": [
+     "--user-data-dir=C:\\Users\\Marsel\\AppData\\Roaming\\Mozilla"
+    ],
+    "workspaceDir": "C:\\Users\\Marsel\\Work\\proj"
+   },
+   {
+    "action": "refuse",
+    "args": [
+     "--user-data-dir=C:\\Users\\Marsel\\AppData\\Roaming\\Mozilla"
+    ],
+    "reason": "Refused: that is the user's own browser profile, with their logged-in sessions in it. Driving it would interfere with the browser they are using. Use `--user-data-dir=C:\\Users\\Marsel\\Work\\proj\\.agent-browser` instead — a separate profile that belongs to this workspace. If the task genuinely needs the user to be signed in, stop and ask them; do not take their session."
+   }
+  ],
+  [
+   {
+    "command": "chrome",
+    "args": [
+     "--user-data-dir=C:\\Users\\Marsel\\Work\\proj\\.agent-browser",
+     "--headless"
+    ],
+    "workspaceDir": "C:\\Users\\Marsel\\Work\\proj"
+   },
+   {
+    "action": "allow",
+    "args": [
+     "--user-data-dir=C:\\Users\\Marsel\\Work\\proj\\.agent-browser",
+     "--headless"
+    ]
+   }
+  ],
+  [
+   {
+    "command": "chrome",
+    "args": [
+     "--user-data-dir=/home/u/.config/chromium/profile1"
+    ],
+    "workspaceDir": "C:\\Users\\Marsel\\Work\\proj"
+   },
+   {
+    "action": "refuse",
+    "args": [
+     "--user-data-dir=/home/u/.config/chromium/profile1"
+    ],
+    "reason": "Refused: that is the user's own browser profile, with their logged-in sessions in it. Driving it would interfere with the browser they are using. Use `--user-data-dir=C:\\Users\\Marsel\\Work\\proj\\.agent-browser` instead — a separate profile that belongs to this workspace. If the task genuinely needs the user to be signed in, stop and ask them; do not take their session."
+   }
+  ]
+ ],
+ "challenge": [
+  [
+   {
+    "title": "Just a moment...",
+    "text": "Just a moment... Checking your browser"
+   },
+   "Cloudflare"
+  ],
+  [
+   {
+    "title": "Example",
+    "text": "Please enable JavaScript and cookies to continue"
+   },
+   "Cloudflare"
+  ],
+  [
+   {
+    "title": "Access denied",
+    "text": "Access denied. Reference #18.2b1"
+   },
+   "an edge block"
+  ],
+  [
+   {
+    "title": "Hi",
+    "text": "Verify you are human by completing the action below."
+   },
+   "a bot check"
+  ],
+  [
+   {
+    "title": "News",
+    "text": "A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. A long article about captchas. "
+   },
+   null
+  ],
+  [
+   {
+    "title": "Shop",
+    "text": "Welcome to the shop, please sign in."
+   },
+   null
+  ],
+  [
+   {
+    "title": "Blocked",
+    "text": "Are you a robot? Prove it."
+   },
+   "a CAPTCHA"
+  ],
+  [
+   {
+    "title": "x",
+    "text": "incapsula incident id 123"
+   },
+   "Imperva"
+  ]
+ ],
+ "validate": [
+  [
+   [],
+   {
+    "error": "actions must be a non-empty list, e.g. [{\"action\":\"goto\",\"url\":\"https://example.com\"},{\"action\":\"screenshot\"}]"
+   }
+  ],
+  [
+   [
+    {
+     "action": "click",
+     "selector": "#a"
+    }
+   ],
+   {
+    "error": "The first action must be goto — there is no page open until you navigate to one."
+   }
+  ],
+  [
+   [
+    {
+     "action": "goto",
+     "url": "https://x.test"
+    },
+    {
+     "action": "click",
+     "selector": " #a ",
+     "force": true
+    }
+   ],
+   {
+    "ok": [
+     {
+      "action": "goto",
+      "url": "https://x.test"
+     },
+     {
+      "action": "click",
+      "selector": "#a",
+      "force": true
+     }
+    ]
+   }
+  ],
+  [
+   [
+    {
+     "action": "goto",
+     "url": " https://x.test "
+    },
+    {
+     "action": "type",
+     "selector": "#q",
+     "text": "hi",
+     "press_enter": true
+    }
+   ],
+   {
+    "ok": [
+     {
+      "action": "goto",
+      "url": "https://x.test"
+     },
+     {
+      "action": "type",
+      "selector": "#q",
+      "text": "hi",
+      "pressEnter": true
+     }
+    ]
+   }
+  ],
+  [
+   [
+    {
+     "action": "goto",
+     "url": "https://x.test"
+    },
+    {
+     "action": "wait_for",
+     "ms": 99999
+    }
+   ],
+   {
+    "ok": [
+     {
+      "action": "goto",
+      "url": "https://x.test"
+     },
+     {
+      "action": "wait_for",
+      "ms": 10000
+     }
+    ]
+   }
+  ],
+  [
+   [
+    {
+     "action": "goto",
+     "url": "https://x.test"
+    },
+    {
+     "action": "wait_for"
+    }
+   ],
+   {
+    "error": "Action 2: wait_for needs either a selector or ms."
+   }
+  ],
+  [
+   [
+    {
+     "action": "goto",
+     "url": "https://x.test"
+    },
+    {
+     "action": "scroll",
+     "to": "sideways"
+    }
+   ],
+   {
+    "error": "Action 2: scroll needs to be \"top\", \"bottom\" or a pixel offset."
+   }
+  ],
+  [
+   [
+    {
+     "action": "goto",
+     "url": "https://x.test"
+    },
+    {
+     "action": "fly"
+    }
+   ],
+   {
+    "error": "Action 2: unknown action \"fly\". Valid actions are goto, html, click, type, wait_for, scroll, screenshot, evaluate and extract."
+   }
+  ],
+  [
+   [
+    {
+     "action": "goto",
+     "url": "https://x.test"
+    },
+    {
+     "action": "evaluate",
+     "script": "   "
+    }
+   ],
+   {
+    "error": "Action 2: evaluate needs a script."
+   }
+  ],
+  [
+   [
+    {
+     "action": "goto",
+     "url": "https://x.test"
+    },
+    {
+     "action": "screenshot",
+     "name": " shop page!! ",
+     "full_page": true
+    }
+   ],
+   {
+    "ok": [
+     {
+      "action": "goto",
+      "url": "https://x.test"
+     },
+     {
+      "action": "screenshot",
+      "name": "shop page!!",
+      "fullPage": true
+     }
+    ]
+   }
+  ],
+  [
+   [
+    {
+     "action": "html",
+     "selector": "  "
+    }
+   ],
+   {
+    "error": "The first action must be goto — there is no page open until you navigate to one."
+   }
+  ],
+  [
+   [
+    {
+     "action": "goto",
+     "url": ""
+    }
+   ],
+   {
+    "error": "Action 1: goto needs a url."
+   }
+  ],
+  [
+   [
+    {
+     "action": "goto",
+     "url": "https://x.test"
+    },
+    {
+     "action": "extract",
+     "selector": ".row"
+    }
+   ],
+   {
+    "ok": [
+     {
+      "action": "goto",
+      "url": "https://x.test"
+     },
+     {
+      "action": "extract",
+      "selector": ".row"
+     }
+    ]
+   }
+  ]
+ ]
+}

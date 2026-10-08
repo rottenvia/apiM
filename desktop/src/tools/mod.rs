@@ -2,6 +2,7 @@
 //! app); only tools with a handler here are offered to the model.
 
 pub mod binary;
+pub mod browser;
 pub mod build;
 pub mod code;
 pub mod data;
@@ -114,7 +115,7 @@ const IMPLEMENTED: &[&str] = &[
     "list_files", "read_file", "read_files", "write_file", "write_files", "edit_file", "edit_files", "replace_in_files",
     "search_files", "delete_file", "move_file", "undo_file", "run_command", "run_tests", "start_process", "read_process",
     "write_process", "stop_process", "list_processes", "wait_for_output", "fetch_url", "http_request", "download_file",
-    "web_search", "make_plan", "update_plan", "ask_user", "finish", "note_finding", "view_image", "show_image",
+    "web_search", "make_plan", "update_plan", "ask_user", "finish", "note_finding", "view_image", "show_image", "browse", "inspect_page", "screenshot_window",
     "git_status", "git_diff", "git_log", "git_commit", "git_branch", "apply_patch", "verify_file", "read_symbol", "find_references",
     "analyze_log", "extract_archive", "query_data", "list_snapshots", "restore_snapshot", "search_conversation",
     "git_pull_base", "github_push", "github_create_pr", "github_pr_status", "read_document", "build_project", "inspect_binary", "note_binary",
@@ -123,6 +124,10 @@ const IMPLEMENTED: &[&str] = &[
 static SCHEMAS: LazyLock<Vec<Value>> = LazyLock::new(|| {
     let mut all: Vec<Value> = serde_json::from_str(include_str!("../../assets/tools.json")).expect("assets/tools.json is valid");
     all.retain(|t| IMPLEMENTED.contains(&t["function"]["name"].as_str().unwrap_or("")));
+    // Without a browser on this computer `browse` is withheld, as the web app does.
+    if !crate::browser::available() {
+        all.retain(|t| t["function"]["name"] != "browse");
+    }
     for t in &mut all {
         // Options this build cannot honour are removed, so the model never asks for them.
         if t["function"]["name"] == "start_process" {
@@ -223,6 +228,9 @@ pub async fn run(name: &str, args: &Value, ctx: &Ctx) -> Output {
         "list_processes" => exec::read_process(ctx, &Value::Null),
         "wait_for_output" => exec::wait_for_output(ctx, args).await,
         "fetch_url" => web::fetch_url(ctx, args).await,
+        "inspect_page" => browser::inspect_page(ctx, args).await,
+        "browse" => browser::browse(ctx, args).await,
+        "screenshot_window" => browser::screenshot_window(ctx, args).await,
         "http_request" => web::http_request(ctx, args).await,
         "download_file" => web::download_file(ctx, args).await,
         "web_search" => web::web_search(ctx, args).await,

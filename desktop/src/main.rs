@@ -4,6 +4,7 @@
 
 mod agent;
 mod binary;
+mod browser;
 mod compact;
 mod context;
 mod diagnostics;
