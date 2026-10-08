@@ -531,7 +531,10 @@ async fn run_inner(mut req: Request, emit: &Emitter, procs: Arc<Procs>) -> Resul
 
     let every = plugins::all(&s.custom_plugins);
     let directives = plugins::directives(&every, &s.enabled_plugins);
-    let mut system = prompt::system(&plugins::legacy_prompt(&every, &s.enabled_plugins), web_search, native_vision, git_repo);
+    // A repository connected through the GitHub dialog, and whether there is a token to push with.
+    let github = crate::github::read_connection(&tools::github::ws(&ctx));
+    let github_token = github.as_ref().map(|_| matches!(crate::github::resolve_token(&s.github_token), Ok(Some(_))));
+    let mut system = prompt::system(&plugins::legacy_prompt(&every, &s.enabled_plugins), web_search, native_vision, git_repo, github.as_ref());
     // What earlier turns established rides in the system prompt, read fresh from the workspace's store (the web app's file).
     let findings_path = findings::store_path(&req.workspace);
     if !findings_path.exists() {
@@ -578,7 +581,7 @@ async fn run_inner(mut req: Request, emit: &Emitter, procs: Arc<Procs>) -> Resul
     // A current listing, last: the files have moved on since a resumed reply stopped, and its saved listing goes.
     start.tree = Tree::open(&req.workspace, &mut messages);
 
-    let mut tool_defs = tools::definitions(web_search, native_vision, git_repo);
+    let mut tool_defs = tools::definitions(web_search, native_vision, git_repo, github_token);
     // Read-only helpers with their own context.
     tool_defs.push(delegate_tool());
     // Tools lent by the MCP servers switched on in Settings ride after the built-in ones.
