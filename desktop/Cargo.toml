@@ -6,6 +6,7 @@ description = "apiM desktop: the native Rust version, no browser engine"
 license = "MIT"
 
 [dependencies]
+flate2 = "1"
 eframe = { version = "0.36", default-features = false, features = ["glow", "default_fonts", "accesskit", "links", "wayland", "x11"] }
 egui_extras = { version = "0.36", features = ["image", "file", "svg"] }
 pulldown-cmark = { version = "0.13", default-features = false }

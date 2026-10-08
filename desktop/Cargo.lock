@@ -185,6 +185,7 @@ dependencies = [
  "chrono",
  "eframe",
  "egui_extras",
+ "flate2",
  "futures-util",
  "globset",
  "image",

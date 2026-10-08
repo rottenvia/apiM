@@ -47,7 +47,7 @@ pub fn new_id() -> String {
 }
 
 /// Writes through a temp file so a crash mid-write never leaves half a file.
-fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -75,6 +75,12 @@ pub struct Settings {
     pub openrouter_key: String,
     pub tavily_key: String,
     pub exa_key: String,
+    /// A provider switched off keeps its key but is not searched.
+    pub tavily_enabled: bool,
+    pub exa_enabled: bool,
+    /// OpenAI key for describing pictures to models that cannot see them. Optional: OCR is free.
+    pub vision_key: String,
+    pub vision_model: String,
     pub local_base_url: String,
     pub local_api_key: String,
     pub local_api_model: String,
@@ -84,6 +90,8 @@ pub struct Settings {
     /// off | auto | always
     pub web_search_mode: String,
     pub enabled_plugins: Vec<String>,
+    /// The user's own plugins. They live in data/plugins.json (shared with the web app), not in settings.json.
+    #[serde(skip_serializing)]
     pub custom_plugins: Vec<Plugin>,
     pub custom_models: Vec<CustomModel>,
     pub approval: Approval,
@@ -98,6 +106,12 @@ pub struct Settings {
     pub custom_theme: [String; 4],
     /// Seconds the Delete button stays locked in the confirm dialog.
     pub delete_delay: u32,
+    /// claude | split: where a reply's steps sit next to its text.
+    pub reply_layout: String,
+    /// quality | balanced | cheap: how hard a web search looks.
+    pub search_profile: String,
+    /// Keep a LESSONS.md of proven facts in the workspace and read it back.
+    pub lessons_enabled: bool,
 }
 
 impl Default for Settings {
@@ -107,6 +121,10 @@ impl Default for Settings {
             openrouter_key: String::new(),
             tavily_key: String::new(),
             exa_key: String::new(),
+            tavily_enabled: true,
+            exa_enabled: true,
+            vision_key: String::new(),
+            vision_model: "gpt-4o-mini".into(),
             local_base_url: String::new(),
             local_api_key: String::new(),
             local_api_model: String::new(),
@@ -123,7 +141,10 @@ impl Default for Settings {
             zoom: 1.0,
             theme: "apim".into(),
             custom_theme: ["#191715".into(), "#2a2723".into(), "#ede9e2".into(), "#c96442".into()],
-            delete_delay: 3,
+            delete_delay: 5,
+            reply_layout: "claude".into(),
+            search_profile: "balanced".into(),
+            lessons_enabled: false,
         }
     }
 }
@@ -134,7 +155,13 @@ impl Settings {
     }
 
     pub fn load() -> Settings {
-        std::fs::read(Self::path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+        let mut s: Settings = std::fs::read(Self::path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        // Plugins written by an older desktop build sat in settings.json: move them next to the web app's.
+        for old in std::mem::take(&mut s.custom_plugins) {
+            let _ = crate::plugins::save(&Plugin { id: String::new(), ..old });
+        }
+        s.custom_plugins = crate::plugins::custom();
+        s
     }
 
     pub fn save(&self) {
@@ -155,10 +182,10 @@ impl Settings {
         self.key(&self.deepseek_key, "DEEPSEEK_API_KEY")
     }
     pub fn tavily(&self) -> String {
-        self.key(&self.tavily_key, "TAVILY_API_KEY")
+        if self.tavily_enabled { self.key(&self.tavily_key, "TAVILY_API_KEY") } else { String::new() }
     }
     pub fn exa(&self) -> String {
-        self.key(&self.exa_key, "EXA_API_KEY")
+        if self.exa_enabled { self.key(&self.exa_key, "EXA_API_KEY") } else { String::new() }
     }
 
     pub fn web_mode(&self) -> &'static str {
@@ -938,5 +965,92 @@ mod tests {
         assert_eq!(slugify("  CON "), "con-chat");
         assert_eq!(slugify("🙂🙂"), "");
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+// ---------------------------------------------------------------- search across chats
+
+/// One chat that matched a search (`searchConversations` in src/lib/store.ts).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SearchHit {
+    pub id: String,
+    pub title: String,
+    pub archived: bool,
+    pub updated_at: u64,
+    /// Messages that contain the text.
+    pub match_count: usize,
+    pub title_match: bool,
+    /// The first three of them: (written by the user, the text around the match).
+    pub snippets: Vec<(bool, String)>,
+}
+
+/// Lower-cased one character at a time, so positions line up with the original.
+fn lowered(text: &str) -> Vec<char> {
+    text.chars().map(|c| c.to_lowercase().next().unwrap_or(c)).collect()
+}
+
+fn find(hay: &[char], needle: &[char]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > hay.len() {
+        return None;
+    }
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+/// 45 characters before the match and 75 after it, on one line.
+fn snippet(content: &str, needle: &[char]) -> String {
+    let chars: Vec<char> = content.chars().collect();
+    let Some(at) = find(&lowered(content), needle) else { return chars.iter().take(120).collect::<String>().trim().to_string() };
+    let start = at.saturating_sub(45);
+    let end = (at + needle.len() + 75).min(chars.len());
+    let middle: String = chars[start..end].iter().collect();
+    format!("{}{}{}", if start > 0 { "…" } else { "" }, middle.split_whitespace().collect::<Vec<_>>().join(" "), if end < chars.len() { "…" } else { "" })
+}
+
+/// Every chat whose title or messages contain `query`, whatever its case: title matches
+/// first, then the most matches, then the most recent.
+// ponytail: a linear scan of every chat.json per search. Index the text if the history grows past a few thousand chats.
+pub fn search_chats(query: &str, limit: usize) -> Vec<SearchHit> {
+    let needle = lowered(query.trim());
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let mut hits = Vec::new();
+    for entry in std::fs::read_dir(chats_dir()).into_iter().flatten().flatten().filter(|e| e.path().is_dir()) {
+        let Some(conv) = std::fs::read(entry.path().join("chat.json")).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()) else { continue };
+        let title = conv["title"].as_str().unwrap_or_default();
+        let title_match = find(&lowered(title), &needle).is_some();
+        let matching: Vec<&serde_json::Value> = conv["messages"].as_array().into_iter().flatten().filter(|m| m["content"].as_str().is_some_and(|c| find(&lowered(c), &needle).is_some())).collect();
+        if !title_match && matching.is_empty() {
+            continue;
+        }
+        hits.push(SearchHit {
+            id: conv["id"].as_str().unwrap_or_default().to_string(),
+            title: title.to_string(),
+            archived: conv["archived"].as_bool().unwrap_or(false),
+            updated_at: from_iso(conv["updatedAt"].as_str().unwrap_or_default()),
+            match_count: matching.len(),
+            title_match,
+            snippets: matching.iter().take(3).map(|m| (m["role"] == "user", snippet(m["content"].as_str().unwrap_or_default(), &needle))).collect(),
+        });
+    }
+    hits.sort_by(|a, b| b.title_match.cmp(&a.title_match).then(b.match_count.cmp(&a.match_count)).then(b.updated_at.cmp(&a.updated_at)));
+    hits.truncate(limit);
+    hits
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    #[test]
+    fn snippets_keep_the_match_in_view() {
+        let needle = lowered("NEEDLE");
+        let text = format!("{}\n\n  the Needle  is here {}", "a".repeat(100), "b".repeat(200));
+        let s = snippet(&text, &needle);
+        assert!(s.starts_with('…') && s.ends_with('…') && s.contains("the Needle is here"));
+        // 45 before + 6 + 75 after, less the collapsed whitespace.
+        assert!(s.chars().count() <= 45 + 6 + 75 + 2);
+        assert_eq!(snippet("short Needle", &needle), "short Needle");
+        assert_eq!(snippet("  nothing to see  ", &needle), "nothing to see");
     }
 }

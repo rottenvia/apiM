@@ -428,3 +428,102 @@ mod hours_tests {
         assert_eq!(deepseek_clock(at(16, 30)), (false, 16 * 60)); // 00:30 Beijing: peak again
     }
 }
+
+// ------------------------------------------------------------------ OpenRouter model lookup
+
+/// What OpenRouter says about a model id (src/app/api/openrouter/verify/route.ts).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Verified {
+    /// The id as typed: what goes on the wire, `:free` suffix and all.
+    pub id: String,
+    pub name: String,
+    pub context_length: Option<u64>,
+    /// USD per 1M tokens.
+    pub input_price: Option<f64>,
+    pub output_price: Option<f64>,
+    pub supports_tools: bool,
+    pub supports_vision: bool,
+    pub supports_thinking: bool,
+}
+
+fn shape_verified(entry: &Value, wire: &str) -> Verified {
+    let list = |v: &Value| v.as_array().map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>()).unwrap_or_default();
+    let params = list(&entry["supported_parameters"]);
+    let inputs = list(&entry["architecture"]["input_modalities"]);
+    // Prices arrive per token, as strings.
+    let per_million = |v: &Value| v.as_str().and_then(|s| s.trim().parse::<f64>().ok()).filter(|n| n.is_finite() && *n >= 0.0).map(|n| n * 1_000_000.0);
+    Verified {
+        id: wire.to_string(),
+        name: entry["name"].as_str().filter(|n| !n.is_empty()).unwrap_or(wire).to_string(),
+        context_length: entry["context_length"].as_f64().filter(|n| *n > 0.0).map(|n| n as u64),
+        input_price: per_million(&entry["pricing"]["prompt"]),
+        output_price: per_million(&entry["pricing"]["completion"]),
+        supports_tools: params.is_empty() || params.iter().any(|p| p == "tools"),
+        supports_vision: inputs.iter().any(|m| m == "image" || m == "video"),
+        supports_thinking: params.iter().any(|p| p == "reasoning" || p == "include_reasoning"),
+    }
+}
+
+/// Checks a model id with OpenRouter and brings back its window, prices and abilities.
+pub async fn verify_openrouter(slug: &str, api_key: &str) -> Result<Verified, String> {
+    const MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
+    let wire = slug.trim();
+    if wire.is_empty() || wire.len() > 160 || !crate::models::valid_slug(wire) || wire.len() < 2 {
+        return Err("That is not an OpenRouter model id. It looks like `author/model-name`, optionally with `:free` on the end — copy it from the model's openrouter.ai page.".into());
+    }
+    // `:free` / `:nitro` / `:floor` route the request but are not catalog ids.
+    let catalog = wire.split(':').next().unwrap_or(wire);
+    let key = api_key.trim();
+    let get = |url: String, secs| {
+        let request = client().get(url).timeout(std::time::Duration::from_secs(secs));
+        if key.is_empty() { request } else { request.bearer_auth(key) }
+    };
+    let rejected = || Err("That OpenRouter API key was rejected. Check it in Settings → Keys.".to_string());
+
+    // 1. Cheap exact lookup.
+    if let Ok(res) = get(format!("{MODELS_URL}/{catalog}"), 15).send().await {
+        if res.status().is_success() {
+            if let Ok(parsed) = res.json::<Value>().await {
+                if parsed["data"]["id"].is_string() {
+                    return Ok(shape_verified(&parsed["data"], wire));
+                }
+            }
+        } else if res.status().as_u16() == 401 && !key.is_empty() {
+            return rejected();
+        }
+    }
+    // 2. The whole list, for `:free` variants and ids the per-model endpoint will not address.
+    let unreachable = "Could not reach OpenRouter. Check the connection and try again.";
+    let res = get(MODELS_URL.to_string(), 20).send().await.map_err(|_| unreachable.to_string())?;
+    if !res.status().is_success() {
+        if res.status().as_u16() == 401 && !key.is_empty() {
+            return rejected();
+        }
+        return Err(format!("OpenRouter returned {}. Try again in a moment.", res.status().as_u16()));
+    }
+    let parsed: Value = res.json().await.map_err(|_| unreachable.to_string())?;
+    let list = parsed["data"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let found = list.iter().find(|m| m["id"] == wire).or_else(|| list.iter().find(|m| m["id"] == catalog));
+    match found {
+        Some(entry) => Ok(shape_verified(entry, wire)),
+        None => Err(format!("No OpenRouter model matches \"{wire}\". Open the model on openrouter.ai and copy its id exactly.")),
+    }
+}
+
+#[cfg(test)]
+mod verify_tests {
+    use super::*;
+
+    #[test]
+    fn shapes_a_catalog_entry() {
+        let entry = json!({ "id": "z/glm", "name": "GLM", "context_length": 1048576, "pricing": { "prompt": "0.00000015", "completion": "0.0000005" },
+            "supported_parameters": ["tools", "reasoning"], "architecture": { "input_modalities": ["text", "image"] } });
+        let v = shape_verified(&entry, "z/glm:free");
+        assert_eq!((v.id.as_str(), v.name.as_str(), v.context_length), ("z/glm:free", "GLM", Some(1_048_576)));
+        assert!((v.input_price.unwrap() - 0.15).abs() < 1e-9 && (v.output_price.unwrap() - 0.5).abs() < 1e-9);
+        assert!(v.supports_tools && v.supports_vision && v.supports_thinking);
+        // No parameter list means tools are assumed; no pricing means unknown, not free.
+        let bare = shape_verified(&json!({ "id": "a/b" }), "a/b");
+        assert!(bare.supports_tools && !bare.supports_vision && bare.input_price.is_none() && bare.name == "a/b");
+    }
+}

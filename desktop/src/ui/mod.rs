@@ -6,17 +6,20 @@ mod bubble;
 mod chat;
 mod composer;
 mod dialogs;
+mod form;
 mod icons;
 mod markdown;
 mod overlay;
+mod plugin_modal;
 mod prompts;
+mod settings;
+mod settings_panels;
 mod sidebar;
 pub mod theme;
 mod widgets;
 mod workspace;
 
 use crate::agent::{self, Emitter, Event, Stopwatch};
-use crate::models::CustomModel;
 use crate::store::{self, Attachment, Bucket, ChatMeta, Conversation, HistorySummary, Message, Part, Role, Settings};
 use crate::tools::{ChatState, exec::Procs};
 use crate::{export, provider, summary};
@@ -161,12 +164,11 @@ pub struct App {
     /// The theme the window is drawn in right now, to notice a change in Settings.
     applied_theme: (String, [String; 4]),
     shot: Option<Shot>,
-    // Settings dialog state.
-    settings_tab: usize,
-    new_model: CustomModel,
-    verify: Option<mpsc::Receiver<Result<CustomModel, String>>>,
-    verify_note: String,
-    new_plugin: crate::plugins::Plugin,
+    // What the dialogs remember while they are open.
+    settings_ui: settings::State,
+    plugin_ui: plugin_modal::State,
+    console: dialogs::Console,
+    search: dialogs::Search,
 }
 
 impl App {
@@ -210,11 +212,10 @@ impl App {
             focus_composer: true,
             applied_theme: (settings.theme.clone(), settings.custom_theme.clone()),
             shot,
-            settings_tab: 0,
-            new_model: blank_model(),
-            verify: None,
-            verify_note: String::new(),
-            new_plugin: blank_plugin(),
+            settings_ui: Default::default(),
+            plugin_ui: Default::default(),
+            console: Default::default(),
+            search: Default::default(),
             settings,
         };
         app.stage_shot();
@@ -258,7 +259,13 @@ impl App {
                 "lightbox" => self.lightbox = Some(("b1.png".into(), file_uri(&shot.path.with_file_name("b1.png")))),
                 "toast" => self.toast("That chat couldn't be deleted. Please try again."),
                 "draft" => self.draft = "Explain how the context meter decides when to compact, and show me where that lives in the code.".into(),
-                tab if tab.starts_with("tab") => self.settings_tab = tab[3..].parse().unwrap_or(0),
+                "search" => {
+                    self.dialog = Dialog::Search;
+                    self.search = dialogs::Search::asking(&std::env::var("APIM_SHOT_QUERY").unwrap_or_default());
+                }
+                "plugin-editor" => self.plugin_ui = plugin_modal::State::writing(),
+                "auto-run" => self.settings.approval = store::Approval::Auto,
+                tab if tab.starts_with("tab") => self.settings_ui.tab = tab[3..].parse().unwrap_or(0),
                 _ => {}
             }
         }
@@ -556,7 +563,7 @@ impl App {
         if let Err(problem) = provider::resolve_target(&self.settings.model, &self.settings) {
             self.toast(problem);
             self.dialog = Dialog::Settings;
-            self.settings_tab = 0;
+            self.settings_ui.tab = 0;
             self.draft = text;
             return;
         }
@@ -827,7 +834,7 @@ impl App {
     fn take_shot(&mut self, ctx: &egui::Context) {
         let Some(shot) = self.shot.as_mut() else { return };
         ctx.request_repaint();
-        if !shot.asked && shot.started.elapsed() > Duration::from_millis(1200) {
+        if !shot.asked && shot.started.elapsed() > Duration::from_millis(std::env::var("APIM_SHOT_WAIT").ok().and_then(|ms| ms.parse().ok()).unwrap_or(1200)) {
             shot.asked = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
         }
@@ -970,10 +977,3 @@ fn open_in_file_manager(path: &std::path::Path) {
     let _ = std::process::Command::new(program).arg(path).spawn();
 }
 
-fn blank_model() -> CustomModel {
-    CustomModel { api_model: String::new(), label: String::new(), vision: crate::models::Vision::None, max_output_tokens: 65_536, context_length: None, input_price: None, output_price: None }
-}
-
-fn blank_plugin() -> crate::plugins::Plugin {
-    crate::plugins::Plugin { id: String::new(), name: String::new(), icon: "🔌".into(), description: String::new(), category: "custom".into(), prompt: String::new() }
-}

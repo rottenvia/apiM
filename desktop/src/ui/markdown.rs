@@ -371,6 +371,12 @@ fn stretches(galley: &egui::Galley, spans: &[Span], wanted: impl Fn(&Span) -> bo
         }
         at += len;
     }
+    runs(galley, &ranges)
+}
+
+/// Where character ranges of a laid-out text ended up: one stretch per range per
+/// row, as (left, right, top of the row, baseline) in the galley's own coordinates.
+pub fn runs(galley: &egui::Galley, ranges: &[std::ops::Range<usize>]) -> Vec<[f32; 4]> {
     let mut out = Vec::new();
     if ranges.is_empty() {
         return out;

@@ -27,15 +27,26 @@ pub enum State {
 /// out, closed by Esc or a click on the dimmed part. `place` gets how far in it
 /// is (0..1) and returns where the content goes; `add` may set its flag to close.
 fn overlay(ctx: &egui::Context, name: &str, secs: f32, dim: u8, esc: bool, place: impl FnOnce(Rect, f32) -> Rect, add: impl FnOnce(&mut egui::Ui, &mut bool)) -> State {
+    overlay_with(ctx, name, secs, dim, esc, true, place, add)
+}
+
+/// `exit: false` is the web's dialogs that vanish at once: the dim does not fade and closing skips the way out.
+fn overlay_with(ctx: &egui::Context, name: &str, secs: f32, dim: u8, esc: bool, exit: bool, place: impl FnOnce(Rect, f32) -> Rect, add: impl FnOnce(&mut egui::Ui, &mut bool)) -> State {
     let id = egui::Id::new(name);
     let closing_id = id.with("closing");
     let mut closing: bool = ctx.data(|d| d.get_temp(closing_id)).unwrap_or(false);
+    // egui starts a new animation at its target, so a fresh overlay is first told it is shut.
+    let open_id = id.with("open");
+    if !ctx.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false) {
+        ctx.animate_bool_with_time(id.with("in"), false, 0.0);
+        ctx.data_mut(|d| d.insert_temp(open_id, true));
+    }
     let t = ctx.animate_bool_with_time_and_easing(id.with("in"), !closing, secs, egui::emath::easing::cubic_out);
     let screen = ctx.content_rect();
     let mut close = esc && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
     egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(screen.min).show(ctx, |ui| {
         let scrim = ui.allocate_rect(screen, Sense::click());
-        ui.painter().rect_filled(screen, 0.0, Color32::from_black_alpha((dim as f32 * t) as u8));
+        ui.painter().rect_filled(screen, 0.0, Color32::from_black_alpha((dim as f32 * if exit { t } else { 1.0 }) as u8));
         let content = place(screen, t);
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(content).layout(egui::Layout::top_down(egui::Align::Min)));
         child.set_clip_rect(content.intersect(screen));
@@ -47,15 +58,90 @@ fn overlay(ctx: &egui::Context, name: &str, secs: f32, dim: u8, esc: bool, place
             close = true;
         }
     });
-    if close && !closing {
+    if close && !closing && exit {
         closing = true;
         ctx.data_mut(|d| d.insert_temp(closing_id, true));
     }
-    if closing && t <= 0.0 {
-        ctx.data_mut(|d| d.remove::<bool>(closing_id));
+    if (close && !exit) || (closing && t <= 0.0) {
+        ctx.data_mut(|d| {
+            d.remove::<bool>(closing_id);
+            d.remove::<bool>(open_id);
+        });
         return State::Gone;
     }
     State::Open
+}
+
+/// A dialog card: the rounded box every modal of the web app is.
+pub struct Card<'a> {
+    pub name: &'a str,
+    pub width: f32,
+    /// Its height, or the most it may take when it hugs its content.
+    pub height: f32,
+    pub hug: bool,
+    /// Distance from the window's top. None centres it.
+    pub top: Option<f32>,
+    pub dim: u8,
+    pub secs: f32,
+    /// How far it travels while fading in: positive comes up from below.
+    pub rise: f32,
+    /// The scale it starts from.
+    pub grow: f32,
+    /// Fades out on close (most of the web's dialogs just vanish).
+    pub exit: bool,
+    pub esc: bool,
+    pub border: Color32,
+}
+
+impl<'a> Card<'a> {
+    /// The web's MODAL-SHELL: 60% dim, rises 8px in 0.3s, gone at once.
+    pub fn new(name: &'a str, width: f32, height: f32) -> Card<'a> {
+        Card { name, width, height, hug: false, top: None, dim: 153, secs: 0.3, rise: 8.0, grow: 1.0, exit: false, esc: true, border: p().border_light }
+    }
+
+    pub fn show(self, ctx: &egui::Context, add: impl FnOnce(&mut egui::Ui, &mut bool)) -> State {
+        let p = p();
+        let screen = ctx.content_rect();
+        let most = vec2(self.width.min(screen.width() - 32.0), self.height.min(screen.height() - 32.0));
+        let memory = egui::Id::new(self.name).with("height");
+        // A hugging card is as tall as what it held last frame.
+        let last: f32 = if self.hug { ctx.data(|d| d.get_temp(memory)).unwrap_or(most.y).min(most.y) } else { most.y };
+        let mut used = last;
+        let state = overlay_with(
+            ctx,
+            self.name,
+            self.secs,
+            self.dim,
+            self.esc,
+            self.exit,
+            |screen, t| {
+                let size = vec2(most.x, last);
+                let rect = match self.top {
+                    Some(top) => Rect::from_min_size(pos2(screen.center().x - size.x / 2.0, screen.top() + top), size),
+                    None => Rect::from_center_size(screen.center(), size),
+                };
+                let scale = self.grow + (1.0 - self.grow) * t;
+                Rect::from_center_size(rect.center(), rect.size() * scale).translate(vec2(0.0, (self.rise * (1.0 - t)).round()))
+            },
+            |ui, close| {
+                let rect = ui.max_rect();
+                ui.painter().add(egui::Shadow { offset: [0, 25], blur: 50, spread: 0, color: Color32::from_black_alpha(if self.border == p.border_light { 128 } else { 64 }) }.as_shape(rect.shrink(12.0), 16));
+                ui.painter().rect(rect, 16.0, p.bg2, Stroke::new(1.0, self.border), StrokeKind::Inside);
+                ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                let room = Rect::from_min_size(rect.min, vec2(rect.width(), if self.hug { most.y } else { rect.height() })).shrink(1.0);
+                let inner = ui.scope_builder(egui::UiBuilder::new().max_rect(room).layout(egui::Layout::top_down(egui::Align::Min)), |ui| {
+                    ui.set_clip_rect(rect.shrink(1.0).intersect(ui.clip_rect()));
+                    add(ui, close)
+                });
+                used = inner.response.rect.height() + 2.0;
+            },
+        );
+        if self.hug && (used - last).abs() > 0.5 {
+            ctx.data_mut(|d| d.insert_temp(memory, used));
+            ctx.request_repaint();
+        }
+        state
+    }
 }
 
 /// A panel as tall as the window that slides in from its right edge.
