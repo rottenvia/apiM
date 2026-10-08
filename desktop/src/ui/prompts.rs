@@ -67,10 +67,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> bool {
         // (approved, remember)
         let mut verdict = None;
         let command = pending.command.clone();
+        let mcp = pending.mcp;
         card(
             ui,
             icons::TERMINAL,
-            "Run this command?",
+            if mcp { "Call this MCP tool?" } else { "Run this command?" },
             &pending.reason,
             |ui| {
                 ui.add_space(8.0);
@@ -79,7 +80,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> bool {
                     egui::ScrollArea::horizontal().id_salt("command").show(ui, |ui| {
                         let mut job = egui::text::LayoutJob::default();
                         let format = |colour| egui::TextFormat { font_id: theme::mono(12.0), color: colour, line_height: Some(18.0), ..Default::default() };
-                        job.append("$ ", 0.0, format(p.muted));
+                        if !mcp {
+                            job.append("$ ", 0.0, format(p.muted));
+                        }
                         job.append(&command.replace('\n', " "), 0.0, format(p.text2));
                         ui.add(egui::Label::new(job).extend().selectable(true));
                     });
@@ -108,7 +111,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> bool {
         if let Some((approved, remember)) = verdict {
             if let Some(pending) = run.approval.take() {
                 if remember {
-                    app.always_allow.entry(conv_id.clone()).or_default().insert(pending.command.clone());
+                    app.always_allow.entry(conv_id.clone()).or_default().insert(pending.key.clone());
                 }
                 let _ = pending.reply.send(approved);
             }

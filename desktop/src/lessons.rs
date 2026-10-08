@@ -305,7 +305,7 @@ mod tests {
         );
         assert_eq!(text, expected);
         assert!(text.starts_with("# What I've learned about this project\n\nWritten by the agent") && HEADER.ends_with("by hand.\n\n"));
-        assert_eq!(parse(&text), [lesson.clone()]);
+        assert_eq!(parse(&text), std::slice::from_ref(&lesson));
         assert_eq!(format_lessons_for_prompt(&[lesson]), format_lessons_for_prompt(&parse(&text)));
         assert!(format_lessons_for_prompt(&parse(&text)).contains("- [l1] Use pnpm, not npm (unverified — check before relying on it)"));
         // A broken comment loses that lesson only.

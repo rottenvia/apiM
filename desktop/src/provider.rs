@@ -30,6 +30,13 @@ pub struct Target {
     pub api_model: String,
 }
 
+/// The cheap lane for side calls (search planning): Flash when a DeepSeek key
+/// exists, else the free Nemotron lane. Never the main model, never a custom.
+pub fn helper_target(s: &Settings) -> Option<Target> {
+    let id = if !s.deepseek().is_empty() { "deepseek-v4-flash" } else { "nvidia-nemotron-3-ultra-free" };
+    resolve_target(id, s).ok()
+}
+
 fn env_or(name: &str, default: &str) -> String {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| default.to_string())
 }

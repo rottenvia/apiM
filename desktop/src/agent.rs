@@ -7,6 +7,8 @@ use crate::plugins;
 use crate::prompt;
 use crate::provider::{self, Delta, RoundError, Target, ThinkingStyle};
 use crate::compact;
+use crate::diagnostics;
+use crate::mcp;
 use crate::store::{Attachment, Bucket, Role, Settings, ToolEvent};
 use crate::tools::{self, ChatState, Ctx, exec::Procs};
 use base64::Engine;
@@ -35,7 +37,8 @@ pub enum Event {
     ToolDraft { name: String, chars: usize },
     ToolStart(ToolEvent),
     ToolDone { id: String, ok: bool, summary: String, image: Option<PathBuf>, changed: Option<String> },
-    Approval { command: String, reason: String, reply: oneshot::Sender<bool> },
+    /// `key` is what "Always allow this" remembers; `mcp` titles the card for a remote tool.
+    Approval { command: String, reason: String, key: String, mcp: bool, reply: oneshot::Sender<bool> },
     Question { question: String, options: Vec<String>, context: String, reply: oneshot::Sender<String> },
     Usage(Usage),
     /// Where the newest request's characters went.
@@ -71,8 +74,15 @@ impl Emitter {
     }
     /// Asks the user to allow a command. False when declined or the window is gone.
     pub async fn approve(&self, command: &str, reason: &str) -> bool {
+        self.ask(command, reason, command, false).await
+    }
+    /// The same card for a call to an MCP server: `display` is shown, `key` is remembered.
+    pub async fn approve_mcp(&self, display: &str, key: &str) -> bool {
+        self.ask(display, "", key, true).await
+    }
+    async fn ask(&self, command: &str, reason: &str, key: &str, mcp: bool) -> bool {
         let (reply, answer) = oneshot::channel();
-        self.send(Event::Approval { command: command.to_string(), reason: reason.to_string(), reply });
+        self.send(Event::Approval { command: command.to_string(), reason: reason.to_string(), key: key.to_string(), mcp, reply });
         answer.await.unwrap_or(false)
     }
     pub async fn question(&self, question: &str, options: Vec<String>, context: &str) -> Option<String> {
@@ -180,6 +190,7 @@ async fn run_inner(req: Request, emit: &Emitter, procs: Arc<Procs>) -> Result<En
         emit: emit.clone(),
         chat: chat.clone(),
         procs,
+        planner: provider::helper_target(s).map(|h| crate::search::Planner { api_key: h.api_key, base_url: h.base_url, api_model: h.api_model, deepseek: h.style == ThinkingStyle::Deepseek }),
     };
 
     let every = plugins::all(&s.custom_plugins);
@@ -208,7 +219,9 @@ async fn run_inner(req: Request, emit: &Emitter, procs: Arc<Procs>) -> Result<En
         messages.push(json!({ "role": "user", "content": parts }));
     }
 
-    let tool_defs = tools::definitions(web_search, native_vision, git_repo);
+    let mut tool_defs = tools::definitions(web_search, native_vision, git_repo);
+    // Tools lent by the MCP servers switched on in Settings ride after the built-in ones.
+    tool_defs.extend(mcp::tools_for_model(&ctx.client, &crate::store::data_dir()).await);
     let tools_chars = json!(tool_defs).to_string().len();
     let mut usage = Usage::default();
     let mut mandatory = target.provider == ProviderId::Openrouter && provider::openrouter_reasoning_mandatory(&target.model.id);
@@ -277,7 +290,7 @@ async fn run_inner(req: Request, emit: &Emitter, procs: Arc<Procs>) -> Result<En
         emit.send(Event::Context(compact::breakdown(&wire, tools_chars)));
 
         emit.send(Event::Status(if round > 0 { "Working" } else if thinking { "Thinking" } else { "Writing" }));
-        let result = stream_with_retries(&ctx.client, &target, &mut body, &mut mandatory, &mut unpinned, thinking, effort, emit).await?;
+        let result = stream_with_retries(&ctx.client, &target, &mut body, &mut mandatory, &mut unpinned, thinking, effort, emit).await.inspect_err(|e| diagnostics::record("api_error", &target.model.id, e))?;
 
         if let Some(u) = result.usage {
             usage.add(u);
@@ -327,6 +340,9 @@ async fn run_inner(req: Request, emit: &Emitter, procs: Arc<Procs>) -> Result<En
                 Err(e) if cut_off => tools::Output::fail(format!("This call was cut off by the output limit before its arguments were complete ({e}). Send it again in smaller pieces: fewer files per call, or one file at a time.")),
                 Err(e) => tools::Output::fail(format!("The arguments were not valid JSON ({e}). Send the call again.")),
             };
+            if !out.ok {
+                diagnostics::record("tool_failed", &call.name, if out.summary.is_empty() { &out.text } else { &out.summary });
+            }
             emit.send(Event::ToolDone { id: call.id.clone(), ok: out.ok, summary: out.summary.clone(), image: out.image.clone(), changed: out.changed.clone() });
             messages.push(json!({ "role": "tool", "tool_call_id": call.id, "content": out.text }));
             looks.extend(out.look);
@@ -352,10 +368,12 @@ Verified: {}", field("result"), field("verified"))));
         }
         if let (Some(limit), Some(spent)) = (s.budget_usd.filter(|l| *l > 0.0), usage.cost(&target.model.id, customs)) {
             if spent >= limit {
+                diagnostics::record("run_stopped", "spending limit", &format!("${spent:.3} of ${limit:.2}"));
                 return Ok(Ending { finish: last_finish, incomplete: true, stop_reason: Some(format!("Stopped at the spending limit (${spent:.3} of ${limit:.2}). The work so far is saved.")) });
             }
         }
     }
+    diagnostics::record("limit_hit", "tool rounds", &format!("Stopped after {MAX_ROUNDS} tool rounds."));
     Ok(Ending { finish: last_finish, incomplete: true, stop_reason: Some(format!("Stopped after {MAX_ROUNDS} tool rounds. Send \"continue\" to carry on.")) })
 }
 

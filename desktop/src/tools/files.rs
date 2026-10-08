@@ -18,7 +18,7 @@ pub const MAX_BATCH_EDITS: usize = 40;
 pub const MAX_SEARCH_HITS: usize = 60;
 const MAX_SEARCHABLE_BYTES: u64 = 512 * 1024;
 const MAX_SEARCH_CONTEXT: u64 = 40;
-const MAX_HISTORY_VERSIONS: usize = 10;
+use crate::snapshots::MAX_HISTORY_VERSIONS;
 
 /// Turns a model-supplied path into a real one inside `root`, or says why not.
 pub fn resolve(root: &Path, rel: &str) -> Result<PathBuf, String> {
@@ -252,40 +252,18 @@ pub fn read_files(ctx: &Ctx, args: &Value) -> Output {
     Output::ok(out, format!("Read {read} of {} files", paths.len()))
 }
 
-fn history_dir(ctx: &Ctx, rel: &str) -> PathBuf {
-    let safe: String = rel.chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' }).collect();
-    // The hash keeps "a/b.txt" and "a_b.txt" apart.
-    let hash = rel.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
-    ctx.state_dir.join("history").join(format!("{safe}-{hash:08x}"))
+/// Why the file tools will not write here, if they will not.
+fn protected(rel: &str) -> Result<(), String> {
+    if crate::snapshots::is_protected_path(rel) {
+        return Err(format!("{rel} is inside a protected folder (.git, .history or .snapshots) and cannot be written, moved or deleted by the file tools"));
+    }
+    Ok(())
 }
 
-fn versions(dir: &Path) -> Vec<(u32, PathBuf)> {
-    let mut v: Vec<(u32, PathBuf)> = std::fs::read_dir(dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| Some((e.path().file_stem()?.to_str()?.parse().ok()?, e.path())))
-        .collect();
-    v.sort();
-    v
-}
-
-/// Keeps the file as it is now, so undo_file can put it back.
+/// Keeps the file as it is now, so undo_file can put it back. The history is the web app's: <workspace>/.history.
 fn backup(ctx: &Ctx, rel: &str, path: &Path) {
-    let dir = history_dir(ctx, rel);
-    if std::fs::create_dir_all(&dir).is_err() {
-        return;
-    }
-    let existing = versions(&dir);
-    let next = existing.last().map_or(1, |(n, _)| n + 1);
-    if path.exists() {
-        let _ = std::fs::copy(path, dir.join(format!("{next}.bak")));
-    } else {
-        // The file did not exist: undoing its creation deletes it.
-        let _ = std::fs::write(dir.join(format!("{next}.absent")), b"");
-    }
-    for (_, old) in existing.iter().rev().skip(MAX_HISTORY_VERSIONS - 1) {
-        let _ = std::fs::remove_file(old);
+    if let Ok(old) = std::fs::read(path) {
+        crate::snapshots::record_previous(&ctx.root, rel, &old);
     }
 }
 
@@ -295,6 +273,7 @@ fn write_checked(ctx: &Ctx, rel: &str, content: &str) -> Result<String, String> 
     if path == ctx.root {
         return Err("path is required.".into());
     }
+    protected(rel)?;
     backup(ctx, rel, &path);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
@@ -349,6 +328,9 @@ pub fn delete_file(ctx: &Ctx, args: &Value) -> Output {
         Ok(_) => return Output::fail(format!("{rel} is not a file in the workspace.")),
         Err(e) => return Output::fail(e),
     };
+    if let Err(e) = protected(rel) {
+        return Output::fail(e);
+    }
     backup(ctx, rel, &path);
     match std::fs::remove_file(&path) {
         Ok(()) => Output::ok(format!("Deleted {rel}. undo_file brings it back."), format!("Deleted {rel}")).changed(rel),
@@ -362,6 +344,9 @@ pub fn move_file(ctx: &Ctx, args: &Value) -> Output {
         (Ok(s), Ok(d)) => (s, d),
         (Err(e), _) | (_, Err(e)) => return Output::fail(e),
     };
+    if let Err(e) = protected(from).and(protected(to)) {
+        return Output::fail(e);
+    }
     if !src.is_file() {
         return Output::fail(format!("{from} does not exist."));
     }
@@ -384,20 +369,25 @@ pub fn undo_file(ctx: &Ctx, args: &Value) -> Output {
         Err(e) => return Output::fail(e),
     };
     let steps = num_arg(args, "steps").unwrap_or(1).max(1) as usize;
-    let saved = versions(&history_dir(ctx, rel));
-    if saved.len() < steps {
-        return Output::fail(format!("{rel} has {} earlier version(s) saved, not {steps}.", saved.len()));
+    let Some(previous) = crate::snapshots::previous_version_bytes(&ctx.root, rel, steps) else {
+        let depth = crate::snapshots::history_depth(&ctx.root, rel);
+        let text = if depth > 0 {
+            let cap = if steps > MAX_HISTORY_VERSIONS { format!(" (at most {MAX_HISTORY_VERSIONS} are ever kept)") } else { String::new() };
+            format!("Cannot go back {steps} writes: only {depth} previous version{} kept for {rel}{cap}. Try a smaller number.", if depth == 1 { " is" } else { "s are" })
+        } else {
+            format!("No previous version of {rel} is kept — it has not been overwritten since it was created. Fix it forward with edit_file instead.")
+        };
+        return Output { ok: false, text, summary: format!("No history for {rel}"), ..Default::default() };
+    };
+    // Reverting is itself a write, so it goes into history too: undoing an undo falls out for free.
+    backup(ctx, rel, &path);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
     }
-    let (_, version) = &saved[saved.len() - steps];
-    let result = if version.extension().is_some_and(|e| e == "absent") { std::fs::remove_file(&path) } else { std::fs::copy(version, &path).map(|_| ()) };
-    if let Err(e) = result {
+    if let Err(e) = std::fs::write(&path, &previous) {
         return Output::fail(format!("Cannot restore {rel}: {e}"));
     }
-    // The restored version and everything newer are spent.
-    for (_, newer) in &saved[saved.len() - steps..] {
-        let _ = std::fs::remove_file(newer);
-    }
-    Output::ok(format!("Restored {rel} to how it was {steps} write(s) ago."), format!("Reverted {rel}")).changed(rel)
+    Output::ok(format!("Reverted {rel} to how it was {steps} write{} ago ({} bytes).", if steps == 1 { "" } else { "s" }, previous.len()), format!("Reverted {rel}")).changed(rel)
 }
 
 // ---------------------------------------------------------------- editing

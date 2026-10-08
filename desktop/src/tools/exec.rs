@@ -139,7 +139,11 @@ fn command(ctx: &Ctx, launch: &Launch) -> Command {
 }
 
 async fn approved(ctx: &Ctx, launch: &Launch, reason: &str) -> bool {
-    !launch.ask || ctx.emit.approve(&launch.display, reason).await
+    if !launch.ask || ctx.emit.approve(&launch.display, reason).await {
+        return true;
+    }
+    crate::diagnostics::record("command_refused", &launch.display.chars().take(60).collect::<String>(), "The user declined this command.");
+    false
 }
 
 /// Reads a pipe to the end into a shared buffer, keeping only the newest part of a huge log.
