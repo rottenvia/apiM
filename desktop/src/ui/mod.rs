@@ -14,6 +14,7 @@ mod overlay;
 mod plan_panel;
 mod plugin_modal;
 mod prompts;
+mod rewind;
 mod settings;
 mod settings_panels;
 mod sidebar;
@@ -170,6 +171,10 @@ pub struct App {
     /// The theme the window is drawn in right now, to notice a change in Settings.
     applied_theme: (String, [String; 4]),
     shot: Option<Shot>,
+    /// The rewind popover that is open, if one is.
+    rewind: Option<rewind::Preview>,
+    /// The files as they were before the last rewind, to undo it.
+    rewind_undo: Option<String>,
     // What the dialogs remember while they are open.
     settings_ui: settings::State,
     plugin_ui: plugin_modal::State,
@@ -218,6 +223,8 @@ impl App {
             focus_composer: true,
             applied_theme: (settings.theme.clone(), settings.custom_theme.clone()),
             shot,
+            rewind: None,
+            rewind_undo: None,
             settings_ui: Default::default(),
             plugin_ui: Default::default(),
             console: Default::default(),
@@ -271,6 +278,11 @@ impl App {
                 }
                 "plugin-editor" => self.plugin_ui = plugin_modal::State::writing(),
                 "auto-run" => self.settings.approval = store::Approval::Auto,
+                "rewind" => {
+                    if let Some(id) = self.conv.messages.iter().rev().find(|m| m.role == Role::User && !m.note).map(|m| m.id.clone()) {
+                        self.rewind_open(&id);
+                    }
+                }
                 which @ ("plan" | "plan-blocked") => {
                     let step = |id, text: &str, state: &str, note: &str| store::PlanStep { id, text: text.into(), state: state.into(), note: note.into() };
                     let last = if which == "plan" { step(4, "Write the README section", "todo", "") } else { step(4, "Publish the release", "blocked", "no signing key on this machine") };
@@ -587,6 +599,12 @@ impl App {
 
         let mut user = Message::new(Role::User, &text);
         user.attachments = attached.clone();
+        // A restore point before the question, so Rewind can put the files back. Failing must not block the reply.
+        // ponytail: copied on this thread; a workspace of many large new files makes sending pause.
+        let workspace = self.conv.workspace();
+        if let Ok(snapshot) = crate::snapshots::create(&workspace, &text.chars().take(80).collect::<String>(), &[]) {
+            crate::snapshots::link_restore_point(&workspace, &mut user.other, snapshot.as_ref());
+        }
         self.conv.messages.push(user);
         let mut reply = Message::new(Role::Assistant, "");
         reply.model = self.settings.model.clone();
@@ -668,6 +686,53 @@ impl App {
         self.conv.updated_at = store::now_ms();
         self.conv.save();
         self.refresh_chats();
+    }
+
+    /// Opens the rewind popover on a question, with what going back to it would do.
+    fn rewind_open(&mut self, id: &str) {
+        let Some(at) = self.conv.messages.iter().position(|m| m.id == id) else { return };
+        let msg = &self.conv.messages[at];
+        let next = self.conv.messages[at + 1..].iter().find(|m| m.role == Role::User && !m.note).map(|m| m.created_at);
+        let point = crate::snapshots::find_restore_point(&self.conv.workspace(), msg.other.get("restorePoint"), &msg.text(), msg.created_at, next);
+        self.rewind = Some(rewind::Preview { id: id.to_string(), removed: self.conv.messages.len() - at, point, error: String::new() });
+    }
+
+    /// The popover's answer: None closes it, otherwise the chat is cut at the question (files first, when asked).
+    fn rewind_run(&mut self, files: Option<bool>) {
+        let (Some(preview), Some(files)) = (self.rewind.take(), files) else { return };
+        let Some(at) = self.conv.messages.iter().position(|m| m.id == preview.id).filter(|_| !self.running_here()) else { return };
+        let question = self.conv.messages[at].text();
+        let mut counts = None;
+        if files {
+            // Before the cut, so an error leaves the chat as it was.
+            match crate::snapshots::rewind_files(&self.conv.workspace(), &preview.point, &question) {
+                Ok(restored) => {
+                    counts = Some((restored.restored, restored.removed));
+                    self.rewind_undo = restored.safety.map(|s| s.id);
+                }
+                Err(error) => {
+                    self.rewind = Some(rewind::Preview { error, ..preview });
+                    return;
+                }
+            }
+        }
+        let removed = self.conv.messages.len() - at;
+        self.conv.messages.truncate(at);
+        // A summary that stood in for turns now gone would describe a chat that no longer exists.
+        if self.conv.summary.as_ref().is_some_and(|s| !self.conv.messages.iter().any(|m| m.id == s.up_to_id)) {
+            self.conv.summary = None;
+        }
+        self.heights.clear();
+        self.conv.updated_at = store::now_ms();
+        self.conv.save();
+        self.refresh_chats();
+        self.files_stale = true;
+        self.draft = if self.draft.trim().is_empty() { question } else { format!("{question}
+
+{}", self.draft) };
+        self.focus_composer = true;
+        // ponytail: the "Undo file changes" button is not on this line yet; Restore points in the file panel does it.
+        self.composer_note = Some(rewind::done_text(removed, counts));
     }
 
     /// The plan card's footer: clear the plan, or put its blocked steps back to "todo".

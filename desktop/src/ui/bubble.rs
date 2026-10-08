@@ -27,6 +27,10 @@ pub enum Action {
     Delete(String),
     /// Send message `id` again with new text.
     Edit(String, String),
+    /// Open the rewind popover on question `id`.
+    RewindOpen(String),
+    /// The popover's answer; None closes it.
+    Rewind(Option<bool>),
     /// Blocked plan steps go back to "todo".
     PlanUnblock,
     PlanClear,
@@ -49,6 +53,8 @@ pub struct Env<'a> {
     /// The user message being edited in place: (id, draft).
     pub editing: &'a mut Option<(String, String)>,
     pub action: &'a mut Option<Action>,
+    /// The question whose rewind popover is open.
+    pub rewind: Option<&'a super::rewind::Preview>,
     /// The chat's plan, drawn in the newest reply.
     pub plan: Option<&'a crate::store::Plan>,
 }
@@ -277,6 +283,9 @@ fn user(ui: &mut Ui, msg: &Message, env: &mut Env) {
             if !env.busy && action_btn(ui, icons::TRASH_SMALL, "Delete", "Delete this question and the reply — both forget it", 24.0, true, None).clicked() {
                 *env.action = Some(Action::Delete(msg.id.clone()));
             }
+            if !env.busy && action_btn(ui, icons::REWIND, "Rewind", "Go back to before this message — the chat, and the files if you want", 24.0, false, None).clicked() {
+                *env.action = Some(Action::RewindOpen(msg.id.clone()));
+            }
             if !env.busy && action_btn(ui, icons::RENAME.stroke(1.9), "Edit", "Edit and resend", 24.0, false, None).clicked() {
                 *env.editing = Some((msg.id.clone(), body.clone()));
             }
@@ -287,6 +296,14 @@ fn user(ui: &mut Ui, msg: &Message, env: &mut Env) {
                 ui.data_mut(|d| d.insert_temp(copied_id, now));
                 *env.action = Some(Action::Copy(body.clone()));
             }
+        }
+    }
+    if let Some(preview) = env.rewind.filter(|r| r.id == msg.id) {
+        match super::rewind::show(ui, bubble, preview) {
+            Some(super::rewind::Choice::ChatAndFiles) => *env.action = Some(Action::Rewind(Some(true))),
+            Some(super::rewind::Choice::ChatOnly) => *env.action = Some(Action::Rewind(Some(false))),
+            Some(super::rewind::Choice::Cancel) => *env.action = Some(Action::Rewind(None)),
+            None => {}
         }
     }
     if cancel {

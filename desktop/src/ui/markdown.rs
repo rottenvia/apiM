@@ -352,10 +352,39 @@ fn job(spans: &[Span], color: Color32, weight: f32, wrap: f32) -> LayoutJob {
     let mut after_code = false;
     for span in spans {
         let lead = if span.code { CODE_PAD } else { 0.0 } + if after_code { CODE_PAD } else { 0.0 };
-        job.append(&span.text, lead, format(span, color, weight));
+        let style = format(span, color, weight);
+        // Emoji keep their place in the line but are not drawn: `pictures` paints them in colour on top.
+        let (mut at, mut lead) = (0, lead);
+        for emoji in super::emoji::clusters(&span.text) {
+            job.append(&span.text[at..emoji.start], lead, style.clone());
+            job.append(&span.text[emoji.clone()], 0.0, TextFormat { color: Color32::TRANSPARENT, ..style.clone() });
+            (at, lead) = (emoji.end, 0.0);
+        }
+        job.append(&span.text[at..], lead, style);
         after_code = span.code;
     }
     job
+}
+
+/// Paints the colour emoji of a laid-out text over the room `job` kept for them.
+fn pictures(ui: &Ui, galley: &egui::Galley, spans: &[Span], origin: egui::Vec2, color: Color32) {
+    let (mut ranges, mut found, mut at) = (Vec::new(), Vec::new(), 0);
+    for span in spans {
+        for emoji in super::emoji::clusters(&span.text) {
+            let start = at + span.text[..emoji.start].chars().count();
+            ranges.push(start..start + span.text[emoji.clone()].chars().count());
+            found.push(&span.text[emoji]);
+        }
+        at += span.text.chars().count();
+    }
+    if ranges.is_empty() {
+        return;
+    }
+    let row_height = galley.rows.first().map_or(LINE, |r| r.row.size.y);
+    // One stretch per emoji: a cluster is never split across rows.
+    for ([left, right, top, _], emoji) in runs(galley, &ranges).into_iter().zip(found) {
+        super::emoji::paint(ui, emoji, pos2((left + right) / 2.0, top + row_height / 2.0) + origin, SIZE, color);
+    }
 }
 
 /// Where the spans picked by `wanted` ended up: one stretch per span per row, as
@@ -425,6 +454,7 @@ fn text(ui: &mut Ui, spans: &[Span], color: Color32, weight: f32, click: &mut Op
     let under = ui.painter().add(egui::Shape::Noop);
     let response = ui.add(egui::Label::new(galley.clone()).selectable(true));
     ui.painter().set(under, egui::Shape::Vec(decorations(&galley, spans, response.rect.min.to_vec2())));
+    pictures(ui, &galley, spans, response.rect.min.to_vec2(), color);
     if !spans.iter().any(|s| s.link.is_some()) {
         return;
     }
