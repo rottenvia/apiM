@@ -169,9 +169,10 @@ check(
   `break-even is ${Math.round(breakEvenRounds)} rounds at these rates`
 );
 check(
-  "so the threshold caps the prefill, not just the window",
-  compact.COMPACT_THRESHOLD_CHARS / 3.6 < 50_000,
-  `~${Math.round(compact.COMPACT_THRESHOLD_CHARS / 3.6 / 1000)}k tokens of prefill — a small request must not prefill a novel`
+  "the valve is 65% of the model's window",
+  Math.round(compact.compactThresholdChars(1_000_000) / 3.6) === 650_000 &&
+    Math.round(compact.compactThresholdChars(128_000) / 3.6) === 83_200,
+  `1M folds at ~${Math.round(compact.compactThresholdChars(1_000_000) / 3.6 / 1000)}k tokens, 128K at ~${Math.round(compact.compactThresholdChars(128_000) / 3.6 / 1000)}k`
 );
 check(
   "but it still fires before the context window is exhausted",

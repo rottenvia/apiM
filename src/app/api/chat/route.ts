@@ -100,7 +100,7 @@ const PLUGIN_TAIL_MAX_CHARS = 4_000;
 
 /** AGENTS.md beyond this rides as a pointer, not text. */
 const PROJECT_NOTES_MAX_CHARS = 12_000;
-import { compactTranscript } from "@/lib/compact";
+import { compactTranscript, compactThresholdChars } from "@/lib/compact";
 import {
   QWEN_COMPACT,
   QWEN_PRUNE,
@@ -2052,7 +2052,11 @@ Ask before you build the wrong thing. If a choice would change what you produce 
            * that follows still collapses very large old *file reads*, and
            * findings/plan are refreshed below.
            */
-          const folded = compactTranscript(resumed.messages);
+          const folded = compactTranscript(resumed.messages, {
+            thresholdChars: compactThresholdChars(
+              contextWindowFor(model, customs)
+            ),
+          });
           transcript.push(...folded.messages);
           if (folded.stats.rounds > 0) {
             send({
@@ -2741,7 +2745,14 @@ Ask before you build the wrong thing. If a choice would change what you produce 
            */
           const compacted = compactTranscript(
             pruned.messages,
-            target.thinkingStyle === "qwen" ? QWEN_COMPACT : undefined
+            target.thinkingStyle === "qwen"
+              ? QWEN_COMPACT
+              : {
+                  // 65% of this model's window: 650k tokens on a 1M model.
+                  thresholdChars: compactThresholdChars(
+                    contextWindowFor(model, customs)
+                  ),
+                }
           );
           if (compacted.stats.rounds > 0) {
             send({

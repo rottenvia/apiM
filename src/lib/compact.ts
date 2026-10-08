@@ -75,8 +75,28 @@ export const KEEP_RECENT_ROUNDS = 4;
  * word. The valve therefore caps the prefill at a size that answers fast:
  *
  *     160_000 chars ≈ ~44k tokens of prefill — seconds on Flash, not minutes.
+ *
+ * Third move, asked for directly: "lift our context window to 1mil so it
+ * autocompact on 650 k". The valve is now a share of the model's own window
+ * rather than one number for every model — 65%, so a 1M model folds at
+ * about 650k tokens and a 128K custom at about 83k. The price of that is
+ * exactly what the paragraphs above describe: long runs prefill far more
+ * before every round, and OpenRouter's cache-blind pre-flight can refuse a
+ * balance that the round would not actually have spent. The trade was the
+ * user's to make. Qwen keeps its own, much smaller numbers (local-context.ts).
  */
-export const COMPACT_THRESHOLD_CHARS = 160_000;
+export const COMPACT_WINDOW_FRACTION = 0.65;
+
+/** Characters per token, as the context meter estimates them. */
+const CHARS_PER_TOKEN = 3.6;
+
+/** The valve for a model with this context window, in characters. */
+export function compactThresholdChars(windowTokens: number): number {
+  return Math.floor(windowTokens * COMPACT_WINDOW_FRACTION * CHARS_PER_TOKEN);
+}
+
+/** The valve when the caller does not say which model: a 1M window. */
+export const COMPACT_THRESHOLD_CHARS = compactThresholdChars(1_000_000);
 
 /**
  * How far the compaction boundary jumps at a time.
