@@ -220,6 +220,19 @@ pub fn btw_note(text: &str) -> Option<&str> {
     (note.len() < rest.len() && !note.is_empty()).then_some(note)
 }
 
+/// "resume", or "continue, and also fix the header": the instruction after the word, "" when there is none.
+/// None when the text does not open with one of the web's resume words.
+pub fn resume_note(text: &str) -> Option<&str> {
+    let text = text.trim();
+    let word = ["resume", "continue", "carry on", "keep going", "go on"].into_iter().find(|w| text.get(..w.len()).is_some_and(|head| head.eq_ignore_ascii_case(w)))?;
+    let rest = &text[word.len()..];
+    // The word must end there: "continued" and "resumes" are ordinary messages.
+    if rest.starts_with(|c: char| c.is_alphanumeric() || c == '_') {
+        return None;
+    }
+    Some(rest.trim_start_matches(|c: char| c.is_whitespace() || matches!(c, ',' | ':' | '.' | '—' | '-')).trim_end())
+}
+
 /// The teal dot that breathes beside a note (`.btw-pulse`).
 fn pulse(ui: &mut egui::Ui) {
     let (rect, _) = ui.allocate_exact_size(vec2(6.0, 16.0), Sense::hover());
@@ -722,6 +735,16 @@ fn context_panel(app: &mut App, ui: &mut egui::Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resume_words() {
+        assert_eq!(resume_note(" Resume "), Some(""));
+        assert_eq!(resume_note("continue, and also fix the header"), Some("and also fix the header"));
+        assert_eq!(resume_note("carry on — use tabs"), Some("use tabs"));
+        for not_one in ["continued fraction maths", "resumes are hard", "please continue", "go online"] {
+            assert_eq!(resume_note(not_one), None, "{not_one}");
+        }
+    }
 
     #[test]
     fn btw_notes() {

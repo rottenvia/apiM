@@ -385,11 +385,7 @@ fn perform(app: &mut App, ctx: &egui::Context, cmd: Cmd, arg: &str) -> Result<Op
             app.retry(ctx);
         }
         Cmd::Rewind => return rewind(app),
-        Cmd::Resume => {
-            let interrupted = app.conv.messages.last().is_some_and(|m| m.role == Role::Assistant && m.incomplete);
-            // ponytail: the desktop agent cannot resume yet, so an interrupted reply can only be asked again.
-            return Err(if interrupted { "Resume is not in the desktop app yet — Try again answers the question from the start." } else { "There is no interrupted reply to resume." }.into());
-        }
+        Cmd::Resume => app.resume(ctx, arg.trim().to_string())?,
         Cmd::Stop => {
             if !app.running_here() {
                 return Ok(Some("Nothing is running.".into()));

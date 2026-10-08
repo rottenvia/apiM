@@ -281,6 +281,11 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
 
     match action {
         Some(bubble::Action::Retry) => app.retry(ui.ctx()),
+        Some(bubble::Action::Resume) => {
+            if let Err(why) = app.resume(ui.ctx(), String::new()) {
+                app.toast(why);
+            }
+        }
         Some(bubble::Action::Copy(text)) => ui.ctx().copy_text(text),
         Some(bubble::Action::Link(url)) => ui.ctx().open_url(egui::OpenUrl::new_tab(url)),
         Some(bubble::Action::OpenCode(title, language, code)) => app.artifact = Some(super::overlay::Artifact { title, language, code, copied: None }),

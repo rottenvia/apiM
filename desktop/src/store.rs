@@ -303,6 +303,11 @@ pub struct Message {
 }
 
 impl Message {
+    /// The message as the web app stores it: what the rules shared with the web (`crate::context`) read.
+    pub fn to_web(&self) -> serde_json::Value {
+        serde_json::to_value(wire::Msg::from(self)).unwrap_or_default()
+    }
+
     pub fn new(role: Role, text: &str) -> Message {
         Message { id: new_id(), role, parts: if text.is_empty() { Vec::new() } else { vec![Part::Text(text.to_string())] }, created_at: now_ms(), ..Default::default() }
     }

@@ -12,12 +12,6 @@ const IGNORED: &[&str] = &[".history", ".snapshots", ".packages", ".analysis", "
 const IGNORED_AT_ROOT: &[&str] = &["dist", "build"];
 const MAX_WALK: usize = 50_000;
 const MAX_LISTED: usize = 2_000;
-pub const MAX_READ_FILES: usize = 60;
-pub const MAX_WRITE_FILES: usize = 30;
-pub const MAX_BATCH_EDITS: usize = 40;
-pub const MAX_SEARCH_HITS: usize = 60;
-const MAX_SEARCHABLE_BYTES: u64 = 512 * 1024;
-const MAX_SEARCH_CONTEXT: u64 = 40;
 use crate::snapshots::MAX_HISTORY_VERSIONS;
 
 /// Turns a model-supplied path into a real one inside `root`, or says why not.
@@ -90,31 +84,6 @@ fn human(size: u64) -> String {
         s if s >= 1024 => format!("{:.1} KB", s as f64 / 1024.0),
         s => format!("{s} B"),
     }
-}
-
-/// The file listing appended to each request, so the model knows what already exists.
-pub fn workspace_context(root: &Path) -> String {
-    const MAX_FILES: usize = 200;
-    const MAX_CHARS: usize = 8_000;
-    let files = walk(root, root);
-    if files.is_empty() {
-        return "The workspace is currently empty.".into();
-    }
-    let mut tree = String::new();
-    let mut shown = 0;
-    for (path, size) in files.iter().take(MAX_FILES) {
-        if tree.len() > MAX_CHARS {
-            break;
-        }
-        tree.push_str(&format!("{path}  ({})\n", human(*size)));
-        shown += 1;
-    }
-    if files.len() > shown {
-        tree.push_str(&format!("… and {} more (use list_files)\n", files.len() - shown));
-    }
-    format!(
-        "Files already in the workspace:\n\n{tree}\nThese exist right now. Edit the relevant one rather than creating a near-duplicate, and read a file before editing it so your replacement matches exactly. Sizes are shown so you can tell a stub from a real file."
-    )
 }
 
 pub fn list_files(ctx: &Ctx, args: &Value) -> Output {
@@ -193,10 +162,30 @@ pub fn read_file(ctx: &Ctx, args: &Value) -> Output {
         Ok(p) => p,
         Err(e) => return Output::fail(e),
     };
+    let (start, end) = (num_arg(args, "start_line"), num_arg(args, "end_line"));
+    let ranged = start.is_some() || end.is_some();
     match read_text(&path) {
         Ok(text) => {
-            let out = render_read(rel, &text, num_arg(args, "start_line"), num_arg(args, "end_line"), bool_arg(args, "line_numbers"), ctx.read_chars);
-            let summary = out.lines().next().unwrap_or(rel).to_string();
+            // A whole-file read of something this reply just wrote is answered from the run's memory. The memory is a
+            // shortcut, never a second source of truth: the bytes are checked against the disk first, so an edit, a
+            // command or the user's editor cannot make it lie.
+            let written = if ranged { None } else { ctx.memory.get(rel) };
+            let recalled = written.as_deref() == Some(text.as_str());
+            if written.is_some() && !recalled {
+                ctx.memory.invalidate(rel);
+            }
+            let mut out = render_read(rel, &text, start, end, bool_arg(args, "line_numbers"), if recalled { usize::MAX } else { ctx.read_chars });
+            let header = out.find('\n').unwrap_or(out.len());
+            // ponytail: nothing reads this back yet. The web uses it to hand a small file over whole on its first range read
+            // and only then (tools.ts SMALL_FILE_LINES); port that with `already_served_whole` when slice-walking costs rounds.
+            if !ranged && (out[..header].contains(": EXACT, all ") || text.is_empty()) {
+                ctx.memory.record_whole_read(rel, &text);
+            }
+            if recalled {
+                out.insert_str(header, " — served from the run's own write (you wrote these exact bytes in this reply; no re-read was needed)");
+                return Output::ok(out, format!("Have {rel} — already written this reply"));
+            }
+            let summary = out[..header].to_string();
             Output::ok(out, summary)
         }
         Err(e) => Output::fail(e),
@@ -209,6 +198,7 @@ fn glob(pattern: &str) -> Option<GlobMatcher> {
 
 pub fn read_files(ctx: &Ctx, args: &Value) -> Output {
     let Some(patterns) = args["paths"].as_array() else { return Output::fail("paths must be a list of file paths.") };
+    let cap = ctx.limits.read_files as usize;
     let all = walk(&ctx.root, &ctx.root);
     let mut paths: Vec<String> = Vec::new();
     for p in patterns.iter().filter_map(Value::as_str) {
@@ -222,8 +212,8 @@ pub fn read_files(ctx: &Ctx, args: &Value) -> Output {
         }
     }
     paths.dedup();
-    let skipped = paths.len().saturating_sub(MAX_READ_FILES);
-    paths.truncate(MAX_READ_FILES);
+    let skipped = paths.len().saturating_sub(cap);
+    paths.truncate(cap);
     if paths.is_empty() {
         return Output::fail("No files matched.");
     }
@@ -247,7 +237,7 @@ pub fn read_files(ctx: &Ctx, args: &Value) -> Output {
         }
     }
     if skipped > 0 {
-        out.push_str(&format!("[{skipped} more files matched; only {MAX_READ_FILES} are read per call.]\n"));
+        out.push_str(&format!("[{skipped} more files matched; only {cap} are read per call.]\n"));
     }
     Output::ok(out, format!("Read {read} of {} files", paths.len()))
 }
@@ -293,6 +283,8 @@ pub fn write_file(ctx: &Ctx, args: &Value) -> Output {
     let Some(content) = args["content"].as_str() else { return Output::fail("content is required.") };
     match write_checked(ctx, rel, content) {
         Ok(warning) => {
+            ctx.memory.record_write(rel, content);
+            ctx.memory.record_whole_read(rel, content);
             let summary = format!("Wrote {rel} ({} lines)", content.lines().count());
             Output::ok(format!("{summary}.{warning}"), summary).changed(rel)
         }
@@ -302,20 +294,23 @@ pub fn write_file(ctx: &Ctx, args: &Value) -> Output {
 
 pub fn write_files(ctx: &Ctx, args: &Value) -> Output {
     let Some(files) = args["files"].as_array() else { return Output::fail("files must be a list of {path, content}.") };
+    let cap = ctx.limits.write_files as usize;
     let mut report = String::new();
     let mut written = 0;
-    for f in files.iter().take(MAX_WRITE_FILES) {
+    for f in files.iter().take(cap) {
         let rel = str_arg(f, "path");
         match f["content"].as_str().ok_or_else(|| "content is required.".to_string()).and_then(|c| write_checked(ctx, rel, c).map(|w| (c, w))) {
             Ok((c, warning)) => {
                 written += 1;
+                ctx.memory.record_write(rel, c);
+                ctx.memory.record_whole_read(rel, c);
                 report.push_str(&format!("Wrote {rel} ({} lines).{warning}\n", c.lines().count()));
             }
             Err(e) => report.push_str(&format!("FAILED {rel}: {e}\n")),
         }
     }
-    if files.len() > MAX_WRITE_FILES {
-        report.push_str(&format!("[{} files were not written: only {MAX_WRITE_FILES} per call. Send the rest in another call.]\n", files.len() - MAX_WRITE_FILES));
+    if files.len() > cap {
+        report.push_str(&format!("[{} files were not written: only {cap} per call. Send the rest in another call.]\n", files.len() - cap));
     }
     let summary = format!("Wrote {written} of {} files", files.len());
     Output { ok: written > 0, ..Output::ok(report, summary) }
@@ -641,6 +636,7 @@ pub fn edit_file(ctx: &Ctx, args: &Value) -> Output {
 }
 
 pub fn edit_files(ctx: &Ctx, args: &Value) -> Output {
+    let cap = ctx.limits.batch_edits as usize;
     // Accepts flat edits, a single top-level path, and {path, edits:[…]} groups.
     let top = str_arg(args, "path");
     let mut flat: Vec<(String, EditSpec)> = Vec::new();
@@ -654,8 +650,8 @@ pub fn edit_files(ctx: &Ctx, args: &Value) -> Output {
     if flat.is_empty() {
         return Output::fail("edits must be a list of {path, old_text|anchors|lines, new_text}.");
     }
-    let dropped = flat.len().saturating_sub(MAX_BATCH_EDITS);
-    flat.truncate(MAX_BATCH_EDITS);
+    let dropped = flat.len().saturating_sub(cap);
+    flat.truncate(cap);
     let preview = bool_arg(args, "preview");
 
     // Edits to one file apply in order against the same evolving content.
@@ -682,7 +678,7 @@ pub fn edit_files(ctx: &Ctx, args: &Value) -> Output {
     }
     let mut text = report.join("\n");
     if dropped > 0 {
-        text.push_str(&format!("\n[{dropped} edits were not applied: only {MAX_BATCH_EDITS} per call. Send the rest in another call.]"));
+        text.push_str(&format!("\n[{dropped} edits were not applied: only {cap} per call. Send the rest in another call.]"));
     }
     let summary = format!("{landed} of {} edits {}", flat.len(), if preview { "previewed" } else { "applied" });
     Output { ok: landed > 0, ..Output::ok(text, summary) }
@@ -702,10 +698,11 @@ fn pattern(query: &str, regex: bool, case_sensitive: bool) -> Result<Regex, Stri
 /// Files a search or bulk replace should look at: text, not huge, matching the glob.
 fn searchable(ctx: &Ctx, filter: &str) -> Result<Vec<String>, String> {
     let matcher = if filter.is_empty() { None } else { Some(glob(filter).ok_or_else(|| format!("Bad glob: {filter}"))?) };
-    Ok(walk(&ctx.root, &ctx.root).into_iter().filter(|(p, size)| *size <= MAX_SEARCHABLE_BYTES && matcher.as_ref().is_none_or(|g| g.is_match(p))).map(|(p, _)| p).collect())
+    Ok(walk(&ctx.root, &ctx.root).into_iter().filter(|(p, size)| *size <= ctx.limits.searchable_bytes && matcher.as_ref().is_none_or(|g| g.is_match(p))).map(|(p, _)| p).collect())
 }
 
 pub fn search_files(ctx: &Ctx, args: &Value) -> Output {
+    let cap = ctx.limits.search_hits as usize;
     let query = str_arg(args, "query");
     if query.is_empty() {
         return Output::fail("query is required.");
@@ -718,7 +715,7 @@ pub fn search_files(ctx: &Ctx, args: &Value) -> Output {
         Ok(f) => f,
         Err(e) => return Output::fail(e),
     };
-    let context = num_arg(args, "context").unwrap_or(0).min(MAX_SEARCH_CONTEXT) as usize;
+    let context = num_arg(args, "context").unwrap_or(0).min(ctx.limits.search_context) as usize;
     let mut out = String::new();
     let (mut hits, mut in_files) = (0, 0);
     'files: for rel in &files {
@@ -730,8 +727,8 @@ pub fn search_files(ctx: &Ctx, args: &Value) -> Output {
             if !re.is_match(line) {
                 continue;
             }
-            if hits >= MAX_SEARCH_HITS {
-                out.push_str(&format!("[Stopped at {MAX_SEARCH_HITS} matches. Narrow the query or add a glob.]\n"));
+            if hits >= cap {
+                out.push_str(&format!("[Stopped at {cap} matches. Narrow the query or add a glob.]\n"));
                 break 'files;
             }
             hits += 1;

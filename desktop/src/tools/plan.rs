@@ -90,51 +90,49 @@ pub fn update_plan(ctx: &Ctx, args: &Value) -> Output {
     Output { ok: problems.is_empty(), ..Output::ok(text, summary) }
 }
 
-/// Active findings, listed to the model every turn so it never re-derives them.
-pub fn format_findings(findings: &[Finding]) -> String {
-    let active: Vec<&Finding> = findings.iter().filter(|f| f.active).collect();
-    if active.is_empty() {
-        return String::new();
-    }
-    let mut out = String::from("FINDINGS you recorded earlier in this chat (your working memory; use the relevant ones, do not cite them):\n");
-    for f in active {
-        out.push_str(&format!("[{}] {}", f.id, f.claim));
-        if !f.evidence.is_empty() {
-            out.push_str(&format!(" (evidence: {})", f.evidence));
-        }
-        if !f.refs.is_empty() {
-            out.push_str(&format!(" [{}]", f.refs.join(", ")));
-        }
-        out.push('\n');
-    }
-    out
-}
-
+/// Files a conclusion in `<workspace>/.analysis/findings.json`, the store the web app reads too, or retires one
+/// (`id` with status "disproved"). The system prompt lists the active ones on every later message. The wording is the web's.
+// ponytail: always this workspace's store. The web can also file machine-wide (scope "machine" under APIM_SHARED_FINDINGS=1);
+// the desktop's tool schema has no `scope`, so that store is only read into the prompt here.
 pub fn note_finding(ctx: &Ctx, args: &Value) -> Output {
-    // Oversized text is sliced, never shipped whole.
-    let short = |s: &str, n: usize| s.trim().chars().take(n).collect::<String>();
-    let claim = short(str_arg(args, "claim"), 400);
+    use crate::context::findings::{NewFinding, Revision, Status, add_finding, read_store, revise_finding, store_path};
+    let claim = str_arg(args, "claim").trim();
     if claim.is_empty() {
-        return Output::fail("claim is required: the conclusion in one sentence.");
+        return Output { summary: "Missing claim".into(), ..Output::fail("note_finding requires a claim (the conclusion).") };
     }
-    let mut chat = ctx.chat.lock().unwrap();
-    let id = str_arg(args, "id").trim().trim_matches(['[', ']']).to_string();
-    let text = if !id.is_empty() && str_arg(args, "status") == "disproved" {
-        match chat.findings.iter_mut().find(|f| f.id == id) {
-            Some(f) => {
-                f.active = false;
-                format!("Retired finding [{id}]: {claim}")
-            }
-            None => return Output::fail(format!("No finding [{id}].")),
+    let id = str_arg(args, "id").trim().trim_matches(['[', ']']);
+    let evidence = str_arg(args, "evidence").trim();
+    let refs: Vec<String> = args["refs"].as_array().map(|a| a.iter().map(crate::context::js_str).collect()).unwrap_or_default();
+    let path = store_path(&ctx.root);
+    let refuse = |text: String, summary: &str| Output { summary: summary.into(), ..Output::fail(text) };
+    let out = if !id.is_empty() && str_arg(args, "status") == "disproved" {
+        let reason = if evidence.is_empty() { "Corrected by later analysis." } else { evidence };
+        let replacement = NewFinding { claim: claim.into(), refs, evidence: reason.into() };
+        match revise_finding(&path, &Revision { id: id.into(), reason: reason.into(), status: Some("disproved".into()) }, Some(&replacement)) {
+            Err(e) => Output::fail(e),
+            Ok(revised) if revised.updated => match revised.replacement {
+                Some(new) => Output::ok(format!("Finding {id} marked disproved and replaced with the corrected conclusion [{}]. The old one will no longer steer later turns.", new.id), "Finding corrected"),
+                None => Output::ok(format!("Finding {id} retired. It will no longer be shown on later turns, and nothing replaces it."), "Finding retired"),
+            },
+            Ok(revised) if revised.already_retired == Some(true) => refuse(format!("Finding {id} is already retired — nothing to do. Record a new finding (no id) if there is a new conclusion."), "Finding already retired"),
+            Ok(_) => refuse(format!("No active finding with id {id} was found to revise."), "Finding not found"),
         }
     } else {
-        let id = format!("f{}", chat.findings.len() + 1);
-        chat.findings.push(Finding { id: id.clone(), claim: claim.clone(), evidence: short(str_arg(args, "evidence"), 300), refs: list_arg(args, "refs"), active: true });
-        format!("Recorded finding [{id}].")
+        match add_finding(&path, &NewFinding { claim: claim.into(), refs, evidence: evidence.into() }) {
+            Ok(new) => Output::ok(
+                format!(
+                    "Finding recorded [{0}]. It will be shown on every later turn in this chat so you do not re-derive it. If it turns out wrong, note_finding again with id={0} and status='disproved'. When the work it describes is DONE, retire it the same way (id={0}, status='disproved', claim 'done — shipped in <commit/fix>') so finished items stop riding later prompts.",
+                    new.id
+                ),
+                "Finding recorded",
+            ),
+            Err(e) => Output::fail(e),
+        }
     };
-    drop(chat);
+    // The chat keeps a copy of the store, for the window.
+    ctx.chat.lock().unwrap().findings = read_store(&path).findings.into_iter().map(|f| Finding { active: f.status == Status::Active, id: f.id, claim: f.claim, evidence: f.evidence, refs: f.refs }).collect();
     publish(ctx);
-    Output::ok(text, format!("Noted: {}", claim.chars().take(80).collect::<String>()))
+    out
 }
 
 pub fn finish(ctx: &Ctx, args: &Value) -> Output {
@@ -203,7 +201,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn plan_and_findings_render() {
+    fn plan_renders() {
         let plan = Plan {
             goal: "ship".into(),
             steps: vec![
@@ -213,9 +211,5 @@ mod tests {
         };
         let text = format_plan(&plan);
         assert!(text.contains("[x] 1. write (ran it)") && text.contains("[ ] 2. test"));
-        assert_eq!(format_findings(&[]), "");
-        let f = [Finding { id: "f1".into(), claim: "c".into(), evidence: "e".into(), refs: vec![], active: true }, Finding { id: "f2".into(), claim: "old".into(), active: false, ..Default::default() }];
-        let text = format_findings(&f);
-        assert!(text.contains("[f1] c (evidence: e)") && !text.contains("old"));
     }
 }
