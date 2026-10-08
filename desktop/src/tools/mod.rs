@@ -1,10 +1,13 @@
 //! The agent's tools. Schemas come from assets/tools.json (synced from the web
 //! app); only tools with a handler here are offered to the model.
 
+pub mod code;
+pub mod data;
 pub mod exec;
 pub mod files;
 pub mod git;
 pub mod plan;
+pub mod recall;
 pub mod web;
 
 use crate::agent::Emitter;
@@ -103,7 +106,8 @@ const IMPLEMENTED: &[&str] = &[
     "search_files", "delete_file", "move_file", "undo_file", "run_command", "run_tests", "start_process", "read_process",
     "write_process", "stop_process", "list_processes", "wait_for_output", "fetch_url", "http_request", "download_file",
     "web_search", "make_plan", "update_plan", "ask_user", "finish", "note_finding", "view_image", "show_image",
-    "git_status", "git_diff", "git_log", "git_commit", "git_branch",
+    "git_status", "git_diff", "git_log", "git_commit", "git_branch", "apply_patch", "verify_file", "read_symbol", "find_references",
+    "analyze_log", "extract_archive", "query_data", "list_snapshots", "restore_snapshot", "search_conversation",
 ];
 
 static SCHEMAS: LazyLock<Vec<Value>> = LazyLock::new(|| {
@@ -154,6 +158,7 @@ async fn mcp_call(name: &str, args: &Value, ctx: &Ctx) -> Output {
 pub async fn run(name: &str, args: &Value, ctx: &Ctx) -> Output {
     // File work is plain blocking I/O; tell the runtime so other tasks keep moving.
     let sync = |f: fn(&Ctx, &Value) -> Output| tokio::task::block_in_place(|| f(ctx, args));
+    let at_root = |f: fn(&std::path::Path, &Value) -> Output| tokio::task::block_in_place(|| f(&ctx.root, args));
     if name.starts_with("mcp__") {
         return mcp_call(name, args, ctx).await;
     }
@@ -170,6 +175,16 @@ pub async fn run(name: &str, args: &Value, ctx: &Ctx) -> Output {
         "delete_file" => sync(files::delete_file),
         "move_file" => sync(files::move_file),
         "undo_file" => sync(files::undo_file),
+        "apply_patch" => at_root(code::apply_patch),
+        "verify_file" => at_root(code::verify_file),
+        "read_symbol" => at_root(code::read_symbol),
+        "find_references" => at_root(code::find_references),
+        "analyze_log" => at_root(code::analyze_log),
+        "extract_archive" => at_root(data::extract_archive),
+        "query_data" => at_root(data::query_data),
+        "list_snapshots" => at_root(recall::list_snapshots),
+        "restore_snapshot" => at_root(recall::restore_snapshot),
+        "search_conversation" => sync(search_conversation),
         "make_plan" => sync(plan::make_plan),
         "update_plan" => sync(plan::update_plan),
         "note_finding" => sync(plan::note_finding),
@@ -192,6 +207,21 @@ pub async fn run(name: &str, args: &Value, ctx: &Ctx) -> Output {
         n if n.starts_with("git_") => git::run(ctx, n, args).await,
         _ => Output::fail(format!("Unknown tool: {name}. Use one of the tools you were given.")),
     }
+}
+
+/// `search_conversation` reads the chat as stored, so turns folded out of the model's view are still found.
+fn search_conversation(ctx: &Ctx, args: &Value) -> Output {
+    let chat = crate::store::data_dir().join("chats").join(ctx.state_dir.file_name().unwrap_or_default()).join("chat.json");
+    let Some(stored) = std::fs::read(chat).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()) else {
+        return Output { ok: false, text: "Error: no conversation scope for this search.".into(), summary: "No conversation scope".into(), ..Default::default() };
+    };
+    let said: Vec<&Value> = stored["messages"].as_array().into_iter().flatten().filter(|m| matches!(m["role"].as_str(), Some("user" | "assistant"))).collect();
+    fn name_and_note(a: &Value) -> (&str, &str) {
+        (a["name"].as_str().unwrap_or(""), a["description"].as_str().unwrap_or(""))
+    }
+    let turns: Vec<crate::find::Turn> = said.iter().map(|m| crate::find::Turn { content: m["content"].as_str().unwrap_or(""), attachments: m["attachments"].as_array().into_iter().flatten().map(name_and_note).collect() }).collect();
+    let roles: Vec<&str> = said.iter().map(|m| m["role"].as_str().unwrap_or("")).collect();
+    recall::search_conversation(&ctx.root, args, &turns, &roles)
 }
 
 #[cfg(test)]
