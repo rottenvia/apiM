@@ -702,6 +702,11 @@ impl App {
         if self.compacting() {
             return;
         }
+        // "resume", or "resume, and also do X", carries on the last reply when it can be continued; otherwise the words are an ordinary message.
+        if self.attachments.is_empty() && composer::resume_note(&text).is_some_and(|note| self.resume(ctx, note.to_string()).is_ok()) {
+            self.draft.clear();
+            return;
+        }
         // Pictures go to the model; any other file is copied into the workspace for the tools to read.
         let workspace = self.conv.workspace();
         let (attached, notes) = attachments::take(std::mem::take(&mut self.attachments), &workspace);
@@ -747,6 +752,7 @@ impl App {
         let shape = summary::shape(&self.conv.messages, self.conv.summary.as_ref());
         let history: Vec<(Role, String)> = shape.verbatim.iter().map(|m| (m.role, m.history_text())).collect();
         let stored = self.conv.summary.as_ref().filter(|s| self.conv.messages.iter().any(|m| m.id == s.up_to_id)).map(summary::render);
+        let history_last_user = self.conv.messages.iter().rev().filter(|m| m.role == Role::User && !m.note).map(|m| m.text().trim().to_string()).find(|t| !t.is_empty());
         if self.conv.messages.is_empty() {
             self.conv.title = store::derive_title(if text.trim().is_empty() { "Attached files" } else { &text });
         }
@@ -773,21 +779,28 @@ impl App {
         self.conv.save();
         self.refresh_chats();
 
-        let (tx, rx) = mpsc::channel();
-        let wake = ctx.clone();
-        let notes = Arc::new(Mutex::new(Vec::new()));
         let request = agent::Request {
             settings: self.settings.clone(),
             history,
             summary: stored,
+            history_last_user,
             text: wire,
             images: attached.into_iter().filter(|a| a.kind == "image").collect(),
             workspace: self.conv.workspace(),
             state_dir: self.conv.state_dir(),
             chat: ChatState { plan: self.conv.plan.clone(), findings: self.conv.findings.clone(), finish_bounced: false },
             conv_id: self.conv.id.clone(),
-            notes: notes.clone(),
+            notes: Default::default(),
+            resume: None,
         };
+        self.start_run(ctx, request, Instant::now());
+    }
+
+    /// Starts the agent on `request`. What it reports fills the chat's last message, timed from `started`.
+    fn start_run(&mut self, ctx: &egui::Context, request: agent::Request, started: Instant) {
+        let (tx, rx) = mpsc::channel();
+        let wake = ctx.clone();
+        let notes = request.notes.clone();
         let handle = self.rt.spawn(agent::run(request, Emitter::new(tx, move || wake.request_repaint()), self.procs.clone()));
         self.run = Some(Run {
             rx,
@@ -801,12 +814,55 @@ impl App {
             question: None,
             notes,
             thinking: Stopwatch::new(),
-            started: Instant::now(),
+            started,
             saved: Instant::now(),
         });
         self.focus_composer = true;
         self.jump_to_latest = true;
         self.slash.notice = None;
+    }
+
+    /// Carries on the chat's last reply instead of answering again: what it did is replayed to the model, so only the
+    /// work still outstanding is paid for and every file already written stays written. `note` is what was typed next
+    /// to "resume". Err says why nothing was started.
+    fn resume(&mut self, ctx: &egui::Context, note: String) -> Result<(), String> {
+        let none = || "There is no interrupted reply to resume.".to_string();
+        // Only the last message, and only under a question: anything looser would continue something the user has moved on from.
+        let [.., before, last] = self.conv.messages.as_slice() else { return Err(none()) };
+        if self.run.is_some() || self.compacting() || last.role != Role::Assistant || before.role != Role::User {
+            return Err(none());
+        }
+        let prior = last.to_web();
+        if !crate::context::rebuild_resume::reply_can_continue(&prior) {
+            return Err(none());
+        }
+        let (start, _) = self.exchange(&last.id).ok_or_else(none)?;
+        provider::resolve_target(&self.settings.model, &self.settings)?;
+        // The request is rebuilt as it was asked: the turns before the question, then the question.
+        let (earlier, question) = (&self.conv.messages[..start], &self.conv.messages[start]);
+        let shape = summary::shape(earlier, self.conv.summary.as_ref());
+        let request = agent::Request {
+            settings: self.settings.clone(),
+            history: shape.verbatim.iter().map(|m| (m.role, m.history_text())).collect(),
+            summary: self.conv.summary.as_ref().filter(|s| earlier.iter().any(|m| m.id == s.up_to_id)).map(summary::render),
+            history_last_user: earlier.iter().rev().filter(|m| m.role == Role::User && !m.note).map(|m| m.text().trim().to_string()).find(|t| !t.is_empty()),
+            text: crate::slash::wire(&question.text()).into_owned(),
+            images: question.attachments.iter().filter(|a| a.kind == "image").cloned().collect(),
+            workspace: self.conv.workspace(),
+            state_dir: self.conv.state_dir(),
+            chat: ChatState { plan: self.conv.plan.clone(), findings: self.conv.findings.clone(), finish_bounced: false },
+            conv_id: self.conv.id.clone(),
+            notes: Default::default(),
+            resume: Some(agent::Resume { prior, note, usage: last.usage }),
+        };
+        // The reply goes back to being written: what it has stays, the rest is added to it, by the model chosen now.
+        let model = self.settings.model.clone();
+        let reply = self.conv.messages.last_mut().expect("checked above");
+        (reply.incomplete, reply.error, reply.finish, reply.model) = (false, None, None, model);
+        let started = Instant::now().checked_sub(Duration::from_millis(reply.duration_ms)).unwrap_or_else(Instant::now);
+        self.heights.clear();
+        self.start_run(ctx, request, started);
+        Ok(())
     }
 
     /// Drops the last reply and asks the same question again.
@@ -1023,6 +1079,15 @@ impl App {
                     }
                     self.files_stale = true;
                 }
+                Event::ToolProgress { id, text } => {
+                    // A helper's rounds, on its still-running row.
+                    if let Some(tool) = msg.parts.iter_mut().rev().find_map(|p| match p {
+                        Part::Tool(t) if t.id == id && t.ok.is_none() => Some(t),
+                        _ => None,
+                    }) {
+                        tool.summary = text;
+                    }
+                }
                 Event::Approval { key, reply, .. } if self.always_allow.get(&run.conv_id).is_some_and(|allowed| allowed.contains(&key)) => {
                     let _ = reply.send(true);
                 }
@@ -1052,10 +1117,17 @@ impl App {
                     close_thinking(msg, &mut run.thinking);
                     msg.parts.push(Part::Notice(note));
                 }
+                Event::Checkpoint(state) => {
+                    msg.other.insert("resumeState".into(), state);
+                }
                 Event::Done { finish, incomplete, stop_reason } => {
                     finish_message(msg, run.started);
                     msg.finish = finish;
                     msg.incomplete = incomplete;
+                    if !incomplete {
+                        // A finished reply drops it: it is the largest field in the record, and resuming a complete answer means nothing.
+                        msg.other.remove("resumeState");
+                    }
                     msg.parts.extend(stop_reason.map(Part::Notice));
                     finished = true;
                 }

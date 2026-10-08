@@ -15,6 +15,8 @@ use std::time::Duration;
 pub enum Action {
     /// Answer the last question again.
     Retry,
+    /// Carry on the last reply from where it stopped.
+    Resume,
     Copy(String),
     Link(String),
     /// A long code block was clicked: (title, language, code).
@@ -627,6 +629,9 @@ fn step(ui: &mut Ui, tool: &ToolEvent, env: &mut Env, open: &mut Option<String>)
     let wide = ui.ctx().content_rect().width() >= 640.0;
     let remark = if failed && !tool.summary.is_empty() {
         Some((format!("— {}", tool.summary), base.gamma_multiply(0.8), 0.5))
+    } else if running && !tool.summary.is_empty() {
+        // A helper's progress: "round 2 · 5 tool calls · read_file, search_files".
+        Some((format!("· {}", tool.summary), p.muted, 0.45))
     } else if !running && !failed && wide && !tool.summary.is_empty() && (target_text.is_empty() || !tool.summary.contains(target_text)) && tool.summary != d.done {
         Some((format!("· {}", tool.summary), p.muted, 0.45))
     } else {
@@ -971,6 +976,8 @@ fn sources(ui: &mut Ui, msg: &Message, env: &mut Env) {
 /// "This reply stopped before it finished", with the way out.
 fn interrupted(ui: &mut Ui, msg: &Message, env: &mut Env) {
     let p = p();
+    // Anything that arrived can be carried on: text, thinking or a step.
+    let can_resume = msg.parts.iter().any(|part| !matches!(part, Part::Notice(_)));
     egui::Frame::new().fill(alpha(p.warning, 7.0)).stroke(Stroke::new(1.0, alpha(p.warning, 30.0))).corner_radius(12).show(ui, |ui| {
         ui.set_width(ui.available_width());
         egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 10)).show(ui, |ui| {
@@ -983,8 +990,7 @@ fn interrupted(ui: &mut Ui, msg: &Message, env: &mut Env) {
                 ui.vertical(|ui| {
                     ui.add(egui::Label::new(widgets::lines("This reply stopped before it finished", 13.0, 17.875, W::Medium, p.warning)).wrap().selectable(false));
                     ui.add_space(2.0);
-                    // ponytail: no resume yet, so every interrupted reply can only be asked again.
-                    let why = if msg.error.is_some() && msg.text().is_empty() { "Nothing arrived, so there is nothing to resume — Try again re-sends the turn." } else { "What it wrote so far is kept above. Try again answers the question from the start." };
+                    let why = if can_resume { "Everything it did is saved — the files it wrote, what it read, and its reasoning. Resuming carries on from there and only pays for what is left." } else { "Nothing arrived, so there is nothing to resume — Try again re-sends the turn." };
                     ui.add(egui::Label::new(widgets::lines(why, 12.0, 19.5, W::Regular, p.text2)).wrap().selectable(false));
                 });
             });
@@ -992,16 +998,35 @@ fn interrupted(ui: &mut Ui, msg: &Message, env: &mut Env) {
         if env.newest && !env.busy {
             let (line, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
             ui.painter().rect_filled(line, 0.0, alpha(p.warning, 20.0));
+            // Resume dominates because it is nearly always right; starting over buys the same work twice, so it stays reachable but quiet.
+            // ponytail: the web's Resume is a split button that can also pick another model; here the model is the one chosen in the composer.
             egui::Frame::new().inner_margin(egui::Margin::same(6)).show(ui, |ui| {
-                let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 35.5), Sense::click());
-                let response = response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Answer again from the beginning");
-                ui.painter().rect_filled(rect, 8.0, if response.hovered() { theme::mix(p.warning, 90.0, Color32::WHITE) } else { p.warning });
-                let label = widgets::galley(ui, "Try again", theme::font(13.0, W::Medium), p.bg);
-                let label_width = label.size().x;
-                widgets::text_at(ui, rect.center().x - label_width / 2.0, rect.center().y, label);
-                if response.clicked() {
-                    *env.action = Some(Action::Retry);
-                }
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    let over = widgets::galley(ui, "Start over", theme::font(13.0, W::Medium), p.warning);
+                    let over_width = over.size().x + 24.0;
+                    let main_width = ui.available_width() - if can_resume { over_width + 6.0 } else { 0.0 };
+                    let (rect, response) = ui.allocate_exact_size(vec2(main_width, 35.5), Sense::click());
+                    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(if can_resume { "Carry on from where it stopped, keeping the work already done" } else { "Answer again from the beginning" });
+                    ui.painter().rect_filled(rect, 8.0, if response.hovered() { theme::mix(p.warning, 90.0, Color32::WHITE) } else { p.warning });
+                    let label = widgets::galley(ui, if can_resume { "Resume" } else { "Try again" }, theme::font(13.0, if can_resume { W::Semibold } else { W::Medium }), p.bg);
+                    let label_width = label.size().x;
+                    widgets::text_at(ui, rect.center().x - label_width / 2.0, rect.center().y, label);
+                    if response.clicked() {
+                        *env.action = Some(if can_resume { Action::Resume } else { Action::Retry });
+                    }
+                    if can_resume {
+                        let (rect, response) = ui.allocate_exact_size(vec2(over_width, 35.5), Sense::click());
+                        let response = response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Discard what was done and answer again from scratch");
+                        if response.hovered() {
+                            ui.painter().rect_filled(rect, 8.0, alpha(p.warning, 15.0));
+                        }
+                        widgets::text_at(ui, rect.center().x - (over_width - 24.0) / 2.0, rect.center().y, over);
+                        if response.clicked() {
+                            *env.action = Some(Action::Retry);
+                        }
+                    }
+                });
             });
         }
     });

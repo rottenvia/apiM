@@ -138,14 +138,17 @@ async fn run(previous: Option<&str>, pending: &[Message], target: &Target, syste
 /// The automatic summary: folds `pending` into what is stored. None leaves the chat as it was.
 pub async fn refresh(stored: Option<HistorySummary>, pending: Vec<Message>, settings: Settings) -> Option<HistorySummary> {
     let target = provider::resolve_target(&settings.model, &settings).ok()?;
-    let (text, dropped) = run(stored.as_ref().map(|s| s.text.as_str()), &pending, &target, SUMMARY_SYSTEM, 700, TEXT_MAX_CHARS).await?;
+    // A /compact summary stands in for the whole chat: rolling it with the 300-word prompt would squash it on the next refresh.
+    let manual = stored.as_ref().is_some_and(|s| s.manual);
+    let (system, max_tokens, max_chars) = if manual { (compact_system(""), 2000, COMPACT_TEXT_MAX_CHARS) } else { (SUMMARY_SYSTEM.to_string(), 700, TEXT_MAX_CHARS) };
+    let (text, dropped) = run(stored.as_ref().map(|s| s.text.as_str()), &pending, &target, &system, max_tokens, max_chars).await?;
     Some(HistorySummary {
         text,
         up_to_id: pending.last()?.id.clone(),
         dropped_turns: stored.as_ref().map_or(0, |s| s.dropped_turns) + dropped as u32,
         updated_at: crate::store::iso(crate::store::now_ms()),
-        covered_turns: None,
-        manual: false,
+        covered_turns: manual.then(|| stored.as_ref().and_then(|s| s.covered_turns).unwrap_or(0) + pending.len() as u32),
+        manual,
         revised: false,
     })
 }

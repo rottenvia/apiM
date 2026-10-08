@@ -9,7 +9,18 @@
 //! rules live in `run`, one module per web library; this file wires them in.
 
 use crate::compact;
+use crate::context::findings::{self, NewFinding};
+use crate::context::goal_pin::{GOAL_PIN_MARKER, render_goal_pin, resolve_run_goal};
+use crate::context::prune::{self as pruning, QWEN_PRUNE, prune_transcript};
+use crate::context::rebuild_resume::{EXACT_RESUME_INSTRUCTION, ResumeState, rebuild_resume_from_stored, rebuilt_resume_instruction};
+use crate::context::refine::{self, KnownLesson, Outcome};
+use crate::context::subagent::{self, ToolRunner, delegate_tool, parse_delegate_args};
+use crate::context::tool_limits::tool_limits_for;
+use crate::context::Stop;
+use crate::context::tree_delta::{StepKind, TreeEntry, TreeTracker};
+use crate::context::workspace_context::build_workspace_context;
 use crate::diagnostics;
+use crate::lessons::{self, Lesson};
 use crate::mcp;
 use crate::models::{self, ProviderId, Usage, Vision};
 use crate::plugins;
@@ -25,16 +36,13 @@ use crate::store::{Attachment, Bucket, Role, Settings, ToolEvent};
 use crate::tools::{self, ChatState, Ctx, exec::Procs};
 use base64::Engine;
 use serde_json::{Map, Value, json};
-use std::collections::BTreeSet;
+use std::borrow::Cow;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 
-/// Rounds one reply may take. A run that is getting somewhere earns extensions (`stall::should_extend_round_cap`).
-const MAX_ROUNDS: usize = 64;
-/// The same cap for a custom model saved with open limits.
-const OPEN_MAX_ROUNDS: usize = 256;
 /// Times a reply cut off by the output limit is asked to carry on.
 const MAX_CONTINUATIONS: u32 = 16;
 /// Times a reply whose stream ended without a finish reason is asked to carry on.
@@ -76,6 +84,8 @@ pub enum Event {
     Retry { reason: String, attempt: usize, attempts: usize, wait: Duration },
     ToolStart(ToolEvent),
     ToolDone { id: String, ok: bool, summary: String, image: Option<PathBuf>, changed: Option<String> },
+    /// A helper's rounds so far, for its still-running `delegate` row.
+    ToolProgress { id: String, text: String },
     /// `key` is what "Always allow this" remembers; `mcp` titles the card for a remote tool.
     Approval { command: String, reason: String, key: String, mcp: bool, reply: oneshot::Sender<bool> },
     Question { question: String, options: Vec<String>, context: String, reply: oneshot::Sender<String> },
@@ -86,6 +96,8 @@ pub enum Event {
     State(ChatState),
     /// A one-line note shown in the reply: retrying, continuing, context trimmed.
     Notice(String),
+    /// The transcript so far, in the shape of the web's `resumeState`: kept on the reply so Resume can replay it.
+    Checkpoint(Value),
     Done { finish: Option<String>, incomplete: bool, stop_reason: Option<String> },
     Error(String),
 }
@@ -132,6 +144,7 @@ impl Emitter {
 }
 
 /// One message from the user, with everything needed to answer it.
+#[derive(Default)]
 pub struct Request {
     pub settings: Settings,
     /// Earlier turns of this chat, oldest first.
@@ -141,18 +154,34 @@ pub struct Request {
     pub images: Vec<Attachment>,
     /// The system message standing in for turns older than `history` (`summary::render`).
     pub summary: Option<String>,
+    /// The newest earlier question (never a "btw" note): the goal a bare "continue" falls back to.
+    pub history_last_user: Option<String>,
     pub workspace: PathBuf,
     pub state_dir: PathBuf,
     pub chat: ChatState,
     pub conv_id: String,
     /// "btw" notes the user adds while the reply runs.
     pub notes: Arc<Mutex<Vec<String>>>,
+    /// Set to carry on an interrupted reply to this message instead of answering it from the start.
+    pub resume: Option<Resume>,
+}
+
+/// An interrupted reply to carry on.
+pub struct Resume {
+    /// The reply as the web stores it (`Message::to_web`): its saved transcript under `resumeState`, or the text and steps one is rebuilt from.
+    pub prior: Value,
+    /// What the user typed next to "resume": an instruction for the rest of the work.
+    pub note: String,
+    /// What the reply had used before it stopped, so its totals carry on.
+    pub usage: Usage,
 }
 
 struct Ending {
     finish: Option<String>,
     incomplete: bool,
     stop_reason: Option<String>,
+    /// What each tool call did, for the lessons pass. Empty when lessons are off.
+    outcomes: Vec<Outcome>,
 }
 
 /// Why the loop ended short of a finished answer.
@@ -178,6 +207,203 @@ struct Lane {
     degraded: u32,
 }
 
+/// The workspace listing the model was last shown in full, and what has changed since.
+#[derive(Default)]
+struct Tree {
+    tracker: TreeTracker,
+    shown: String,
+}
+
+impl Tree {
+    /// Every file but LESSONS.md, which is already in the prompt as text.
+    fn list(root: &Path) -> (Vec<(String, u64)>, Vec<TreeEntry>) {
+        let mut files = tokio::task::block_in_place(|| tools::files::walk(root, root));
+        files.retain(|(path, _)| path != "LESSONS.md");
+        let entries = files.iter().map(|(path, size)| TreeEntry { path: path.clone(), size: *size }).collect();
+        (files, entries)
+    }
+
+    /// Puts a full listing at the end, in place of any older one and the deltas that described changes to it.
+    /// It rides at the end so everything before it stays byte-identical for the provider's cache. The wording is the web's.
+    fn show(&mut self, text: String, messages: &mut Vec<Value>) {
+        messages.retain(|m| !(m["role"] == "system" && m["content"].as_str().is_some_and(|c| c.starts_with("Current workspace contents") || c.starts_with("Workspace changes since"))));
+        messages.push(json!({ "role": "system", "content": format!("Current workspace contents (refreshed after every action — this replaces any earlier listing):{text}") }));
+        self.shown = text;
+    }
+
+    /// The opening listing. The tracker is seeded with it, so the first delta describes changes from what the model saw.
+    fn open(root: &Path, messages: &mut Vec<Value>) -> Tree {
+        let (files, entries) = Tree::list(root);
+        let mut tree = Tree::default();
+        tree.show(build_workspace_context(Some(&files)), messages);
+        tree.tracker.update(&entries);
+        tree
+    }
+
+    /// After a round's tools: nothing, a short delta appended, or a fresh listing once the deltas outgrow one.
+    fn refresh(&mut self, root: &Path, messages: &mut Vec<Value>) {
+        let (files, entries) = Tree::list(root);
+        let step = self.tracker.update(&entries);
+        match step.kind {
+            StepKind::None => {}
+            StepKind::Delta => messages.push(json!({ "role": "system", "content": step.text })),
+            StepKind::Baseline => {
+                let next = build_workspace_context(Some(&files));
+                if next != self.shown {
+                    self.show(next, messages);
+                }
+            }
+        }
+    }
+}
+
+/// What a run starts from besides its opening messages.
+#[derive(Default)]
+struct Start {
+    tree: Tree,
+    /// This message's text and the question before it: what the goal pin restates.
+    user_text: String,
+    history_last_user: Option<String>,
+    /// What a resumed reply had already spent: tool rounds, continuations against the output ceiling, nudges to stop thinking, tokens.
+    tool_rounds: usize,
+    continuations: u32,
+    think_nudges: u32,
+    usage: Usage,
+    /// What a resumed reply had already written, and the tools it had really run: closing claims are held against both.
+    answer: String,
+    tools_used: Vec<String>,
+}
+
+/// The opening messages of a resumed reply: its saved transcript (the web's `resumeState`) in place of the fresh ones,
+/// or the fresh ones followed by a transcript rebuilt from what the reply stored; then the brief to carry on.
+/// With nothing to carry forward the fresh messages come back untouched and the question is simply answered again.
+/// `findings` is the current findings block. The wording is the web's.
+fn resume_transcript(mut resume: Resume, mut messages: Vec<Value>, start: &mut Start, findings: &str) -> Vec<Value> {
+    let saved = serde_json::from_value::<ResumeState>(resume.prior["resumeState"].take()).ok().filter(|state| !state.messages.is_empty());
+    let brief = match saved {
+        Some(state) => {
+            (start.tool_rounds, start.continuations, start.think_nudges) = (state.tool_rounds as usize, state.continuations, state.think_nudges.unwrap_or(0));
+            messages = state.messages;
+            EXACT_RESUME_INSTRUCTION.to_string()
+        }
+        None => {
+            let Some(rebuilt) = rebuild_resume_from_stored(&resume.prior) else { return messages };
+            // Unknown for a reply without a saved transcript: counted from the calls it made, so the run's length is not silently reset.
+            start.tool_rounds = resume.prior["toolEvents"].as_array().map_or(0, Vec::len);
+            // Some results above are placeholders, and the brief says which: telling the model everything is intact is how it describes a file it never saw.
+            let brief = rebuilt_resume_instruction(&rebuilt);
+            messages.extend(rebuilt.messages);
+            brief
+        }
+    };
+    // Anything typed next to "resume" goes last: the final thing read before continuing is where a course correction belongs.
+    let note = resume.note.trim();
+    messages.push(user(if note.is_empty() { brief } else { format!("{brief}\n\nThe user added this instruction for the rest of the work — follow it:\n{note}") }));
+    if note.to_ascii_lowercase().contains("do not think more") {
+        start.think_nudges = start.think_nudges.max(1);
+    }
+    // Conclusions recorded during the interrupted run are on disk but not in the saved first system message.
+    if let Some(first) = messages.iter_mut().find(|m| m["role"] == "system" && m["content"].is_string()).filter(|_| !findings.is_empty()) {
+        first["content"] = json!(findings::replace_findings(first["content"].as_str().unwrap_or(""), findings));
+    }
+    start.usage = resume.usage;
+    start.answer = resume.prior["content"].as_str().unwrap_or("").to_string();
+    start.tools_used = resume.prior["toolEvents"].as_array().into_iter().flatten().filter_map(|step| step["name"].as_str().map(str::to_string)).collect();
+    messages
+}
+
+/// The run's state after a tool round, as the web saves it on an unfinished reply.
+fn checkpoint(messages: &[Value], tool_rounds: usize, continuations: u32, think_nudges: u32) -> Value {
+    json!({ "toolRounds": tool_rounds, "continuations": continuations, "thinkNudges": think_nudges, "messages": messages })
+}
+
+/// Runs a round's `delegate` calls at once: `jobs` are (call id, brief, round bound). Each is a read-only helper with a
+/// context of its own, on the reply's model with thinking off, and only its report comes back. `left` is what remains of
+/// the spending limit: a helper is never free money outside it. Returns each call's result by id, and what the helpers
+/// used and cost between them. Stopping the reply drops them mid-request.
+async fn run_helpers(target: &Target, ctx: &Ctx, tool_defs: &[Value], listing: &str, jobs: Vec<(String, String, Option<f64>)>, lane: &Lane, left: Option<f64>) -> (HashMap<String, tools::Output>, Usage, f64) {
+    // The helpers' tools get a context of their own: the same folder, keys and limits, none of the reply's plan or file memory.
+    let own = Arc::new(Ctx {
+        root: ctx.root.clone(),
+        state_dir: ctx.state_dir.clone(),
+        settings: ctx.settings.clone(),
+        client: ctx.client.clone(),
+        read_chars: ctx.read_chars,
+        limits: ctx.limits,
+        memory: Default::default(),
+        emit: ctx.emit.clone(),
+        chat: Default::default(),
+        procs: ctx.procs.clone(),
+        planner: ctx.planner.clone(),
+    });
+    let run_tool: ToolRunner = Arc::new(move |name, args| {
+        let own = own.clone();
+        Box::pin(async move { tools::run(&name, &Value::Object(args), &own).await.text })
+    });
+    let openrouter = target.provider == ProviderId::Openrouter;
+    let mut extra_body = Map::new();
+    if let Some(pinned) = provider::openrouter_provider_for(&target.model.id).filter(|_| openrouter && !lane.unpinned) {
+        extra_body.insert("provider".into(), pinned);
+    }
+    provider::apply_thinking(&mut extra_body, target.style, false, "none", lane.mandatory);
+    let mut headers = vec![("Authorization".to_string(), format!("Bearer {}", target.api_key))];
+    if openrouter {
+        headers.extend([("HTTP-Referer".to_string(), "https://github.com/rottenvia/apiM".to_string()), ("X-Title".to_string(), "apiM".to_string())]);
+    }
+    let to = subagent::Target { base_url: target.base_url.clone(), api_model: target.api_model.clone(), headers, extra_body };
+    // A helper may use the read-only tools the reply itself was offered, nothing more.
+    let available: HashSet<String> = tool_defs.iter().filter_map(|t| t["function"]["name"].as_str().map(str::to_string)).collect();
+    let customs = &ctx.settings.custom_models;
+    let cap = subagent::helper_context_cap(models::context_window(&target.model.id, customs));
+    let bill = Arc::new(Mutex::new((Usage::default(), 0.0f64)));
+    let helpers = jobs.into_iter().map(|(id, task, max_rounds)| {
+        let mut opts = subagent::Options::new(task, to.clone(), tool_defs.to_vec(), available.clone(), Stop::new(), run_tool.clone());
+        opts.tree = listing.to_string();
+        opts.max_rounds = max_rounds;
+        opts.context_cap_chars = Some(cap);
+        let (model, customs, counted) = (target.model.id.clone(), customs.clone(), bill.clone());
+        opts.on_usage = Some(Arc::new(move |u: &Value| {
+            let used = Usage::from_wire(u);
+            let mut bill = counted.lock().unwrap();
+            bill.1 += used.cost(&model, &customs).unwrap_or(0.0);
+            bill.0.add(used);
+        }));
+        let spent = bill.clone();
+        opts.should_stop = Some(Arc::new(move || left.is_some_and(|left| spent.lock().unwrap().1 >= left)));
+        let (emit, row) = (ctx.emit.clone(), id.clone());
+        opts.on_progress = Some(Arc::new(move |p: &subagent::Progress| emit.send(Event::ToolProgress { id: row.clone(), text: subagent::progress_text(p) })));
+        async move {
+            let result = subagent::run_sub_agent(&ctx.client, opts).await;
+            let (text, summary) = subagent::format_sub_agent_result(&result);
+            (id, tools::Output { ok: result.ok, text, summary, ..Default::default() })
+        }
+    });
+    let done = futures_util::future::join_all(helpers).await.into_iter().collect();
+    let (used, cost) = *bill.lock().unwrap();
+    (done, used, cost)
+}
+
+/// After a reply: a cheap model reads what the tools did and writes what that proved into the workspace's LESSONS.md.
+/// Runs on its own once the reply is over, so nothing here can hold the reply up or change it. Every failure is silence.
+async fn learn(client: reqwest::Client, helper: Target, workspace: PathBuf, outcomes: Vec<Outcome>, known: Vec<Lesson>) {
+    let known: Vec<KnownLesson> = known.into_iter().map(|l| KnownLesson { id: l.id, text: l.text, superseded_by: l.superseded_by }).collect();
+    let style = match helper.style {
+        ThinkingStyle::Deepseek => "deepseek",
+        ThinkingStyle::Qwen => "qwen",
+        _ => "openai",
+    };
+    let pass = refine::run_refine(&client, &outcomes, &known, &helper.api_key, &helper.base_url, None, Some(&helper.api_model), Some(style));
+    let Ok(refined) = tokio::time::timeout(Duration::from_secs(120), pass).await else { return };
+    if refined.lessons.is_empty() && refined.confirms.is_empty() {
+        return;
+    }
+    let updates: Vec<lessons::LessonUpdate> = refined.lessons.into_iter().map(|l| lessons::LessonUpdate { text: l.text, evidence: l.evidence, replaces: l.replaces }).collect();
+    let _ = tokio::task::spawn_blocking(move || lessons::apply_lessons(&workspace, &updates, &refined.confirms)).await;
+}
+
+// ponytail: no run registry (the web's runs.begin / touch / end, `context::runs`). Stop aborts this task from the window, and
+// Resume reads the transcript saved on the reply, so nothing here has to find a run by its message id. Wire it in when a run
+// can outlive the window that started it: the registry's idle and age limits are then what stops a wedged one.
 pub async fn run(req: Request, emit: Emitter, procs: Arc<Procs>) {
     match run_inner(req, &emit, procs).await {
         Ok(end) => emit.send(Event::Done { finish: end.finish, incomplete: end.incomplete, stop_reason: end.stop_reason }),
@@ -270,7 +496,8 @@ fn over_budget(spend: &mut Budget, last_round_cost: f64, rounds: usize, emit: &E
     }
 }
 
-async fn run_inner(req: Request, emit: &Emitter, procs: Arc<Procs>) -> Result<Ending, String> {
+async fn run_inner(mut req: Request, emit: &Emitter, procs: Arc<Procs>) -> Result<Ending, String> {
+    let resume = req.resume.take();
     let s = &req.settings;
     let target = provider::resolve_target(&s.model, s)?;
     let customs = &s.custom_models;
@@ -283,15 +510,19 @@ async fn run_inner(req: Request, emit: &Emitter, procs: Arc<Procs>) -> Result<En
     let native_vision = target.model.vision == Vision::Native;
     let web_search = s.web_mode() != "off" && (!s.tavily().is_empty() || !s.exa().is_empty());
     let git_repo = req.workspace.join(".git").exists();
-    // About 3.5 characters per token; a single read may use a quarter of the window.
+    // About 3.5 characters per token.
     let window_chars = models::context_window(&target.model.id, customs) as usize * 7 / 2;
 
+    // The model's ceilings, wider for a custom model saved with open limits. A single read may still use only a quarter of the window.
+    let limits = tool_limits_for(customs.iter().any(|c| c.open_limits && c.id() == target.model.id));
     let ctx = Ctx {
         root: req.workspace.clone(),
         state_dir: req.state_dir.clone(),
         settings: s.clone(),
         client: provider::client(),
-        read_chars: (window_chars / 4).clamp(20_000, 400_000),
+        read_chars: (window_chars / 4).clamp(20_000, limits.read_chars as usize),
+        limits,
+        memory: Default::default(),
         emit: emit.clone(),
         chat: Arc::new(Mutex::new(req.chat.clone())),
         procs,
@@ -301,6 +532,22 @@ async fn run_inner(req: Request, emit: &Emitter, procs: Arc<Procs>) -> Result<En
     let every = plugins::all(&s.custom_plugins);
     let directives = plugins::directives(&every, &s.enabled_plugins);
     let mut system = prompt::system(&plugins::legacy_prompt(&every, &s.enabled_plugins), web_search, native_vision, git_repo);
+    // What earlier turns established rides in the system prompt, read fresh from the workspace's store (the web app's file).
+    let findings_path = findings::store_path(&req.workspace);
+    if !findings_path.exists() {
+        // Findings this chat recorded before the store was shared lived only in the chat file: they move over once.
+        for old in req.chat.findings.iter().filter(|f| f.active) {
+            let _ = findings::add_finding(&findings_path, &NewFinding { claim: old.claim.clone(), refs: old.refs.clone(), evidence: old.evidence.clone() });
+        }
+    }
+    if findings::shared_findings_enabled() {
+        system.push_str(&findings::format_machine_findings_for_prompt(&findings::read_store(&findings::machine_store_path(&crate::store::data_dir()))));
+    }
+    let findings_block = findings::format_findings_for_prompt(&findings::read_store(&findings_path));
+    system.push_str(&findings_block);
+    // What earlier work in this workspace proved, when lessons are switched on.
+    let known_lessons = if s.lessons_enabled { lessons::read_lessons(&req.workspace) } else { Vec::new() };
+    system.push_str(&lessons::format_lessons_for_prompt(&known_lessons));
     // Standing orders go at the start of the first system message: some lanes only honour that one.
     if !directives.is_empty() {
         system = format!("{directives}\n\n{system}");
@@ -324,14 +571,33 @@ async fn run_inner(req: Request, emit: &Emitter, procs: Arc<Procs>) -> Result<En
         messages.push(json!({ "role": "user", "content": parts }));
     }
 
+    let mut start = Start { user_text: req.text.clone(), history_last_user: req.history_last_user.clone(), ..Default::default() };
+    if let Some(resume) = resume {
+        messages = resume_transcript(resume, messages, &mut start, &findings_block);
+    }
+    // A current listing, last: the files have moved on since a resumed reply stopped, and its saved listing goes.
+    start.tree = Tree::open(&req.workspace, &mut messages);
+
     let mut tool_defs = tools::definitions(web_search, native_vision, git_repo);
+    // Read-only helpers with their own context.
+    tool_defs.push(delegate_tool());
     // Tools lent by the MCP servers switched on in Settings ride after the built-in ones.
     tool_defs.extend(mcp::tools_for_model(&ctx.client, &crate::store::data_dir()).await);
-    drive(&target, &ctx, messages, tool_defs, effort, &req.conv_id, &req.notes).await
+    let mut end = drive(&target, &ctx, messages, tool_defs, effort, &req.conv_id, &req.notes, start).await?;
+    // The lessons pass: skipped when nothing ran, since nothing was demonstrated. Detached, so the reply ends without waiting for it.
+    let outcomes = std::mem::take(&mut end.outcomes);
+    if let (false, Some(helper)) = (outcomes.is_empty(), provider::helper_target(s)) {
+        tokio::spawn(learn(ctx.client.clone(), helper, req.workspace.clone(), outcomes, known_lessons));
+    }
+    Ok(end)
 }
 
 /// The loop itself, once the endpoint, the tools and the opening messages are settled.
-async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, tool_defs: Vec<Value>, effort: &str, conv_id: &str, notes: &Mutex<Vec<String>>) -> Result<Ending, String> {
+#[allow(clippy::too_many_arguments)]
+async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, tool_defs: Vec<Value>, effort: &str, conv_id: &str, notes: &Mutex<Vec<String>>, start: Start) -> Result<Ending, String> {
+    let Start { mut tree, user_text, history_last_user, tool_rounds: resumed_rounds, continuations: resumed_continuations, think_nudges: resumed_think_nudges, usage: resumed_usage, answer: resumed_answer, tools_used: resumed_tools } = start;
+    // The newest note the user added mid-run: it becomes the goal the pin restates.
+    let mut steering: Option<String> = None;
     let (emit, s, chat) = (&ctx.emit, &ctx.settings, &ctx.chat);
     let customs = &s.custom_models;
     let thinking = effort != "none";
@@ -345,7 +611,8 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, tool_defs: 
     let done_steps = || chat.lock().unwrap().plan.as_ref().map_or(0, |p| plan::progress(p).done);
     let started = Instant::now();
 
-    let mut usage = Usage::default();
+    // A resumed reply keeps counting its tokens from where it stopped. The spending limit starts over: Resume is how a run stopped by it goes on.
+    let mut usage = resumed_usage;
     let mut spend = Budget::new(s.budget_usd);
     let mut last_round_cost = 0.0;
     let mut last_finish = None;
@@ -354,13 +621,15 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, tool_defs: 
         replay: openrouter && target.api_model.to_ascii_lowercase().starts_with("deepseek/"),
         ..Default::default()
     };
-    // The round cap, and what the run has done since it was last checked.
-    let mut round_cap = if customs.iter().any(|c| c.open_limits && c.id() == target.model.id) { OPEN_MAX_ROUNDS } else { MAX_ROUNDS };
+    // The round cap, a guard against a model that never stops calling tools (a run that is getting somewhere earns
+    // extensions, `stall::should_extend_round_cap`), and what the run has done since it was last checked.
+    let mut round_cap = ctx.limits.agent_rounds as usize;
     let (mut cap_extensions, mut changes_since_check, mut steps_at_check) = (0u32, 0u32, done_steps());
     // How often each kind of rescue has been used on this reply.
-    let (mut continuations, mut stream_cuts, mut think_nudges, mut draft_cutovers, mut auto_revives, mut refusal_reopens) = (0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
+    let (mut continuations, mut stream_cuts, mut think_nudges, mut draft_cutovers, mut auto_revives, mut refusal_reopens) = (resumed_continuations, 0u32, 0u32, 0u32, 0u32, 0u32);
     // Thinking is off for the rest of the run, or for the next round only; the next round continues cut-off prose.
-    let (mut force_no_thinking, mut no_think_next, mut continuation_pending) = (false, false, false);
+    // A reply that already burned its output on thinking is not told it may think again when resumed.
+    let (mut force_no_thinking, mut no_think_next, mut continuation_pending) = (resumed_think_nudges > 0, false, false);
     let (mut claim_retried, mut asked_early, mut nudged_incomplete, mut ran_without_tools) = (false, false, false, false);
     // The guards: one call failing identically, calls that add nothing, a read-only streak, whole-file rewrites, a preview taken for an edit.
     let mut breaker = LoopBreaker::default();
@@ -371,11 +640,12 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, tool_defs: 
     let mut step_watch = None;
     let mut rounds_since_plan_update = 0;
     // Everything this reply has written and thought so far, across rounds, and the tools it really ran.
-    let mut answer = String::new();
+    let mut answer = resumed_answer;
     let mut thought = String::new();
     let mut fields_seen: BTreeSet<String> = BTreeSet::new();
-    let mut tools_used: Vec<String> = Vec::new();
-    let mut tool_rounds = 0;
+    let mut tools_used = resumed_tools;
+    let mut outcomes: Vec<Outcome> = Vec::new();
+    let mut tool_rounds = resumed_rounds;
     // Notes from the loop to the model that ride in the next request only: a stale plan, a step over its budget, code drafted in thought.
     // ponytail: the web pushes these as system messages and removes them by marker a round later; here they join the tail the same request already ends with.
     let mut harness: Vec<String> = Vec::new();
@@ -404,7 +674,18 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, tool_defs: 
         // Anything the user said in passing joins the conversation before the next request.
         for note in std::mem::take(&mut *notes.lock().unwrap()) {
             emit.send(Event::NoteRead { note: note.clone(), round });
+            steering = Some(note.trim().to_string());
             messages.push(user(format!("[Note from the user while you work. Take it into account and carry on; do not start over.]\n{note}")));
+        }
+        // Old tool output collapses to a line saying what it was, and fat call arguments to a stub; files still being worked from stay whole.
+        // ponytail: the web prunes the copy it sends and keeps its transcript whole; here the result is kept, like the fold below.
+        // Its `context_pruned` event is ignored by its page, so nothing is shown here either.
+        let pruned = match prune_transcript(&messages, &if qwen { QWEN_PRUNE } else { pruning::Options::default() }).0 {
+            Cow::Owned(pruned) => Some(pruned),
+            Cow::Borrowed(_) => None,
+        };
+        if let Some(pruned) = pruned {
+            messages = pruned;
         }
         // The valve: finished rounds fold into one line each once the run passes 65% of the window.
         let folded = compact::fold(&mut messages, window);
@@ -417,32 +698,22 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, tool_defs: 
             notice(&format!("Trimmed {collapsed} older tool results to fit the context window"));
         }
 
-        // What exists right now, the plan and the findings ride at the end, so the
-        // start of the request stays byte-identical and the provider's prompt cache keeps hitting.
+        // The plan rides at the end, so the start of the request stays byte-identical and the provider's prompt cache keeps hitting.
         let tail = {
-            let state = chat.lock().unwrap();
-            let mut t = tokio::task::block_in_place(|| tools::files::workspace_context(&ctx.root));
-            if let Some(plan) = &state.plan {
-                t.push_str(&format!("\n\n{}", tools::plan::format_plan(plan)));
-            }
-            let findings = tools::plan::format_findings(&state.findings);
-            if !findings.is_empty() {
-                t.push_str(&format!("\n\n{findings}"));
-            }
-            for note in harness.drain(..) {
-                t.push_str(&format!("\n\n{note}"));
-            }
-            t
+            let mut t: Vec<String> = chat.lock().unwrap().plan.iter().map(tools::plan::format_plan).collect();
+            t.append(&mut harness);
+            t.join("\n\n")
         };
         // DeepSeek takes each tool turn's reasoning back as `reasoning_content`. OpenRouter's validators reject
         // the field, so its lanes get `reasoning` where a model needs it and the end of the thought as plain text elsewhere.
         let reasoning_field = if !openrouter { Some("reasoning_content") } else if lane.replay { Some("reasoning") } else { None };
         let mut wire = transcript::wire(&messages, reasoning_field);
         if qwen {
-            // Qwen's template only accepts a system message at index 0.
-            let first = wire[0]["content"].as_str().unwrap_or("").to_string();
-            wire[0]["content"] = json!(format!("{first}\n\n{tail}"));
-        } else {
+            // Qwen's template only accepts a system message at index 0: the listing, its deltas and the tail all join the first one.
+            let (systems, rest): (Vec<Value>, Vec<Value>) = wire.into_iter().partition(|m| m["role"] == "system");
+            let text: Vec<&str> = systems.iter().filter_map(|m| m["content"].as_str()).chain([tail.as_str()]).filter(|c| !c.is_empty()).collect();
+            wire = std::iter::once(json!({ "role": "system", "content": text.join("\n\n") })).chain(rest).collect();
+        } else if !tail.is_empty() {
             wire.push(json!({ "role": "system", "content": tail }));
         }
 
@@ -633,8 +904,8 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, tool_defs: 
 
         // The limit is asked again before the tools run: one round can cross it on its own.
         if over_budget(&mut spend, last_round_cost, tool_rounds, emit) {
-            // ponytail: the web answers each pending call "Not run — the spending limit for this reply was reached …" so a
-            // resumed transcript stays legal. This transcript ends with the run; add them when resume replays one.
+            // ponytail: the web keeps this turn and answers each pending call "Not run — the spending limit for this reply was reached …".
+            // Here the turn is left out of the transcript instead, so a resumed one stays legal and the model asks for those calls again.
             halt = Some(Halt::Budget);
             break;
         }
@@ -650,11 +921,40 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, tool_defs: 
         let mut plan_touched = false;
         // A guard that ends the run, and the note the user reads about it.
         let mut stopped: Option<(Premature, String)> = None;
+        // The reports of this round's delegate calls, by call id, once the first of them has been reached.
+        let mut reports: Option<HashMap<String, tools::Output>> = None;
         for (n, call) in calls.iter().enumerate() {
             let args_text = if call.args.trim().is_empty() { "{}" } else { call.args.as_str() };
-            emit.send(Event::ToolStart(ToolEvent { id: call.id.clone(), name: call.name.clone(), args: args_text.to_string(), ..Default::default() }));
+            // A helper started with an earlier delegate call already has its row.
+            if !reports.as_ref().is_some_and(|r| r.contains_key(&call.id)) {
+                emit.send(Event::ToolStart(ToolEvent { id: call.id.clone(), name: call.name.clone(), args: args_text.to_string(), ..Default::default() }));
+            }
             let parsed = serde_json::from_str::<Value>(args_text);
             let out = match &parsed {
+                Ok(args) if call.name == "delegate" => {
+                    tools_used.push(call.name.clone());
+                    if reports.is_none() {
+                        // Several delegate calls in one round work at the same time: the first one reached starts every one still to come.
+                        let mut jobs = Vec::new();
+                        for other in calls[n..].iter().filter(|c| c.name == "delegate") {
+                            let Some((task, max_rounds)) = serde_json::from_str::<Value>(&other.args).ok().and_then(|a| parse_delegate_args(&a).ok()) else { continue };
+                            if other.id != call.id {
+                                emit.send(Event::ToolStart(ToolEvent { id: other.id.clone(), name: other.name.clone(), args: other.args.clone(), ..Default::default() }));
+                            }
+                            jobs.push((other.id.clone(), task, max_rounds));
+                        }
+                        let (done, used, cost) = run_helpers(target, ctx, &tool_defs, &tree.shown, jobs, &lane, spend.limit.map(|limit| limit - spend.spent)).await;
+                        // What the helpers used is the reply's: its totals show it and its spending limit counts it.
+                        usage.add(used);
+                        spend.spent += cost;
+                        emit.send(Event::Usage(usage));
+                        reports = Some(done);
+                    }
+                    reports.as_mut().and_then(|r| r.remove(&call.id)).unwrap_or_else(|| match parse_delegate_args(args) {
+                        Err((text, summary)) => tools::Output { summary, ..tools::Output::fail(text) },
+                        Ok(_) => tools::Output { summary: "Helper failed".into(), ..tools::Output::fail("Error: helper failed") },
+                    })
+                }
                 Ok(args) => {
                     tools_used.push(call.name.clone());
                     tools::run(&call.name, args, ctx).await
@@ -672,6 +972,9 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, tool_defs: 
                 log("tool_failed", &call.name, if out.summary.is_empty() { &out.text } else { &out.summary });
             }
             emit.send(Event::ToolDone { id: call.id.clone(), ok: out.ok, summary: out.summary.clone(), image: out.image.clone(), changed: out.changed.clone() });
+            if s.lessons_enabled {
+                outcomes.push(Outcome { name: call.name.clone(), args: args_text.to_string(), ok: out.ok, summary: out.summary.clone() });
+            }
 
             // The guards read every result. A warning rides in the result itself: the text the model is sure to read next.
             let key = match &parsed {
@@ -730,8 +1033,11 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, tool_defs: 
             finished |= out.finish;
         }
         if let Some((reason, note)) = stopped {
-            // ponytail: the web also answers every call left unrun with "Not run — the run was halted before this call ran."
-            // This transcript ends with the run, so nothing would read them; add them when resume replays one.
+            // Every call left unrun still gets an answer, so the transcript a Resume replays stays legal.
+            let answered = messages.len() - 1 - turn_at;
+            for call in &calls[answered..] {
+                messages.push(json!({ "role": "tool", "tool_call_id": call.id, "content": "Not run — the run was halted before this call ran." }));
+            }
             log("run_stopped", reason.key(), &note);
             emit.send(Event::Content(format!("{}{note}", gap_after(&answer))));
             halt = Some(Halt::Premature(reason));
@@ -745,8 +1051,17 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, tool_defs: 
             messages.push(json!({ "role": "user", "content": content }));
         }
         if finished {
-            return Ok(Ending { finish: Some("stop".into()), incomplete: false, stop_reason: None });
+            return Ok(Ending { finish: Some("stop".into()), incomplete: false, stop_reason: None, outcomes });
         }
+        // The next round must see the workspace as it is now, not as it was before these tools ran.
+        tree.refresh(&ctx.root, &mut messages);
+        // The request is restated at the end every round, so a long run cannot drift back to an older task from the history or the summary.
+        messages.retain(|m| !(m["role"] == "system" && m["content"].as_str().is_some_and(|c| c.starts_with(GOAL_PIN_MARKER))));
+        if let Some(goal) = resolve_run_goal(&user_text, history_last_user.as_deref(), steering.as_deref()) {
+            messages.push(json!({ "role": "system", "content": render_goal_pin(&goal, tool_rounds > 0) }));
+        }
+        // Saved once per tool round, where the expensive, hard-to-redo work happens: a reply stopped or failed after this resumes from here.
+        emit.send(Event::Checkpoint(checkpoint(&messages, tool_rounds, continuations, think_nudges.max(resumed_think_nudges))));
 
         // The plan goes stale while the work moves on, or the prose just claimed a step the plan does not show.
         let current = chat.lock().unwrap().plan.clone();
@@ -790,6 +1105,10 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, tool_defs: 
         let seen = if fields_seen.is_empty() { "none".to_string() } else { fields_seen.iter().cloned().collect::<Vec<_>>().join(", ") };
         log_with("api_error", "reasoning stream", "Thinking was enabled but no plain-text reasoning field was received.", json!({ "model": target.api_model, "effort": effort, "fieldsSeen": seen }));
     }
+    // A reply cut at the output ceiling is half-finished evidence: nothing is learned from it.
+    if matches!(halt, Some(Halt::OutputCeiling)) {
+        outcomes.clear();
+    }
     let mut stop_reason = halt.map(|halt| match halt {
         Halt::Premature(reason) => revive::premature_stop_notice(reason).to_string(),
         Halt::ThinkCeiling => "It thought through the whole output budget three times without writing anything — Resume continues with thinking switched off".to_string(),
@@ -800,7 +1119,11 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, tool_defs: 
     if let (Some(reason), true) = (&mut stop_reason, lane.degraded > 0) {
         reason.push_str(&format!(" — {} round{} ran without tools after rejections", lane.degraded, if lane.degraded == 1 { "" } else { "s" }));
     }
-    Ok(Ending { finish: last_finish, incomplete: stop_reason.is_some(), stop_reason })
+    if stop_reason.is_some() {
+        // An unfinished reply keeps everything up to its last word.
+        emit.send(Event::Checkpoint(checkpoint(&messages, tool_rounds, continuations, think_nudges.max(resumed_think_nudges))));
+    }
+    Ok(Ending { finish: last_finish, incomplete: stop_reason.is_some(), stop_reason, outcomes })
 }
 
 /// Folds the oldest plain turns of a request away. Returns how many went.
@@ -1180,11 +1503,209 @@ mod tests {
     }
 
     fn calls(name: &str, args: &str) -> Value {
-        json!({ "choices": [{ "delta": { "tool_calls": [{ "index": 0, "id": "call_1", "function": { "name": name, "arguments": args } }] }, "finish_reason": "tool_calls" }] })
+        call_as("call_1", name, args)
+    }
+
+    fn call_as(id: &str, name: &str, args: &str) -> Value {
+        json!({ "choices": [{ "delta": { "tool_calls": [{ "index": 0, "id": id, "function": { "name": name, "arguments": args } }] }, "finish_reason": "tool_calls" }] })
+    }
+
+    /// The system messages of a request after the first that start with `prefix`.
+    fn sent_systems(request: &Value, prefix: &str) -> Vec<String> {
+        request["messages"].as_array().unwrap().iter().skip(1).filter(|m| m["role"] == "system").filter_map(|m| m["content"].as_str()).filter(|c| c.starts_with(prefix)).map(str::to_string).collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_listing_is_shown_once_and_later_rounds_get_what_changed() {
+        let write = |id: &str, path: &str| sse(&[call_as(id, "write_file", &json!({ "path": path, "content": "hello" }).to_string())]);
+        let (_, _, _, sent) = reply(vec![write("w1", "a.txt"), write("w2", "b.txt"), sse(&[says("Here is what I did: wrote a.txt and b.txt.", Some("stop"))])], "none", None).await;
+        let listing = "Current workspace contents (refreshed after every action — this replaces any earlier listing):\n\nThe workspace is currently empty.";
+        for request in &sent {
+            assert_eq!(sent_systems(request, "Current workspace contents"), [listing]);
+        }
+        let deltas = sent_systems(&sent[2], "Workspace changes since");
+        assert_eq!(sent_systems(&sent[0], "Workspace changes since").len(), 0);
+        assert_eq!(sent_systems(&sent[1], "Workspace changes since"), deltas[..1]);
+        assert!(deltas.len() == 2 && deltas[0].ends_with("  + a.txt  (5B)") && deltas[1].ends_with("  + b.txt  (5B)"), "{deltas:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stopped_reply_is_resumed_from_its_saved_transcript() {
+        let ask = "Write the release notes into notes.txt";
+        let args = r#"{"path":"notes.txt","content":"v1"}"#;
+        let checkpoints = run_with(vec![sse(&[call_as("w1", "write_file", args)]), sse(&[says("Here is what I did: wrote notes.txt.", Some("stop"))])], "none", None, |dir| opening(dir, ask)).await.checkpoints;
+        // What a Stop during the second request leaves on the reply: the transcript after the first tool round.
+        let prior = json!({ "role": "assistant", "content": "", "resumeState": checkpoints[0], "toolEvents": [{ "id": "w1", "name": "write_file", "args": args, "ok": true, "summary": "Wrote notes.txt" }] });
+        let resume = Resume { prior, note: " keep it short ".into(), usage: Usage { prompt: 7, ..Default::default() } };
+        let Ran { text, end, sent, .. } = run_with(vec![sse(&[says("Here is what I did: carried on, and notes.txt is written.", Some("stop"))])], "none", None, |dir| {
+            let mut start = Start { user_text: ask.into(), ..Default::default() };
+            let mut messages = resume_transcript(resume, vec![json!({ "role": "system", "content": "fresh rules" }), user(ask)], &mut start, "");
+            assert_eq!((start.tool_rounds, start.usage.prompt), (1, 7));
+            start.tree = Tree::open(dir, &mut messages);
+            (messages, start)
+        })
+        .await;
+        assert_eq!((text.as_str(), end.incomplete), ("Here is what I did: carried on, and notes.txt is written.", false));
+        // The saved round is replayed under the prompt it ran with: the call, its result, then the brief ending in the user's note.
+        let messages = sent[0]["messages"].as_array().unwrap();
+        assert_eq!((messages[0]["content"].as_str(), sent_args(&sent[0])), (Some("rules"), vec![args.to_string()]));
+        assert!(last_result(&sent[0]).starts_with("Wrote notes.txt"));
+        let brief = messages.iter().rev().find(|m| m["role"] == "user").unwrap()["content"].as_str().unwrap();
+        assert!(brief.starts_with(EXACT_RESUME_INSTRUCTION) && brief.ends_with("follow it:\nkeep it short"), "{brief}");
+        // One listing, of the workspace as it is now, in place of the saved one and its delta.
+        assert_eq!(sent_systems(&sent[0], "Workspace changes since").len(), 0);
+        assert_eq!(sent_systems(&sent[0], "Current workspace contents"), [messages.last().unwrap()["content"].as_str().unwrap()]);
+    }
+
+    #[test]
+    fn a_reply_with_no_saved_transcript_is_rebuilt_from_its_steps() {
+        let fresh = || vec![json!({ "role": "system", "content": "rules" }), user("q")];
+        let prior = json!({ "role": "assistant", "content": "Half an answer", "toolEvents": [{ "id": "t1", "name": "write_file", "args": "{\"path\":\"a.txt\",\"content\":\"x\"}", "ok": true, "summary": "Wrote a.txt" }] });
+        let mut start = Start::default();
+        let messages = resume_transcript(Resume { prior, note: String::new(), usage: Usage::default() }, fresh(), &mut start, "");
+        assert_eq!((messages[..2].to_vec(), start.tool_rounds), (fresh(), 1));
+        assert!(messages.len() > 3 && messages.last().unwrap()["content"].as_str().unwrap().starts_with("You were interrupted before finishing. Everything above is your own work from that attempt"));
+        assert!(crate::context::prune::tool_calls_are_balanced(&messages));
+        // Nothing arrived at all: there is nothing to carry forward, and the question is answered normally.
+        let empty = Resume { prior: json!({ "role": "assistant", "content": "" }), note: String::new(), usage: Usage::default() };
+        assert_eq!(resume_transcript(empty, fresh(), &mut Start::default(), ""), fresh());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn delegate_calls_in_one_round_run_as_helpers_and_report_back() {
+        let call = |index: u32, id: &str, args: &str| json!({ "index": index, "id": id, "function": { "name": "delegate", "arguments": args } });
+        let round = json!({ "choices": [{ "delta": { "tool_calls": [call(0, "d1", r#"{"task":"Find where the parser lives"}"#), call(1, "d2", r#"{"task":" Find where the lexer lives "}"#), call(2, "d3", "{}")] }, "finish_reason": "tool_calls" }] });
+        let report = || refuse(200, "", &json!({ "choices": [{ "message": { "role": "assistant", "content": "It lives in src/parse.rs:10." } }], "usage": { "prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120 } }).to_string());
+        let ran = run_with(vec![sse(&[round]), report(), report(), sse(&[says("Here is what I did: asked two helpers, and both point at src/parse.rs.", Some("stop"))])], "none", None, |dir| opening(dir, "q")).await;
+        assert_eq!(ran.sent.len(), 4);
+        // Each helper is its own conversation: the research prompt, the brief, the reply's read-only tools, thinking off.
+        let mut briefs = Vec::new();
+        for helper in &ran.sent[1..3] {
+            assert!(helper["messages"][0]["content"].as_str().unwrap().starts_with("You are a research helper") && helper["messages"].as_array().unwrap().len() == 2);
+            assert_eq!((helper["stream"].as_bool(), helper["thinking"]["type"].as_str(), helper["tools"][0]["function"]["name"].as_str()), (Some(false), Some("disabled"), Some("read_file")));
+            briefs.push(helper["messages"][1]["content"].as_str().unwrap().to_string());
+        }
+        briefs.sort();
+        assert_eq!(briefs, ["Find where the lexer lives", "Find where the parser lives"]);
+        // The reply reads the two reports and the refusal of the call that had no brief, in call order.
+        let results: Vec<&str> = ran.sent[3]["messages"].as_array().unwrap().iter().filter(|m| m["role"] == "tool").map(|m| m["content"].as_str().unwrap()).collect();
+        assert!(results.len() == 3 && results[..2].iter().all(|r| r.starts_with("Helper report (1 round, 0 tool calls).\n\nIt lives in src/parse.rs:10.")), "{results:?}");
+        assert!(results[2].starts_with("Error: task is required — the helper's complete brief."), "{}", results[2]);
+        assert_eq!(ran.steps, [("d1", "Helper finished · 1 round, 0 tool calls"), ("d2", "Helper finished · 1 round, 0 tool calls"), ("d3", "No task given")].map(|(id, summary)| (id.to_string(), summary.to_string())));
+        // What the helpers used is counted on the reply.
+        assert_eq!((ran.usage.prompt, ran.usage.completion), (200, 40));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_request_is_pinned_after_each_tool_round() {
+        let ask = "Write the release notes into notes.txt";
+        let write = |id: &str, text: &str| sse(&[call_as(id, "write_file", &json!({ "path": "notes.txt", "content": text }).to_string())]);
+        let (_, _, _, sent) = reply_to(ask, vec![write("w1", "v1"), write("w2", "v2"), sse(&[says("Here is what I did: wrote notes.txt.", Some("stop"))])], "none", None).await;
+        assert!(sent_systems(&sent[0], GOAL_PIN_MARKER).is_empty());
+        for request in &sent[1..] {
+            // One pin however many rounds ran, and it is the last thing read.
+            let pins = sent_systems(request, GOAL_PIN_MARKER);
+            assert!(pins.len() == 1 && pins[0].contains("You are mid-task on this request") && pins[0].ends_with(ask), "{pins:?}");
+            assert_eq!(request["messages"].as_array().unwrap().last().unwrap()["content"], pins[0]);
+        }
+    }
+
+    /// The newest tool result in a request.
+    fn last_result(request: &Value) -> String {
+        request["messages"].as_array().unwrap().iter().rev().find(|m| m["role"] == "tool").unwrap()["content"].as_str().unwrap().to_string()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_file_this_reply_wrote_is_read_back_from_memory_until_it_changes() {
+        // 30,000 characters: more than this test's 20,000-character read budget.
+        let body = "line of text\n".repeat(2_308);
+        let write = sse(&[call_as("w1", "write_file", &json!({ "path": "big.txt", "content": body }).to_string())]);
+        let read = |id: &str| sse(&[call_as(id, "read_file", r#"{"path":"big.txt"}"#)]);
+        let edit = sse(&[call_as("e1", "edit_file", r#"{"path":"big.txt","start_line":1,"end_line":1,"new_text":"changed"}"#)]);
+        let (_, _, _, sent) = reply(vec![write, read("r1"), edit, read("r2"), sse(&[says("Here is what I did: wrote big.txt, read it and edited it.", Some("stop"))])], "none", None).await;
+        let recalled = last_result(&sent[2]);
+        assert!(recalled.starts_with("big.txt: EXACT, all 2308 lines, 30004 chars — served from the run's own write") && !recalled.contains("CUT SHORT"), "{}", &recalled[..200]);
+        // After the edit the memory no longer matches the disk: an ordinary read, cut at the budget.
+        let fresh = last_result(&sent[4]);
+        assert!(fresh.starts_with("big.txt: lines 1-") && fresh.contains("CUT SHORT"), "{}", &fresh[..200]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn what_a_run_proved_is_written_to_the_lessons_file() {
+        let answer = json!({ "lessons": [{ "text": "Tests here run with cargo test -j 3", "evidence": "run_tests passed with it" }, { "text": "A guess", "evidence": "" }], "confirms": [] });
+        let (base, seen) = stub(vec![refuse(200, "", &json!({ "choices": [{ "message": { "content": answer.to_string() } }] }).to_string())]);
+        let dir = std::env::temp_dir().join(format!("apim-learn-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let helper = Target { model: models::resolve("deepseek-v4-flash", &[]), provider: ProviderId::Deepseek, style: ThinkingStyle::Deepseek, api_key: "test".into(), base_url: base, api_model: "stub".into() };
+        let outcomes = vec![Outcome { name: "run_tests".into(), args: "{}".into(), ok: true, summary: "12 passed".into() }];
+        learn(reqwest::Client::builder().no_proxy().build().unwrap(), helper, dir.clone(), outcomes, Vec::new()).await;
+        let saved = lessons::read_lessons(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        // The one with evidence is kept; the guess is refused.
+        assert_eq!(saved.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), ["Tests here run with cargo test -j 3"]);
+        assert!(seen.lock().unwrap()[0]["messages"][1]["content"].as_str().unwrap().contains("run_tests"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_finding_is_filed_in_the_workspace_store_and_can_be_retired() {
+        let note = sse(&[call_as("n1", "note_finding", r#"{"claim":"The parser lives in src/parse.rs","refs":["src/parse.rs"]}"#)]);
+        let again = sse(&[call_as("n2", "note_finding", r#"{"claim":"done","id":"nope","status":"disproved"}"#)]);
+        let (_, _, _, sent) = reply(vec![note, again, sse(&[says("Here is what I did: noted where the parser lives.", Some("stop"))])], "none", None).await;
+        assert!(last_result(&sent[1]).starts_with("Finding recorded ["), "{}", last_result(&sent[1]));
+        assert!(last_result(&sent[2]).starts_with("No active finding with id nope was found to revise."), "{}", last_result(&sent[2]));
+    }
+
+    /// The arguments of every tool call in a request, oldest first.
+    fn sent_args(request: &Value) -> Vec<String> {
+        request["messages"].as_array().unwrap().iter().filter(|m| m["tool_calls"].is_array()).map(|m| m["tool_calls"][0]["function"]["arguments"].as_str().unwrap().to_string()).collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fat_arguments_of_superseded_writes_are_stubbed() {
+        let write = |id: &str, fill: &str| sse(&[call_as(id, "write_file", &json!({ "path": "a.txt", "content": fill.repeat(10_000) }).to_string())]);
+        let (_, end, _, sent) = reply(vec![write("w1", "a"), write("w2", "b"), write("w3", "c"), sse(&[says("Here is what I did: wrote a.txt three times.", Some("stop"))])], "none", None).await;
+        assert!(!end.incomplete);
+        // Two writes are under the pruning threshold; with the third, the two it replaced lose their content.
+        assert!(sent_args(&sent[2]).iter().all(|a| a.len() > 10_000));
+        let last = sent_args(&sent[3]);
+        assert!(last[0].starts_with(r#"{"_trimmed":true"#) && last[1].starts_with(r#"{"_trimmed":true"#) && last[2].len() > 10_000, "{:?}", last.iter().map(String::len).collect::<Vec<_>>());
     }
 
     /// One whole reply against the stub, driven the way `run` drives it: what it wrote, how it ended, its notices, and every request sent.
     async fn reply(replies: Vec<String>, effort: &str, budget: Option<f64>) -> (String, Ending, Vec<String>, Vec<Value>) {
+        reply_to("q", replies, effort, budget).await
+    }
+
+    /// The same, for a question of the test's choosing.
+    async fn reply_to(question: &str, replies: Vec<String>, effort: &str, budget: Option<f64>) -> (String, Ending, Vec<String>, Vec<Value>) {
+        let ran = run_with(replies, effort, budget, |dir| opening(dir, question)).await;
+        (ran.text, ran.end, ran.notices, ran.sent)
+    }
+
+    /// Everything a test may ask about one run.
+    struct Ran {
+        text: String,
+        end: Ending,
+        notices: Vec<String>,
+        /// Every request the stub was sent, in order.
+        sent: Vec<Value>,
+        /// The resume states saved along the way.
+        checkpoints: Vec<Value>,
+        /// The last token totals reported.
+        usage: Usage,
+        /// (call id, summary) of every finished step.
+        steps: Vec<(String, String)>,
+    }
+
+    /// What `run_inner` opens an ordinary reply with: the prompt, the question, the listing.
+    fn opening(dir: &Path, question: &str) -> (Vec<Value>, Start) {
+        let mut messages = vec![json!({ "role": "system", "content": "rules" }), user(question)];
+        let tree = Tree::open(dir, &mut messages);
+        (messages, Start { tree, user_text: question.into(), ..Default::default() })
+    }
+
+    /// A reply from opening messages of the test's making (given the workspace folder).
+    async fn run_with(replies: Vec<String>, effort: &str, budget: Option<f64>, open: impl FnOnce(&Path) -> (Vec<Value>, Start)) -> Ran {
         let (base, seen) = stub(replies);
         let (tx, rx) = mpsc::channel();
         let dir = std::env::temp_dir().join(format!("apim-loop-{}-{}", std::process::id(), base.rsplit(':').next().unwrap()));
@@ -1195,26 +1716,31 @@ mod tests {
             settings: Settings { budget_usd: budget, ..Settings::default() },
             client: reqwest::Client::builder().no_proxy().build().unwrap(),
             read_chars: 20_000,
+            limits: tool_limits_for(false),
+            memory: Default::default(),
             emit: Emitter::new(tx, || {}),
             chat: Arc::new(Mutex::new(ChatState { plan: None, findings: Vec::new(), finish_bounced: false })),
             procs: Arc::new(Procs::default()),
             planner: None,
         };
         let target = Target { model: models::resolve("deepseek-v4-flash", &[]), provider: ProviderId::Deepseek, style: ThinkingStyle::Deepseek, api_key: "test".into(), base_url: base, api_model: "stub".into() };
-        let opening = vec![json!({ "role": "system", "content": "rules" }), user("q")];
-        let end = drive(&target, &ctx, opening, vec![json!({ "type": "function", "function": { "name": "read_file" } })], effort, "test", &Mutex::new(Vec::new())).await.unwrap();
+        let (opening, start) = open(&dir);
+        let end = drive(&target, &ctx, opening, vec![json!({ "type": "function", "function": { "name": "read_file" } })], effort, "test", &Mutex::new(Vec::new()), start).await.unwrap();
         drop(ctx);
-        let (mut text, mut notices) = (String::new(), Vec::new());
+        let mut ran = Ran { text: String::new(), end, notices: Vec::new(), sent: Vec::new(), checkpoints: Vec::new(), usage: Usage::default(), steps: Vec::new() };
         for event in rx.try_iter() {
             match event {
-                Event::Content(t) => text.push_str(&t),
-                Event::Notice(n) => notices.push(n),
+                Event::Content(t) => ran.text.push_str(&t),
+                Event::Notice(n) => ran.notices.push(n),
+                Event::Checkpoint(state) => ran.checkpoints.push(state),
+                Event::Usage(usage) => ran.usage = usage,
+                Event::ToolDone { id, summary, .. } => ran.steps.push((id, summary)),
                 _ => {}
             }
         }
         let _ = std::fs::remove_dir_all(&dir);
-        let sent = seen.lock().unwrap().clone();
-        (text, end, notices, sent)
+        ran.sent = seen.lock().unwrap().clone();
+        ran
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1223,7 +1749,7 @@ mod tests {
         assert_eq!(text, "The first half of the answer and the second half.");
         assert_eq!(notices, ["Answer was longer than one response allows — continuing (1/16)"]);
         assert!(!end.incomplete && end.stop_reason.is_none());
-        assert!(sent[1]["messages"][3]["content"].as_str().unwrap().starts_with("You reached the output limit mid-answer. Continue from exactly where you stopped"));
+        assert!(sent[1]["messages"][4]["content"].as_str().unwrap().starts_with("You reached the output limit mid-answer. Continue from exactly where you stopped"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1254,7 +1780,7 @@ mod tests {
         assert_eq!((text.as_str(), end.incomplete), ("Short answer.", false));
         assert_eq!(notices, ["Used the thinking budget — answering now, without another think"]);
         assert_eq!((sent[0]["thinking"]["type"].as_str(), sent[1]["thinking"]["type"].as_str()), (Some("enabled"), Some("disabled")));
-        assert_eq!(sent[1]["messages"][3]["content"], THINK_ONLY[0]);
+        assert_eq!(sent[1]["messages"][4]["content"], THINK_ONLY[0]);
     }
 
     #[tokio::test(flavor = "multi_thread")]

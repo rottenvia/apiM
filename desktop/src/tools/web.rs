@@ -8,10 +8,7 @@ use std::net::IpAddr;
 use std::sync::LazyLock;
 use std::time::Duration;
 
-const FETCH_CHARS: usize = 200_000;
-const FETCH_BYTES: usize = 5 * 1024 * 1024;
 const DOWNLOAD_BYTES: u64 = 200 * 1024 * 1024;
-const FIND_MATCHES: usize = 20;
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) apiM/0.1";
 
 /// Refuses addresses on this machine and the local network, so a page or a model
@@ -102,15 +99,15 @@ pub fn html_to_text(html: &str) -> String {
 }
 
 /// Only the lines matching `find`, each with a little context.
-fn find_lines(text: &str, find: &str) -> String {
+fn find_lines(text: &str, find: &str, max: usize) -> String {
     let needle = Regex::new(&format!("(?i){find}")).unwrap_or_else(|_| re(&format!("(?i){}", regex::escape(find))));
     let lines: Vec<&str> = text.lines().collect();
     let hits: Vec<usize> = (0..lines.len()).filter(|&i| needle.is_match(lines[i])).collect();
     if hits.is_empty() {
         return format!("`{find}` does not appear in the page ({} lines).", lines.len());
     }
-    let mut out = format!("{} matching lines (showing up to {FIND_MATCHES}):\n", hits.len());
-    for &i in hits.iter().take(FIND_MATCHES) {
+    let mut out = format!("{} matching lines (showing up to {max}):\n", hits.len());
+    for &i in hits.iter().take(max) {
         for n in i.saturating_sub(1)..(i + 2).min(lines.len()) {
             let line: String = lines[n].chars().take(600).collect();
             out.push_str(&format!("{}{} {line}\n", n + 1, if n == i { ":" } else { "-" }));
@@ -131,7 +128,7 @@ pub async fn fetch_url(ctx: &Ctx, args: &Value) -> Output {
     };
     let status = resp.status();
     let kind = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
-    let (bytes, cut) = match read_capped(resp, FETCH_BYTES).await {
+    let (bytes, cut) = match read_capped(resp, ctx.limits.fetch_bytes as usize).await {
         Ok(b) => b,
         Err(e) => return Output::fail(e),
     };
@@ -139,8 +136,8 @@ pub async fn fetch_url(ctx: &Ctx, args: &Value) -> Output {
     let is_html = kind.contains("html") || body.trim_start().starts_with("<!") || body.trim_start().to_ascii_lowercase().starts_with("<html");
     let text = if is_html && !bool_arg(args, "raw") { html_to_text(&body) } else { body.into_owned() };
     let find = str_arg(args, "find");
-    let shown = if find.is_empty() { clip(&text, FETCH_CHARS) } else { find_lines(&text, find) };
-    let header = format!("{url} answered {} ({kind}, {} chars{})", status.as_u16(), text.len(), if cut { ", cut at 5 MB" } else { "" });
+    let shown = if find.is_empty() { clip(&text, ctx.limits.fetch_chars as usize) } else { find_lines(&text, find, ctx.limits.fetch_find_matches as usize) };
+    let header = format!("{url} answered {} ({kind}, {} chars{})", status.as_u16(), text.len(), if cut { format!(", cut at {} MB", ctx.limits.fetch_bytes >> 20) } else { String::new() });
     Output { ok: status.is_success(), ..Output::ok(format!("{header}\n\n{shown}"), format!("Read {} ({})", url.host_str().unwrap_or(""), status.as_u16())) }
 }
 
@@ -175,7 +172,7 @@ pub async fn http_request(ctx: &Ctx, args: &Value) -> Output {
     };
     let status = resp.status();
     let headers: String = resp.headers().iter().take(30).map(|(k, v)| format!("{k}: {}\n", v.to_str().unwrap_or("?"))).collect();
-    let (bytes, _) = match read_capped(resp, FETCH_BYTES).await {
+    let (bytes, _) = match read_capped(resp, ctx.limits.fetch_bytes as usize).await {
         Ok(b) => b,
         Err(e) => return Output::fail(e),
     };
@@ -261,6 +258,6 @@ mod tests {
     fn html_becomes_text() {
         let html = "<html><head><title>T</title><style>p{}</style></head><body><h1>Hi &amp; bye</h1><script>x()</script><p>One<br>two&nbsp;&#33;</p><!-- c --></body></html>";
         assert_eq!(html_to_text(html), "Hi & bye\n\nOne\ntwo !");
-        assert!(find_lines("a\nversion: 2\nb", "version").contains("2: version: 2"));
+        assert!(find_lines("a\nversion: 2\nb", "version", 20).contains("2: version: 2"));
     }
 }

@@ -79,7 +79,7 @@ fn headless(args: &[String]) {
         state_dir: dir.join(".apim-state"),
         chat: Default::default(),
         conv_id: store::new_id(),
-        notes: Default::default(),
+        ..Default::default()
     };
     let rt = runtime();
     rt.spawn(agent::run(request, agent::Emitter::new(tx, || {}), Arc::new(tools::exec::Procs::default())));
@@ -109,7 +109,7 @@ fn headless(args: &[String]) {
                 println!("\n[error: {e}]");
                 break;
             }
-            Status(_) | Reasoning(_) | ToolDraft { .. } | NoteRead { .. } | State(_) | Context(_) => {}
+            Status(_) | Reasoning(_) | ToolDraft { .. } | NoteRead { .. } | State(_) | Context(_) | Checkpoint(_) | ToolProgress { .. } => {}
         }
     }
 }

@@ -35,6 +35,10 @@ pub struct Ctx {
     pub client: reqwest::Client,
     /// Character budget for one read, sized to the model's context window.
     pub read_chars: usize,
+    /// The model's ceilings: files per call, characters per page, search hits. Wider for a custom model saved with open limits.
+    pub limits: &'static crate::context::tool_limits::ToolLimits,
+    /// The files this reply wrote, so reading one straight back is answered without a cut.
+    pub memory: crate::context::run_memory::RunFileMemory,
     pub emit: Emitter,
     pub chat: Arc<Mutex<ChatState>>,
     pub procs: Arc<exec::Procs>,
@@ -161,6 +165,10 @@ pub async fn run(name: &str, args: &Value, ctx: &Ctx) -> Output {
     let at_root = |f: fn(&std::path::Path, &Value) -> Output| tokio::task::block_in_place(|| f(&ctx.root, args));
     if name.starts_with("mcp__") {
         return mcp_call(name, args, ctx).await;
+    }
+    // A command may rewrite, reformat or generate anything: after one the disk is the only truth.
+    if matches!(name, "run_command" | "run_tests" | "start_process") {
+        ctx.memory.invalidate_all();
     }
     match name {
         "list_files" => sync(files::list_files),
