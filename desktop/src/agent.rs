@@ -1,32 +1,67 @@
 //! The agent loop: send the conversation, stream the reply, run the tools it
 //! asks for, repeat until it answers. Runs on the async runtime and reports to
 //! the window through events.
+//!
+//! Around each round it does what the web app's chat route does: retries a
+//! request the provider dropped, reshapes one it rejected, carries on a reply
+//! that was cut off, picks up a model that stopped mid-task, and halts a run
+//! that repeats itself, makes no progress, or reaches the spending limit. The
+//! rules live in `run`, one module per web library; this file wires them in.
 
-use crate::models::{self, ProviderId, Usage, Vision};
-use crate::plugins;
-use crate::prompt;
-use crate::provider::{self, Delta, RoundError, Target, ThinkingStyle};
 use crate::compact;
 use crate::diagnostics;
 use crate::mcp;
+use crate::models::{self, ProviderId, Usage, Vision};
+use crate::plugins;
+use crate::prompt;
+use crate::provider::{self, Delta, Failure, Target, ThinkingStyle};
+use crate::run::budget::{self, Budget, Verdict};
+use crate::run::dedup::ContinuationDedup;
+use crate::run::loop_breaker::{self, LoopBreaker};
+use crate::run::revive::{self, Premature};
+use crate::run::stall::{self, ChurnTracker, GatherTracker, PreviewTracker, StallTracker};
+use crate::run::{fixed, head, plan, retry, transcript};
 use crate::store::{Attachment, Bucket, Role, Settings, ToolEvent};
 use crate::tools::{self, ChatState, Ctx, exec::Procs};
 use base64::Engine;
 use serde_json::{Map, Value, json};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 
-/// Tool rounds one reply may take before it stops and offers to continue.
+/// Rounds one reply may take. A run that is getting somewhere earns extensions (`stall::should_extend_round_cap`).
 const MAX_ROUNDS: usize = 64;
+/// The same cap for a custom model saved with open limits.
+const OPEN_MAX_ROUNDS: usize = 256;
 /// Times a reply cut off by the output limit is asked to carry on.
-const MAX_CONTINUATIONS: usize = 3;
-const MAX_RETRIES: usize = 3;
+const MAX_CONTINUATIONS: u32 = 16;
+/// Times a reply whose stream ended without a finish reason is asked to carry on.
+const MAX_STREAM_CUTS: u32 = 4;
+/// Times a round that spent its whole output on thinking is told to answer without it.
+const MAX_THINK_NUDGES: u32 = 2;
+/// Waits on a rate limit that outlasted the ordinary retries.
+const MAX_RATE_LIMIT_WAITS: u32 = 6;
+/// Times steps blocked by a refusal, or before anything was tried, are reopened.
+const MAX_REFUSAL_REOPENS: u32 = 2;
+/// What a request rejected for its size is folded down to before the retry.
+const FOLD_RETRY_TARGET_CHARS: usize = 350_000;
 /// Earlier turns sent verbatim with each request.
 const HISTORY_TURNS: usize = 40;
 /// Newest tool results that are never collapsed.
 const KEEP_RECENT_RESULTS: usize = 6;
+
+// What the model is told on the paths below. The wording is the web app's.
+const CARRY_ON: &str = "Continue from exactly where you stopped — do not repeat anything you already wrote, do not restate the plan, and do not apologise. Carry straight on from the last character.";
+const CLAIM_RETRY: &str = "Your reply above describes tools running and reporting results — edits applied, a build coming back green, checks passing — but those tools were not called in this reply. The user reads that as work that happened. Finish this reply one of two ways: either actually call the tools now and report exactly what comes back, or rewrite the reply to state plainly what was and was not done. Do not describe output you do not have.";
+const REOPEN_BLOCKED: &str = "A blocked step means something OUTSIDE your control is in the way — a failing command, a missing file, a decision only the user can make. It is not a way to decline the task. This is ordinary creative and technical work on the user's own machine; there is nothing here to refuse. The blocked steps have been reopened. Do them now: pick a concrete approach and start with the first tool call. If your first idea for an approach seems unsuitable, use a different approach — do not stop. Only a real external obstacle may block a step, and even then ask_user first.";
+const BLOCKED_UNTRIED: &str = "You marked work blocked without attempting any of it. Try the steps first. If something genuinely cannot be done — a missing key, a decision only the user can make — use ask_user to ask for it directly rather than stopping.";
+const NARRATED: &str = "\n\nYou just described the next action instead of doing it. Do not narrate, plan aloud, or repeat what you already said — call the tool in this response.";
+const THINK_ONLY: [&str; 2] = [
+    "You used the whole output budget on thinking and produced no answer and no tool call. Stop reasoning. Call a tool or write the reply now. Do not think more.",
+    "Still no answer and no tool call. Do not think. Write the reply or call a tool NOW, briefly.",
+];
 
 pub enum Event {
     /// What the model is doing right now: "Thinking", "Writing", "Working".
@@ -120,6 +155,29 @@ struct Ending {
     stop_reason: Option<String>,
 }
 
+/// Why the loop ended short of a finished answer.
+enum Halt {
+    Premature(Premature),
+    /// Every nudge to stop thinking was spent and the output still went to thought.
+    ThinkCeiling,
+    OutputCeiling,
+    CutsExhausted,
+    Budget,
+}
+
+/// What a run learns about its endpoint along the way. Each stays for the rest of the reply.
+#[derive(Default)]
+struct Lane {
+    /// The endpoint refuses "reasoning off": minimal effort is sent instead.
+    mandatory: bool,
+    /// The pinned OpenRouter endpoint turned the run away.
+    unpinned: bool,
+    /// Each tool turn's reasoning is replayed in OpenRouter's `reasoning` field (DeepSeek models behind it need it back).
+    replay: bool,
+    /// Rounds that only got through with their tools stripped.
+    degraded: u32,
+}
+
 pub async fn run(req: Request, emit: Emitter, procs: Arc<Procs>) {
     match run_inner(req, &emit, procs).await {
         Ok(end) => emit.send(Event::Done { finish: end.finish, incomplete: end.incomplete, stop_reason: end.stop_reason }),
@@ -166,6 +224,52 @@ fn prune(messages: &mut [Value], budget_chars: usize) -> usize {
     collapsed
 }
 
+/// A line for the diagnostics log. That log is the user's own: tests leave it alone.
+fn log(kind: &str, subject: &str, detail: &str) {
+    if cfg!(not(test)) {
+        diagnostics::record(kind, subject, detail);
+    }
+}
+
+fn log_with(kind: &str, subject: &str, detail: &str, context: Value) {
+    if cfg!(not(test)) {
+        diagnostics::record_with(kind, subject, detail, context);
+    }
+}
+
+fn user(text: impl Into<String>) -> Value {
+    json!({ "role": "user", "content": text.into() })
+}
+
+fn assistant(content: &str, reasoning: &str) -> Value {
+    let mut turn = json!({ "role": "assistant", "content": content });
+    if !reasoning.is_empty() {
+        turn["reasoning_content"] = json!(reasoning);
+    }
+    turn
+}
+
+/// A blank line before a note the loop appends, when the reply already has text.
+fn gap_after(answer: &str) -> &'static str {
+    if answer.trim().is_empty() { "" } else { "\n\n" }
+}
+
+/// Asks the spending limit whether another step may run. Warns once near it; true means the run stops here.
+fn over_budget(spend: &mut Budget, last_round_cost: f64, rounds: usize, emit: &Emitter) -> bool {
+    let Some(limit) = spend.limit else { return false };
+    match spend.check(last_round_cost) {
+        Verdict::Continue => false,
+        Verdict::Warn => {
+            emit.send(Event::Notice(format!("Spending limit approaching — ${} of ${} used on this reply", fixed(spend.spent, 4), fixed(limit, 2))));
+            false
+        }
+        Verdict::Stop(reason) => {
+            log_with("run_stopped", "spending limit", reason, json!({ "spentUsd": spend.spent, "limitUsd": limit, "rounds": rounds }));
+            true
+        }
+    }
+}
+
 async fn run_inner(req: Request, emit: &Emitter, procs: Arc<Procs>) -> Result<Ending, String> {
     let s = &req.settings;
     let target = provider::resolve_target(&s.model, s)?;
@@ -174,17 +278,14 @@ async fn run_inner(req: Request, emit: &Emitter, procs: Arc<Procs>) -> Result<En
     let effort = if s.effort == "auto" { prompt::auto_effort(&req.text) } else { s.effort.as_str() };
     // Local models on a CPU cannot spend the top effort: thinking fills the output budget and no answer comes.
     let effort = if target.style == ThinkingStyle::Qwen && s.effort == "auto" && effort == "max" { "high" } else { effort };
-    let thinking = effort != "none";
 
     std::fs::create_dir_all(&req.workspace).map_err(|e| format!("Cannot open the workspace folder {}: {e}", req.workspace.display()))?;
     let native_vision = target.model.vision == Vision::Native;
     let web_search = s.web_mode() != "off" && (!s.tavily().is_empty() || !s.exa().is_empty());
     let git_repo = req.workspace.join(".git").exists();
-    let window = models::context_window(&target.model.id, customs);
     // About 3.5 characters per token; a single read may use a quarter of the window.
-    let window_chars = window as usize * 7 / 2;
+    let window_chars = models::context_window(&target.model.id, customs) as usize * 7 / 2;
 
-    let chat = Arc::new(Mutex::new(req.chat.clone()));
     let ctx = Ctx {
         root: req.workspace.clone(),
         state_dir: req.state_dir.clone(),
@@ -192,7 +293,7 @@ async fn run_inner(req: Request, emit: &Emitter, procs: Arc<Procs>) -> Result<En
         client: provider::client(),
         read_chars: (window_chars / 4).clamp(20_000, 400_000),
         emit: emit.clone(),
-        chat: chat.clone(),
+        chat: Arc::new(Mutex::new(req.chat.clone())),
         procs,
         planner: provider::helper_target(s).map(|h| crate::search::Planner { api_key: h.api_key, base_url: h.base_url, api_model: h.api_model, deepseek: h.style == ThinkingStyle::Deepseek }),
     };
@@ -216,7 +317,7 @@ async fn run_inner(req: Request, emit: &Emitter, procs: Arc<Procs>) -> Result<En
     let images: Vec<Value> = if native_vision { req.images.iter().filter_map(|a| a.data_url.as_ref()).map(|url| json!({ "type": "image_url", "image_url": { "url": url } })).collect() } else { Vec::new() };
     if images.is_empty() {
         let note = if req.images.is_empty() { String::new() } else { format!("\n\n[The user attached {} image(s), but this model cannot see images.]", req.images.len()) };
-        messages.push(json!({ "role": "user", "content": format!("{}{note}", req.text) }));
+        messages.push(user(format!("{}{note}", req.text)));
     } else {
         let mut parts = vec![json!({ "type": "text", "text": req.text })];
         parts.extend(images);
@@ -226,38 +327,101 @@ async fn run_inner(req: Request, emit: &Emitter, procs: Arc<Procs>) -> Result<En
     let mut tool_defs = tools::definitions(web_search, native_vision, git_repo);
     // Tools lent by the MCP servers switched on in Settings ride after the built-in ones.
     tool_defs.extend(mcp::tools_for_model(&ctx.client, &crate::store::data_dir()).await);
-    let tools_chars = json!(tool_defs).to_string().len();
-    let mut usage = Usage::default();
-    let mut mandatory = target.provider == ProviderId::Openrouter && provider::openrouter_reasoning_mandatory(&target.model.id);
-    let mut continuations = 0;
-    let mut nudged = false;
-    let mut last_finish = None;
-    // Set once the pinned OpenRouter endpoint turned the run away.
-    let mut unpinned = false;
+    drive(&target, &ctx, messages, tool_defs, effort, &req.conv_id, &req.notes).await
+}
 
-    for round in 0..MAX_ROUNDS {
+/// The loop itself, once the endpoint, the tools and the opening messages are settled.
+async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, tool_defs: Vec<Value>, effort: &str, conv_id: &str, notes: &Mutex<Vec<String>>) -> Result<Ending, String> {
+    let (emit, s, chat) = (&ctx.emit, &ctx.settings, &ctx.chat);
+    let customs = &s.custom_models;
+    let thinking = effort != "none";
+    let qwen = target.style == ThinkingStyle::Qwen;
+    let openrouter = target.provider == ProviderId::Openrouter;
+    let window = models::context_window(&target.model.id, customs);
+    let window_chars = window as usize * 7 / 2;
+    let tools_chars = json!(tool_defs).to_string().len();
+    let output_rate = models::rates(&target.model.id, customs).map(|rates| rates.2);
+    let notice = |text: &str| emit.send(Event::Notice(text.to_string()));
+    let done_steps = || chat.lock().unwrap().plan.as_ref().map_or(0, |p| plan::progress(p).done);
+    let started = Instant::now();
+
+    let mut usage = Usage::default();
+    let mut spend = Budget::new(s.budget_usd);
+    let mut last_round_cost = 0.0;
+    let mut last_finish = None;
+    let mut lane = Lane {
+        mandatory: openrouter && provider::openrouter_reasoning_mandatory(&target.model.id),
+        replay: openrouter && target.api_model.to_ascii_lowercase().starts_with("deepseek/"),
+        ..Default::default()
+    };
+    // The round cap, and what the run has done since it was last checked.
+    let mut round_cap = if customs.iter().any(|c| c.open_limits && c.id() == target.model.id) { OPEN_MAX_ROUNDS } else { MAX_ROUNDS };
+    let (mut cap_extensions, mut changes_since_check, mut steps_at_check) = (0u32, 0u32, done_steps());
+    // How often each kind of rescue has been used on this reply.
+    let (mut continuations, mut stream_cuts, mut think_nudges, mut draft_cutovers, mut auto_revives, mut refusal_reopens) = (0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
+    // Thinking is off for the rest of the run, or for the next round only; the next round continues cut-off prose.
+    let (mut force_no_thinking, mut no_think_next, mut continuation_pending) = (false, false, false);
+    let (mut claim_retried, mut asked_early, mut nudged_incomplete, mut ran_without_tools) = (false, false, false, false);
+    // The guards: one call failing identically, calls that add nothing, a read-only streak, whole-file rewrites, a preview taken for an edit.
+    let mut breaker = LoopBreaker::default();
+    let mut stalls = StallTracker::default();
+    let mut gather = GatherTracker::default();
+    let mut churn = ChurnTracker::default();
+    let mut previews = PreviewTracker::default();
+    let mut step_watch = None;
+    let mut rounds_since_plan_update = 0;
+    // Everything this reply has written and thought so far, across rounds, and the tools it really ran.
+    let mut answer = String::new();
+    let mut thought = String::new();
+    let mut fields_seen: BTreeSet<String> = BTreeSet::new();
+    let mut tools_used: Vec<String> = Vec::new();
+    let mut tool_rounds = 0;
+    // Notes from the loop to the model that ride in the next request only: a stale plan, a step over its budget, code drafted in thought.
+    // ponytail: the web pushes these as system messages and removes them by marker a round later; here they join the tail the same request already ends with.
+    let mut harness: Vec<String> = Vec::new();
+    let mut halt = None;
+    let mut round = 0;
+
+    loop {
+        round += 1;
+        if round > round_cap {
+            let done = done_steps();
+            if stall::should_extend_round_cap(cap_extensions, done.saturating_sub(steps_at_check) as u32, changes_since_check) {
+                cap_extensions += 1;
+                round_cap += stall::CAP_EXTENSION_ROUNDS;
+                (steps_at_check, changes_since_check) = (done, 0);
+            } else {
+                log("limit_hit", "tool rounds", &format!("Stopped after {} tool rounds.", round - 1));
+                halt = Some(Halt::Premature(Premature::RoundCap));
+                break;
+            }
+        }
+        if round > 1 && last_round_cost > 0.0 && over_budget(&mut spend, last_round_cost, tool_rounds, emit) {
+            halt = Some(Halt::Budget);
+            break;
+        }
+
         // Anything the user said in passing joins the conversation before the next request.
-        for note in std::mem::take(&mut *req.notes.lock().unwrap()) {
-            emit.send(Event::NoteRead { note: note.clone(), round: round + 1 });
-            messages.push(json!({ "role": "user", "content": format!("[Note from the user while you work. Take it into account and carry on; do not start over.]
-{note}") }));
+        for note in std::mem::take(&mut *notes.lock().unwrap()) {
+            emit.send(Event::NoteRead { note: note.clone(), round });
+            messages.push(user(format!("[Note from the user while you work. Take it into account and carry on; do not start over.]\n{note}")));
         }
         // The valve: finished rounds fold into one line each once the run passes 65% of the window.
         let folded = compact::fold(&mut messages, window);
         if folded.rounds > 0 {
-            emit.send(Event::Notice(format!("Context compacted · {} steps summarised · about {} tokens saved", folded.rounds, folded.tokens_saved)));
+            notice(&format!("Context compacted · {} steps summarised · about {} tokens saved", folded.rounds, folded.tokens_saved));
         }
         // Still too big after that (huge tool results in the rounds kept): collapse the oldest of them.
         let collapsed = prune(&mut messages, window_chars * 8 / 10);
         if collapsed > 0 {
-            emit.send(Event::Notice(format!("Trimmed {collapsed} older tool results to fit the context window")));
+            notice(&format!("Trimmed {collapsed} older tool results to fit the context window"));
         }
 
         // What exists right now, the plan and the findings ride at the end, so the
         // start of the request stays byte-identical and the provider's prompt cache keeps hitting.
         let tail = {
             let state = chat.lock().unwrap();
-            let mut t = tokio::task::block_in_place(|| tools::files::workspace_context(&req.workspace));
+            let mut t = tokio::task::block_in_place(|| tools::files::workspace_context(&ctx.root));
             if let Some(plan) = &state.plan {
                 t.push_str(&format!("\n\n{}", tools::plan::format_plan(plan)));
             }
@@ -265,10 +429,16 @@ async fn run_inner(req: Request, emit: &Emitter, procs: Arc<Procs>) -> Result<En
             if !findings.is_empty() {
                 t.push_str(&format!("\n\n{findings}"));
             }
+            for note in harness.drain(..) {
+                t.push_str(&format!("\n\n{note}"));
+            }
             t
         };
-        let mut wire = messages.clone();
-        if target.style == ThinkingStyle::Qwen {
+        // DeepSeek takes each tool turn's reasoning back as `reasoning_content`. OpenRouter's validators reject
+        // the field, so its lanes get `reasoning` where a model needs it and the end of the thought as plain text elsewhere.
+        let reasoning_field = if !openrouter { Some("reasoning_content") } else if lane.replay { Some("reasoning") } else { None };
+        let mut wire = transcript::wire(&messages, reasoning_field);
+        if qwen {
             // Qwen's template only accepts a system message at index 0.
             let first = wire[0]["content"].as_str().unwrap_or("").to_string();
             wire[0]["content"] = json!(format!("{first}\n\n{tail}"));
@@ -276,90 +446,296 @@ async fn run_inner(req: Request, emit: &Emitter, procs: Arc<Procs>) -> Result<En
             wire.push(json!({ "role": "system", "content": tail }));
         }
 
+        let thinking_now = thinking && !force_no_thinking && !no_think_next;
+        let no_think_round = std::mem::take(&mut no_think_next);
         let mut body = Map::new();
         body.insert("model".into(), json!(target.api_model));
         body.insert("messages".into(), json!(wire));
         body.insert("stream".into(), json!(true));
         body.insert("stream_options".into(), json!({ "include_usage": true }));
-        body.insert("max_tokens".into(), json!(target.model.max_output_tokens));
+        // The limit is enforced inside the round too: the model cannot write what it is not allowed to.
+        body.insert("max_tokens".into(), json!(spend.max_tokens(output_rate, target.model.max_output_tokens as u64)));
         body.insert("tools".into(), json!(tool_defs));
         body.insert("tool_choice".into(), json!("auto"));
-        if target.provider == ProviderId::Openrouter {
+        if openrouter {
             // Pins every round of this chat to one endpoint, so its prompt cache stays warm.
-            body.insert("session_id".into(), json!(format!("conv-{}", req.conv_id)));
-            if let Some(pinned) = provider::openrouter_provider_for(&target.model.id).filter(|_| !unpinned) {
+            body.insert("session_id".into(), json!(format!("conv-{conv_id}")));
+            if let Some(pinned) = provider::openrouter_provider_for(&target.model.id).filter(|_| !lane.unpinned) {
                 body.insert("provider".into(), pinned);
             }
         }
-        provider::apply_thinking(&mut body, target.style, thinking, effort, mandatory);
+        provider::apply_thinking(&mut body, target.style, thinking_now, effort, lane.mandatory);
         emit.send(Event::Context(compact::breakdown(&wire, tools_chars)));
 
-        emit.send(Event::Status(if round > 0 { "Working" } else if thinking { "Thinking" } else { "Writing" }));
-        let result = stream_with_retries(&ctx.client, &target, &mut body, &mut mandatory, &mut unpinned, thinking, effort, emit).await.inspect_err(|e| diagnostics::record("api_error", &target.model.id, e))?;
+        emit.send(Event::Status(if round > 1 { "Working" } else if thinking_now { "Thinking" } else { "Writing" }));
+        // A round that continues cut-off prose has any sentence it restarts trimmed as it streams.
+        let dedup = std::mem::take(&mut continuation_pending).then(|| ContinuationDedup::new(&answer));
+        // Two thinks in a row would otherwise run together in the thought box.
+        let gap = !thought.is_empty() && !thought.trim_end_matches([' ', '\t', '\r']).ends_with('\n');
+        let cut_drafts = thinking_now && draft_cutovers < stall::MAX_DRAFT_CUTOVERS;
+        let (result, without_tools) = call_model(&ctx.client, target, &mut body, &mut lane, dedup, cut_drafts, gap, emit).await.inspect_err(|e| log("api_error", &target.model.id, e))?;
+        ran_without_tools = without_tools;
 
-        if let Some(u) = result.usage {
+        let provider::Round { content, reasoning, tool_calls: calls, finish, usage: round_usage, fields, draft_cut } = result;
+        // A think stopped by the loop never reached its usage frame: about four characters per token, none of it cached.
+        let round_usage = round_usage.or_else(|| {
+            draft_cut.map(|_| {
+                let prompt = ((chars_of(&wire) + tools_chars) as u64).div_ceil(4);
+                Usage { prompt, completion: (reasoning.chars().count() as u64).div_ceil(4), cache_miss: prompt, ..Default::default() }
+            })
+        });
+        if let Some(u) = round_usage {
+            last_round_cost = u.cost(&target.model.id, customs).unwrap_or(0.0);
+            spend.spent += last_round_cost;
             usage.add(u);
             emit.send(Event::Usage(usage));
         }
-        last_finish = result.finish.clone();
-        let cut_off = matches!(result.finish.as_deref(), Some("length" | "max_tokens"));
-
-        let mut assistant = json!({ "role": "assistant", "content": result.content });
-        // DeepSeek requires the reasoning back on tool-calling turns; OpenRouter's lanes reject the field.
-        if target.provider != ProviderId::Openrouter && !result.reasoning.is_empty() {
-            assistant["reasoning_content"] = json!(result.reasoning);
+        fields_seen.extend(fields);
+        if !reasoning.is_empty() {
+            thought.push_str(if gap { "\n\n" } else { "" });
+            thought.push_str(&reasoning);
         }
-        if !result.tool_calls.is_empty() {
-            assistant["tool_calls"] = result
-                .tool_calls
-                .iter()
-                .map(|c| json!({ "id": c.id, "type": "function", "function": { "name": c.name, "arguments": if c.args.trim().is_empty() { "{}" } else { &c.args } } }))
-                .collect();
-        }
-        messages.push(assistant);
+        answer.push_str(&content);
+        last_finish = finish.clone();
+        let finish = finish.unwrap_or_default().to_ascii_lowercase();
 
-        if result.tool_calls.is_empty() {
-            if cut_off && continuations < MAX_CONTINUATIONS {
+        // The think was drafting a whole program: hand it back as the model's own words and have it write the files, without another think.
+        if let Some(lines) = draft_cut {
+            draft_cutovers += 1;
+            messages.push(assistant(&stall::draft_carry(&reasoning, None), ""));
+            messages.push(user(stall::draft_cutover_text(lines)));
+            no_think_next = true;
+            notice("It was writing the whole program in its head — stopped the think, writing the draft to files now");
+            continue;
+        }
+
+        // Cut by the output limit, or by a stream that ended without saying why.
+        let hard = matches!(finish.as_str(), "length" | "max_tokens");
+        let stream_cut = !hard && calls.is_empty() && (!content.is_empty() || !reasoning.is_empty()) && !matches!(finish.as_str(), "stop" | "tool_calls" | "content_filter");
+        if stream_cut && content.is_empty() && stream_cuts < MAX_STREAM_CUTS {
+            // Dropped mid-think. A long think is handed back so the analysis is not started over; a short one is simply asked again.
+            stream_cuts += 1;
+            no_think_next = no_think_round;
+            if reasoning.chars().count() >= stall::DROPPED_THINK_CARRY_CHARS {
+                messages.push(assistant(&stall::draft_carry(&reasoning, Some("the connection dropped mid-thought")), ""));
+                messages.push(user(stall::DROPPED_THINK_TEXT));
+            }
+            notice(&format!("The model stopped mid-task — continuing from where it left off ({stream_cuts}/{MAX_STREAM_CUTS})"));
+            continue;
+        }
+        if hard && calls.is_empty() && reasoning.chars().count() >= 80 && content.trim().chars().count() < 40 {
+            // The whole output went to thinking. The think is not replayed: it is what filled the budget.
+            messages.push(assistant(&content, &format!("[thinking produced no output — {} chars trimmed]", reasoning.chars().count())));
+            if think_nudges >= MAX_THINK_NUDGES {
+                halt = Some(Halt::ThinkCeiling);
+                break;
+            }
+            messages.push(user(THINK_ONLY[think_nudges as usize]));
+            think_nudges += 1;
+            force_no_thinking = true;
+            notice("Used the thinking budget — answering now, without another think");
+            continue;
+        }
+        if (hard || stream_cut) && calls.is_empty() {
+            // Cut mid-answer: ask for the rest, with thinking off for that one round.
+            messages.push(assistant(&content, &reasoning));
+            if hard && continuations < MAX_CONTINUATIONS {
                 continuations += 1;
-                emit.send(Event::Notice(format!("The reply hit the output limit. Continuing ({continuations}/{MAX_CONTINUATIONS})")));
-                messages.push(json!({ "role": "user", "content": "Your reply was cut off by the output limit. Continue exactly where you stopped, without repeating anything." }));
-                continue;
+                notice(&format!("Answer was longer than one response allows — continuing ({continuations}/{MAX_CONTINUATIONS})"));
+            } else if !hard && stream_cuts < MAX_STREAM_CUTS {
+                stream_cuts += 1;
+                notice(&format!("The model stopped mid-task — continuing from where it left off ({stream_cuts}/{MAX_STREAM_CUTS})"));
+            } else {
+                halt = Some(if hard { Halt::OutputCeiling } else { Halt::CutsExhausted });
+                break;
             }
-            if result.content.trim().is_empty() && !nudged {
-                // Thought, then said nothing: ask once for the answer itself.
-                nudged = true;
-                messages.push(json!({ "role": "user", "content": "You reasoned but wrote no answer. Do not think more. Give the answer or make the next tool call now." }));
-                continue;
-            }
-            return Ok(Ending { finish: last_finish, incomplete: cut_off, stop_reason: cut_off.then(|| "The reply hit the output limit.".to_string()) });
+            (continuation_pending, no_think_next) = (true, true);
+            messages.push(user(format!("{}{CARRY_ON}", if hard { "You reached the output limit mid-answer. " } else { "Your previous reply was cut off mid-answer before it finished. " })));
+            continue;
         }
+
+        if calls.is_empty() {
+            // The model stopped. Before taking that as the end: is the answer honest, is the plan done, did it mean to stop?
+            messages.push(assistant(&content, &reasoning));
+            if !claim_retried && plan::check_answer_claims(&answer, &tools_used).is_some() {
+                claim_retried = true;
+                messages.push(user(CLAIM_RETRY));
+                notice("That reply claimed work that did not run — it is redoing it for real");
+                continue;
+            }
+            let current = chat.lock().unwrap().plan.clone();
+            let progress = current.as_ref().map(plan::progress);
+            if current.is_none() && !asked_early && tool_rounds >= 8 && !tools_used.iter().any(|tool| tool == "ask_user") {
+                // A long build with no plan and no question asked rests on an interpretation nobody confirmed. Said once.
+                asked_early = true;
+                messages.push(user(format!(
+                    "You are {tool_rounds} rounds in, you have not written a plan, and you have not asked anything. If any part of what you are building rests on a guess about what was wanted — the platform, the shape of the interface, what \"done\" means — call ask_user NOW, with concrete options. One question here is far cheaper than continuing in the wrong direction. If nothing is genuinely ambiguous, ignore this and carry on."
+                )));
+                continue;
+            }
+            if let (Some(current), Some(p), false) = (&current, &progress, nudged_incomplete) {
+                let stuck = p.blocked > 0;
+                let untried = p.done == 0 && tool_rounds <= 2;
+                let refused = current.steps.iter().any(|step| step.state == "blocked" && plan::looks_like_refusal_blocker(&step.note));
+                if stuck && (untried || refused) && refusal_reopens < MAX_REFUSAL_REOPENS {
+                    // "Blocked" used to decline the task, or before anything was tried: the steps are put back.
+                    refusal_reopens += 1;
+                    let state = {
+                        let mut state = chat.lock().unwrap();
+                        for step in state.plan.iter_mut().flat_map(|p| p.steps.iter_mut()).filter(|step| step.state == "blocked") {
+                            step.state = "todo".into();
+                            step.note.clear();
+                        }
+                        state.clone()
+                    };
+                    emit.state(state);
+                    messages.push(user(REOPEN_BLOCKED));
+                    continue;
+                }
+                if stuck && untried {
+                    nudged_incomplete = true;
+                    messages.push(user(BLOCKED_UNTRIED));
+                    continue;
+                }
+                if let (false, false, Some(next)) = (p.complete, stuck, p.next) {
+                    nudged_incomplete = true;
+                    let narrated = if revive::describes_imminent_action(&content) { NARRATED } else { "" };
+                    messages.push(user(format!(
+                        "Your plan is not finished — {} of {} steps are done, and you stopped before step {} ({}).\n\nEither carry on with it, or if it genuinely cannot be done, mark that step blocked with update_plan and tell the user what is in the way. Do not present unfinished work as complete.{narrated}",
+                        p.done, p.total, next.id, next.text
+                    )));
+                    continue;
+                }
+            }
+            let stop = revive::Stop {
+                content: &answer,
+                round_content: &content,
+                reasoning: &thought,
+                tool_rounds,
+                plan_complete: progress.as_ref().map(|p| p.complete),
+                plan_blocked: progress.as_ref().is_some_and(|p| p.blocked > 0),
+                finish_reason: &finish,
+            };
+            match revive::detect_premature_stop(&stop) {
+                // A cut think is not asked again where switching thinking off cannot be the cure.
+                Some(Premature::ThinkingCut) if qwen || force_no_thinking => halt = Some(Halt::Premature(Premature::ThinkingCut)),
+                Some(reason) if auto_revives < revive::MAX_AUTO_REVIVES => {
+                    auto_revives += 1;
+                    messages.push(user(revive::revive_instruction(reason, ran_without_tools)));
+                    log_with("run_stopped", "premature stop", &format!("Auto-continued a mid-task stop ({}).", reason.key()), json!({ "n": auto_revives, "rounds": tool_rounds }));
+                    notice(&format!("The model stopped mid-task — continuing from where it left off ({auto_revives}/{})", revive::MAX_AUTO_REVIVES));
+                    continue;
+                }
+                reason => halt = reason.map(Halt::Premature),
+            }
+            break;
+        }
+
+        // The limit is asked again before the tools run: one round can cross it on its own.
+        if over_budget(&mut spend, last_round_cost, tool_rounds, emit) {
+            // ponytail: the web answers each pending call "Not run — the spending limit for this reply was reached …" so a
+            // resumed transcript stays legal. This transcript ends with the run; add them when resume replays one.
+            halt = Some(Halt::Budget);
+            break;
+        }
+        tool_rounds += 1;
+        let mut turn = assistant(&content, &reasoning);
+        turn["tool_calls"] = calls.iter().map(|c| json!({ "id": c.id, "type": "function", "function": { "name": c.name, "arguments": if c.args.trim().is_empty() { "{}" } else { &c.args } } })).collect();
+        messages.push(turn);
+        let turn_at = messages.len() - 1;
 
         emit.send(Event::Status("Working"));
         let mut looks: Vec<PathBuf> = Vec::new();
         let mut finished = false;
-        for call in &result.tool_calls {
+        let mut plan_touched = false;
+        // A guard that ends the run, and the note the user reads about it.
+        let mut stopped: Option<(Premature, String)> = None;
+        for (n, call) in calls.iter().enumerate() {
             let args_text = if call.args.trim().is_empty() { "{}" } else { call.args.as_str() };
             emit.send(Event::ToolStart(ToolEvent { id: call.id.clone(), name: call.name.clone(), args: args_text.to_string(), ..Default::default() }));
-            let out = match serde_json::from_str::<Value>(args_text) {
-                Ok(args) => tools::run(&call.name, &args, &ctx).await,
-                Err(e) if cut_off => tools::Output::fail(format!("This call was cut off by the output limit before its arguments were complete ({e}). Send it again in smaller pieces: fewer files per call, or one file at a time.")),
-                Err(e) => tools::Output::fail(format!("The arguments were not valid JSON ({e}). Send the call again.")),
+            let parsed = serde_json::from_str::<Value>(args_text);
+            let out = match &parsed {
+                Ok(args) => {
+                    tools_used.push(call.name.clone());
+                    tools::run(&call.name, args, ctx).await
+                }
+                Err(e) if hard || e.is_eof() => {
+                    // The broken half of a huge call is not sent back with every later request.
+                    // ponytail: the web first salvages the whole files or batch items that did arrive (transcript.ts salvageToolArguments); here the call is redone in parts.
+                    messages[turn_at]["tool_calls"][n]["function"]["arguments"] = json!("{}");
+                    let text = format!("Error: this {} call was cut off by the output limit — its arguments are incomplete, so nothing was written.\n\nThe content was too large for one call. Do NOT resend it whole. Instead:\n  1. write_file with the FIRST part only (aim for under 1500 lines).\n  2. Then append each following part with edit_file, using the last few lines of what you just wrote as old_text.\nKeep going until the file is complete. Say nothing else until it is.", call.name);
+                    tools::Output { summary: "Cut off mid-call — splitting into parts".into(), ..tools::Output::fail(text) }
+                }
+                Err(e) => tools::Output { summary: "Invalid tool arguments".into(), ..tools::Output::fail(format!("Error: arguments were not valid JSON ({e})")) },
             };
             if !out.ok {
-                diagnostics::record("tool_failed", &call.name, if out.summary.is_empty() { &out.text } else { &out.summary });
+                log("tool_failed", &call.name, if out.summary.is_empty() { &out.text } else { &out.summary });
             }
             emit.send(Event::ToolDone { id: call.id.clone(), ok: out.ok, summary: out.summary.clone(), image: out.image.clone(), changed: out.changed.clone() });
-            messages.push(json!({ "role": "tool", "tool_call_id": call.id, "content": out.text }));
+
+            // The guards read every result. A warning rides in the result itself: the text the model is sure to read next.
+            let key = match &parsed {
+                Ok(args) => args.clone(),
+                Err(_) => json!(args_text),
+            };
+            let mut text = out.text.clone();
+            let strike = breaker.observe(&call.name, &key, out.ok);
+            if strike.trip {
+                text.push_str(&loop_breaker::loop_trip_marker(&call.name));
+                let last_error = if out.summary.is_empty() { head(&out.text, 300) } else { out.summary.as_str() };
+                stopped = Some((Premature::LoopBreaker, loop_breaker::loop_trip_user_note(&call.name, last_error)));
+            } else {
+                if strike.warn {
+                    text.push_str(&loop_breaker::loop_warning_text(&call.name));
+                }
+                let seen = stalls.observe(&call.name, &key, out.ok, &out.text);
+                let (_, gathering) = gather.observe(&call.name, &key, out.ok);
+                if let Some(note) = previews.observe(&call.name, out.ok, &out.summary) {
+                    text.push_str(&note);
+                }
+                let churned = churn.observe(&call.name, &key, out.ok);
+                if seen.repeat_trip {
+                    text.push_str(&stall::reread_trip_marker(seen.repeat_total));
+                    stopped = Some((Premature::NoProgress, stall::reread_trip_user_note(seen.repeat_total, seen.top_repeat_target.as_deref(), stalls.recent_actions())));
+                } else if seen.trip {
+                    text.push_str(&stall::stall_trip_marker());
+                    stopped = Some((Premature::NoProgress, stall::stall_trip_user_note(stalls.recent_actions())));
+                } else if seen.repeat_warn {
+                    text.push_str(&stall::reread_warning_text(seen.repeat_total, seen.top_repeat_target.as_deref()));
+                } else if seen.warn {
+                    text.push_str(&stall::stall_warning_text(seen.stall_calls));
+                } else if let Some((path, count)) = churned {
+                    text.push_str(&stall::churn_nudge_text(&path, count));
+                } else if gathering {
+                    text.push_str(&gather.nudge_text());
+                } else if out.ok && !seen.progress && stall::is_read_tool(&call.name) {
+                    text.push_str(stall::unchanged_read_text());
+                }
+            }
+            messages.push(json!({ "role": "tool", "tool_call_id": call.id, "content": text }));
+            if stopped.is_some() {
+                break;
+            }
+            if out.ok && stall::is_world_changing(&call.name) {
+                changes_since_check += 1;
+            }
+            plan_touched |= out.ok && matches!(call.name.as_str(), "make_plan" | "update_plan");
             looks.extend(out.look);
             if out.finish {
                 // The receipt becomes the closing text, so a reply never ends on a bare tool step.
                 let args: Value = serde_json::from_str(args_text).unwrap_or_default();
                 let field = |key: &str| args[key].as_str().unwrap_or("").trim().to_string();
-                emit.send(Event::Content(format!("{}
-
-Verified: {}", field("result"), field("verified"))));
+                emit.send(Event::Content(format!("{}\n\nVerified: {}", field("result"), field("verified"))));
             }
             finished |= out.finish;
+        }
+        if let Some((reason, note)) = stopped {
+            // ponytail: the web also answers every call left unrun with "Not run — the run was halted before this call ran."
+            // This transcript ends with the run, so nothing would read them; add them when resume replays one.
+            log("run_stopped", reason.key(), &note);
+            emit.send(Event::Content(format!("{}{note}", gap_after(&answer))));
+            halt = Some(Halt::Premature(reason));
+            break;
         }
         // Pictures the model asked to see follow the tool results as a user message: a tool result cannot carry one.
         let parts: Vec<Value> = looks.iter().filter_map(|p| image_part(p)).collect();
@@ -371,68 +747,245 @@ Verified: {}", field("result"), field("verified"))));
         if finished {
             return Ok(Ending { finish: Some("stop".into()), incomplete: false, stop_reason: None });
         }
-        if let (Some(limit), Some(spent)) = (s.budget_usd.filter(|l| *l > 0.0), usage.cost(&target.model.id, customs)) {
-            if spent >= limit {
-                diagnostics::record("run_stopped", "spending limit", &format!("${spent:.3} of ${limit:.2}"));
-                return Ok(Ending { finish: last_finish, incomplete: true, stop_reason: Some(format!("Stopped at the spending limit (${spent:.3} of ${limit:.2}). The work so far is saved.")) });
+
+        // The plan goes stale while the work moves on, or the prose just claimed a step the plan does not show.
+        let current = chat.lock().unwrap().plan.clone();
+        rounds_since_plan_update = if plan_touched { 0 } else { rounds_since_plan_update + 1 };
+        let claimed = plan::step_claimed_complete(&content);
+        if current.as_ref().is_some_and(|p| !plan::progress(p).complete) && (rounds_since_plan_update >= plan::PLAN_STALE_AFTER_TOOL_ROUNDS || claimed) {
+            harness.push(plan::build_stale_plan_nudge(rounds_since_plan_update, claimed));
+        }
+        // One step that has run a long time gets a checkpoint, then another, then the run pauses for the user.
+        let (watch, due) = plan::watch_step(step_watch.take(), current.as_ref(), tool_rounds, started.elapsed().as_millis() as u64);
+        step_watch = watch;
+        if let Some(due) = due {
+            if due.halt {
+                emit.send(Event::Content(format!("{}{}", gap_after(&answer), plan::step_budget_user_note(&due))));
+                halt = Some(Halt::Premature(Premature::StepBudget));
+                break;
             }
+            log_with("run_stopped", "step budget checkpoint", &format!("Step {}: {} rounds, {} min (checkpoint {}).", due.id, due.rounds, due.minutes, due.level), json!({ "rounds": tool_rounds }));
+            harness.push(plan::step_budget_nudge(&due));
+        }
+        // Code drafted in thought is paid for again as the file's content: say so, with the count.
+        let drafted = stall::drafted_code_lines(&reasoning);
+        if drafted >= stall::CODE_DRAFT_LINES {
+            harness.push(stall::code_draft_nudge_text(drafted));
         }
     }
-    diagnostics::record("limit_hit", "tool rounds", &format!("Stopped after {MAX_ROUNDS} tool rounds."));
-    Ok(Ending { finish: last_finish, incomplete: true, stop_reason: Some(format!("Stopped after {MAX_ROUNDS} tool rounds. Send \"continue\" to carry on.")) })
+
+    // The closing text is held against what actually ran: a claim no tool backs is marked, not hidden.
+    let mut gap = gap_after(&answer);
+    if let Some(issue) = plan::check_answer_claims(&answer, &tools_used) {
+        emit.send(Event::Content(format!("{gap}_{issue}_")));
+        log_with("unverified_claim", "closing summary", &issue, json!({ "toolsUsed": tools_used.len() }));
+        gap = "\n\n";
+    }
+    if let (Some(Halt::Budget), Some(limit)) = (&halt, spend.limit) {
+        emit.send(Event::Content(format!("{gap}{}", budget::budget_stop_message(spend.spent, limit, true))));
+    }
+    if thinking && thought.is_empty() {
+        // ponytail: the web also shows "No plain-text reasoning was present in the upstream stream…" in the thought box;
+        // a notice in every reply of a model that never thinks would be noise, so only the diagnostics keep it.
+        let seen = if fields_seen.is_empty() { "none".to_string() } else { fields_seen.iter().cloned().collect::<Vec<_>>().join(", ") };
+        log_with("api_error", "reasoning stream", "Thinking was enabled but no plain-text reasoning field was received.", json!({ "model": target.api_model, "effort": effort, "fieldsSeen": seen }));
+    }
+    let mut stop_reason = halt.map(|halt| match halt {
+        Halt::Premature(reason) => revive::premature_stop_notice(reason).to_string(),
+        Halt::ThinkCeiling => "It thought through the whole output budget three times without writing anything — Resume continues with thinking switched off".to_string(),
+        Halt::OutputCeiling => "The answer hit the output limit before it finished".to_string(),
+        Halt::CutsExhausted => "The connection kept dropping before the answer finished".to_string(),
+        Halt::Budget => format!("Stopped at your ${} spending limit — the work so far is saved, use Resume to continue", fixed(spend.limit.unwrap_or(0.0), 2)),
+    });
+    if let (Some(reason), true) = (&mut stop_reason, lane.degraded > 0) {
+        reason.push_str(&format!(" — {} round{} ran without tools after rejections", lane.degraded, if lane.degraded == 1 { "" } else { "s" }));
+    }
+    Ok(Ending { finish: last_finish, incomplete: stop_reason.is_some(), stop_reason })
 }
 
-/// One round, retried on transient failures as long as nothing reached the user yet.
-async fn stream_with_retries(
-    client: &reqwest::Client,
-    target: &Target,
-    body: &mut Map<String, Value>,
-    mandatory: &mut bool,
-    unpinned: &mut bool,
-    thinking: bool,
-    effort: &str,
-    emit: &Emitter,
-) -> Result<provider::Round, String> {
-    let mut attempt = 0;
+/// Folds the oldest plain turns of a request away. Returns how many went.
+fn fold_body(body: &mut Map<String, Value>) -> usize {
+    let Some(Value::Array(messages)) = body.get("messages") else { return 0 };
+    let (folded, dropped) = transcript::fold_oldest_history(messages, FOLD_RETRY_TARGET_CHARS);
+    if dropped > 0 {
+        body.insert("messages".into(), Value::Array(folded));
+    }
+    dropped
+}
+
+fn strip_media_body(body: &mut Map<String, Value>) -> bool {
+    body.get_mut("messages").and_then(Value::as_array_mut).is_some_and(|messages| transcript::strip_media(messages))
+}
+
+/// One model round, with what the web does around the request: backoff on transient failures, a second shape
+/// for a body the host rejected, patience with a rate limit, and another try for a stream that never said
+/// anything. Returns the round and whether it had to run without its tools.
+#[allow(clippy::too_many_arguments)]
+async fn call_model(client: &reqwest::Client, target: &Target, body: &mut Map<String, Value>, lane: &mut Lane, mut dedup: Option<ContinuationDedup>, cut_drafts: bool, mut gap: bool, emit: &Emitter) -> Result<(provider::Round, bool), String> {
+    let openrouter = target.provider == ProviderId::Openrouter;
+    // Three tries, five on OpenRouter, whose shared pool answers 503 several times a day.
+    let policy = if openrouter { &retry::OPENROUTER } else { &retry::DEFAULT };
+    let name = target.provider.name();
+    let original = body.clone();
+    let (mut attempt, mut waits, mut empties, mut reshapes) = (1u32, 0u32, 0u32, 0u32);
+    // The status the first reshaped retry answered, and what the diagnostics say if a reshaped request gets through.
+    let mut first_status = 0;
+    let mut recovered: Option<(u16, String)> = None;
     loop {
         let mut announced = "";
+        let mut shown = String::new();
+        let mut echo = dedup.as_mut();
         let wire = Value::Object(body.clone());
-        let result = provider::stream_round(client, target, &wire, |delta| match delta {
-            Delta::Reasoning(t) => emit.send(Event::Reasoning(t.to_string())),
-            Delta::Content(t) => {
-                if announced != "Writing" {
-                    announced = "Writing";
-                    emit.send(Event::Status("Writing"));
+        let result = provider::stream(client, target, &wire, cut_drafts, |delta| match delta {
+            Delta::Reasoning(t) => {
+                if std::mem::take(&mut gap) {
+                    emit.send(Event::Reasoning("\n\n".into()));
                 }
-                emit.send(Event::Content(t.to_string()));
+                emit.send(Event::Reasoning(t.to_string()))
+            }
+            Delta::Content(t) => {
+                let text = match echo.as_mut() {
+                    Some(dedup) => dedup.push(t),
+                    None => t.to_string(),
+                };
+                if !text.is_empty() {
+                    if announced != "Writing" {
+                        announced = "Writing";
+                        emit.send(Event::Status("Writing"));
+                    }
+                    shown.push_str(&text);
+                    emit.send(Event::Content(text));
+                }
             }
             Delta::ToolDraft { name, chars, args } => emit.send(Event::ToolDraft { name: name.to_string(), chars, path: draft_path(args) }),
         })
         .await;
-        let RoundError { message, status, detail, retryable } = match result {
-            Ok(round) => return Ok(round),
+        let e = match result {
+            Ok(mut round) => {
+                if let Some(dedup) = echo {
+                    // The web never releases a continuation shorter than 24 characters; here what is held comes out when the round ends.
+                    let rest = dedup.finish();
+                    if !rest.is_empty() {
+                        shown.push_str(&rest);
+                        emit.send(Event::Content(rest));
+                    }
+                }
+                round.content = shown;
+                let without_tools = !body.contains_key("tools");
+                if let Some((status, detail)) = recovered {
+                    log_with("api_error", "openrouter_rejection_recovery", &detail, json!({ "status": status }));
+                    lane.degraded += without_tools as u32;
+                }
+                return Ok((round, without_tools));
+            }
             Err(e) => e,
         };
-        // An endpoint that refuses "reasoning off" gets minimal effort instead, for the rest of the run.
-        if status == 400 && !*mandatory && detail.to_lowercase().contains("reasoning is mandatory") {
-            *mandatory = true;
-            body.remove("reasoning");
-            provider::apply_thinking(body, target.style, thinking, effort, true);
-            continue;
-        }
+        let status = e.status;
+        let detail = retry::extract_rejection_detail(&e.detail, 300);
+        let said = detail.to_lowercase();
+
         // The cheap pinned endpoint is rate limited: any other one beats no answer, for the rest of the run.
         if status == 429 && body.remove("provider").is_some() {
-            *unpinned = true;
+            lane.unpinned = true;
             emit.send(Event::Notice("This model's usual provider is busy, so OpenRouter picks another one for this reply. It can cost a little more.".into()));
             continue;
         }
-        attempt += 1;
-        if !retryable || attempt >= MAX_RETRIES {
-            return Err(message);
+
+        // A stream that opened and then never said anything: two more tries, a little apart.
+        if matches!(e.kind, Failure::Empty | Failure::NoFirstToken) {
+            if empties == 2 {
+                // The web's wording names OpenRouter's shared pool; other providers keep their own line.
+                return Err(if openrouter { format!("{name} returned an empty response after 3 attempt(s). The host is overloaded or down right now — this is their pool, not your key. Wait a minute and try again, or switch to a DeepSeek model in Settings.") } else { e.message });
+            }
+            let wait = Duration::from_millis(if empties == 0 { 1_500 } else { 4_000 });
+            empties += 1;
+            emit.send(Event::Retry { reason: if e.kind == Failure::Empty { "empty reply" } else { "no first token" }.into(), attempt: empties as usize + 1, attempts: 3, wait });
+            tokio::time::sleep(wait).await;
+            continue;
         }
-        let wait = Duration::from_secs(2 << attempt);
-        emit.send(Event::Retry { reason: message, attempt: attempt + 1, attempts: MAX_RETRIES, wait });
-        tokio::time::sleep(wait).await;
+
+        // Transient: wait and send the same request again.
+        if e.retryable && attempt < policy.attempts {
+            let reason = match e.kind {
+                Failure::TimedOut => "timed out".to_string(),
+                Failure::Unreachable => "connection lost".to_string(),
+                _ => retry::status_reason(if status == 0 { 500 } else { status }),
+            };
+            let wait = Duration::from_millis(retry::wait_ms(policy, attempt, e.retry_after));
+            emit.send(Event::Retry { reason, attempt: attempt as usize + 1, attempts: policy.attempts as usize, wait });
+            tokio::time::sleep(wait).await;
+            attempt += 1;
+            continue;
+        }
+
+        // OpenRouter turned the body itself away: send it once more in a shape it may take, and once more after that, smaller still.
+        let rejected = matches!(status, 400 | 413 | 422) || (status >= 500 && said.contains("endpoint is unavailable"));
+        if openrouter && rejected && reshapes < 2 && !retry::is_unknown_model_rejection(&detail) {
+            let size = retry::is_size_rejection(status, &detail);
+            let mandatory_said = said.contains("reasoning is mandatory");
+            let turns = |n: usize| format!("{n} older turn{}", if n == 1 { "" } else { "s" });
+            let reason = if reshapes == 1 {
+                // Not when the tools were kept and it is still too large: taking them out would not make it fit.
+                if !matches!(status, 400 | 413 | 422) || (size && body.contains_key("tools")) {
+                    None
+                } else {
+                    *body = original.clone();
+                    if lane.mandatory && body.remove("reasoning").is_some() {
+                        body.insert("reasoning_effort".into(), json!("low"));
+                    }
+                    fold_body(body);
+                    body.remove("tools");
+                    body.remove("tool_choice");
+                    strip_media_body(body);
+                    Some("still rejected — retrying once more, smaller and without tools".to_string())
+                }
+            } else if status == 400 && lane.replay && !mandatory_said && !size && body.get_mut("messages").and_then(Value::as_array_mut).is_some_and(|m| transcript::condense_reasoning(m)) {
+                lane.replay = false;
+                Some("endpoint rejected replayed reasoning — retrying with its condensed form".to_string())
+            } else if status == 400 && mandatory_said && body.get("reasoning").is_some_and(|r| r["effort"] == "none") {
+                // An endpoint that refuses "reasoning off" gets minimal effort instead, for the rest of the run.
+                lane.mandatory = true;
+                body.remove("reasoning");
+                body.insert("reasoning_effort".into(), json!("low"));
+                Some("endpoint requires reasoning — retrying with minimal thinking instead of none".to_string())
+            } else {
+                // Size wants the history folded and the tools kept; shape wants the tools and media gone.
+                let (dropped, media) = if size { (fold_body(body), strip_media_body(body)) } else { (0, false) };
+                if dropped > 0 || media {
+                    Some(format!("payload too large — retrying with {} folded, tools kept", turns(dropped)))
+                } else if body.remove("tools").is_some() | body.remove("tool_choice").is_some() | strip_media_body(body) {
+                    Some("host rejected the payload — retrying without tools and media".to_string())
+                } else {
+                    Some(fold_body(body)).filter(|dropped| *dropped > 0).map(|dropped| format!("host rejected the payload — retrying with {} folded", turns(dropped)))
+                }
+            };
+            if let Some(reason) = reason {
+                reshapes += 1;
+                recovered = Some((status, if reshapes == 1 { format!("Recovered on rejection retry after HTTP {status}: {reason} — {}", head(&detail, 160)) } else { format!("Recovered on composed retry after HTTP {first_status} then {status}: {}", head(&detail, 160)) }));
+                first_status = status;
+                // The reshaped request gets one try, not another round of backoff.
+                attempt = policy.attempts;
+                let tries = (policy.attempts + reshapes) as usize;
+                emit.send(Event::Retry { reason, attempt: tries, attempts: tries, wait: Duration::ZERO });
+                continue;
+            }
+        }
+
+        // Still rate limited after the retries: the pool is busy, not broken. Wait it out, up to six times.
+        if status == 429 && waits < MAX_RATE_LIMIT_WAITS {
+            waits += 1;
+            // The web reads a missing Retry-After header as zero and does not wait at all; the doubling wait its own comment describes runs here.
+            let wait = Duration::from_millis(e.retry_after.unwrap_or(5_000 << (waits - 1)).min(60_000));
+            emit.send(Event::Retry { reason: "service busy".into(), attempt: waits as usize, attempts: MAX_RATE_LIMIT_WAITS as usize, wait });
+            tokio::time::sleep(wait).await;
+            continue;
+        }
+
+        return Err(match e.kind {
+            Failure::Unreachable if e.retryable => provider::unreachable_message(name, attempt),
+            Failure::TimedOut => provider::timed_out_message(name, attempt),
+            _ => e.message,
+        });
     }
 }
 
@@ -466,6 +1019,7 @@ impl Stopwatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
 
     #[test]
     fn prune_collapses_old_results_only() {
@@ -479,5 +1033,237 @@ mod tests {
         assert_eq!(collapsed, 10 - KEEP_RECENT_RESULTS);
         assert!(messages[1]["content"].as_str().unwrap().contains("removed to save context"));
         assert_eq!(messages[10]["content"].as_str().unwrap().len(), 5_000);
+    }
+
+    /// A stand-in provider on 127.0.0.1: answers each request with the next scripted reply, closes, and keeps what it was sent.
+    fn stub(replies: Vec<String>) -> (String, Arc<Mutex<Vec<Value>>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        std::thread::spawn(move || {
+            for reply in replies {
+                let Ok((mut socket, _)) = listener.accept() else { return };
+                let (mut raw, mut chunk) = (Vec::new(), [0u8; 16_384]);
+                let body = loop {
+                    let n = socket.read(&mut chunk).unwrap_or(0);
+                    raw.extend_from_slice(&chunk[..n]);
+                    if let Some(at) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&raw[..at]).to_lowercase();
+                        let length: usize = headers.lines().find_map(|l| l.strip_prefix("content-length:")).and_then(|v| v.trim().parse().ok()).unwrap_or(0);
+                        if raw.len() >= at + 4 + length {
+                            break raw[at + 4..at + 4 + length].to_vec();
+                        }
+                    }
+                    if n == 0 {
+                        break Vec::new();
+                    }
+                };
+                log.lock().unwrap().push(serde_json::from_slice(&body).unwrap_or(Value::Null));
+                let _ = socket.write_all(reply.as_bytes());
+            }
+        });
+        (base, seen)
+    }
+
+    fn sse(frames: &[Value]) -> String {
+        let body = frames.iter().map(|f| format!("data: {f}\n\n")).collect::<String>() + "data: [DONE]\n\n";
+        format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len())
+    }
+
+    fn refuse(status: u16, headers: &str, body: &str) -> String {
+        format!("HTTP/1.1 {status} No\r\nContent-Type: application/json\r\nConnection: close\r\n{headers}Content-Length: {}\r\n\r\n{body}", body.len())
+    }
+
+    fn says(text: &str, finish: Option<&str>) -> Value {
+        json!({ "choices": [{ "delta": { "content": text }, "finish_reason": finish }] })
+    }
+
+    fn request(messages: Value) -> Value {
+        json!({ "model": "stub", "messages": messages, "stream": true, "tools": [{ "type": "function", "function": { "name": "read_file" } }], "tool_choice": "auto" })
+    }
+
+    /// One `call_model` against the stub: the outcome, and the reason of every retry it announced.
+    async fn ask(base: &str, provider: ProviderId, body: Value, lane: &mut Lane, dedup: Option<ContinuationDedup>) -> (Result<(provider::Round, bool), String>, Vec<String>) {
+        let (tx, rx) = mpsc::channel();
+        let emit = Emitter::new(tx, || {});
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let target = Target { model: models::resolve("deepseek-v4-flash", &[]), provider, style: if provider == ProviderId::Openrouter { ThinkingStyle::Openai } else { ThinkingStyle::Deepseek }, api_key: "test".into(), base_url: base.to_string(), api_model: "stub".into() };
+        let mut body = body.as_object().unwrap().clone();
+        let result = call_model(&client, &target, &mut body, lane, dedup, false, false, &emit).await;
+        drop(emit);
+        let retries = rx.try_iter().filter_map(|event| if let Event::Retry { reason, .. } = event { Some(reason) } else { None }).collect();
+        (result, retries)
+    }
+
+    #[tokio::test]
+    async fn a_rate_limit_is_retried_then_waited_out() {
+        let mut replies = vec![refuse(429, "Retry-After: 0\r\n", "{}"); 5];
+        replies.push(sse(&[says("hi", Some("stop"))]));
+        let (base, seen) = stub(replies);
+        let (result, retries) = ask(&base, ProviderId::Openrouter, request(json!([{ "role": "user", "content": "q" }])), &mut Lane::default(), None).await;
+        assert_eq!(result.unwrap().0.content, "hi");
+        assert_eq!(retries, ["rate limited", "rate limited", "rate limited", "rate limited", "service busy"]);
+        assert_eq!(seen.lock().unwrap().len(), 6);
+    }
+
+    #[tokio::test]
+    async fn a_server_error_backs_off_then_gives_up() {
+        let (base, _) = stub(vec![refuse(503, "Retry-After: 0\r\n", ""); 3]);
+        let (result, retries) = ask(&base, ProviderId::Deepseek, request(json!([{ "role": "user", "content": "q" }])), &mut Lane::default(), None).await;
+        assert!(result.unwrap_err().contains("temporarily unavailable (503)"));
+        assert_eq!(retries, ["inference unavailable", "inference unavailable"]);
+    }
+
+    #[tokio::test]
+    async fn a_size_rejection_folds_history_and_keeps_the_tools() {
+        let too_big = refuse(400, "", r#"{"error":{"message":"This endpoint's maximum context length is 1000 tokens."}}"#);
+        let (base, seen) = stub(vec![too_big, sse(&[says("ok", Some("stop"))])]);
+        let messages = json!([{ "role": "system", "content": "rules" }, { "role": "user", "content": "u".repeat(200_000) }, { "role": "assistant", "content": "a".repeat(200_000) }, { "role": "user", "content": "live" }]);
+        let mut lane = Lane::default();
+        let (result, retries) = ask(&base, ProviderId::Openrouter, request(messages), &mut lane, None).await;
+        assert!(!result.unwrap().1, "the tools stay");
+        assert_eq!(retries, ["payload too large — retrying with 1 older turn folded, tools kept"]);
+        let seen = seen.lock().unwrap();
+        assert!(seen[1]["messages"][1]["content"].as_str().unwrap().starts_with("[1 older history turn omitted"));
+        assert!(seen[1]["tools"].is_array() && lane.degraded == 0);
+    }
+
+    #[tokio::test]
+    async fn a_shape_rejection_strips_the_tools_and_counts_the_round() {
+        let (base, seen) = stub(vec![refuse(400, "", r#"{"error":{"message":"Invalid API parameter"}}"#), sse(&[says("ok", Some("stop"))])]);
+        let mut lane = Lane::default();
+        let (result, retries) = ask(&base, ProviderId::Openrouter, request(json!([{ "role": "user", "content": "q" }])), &mut lane, None).await;
+        assert!(result.unwrap().1, "the round ran without tools");
+        assert_eq!(retries, ["host rejected the payload — retrying without tools and media"]);
+        assert!(seen.lock().unwrap()[1].get("tools").is_none() && lane.degraded == 1);
+    }
+
+    #[tokio::test]
+    async fn mandatory_reasoning_gets_minimal_effort() {
+        let (base, seen) = stub(vec![refuse(400, "", r#"{"error":{"message":"Reasoning is mandatory for this endpoint and cannot be disabled."}}"#), sse(&[says("ok", Some("stop"))])]);
+        let mut body = request(json!([{ "role": "user", "content": "q" }]));
+        body["reasoning"] = json!({ "effort": "none" });
+        let mut lane = Lane::default();
+        let (result, retries) = ask(&base, ProviderId::Openrouter, body, &mut lane, None).await;
+        assert!(result.is_ok() && lane.mandatory);
+        assert_eq!(retries, ["endpoint requires reasoning — retrying with minimal thinking instead of none"]);
+        let seen = seen.lock().unwrap();
+        assert!(seen[1].get("reasoning").is_none() && seen[1]["reasoning_effort"] == "low" && seen[1]["tools"].is_array());
+    }
+
+    #[tokio::test]
+    async fn an_empty_stream_is_asked_again() {
+        let (base, seen) = stub(vec![sse(&[]), sse(&[says("there", Some("stop"))])]);
+        let (result, retries) = ask(&base, ProviderId::Deepseek, request(json!([{ "role": "user", "content": "q" }])), &mut Lane::default(), None).await;
+        assert_eq!(result.unwrap().0.content, "there");
+        assert_eq!((retries, seen.lock().unwrap().len()), (vec!["empty reply".to_string()], 2));
+    }
+
+    #[tokio::test]
+    async fn a_dropped_stream_comes_back_as_a_cut_reply() {
+        // The headers promise more than arrives: the connection closes mid-reply.
+        let dropped = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\nContent-Length: 9999\r\n\r\ndata: {}\n\n", says("partial", None));
+        let (base, _) = stub(vec![dropped]);
+        let (result, retries) = ask(&base, ProviderId::Deepseek, request(json!([{ "role": "user", "content": "q" }])), &mut Lane::default(), None).await;
+        let round = result.unwrap().0;
+        assert_eq!((round.content.as_str(), round.finish, retries.len()), ("partial", None, 0));
+    }
+
+    #[tokio::test]
+    async fn a_continuation_that_restarts_its_sentence_is_trimmed() {
+        let frames = [says("The chain is closed and the pawn ", None), says("handle now resolves through m_hPawn = controller + 0x8", None), says(" and that is all.", Some("stop"))];
+        let (base, _) = stub(vec![sse(&frames)]);
+        let dedup = ContinuationDedup::new("The chain is closed and the pawn handle now resolves through m_hPawn = ");
+        let (result, _) = ask(&base, ProviderId::Deepseek, request(json!([{ "role": "user", "content": "q" }])), &mut Lane::default(), Some(dedup)).await;
+        assert_eq!(result.unwrap().0.content, "controller + 0x8 and that is all.");
+    }
+
+    fn calls(name: &str, args: &str) -> Value {
+        json!({ "choices": [{ "delta": { "tool_calls": [{ "index": 0, "id": "call_1", "function": { "name": name, "arguments": args } }] }, "finish_reason": "tool_calls" }] })
+    }
+
+    /// One whole reply against the stub, driven the way `run` drives it: what it wrote, how it ended, its notices, and every request sent.
+    async fn reply(replies: Vec<String>, effort: &str, budget: Option<f64>) -> (String, Ending, Vec<String>, Vec<Value>) {
+        let (base, seen) = stub(replies);
+        let (tx, rx) = mpsc::channel();
+        let dir = std::env::temp_dir().join(format!("apim-loop-{}-{}", std::process::id(), base.rsplit(':').next().unwrap()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = Ctx {
+            root: dir.clone(),
+            state_dir: dir.clone(),
+            settings: Settings { budget_usd: budget, ..Settings::default() },
+            client: reqwest::Client::builder().no_proxy().build().unwrap(),
+            read_chars: 20_000,
+            emit: Emitter::new(tx, || {}),
+            chat: Arc::new(Mutex::new(ChatState { plan: None, findings: Vec::new(), finish_bounced: false })),
+            procs: Arc::new(Procs::default()),
+            planner: None,
+        };
+        let target = Target { model: models::resolve("deepseek-v4-flash", &[]), provider: ProviderId::Deepseek, style: ThinkingStyle::Deepseek, api_key: "test".into(), base_url: base, api_model: "stub".into() };
+        let opening = vec![json!({ "role": "system", "content": "rules" }), user("q")];
+        let end = drive(&target, &ctx, opening, vec![json!({ "type": "function", "function": { "name": "read_file" } })], effort, "test", &Mutex::new(Vec::new())).await.unwrap();
+        drop(ctx);
+        let (mut text, mut notices) = (String::new(), Vec::new());
+        for event in rx.try_iter() {
+            match event {
+                Event::Content(t) => text.push_str(&t),
+                Event::Notice(n) => notices.push(n),
+                _ => {}
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        let sent = seen.lock().unwrap().clone();
+        (text, end, notices, sent)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reply_cut_by_the_output_limit_is_continued() {
+        let (text, end, notices, sent) = reply(vec![sse(&[says("The first half of the answer", Some("length"))]), sse(&[says(" and the second half.", Some("stop"))])], "none", None).await;
+        assert_eq!(text, "The first half of the answer and the second half.");
+        assert_eq!(notices, ["Answer was longer than one response allows — continuing (1/16)"]);
+        assert!(!end.incomplete && end.stop_reason.is_none());
+        assert!(sent[1]["messages"][3]["content"].as_str().unwrap().starts_with("You reached the output limit mid-answer. Continue from exactly where you stopped"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_same_failing_call_three_times_stops_the_run() {
+        let failing = || sse(&[calls("read_file", r#"{"path":"missing.txt"}"#)]);
+        let (text, end, _, sent) = reply(vec![failing(), failing(), failing()], "none", None).await;
+        assert!(text.starts_with("Stopped by the loop breaker: `read_file` failed three times with identical arguments"), "{text}");
+        assert_eq!(end.stop_reason.as_deref(), Some(revive::premature_stop_notice(Premature::LoopBreaker)));
+        // The second failure carried the warning in the result the model read before its third try.
+        let read = sent[2]["messages"].as_array().unwrap().iter().rev().find(|m| m["role"] == "tool").unwrap()["content"].as_str().unwrap().to_string();
+        assert!(read.contains("[Harness: this exact `read_file` call has now failed twice"), "{read}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stop_after_tools_with_no_answer_is_picked_up() {
+        let (text, end, notices, sent) = reply(vec![sse(&[calls("list_files", "{}")]), sse(&[says("", Some("stop"))]), sse(&[says("Here is what I did: listed the folder, and it is empty.", Some("stop"))])], "none", None).await;
+        assert_eq!(text, "Here is what I did: listed the folder, and it is empty.");
+        assert_eq!(notices, ["The model stopped mid-task — continuing from where it left off (1/2)"]);
+        assert!(!end.incomplete);
+        let shove = sent[2]["messages"].as_array().unwrap().iter().rev().find(|m| m["role"] == "user").unwrap()["content"].as_str().unwrap().to_string();
+        assert!(shove.starts_with("You stopped before the task was finished — you called tools and then produced no closing answer."), "{shove}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_think_that_fills_the_output_is_told_to_answer_without_one() {
+        let think = json!({ "choices": [{ "delta": { "reasoning_content": "r".repeat(100) }, "finish_reason": "length" }] });
+        let (text, end, notices, sent) = reply(vec![sse(&[think]), sse(&[says("Short answer.", Some("stop"))])], "high", None).await;
+        assert_eq!((text.as_str(), end.incomplete), ("Short answer.", false));
+        assert_eq!(notices, ["Used the thinking budget — answering now, without another think"]);
+        assert_eq!((sent[0]["thinking"]["type"].as_str(), sent[1]["thinking"]["type"].as_str()), (Some("enabled"), Some("disabled")));
+        assert_eq!(sent[1]["messages"][3]["content"], THINK_ONLY[0]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_spending_limit_stops_the_run_before_its_tools() {
+        let costly = json!({ "choices": [], "usage": { "prompt_tokens": 10_000_000, "completion_tokens": 1_000, "total_tokens": 10_001_000 } });
+        let (text, end, _, sent) = reply(vec![sse(&[calls("list_files", "{}"), costly])], "none", Some(0.01)).await;
+        assert!(text.starts_with("Stopped at your spending limit — this reply has cost $"), "{text}");
+        assert_eq!(end.stop_reason.as_deref(), Some("Stopped at your $0.01 spending limit — the work so far is saved, use Resume to continue"));
+        // One cent buys at most 35,714 output tokens of this model: the request was capped to that.
+        assert!(end.incomplete && sent.len() == 1 && sent[0]["max_tokens"].as_u64().unwrap() <= 35_714);
     }
 }

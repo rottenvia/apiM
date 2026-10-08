@@ -16,6 +16,7 @@ mod plugins;
 mod prompt;
 mod provider;
 mod refusal;
+mod run;
 mod search;
 mod search_usage;
 mod slash;
