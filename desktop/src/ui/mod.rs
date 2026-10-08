@@ -1,45 +1,61 @@
 //! The window: sidebar, chat, workspace panel. Drawn directly with egui; there
-//! is no web view anywhere.
+//! is no web view anywhere. The layout follows the web app's src/app/page.tsx.
 
+mod attachments;
+mod bubble;
 mod chat;
+mod composer;
 mod dialogs;
+mod icons;
+mod markdown;
+mod overlay;
+mod prompts;
+mod sidebar;
 pub mod theme;
+mod widgets;
+mod workspace;
 
 use crate::agent::{self, Emitter, Event, Stopwatch};
 use crate::models::CustomModel;
-use crate::provider;
-use crate::store::{self, ChatMeta, Conversation, Message, Part, Role, Settings};
-use crate::tools::{ChatState, exec::Procs, files};
-use eframe::egui::{self, RichText};
-use egui_commonmark::CommonMarkCache;
+use crate::store::{self, Attachment, Bucket, ChatMeta, Conversation, HistorySummary, Message, Part, Role, Settings};
+use crate::tools::{ChatState, exec::Procs};
+use crate::{export, provider, summary};
+use composer::Popover;
+use eframe::egui::{self, Rect, vec2};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 
-const SIDEBAR_WIDTH: f32 = 264.0;
 /// How often a reply in progress is written to disk, so a crash loses seconds, not the answer.
 const CHECKPOINT: Duration = Duration::from_secs(5);
 
 pub fn run(rt: tokio::runtime::Runtime) -> eframe::Result {
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_title("apiM").with_inner_size([1180.0, 780.0]).with_min_inner_size([560.0, 420.0]).with_drag_and_drop(true),
-        renderer: eframe::Renderer::Glow,
-        ..Default::default()
-    };
-    eframe::run_native("apiM", options, Box::new(move |cc| Ok(Box::new(App::new(cc, rt)))))
+    let shot = Shot::from_env();
+    let mut viewport = egui::ViewportBuilder::default().with_title("apiM").with_inner_size([1280.0, 800.0]).with_min_inner_size([420.0, 420.0]).with_drag_and_drop(true);
+    if let Some(shot) = &shot {
+        // A picture of itself, for checking the look: off screen, never focused, gone in a moment.
+        viewport = viewport.with_inner_size(shot.size).with_position([-8000.0, -8000.0]).with_active(false).with_taskbar(false).with_decorations(false);
+    }
+    let options = eframe::NativeOptions { viewport, renderer: eframe::Renderer::Glow, ..Default::default() };
+    eframe::run_native("apiM", options, Box::new(move |cc| Ok(Box::new(App::new(cc, rt, shot)))))
 }
 
 #[derive(PartialEq)]
-enum Dialog {
+pub enum Dialog {
     None,
     Settings,
     Plugins,
-    Rename(String, String),
-    Delete(String, String),
+    Mcp,
+    Delete {
+        ids: Vec<String>,
+        opened: Instant,
+    },
     /// A workspace file opened for reading: (path, contents).
     Preview(String, String),
+    /// Search across every chat (Ctrl+K).
+    Search,
 }
 
 struct PendingApproval {
@@ -66,9 +82,36 @@ struct Run {
     drafting: Option<(String, usize)>,
     approval: Option<PendingApproval>,
     question: Option<PendingQuestion>,
+    /// "btw" notes typed while it works, picked up before its next round.
+    notes: Arc<Mutex<Vec<String>>>,
     thinking: Stopwatch,
     started: Instant,
     saved: Instant,
+}
+
+/// A summary being written in the background: the automatic one, or `/compact`.
+struct SummaryJob {
+    conv_id: String,
+    manual: bool,
+    rx: mpsc::Receiver<Result<HistorySummary, String>>,
+}
+
+/// `APIM_SHOT=out.png`: draw one state, save a picture of it, quit. Nothing is clicked or typed.
+struct Shot {
+    path: PathBuf,
+    size: [f32; 2],
+    /// What to show: settings, plugins, model, effort, web, context, workspace…
+    state: String,
+    started: Instant,
+    asked: bool,
+}
+
+impl Shot {
+    fn from_env() -> Option<Shot> {
+        let path = PathBuf::from(std::env::var_os("APIM_SHOT")?);
+        let size = std::env::var("APIM_SHOT_SIZE").ok().and_then(|s| s.split_once('x').and_then(|(w, h)| Some([w.parse().ok()?, h.parse().ok()?]))).unwrap_or([1280.0, 800.0]);
+        Some(Shot { path, size, state: std::env::var("APIM_SHOT_STATE").unwrap_or_default(), started: Instant::now(), asked: false })
+    }
 }
 
 pub struct App {
@@ -80,19 +123,44 @@ pub struct App {
     /// The chat a reply is still being written to, when the user has switched away from it.
     parked: Option<Conversation>,
     run: Option<Run>,
+    summary_job: Option<SummaryJob>,
     procs: Arc<Procs>,
     draft: String,
-    attachments: Vec<PathBuf>,
-    md: CommonMarkCache,
+    attachments: Vec<attachments::Pending>,
+    /// The question being edited in place: (message id, draft).
+    editing: Option<(String, String)>,
+    /// A long code block opened in the side viewer.
+    artifact: Option<overlay::Artifact>,
+    /// A picture opened large: (name, where egui loads it from).
+    lightbox: Option<(String, String)>,
+    /// Why the last thing dropped or picked was not attached.
+    attach_error: Option<String>,
+    /// Commands the user said never to ask about again, per chat.
+    always_allow: HashMap<String, std::collections::HashSet<String>>,
     /// Measured height of each message at a given width, so off-screen ones are skipped.
     heights: HashMap<String, (f32, f32)>,
     dialog: Dialog,
-    filter: String,
+    side: sidebar::State,
+    popover: Popover,
+    fullscreen: bool,
+    /// Where the composer sat last frame: its popovers hang above it.
+    composer_rect: Rect,
+    /// A line above the message box: why something was not sent.
+    composer_note: Option<String>,
+    compact_focus: String,
+    compact_note: Option<(bool, String)>,
+    show_summary: bool,
+    find_open: bool,
+    find: String,
+    jump_to_latest: bool,
     /// Files of the workspace on screen, refreshed when a tool changes something.
     files: Vec<(String, u64)>,
     files_stale: bool,
     toast: Option<(String, Instant)>,
     focus_composer: bool,
+    /// The theme the window is drawn in right now, to notice a change in Settings.
+    applied_theme: (String, [String; 4]),
+    shot: Option<Shot>,
     // Settings dialog state.
     settings_tab: usize,
     new_model: CustomModel,
@@ -102,34 +170,97 @@ pub struct App {
 }
 
 impl App {
-    fn new(cc: &eframe::CreationContext<'_>, rt: tokio::runtime::Runtime) -> App {
-        theme::apply(&cc.egui_ctx);
-        egui_extras::install_image_loaders(&cc.egui_ctx);
+    fn new(cc: &eframe::CreationContext<'_>, rt: tokio::runtime::Runtime, shot: Option<Shot>) -> App {
         let settings = Settings::load();
+        theme::install_fonts(&cc.egui_ctx);
+        theme::apply(&cc.egui_ctx, theme::Palette::for_theme(&settings.theme, &settings.custom_theme));
+        egui_extras::install_image_loaders(&cc.egui_ctx);
         cc.egui_ctx.set_zoom_factor(settings.zoom.clamp(0.6, 2.0));
-        App {
+        let mut app = App {
             rt,
             chats: Conversation::list(),
             conv: Conversation::new(),
             parked: None,
             run: None,
+            summary_job: None,
             procs: Arc::new(Procs::default()),
             draft: String::new(),
             attachments: Vec::new(),
-            md: CommonMarkCache::default(),
+            editing: None,
+            artifact: None,
+            lightbox: None,
+            attach_error: None,
+            always_allow: HashMap::new(),
             heights: HashMap::new(),
             dialog: Dialog::None,
-            filter: String::new(),
+            side: sidebar::State::default(),
+            popover: Popover::None,
+            fullscreen: false,
+            composer_rect: Rect::NOTHING,
+            composer_note: None,
+            compact_focus: String::new(),
+            compact_note: None,
+            show_summary: false,
+            find_open: false,
+            find: String::new(),
+            jump_to_latest: false,
             files: Vec::new(),
             files_stale: true,
             toast: None,
             focus_composer: true,
+            applied_theme: (settings.theme.clone(), settings.custom_theme.clone()),
+            shot,
             settings_tab: 0,
             new_model: blank_model(),
             verify: None,
             verify_note: String::new(),
             new_plugin: blank_plugin(),
             settings,
+        };
+        app.stage_shot();
+        app
+    }
+
+    /// Puts the window in the state a self-portrait was asked for.
+    fn stage_shot(&mut self) {
+        let Some(shot) = self.shot.as_ref().map(|s| Shot { path: s.path.clone(), size: s.size, state: s.state.clone(), started: s.started, asked: s.asked }) else { return };
+        let state = shot.state.clone();
+        self.focus_composer = false;
+        if let Ok(wanted) = std::env::var("APIM_SHOT_CHAT") {
+            let found = self.chats.iter().find(|c| c.id == wanted || c.title.to_lowercase().contains(&wanted.to_lowercase())).map(|c| c.id.clone());
+            if let Some(id) = found {
+                self.open_chat(&id);
+            }
+        }
+        for part in state.split(',') {
+            match part {
+                "settings" => self.dialog = Dialog::Settings,
+                "plugins" => self.dialog = Dialog::Plugins,
+                "mcp" => self.dialog = Dialog::Mcp,
+                "delete" => self.dialog = Dialog::Delete { ids: self.chats.iter().take(1).map(|c| c.id.clone()).collect(), opened: Instant::now() },
+                "model" => self.popover = Popover::Model,
+                "effort" => self.popover = Popover::Effort,
+                "web" => self.popover = Popover::Web,
+                "context" => self.popover = Popover::Context,
+                "workspace" => self.settings.workspace_open = true,
+                "no-workspace" => self.settings.workspace_open = false,
+                "no-sidebar" => self.settings.sidebar_open = false,
+                "sidebar" => self.settings.sidebar_open = true,
+                "archive" => self.side.show_archived = true,
+                "attach" => {
+                    // The app's own sources, and the picture it took last time if there is one.
+                    let here = std::env::current_dir().unwrap_or_default();
+                    for item in [here.join("Cargo.toml"), here.join("src"), shot.path.with_file_name("b1.png")] {
+                        attachments::add(self, item);
+                    }
+                }
+                "artifact" => self.artifact = Some(overlay::Artifact { title: "main.rs".into(), language: "rust".into(), code: include_str!("../main.rs").into(), copied: None }),
+                "lightbox" => self.lightbox = Some(("b1.png".into(), file_uri(&shot.path.with_file_name("b1.png")))),
+                "toast" => self.toast("That chat couldn't be deleted. Please try again."),
+                "draft" => self.draft = "Explain how the context meter decides when to compact, and show me where that lives in the code.".into(),
+                tab if tab.starts_with("tab") => self.settings_tab = tab[3..].parse().unwrap_or(0),
+                _ => {}
+            }
         }
     }
 
@@ -139,6 +270,25 @@ impl App {
 
     fn running_here(&self) -> bool {
         self.run.as_ref().is_some_and(|r| r.conv_id == self.conv.id)
+    }
+
+    fn toggle_popover(&mut self, which: Popover) {
+        self.popover = if self.popover == which { Popover::None } else { which };
+    }
+
+    /// Runs `change` on a chat wherever it lives right now (on screen, parked, or only on disk) and saves it.
+    fn with_chat(&mut self, id: &str, change: impl FnOnce(&mut Conversation)) {
+        if self.conv.id == id {
+            change(&mut self.conv);
+            self.conv.save();
+        } else if let Some(parked) = self.parked.as_mut().filter(|p| p.id == id) {
+            change(parked);
+            parked.save();
+        } else if let Some(mut conv) = Conversation::load(id) {
+            change(&mut conv);
+            conv.save();
+        }
+        self.refresh_chats();
     }
 
     // ------------------------------------------------------------ chats
@@ -151,10 +301,15 @@ impl App {
         self.heights.clear();
         self.files_stale = true;
         self.focus_composer = true;
+        self.popover = Popover::None;
+        self.compact_note = None;
+        self.show_summary = false;
+        self.jump_to_latest = true;
     }
 
     fn new_chat(&mut self) {
         if self.conv.messages.is_empty() && !self.running_here() {
+            self.focus_composer = true;
             return;
         }
         self.leave_current();
@@ -170,68 +325,256 @@ impl App {
             Some(parked) => parked,
             None => Conversation::load(id).unwrap_or_else(Conversation::new),
         };
+        self.editing = None;
+        self.jump_to_latest = true;
     }
 
-    fn delete_chat(&mut self, id: &str) {
-        if self.run.as_ref().is_some_and(|r| r.conv_id == id) {
-            self.stop();
+    fn delete_chats(&mut self, ids: &[String]) {
+        for id in ids {
+            if self.run.as_ref().is_some_and(|r| &r.conv_id == id) {
+                self.stop();
+            }
+            Conversation::delete(id);
+            if &self.conv.id == id {
+                self.conv = Conversation::new();
+                self.heights.clear();
+                self.files_stale = true;
+            }
         }
-        Conversation::delete(id);
-        self.chats.retain(|c| c.id != id);
-        if self.conv.id == id {
-            self.conv = Conversation::new();
-            self.heights.clear();
-            self.files_stale = true;
+        self.refresh_chats();
+        self.side.finish_selecting();
+    }
+
+    fn rename_chat(&mut self, id: &str, title: &str) {
+        let title = title.trim().to_string();
+        if !title.is_empty() {
+            self.with_chat(id, |c| c.title = title);
         }
+    }
+
+    fn archive_chat(&mut self, id: &str, archived: bool) {
+        self.with_chat(id, |c| c.archived = archived);
+    }
+
+    /// "Download": the chat as a file, wherever the user wants it.
+    fn export_chat(&mut self, id: &str, format: &str) {
+        let conv = if self.conv.id == id { Some(self.conv.clone()) } else { Conversation::load(id) };
+        let Some(conv) = conv else { return };
+        let Some(path) = rfd::FileDialog::new().set_file_name(export::filename(&conv.title, format)).save_file() else { return };
+        match std::fs::write(&path, export::render(&conv, format)) {
+            Ok(()) => self.side.note = Some((format!("Saved {}", path.file_name().unwrap_or_default().to_string_lossy()), Instant::now())),
+            Err(e) => self.toast(format!("Could not save the file: {e}")),
+        }
+    }
+
+    fn import_chats(&mut self) {
+        let Some(paths) = rfd::FileDialog::new().add_filter("apiM chat export", &["json"]).pick_files() else { return };
+        let mut imported = 0;
+        for path in &paths {
+            let Some(mut conv) = std::fs::read(path).ok().and_then(|b| Conversation::from_json(&b)) else { continue };
+            conv.save();
+            imported += 1;
+        }
+        self.refresh_chats();
+        self.side.note = Some((
+            match (imported, paths.len()) {
+                (0, _) => "That file is not an apiM chat export".to_string(),
+                (1, 1) => "Imported 1 chat".to_string(),
+                (n, total) if n == total => format!("Imported {n} chats"),
+                (n, total) => format!("Imported {n} of {total} files"),
+            },
+            Instant::now(),
+        ));
     }
 
     fn refresh_chats(&mut self) {
         self.chats = Conversation::list();
+        self.side.prune(&self.chats);
+    }
+
+    // ------------------------------------------------------------ context
+
+    /// Tokens the newest request occupied in the model's window, and whether that is a guess.
+    fn context_used(&self) -> (Option<u64>, bool) {
+        if let Some(m) = self.conv.messages.iter().rev().find(|m| m.usage.context > 0) {
+            return (Some(m.usage.context), false);
+        }
+        if self.conv.messages.is_empty() {
+            return (None, false);
+        }
+        let chars: usize = self.conv.messages.iter().map(|m| m.history_text().len()).sum();
+        (Some((chars as f64 / 3.6) as u64), true)
+    }
+
+    fn context_breakdown(&self) -> Vec<Bucket> {
+        self.conv.messages.iter().rev().find(|m| !m.context_breakdown.is_empty()).map(|m| m.context_breakdown.clone()).unwrap_or_default()
+    }
+
+    fn totals(&self) -> chat::Totals {
+        let mut t = chat::Totals::default();
+        let off_peak = provider::deepseek_off_peak();
+        for m in &self.conv.messages {
+            if m.role == Role::User {
+                t.messages += 1;
+                continue;
+            }
+            t.tokens += m.usage.prompt + m.usage.completion;
+            t.ms += m.duration_ms;
+            if let Some(cost) = m.usage.shown_cost(&m.model, &self.settings.custom_models, off_peak).filter(|_| m.usage.prompt > 0) {
+                t.cost += cost;
+                t.priced += 1;
+            }
+        }
+        t
+    }
+
+    fn compacting(&self) -> bool {
+        self.summary_job.as_ref().is_some_and(|j| j.manual && j.conv_id == self.conv.id)
+    }
+
+    fn can_compact(&self) -> bool {
+        summary::compact_blocker(&self.conv).is_none()
+    }
+
+    /// `/compact`: one summary replaces the conversation for the model. The transcript stays on screen.
+    fn compact(&mut self, ctx: &egui::Context, focus: String) {
+        if self.running_here() {
+            self.compact_note = Some((false, "A reply is still running in this chat. Stop it or wait for it to finish, then compact.".into()));
+            return;
+        }
+        if let Some(why) = summary::compact_blocker(&self.conv) {
+            self.compact_note = Some((false, why.into()));
+            return;
+        }
+        if let Err(problem) = provider::resolve_target(&self.settings.model, &self.settings) {
+            self.compact_note = Some((false, problem));
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let wake = ctx.clone();
+        let (messages, stored, settings) = (self.conv.messages.clone(), self.conv.summary.clone(), self.settings.clone());
+        self.rt.spawn(async move {
+            let _ = tx.send(summary::compact(messages, stored, settings, focus).await);
+            wake.request_repaint();
+        });
+        self.summary_job = Some(SummaryJob { conv_id: self.conv.id.clone(), manual: true, rx });
+        self.compact_note = None;
+    }
+
+    /// Older turns are folded into the summary once enough of them have piled up behind the newest eight.
+    fn refresh_summary(&mut self, ctx: &egui::Context, conv_id: &str) {
+        if self.summary_job.is_some() {
+            return;
+        }
+        let conv = match &self.parked {
+            Some(parked) if parked.id == conv_id => parked,
+            _ => &self.conv,
+        };
+        let shape = summary::shape(&conv.messages, conv.summary.as_ref());
+        if conv.id != conv_id || !summary::should_refresh(shape.pending) {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let wake = ctx.clone();
+        let (stored, pending, settings) = (conv.summary.clone(), shape.pending.to_vec(), self.settings.clone());
+        self.rt.spawn(async move {
+            let _ = tx.send(summary::refresh(stored, pending, settings).await.ok_or_else(String::new));
+            wake.request_repaint();
+        });
+        self.summary_job = Some(SummaryJob { conv_id: conv_id.to_string(), manual: false, rx });
+    }
+
+    fn pump_summary(&mut self) {
+        let Some(job) = &self.summary_job else { return };
+        let Ok(result) = job.rx.try_recv() else { return };
+        let job = self.summary_job.take().unwrap();
+        match result {
+            Ok(fresh) => {
+                let turns = fresh.covered_turns.unwrap_or(0);
+                // A chat that changed underneath (retry, delete) keeps its old summary.
+                self.with_chat(&job.conv_id, |c| {
+                    if c.messages.iter().any(|m| m.id == fresh.up_to_id) {
+                        c.summary = Some(fresh);
+                    }
+                });
+                if job.manual && job.conv_id == self.conv.id {
+                    self.compact_note = Some((true, format!("Compacted {turns} messages into a summary. The model now starts from it.")));
+                    self.compact_focus.clear();
+                }
+            }
+            Err(problem) if job.manual => self.compact_note = Some((false, problem)),
+            Err(_) => {}
+        }
     }
 
     // ------------------------------------------------------------ sending
 
-    fn send(&mut self, ctx: &egui::Context) {
-        let mut text = self.draft.trim().to_string();
-        if (text.is_empty() && self.attachments.is_empty()) || self.run.is_some() {
-            if self.run.is_some() && !self.running_here() {
-                self.toast("Another chat is still being answered. Stop it or wait for it to finish.");
+    /// The Send button and Enter.
+    fn submit(&mut self, ctx: &egui::Context) {
+        let text = self.draft.trim().to_string();
+        if self.running_here() {
+            // "btw …" while a reply runs is handed to it; anything else waits.
+            if composer::is_btw(&text) {
+                if let Some(run) = &self.run {
+                    run.notes.lock().unwrap().push(text.clone());
+                }
+                let mut note = Message::new(Role::User, &text);
+                note.note = true;
+                let at = self.conv.messages.len().saturating_sub(1);
+                self.conv.messages.insert(at, note);
+                self.heights.clear();
+                self.draft.clear();
             }
             return;
         }
+        if let Some(rest) = text.strip_prefix("/compact") {
+            if rest.is_empty() || rest.starts_with(' ') {
+                self.draft.clear();
+                self.popover = Popover::Context;
+                self.compact(ctx, rest.trim().to_string());
+                return;
+            }
+        }
+        if text.is_empty() && self.attachments.is_empty() {
+            return;
+        }
+        if self.run.is_some() {
+            self.composer_note = Some("Another chat is still being answered. Stop it or wait for it to finish.".into());
+            return;
+        }
+        if self.compacting() {
+            return;
+        }
+        // Pictures go to the model; any other file is copied into the workspace for the tools to read.
+        let workspace = self.conv.workspace();
+        let (attached, notes) = attachments::take(std::mem::take(&mut self.attachments), &workspace);
+        self.draft.clear();
+        self.send(ctx, format!("{text}{notes}"), attached);
+    }
+
+    fn send(&mut self, ctx: &egui::Context, text: String, attached: Vec<Attachment>) {
         if let Err(problem) = provider::resolve_target(&self.settings.model, &self.settings) {
             self.toast(problem);
             self.dialog = Dialog::Settings;
             self.settings_tab = 0;
+            self.draft = text;
             return;
         }
-        let history: Vec<(Role, String)> = self.conv.messages.iter().map(|m| (m.role, m.history_text())).collect();
+        let shape = summary::shape(&self.conv.messages, self.conv.summary.as_ref());
+        let history: Vec<(Role, String)> = shape.verbatim.iter().map(|m| (m.role, m.history_text())).collect();
+        let stored = self.conv.summary.as_ref().filter(|s| self.conv.messages.iter().any(|m| m.id == s.up_to_id)).map(summary::render);
         if self.conv.messages.is_empty() {
-            self.conv.title = store::derive_title(if text.is_empty() { "Attached files" } else { &text });
-        }
-
-        // Pictures go to the model; any other file is copied into the workspace for the tools to read.
-        let workspace = self.conv.workspace();
-        let mut images = Vec::new();
-        for path in std::mem::take(&mut self.attachments) {
-            if is_image(&path) {
-                images.push(path);
-                continue;
-            }
-            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
-            let dest = workspace.join("uploads").join(&name);
-            let copied = std::fs::create_dir_all(workspace.join("uploads")).and_then(|_| std::fs::copy(&path, &dest));
-            text.push_str(&match copied {
-                Ok(_) => format!("\n\n[Attached file saved in the workspace: uploads/{name}]"),
-                Err(e) => format!("\n\n[Could not attach {name}: {e}]"),
-            });
+            self.conv.title = store::derive_title(if text.trim().is_empty() { "Attached files" } else { &text });
         }
 
         let mut user = Message::new(Role::User, &text);
-        user.attachments = images.clone();
+        user.attachments = attached.clone();
         self.conv.messages.push(user);
         let mut reply = Message::new(Role::Assistant, "");
         reply.model = self.settings.model.clone();
+        // "auto" is settled per message, and the reply is labelled with what it got.
+        reply.effort = Some(if self.settings.effort == "auto" { crate::prompt::auto_effort(&text).to_string() } else { self.settings.effort.clone() });
+        reply.plugins_used = self.settings.enabled_plugins.clone();
         self.conv.messages.push(reply);
         self.conv.updated_at = store::now_ms();
         self.conv.save();
@@ -239,15 +582,18 @@ impl App {
 
         let (tx, rx) = mpsc::channel();
         let wake = ctx.clone();
+        let notes = Arc::new(Mutex::new(Vec::new()));
         let request = agent::Request {
             settings: self.settings.clone(),
             history,
+            summary: stored,
             text,
-            images,
-            workspace,
+            images: attached.into_iter().filter(|a| a.kind == "image").collect(),
+            workspace: self.conv.workspace(),
             state_dir: self.conv.state_dir(),
             chat: ChatState { plan: self.conv.plan.clone(), findings: self.conv.findings.clone(), finish_bounced: false },
             conv_id: self.conv.id.clone(),
+            notes: notes.clone(),
         };
         let handle = self.rt.spawn(agent::run(request, Emitter::new(tx, move || wake.request_repaint()), self.procs.clone()));
         self.run = Some(Run {
@@ -258,12 +604,14 @@ impl App {
             drafting: None,
             approval: None,
             question: None,
+            notes,
             thinking: Stopwatch::new(),
             started: Instant::now(),
             saved: Instant::now(),
         });
-        self.draft.clear();
         self.focus_composer = true;
+        self.jump_to_latest = true;
+        self.composer_note = None;
     }
 
     /// Drops the last reply and asks the same question again.
@@ -272,12 +620,48 @@ impl App {
             return;
         }
         self.conv.messages.pop();
-        if let Some(question) = self.conv.messages.pop() {
-            self.draft = question.text();
-            self.attachments = question.attachments;
-            self.heights.clear();
-            self.send(ctx);
+        // Notes passed to that reply go with it.
+        while self.conv.messages.last().is_some_and(|m| m.note) {
+            self.conv.messages.pop();
         }
+        if let Some(question) = self.conv.messages.pop() {
+            self.heights.clear();
+            self.send(ctx, question.text(), question.attachments);
+        }
+    }
+
+    /// The question a message belongs to and everything up to the next one: `start..end`.
+    fn exchange(&self, id: &str) -> Option<(usize, usize)> {
+        let asked = |m: &Message| m.role == Role::User && !m.note;
+        let at = self.conv.messages.iter().position(|m| m.id == id)?;
+        let start = self.conv.messages[..=at].iter().rposition(asked)?;
+        let end = self.conv.messages[start + 1..].iter().position(asked).map_or(self.conv.messages.len(), |i| start + 1 + i);
+        Some((start, end))
+    }
+
+    /// Removes a question and its reply, so neither is sent to the model again.
+    fn delete_exchange(&mut self, id: &str) {
+        if self.running_here() {
+            return;
+        }
+        let Some((start, end)) = self.exchange(id) else { return };
+        self.conv.messages.drain(start..end);
+        self.heights.clear();
+        self.conv.updated_at = store::now_ms();
+        self.conv.save();
+        self.refresh_chats();
+    }
+
+    /// Asks an earlier question again with new words: it and everything after it are replaced.
+    fn resend_edited(&mut self, ctx: &egui::Context, id: &str, text: String) {
+        if self.run.is_some() || self.compacting() {
+            return;
+        }
+        let Some((start, _)) = self.exchange(id) else { return };
+        let attached = std::mem::take(&mut self.conv.messages[start].attachments);
+        self.conv.messages.truncate(start);
+        self.heights.clear();
+        self.send(ctx, text, attached);
     }
 
     fn stop(&mut self) {
@@ -340,7 +724,7 @@ impl App {
                     run.drafting = None;
                     msg.parts.push(Part::Tool(tool));
                 }
-                Event::ToolDone { id, ok, summary, image } => {
+                Event::ToolDone { id, ok, summary, image, changed } => {
                     if let Some(tool) = msg.parts.iter_mut().rev().find_map(|p| match p {
                         Part::Tool(t) if t.id == id => Some(t),
                         _ => None,
@@ -348,8 +732,12 @@ impl App {
                         tool.ok = Some(ok);
                         tool.summary = summary;
                         tool.image = image;
+                        tool.changed_path = changed;
                     }
                     self.files_stale = true;
+                }
+                Event::Approval { command, reason, reply } if self.always_allow.get(&run.conv_id).is_some_and(|allowed| allowed.contains(&command)) => {
+                    let _ = (reason, reply.send(true));
                 }
                 Event::Approval { command, reason, reply } => {
                     run.approval = Some(PendingApproval { command, reason, reply });
@@ -361,8 +749,10 @@ impl App {
                 }
                 Event::Usage(usage) => {
                     msg.usage = usage;
+                    msg.raw_usage = None;
                     msg.cost = usage.cost(&msg.model, &self.settings.custom_models);
                 }
+                Event::Context(breakdown) => msg.context_breakdown = breakdown,
                 Event::State(state) => {
                     conv.plan = state.plan;
                     conv.findings = state.findings;
@@ -392,7 +782,9 @@ impl App {
             conv.save();
         }
         if finished {
+            let conv_id = run.conv_id.clone();
             self.run = None;
+            self.refresh_summary(ctx, &conv_id);
             self.parked = None;
             self.files_stale = true;
             self.refresh_chats();
@@ -400,186 +792,62 @@ impl App {
         }
     }
 
-    // ------------------------------------------------------------ panels
+    // ------------------------------------------------------------ attaching
 
-    fn sidebar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("apiM").font(egui::FontId::new(19.0, theme::serif())));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("+ New chat").on_hover_text("Start a new chat (Ctrl+N)").clicked() {
-                    self.new_chat();
-                }
-            });
-        });
-        ui.add_space(4.0);
-        ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Search chats").desired_width(f32::INFINITY));
-        ui.add_space(4.0);
-
-        let mut open = None;
-        let mut dialog = None;
-        let needle = self.filter.to_lowercase();
-        let now = chrono::Local::now().date_naive();
-        egui::ScrollArea::vertical().auto_shrink(false).max_height(ui.available_height() - 44.0).show(ui, |ui| {
-            let mut last_group = "";
-            for chat in self.chats.iter().filter(|c| needle.is_empty() || c.title.to_lowercase().contains(&needle)) {
-                let group = date_group(chat.updated_at, now);
-                if group != last_group {
-                    ui.add_space(6.0);
-                    ui.label(theme::muted(group));
-                    last_group = group;
-                }
-                let busy = self.run.as_ref().is_some_and(|r| r.conv_id == chat.id);
-                let title = if busy { format!("● {}", chat.title) } else { chat.title.clone() };
-                let row = ui.add_sized([ui.available_width(), 30.0], egui::Button::selectable(chat.id == self.conv.id, title).truncate().frame_when_inactive(false));
-                if row.clicked() {
-                    open = Some(chat.id.clone());
-                }
-                egui::Popup::context_menu(&row).show(|ui| {
-                    if ui.button("Rename").clicked() {
-                        dialog = Some(Dialog::Rename(chat.id.clone(), chat.title.clone()));
-                    }
-                    if ui.button(RichText::new("Delete").color(theme::DANGER)).clicked() {
-                        dialog = Some(Dialog::Delete(chat.id.clone(), chat.title.clone()));
-                    }
-                });
-            }
-            if self.chats.is_empty() {
-                ui.add_space(12.0);
-                ui.label(theme::muted("Your chats will appear here."));
-            }
-        });
-        if let Some(id) = open {
-            self.open_chat(&id);
+    fn pick_files(&mut self) {
+        if let Some(picked) = rfd::FileDialog::new().pick_files() {
+            picked.into_iter().for_each(|p| attachments::add(self, p));
         }
-        if let Some(d) = dialog {
-            self.dialog = d;
-        }
-
-        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-            ui.horizontal(|ui| {
-                if ui.button("⚙ Settings").clicked() {
-                    self.dialog = Dialog::Settings;
-                }
-                if ui.button("🔌 Plugins").clicked() {
-                    self.dialog = Dialog::Plugins;
-                }
-            });
-        });
     }
 
-    fn top_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_centered(|ui| {
-            if ui.add(egui::Button::new("☰").frame_when_inactive(false)).on_hover_text("Show or hide the chat list").clicked() {
-                self.settings.sidebar_open = !self.settings.sidebar_open;
-                self.settings.save();
-            }
-            ui.label(theme::secondary(self.conv.title.as_str()));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add(egui::Button::selectable(self.settings.workspace_open, "📁 Workspace").frame_when_inactive(false)).on_hover_text("Files the agent works on in this chat").clicked() {
-                    self.settings.workspace_open = !self.settings.workspace_open;
-                    self.files_stale = true;
-                    self.settings.save();
-                }
-                let running = self.procs.running();
-                if running > 0 && ui.button(RichText::new(format!("■ {running} running")).color(theme::WARNING)).on_hover_text("Background processes the agent started. Click to stop them all.").clicked() {
-                    self.procs.stop_all();
-                }
-            });
-        });
-    }
-
-    fn workspace_panel(&mut self, ui: &mut egui::Ui) {
-        let root = self.conv.workspace();
-        if std::mem::take(&mut self.files_stale) {
-            self.files = if root.exists() { files::walk(&root, &root) } else { Vec::new() };
+    fn pick_folder(&mut self) {
+        if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+            attachments::add(self, folder);
         }
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Workspace").strong());
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("⟳").on_hover_text("Refresh the list").clicked() {
-                    self.files_stale = true;
-                }
-            });
-        });
-        let shown = root.display().to_string();
-        ui.add(egui::Label::new(theme::muted(shown.as_str())).truncate()).on_hover_text(shown.as_str());
-        ui.horizontal_wrapped(|ui| {
-            if ui.small_button("Open folder").clicked() {
-                let _ = std::fs::create_dir_all(&root);
-                open_in_file_manager(&root);
-            }
-            if ui.small_button("Choose folder…").on_hover_text("Point this chat at a project on this PC. The agent reads and edits files inside it.").clicked() && !self.running_here() {
-                if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                    self.conv.folder = Some(folder);
-                    self.conv.save();
-                    self.files_stale = true;
-                }
-            }
-            if self.conv.folder.is_some() && ui.small_button("Use chat folder").on_hover_text("Go back to this chat's own folder").clicked() && !self.running_here() {
-                self.conv.folder = None;
-                self.conv.save();
-                self.files_stale = true;
-            }
-        });
-        ui.separator();
-
-        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-            if let Some(plan) = &self.conv.plan {
-                ui.label(RichText::new("Plan").strong());
-                ui.label(theme::secondary(plan.goal.as_str()));
-                for step in &plan.steps {
-                    let (mark, colour) = match step.state.as_str() {
-                        "done" => ("✔", theme::SUCCESS),
-                        "doing" => ("▶", theme::ACCENT_LIGHT),
-                        "blocked" => ("!", theme::DANGER),
-                        _ => ("○", theme::TEXT_MUTED),
-                    };
-                    ui.horizontal_top(|ui| {
-                        ui.label(RichText::new(mark).color(colour));
-                        ui.add(egui::Label::new(RichText::new(step.text.as_str()).size(12.5)).wrap()).on_hover_text(step.note.as_str());
-                    });
-                }
-                ui.separator();
-            }
-            let active: Vec<_> = self.conv.findings.iter().filter(|f| f.active).collect();
-            if !active.is_empty() {
-                egui::CollapsingHeader::new(format!("Findings ({})", active.len())).show(ui, |ui| {
-                    for f in active {
-                        ui.add(egui::Label::new(RichText::new(format!("• {}", f.claim)).size(12.5)).wrap()).on_hover_text(f.evidence.as_str());
-                    }
-                });
-                ui.separator();
-            }
-
-            ui.label(theme::muted(format!("{} files", self.files.len())));
-            if self.files.is_empty() {
-                ui.label(theme::muted("No files yet. Ask for one and it appears here."));
-            }
-            let mut preview = None;
-            // ponytail: a flat list, capped. Make it a collapsible tree if big projects are common.
-            for (path, size) in self.files.iter().take(500) {
-                let label = format!("{path}  ·  {}", human_size(*size));
-                if ui.add(egui::Button::new(RichText::new(label).size(12.5)).frame(false).truncate()).on_hover_text("Click to read").clicked() {
-                    preview = Some(path.clone());
-                }
-            }
-            if self.files.len() > 500 {
-                ui.label(theme::muted(format!("… and {} more", self.files.len() - 500)));
-            }
-            if let Some(path) = preview {
-                let text = match files::read_text(&root.join(&path)) {
-                    Ok(t) => t.chars().take(200_000).collect(),
-                    Err(e) => e,
-                };
-                self.dialog = Dialog::Preview(path, text);
-            }
-        });
     }
 
     /// Files dropped on the window become attachments.
     fn take_drops(&mut self, ctx: &egui::Context) {
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
-        self.attachments.extend(dropped.into_iter().filter(|p| p.is_file()));
+        dropped.into_iter().for_each(|p| attachments::add(self, p));
+    }
+
+    /// The web app has exactly two global shortcuts, so this does too.
+    fn shortcuts(&mut self, ctx: &egui::Context) {
+        let pressed = |key| ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, key));
+        if pressed(egui::Key::F) {
+            self.find_open = true;
+        }
+        if pressed(egui::Key::K) {
+            self.dialog = Dialog::Search;
+        }
+    }
+
+    /// The self-portrait: wait for the first frames to settle, ask for the pixels, save them, leave.
+    fn take_shot(&mut self, ctx: &egui::Context) {
+        let Some(shot) = self.shot.as_mut() else { return };
+        ctx.request_repaint();
+        if !shot.asked && shot.started.elapsed() > Duration::from_millis(1200) {
+            shot.asked = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+        }
+        let image = ctx.input(|i| {
+            i.events.iter().find_map(|e| match e {
+                egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                _ => None,
+            })
+        });
+        if let Some(image) = image {
+            let [w, h] = image.size;
+            let saved = image::save_buffer(&shot.path, image.as_raw(), w as u32, h as u32, image::ColorType::Rgba8);
+            if let Err(e) = saved {
+                eprintln!("could not save the picture: {e}");
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else if shot.started.elapsed() > Duration::from_secs(15) {
+            eprintln!("no picture arrived");
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
     }
 }
 
@@ -587,50 +855,77 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.pump(&ctx);
+        self.pump_summary();
         self.take_drops(&ctx);
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::N)) {
-            self.new_chat();
-        }
-        if self.run.is_some() {
-            // Keeps the spinner and the elapsed time moving between tokens.
+        self.shortcuts(&ctx);
+        if self.run.is_some() || self.summary_job.is_some() {
+            // Keeps the elapsed time moving between tokens.
             ctx.request_repaint_after(Duration::from_millis(120));
         }
+        if self.applied_theme != (self.settings.theme.clone(), self.settings.custom_theme.clone()) {
+            self.applied_theme = (self.settings.theme.clone(), self.settings.custom_theme.clone());
+            theme::apply(&ctx, theme::Palette::for_theme(&self.settings.theme, &self.settings.custom_theme));
+        }
+        let p = theme::p();
 
-        if self.settings.sidebar_open {
-            let frame = egui::Frame::new().fill(theme::BG_SIDEBAR).inner_margin(egui::Margin::same(10));
-            egui::Panel::left("sidebar").exact_size(SIDEBAR_WIDTH).resizable(false).frame(frame).show(ui, |ui| self.sidebar(ui));
+        // The sidebar slides: its content keeps its full width and is cut off, like the web app's.
+        let open = ctx.animate_bool_with_time_and_easing(egui::Id::new("sidebar-open"), self.settings.sidebar_open && !self.fullscreen, 0.3, egui::emath::easing::cubic_out);
+        if open > 0.0 {
+            let width = (sidebar::WIDTH * open).round();
+            egui::Panel::left("sidebar").exact_size(width).resizable(false).show_separator_line(false).frame(egui::Frame::new().fill(p.bg2)).show(ui, |ui| {
+                let rect = ui.max_rect();
+                ui.set_clip_rect(rect);
+                let full = Rect::from_min_size(rect.min, vec2(sidebar::WIDTH, rect.height()));
+                ui.scope_builder(egui::UiBuilder::new().max_rect(full), |ui| sidebar::show(self, ui));
+                ui.painter().vline(rect.right() - 0.5, rect.y_range(), egui::Stroke::new(1.0, p.border));
+            });
         }
-        if self.settings.workspace_open {
-            let frame = egui::Frame::new().fill(theme::BG_SIDEBAR).inner_margin(egui::Margin::same(10));
-            egui::Panel::right("workspace").default_size(300.0).size_range(220.0..=520.0).frame(frame).show(ui, |ui| self.workspace_panel(ui));
+        // A fixed rail, and only when the window has room for it (the web hides it under 1024).
+        if self.settings.workspace_open && !self.fullscreen && ctx.content_rect().width() >= 1024.0 {
+            egui::Panel::right("workspace").exact_size(workspace::WIDTH).resizable(false).show_separator_line(false).frame(egui::Frame::new().fill(p.bg2)).show(ui, |ui| workspace::show(self, ui));
         }
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::BG)).show(ui, |ui| {
-            let bar = egui::Frame::new().inner_margin(egui::Margin::symmetric(10, 4));
-            egui::Panel::top("bar").exact_size(40.0).show_separator_line(false).frame(bar).show(ui, |ui| self.top_bar(ui));
-            let composer = egui::Frame::new().inner_margin(egui::Margin::symmetric(16, 12));
-            egui::Panel::bottom("composer").show_separator_line(false).resizable(false).frame(composer).show(ui, |ui| chat::composer(self, ui));
-            egui::CentralPanel::default().frame(egui::Frame::new()).show(ui, |ui| chat::messages(self, ui));
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg)).show(ui, |ui| {
+            let bar = egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 0));
+            egui::Panel::top("header").exact_size(56.0).show_separator_line(false).frame(bar).show(ui, |ui| ui.horizontal_centered(|ui| chat::header(self, ui)));
+            egui::Panel::bottom("composer").show_separator_line(false).resizable(false).frame(egui::Frame::NONE).show(ui, |ui| composer::show(self, ui));
+            egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| chat::messages(self, ui));
         });
 
+        overlay::artifact(self, &ctx);
         dialogs::show(self, &ctx);
+        overlay::lightbox(self, &ctx);
         self.show_toast(&ctx);
+        self.take_shot(&ctx);
     }
 }
 
 impl App {
+    /// Something went wrong and nothing on screen says so: a line at the bottom that stays until dismissed.
     fn show_toast(&mut self, ctx: &egui::Context) {
-        let Some((text, since)) = &self.toast else { return };
-        if since.elapsed() > Duration::from_secs(6) {
-            self.toast = None;
-            return;
-        }
-        egui::Area::new(egui::Id::new("toast")).anchor(egui::Align2::CENTER_TOP, [0.0, 52.0]).order(egui::Order::Tooltip).show(ctx, |ui| {
-            theme::card(theme::BG_ELEVATED).stroke(egui::Stroke::new(1.0, theme::WARNING)).show(ui, |ui| {
-                ui.set_max_width(520.0);
-                ui.label(text.as_str());
+        let Some((text, _)) = &self.toast else { return };
+        let p = theme::p();
+        let mut dismiss = false;
+        egui::Area::new(egui::Id::new("toast")).anchor(egui::Align2::CENTER_BOTTOM, [0.0, -20.0]).order(egui::Order::Tooltip).show(ctx, |ui| {
+            let shadow = egui::Shadow { offset: [0, 25], blur: 50, spread: 0, color: egui::Color32::from_black_alpha(64) };
+            egui::Frame::new().fill(p.bg2).stroke(egui::Stroke::new(1.0, theme::alpha(p.danger, 30.0))).corner_radius(12).shadow(shadow).inner_margin(egui::Margin::symmetric(16, 10)).show(ui, |ui| {
+                ui.set_max_width(560.0);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 12.0;
+                    icons::show(ui, icons::WARNING.stroke(1.8), 15.0, p.danger);
+                    ui.add(egui::Label::new(widgets::lines(text.as_str(), 13.0, 19.5, theme::W::Regular, p.text)).wrap().selectable(false));
+                    let label = widgets::galley(ui, "Dismiss", theme::font(12.0, theme::W::Regular), egui::Color32::WHITE);
+                    let (rect, response) = ui.allocate_exact_size(vec2(label.size().x + 16.0, 22.0), egui::Sense::click());
+                    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+                    let t = widgets::fade(ui, response.id, response.hovered());
+                    ui.painter().rect_filled(rect, 8.0, widgets::lerp(egui::Color32::TRANSPARENT, p.hover, t));
+                    ui.painter().galley_with_override_text_color(egui::pos2(rect.left() + 8.0, (rect.center().y - label.size().y / 2.0).round()), label, widgets::lerp(p.text2, p.text, t));
+                    dismiss = response.clicked();
+                });
             });
         });
-        ctx.request_repaint_after(Duration::from_millis(500));
+        if dismiss {
+            self.toast = None;
+        }
     }
 }
 
@@ -641,22 +936,15 @@ fn close_thinking(msg: &mut Message, watch: &mut Stopwatch) {
 }
 
 fn finish_message(msg: &mut Message, started: Instant) {
+    let mut thought = 0;
     for part in &mut msg.parts {
-        if let Part::Thinking { ms: ms @ 0, .. } = part {
-            *ms = 1;
+        if let Part::Thinking { ms, .. } = part {
+            *ms = (*ms).max(1);
+            thought += *ms;
         }
     }
+    msg.reasoning_ms = thought;
     msg.duration_ms = started.elapsed().as_millis() as u64;
-}
-
-fn date_group(updated_ms: u64, today: chrono::NaiveDate) -> &'static str {
-    let day = chrono::DateTime::from_timestamp_millis(updated_ms as i64).map(|d| d.with_timezone(&chrono::Local).date_naive()).unwrap_or(today);
-    match (today - day).num_days() {
-        ..=0 => "Today",
-        1 => "Yesterday",
-        2..=7 => "Previous 7 days",
-        _ => "Older",
-    }
 }
 
 fn human_size(size: u64) -> String {
@@ -665,6 +953,12 @@ fn human_size(size: u64) -> String {
         s if s >= 1024 => format!("{:.0} KB", s as f64 / 1024.0),
         s => format!("{s} B"),
     }
+}
+
+/// Where egui loads a file on disk from. Windows paths need the third slash, or the drive reads as a host name.
+fn file_uri(path: &std::path::Path) -> String {
+    let text = path.display().to_string().replace(std::path::MAIN_SEPARATOR, "/");
+    if text.starts_with('/') { format!("file://{text}") } else { format!("file:///{text}") }
 }
 
 fn is_image(path: &std::path::Path) -> bool {

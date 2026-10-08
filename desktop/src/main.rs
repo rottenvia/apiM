@@ -3,12 +3,15 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod agent;
+mod compact;
+mod export;
 mod models;
 mod plugins;
 mod prompt;
 mod provider;
 mod refusal;
 mod store;
+mod summary;
 mod tools;
 mod ui;
 
@@ -59,10 +62,12 @@ fn headless(args: &[String]) {
         history: Vec::new(),
         text: words.join(" "),
         images: Vec::new(),
+        summary: None,
         workspace: dir.clone(),
         state_dir: dir.join(".apim-state"),
         chat: Default::default(),
         conv_id: store::new_id(),
+        notes: Default::default(),
     };
     let rt = runtime();
     rt.spawn(agent::run(request, agent::Emitter::new(tx, || {}), Arc::new(tools::exec::Procs::default())));
@@ -91,7 +96,7 @@ fn headless(args: &[String]) {
                 println!("\n[error: {e}]");
                 break;
             }
-            Status(_) | Reasoning(_) | ToolDraft { .. } | State(_) => {}
+            Status(_) | Reasoning(_) | ToolDraft { .. } | State(_) | Context(_) => {}
         }
     }
 }

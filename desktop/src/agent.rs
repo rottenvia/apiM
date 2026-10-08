@@ -6,7 +6,8 @@ use crate::models::{self, ProviderId, Usage, Vision};
 use crate::plugins;
 use crate::prompt;
 use crate::provider::{self, Delta, RoundError, Target, ThinkingStyle};
-use crate::store::{Role, Settings, ToolEvent};
+use crate::compact;
+use crate::store::{Attachment, Bucket, Role, Settings, ToolEvent};
 use crate::tools::{self, ChatState, Ctx, exec::Procs};
 use base64::Engine;
 use serde_json::{Map, Value, json};
@@ -33,10 +34,12 @@ pub enum Event {
     /// A tool call still streaming its arguments.
     ToolDraft { name: String, chars: usize },
     ToolStart(ToolEvent),
-    ToolDone { id: String, ok: bool, summary: String, image: Option<PathBuf> },
+    ToolDone { id: String, ok: bool, summary: String, image: Option<PathBuf>, changed: Option<String> },
     Approval { command: String, reason: String, reply: oneshot::Sender<bool> },
     Question { question: String, options: Vec<String>, context: String, reply: oneshot::Sender<String> },
     Usage(Usage),
+    /// Where the newest request's characters went.
+    Context(Vec<Bucket>),
     /// The plan or findings changed.
     State(ChatState),
     /// A one-line note shown in the reply: retrying, continuing, context trimmed.
@@ -85,12 +88,16 @@ pub struct Request {
     /// Earlier turns of this chat, oldest first.
     pub history: Vec<(Role, String)>,
     pub text: String,
-    /// Image files attached to this message.
-    pub images: Vec<PathBuf>,
+    /// Pictures attached to this message, as data URLs.
+    pub images: Vec<Attachment>,
+    /// The system message standing in for turns older than `history` (`summary::render`).
+    pub summary: Option<String>,
     pub workspace: PathBuf,
     pub state_dir: PathBuf,
     pub chat: ChatState,
     pub conv_id: String,
+    /// "btw" notes the user adds while the reply runs.
+    pub notes: Arc<Mutex<Vec<String>>>,
 }
 
 struct Ending {
@@ -119,9 +126,7 @@ fn image_part(path: &Path) -> Option<Value> {
     Some(json!({ "type": "image_url", "image_url": { "url": format!("data:{mime};base64,{data}") } }))
 }
 
-fn chars_of(messages: &[Value]) -> usize {
-    messages.iter().map(|m| m["content"].as_str().map_or_else(|| m["content"].to_string().len(), str::len) + m["tool_calls"].to_string().len()).sum()
-}
+use compact::size_of as chars_of;
 
 /// Collapses old tool output once the transcript outgrows the model's window.
 /// The newest results stay whole. Returns how many were collapsed.
@@ -159,7 +164,7 @@ async fn run_inner(req: Request, emit: &Emitter, procs: Arc<Procs>) -> Result<En
 
     std::fs::create_dir_all(&req.workspace).map_err(|e| format!("Cannot open the workspace folder {}: {e}", req.workspace.display()))?;
     let native_vision = target.model.vision == Vision::Native;
-    let web_search = s.web_search && (!s.tavily().is_empty() || !s.exa().is_empty());
+    let web_search = s.web_mode() != "off" && (!s.tavily().is_empty() || !s.exa().is_empty());
     let git_repo = req.workspace.join(".git").exists();
     let window = models::context_window(&target.model.id, customs);
     // About 3.5 characters per token; a single read may use a quarter of the window.
@@ -185,11 +190,14 @@ async fn run_inner(req: Request, emit: &Emitter, procs: Arc<Procs>) -> Result<En
     }
 
     let mut messages: Vec<Value> = vec![json!({ "role": "system", "content": system })];
+    if let Some(summary) = req.summary.as_deref().filter(|s| !s.trim().is_empty()) {
+        messages.push(json!({ "role": "system", "content": summary }));
+    }
     let skip = req.history.len().saturating_sub(HISTORY_TURNS);
     for (role, text) in req.history.iter().skip(skip).filter(|(_, t)| !t.trim().is_empty()) {
         messages.push(json!({ "role": if *role == Role::User { "user" } else { "assistant" }, "content": text }));
     }
-    let images: Vec<Value> = if native_vision { req.images.iter().filter_map(|p| image_part(p)).collect() } else { Vec::new() };
+    let images: Vec<Value> = if native_vision { req.images.iter().filter_map(|a| a.data_url.as_ref()).map(|url| json!({ "type": "image_url", "image_url": { "url": url } })).collect() } else { Vec::new() };
     if images.is_empty() {
         let note = if req.images.is_empty() { String::new() } else { format!("\n\n[The user attached {} image(s), but this model cannot see images.]", req.images.len()) };
         messages.push(json!({ "role": "user", "content": format!("{}{note}", req.text) }));
@@ -200,6 +208,7 @@ async fn run_inner(req: Request, emit: &Emitter, procs: Arc<Procs>) -> Result<En
     }
 
     let tool_defs = tools::definitions(web_search, native_vision, git_repo);
+    let tools_chars = json!(tool_defs).to_string().len();
     let mut usage = Usage::default();
     let mut mandatory = target.provider == ProviderId::Openrouter && provider::openrouter_reasoning_mandatory(&target.model.id);
     let mut continuations = 0;
@@ -209,7 +218,18 @@ async fn run_inner(req: Request, emit: &Emitter, procs: Arc<Procs>) -> Result<En
     let mut unpinned = false;
 
     for round in 0..MAX_ROUNDS {
-        let collapsed = prune(&mut messages, window_chars * 6 / 10);
+        // Anything the user said in passing joins the conversation before the next request.
+        for note in std::mem::take(&mut *req.notes.lock().unwrap()) {
+            messages.push(json!({ "role": "user", "content": format!("[Note from the user while you work. Take it into account and carry on; do not start over.]
+{note}") }));
+        }
+        // The valve: finished rounds fold into one line each once the run passes 65% of the window.
+        let folded = compact::fold(&mut messages, window);
+        if folded.rounds > 0 {
+            emit.send(Event::Notice(format!("Context compacted · {} steps summarised · about {} tokens saved", folded.rounds, folded.tokens_saved)));
+        }
+        // Still too big after that (huge tool results in the rounds kept): collapse the oldest of them.
+        let collapsed = prune(&mut messages, window_chars * 8 / 10);
         if collapsed > 0 {
             emit.send(Event::Notice(format!("Trimmed {collapsed} older tool results to fit the context window")));
         }
@@ -253,6 +273,7 @@ async fn run_inner(req: Request, emit: &Emitter, procs: Arc<Procs>) -> Result<En
             }
         }
         provider::apply_thinking(&mut body, target.style, thinking, effort, mandatory);
+        emit.send(Event::Context(compact::breakdown(&wire, tools_chars)));
 
         emit.send(Event::Status(if round > 0 { "Working" } else if thinking { "Thinking" } else { "Writing" }));
         let result = stream_with_retries(&ctx.client, &target, &mut body, &mut mandatory, &mut unpinned, thinking, effort, emit).await?;
@@ -305,7 +326,7 @@ async fn run_inner(req: Request, emit: &Emitter, procs: Arc<Procs>) -> Result<En
                 Err(e) if cut_off => tools::Output::fail(format!("This call was cut off by the output limit before its arguments were complete ({e}). Send it again in smaller pieces: fewer files per call, or one file at a time.")),
                 Err(e) => tools::Output::fail(format!("The arguments were not valid JSON ({e}). Send the call again.")),
             };
-            emit.send(Event::ToolDone { id: call.id.clone(), ok: out.ok, summary: out.summary.clone(), image: out.image.clone() });
+            emit.send(Event::ToolDone { id: call.id.clone(), ok: out.ok, summary: out.summary.clone(), image: out.image.clone(), changed: out.changed.clone() });
             messages.push(json!({ "role": "tool", "tool_call_id": call.id, "content": out.text }));
             looks.extend(out.look);
             if out.finish {
@@ -400,6 +421,10 @@ impl Stopwatch {
     }
     pub fn start(&mut self) {
         self.0.get_or_insert_with(Instant::now);
+    }
+    /// Whole seconds since `start`, while it runs.
+    pub fn secs(&self) -> Option<u64> {
+        self.0.map(|t| t.elapsed().as_secs())
     }
     /// Milliseconds since `start`, and resets.
     pub fn stop(&mut self) -> u64 {

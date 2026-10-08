@@ -13,32 +13,33 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         Dialog::None => return,
         Dialog::Settings => modal(ctx, "Settings", 600.0, |ui| settings(app, ui)),
         Dialog::Plugins => modal(ctx, "Plugins", 640.0, |ui| plugin_list(app, ui)),
-        Dialog::Rename(id, title) => modal(ctx, "Rename chat", 420.0, |ui| {
-            let field = ui.add(egui::TextEdit::singleline(title).desired_width(f32::INFINITY));
-            field.request_focus();
-            let entered = ui.input(|i| i.key_pressed(egui::Key::Enter));
+        Dialog::Mcp => modal(ctx, "MCP console", 520.0, |ui| {
+            ui.add(egui::Label::new(secondary("MCP servers are not wired into the desktop app yet. The web app's console (npm run dev) can call them.")).wrap());
+            true
+        }),
+        Dialog::Delete { ids, opened } => modal(ctx, if ids.len() == 1 { "Delete chat?" } else { "Delete chats?" }, 420.0, |ui| {
+            let what = match ids.as_slice() {
+                [id] => format!("“{}” and the files in its workspace will be removed from this PC.", app.chats.iter().find(|c| &c.id == id).map_or("This chat", |c| c.title.as_str())),
+                many => format!("{} chats and the files in their workspaces will be removed from this PC.", many.len()),
+            };
+            ui.add(egui::Label::new(what).wrap());
+            // The button unlocks after a pause, so a double click cannot delete by accident.
+            let left = (app.settings.delete_delay as f32 - opened.elapsed().as_secs_f32()).max(0.0);
             let mut keep = true;
             ui.horizontal(|ui| {
-                if (primary(ui, "Save").clicked() || entered) && !title.trim().is_empty() {
-                    rename(app, id, title.trim());
+                let label = if left > 0.0 { format!("Delete ({})", left.ceil() as u32) } else { "Delete".to_string() };
+                if ui.add_enabled(left <= 0.0, egui::Button::new(RichText::new(label).color(egui::Color32::WHITE)).fill(theme::p().danger)).clicked() {
+                    app.delete_chats(ids);
                     keep = false;
                 }
                 keep &= !ui.button("Cancel").clicked();
             });
+            if left > 0.0 {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+            }
             keep
         }),
-        Dialog::Delete(id, title) => modal(ctx, "Delete chat?", 420.0, |ui| {
-            ui.add(egui::Label::new(format!("“{title}” and the files in its workspace will be removed from this PC.")).wrap());
-            let mut keep = true;
-            ui.horizontal(|ui| {
-                if ui.add(egui::Button::new(RichText::new("Delete").color(egui::Color32::WHITE)).fill(theme::DANGER)).clicked() {
-                    app.delete_chat(id);
-                    keep = false;
-                }
-                keep &= !ui.button("Cancel").clicked();
-            });
-            keep
-        }),
+        Dialog::Search => false,
         Dialog::Preview(path, text) => modal(ctx, path, 820.0, |ui| {
             if ui.button("Copy").clicked() {
                 ui.ctx().copy_text(text.clone());
@@ -56,7 +57,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
 
 /// A centred dialog with a title and a close button. False once it should close.
 fn modal(ctx: &egui::Context, title: &str, width: f32, body: impl FnOnce(&mut egui::Ui) -> bool) -> bool {
-    let frame = egui::Frame::new().fill(theme::BG_TERTIARY).stroke(egui::Stroke::new(1.0, theme::BORDER_LIGHT)).corner_radius(14).inner_margin(egui::Margin::same(18));
+    let frame = egui::Frame::new().fill(theme::p().bg3).stroke(egui::Stroke::new(1.0, theme::p().border_light)).corner_radius(14).inner_margin(egui::Margin::same(18));
     let mut open = true;
     // egui caps a new area at 600x400 unless told how much room there is.
     let id = egui::Id::new("dialog");
@@ -64,7 +65,7 @@ fn modal(ctx: &egui::Context, title: &str, width: f32, body: impl FnOnce(&mut eg
     let shown = egui::Modal::new(id).area(area).frame(frame).show(ctx, |ui| {
         ui.set_width(width.min(ctx.content_rect().width() - 48.0));
         ui.horizontal(|ui| {
-            ui.add(egui::Label::new(RichText::new(title).font(egui::FontId::new(20.0, theme::serif()))).truncate());
+            ui.add(egui::Label::new(RichText::new(title).font(theme::serif(20.0))).truncate());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 open = !ui.add(egui::Button::new("✕").frame_when_inactive(false)).clicked();
             });
@@ -76,18 +77,15 @@ fn modal(ctx: &egui::Context, title: &str, width: f32, body: impl FnOnce(&mut eg
 }
 
 fn primary(ui: &mut egui::Ui, text: &str) -> egui::Response {
-    ui.add(egui::Button::new(RichText::new(text).color(egui::Color32::WHITE)).fill(theme::ACCENT))
+    ui.add(egui::Button::new(RichText::new(text).color(egui::Color32::WHITE)).fill(theme::p().accent))
 }
 
-fn rename(app: &mut App, id: &str, title: &str) {
-    if app.conv.id == id {
-        app.conv.title = title.into();
-        app.conv.save();
-    } else if let Some(mut conv) = store::Conversation::load(id) {
-        conv.title = title.into();
-        conv.save();
-    }
-    app.refresh_chats();
+fn muted(text: impl Into<String>) -> RichText {
+    RichText::new(text).size(12.5).color(theme::p().muted)
+}
+
+fn secondary(text: impl Into<String>) -> RichText {
+    RichText::new(text).color(theme::p().text2)
 }
 
 // ---------------------------------------------------------------- settings
@@ -114,7 +112,7 @@ fn settings(app: &mut App, ui: &mut egui::Ui) -> bool {
 fn key_field(ui: &mut egui::Ui, label: &str, value: &mut String, env: &str, link: &str) {
     ui.horizontal(|ui| {
         ui.label(RichText::new(label).strong());
-        ui.hyperlink_to(theme::muted("get a key"), link);
+        ui.hyperlink_to(muted("get a key"), link);
     });
     let hint = if std::env::var(env).is_ok_and(|v| !v.trim().is_empty()) { format!("Using {env} from the environment") } else { "Paste the key here".into() };
     ui.add(egui::TextEdit::singleline(value).password(true).hint_text(hint).desired_width(f32::INFINITY));
@@ -123,17 +121,17 @@ fn key_field(ui: &mut egui::Ui, label: &str, value: &mut String, env: &str, link
 
 fn keys_tab(app: &mut App, ui: &mut egui::Ui) {
     let s = &mut app.settings;
-    ui.label(theme::secondary("Keys are saved on this PC only and go straight to the provider you chose."));
+    ui.label(secondary("Keys are saved on this PC only and go straight to the provider you chose."));
     ui.add_space(8.0);
     key_field(ui, "OpenRouter", &mut s.openrouter_key, "OPENROUTER_API_KEY", "https://openrouter.ai/settings/keys");
     key_field(ui, "DeepSeek", &mut s.deepseek_key, "DEEPSEEK_API_KEY", "https://platform.deepseek.com/api_keys");
-    ui.label(theme::secondary("Web search uses the first one of these that has a key."));
+    ui.label(secondary("Web search uses the first one of these that has a key."));
     key_field(ui, "Tavily", &mut s.tavily_key, "TAVILY_API_KEY", "https://app.tavily.com");
     key_field(ui, "Exa", &mut s.exa_key, "EXA_API_KEY", "https://dashboard.exa.ai/api-keys");
 
     ui.separator();
     ui.label(RichText::new("Model on this PC").strong());
-    ui.label(theme::secondary("Any OpenAI-compatible server: llama.cpp, Ollama, LM Studio. Leave empty for the default address."));
+    ui.label(secondary("Any OpenAI-compatible server: llama.cpp, Ollama, LM Studio. Leave empty for the default address."));
     egui::Grid::new("local").num_columns(2).show(ui, |ui| {
         ui.label("Address");
         ui.add(egui::TextEdit::singleline(&mut s.local_base_url).hint_text(crate::provider::DEFAULT_LOCAL_BASE_URL).desired_width(360.0));
@@ -155,7 +153,7 @@ fn models_tab(app: &mut App, ui: &mut egui::Ui) {
             ui.selectable_value(&mut app.settings.model, m.id.clone(), format!("{}  ·  {}", m.label, m.provider.name()));
         }
     });
-    ui.label(theme::muted(format!("{}  ·  {}", current.description, current.specs)));
+    ui.label(muted(format!("{}  ·  {}", current.description, current.specs)));
     ui.separator();
 
     ui.label(RichText::new("Your OpenRouter models").strong());
@@ -163,7 +161,7 @@ fn models_tab(app: &mut App, ui: &mut egui::Ui) {
     for (i, m) in app.settings.custom_models.iter().enumerate() {
         ui.horizontal(|ui| {
             ui.label(m.label.as_str());
-            ui.label(theme::muted(m.to_info().specs));
+            ui.label(muted(m.to_info().specs));
             if ui.small_button("Remove").clicked() {
                 remove = Some(i);
             }
@@ -177,7 +175,7 @@ fn models_tab(app: &mut App, ui: &mut egui::Ui) {
     }
 
     ui.add_space(6.0);
-    ui.label(theme::secondary("Add any model OpenRouter serves by its slug, for example anthropic/claude-sonnet-5-5."));
+    ui.label(secondary("Add any model OpenRouter serves by its slug, for example anthropic/claude-sonnet-5-5."));
     let draft = &mut app.new_model;
     egui::Grid::new("new-model").num_columns(2).show(ui, |ui| {
         ui.label("Slug");
@@ -218,7 +216,7 @@ fn models_tab(app: &mut App, ui: &mut egui::Ui) {
             app.verify = Some(rx);
             app.verify_note = "Checking…".into();
         }
-        if ui.add_enabled(valid, egui::Button::new(RichText::new("Add model").color(egui::Color32::WHITE)).fill(theme::ACCENT)).clicked() {
+        if ui.add_enabled(valid, egui::Button::new(RichText::new("Add model").color(egui::Color32::WHITE)).fill(theme::p().accent)).clicked() {
             let mut model = std::mem::replace(&mut app.new_model, blank_model());
             model.api_model = slug.clone();
             if model.label.trim().is_empty() {
@@ -231,10 +229,10 @@ fn models_tab(app: &mut App, ui: &mut egui::Ui) {
         }
     });
     if !slug.is_empty() && !valid {
-        ui.label(RichText::new("That does not look like an OpenRouter slug (vendor/model-name).").color(theme::WARNING));
+        ui.label(RichText::new("That does not look like an OpenRouter slug (vendor/model-name).").color(theme::p().warning));
     }
     if !app.verify_note.is_empty() {
-        ui.label(theme::secondary(app.verify_note.as_str()));
+        ui.label(secondary(app.verify_note.as_str()));
     }
 }
 
@@ -267,9 +265,9 @@ fn agent_tab(app: &mut App, ui: &mut egui::Ui) {
     let s = &mut app.settings;
     ui.label(RichText::new("Running commands").strong());
     ui.radio_value(&mut s.approval, Approval::Manual, "Manual: ask me before a command runs");
-    ui.label(theme::muted("Reading files and read-only commands never ask."));
+    ui.label(muted("Reading files and read-only commands never ask."));
     ui.radio_value(&mut s.approval, Approval::Auto, "Auto: run developer tools without asking");
-    ui.label(theme::muted("git, npm, cargo, python and the like run straight away. Shells, unknown programs and programs built in the workspace still ask."));
+    ui.label(muted("git, npm, cargo, python and the like run straight away. Shells, unknown programs and programs built in the workspace still ask."));
     ui.separator();
 
     ui.label(RichText::new("Spending limit per reply").strong());
@@ -302,14 +300,14 @@ fn agent_tab(app: &mut App, ui: &mut egui::Ui) {
         }
     });
     ui.separator();
-    ui.label(theme::muted(format!("Chats and settings live in {}", store::data_dir().display())));
+    ui.label(muted(format!("Chats and settings live in {}", store::data_dir().display())));
 }
 
 // ---------------------------------------------------------------- plugins
 
 fn plugin_list(app: &mut App, ui: &mut egui::Ui) -> bool {
     let before = app.settings.clone();
-    ui.label(theme::secondary("A plugin is a standing instruction the model follows in every reply while it is on."));
+    ui.label(secondary("A plugin is a standing instruction the model follows in every reply while it is on."));
     ui.add_space(6.0);
     egui::ScrollArea::vertical().max_height(ui.ctx().content_rect().height() - 220.0).show(ui, |ui| {
         let mut edit = None;
@@ -318,7 +316,7 @@ fn plugin_list(app: &mut App, ui: &mut egui::Ui) -> bool {
             let custom = p.category == "custom";
             let mut on = app.settings.enabled_plugins.contains(&p.id);
             ui.horizontal(|ui| {
-                if theme::toggle(ui, &mut on).changed() {
+                if super::widgets::toggle(ui, &mut on).changed() {
                     app.settings.enabled_plugins.retain(|id| id != &p.id);
                     if on {
                         app.settings.enabled_plugins.push(p.id.clone());
@@ -337,7 +335,7 @@ fn plugin_list(app: &mut App, ui: &mut egui::Ui) -> bool {
                 }
             });
             if !p.description.is_empty() {
-                ui.add(egui::Label::new(theme::muted(p.description.as_str())).wrap());
+                ui.add(egui::Label::new(muted(p.description.as_str())).wrap());
             }
             ui.add_space(4.0);
         }
@@ -358,11 +356,11 @@ fn plugin_list(app: &mut App, ui: &mut egui::Ui) -> bool {
         ui.add(egui::TextEdit::multiline(&mut draft.prompt).hint_text("The instruction, for example: Always answer in Russian.").desired_rows(4).desired_width(f32::INFINITY));
         let too_long = draft.prompt.len() > plugins::MAX_PLUGIN_PROMPT;
         if too_long {
-            ui.label(RichText::new(format!("Too long: {} of {} characters.", draft.prompt.len(), plugins::MAX_PLUGIN_PROMPT)).color(theme::WARNING));
+            ui.label(RichText::new(format!("Too long: {} of {} characters.", draft.prompt.len(), plugins::MAX_PLUGIN_PROMPT)).color(theme::p().warning));
         }
         let ready = !draft.name.trim().is_empty() && !draft.prompt.trim().is_empty() && !too_long;
         ui.horizontal(|ui| {
-            if ui.add_enabled(ready, egui::Button::new(RichText::new(if editing { "Save" } else { "Add plugin" }).color(egui::Color32::WHITE)).fill(theme::ACCENT)).clicked() {
+            if ui.add_enabled(ready, egui::Button::new(RichText::new(if editing { "Save" } else { "Add plugin" }).color(egui::Color32::WHITE)).fill(theme::p().accent)).clicked() {
                 let mut plugin: Plugin = std::mem::replace(&mut app.new_plugin, blank_plugin());
                 if plugin.id.is_empty() {
                     plugin.id = format!("custom-{}", store::new_id());

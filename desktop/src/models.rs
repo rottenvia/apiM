@@ -194,6 +194,9 @@ pub struct Usage {
     pub prompt: u64,
     pub completion: u64,
     pub cache_hit: u64,
+    /// Prompt tokens billed at the full input rate. 0 when the provider did not say: then it is the prompt less the hits.
+    #[serde(default)]
+    pub cache_miss: u64,
     pub reasoning: u64,
     /// Tokens the newest round occupied in the context window.
     pub context: u64,
@@ -206,12 +209,17 @@ impl Usage {
         let prompt = n(&u["prompt_tokens"]);
         let completion = n(&u["completion_tokens"]);
         let details = &u["prompt_tokens_details"];
-        let cache_hit =
-            (n(&u["prompt_cache_hit_tokens"]) + n(&details["cached_tokens"]) + n(&details["cache_read_tokens"])).min(prompt);
+        // The same split as the web app's `cacheSplit`, quirks included: a provider that reports its hits in
+        // both shapes has them counted twice, and both apps must show the same price.
+        let cache_hit = n(&u["prompt_cache_hit_tokens"]) + n(&details["cached_tokens"]) + n(&details["cache_read_tokens"]);
+        let said = n(&u["prompt_cache_miss_tokens"]);
+        // Writing to the cache is billed like ordinary input.
+        let cache_miss = if said > 0 { said } else { prompt.saturating_sub(cache_hit) }.max(n(&details["cache_creation_tokens"]));
         Usage {
             prompt,
             completion,
             cache_hit,
+            cache_miss,
             reasoning: n(&u["completion_tokens_details"]["reasoning_tokens"]),
             context: prompt + completion,
         }
@@ -221,16 +229,25 @@ impl Usage {
         self.prompt += round.prompt;
         self.completion += round.completion;
         self.cache_hit += round.cache_hit;
+        self.cache_miss += round.cache_miss;
         self.reasoning += round.reasoning;
         if round.prompt > 0 {
             self.context = round.context;
         }
     }
 
+    /// List price: what the spending limit counts, so it never undercounts.
     pub fn cost(&self, model_id: &str, customs: &[CustomModel]) -> Option<f64> {
+        self.shown_cost(model_id, customs, false)
+    }
+
+    /// What a reply is shown to have cost. In DeepSeek's off-peak hours input and output are
+    /// halved and cached input is not — for every model, exactly as the web app's `estimateCost` has it.
+    pub fn shown_cost(&self, model_id: &str, customs: &[CustomModel], off_peak: bool) -> Option<f64> {
         let (input, cached, output) = rates(model_id, customs)?;
-        let miss = self.prompt.saturating_sub(self.cache_hit);
-        Some((miss as f64 * input + self.cache_hit as f64 * cached + self.completion as f64 * output) / 1e6)
+        let factor = if off_peak { 0.5 } else { 1.0 };
+        let miss = if self.cache_miss > 0 { self.cache_miss } else { self.prompt.saturating_sub(self.cache_hit) };
+        Some((miss as f64 * input * factor + self.cache_hit as f64 * cached + self.completion as f64 * output * factor) / 1e6)
     }
 }
 
@@ -264,6 +281,12 @@ mod tests {
         assert_eq!(context_window("custom:a/b", &customs), 200_000);
         let u = Usage { prompt: 1_000_000, completion: 1_000_000, ..Default::default() };
         assert_eq!(u.cost("custom:a/b", &customs), Some(18.0));
+        assert_eq!(u.shown_cost("custom:a/b", &customs, true), Some(9.0));
+        // DeepSeek reports its cache hits twice over; the price follows the web app's reading of that.
+        let wire = serde_json::json!({ "prompt_tokens": 1000, "completion_tokens": 100, "prompt_cache_hit_tokens": 600, "prompt_cache_miss_tokens": 400, "prompt_tokens_details": { "cached_tokens": 600 } });
+        let u = Usage::from_wire(&wire);
+        assert_eq!((u.cache_hit, u.cache_miss), (1200, 400));
+        assert_eq!(u.cost("deepseek-v4-pro", &[]), Some((400.0 * 0.435 + 1200.0 * 0.003625 + 100.0 * 0.87) / 1e6));
     }
 
     #[test]

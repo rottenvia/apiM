@@ -1,515 +1,340 @@
-//! The conversation column and the composer under it.
+//! The conversation column: header, transcript, the wait rows under it.
+//! The frame of src/components/ChatArea.tsx.
 
-use super::{App, Dialog, theme};
-use crate::models;
-use crate::refusal::{self, RefusalSource};
-use crate::store::{Message, Part, Role, ToolEvent};
-use eframe::egui::{self, RichText};
-use egui_commonmark::CommonMarkViewer;
+use super::theme::{self, W, mix, p};
+use super::widgets;
+use super::{App, Dialog, bubble, composer, icons};
+use crate::store::Role;
+use eframe::egui::{self, Color32, Rect, Sense, Stroke, pos2, vec2};
+use std::time::Duration;
 
-const COLUMN: f32 = 780.0;
+/// `toLocaleString()` for whole numbers: 1,234,567.
+pub fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
 
-enum Action {
-    Retry,
-    Copy(String),
-    Settings,
+pub fn format_cost(usd: f64) -> String {
+    if usd < 0.01 {
+        format!("${usd:.4}")
+    } else if usd < 1.0 {
+        format!("${usd:.3}")
+    } else {
+        format!("${usd:.2}")
+    }
+}
+
+pub fn format_duration(ms: u64) -> String {
+    let seconds = ms as f64 / 1000.0;
+    if ms < 1000 {
+        format!("{ms}ms")
+    } else if seconds < 60.0 {
+        format!("{seconds:.1}s")
+    } else {
+        format!("{}m {}s", (seconds / 60.0).floor(), (seconds % 60.0).round())
+    }
+}
+
+/// What a whole chat has used.
+#[derive(Default, Clone, Copy)]
+pub struct Totals {
+    pub tokens: u64,
+    pub cost: f64,
+    pub ms: u64,
+    /// Replies whose price is known.
+    pub priced: u32,
+    /// Questions asked.
+    pub messages: usize,
+}
+
+/// A label whose colour sweeps like the web app's `.thinking-shimmer`.
+pub fn shimmer(ui: &egui::Ui, text: &str, size: f32) -> egui::text::LayoutJob {
+    let p = p();
+    let dim = mix(p.thinking, 55.0, p.muted);
+    let bright = mix(p.thinking, 65.0, Color32::WHITE);
+    let time = ui.input(|i| i.time);
+    // The band crosses the text once every 1.5s, right to left like the CSS.
+    let centre = 1.5 - (time % 1.5) / 1.5 * 2.0;
+    let count = text.chars().count().max(1) as f64;
+    let mut job = egui::text::LayoutJob::default();
+    for (i, ch) in text.chars().enumerate() {
+        let x = i as f64 / count;
+        let near = (1.0 - ((x - centre).abs() / 0.3)).clamp(0.0, 1.0) as f32;
+        let format = egui::TextFormat { font_id: theme::font(size, W::Regular), color: dim.lerp_to_gamma(bright, near), line_height: Some(20.0), ..Default::default() };
+        job.append(&ch.to_string(), 0.0, format);
+    }
+    ui.ctx().request_repaint_after(Duration::from_millis(40));
+    job
+}
+
+pub fn header(app: &mut App, ui: &mut egui::Ui) {
+    let p = p();
+    ui.spacing_mut().item_spacing.x = 4.0;
+    let tip = if app.settings.sidebar_open { "Close sidebar" } else { "Open sidebar" };
+    if widgets::icon_btn(ui, icons::SIDEBAR_LEFT, tip).clicked() {
+        app.settings.sidebar_open = !app.settings.sidebar_open;
+        app.settings.save();
+    }
+    if !app.settings.sidebar_open && widgets::icon_btn(ui, icons::PLUS.stroke(1.6), "New chat").clicked() {
+        app.new_chat();
+    }
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        let tip = if app.fullscreen { "Exit full screen" } else { "Full screen" };
+        if widgets::icon_btn(ui, if app.fullscreen { icons::FULLSCREEN_EXIT } else { icons::FULLSCREEN }, tip).clicked() {
+            app.fullscreen = !app.fullscreen;
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(app.fullscreen));
+        }
+        if widgets::icon_btn(ui, icons::FIND, "Find in this chat (Ctrl+F)").clicked() {
+            app.find_open = !app.find_open;
+        }
+        if !app.settings.workspace_open && widgets::icon_btn(ui, icons::PANEL_RIGHT, "Show the workspace panel").clicked() {
+            app.settings.workspace_open = true;
+            app.files_stale = true;
+            app.settings.save();
+        }
+        let running = app.procs.running();
+        if running > 0 {
+            let label = format!("{running} running");
+            if widgets::small_btn(ui, &label, p.warning, Color32::TRANSPARENT, p.border).on_hover_text("Background processes the agent started. Click to stop them all.").clicked() {
+                app.procs.stop_all();
+            }
+        }
+        let totals = app.totals();
+        if totals.priced > 0 {
+            ui.add_space(4.0);
+            ui.label(widgets::text(format_cost(totals.cost), 11.0, W::Regular, p.muted)).on_hover_text("What this chat has cost so far, estimated from published rates — the full breakdown is at the top of the conversation");
+        }
+    });
 }
 
 pub fn messages(app: &mut App, ui: &mut egui::Ui) {
-    let running = app.running_here();
-    let mut action = None;
-
+    let area = ui.max_rect();
     if app.conv.messages.is_empty() {
         welcome(app, ui);
         return;
     }
+    let p = p();
+    let running = app.running_here();
+    let gutter = if area.width() >= 640.0 { 24.0 } else { 16.0 };
+    let column = (area.width() - gutter * 2.0).min(composer::column_width(ui, app.fullscreen));
+    let left = area.left() + (area.width() - column) / 2.0;
+    let totals = app.totals();
+    let mut action = None;
+    let jump = std::mem::take(&mut app.jump_to_latest);
 
-    let App { conv, md, heights, run, settings, .. } = app;
-    egui::ScrollArea::vertical().auto_shrink(false).stick_to_bottom(true).show(ui, |ui| {
-        let column = (ui.available_width() - 32.0).min(COLUMN);
-        let pad = ((ui.available_width() - column) / 2.0).max(16.0);
-        ui.add_space(12.0);
-        let last = conv.messages.len() - 1;
+    // Each chat keeps its own place, and a chat opened for the first time starts at its end.
+    let mut scroll = egui::ScrollArea::vertical().id_salt(("transcript", &app.conv.id)).auto_shrink(false).stick_to_bottom(true);
+    if jump {
+        // Past the end: clamped to it, and the view then follows the reply as it grows.
+        scroll = scroll.vertical_scroll_offset(1e9);
+    }
+    let out = scroll.show(ui, |ui| {
+        ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+        ui.add_space(24.0);
+        let column_ui = |ui: &mut egui::Ui, add: &mut dyn FnMut(&mut egui::Ui)| {
+            let top = ui.cursor().top();
+            let rect = Rect::from_min_size(pos2(left, top), vec2(column, 0.0));
+            let used = ui.scope_builder(egui::UiBuilder::new().max_rect(rect.with_max_y(f32::INFINITY)), |ui| {
+                ui.set_width(column);
+                add(ui);
+            });
+            ui.advance_cursor_after_rect(Rect::from_min_max(pos2(area.left(), top), pos2(area.right(), used.response.rect.bottom())));
+        };
+
+        if totals.tokens > 0 {
+            column_ui(ui, &mut |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 12.0;
+                    let small = |text: String, colour| widgets::lines(text, 11.0, 16.0, W::Regular, colour);
+                    ui.label(widgets::lines("This conversation", 11.0, 16.0, W::Medium, p.text2));
+                    ui.label(small(format!("{} tokens", thousands(totals.tokens)), p.muted));
+                    if totals.priced > 0 {
+                        ui.label(small(format_cost(totals.cost), p.muted)).on_hover_text("Estimated from the models used");
+                    }
+                    if totals.ms > 0 {
+                        ui.label(small(format_duration(totals.ms), p.muted)).on_hover_text("Total time spent generating");
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(small(format!("{} messages", totals.messages), p.muted));
+                    });
+                });
+                ui.add_space(12.0);
+                widgets::rule(ui);
+                ui.add_space(20.0);
+            });
+        }
+
+        let last = app.conv.messages.len() - 1;
+        let workspace = app.conv.workspace();
+        let App { conv, heights, run, settings, editing, .. } = app;
+        // Bubbles stop at three quarters of the column; a narrow window gives them a little more.
+        let cap = column * if ui.ctx().content_rect().width() < 768.0 { 0.85 } else { 0.75 };
+        let thinking_secs = run.as_ref().and_then(|r| r.thinking.secs());
+        let has_output = conv.messages.last().is_some_and(|m| m.role == Role::Assistant && !m.parts.is_empty());
         for (i, msg) in conv.messages.iter().enumerate() {
             let live = running && i == last;
+            // An empty reply that is still on its way is the status row's job.
+            if live && !has_output {
+                continue;
+            }
             // Replies off screen are not laid out at all: they keep their measured height.
             if let Some(&(w, h)) = heights.get(&msg.id) {
-                let rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), h));
+                let rect = Rect::from_min_size(ui.cursor().min, vec2(area.width(), h));
                 if !live && w == column && !ui.is_rect_visible(rect) {
-                    ui.allocate_space(egui::vec2(ui.available_width(), h));
+                    ui.allocate_space(vec2(area.width(), h));
                     continue;
                 }
             }
-            let top = ui.cursor().min.y;
-            ui.horizontal_top(|ui| {
-                ui.add_space(pad);
-                ui.vertical(|ui| {
-                    ui.set_width(column);
-                    ui.push_id(&msg.id, |ui| match msg.role {
-                        Role::User => user_bubble(ui, msg),
-                        Role::Assistant => {
-                            let status = run.as_ref().filter(|_| live).map(|r| (r.status, r.drafting.as_ref()));
-                            assistant(ui, md, msg, settings, status, i == last && !running, &mut action);
-                        }
-                    });
+            let top = ui.cursor().top();
+            column_ui(ui, &mut |ui| {
+                let mut env = bubble::Env { settings, workspace: &workspace, live, newest: i == last, busy: running, cap, thinking_secs, editing, action: &mut action };
+                ui.push_id(&msg.id, |ui| bubble::show(ui, msg, &mut env));
+            });
+            ui.add_space(24.0);
+            heights.insert(msg.id.clone(), (column, ui.cursor().top() - top));
+        }
+
+        // Whatever the reply is waiting on the user for sits right under it, at its width.
+        if running {
+            let mut asked = false;
+            column_ui(ui, &mut |ui| {
+                super::markdown::indented(ui, 16.0, |ui| {
+                    ui.set_max_width(cap - 32.0);
+                    asked = super::prompts::show(app, ui);
                 });
             });
-            ui.add_space(18.0);
-            heights.insert(msg.id.clone(), (column, ui.cursor().min.y - top));
+            if asked {
+                ui.add_space(24.0);
+            }
         }
+        if let Some(run) = app.run.as_ref().filter(|_| running) {
+            column_ui(ui, &mut |ui| wait_rows(ui, run, has_output));
+        }
+        ui.add_space(24.0);
     });
 
-    match action {
-        Some(Action::Retry) => app.retry(ui.ctx()),
-        Some(Action::Copy(text)) => {
-            ui.ctx().copy_text(text);
-            app.toast("Copied");
+    // Jump to latest: only when scrolled away from the end.
+    let distance = out.content_size.y - out.state.offset.y - out.inner_rect.height();
+    if distance > 40.0 {
+        let centre = pos2(area.center().x, area.bottom() - 12.0 - 17.0);
+        let rect = Rect::from_center_size(centre, vec2(34.0, 34.0));
+        let response = ui.interact(rect, ui.id().with("jump"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+        let t = widgets::fade(ui, response.id, response.hovered());
+        ui.painter().add(egui::Shadow { offset: [0, 6], blur: 20, spread: 0, color: Color32::from_black_alpha(102) }.as_shape(rect, egui::CornerRadius::same(17)));
+        ui.painter().circle(centre, 17.0, widgets::lerp(p.elevated, p.hover, t), Stroke::new(1.0, p.border_light));
+        icons::paint(ui, icons::ARROW_DOWN, centre, 16.0, widgets::lerp(p.text2, p.text, t));
+        if response.clicked() {
+            app.jump_to_latest = true;
         }
-        Some(Action::Settings) => app.dialog = Dialog::Settings,
+    }
+
+    match action {
+        Some(bubble::Action::Retry) => app.retry(ui.ctx()),
+        Some(bubble::Action::Copy(text)) => ui.ctx().copy_text(text),
+        Some(bubble::Action::Link(url)) => ui.ctx().open_url(egui::OpenUrl::new_tab(url)),
+        Some(bubble::Action::OpenCode(title, language, code)) => app.artifact = Some(super::overlay::Artifact { title, language, code, copied: None }),
+        Some(bubble::Action::Image(name, uri)) => app.lightbox = Some((name, uri)),
+        Some(bubble::Action::OpenFile(path)) => super::workspace::open(app, path),
+        Some(bubble::Action::Delete(id)) => app.delete_exchange(&id),
+        Some(bubble::Action::Edit(id, text)) => app.resend_edited(ui.ctx(), &id, text),
         None => {}
     }
 }
 
+/// The lines under a reply that is still on its way: "✻ Thinking… · 12s".
+fn wait_rows(ui: &mut egui::Ui, run: &super::Run, has_output: bool) {
+    let p = p();
+    let seconds = run.started.elapsed().as_secs();
+    let line = |ui: &mut egui::Ui, label: String, detail: String| {
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            ui.spacing_mut().item_spacing.x = 8.0;
+            ui.label(widgets::lines("✻", 13.0, 20.0, W::Regular, p.accent));
+            let job = shimmer(ui, &label, 13.0);
+            ui.label(job);
+            ui.label(widgets::text(detail, 11.0, W::Regular, p.muted));
+        });
+    };
+    match &run.drafting {
+        Some((name, chars)) if *chars > 0 => {
+            let size = if *chars >= 1000 { format!("{:.1}k chars", *chars as f64 / 1000.0) } else { format!("{chars} chars") };
+            ui.add_space(if has_output { 0.0 } else { 8.0 });
+            line(ui, format!("{}…", drafting_label(name)), format!("· {size} · {seconds}s"));
+        }
+        _ if !has_output => {
+            ui.add_space(8.0);
+            let stage = match run.status {
+                "Writing" => "Writing",
+                "Working" => "Working on your files",
+                "Searching" => "Searching the web",
+                _ => "Thinking",
+            };
+            line(ui, format!("{stage}…"), format!("· {seconds}s"));
+        }
+        _ => {}
+    }
+    ui.add_space(8.0);
+}
+
+/// "Writing files", "Preparing edits", "Planning": what a tool call still streaming in is doing.
+fn drafting_label(name: &str) -> String {
+    match name {
+        "write_file" | "write_files" | "create_file" => "Writing files".into(),
+        "edit_file" | "edit_files" | "replace_in_files" => "Preparing edits".into(),
+        n if n.contains("plan") => "Planning".into(),
+        n => format!("Preparing {}", n.replace('_', " ")),
+    }
+}
+
 fn welcome(app: &mut App, ui: &mut egui::Ui) {
-    let has_key = crate::provider::resolve_target(&app.settings.model, &app.settings).is_ok();
-    ui.vertical_centered(|ui| {
-        ui.add_space((ui.available_height() * 0.30).max(24.0));
-        ui.label(RichText::new("How can I help you today?").font(egui::FontId::new(30.0, theme::serif())));
-        ui.add_space(8.0);
-        if has_key {
-            ui.label(theme::secondary("Ask a question, or give it a task: it can write, run and fix files in this chat's workspace."));
+    let p = p();
+    let area = ui.max_rect();
+    let has_keys = crate::provider::resolve_target(&app.settings.model, &app.settings).is_ok();
+    let width = (area.width() - 48.0).min(576.0);
+    let heading = theme::serif(if area.width() >= 640.0 { 36.0 } else { 30.0 });
+    let model = crate::models::resolve(&app.settings.model, &app.settings.custom_models);
+    let provider = match model.provider {
+        crate::models::ProviderId::Openrouter => "OpenRouter",
+        crate::models::ProviderId::Local => "local server",
+        crate::models::ProviderId::Deepseek => "DeepSeek",
+    };
+    let blurb = if has_keys {
+        "Type a message below to start a conversation.".to_string()
+    } else {
+        format!("Connect a {provider} API key to start chatting. DeepSeek and OpenRouter both work. Your keys stay on this PC — nothing leaves this app except your requests.")
+    };
+    // Laid out once to learn the height, so the block sits centred (lifted 32, like the web's pb-16).
+    let id = ui.id().with("welcome-height");
+    let height: f32 = ui.data(|d| d.get_temp(id)).unwrap_or(200.0);
+    let top = area.center().y - 32.0 - height / 2.0;
+    let rect = Rect::from_min_size(pos2(area.center().x - width / 2.0, top.max(area.top())), vec2(width, area.height()));
+    let used = ui.scope_builder(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::top_down(egui::Align::Center)), |ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        ui.label(egui::RichText::new("How can I help you today?").font(heading).color(p.text).extra_letter_spacing(-0.3));
+        ui.add_space(12.0);
+        ui.add(egui::Label::new(widgets::lines(blurb, 14.0, 24.0, W::Regular, p.text2)).wrap().halign(egui::Align::Center));
+        if has_keys {
+            ui.add_space(28.0);
+            let text = widgets::galley(ui, "Ask for a file and it gets written to disk.", theme::font(12.0, W::Regular), p.muted);
+            let (pill, _) = ui.allocate_exact_size(vec2(14.0 + 16.0 + 10.0 + text.size().x + 14.0, 34.0), Sense::hover());
+            ui.painter().rect_stroke(pill, 17.0, Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
+            icons::paint(ui, icons::FOLDER_PLAIN, pos2(pill.left() + 14.0 + 8.0, pill.center().y), 16.0, p.accent_light);
+            widgets::text_at(ui, pill.left() + 14.0 + 16.0 + 10.0, pill.center().y, text);
         } else {
-            ui.label(theme::secondary("Add an OpenRouter or DeepSeek API key to start chatting.\nYour keys stay on this PC. Nothing leaves this app except your requests."));
-            ui.add_space(12.0);
-            if ui.add(egui::Button::new(RichText::new("🔑  Add API keys").color(egui::Color32::WHITE).strong()).fill(theme::ACCENT).min_size(egui::vec2(140.0, 36.0))).clicked() {
+            ui.add_space(24.0);
+            if widgets::btn_primary(ui, Some(icons::KEY), "Add API keys").clicked() {
                 app.dialog = Dialog::Settings;
                 app.settings_tab = 0;
             }
         }
     });
-}
-
-fn image(ui: &mut egui::Ui, path: &std::path::Path, max_width: f32) {
-    let uri = format!("file://{}", path.display().to_string().replace('\\', "/"));
-    let shown = ui.add(egui::Image::new(uri.clone()).max_width(max_width.min(ui.available_width())).max_height(360.0).corner_radius(8).sense(egui::Sense::click()));
-    if shown.on_hover_text("Click to open").clicked() {
-        ui.ctx().open_url(egui::OpenUrl::new_tab(uri));
-    }
-}
-
-fn user_bubble(ui: &mut egui::Ui, msg: &Message) {
-    // Measured first so the bubble hugs its text and sits on the right.
-    const CHROME: f32 = 26.0;
-    let room = ui.available_width() * 0.82 - CHROME;
-    let galley = ui.painter().layout(msg.text(), egui::TextStyle::Body.resolve(ui.style()), theme::TEXT, room);
-    let width = if msg.attachments.is_empty() { galley.size().x } else { galley.size().x.max(room.min(260.0)) };
-    ui.horizontal_top(|ui| {
-        ui.add_space((ui.available_width() - width - CHROME - ui.spacing().item_spacing.x).max(0.0));
-        theme::card(theme::BG_ELEVATED).show(ui, |ui| {
-            ui.vertical(|ui| {
-                ui.set_width(width);
-                for path in &msg.attachments {
-                    image(ui, path, 260.0);
-                }
-                ui.label(galley);
-            });
-        });
-    });
-}
-
-/// A short verb for the step row, and what it acted on.
-fn step_label(tool: &ToolEvent) -> (String, String) {
-    let args: serde_json::Value = serde_json::from_str(&tool.args).unwrap_or_default();
-    let arg = |key: &str| args[key].as_str().unwrap_or("").to_string();
-    let count = |key: &str| args[key].as_array().map_or(0, Vec::len);
-    let (verb, target) = match tool.name.as_str() {
-        "list_files" => ("List files", arg("path")),
-        "read_file" => ("Read", arg("path")),
-        "read_files" => ("Read", format!("{} files", count("paths"))),
-        "write_file" => ("Write", arg("path")),
-        "write_files" => ("Write", format!("{} files", count("files"))),
-        "edit_file" => ("Edit", arg("path")),
-        "edit_files" => ("Edit", format!("{} places", count("edits"))),
-        "replace_in_files" => ("Replace", arg("find")),
-        "search_files" => ("Search", arg("query")),
-        "delete_file" => ("Delete", arg("path")),
-        "move_file" => ("Move", format!("{} → {}", arg("from"), arg("to"))),
-        "undo_file" => ("Undo", arg("path")),
-        "run_command" | "start_process" => {
-            let rest: Vec<String> = args["args"].as_array().into_iter().flatten().filter_map(|a| a.as_str().map(str::to_string)).collect();
-            (if tool.name == "run_command" { "Run" } else { "Start" }, format!("{} {}", arg("command"), rest.join(" ")))
-        }
-        "run_tests" => ("Run tests", arg("filter")),
-        "read_process" => ("Read output", arg("id")),
-        "write_process" => ("Type into", arg("id")),
-        "stop_process" => ("Stop", arg("id")),
-        "list_processes" => ("List processes", String::new()),
-        "wait_for_output" => ("Wait for", if arg("pattern").is_empty() { arg("id") } else { arg("pattern") }),
-        "fetch_url" => ("Open", arg("url")),
-        "http_request" => ("Request", arg("url")),
-        "download_file" => ("Download", arg("url")),
-        "web_search" => ("Search the web", arg("query")),
-        "make_plan" => ("Plan", arg("goal")),
-        "update_plan" => ("Update plan", String::new()),
-        "ask_user" => ("Ask", arg("question")),
-        "finish" => ("Finish", String::new()),
-        "note_finding" => ("Note", arg("claim")),
-        "view_image" => ("Look at", arg("path")),
-        "show_image" => ("Show", arg("path")),
-        other => (other, String::new()),
-    };
-    (verb.to_string(), target)
-}
-
-fn step(ui: &mut egui::Ui, tool: &ToolEvent, index: usize) {
-    let (verb, target) = step_label(tool);
-    let (mark, colour) = match tool.ok {
-        None => ("◌", theme::WARNING),
-        Some(true) => ("✔", theme::SUCCESS),
-        Some(false) => ("✖", theme::DANGER),
-    };
-    let target: String = target.chars().take(90).collect();
-    let mut title = egui::text::LayoutJob::default();
-    let font = egui::FontId::proportional(13.0);
-    title.append(mark, 0.0, egui::TextFormat::simple(font.clone(), colour));
-    title.append(&verb, 8.0, egui::TextFormat::simple(font.clone(), theme::TEXT_SECONDARY));
-    title.append(&target, 6.0, egui::TextFormat::simple(egui::FontId::monospace(12.5), theme::TEXT_MUTED));
-    egui::CollapsingHeader::new(title).id_salt(("step", index)).show(ui, |ui| {
-        if !tool.summary.is_empty() {
-            ui.add(egui::Label::new(RichText::new(tool.summary.as_str()).size(12.5).color(if tool.ok == Some(false) { theme::DANGER } else { theme::TEXT_SECONDARY })).wrap());
-        }
-        let pretty = serde_json::from_str::<serde_json::Value>(&tool.args).ok().and_then(|v| serde_json::to_string_pretty(&v).ok()).unwrap_or_else(|| tool.args.clone());
-        let shown: String = pretty.chars().take(4_000).collect();
-        ui.add(egui::Label::new(RichText::new(shown).monospace().size(12.0).color(theme::TEXT_MUTED)).wrap());
-    });
-    if let Some(path) = &tool.image {
-        image(ui, path, 520.0);
-    }
-}
-
-fn duration(ms: u64) -> String {
-    match ms / 1000 {
-        s if s >= 60 => format!("{}m {}s", s / 60, s % 60),
-        s => format!("{s}s"),
-    }
-}
-
-fn tokens(n: u64) -> String {
-    if n >= 1000 { format!("{:.1}k", n as f64 / 1000.0) } else { n.to_string() }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn assistant(
-    ui: &mut egui::Ui,
-    md: &mut egui_commonmark::CommonMarkCache,
-    msg: &Message,
-    settings: &crate::store::Settings,
-    live: Option<(&'static str, Option<&(String, usize)>)>,
-    can_retry: bool,
-    action: &mut Option<Action>,
-) {
-    for (i, part) in msg.parts.iter().enumerate() {
-        match part {
-            Part::Text(text) => {
-                ui.push_id(i, |ui| CommonMarkViewer::new().show(ui, md, text));
-            }
-            Part::Thinking { text, ms } => {
-                let title = if *ms == 0 { "Thinking…".to_string() } else { format!("Thought for {}", duration((*ms).max(1000))) };
-                egui::CollapsingHeader::new(RichText::new(title).size(13.0).color(theme::WARNING)).id_salt(("think", i)).show(ui, |ui| {
-                    ui.add(egui::Label::new(RichText::new(text.as_str()).size(12.5).color(theme::TEXT_MUTED)).wrap());
-                });
-            }
-            Part::Tool(tool) => step(ui, tool, i),
-            Part::Notice(note) => {
-                ui.label(RichText::new(note.as_str()).italics().size(12.5).color(theme::TEXT_MUTED));
-            }
-        }
-    }
-
-    if let Some(error) = &msg.error {
-        egui::Frame::new().stroke(egui::Stroke::new(1.0, theme::DANGER)).corner_radius(8).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.add(egui::Label::new(RichText::new(error.as_str()).color(theme::DANGER)).wrap());
-            ui.horizontal(|ui| {
-                if can_retry && ui.button("Try again").clicked() {
-                    *action = Some(Action::Retry);
-                }
-                if error.contains("Settings") && ui.button("Open Settings").clicked() {
-                    *action = Some(Action::Settings);
-                }
-            });
-        });
-    }
-
-    if let Some((status, drafting)) = live {
-        ui.horizontal(|ui| {
-            ui.spinner();
-            let text = match drafting {
-                Some((name, chars)) if *chars > 400 => format!("Writing {name} · {} characters", tokens(*chars as u64)),
-                _ => format!("{status}…"),
-            };
-            ui.label(theme::secondary(text));
-        });
-        return;
-    }
-
-    // Who refused, when a reply was blocked: apiM adds no content rules of its own.
-    let text = msg.text();
-    let model = models::resolve(&msg.model, &settings.custom_models);
-    match refusal::refusal_source(&text, msg.finish.as_deref()) {
-        Some(RefusalSource::Model) => {
-            ui.label(theme::muted(format!("This refusal came from {}, not from apiM. apiM adds no content rules. Try again, rephrase, or pick another model.", model.label)));
-        }
-        Some(RefusalSource::ContentFilter) => {
-            ui.label(theme::muted(format!("{}'s content filter cut this reply short. That check runs on their servers; apiM does not filter what you send or receive.", model.provider.name())));
-        }
-        None => {}
-    }
-
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
-        let mut bits = vec![model.short_label.clone()];
-        if msg.usage.prompt > 0 {
-            bits.push(format!("{} in · {} out", tokens(msg.usage.prompt), tokens(msg.usage.completion)));
-        }
-        if let Some(cost) = msg.cost.filter(|c| *c > 0.0) {
-            bits.push(if cost < 0.01 { format!("${cost:.4}") } else { format!("${cost:.2}") });
-        }
-        if msg.duration_ms > 0 {
-            bits.push(duration(msg.duration_ms));
-        }
-        ui.label(theme::muted(bits.join("  ·  ")));
-        if !text.is_empty() && ui.add(egui::Button::new(theme::muted("Copy")).frame(false)).on_hover_text("Copy this reply").clicked() {
-            *action = Some(Action::Copy(text.clone()));
-        }
-        if can_retry && msg.error.is_none() && ui.add(egui::Button::new(theme::muted("Retry")).frame(false)).on_hover_text("Answer this again").clicked() {
-            *action = Some(Action::Retry);
-        }
-    });
-}
-
-// ---------------------------------------------------------------- composer
-
-/// One toolbar control; every chip shares a geometry so the row stays even.
-fn chip(ui: &mut egui::Ui, text: impl Into<String>, on: bool) -> egui::Response {
-    let colour = if on { theme::ACCENT_LIGHT } else { theme::TEXT_SECONDARY };
-    let mut button = egui::Button::new(RichText::new(text).size(13.0).color(colour)).min_size(egui::vec2(0.0, 30.0)).corner_radius(8);
-    if on {
-        button = button.fill(theme::ACCENT.gamma_multiply(0.14)).stroke(egui::Stroke::new(1.0, theme::ACCENT.gamma_multiply(0.5)));
-    }
-    ui.add(button)
-}
-
-fn prompts(app: &mut App, ui: &mut egui::Ui) {
-    let Some(run) = app.run.as_mut().filter(|r| r.conv_id == app.conv.id) else { return };
-    if let Some(pending) = &run.approval {
-        let mut verdict = None;
-        theme::card(theme::BG_TERTIARY).stroke(egui::Stroke::new(1.0, theme::WARNING)).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.label(RichText::new("Allow this command?").strong());
-            ui.add(egui::Label::new(RichText::new(pending.command.as_str()).monospace()).wrap());
-            if !pending.reason.is_empty() {
-                ui.label(theme::secondary(pending.reason.as_str()));
-            }
-            ui.horizontal(|ui| {
-                if ui.add(egui::Button::new(RichText::new("Allow").color(egui::Color32::WHITE)).fill(theme::ACCENT)).clicked() {
-                    verdict = Some(true);
-                }
-                if ui.button("Deny").clicked() {
-                    verdict = Some(false);
-                }
-                ui.label(theme::muted("Settings → Agent → Auto runs developer tools without asking."));
-            });
-        });
-        if let Some(allow) = verdict {
-            if let Some(p) = run.approval.take() {
-                let _ = p.reply.send(allow);
-            }
-        }
-        ui.add_space(8.0);
-    }
-    if let Some(pending) = run.question.as_mut() {
-        let mut answer = None;
-        theme::card(theme::BG_TERTIARY).stroke(egui::Stroke::new(1.0, theme::SEARCH)).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.add(egui::Label::new(RichText::new(pending.question.as_str()).strong()).wrap());
-            if !pending.context.is_empty() {
-                ui.label(theme::secondary(pending.context.as_str()));
-            }
-            ui.horizontal_wrapped(|ui| {
-                for option in &pending.options {
-                    if ui.button(option.as_str()).clicked() {
-                        answer = Some(option.clone());
-                    }
-                }
-            });
-            ui.horizontal(|ui| {
-                let field = ui.add(egui::TextEdit::singleline(&mut pending.answer).hint_text("Or type your own answer").desired_width(ui.available_width() - 150.0));
-                let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if (ui.button("Answer").clicked() || entered) && !pending.answer.trim().is_empty() {
-                    answer = Some(pending.answer.trim().to_string());
-                }
-                if ui.button("Skip").clicked() {
-                    answer = Some(String::new());
-                }
-            });
-        });
-        if let Some(text) = answer {
-            if let Some(q) = run.question.take() {
-                let _ = q.reply.send(text);
-            }
-        }
-        ui.add_space(8.0);
-    }
-}
-
-pub fn composer(app: &mut App, ui: &mut egui::Ui) {
-    let column = (ui.available_width()).min(COLUMN + 32.0);
-    let pad = ((ui.available_width() - column) / 2.0).max(0.0);
-    let ctx = ui.ctx().clone();
-    ui.horizontal(|ui| {
-        ui.add_space(pad);
-        ui.vertical(|ui| {
-            ui.set_width(column);
-            prompts(app, ui);
-            theme::card(theme::BG_TERTIARY).corner_radius(16).show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                attachments_row(app, ui);
-
-                let running = app.running_here();
-                let hint = if running { "Reply in progress…" } else { "Ask anything, or describe a task" };
-                let edit = egui::TextEdit::multiline(&mut app.draft)
-                    .hint_text(hint)
-                    .desired_rows(2)
-                    .desired_width(f32::INFINITY)
-                    .frame(egui::Frame::new())
-                    // Enter sends; Shift+Enter makes a new line.
-                    .return_key(egui::KeyboardShortcut::new(egui::Modifiers::SHIFT, egui::Key::Enter));
-                let field = egui::ScrollArea::vertical().max_height(220.0).id_salt("draft").show(ui, |ui| ui.add(edit)).inner;
-                if std::mem::take(&mut app.focus_composer) && app.dialog == Dialog::None {
-                    field.request_focus();
-                }
-                let enter = field.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
-
-                ui.add_space(4.0);
-                let mut send = enter;
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    if chip(ui, "📎", false).on_hover_text("Attach files or images (or drop them on the window)").clicked() {
-                        if let Some(picked) = rfd::FileDialog::new().pick_files() {
-                            app.attachments.extend(picked);
-                        }
-                    }
-                    model_menu(app, ui);
-                    effort_menu(app, ui);
-                    if chip(ui, "🌐 Web", app.settings.web_search).on_hover_text("Let the agent search the web (needs a Tavily or Exa key in Settings)").clicked() {
-                        app.settings.web_search = !app.settings.web_search;
-                        app.settings.save();
-                    }
-                    let on = app.settings.enabled_plugins.len();
-                    if chip(ui, if on > 0 { format!("🔌 Plugins · {on}") } else { "🔌 Plugins".into() }, on > 0).clicked() {
-                        app.dialog = Dialog::Plugins;
-                    }
-
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if running {
-                            if ui.add(egui::Button::new(RichText::new("■").color(egui::Color32::WHITE)).fill(theme::DANGER).min_size(egui::vec2(32.0, 30.0)).corner_radius(15)).on_hover_text("Stop").clicked() {
-                                app.stop();
-                            }
-                        } else {
-                            let ready = !app.draft.trim().is_empty() || !app.attachments.is_empty();
-                            let fill = if ready { theme::ACCENT } else { theme::BG_ELEVATED };
-                            if ui.add(egui::Button::new(RichText::new("↑").color(egui::Color32::WHITE).strong()).fill(fill).min_size(egui::vec2(32.0, 30.0)).corner_radius(15)).on_hover_text("Send (Enter)").clicked() {
-                                send = true;
-                            }
-                        }
-                        context_meter(app, ui);
-                    });
-                });
-                if send && !running {
-                    app.send(&ctx);
-                }
-            });
-        });
-    });
-}
-
-fn attachments_row(app: &mut App, ui: &mut egui::Ui) {
-    if app.attachments.is_empty() {
-        return;
-    }
-    let mut remove = None;
-    ui.horizontal_wrapped(|ui| {
-        for (i, path) in app.attachments.iter().enumerate() {
-            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            if ui.button(format!("{name}  ✕")).on_hover_text("Remove").clicked() {
-                remove = Some(i);
-            }
-        }
-    });
-    if let Some(i) = remove {
-        app.attachments.remove(i);
-    }
-}
-
-fn model_menu(app: &mut App, ui: &mut egui::Ui) {
-    let current = models::resolve(&app.settings.model, &app.settings.custom_models);
-    let mut picked = None;
-    ui.menu_button(RichText::new(format!("{} ▾", current.short_label)).size(13.0), |ui| {
-        ui.set_min_width(300.0);
-        for m in models::all(&app.settings.custom_models) {
-            let row = ui.add(egui::Button::selectable(m.id == current.id, RichText::new(m.label.as_str()).strong()).right_text(theme::muted(m.provider.name())));
-            if row.on_hover_text(format!("{}\n{}", m.description, m.specs)).clicked() {
-                picked = Some(m.id.clone());
-                ui.close();
-            }
-        }
-        ui.separator();
-        if ui.button("Add a custom model…").clicked() {
-            app.dialog = Dialog::Settings;
-            app.settings_tab = 1;
-            ui.close();
-        }
-    })
-    .response
-    .on_hover_text("Model");
-    if let Some(id) = picked {
-        app.settings.model = id;
-        app.settings.save();
-    }
-}
-
-fn effort_menu(app: &mut App, ui: &mut egui::Ui) {
-    const EFFORTS: [(&str, &str, &str); 5] = [
-        ("auto", "Auto", "Adjusts to how hard the message looks"),
-        ("none", "None", "Fastest, no reasoning"),
-        ("low", "Low", "Light reasoning"),
-        ("high", "High", "Deep reasoning"),
-        ("max", "Max", "Maximum depth, slowest and dearest"),
-    ];
-    let current = EFFORTS.iter().find(|e| e.0 == app.settings.effort).unwrap_or(&EFFORTS[0]);
-    let mut picked = None;
-    ui.menu_button(RichText::new(format!("✦ {} ▾", current.1)).size(13.0), |ui| {
-        for (id, name, blurb) in EFFORTS {
-            if ui.add(egui::Button::selectable(id == current.0, name).right_text(theme::muted(blurb))).clicked() {
-                picked = Some(id);
-                ui.close();
-            }
-        }
-    })
-    .response
-    .on_hover_text("Thinking effort");
-    if let Some(id) = picked {
-        app.settings.effort = id.into();
-        app.settings.save();
-    }
-}
-
-/// How full the model's context window is after the last reply.
-fn context_meter(app: &App, ui: &mut egui::Ui) {
-    let used = app.conv.messages.iter().rev().find(|m| m.role == Role::Assistant && m.usage.context > 0).map_or(0, |m| m.usage.context);
-    let window = models::context_window(&app.settings.model, &app.settings.custom_models);
-    let percent = (used as f64 / window as f64 * 100.0).min(100.0);
-    let colour = if percent > 80.0 { theme::DANGER } else if percent > 50.0 { theme::WARNING } else { theme::TEXT_MUTED };
-    ui.label(RichText::new(format!("{percent:.0}%")).size(12.0).color(colour)).on_hover_text(format!("Context used: {} of {} tokens", tokens(used), tokens(window)));
+    ui.data_mut(|d| d.insert_temp(id, used.response.rect.height()));
 }

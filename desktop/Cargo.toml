@@ -7,8 +7,8 @@ license = "MIT"
 
 [dependencies]
 eframe = { version = "0.36", default-features = false, features = ["glow", "default_fonts", "accesskit", "links", "wayland", "x11"] }
-egui_extras = { version = "0.36", features = ["image", "file"] }
-egui_commonmark = { version = "0.25", features = ["better_syntax_highlighting"] }
+egui_extras = { version = "0.36", features = ["image", "file", "svg"] }
+pulldown-cmark = { version = "0.13", default-features = false }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }
 reqwest = { version = "0.13", default-features = false, features = ["native-tls", "json", "stream", "http2", "gzip", "system-proxy"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "time", "sync", "fs"] }
