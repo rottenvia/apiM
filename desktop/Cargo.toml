@@ -6,6 +6,10 @@ description = "apiM desktop: the native Rust version, no browser engine"
 license = "MIT"
 
 [dependencies]
+# Colour emoji: the same crates egui already builds, used directly.
+skrifa = { version = "0.44.0", default-features = false, features = ["std"] }
+harfrust = "0.12.0"
+tiny-skia = { version = "0.11.4", default-features = false, features = ["std", "simd"] }
 flate2 = "1"
 eframe = { version = "0.36", default-features = false, features = ["glow", "default_fonts", "accesskit", "links", "wayland", "x11"] }
 egui_extras = { version = "0.36", features = ["image", "file", "svg"] }

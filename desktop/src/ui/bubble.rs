@@ -27,6 +27,9 @@ pub enum Action {
     Delete(String),
     /// Send message `id` again with new text.
     Edit(String, String),
+    /// Blocked plan steps go back to "todo".
+    PlanUnblock,
+    PlanClear,
 }
 
 /// What a bubble needs to know about its surroundings.
@@ -46,6 +49,8 @@ pub struct Env<'a> {
     /// The user message being edited in place: (id, draft).
     pub editing: &'a mut Option<(String, String)>,
     pub action: &'a mut Option<Action>,
+    /// The chat's plan, drawn in the newest reply.
+    pub plan: Option<&'a crate::store::Plan>,
 }
 
 pub fn show(ui: &mut Ui, msg: &Message, env: &mut Env) {
@@ -1053,6 +1058,18 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
             gap(ui, 12.0);
             thinking_panel(ui, &reasoning, msg.reasoning_ms, thinking_now, env, msg.usage.reasoning);
         }
+    }
+    // ponytail: a reply written here does not keep its own copy of the plan, so only the newest one shows the chat's.
+    let plan = msg.other.get("plan").and_then(super::plan_panel::from_value).or_else(|| env.plan.filter(|_| env.newest).map(super::plan_panel::from_plan));
+    if let Some(view) = plan.filter(|view| !view.steps.is_empty()) {
+        gap(ui, 12.0);
+        match super::plan_panel::show(ui, &view, env.newest && !env.busy) {
+            Some(super::plan_panel::Act::Unblock) => *env.action = Some(Action::PlanUnblock),
+            Some(super::plan_panel::Act::Clear) => *env.action = Some(Action::PlanClear),
+            None => {}
+        }
+        // The card keeps 10px under it where the other blocks keep 12.
+        ui.add_space(-2.0);
     }
     if msg.incomplete && !env.live {
         gap(ui, 12.0);

@@ -6,10 +6,12 @@ mod bubble;
 mod chat;
 mod composer;
 mod dialogs;
+mod emoji;
 mod form;
 mod icons;
 mod markdown;
 mod overlay;
+mod plan_panel;
 mod plugin_modal;
 mod prompts;
 mod settings;
@@ -269,6 +271,11 @@ impl App {
                 }
                 "plugin-editor" => self.plugin_ui = plugin_modal::State::writing(),
                 "auto-run" => self.settings.approval = store::Approval::Auto,
+                which @ ("plan" | "plan-blocked") => {
+                    let step = |id, text: &str, state: &str, note: &str| store::PlanStep { id, text: text.into(), state: state.into(), note: note.into() };
+                    let last = if which == "plan" { step(4, "Write the README section", "todo", "") } else { step(4, "Publish the release", "blocked", "no signing key on this machine") };
+                    self.conv.plan = Some(store::Plan { goal: "Ship the importer with tests".into(), steps: vec![step(1, "Read the current parser", "done", "read src/parser.rs in full"), step(2, "Add the CSV path", "done", ""), step(3, "Cover it with tests", "doing", ""), last] });
+                }
                 tab if tab.starts_with("tab") => self.settings_ui.tab = tab[3..].parse().unwrap_or(0),
                 _ => {}
             }
@@ -661,6 +668,23 @@ impl App {
         self.conv.updated_at = store::now_ms();
         self.conv.save();
         self.refresh_chats();
+    }
+
+    /// The plan card's footer: clear the plan, or put its blocked steps back to "todo".
+    fn edit_plan(&mut self, clear: bool) {
+        if self.running_here() {
+            return;
+        }
+        if clear {
+            self.conv.plan = None;
+        } else if let Some(plan) = self.conv.plan.as_mut() {
+            for step in plan.steps.iter_mut().filter(|s| s.state == "blocked") {
+                step.state = "todo".into();
+                step.note.clear();
+            }
+        }
+        self.heights.clear();
+        self.conv.save();
     }
 
     /// Asks an earlier question again with new words: it and everything after it are replaced.
