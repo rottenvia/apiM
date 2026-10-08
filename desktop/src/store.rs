@@ -254,6 +254,14 @@ pub struct Attachment {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description_source: Option<String>,
+    /// Videos only: stills sampled at attach time. Present (with no `data_url`) means the clip rides as a strip of images.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frames: Vec<crate::media::video::Frame>,
+    /// Videos only: the clip's length and the spacing of its frames, in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_sec: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_interval_sec: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]

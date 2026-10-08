@@ -22,6 +22,7 @@ use crate::context::workspace_context::build_workspace_context;
 use crate::diagnostics;
 use crate::lessons::{self, Lesson};
 use crate::mcp;
+use crate::media::multimodal::{Media, MediaWindow, build_user_content, strip_ride_along_videos, user_has_content};
 use crate::models::{self, ProviderId, Usage, Vision};
 use crate::plugins;
 use crate::prompt;
@@ -147,8 +148,8 @@ impl Emitter {
 #[derive(Default)]
 pub struct Request {
     pub settings: Settings,
-    /// Earlier turns of this chat, oldest first.
-    pub history: Vec<(Role, String)>,
+    /// Earlier turns of this chat, oldest first, each with the attachments it carried.
+    pub history: Vec<(Role, String, Vec<Attachment>)>,
     pub text: String,
     /// Pictures attached to this message, as data URLs.
     pub images: Vec<Attachment>,
@@ -560,19 +561,7 @@ async fn run_inner(mut req: Request, emit: &Emitter, procs: Arc<Procs>) -> Resul
     if let Some(summary) = req.summary.as_deref().filter(|s| !s.trim().is_empty()) {
         messages.push(json!({ "role": "system", "content": summary }));
     }
-    let skip = req.history.len().saturating_sub(HISTORY_TURNS);
-    for (role, text) in req.history.iter().skip(skip).filter(|(_, t)| !t.trim().is_empty()) {
-        messages.push(json!({ "role": if *role == Role::User { "user" } else { "assistant" }, "content": text }));
-    }
-    let images: Vec<Value> = if native_vision { req.images.iter().filter_map(|a| a.data_url.as_ref()).map(|url| json!({ "type": "image_url", "image_url": { "url": url } })).collect() } else { Vec::new() };
-    if images.is_empty() {
-        let note = if req.images.is_empty() { String::new() } else { format!("\n\n[The user attached {} image(s), but this model cannot see images.]", req.images.len()) };
-        messages.push(user(format!("{}{note}", req.text)));
-    } else {
-        let mut parts = vec![json!({ "type": "text", "text": req.text })];
-        parts.extend(images);
-        messages.push(json!({ "role": "user", "content": parts }));
-    }
+    messages.extend(user_turns(&req.history, &req.text, &req.images, target.model.vision));
 
     let mut start = Start { user_text: req.text.clone(), history_last_user: req.history_last_user.clone(), ..Default::default() };
     if let Some(resume) = resume {
@@ -593,6 +582,55 @@ async fn run_inner(mut req: Request, emit: &Emitter, procs: Arc<Procs>) -> Resul
         tokio::spawn(learn(ctx.client.clone(), helper, req.workspace.clone(), outcomes, known_lessons));
     }
     Ok(end)
+}
+
+/// The conversation the model reads for this turn: the newest earlier turns, then the message being answered (the web's
+/// `buildUserContent` for each). A model that cannot see keeps the one-line note; the others get the media-aware builder.
+fn user_turns(history: &[(Role, String, Vec<Attachment>)], text: &str, images: &[Attachment], vision: Vision) -> Vec<Value> {
+    let skip = history.len().saturating_sub(HISTORY_TURNS);
+    let turns = &history[skip..];
+    let mut out = Vec::new();
+    for ((role, past, attached), window) in turns.iter().zip(history_windows(turns, vision == Vision::Native)) {
+        if *role == Role::User {
+            let media: Vec<Media> = attached.iter().map(Media::from).collect();
+            let content = build_user_content(past, &media, vision, window);
+            if user_has_content(&content) {
+                out.push(json!({ "role": "user", "content": content }));
+            }
+        } else if !past.trim().is_empty() {
+            out.push(json!({ "role": "assistant", "content": past }));
+        }
+    }
+    if vision == Vision::None {
+        let note = if images.is_empty() { String::new() } else { format!("\n\n[The user attached {} image(s), but this model cannot see images.]", images.len()) };
+        out.push(user(format!("{text}{note}")));
+    } else {
+        let media: Vec<Media> = images.iter().map(Media::from).collect();
+        out.push(json!({ "role": "user", "content": build_user_content(text, &media, vision, None) }));
+    }
+    out
+}
+
+/// The web's `mediaWindowFor`: on a native model the two newest pictures in the history ride in full, and a clip never
+/// replays from history. Other models get no window: their history carries descriptions, not pixels.
+fn history_windows(turns: &[(Role, String, Vec<Attachment>)], native: bool) -> Vec<Option<MediaWindow>> {
+    let mut windows = vec![None; turns.len()];
+    if !native {
+        return windows;
+    }
+    let mut pictures = 0;
+    for (i, (role, _, attached)) in turns.iter().enumerate().rev() {
+        if *role != Role::User {
+            continue;
+        }
+        let picture = attached.iter().any(|a| a.kind == "image" && a.data_url.as_deref().is_some_and(|u| !u.is_empty()));
+        let clip = attached.iter().any(|a| a.kind == "video" && (a.data_url.is_some() || !a.frames.is_empty()));
+        if picture || clip {
+            windows[i] = Some(MediaWindow { images: Some(picture && pictures < 2), videos: Some(false) });
+        }
+        pictures += usize::from(picture);
+    }
+    windows
 }
 
 /// The loop itself, once the endpoint, the tools and the opening messages are settled.
@@ -710,7 +748,8 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, tool_defs: 
         // DeepSeek takes each tool turn's reasoning back as `reasoning_content`. OpenRouter's validators reject
         // the field, so its lanes get `reasoning` where a model needs it and the end of the thought as plain text elsewhere.
         let reasoning_field = if !openrouter { Some("reasoning_content") } else if lane.replay { Some("reasoning") } else { None };
-        let mut wire = transcript::wire(&messages, reasoning_field);
+        // Videos ride once: the clip's pixels go on the request that introduces it, and every later round gets a reference line.
+        let mut wire = transcript::wire(&strip_ride_along_videos(&messages, tool_rounds == 0), reasoning_field);
         if qwen {
             // Qwen's template only accepts a system message at index 0: the listing, its deltas and the tail all join the first one.
             let (systems, rest): (Vec<Value>, Vec<Value>) = wire.into_iter().partition(|m| m["role"] == "system");
@@ -1611,6 +1650,31 @@ mod tests {
             assert!(pins.len() == 1 && pins[0].contains("You are mid-task on this request") && pins[0].ends_with(ask), "{pins:?}");
             assert_eq!(request["messages"].as_array().unwrap().last().unwrap()["content"], pins[0]);
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_picture_reaches_a_model_that_cannot_see_as_its_description() {
+        let picture = Attachment { name: "ui.png".into(), kind: "image".into(), data_url: Some("data:image/png;base64,AQID".into()), description: Some("A red button labelled Save.".into()), description_source: Some("ocr".into()), ..Default::default() };
+        let question = "What does the button say?";
+        let ran = run_with(vec![sse(&[says("It says Save.", Some("stop"))])], "none", None, |dir| {
+            let mut messages = vec![json!({ "role": "system", "content": "rules" })];
+            messages.extend(user_turns(&[], question, std::slice::from_ref(&picture), Vision::Helper));
+            let tree = Tree::open(dir, &mut messages);
+            (messages, Start { tree, user_text: question.into(), ..Default::default() })
+        })
+        .await;
+        // The description rides in the request, and the raw picture does not.
+        let sent = ran.sent[0]["messages"].to_string();
+        assert!(sent.contains("A red button labelled Save.") && !sent.contains("data:image/png;base64,AQID"), "{sent}");
+    }
+
+    #[test]
+    fn only_the_two_newest_pictures_in_history_ride_in_full() {
+        let turn = |text: &str, data: &str| (Role::User, text.to_string(), vec![Attachment { name: "p.png".into(), kind: "image".into(), data_url: Some(data.into()), ..Default::default() }]);
+        let history = vec![turn("one", "data:a"), turn("two", "data:b"), turn("three", "data:c")];
+        let sent = Value::Array(user_turns(&history, "now", &[], Vision::Native)).to_string();
+        assert!(sent.contains("data:b") && sent.contains("data:c") && !sent.contains("data:a"), "{sent}");
+        assert!(sent.contains("kept in the conversation, not re-sent"), "{sent}");
     }
 
     /// The newest tool result in a request.

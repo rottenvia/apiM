@@ -1,23 +1,38 @@
 //! Files waiting in the message box, and what becomes of them on Send
-//! (src/components/AttachmentChips.tsx).
+//! (src/components/AttachmentChips.tsx, and the attach path of src/lib/attachments.ts).
 
 use super::theme::{self, W, p};
-use super::{App, icons, is_image, widgets};
-use crate::store::Attachment;
+use super::{App, icons, is_image, slash_menu, widgets};
+use crate::media::attachments::{self as media, AttachStage, Attached, AttachedKind, Picture, Video, build_message_with_attachments};
+use crate::media::ingest::{self, UploadDescription};
+use crate::media::{ocr, vision::{self, VisionResult}};
+use crate::models::Vision;
+use crate::provider;
+use crate::store::{Attachment, Settings};
 use crate::tools::files;
-use base64::Engine;
 use eframe::egui::{self, Color32, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
-const MAX_ATTACHMENTS: usize = 10;
-/// A picture larger than this is not sent: providers reject it, and it would bloat the saved chat.
-const MAX_IMAGE_BYTES: u64 = 8 << 20;
+/// A picture's description while its background job runs: `None` until the job has an answer.
+type Described = Arc<Mutex<Option<VisionResult>>>;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Kind {
     Image,
+    Video,
     File,
     Folder,
+}
+
+/// What a waiting attachment becomes in the message.
+pub enum Body {
+    /// A picture, and on a model that cannot see the description its job is making.
+    Picture { picture: Picture, described: Option<Described> },
+    /// A clip: sent as video on a native model, named on one that cannot watch.
+    Clip(Video),
+    /// A file or folder already copied into the workspace, with the text `ingest` read from it.
+    Saved(UploadDescription),
 }
 
 pub struct Pending {
@@ -27,6 +42,22 @@ pub struct Pending {
     pub kind: Kind,
     /// How many files a folder holds.
     pub files: Option<usize>,
+    pub body: Body,
+}
+
+impl Pending {
+    /// True while a picture is still being described.
+    fn describing(&self) -> bool {
+        matches!(&self.body, Body::Picture { described: Some(slot), .. } if slot.lock().is_ok_and(|s| s.is_none()))
+    }
+
+    /// Why a picture's description failed, once it has (the chip's hover says it).
+    fn vision_error(&self) -> Option<String> {
+        match &self.body {
+            Body::Picture { described: Some(slot), .. } => slot.lock().ok()?.as_ref()?.error.clone(),
+            _ => None,
+        }
+    }
 }
 
 /// "12 KB", "3.4 MB": the size under a chip.
@@ -38,48 +69,86 @@ pub fn format_bytes(size: u64) -> String {
     }
 }
 
+/// The vision mode of the model the next message goes to. A model with no route counts as one that cannot see.
+pub fn model_vision(settings: &Settings) -> Vision {
+    provider::resolve_target(&settings.model, settings).map_or(Vision::None, |t| t.model.vision)
+}
+
+/// Why the message must wait: a picture still being described holds the send, as on the web. None when all is ready.
+pub fn waiting(pending: &[Pending]) -> Option<String> {
+    let chips: Vec<(&str, Option<AttachStage>, bool)> = pending.iter().map(|a| (a.name.as_str(), None, a.describing())).collect();
+    media::attachments_block_send(&chips)
+}
+
+/// Attaches a file or folder from the composer. Refusals and read errors go to the notice line, in the web's words.
 pub fn add(app: &mut App, path: PathBuf) {
-    if app.attachments.iter().any(|a| a.path == path) {
+    if app.attachments.iter().any(|a| a.path == path) || !(path.is_file() || path.is_dir()) {
         return;
+    }
+    if let Some(problem) = media::too_many_files(app.attachments.len()) {
+        return slash_menu::say(app, problem, true);
     }
     let name = path.file_name().map_or_else(|| "file".to_string(), |n| n.to_string_lossy().into_owned());
-    let mut size = std::fs::metadata(&path).map_or(0, |m| m.len());
-    let mut count = None;
-    let kind = if path.is_dir() {
-        let inside = files::walk(&path, &path);
-        size = inside.iter().map(|(_, bytes)| *bytes).sum();
-        count = Some(inside.len());
-        Kind::Folder
-    } else if !path.is_file() {
-        return;
-    } else if is_image(&path) {
-        Kind::Image
-    } else {
-        Kind::File
-    };
-    let problem = if app.attachments.len() >= MAX_ATTACHMENTS {
-        Some(format!("You can attach up to {MAX_ATTACHMENTS} files"))
-    } else if kind == Kind::Image && size > MAX_IMAGE_BYTES {
-        Some(format!("{name} is {} — the image limit is 8 MB", format_bytes(size)))
-    } else if count == Some(0) {
-        Some(format!("{name} had no readable text or binary files in it"))
-    } else {
-        None
-    };
-    match problem {
-        // Several refusals in one go read as one line.
-        Some(problem) => app.attach_error = Some(app.attach_error.take().map_or(problem.clone(), |earlier| format!("{earlier} · {problem}"))),
-        None => {
-            app.attach_error = None;
-            app.attachments.push(Pending { path, name, size, kind, files: count });
-        }
+    let (root, vision) = (app.conv.workspace(), model_vision(&app.settings));
+    let (rt, key, model) = (app.rt.handle().clone(), app.settings.vision_key.clone(), app.settings.vision_model.clone());
+    let describer = |url: &str| describe(&rt, &key, &model, url);
+    match read_attachment(&root, path, name, vision, &describer) {
+        Ok(pending) => app.attachments.push(pending),
+        Err(problem) => slash_menu::say(app, problem, true),
     }
+}
+
+/// Reads one attached thing the way the web's composer does. Pictures are shrunk and capped, clips read whole, and files
+/// and folders are copied into the workspace under a free name and read by `ingest`. A picture on a model that cannot see
+/// starts its description through `describe`.
+fn read_attachment(root: &Path, path: PathBuf, name: String, vision: Vision, describe: &dyn Fn(&str) -> Described) -> Result<Pending, String> {
+    if path.is_dir() {
+        let inside = files::walk(&path, &path);
+        let total: u64 = inside.iter().map(|(_, bytes)| *bytes).sum();
+        media::check_folder(&name, total, inside.len())?;
+        let dest = ingest::free_name(root, &format!("uploads/{name}"))?;
+        // ponytail: a file that fails to copy is skipped quietly; the description says how many arrived.
+        for (rel, _) in &inside {
+            let _ = ingest::save_upload(root, &path.join(rel), &format!("{dest}/{rel}"), media::MAX_BYTES);
+        }
+        let described = ingest::describe_folder(root, &dest)?;
+        return Ok(Pending { path, name, size: total, kind: Kind::Folder, files: Some(inside.len()), body: Body::Saved(described) });
+    }
+    if is_image(&path) {
+        let picture = media::read_image_file(&path)?;
+        let described = (vision != Vision::Native).then(|| describe(picture.data_url.as_str()));
+        return Ok(Pending { path, name, size: picture.size, kind: Kind::Image, files: None, body: Body::Picture { picture, described } });
+    }
+    if media::is_video_file("", &name) {
+        let clip = media::read_video_file(&path)?;
+        return Ok(Pending { path, name, size: clip.size, kind: Kind::Video, files: None, body: Body::Clip(clip) });
+    }
+    let dest = ingest::free_name(root, &format!("uploads/{name}"))?;
+    let (saved, size) = ingest::save_upload(root, &path, &dest, media::MAX_BYTES)?;
+    let described = ingest::ingest_upload(root, &saved, true)?;
+    Ok(Pending { path, name, size, kind: Kind::File, files: None, body: Body::Saved(described) })
+}
+
+/// Starts describing a picture in the background: the vision model when a key is set, else local OCR.
+fn describe(rt: &tokio::runtime::Handle, key: &str, model: &str, data_url: &str) -> Described {
+    let slot: Described = Arc::new(Mutex::new(None));
+    let (job, client, base) = (slot.clone(), provider::client(), vision::vision_base_url());
+    let (key, model, url) = (key.trim().to_string(), vision::model_or_default(model).to_string(), data_url.to_string());
+    let _ = rt.spawn(async move {
+        let result = ocr::describe_image_with_fallback(&client, &base, ocr::TESSERACT, &url, (!key.is_empty()).then_some(key.as_str()), &model, None).await;
+        *job.lock().unwrap() = Some(result);
+    });
+    slot
 }
 
 /// The row of chips above the text: pictures first, then files. Draws nothing when nothing is attached.
 pub fn chips(app: &mut App, ui: &mut egui::Ui) {
     if app.attachments.is_empty() {
         return;
+    }
+    // A description arrives from a background task, which cannot wake the window: look again shortly while one is out.
+    if app.attachments.iter().any(|a| matches!(&a.body, Body::Picture { described: Some(slot), .. } if slot.lock().unwrap().is_none())) {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
     }
     let p = p();
     let mut remove = None;
@@ -89,7 +158,8 @@ pub fn chips(app: &mut App, ui: &mut egui::Ui) {
             ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
             for (i, a) in app.attachments.iter().enumerate().filter(|(_, a)| a.kind == Kind::Image) {
                 let (rect, response) = ui.allocate_exact_size(vec2(66.0, 66.0), Sense::click());
-                let response = response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("{} — click to enlarge", a.name));
+                let hover = a.vision_error().map_or_else(|| format!("{} — click to enlarge", a.name), |e| format!("{} — {e}", a.name));
+                let response = response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(hover);
                 let over = ui.rect_contains_pointer(rect);
                 ui.painter().rect(rect, 8.0, p.elevated, Stroke::new(1.0, p.border), StrokeKind::Inside);
                 let uri = super::file_uri(&a.path);
@@ -102,6 +172,12 @@ pub fn chips(app: &mut App, ui: &mut egui::Ui) {
                 let mut clipped = ui.new_child(egui::UiBuilder::new().max_rect(inner));
                 clipped.set_clip_rect(inner.intersect(ui.clip_rect()));
                 picture.paint_at(&clipped, Rect::from_center_size(inner.center(), size * scale));
+                // While the description is being made the chip says so, as the web's stage label does.
+                if a.describing() {
+                    let band = Rect::from_min_max(pos2(rect.left(), rect.bottom() - 16.0), rect.right_bottom());
+                    ui.painter().rect_filled(band, 0.0, Color32::from_black_alpha(166));
+                    widgets::text_at(ui, band.left() + 4.0, band.top() + 2.0, widgets::galley(ui, "Looking…", theme::font(10.0, W::Regular), Color32::WHITE));
+                }
                 let close = Rect::from_min_size(pos2(rect.right() - 2.0 - 16.0, rect.top() + 2.0), vec2(16.0, 16.0));
                 let shown = widgets::fade(ui, response.id.with("x"), over);
                 let x = ui.interact(close, response.id.with("remove"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -117,7 +193,12 @@ pub fn chips(app: &mut App, ui: &mut egui::Ui) {
             }
             for (i, a) in app.attachments.iter().enumerate().filter(|(_, a)| a.kind != Kind::Image) {
                 let name = widgets::clipped(ui, &a.name, theme::font(12.0, W::Regular), p.text, 240.0 - 8.0 - 13.0 - 8.0 - 8.0 - 20.0 - 4.0 - 2.0);
-                let size = widgets::galley(ui, &format_bytes(a.size), theme::font(11.0, W::Regular), p.text2);
+                // What `ingest` says is inside a file or folder replaces its size, as the web's chip does.
+                let detail = match &a.body {
+                    Body::Saved(d) if !d.label.is_empty() => d.label.clone(),
+                    _ => format_bytes(a.size),
+                };
+                let size = widgets::clipped(ui, &detail, theme::font(11.0, W::Regular), p.text2, 220.0);
                 let count = a.files.map(|n| widgets::galley(ui, &format!(" · {n} file{}", if n == 1 { "" } else { "s" }), theme::font(11.0, W::Regular), p.accent_light));
                 let text_width = name.size().x.max(size.size().x + count.as_ref().map_or(0.0, |c| c.size().x));
                 let width = 1.0 + 8.0 + 13.0 + 8.0 + text_width + 8.0 + 20.0 + 4.0 + 1.0;
@@ -151,53 +232,32 @@ pub fn chips(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-fn mime(path: &Path) -> &'static str {
-    match path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase().as_str() {
-        "jpg" | "jpeg" => "image/jpeg",
-        "webp" => "image/webp",
-        "gif" => "image/gif",
-        "bmp" => "image/bmp",
-        _ => "image/png",
-    }
-}
-
-/// What the attached things become when the message is sent: pictures travel with it,
-/// anything else is copied into the workspace for the tools to read. The second value
-/// is the lines added to the message so the model knows where they went.
-pub fn take(pending: Vec<Pending>, workspace: &Path) -> (Vec<Attachment>, String) {
-    let uploads = workspace.join("uploads");
-    let (mut out, mut notes) = (Vec::new(), String::new());
+/// The message the model gets and the attachments the chat keeps. Pictures travel as data URLs (and as `<image>` descriptions
+/// on a model that cannot see), clips as video, and files as the text `ingest` read from their workspace copy.
+pub fn message(text: &str, pending: Vec<Pending>, vision: Vision) -> (String, Vec<Attachment>) {
+    let (mut stored, mut blocks) = (Vec::new(), Vec::new());
     for a in pending {
-        match a.kind {
-            Kind::Image => match std::fs::read(&a.path) {
-                Ok(bytes) => {
-                    let url = format!("data:{};base64,{}", mime(&a.path), base64::engine::general_purpose::STANDARD.encode(bytes));
-                    out.push(Attachment { name: a.name, kind: "image".into(), data_url: Some(url), ..Default::default() });
-                }
-                Err(e) => notes.push_str(&format!("\n\n[Could not attach {}: {e}]", a.name)),
-            },
-            Kind::File => {
-                let copied = std::fs::create_dir_all(&uploads).and_then(|_| std::fs::copy(&a.path, uploads.join(&a.name)));
-                notes.push_str(&match copied {
-                    Ok(_) => format!("\n\n[Attached file saved in the workspace: uploads/{}]", a.name),
-                    Err(e) => format!("\n\n[Could not attach {}: {e}]", a.name),
-                });
-                out.push(Attachment { name: a.name, kind: "text".into(), ..Default::default() });
+        match a.body {
+            Body::Picture { picture, described } => {
+                let done = described.and_then(|slot| slot.lock().ok().and_then(|s| s.clone()));
+                let description = done.as_ref().and_then(|d| d.description.clone());
+                let source = done.as_ref().and_then(|d| d.source).map(str::to_string);
+                stored.push(Attachment { name: a.name.clone(), kind: "image".into(), data_url: Some(picture.data_url), description: description.clone(), description_source: source, ..Default::default() });
+                blocks.push(Attached { name: a.name, size: picture.size, kind: AttachedKind::Image, description, ..Default::default() });
             }
-            Kind::Folder => {
-                // The same walk the tools use, so build output and dependency folders stay behind.
-                let mut copied = 0;
-                for (rel, _) in files::walk(&a.path, &a.path) {
-                    let to = uploads.join(&a.name).join(&rel);
-                    let done = to.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| std::fs::copy(a.path.join(&rel), &to));
-                    copied += usize::from(done.is_ok());
-                }
-                notes.push_str(&format!("\n\n[Attached folder saved in the workspace: uploads/{}/ ({copied} files)]", a.name));
-                out.push(Attachment { name: format!("{}/", a.name), kind: "text".into(), ..Default::default() });
+            Body::Clip(clip) => {
+                let timed = clip.duration_sec > 0.0;
+                stored.push(Attachment { name: a.name.clone(), kind: "video".into(), data_url: clip.data_url.clone(), frames: clip.frames, duration_sec: timed.then_some(clip.duration_sec), frame_interval_sec: timed.then_some(clip.frame_interval_sec), ..Default::default() });
+                blocks.push(Attached { name: a.name, size: clip.size, kind: AttachedKind::Video, ..Default::default() });
+            }
+            Body::Saved(desc) => {
+                let name = if a.kind == Kind::Folder { format!("{}/", a.name) } else { a.name.clone() };
+                stored.push(Attachment { name: name.clone(), kind: "text".into(), ..Default::default() });
+                blocks.push(Attached { name, size: a.size, content: desc.text, preformatted: true, kind: AttachedKind::Text, ..Default::default() });
             }
         }
     }
-    (out, notes)
+    (build_message_with_attachments(text, &blocks, vision), stored)
 }
 
 #[cfg(test)]
@@ -205,20 +265,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn take_copies_files_and_inlines_pictures() {
+    fn attachments_are_copied_once_and_read_into_the_message() {
         let dir = std::env::temp_dir().join(format!("apim-attach-{}", crate::store::new_id()));
-        let (src, workspace) = (dir.join("src"), dir.join("ws"));
+        let (src, root) = (dir.join("src"), dir.join("ws"));
         std::fs::create_dir_all(src.join("proj")).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
         std::fs::write(src.join("notes.txt"), "hello").unwrap();
         std::fs::write(src.join("pic.png"), [1u8, 2, 3]).unwrap();
         std::fs::write(src.join("proj").join("main.rs"), "fn main() {}").unwrap();
-        let pending = |name: &str, kind| Pending { path: src.join(name), name: name.into(), size: 0, kind, files: None };
-        assert_eq!((format_bytes(900), format_bytes(1536), format_bytes(3 << 20)), ("900 B".into(), "2 KB".into(), "3.0 MB".into()));
-        let (attached, notes) = take(vec![pending("notes.txt", Kind::File), pending("pic.png", Kind::Image), pending("proj", Kind::Folder)], &workspace);
-        assert_eq!(attached.iter().map(|a| a.kind.as_str()).collect::<Vec<_>>(), ["text", "image", "text"]);
-        assert_eq!(attached[1].data_url.as_deref(), Some("data:image/png;base64,AQID"));
-        assert!(notes.contains("uploads/notes.txt") && notes.contains("uploads/proj/ (1 files)"));
-        assert_eq!(std::fs::read_to_string(workspace.join("uploads/proj/main.rs")).unwrap(), "fn main() {}");
+        let no_model = |_: &str| -> Described { Arc::new(Mutex::new(None)) };
+        let mut pending: Vec<Pending> = ["notes.txt", "pic.png", "proj"].iter().map(|name| read_attachment(&root, src.join(name), name.to_string(), Vision::Native, &no_model).unwrap()).collect();
+        // A second copy of a file takes a free name, so the first is never overwritten.
+        pending.push(read_attachment(&root, src.join("notes.txt"), "notes.txt".into(), Vision::Native, &no_model).unwrap());
+        assert!(root.join("uploads/notes-2.txt").is_file());
+        let (text, stored) = message("look", pending, Vision::Native);
+        assert_eq!(stored.iter().map(|a| a.kind.as_str()).collect::<Vec<_>>(), ["text", "image", "text", "text"]);
+        assert_eq!(stored[1].data_url.as_deref(), Some("data:image/png;base64,AQID"));
+        assert_eq!(stored[2].name, "proj/");
+        // A file's text is inlined; a folder is described by its tree, as the web does.
+        assert!(text.contains("hello") && text.contains("uploads/proj/ — 1 files") && text.ends_with("look"), "{text}");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

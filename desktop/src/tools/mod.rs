@@ -3,6 +3,7 @@
 
 pub mod code;
 pub mod data;
+pub mod documents;
 pub mod exec;
 pub mod files;
 pub mod git;
@@ -113,7 +114,7 @@ const IMPLEMENTED: &[&str] = &[
     "web_search", "make_plan", "update_plan", "ask_user", "finish", "note_finding", "view_image", "show_image",
     "git_status", "git_diff", "git_log", "git_commit", "git_branch", "apply_patch", "verify_file", "read_symbol", "find_references",
     "analyze_log", "extract_archive", "query_data", "list_snapshots", "restore_snapshot", "search_conversation",
-    "git_pull_base", "github_push", "github_create_pr", "github_pr_status",
+    "git_pull_base", "github_push", "github_create_pr", "github_pr_status", "read_document",
 ];
 
 static SCHEMAS: LazyLock<Vec<Value>> = LazyLock::new(|| {
@@ -195,6 +196,7 @@ pub async fn run(name: &str, args: &Value, ctx: &Ctx) -> Output {
         "find_references" => at_root(code::find_references),
         "analyze_log" => at_root(code::analyze_log),
         "extract_archive" => at_root(data::extract_archive),
+        "read_document" => tokio::task::block_in_place(|| documents::read_document_limited(&ctx.root, args, ctx.limits.doc_chars as usize)),
         "query_data" => at_root(data::query_data),
         "list_snapshots" => at_root(recall::list_snapshots),
         "restore_snapshot" => at_root(recall::restore_snapshot),

@@ -355,10 +355,12 @@ fn prompt(app: &mut App, ctx: &egui::Context, shown: String) {
     if app.run.is_some() {
         return say(app, "Another chat is still being answered. Stop it or wait for it to finish.", true);
     }
-    let workspace = app.conv.workspace();
-    let (attached, lines) = attachments::take(std::mem::take(&mut app.attachments), &workspace);
+    if let Some(why) = attachments::waiting(&app.attachments) {
+        return say(app, why, false);
+    }
+    let (wire, attached) = attachments::message(&shown, std::mem::take(&mut app.attachments), attachments::model_vision(&app.settings));
     app.draft.clear();
-    app.send(ctx, format!("{shown}{lines}"), attached);
+    app.send(ctx, wire, attached);
 }
 
 /// The system's own OK / Cancel box, as `window.confirm` is on the web.

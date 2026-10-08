@@ -161,7 +161,7 @@ fn read_file(root: &Path, rel: &str, verb: &str) -> Result<(PathBuf, Vec<u8>), S
 
 /// Nearest real paths to one the model got wrong. The basename is matched first: that is the part it almost
 /// always has right, the folder prefix is where a remembered path drifts.
-fn suggest_paths(root: &Path, wanted: &str) -> String {
+pub(crate) fn suggest_paths(root: &Path, wanted: &str) -> String {
     let files = list_files(root);
     if wanted.is_empty() || files.is_empty() {
         return String::new();
