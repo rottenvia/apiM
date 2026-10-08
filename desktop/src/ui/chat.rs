@@ -175,6 +175,7 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
         let last = app.conv.messages.len() - 1;
         let workspace = app.conv.workspace();
         let App { conv, heights, run, settings, editing, .. } = app;
+        let plan = conv.plan.as_ref();
         // Bubbles stop at three quarters of the column; a narrow window gives them a little more.
         let cap = column * if ui.ctx().content_rect().width() < 768.0 { 0.85 } else { 0.75 };
         let thinking_secs = run.as_ref().and_then(|r| r.thinking.secs());
@@ -195,7 +196,7 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
             }
             let top = ui.cursor().top();
             column_ui(ui, &mut |ui| {
-                let mut env = bubble::Env { settings, workspace: &workspace, live, newest: i == last, busy: running, cap, thinking_secs, editing, action: &mut action };
+                let mut env = bubble::Env { settings, workspace: &workspace, live, newest: i == last, busy: running, cap, thinking_secs, editing, action: &mut action, plan };
                 ui.push_id(&msg.id, |ui| bubble::show(ui, msg, &mut env));
             });
             ui.add_space(24.0);
@@ -245,6 +246,8 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
         Some(bubble::Action::OpenFile(path)) => super::workspace::open(app, path),
         Some(bubble::Action::Delete(id)) => app.delete_exchange(&id),
         Some(bubble::Action::Edit(id, text)) => app.resend_edited(ui.ctx(), &id, text),
+        Some(bubble::Action::PlanUnblock) => app.edit_plan(false),
+        Some(bubble::Action::PlanClear) => app.edit_plan(true),
         None => {}
     }
 }

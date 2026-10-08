@@ -238,7 +238,8 @@ fn card(app: &mut App, ui: &mut Ui, plugin: &Plugin, yours: bool) {
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
                 ui.add_space(2.0);
-                ui.add(egui::Label::new(widgets::lines(&plugin.icon, 18.0, 18.0, W::Regular, p.text)).selectable(false));
+                let (slot, _) = ui.allocate_exact_size(vec2(18.0 * super::emoji::ADVANCE, 18.0), Sense::hover());
+                super::emoji::paint(ui, &plugin.icon, slot.center(), 18.0, p.text);
             });
             ui.add_space(12.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
@@ -310,7 +311,12 @@ fn editor(ui: &mut Ui, draft: &mut Draft) {
             field_label(ui, "Icon", "");
             let mut icon = plain("").text(18.0, 20.0).pad(4, 9);
             icon.center = true;
-            icon.show(ui, "plugin-icon", &mut draft.icon);
+            let field = icon.show(ui, "plugin-icon", &mut draft.icon);
+            // The text field cannot draw colour glyphs, so the picture covers its text while nobody types in it.
+            if !field.has_focus() && super::emoji::has(draft.icon.trim()) {
+                ui.painter().rect_filled(field.rect.shrink(2.0), 10.0, p.bg);
+                super::emoji::paint(ui, &draft.icon, field.rect.center(), 18.0, p.text);
+            }
         });
         ui.vertical(|ui| {
             field_label(ui, "Name", "");
@@ -325,8 +331,7 @@ fn editor(ui: &mut Ui, draft: &mut Draft) {
             let response = response.on_hover_cursor(CursorIcon::PointingHand);
             let t = widgets::fade(ui, response.id, response.hovered());
             ui.painter().rect_filled(rect, 8.0, widgets::lerp(Color32::TRANSPARENT, p.hover, t));
-            let glyph = widgets::galley(ui, emoji, theme::font(16.0, W::Regular), p.text);
-            widgets::text_at(ui, rect.center().x - glyph.size().x / 2.0, rect.center().y, glyph);
+            super::emoji::paint(ui, emoji, rect.center(), 16.0, p.text);
             if response.clicked() {
                 draft.icon = emoji.into();
             }

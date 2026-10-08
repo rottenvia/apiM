@@ -188,6 +188,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "globset",
+ "harfrust",
  "image",
  "pulldown-cmark",
  "regex",
@@ -196,6 +197,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "skrifa",
+ "tiny-skia",
  "tokio",
  "walkdir",
 ]
