@@ -1,6 +1,7 @@
 //! Models the user can pick, and which provider serves each one.
 //! The catalog itself is assets/models.json, synced from the web app.
 
+use crate::local::shared::SIDECAR_CTX;
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 
@@ -80,8 +81,6 @@ fn default_max_output() -> u32 {
 pub const CUSTOM_PREFIX: &str = "custom:";
 pub const DEFAULT_MODEL_ID: &str = "glm-5.3-flash";
 pub const FALLBACK_CONTEXT_TOKENS: u64 = 128_000;
-/// Window the in-app Qwen sidecar is started with.
-pub const SIDECAR_CTX: u64 = 80_000;
 
 #[derive(Deserialize)]
 struct Catalog {

@@ -21,6 +21,7 @@ use crate::context::tree_delta::{StepKind, TreeEntry, TreeTracker};
 use crate::context::workspace_context::build_workspace_context;
 use crate::diagnostics;
 use crate::lessons::{self, Lesson};
+use crate::local;
 use crate::mcp;
 use crate::media::multimodal::{Media, MediaWindow, build_user_content, strip_ride_along_videos, user_has_content};
 use crate::models::{self, ProviderId, Usage, Vision};
@@ -505,6 +506,10 @@ async fn run_inner(mut req: Request, emit: &Emitter, procs: Arc<Procs>) -> Resul
     let resume = req.resume.take();
     let s = &req.settings;
     let target = provider::resolve_target(&s.model, s)?;
+    // The in-app sidecar is started on demand, and its window checked, before the request goes out (chat/route.ts:822-841).
+    if target.provider == ProviderId::Local && local::engine::is_managed_engine_url(&target.base_url) {
+        local::engine::chat_ready().await?;
+    }
     let customs = &s.custom_models;
 
     let effort = if s.effort == "auto" { prompt::auto_effort(&req.text) } else { s.effort.as_str() };
@@ -761,6 +766,9 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, tool_defs: 
             let (systems, rest): (Vec<Value>, Vec<Value>) = wire.into_iter().partition(|m| m["role"] == "system");
             let text: Vec<&str> = systems.iter().filter_map(|m| m["content"].as_str()).chain([tail.as_str()]).filter(|c| !c.is_empty()).collect();
             wire = std::iter::once(json!({ "role": "system", "content": text.join("\n\n") })).chain(rest).collect();
+            // The 80K sidecar window: only the copy on the wire is fitted, so the stored transcript keeps every round (route.ts 2778-2788).
+            // ponytail: the web passes whether the workspace is on; here any tool definition sent counts toward the tool reserve.
+            wire = local::context::fit_for_local_context(wire, local::context::local_message_budget(!tool_defs.is_empty())).messages;
         } else if !tail.is_empty() {
             wire.push(json!({ "role": "system", "content": tail }));
         }
@@ -773,7 +781,7 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, tool_defs: 
         body.insert("stream".into(), json!(true));
         body.insert("stream_options".into(), json!({ "include_usage": true }));
         // The limit is enforced inside the round too: the model cannot write what it is not allowed to.
-        body.insert("max_tokens".into(), json!(spend.max_tokens(output_rate, target.model.max_output_tokens as u64)));
+        body.insert("max_tokens".into(), json!(spend.max_tokens(output_rate, local::shared::output_ceiling(qwen, target.model.max_output_tokens as u64))));
         body.insert("tools".into(), json!(tool_defs));
         body.insert("tool_choice".into(), json!("auto"));
         if openrouter {
@@ -1755,6 +1763,18 @@ mod tests {
         (ran.text, ran.end, ran.notices, ran.sent)
     }
 
+    /// The local Qwen wire is fitted to the 80K window (route.ts 2778-2788); another model's wire is sent whole.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn only_the_local_model_fits_its_wire_copy() {
+        let done = || vec![sse(&[says("Done.", Some("stop"))])];
+        let local = run_on(done(), "none", None, long_system_opening, local_target).await;
+        let other = run_on(done(), "none", None, long_system_opening, deepseek_target).await;
+        let (local_wire, other_wire) = (local.sent[0]["messages"].as_array().unwrap(), other.sent[0]["messages"].as_array().unwrap());
+        assert!(crate::local::context::estimate_tokens(local_wire) <= crate::local::context::local_message_budget(true), "the local wire fits its window");
+        assert!(local_wire[0]["content"].as_str().unwrap().len() < 300_000, "the local system prompt was clipped");
+        assert!(other_wire[0]["content"].as_str().unwrap().len() >= 300_000, "the other model's system prompt was sent whole");
+    }
+
     /// Everything a test may ask about one run.
     struct Ran {
         text: String,
@@ -1779,6 +1799,26 @@ mod tests {
 
     /// A reply from opening messages of the test's making (given the workspace folder).
     async fn run_with(replies: Vec<String>, effort: &str, budget: Option<f64>, open: impl FnOnce(&Path) -> (Vec<Value>, Start)) -> Ran {
+        run_on(replies, effort, budget, open, deepseek_target).await
+    }
+
+    fn deepseek_target(base: String) -> Target {
+        Target { model: models::resolve("deepseek-v4-flash", &[]), provider: ProviderId::Deepseek, style: ThinkingStyle::Deepseek, api_key: "test".into(), base_url: base, api_model: "stub".into() }
+    }
+
+    fn local_target(base: String) -> Target {
+        Target { model: models::resolve("qwen-3.8-27b", &[]), provider: ProviderId::Local, style: ThinkingStyle::Qwen, api_key: "local".into(), base_url: base, api_model: "stub".into() }
+    }
+
+    /// A system prompt too long for any window. Nothing old is there to drop, so only the fit can shorten it.
+    fn long_system_opening(dir: &Path) -> (Vec<Value>, Start) {
+        let mut messages = vec![json!({ "role": "system", "content": "x".repeat(300_000) }), user("q")];
+        let tree = Tree::open(dir, &mut messages);
+        (messages, Start { tree, user_text: "q".into(), ..Default::default() })
+    }
+
+    /// The loop against a stub that answers as the target `target_for` makes of its address.
+    async fn run_on(replies: Vec<String>, effort: &str, budget: Option<f64>, open: impl FnOnce(&Path) -> (Vec<Value>, Start), target_for: fn(String) -> Target) -> Ran {
         let (base, seen) = stub(replies);
         let (tx, rx) = mpsc::channel();
         let dir = std::env::temp_dir().join(format!("apim-loop-{}-{}", std::process::id(), base.rsplit(':').next().unwrap()));
@@ -1796,7 +1836,7 @@ mod tests {
             procs: Arc::new(Procs::default()),
             planner: None,
         };
-        let target = Target { model: models::resolve("deepseek-v4-flash", &[]), provider: ProviderId::Deepseek, style: ThinkingStyle::Deepseek, api_key: "test".into(), base_url: base, api_model: "stub".into() };
+        let target = target_for(base);
         let (opening, start) = open(&dir);
         let end = drive(&target, &ctx, opening, vec![json!({ "type": "function", "function": { "name": "read_file" } })], effort, "test", &Mutex::new(Vec::new()), start).await.unwrap();
         drop(ctx);
