@@ -97,6 +97,50 @@ pub fn paint(ui: &eframe::egui::Ui, text: &str, center: eframe::egui::Pos2, px: 
     }
 }
 
+/// Symbols below U+1F000 that browsers draw as pictures without being asked to (Emoji_Presentation).
+const PICTURES: &str = "⌚⌛⏩⏪⏫⏬⏰⏳◽◾☔☕♈♉♊♋♌♍♎♏♐♑♒♓♿⚓⚡⚪⚫⚽⚾⛄⛅⛎⛔⛪⛲⛳⛵⛺⛽✅✊✋✨❌❎❓❔❕❗➕➖➗➰➿⬛⬜⭐⭕";
+
+/// Byte ranges of `text` a browser would draw as colour emoji: a picture character with whatever
+/// joins onto it (skin tone, variation selector, zero-width joiner, keycap), when the font has it in colour.
+pub fn clusters(text: &str) -> Vec<std::ops::Range<usize>> {
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let end_of = |i: usize| chars.get(i).map_or(text.len(), |c| c.0);
+    let is_base = |c: char| matches!(c as u32, 0x1F000..=0x1FAFF | 0x2190..=0x2BFF | 0x3030 | 0x303D | 0x3297 | 0x3299) || matches!(c, '0'..='9' | '#' | '*');
+    let (mut out, mut i) = (Vec::new(), 0);
+    while i < chars.len() {
+        let c = chars[i].1;
+        if !is_base(c) {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        while j < chars.len() {
+            match chars[j].1 as u32 {
+                0xFE0F | 0x20E3 | 0x1F3FB..=0x1F3FF => j += 1,
+                0x200D if j + 1 < chars.len() => j += 2,
+                _ => break,
+            }
+        }
+        let range = chars[i].0..end_of(j);
+        // Arrows, ticks and digits are text unless they are asked to be pictures.
+        let asked = text[range.clone()].chars().any(|c| c as u32 == 0xFE0F);
+        let wanted = (c as u32) >= 0x1F000 || PICTURES.contains(c) || asked;
+        if wanted && known(&text[range.clone()]) {
+            out.push(range);
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// `has`, remembered: the same few emoji are asked about every frame.
+fn known(cluster: &str) -> bool {
+    thread_local!(static SEEN: std::cell::RefCell<std::collections::HashMap<String, bool>> = Default::default());
+    SEEN.with(|seen| *seen.borrow_mut().entry(cluster.to_string()).or_insert_with(|| has(cluster)))
+}
+
 /// How wide a browser lays one emoji out at font size `px`: Segoe UI Emoji advances 1.373 em.
 pub const ADVANCE: f32 = 1.373;
 
@@ -358,6 +402,18 @@ fn blend(mode: CompositeMode) -> BlendMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_the_pictures_in_a_sentence() {
+        let text = "Done ✅ in 3 steps → ship 🚀 now 👍🏽!";
+        let found: Vec<&str> = clusters(text).into_iter().map(|r| &text[r]).collect();
+        // Needs the Windows emoji font; elsewhere nothing is a picture.
+        if has("🚀") {
+            assert_eq!(found, ["✅", "🚀", "👍🏽"]);
+        } else {
+            assert!(found.is_empty());
+        }
+    }
 
     /// How many of twelve 30-degree hue bands hold a real share of the opaque, clearly coloured pixels.
     fn hues(rgba: &[u8]) -> usize {
