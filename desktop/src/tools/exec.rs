@@ -1,35 +1,61 @@
 //! Running programs: one-shot commands, tests, and background processes.
-//! There is no shell by default; every launch goes through the approval rules.
+//! There is no shell by default; every launch goes through the approval rules. Ported from src/lib/runner.ts
+//! (validation, timeouts, result text) and src/lib/processes.ts (background processes). Gaps are marked `ponytail:`.
 
-use super::{Ctx, Output, clip, list_arg, num_arg, str_arg};
+use super::build::group;
+use super::{Ctx, Output, num_arg, str_arg, testing};
 use crate::store::Approval;
 use regex::Regex;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin, Command};
 
-/// Developer programs that run without a prompt in Auto mode.
+/// Developer programs that run without a prompt in Auto mode. Anything else is refused.
 const ALLOWED: &[&str] = &[
-    "python", "python3", "py", "node", "npm", "npx", "pip", "pip3", "tsc", "go", "cargo", "rustc", "java", "javac", "ruby", "php", "dotnet",
+    "python", "python3", "node", "npm", "npx", "pip", "pip3", "tsc", "go", "cargo", "rustc", "java", "javac", "ruby", "php", "dotnet",
     "pytest", "jest", "vitest", "pnpm", "yarn", "bun", "deno", "tsx", "eslint", "prettier", "vite", "next", "git", "make", "cmake", "msbuild",
     "cl", "clang", "clang++", "clang-cl", "gcc", "g++", "csc", "vbc", "link", "rc", "uv", "poetry", "ruff", "black", "mypy", "curl", "wget",
     "which", "where", "unzip", "tar", "grep", "rg", "find", "diff", "cat", "wc", "head", "tail", "ls", "echo",
 ];
-/// A shell runs arbitrary text, so it always asks, even in Auto mode.
+/// A shell runs arbitrary text, so it is refused outright.
 const SHELLS: &[&str] = &["sh", "bash", "zsh", "fish", "dash", "cmd", "powershell", "pwsh"];
-const SLOW_COMMANDS: &[&str] = &["npm", "npx", "pnpm", "yarn", "bun", "pip", "pip3", "uv", "poetry", "cargo", "go", "dotnet", "make", "gcc", "g++", "tsc", "next", "vite", "msbuild", "cmake"];
+/// Package managers and build tools, where a slow run is normal.
+const SLOW_COMMANDS: &[&str] = &["npm", "npx", "pnpm", "yarn", "bun", "pip", "pip3", "uv", "poetry", "cargo", "go", "dotnet", "make", "gcc", "g++", "tsc", "next", "vite"];
+/// Subcommands that mean "this will take a while".
+const SLOW_SUBCOMMANDS: &[&str] = &["install", "i", "add", "ci", "get", "restore", "build", "mod", "sync", "update", "compile", "bundle"];
 const INFO_FLAGS: &[&str] = &["--version", "-v", "-V", "--help", "-h"];
+/// git subcommands that only look at the repository.
+const GIT_LOOKS: &[&str] = &["status", "log", "diff", "show", "branch", "remote", "ls-files", "rev-parse", "describe", "blame"];
+/// The environment a child keeps. Everything else apiM has is withheld, API keys included. Profile paths stay so rustup and npm can find their homes.
+const CHILD_ENV: &[&str] = &[
+    "PATH", "PATHEXT", "SYSTEMROOT", "SystemRoot", "windir", "WINDIR", "COMSPEC", "SYSTEMDRIVE", "PROCESSOR_ARCHITECTURE", "NUMBER_OF_PROCESSORS", "TEMP", "TMP", "USERPROFILE", "USERNAME", "HOME", "APPDATA", "LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)", "ProgramData", "CARGO_HOME", "RUSTUP_HOME", "LANG", "LC_ALL",
+];
 
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
-const SLOW_TIMEOUT: Duration = Duration::from_secs(300);
+/// A command with no timeout asked for runs for this long, or the web's default for everything else.
+const RUN_LIMIT: Duration = Duration::from_secs(60);
+/// Installs and other slow subcommands of the package managers.
+const INSTALL_LIMIT: Duration = Duration::from_secs(300);
+/// The longest a model may ask for with timeout_ms.
+const MAX_ASKED: u64 = 300_000;
+/// Results keep the first HEAD_CHARS and the newest part, up to MAX_OUTPUT in all.
+const HEAD_CHARS: usize = 2_000;
 const MAX_OUTPUT: usize = 20_000;
+/// Buffer cap per background process; the buffer keeps the newest part.
 const MAX_PROCESS_LOG: usize = 1_000_000;
+/// read_process shows at most this much of a log, the newest part.
+const SHOWN_LOG: usize = 30_000;
+/// Background processes one chat may have running at once.
+const MAX_RUNNING: usize = 4;
+/// A process that exits inside this window did not start.
+const START_GRACE: Duration = Duration::from_millis(4_000);
+/// An approval nobody answers in this time is a decline.
+const APPROVAL_LIMIT: Duration = Duration::from_secs(5 * 60);
 
 fn base_name(command: &str) -> String {
     let name = command.rsplit(['/', '\\']).next().unwrap_or(command).to_ascii_lowercase();
@@ -41,14 +67,14 @@ fn base_name(command: &str) -> String {
     name
 }
 
-/// Commands that only look, never change: these never need a prompt.
+/// Commands that only look, never change. The caller only asks this of allowed programs.
 fn read_only(name: &str, args: &[String]) -> bool {
     let first = args.iter().map(String::as_str).find(|a| !a.starts_with('-')).unwrap_or("");
     if matches!(name, "which" | "where") || (args.len() == 1 && INFO_FLAGS.contains(&args[0].as_str())) {
         return true;
     }
     match name {
-        "git" => matches!(first, "status" | "log" | "diff" | "show" | "branch" | "remote" | "ls-files" | "rev-parse" | "describe" | "blame") && !args.iter().any(|a| matches!(a.as_str(), "-d" | "-D" | "-m" | "-M" | "add" | "remove" | "set-url" | "--output")),
+        "git" => git_read_only(first, args),
         "npm" => matches!(first, "ls" | "list" | "view" | "outdated" | "why" | "root" | "prefix"),
         "pnpm" => matches!(first, "ls" | "list" | "why" | "outdated"),
         "pip" | "pip3" => matches!(first, "list" | "show" | "freeze"),
@@ -58,7 +84,35 @@ fn read_only(name: &str, args: &[String]) -> bool {
     }
 }
 
+/// git looks without a prompt only in listing form, and never with an argument that can write a file, run a helper or reach outside the repo.
+// ponytail: git config overrides (core.fsmonitor, hooksPath) are not forced off as the web does; only the argument rules above apply.
+fn git_read_only(first: &str, args: &[String]) -> bool {
+    if !GIT_LOOKS.contains(&first) {
+        return false;
+    }
+    let risky = args.iter().any(|a| {
+        let a = a.as_str();
+        ["--output", "-O", "--ext-diff", "--textconv", "--no-index", "--exec-path", "--work-tree", "--git-dir", "--orderfile", "--config-env", "-c", "-C", "-d"].iter().any(|p| a.starts_with(p))
+            || matches!(a, "-D" | "-m" | "-M" | "add" | "remove" | "set-url")
+            || Path::new(a).is_absolute()
+            || a.starts_with('~')
+            || a.split(['/', '\\']).any(|p| p == "..")
+    });
+    if risky {
+        return false;
+    }
+    let positional: Vec<&str> = args.iter().map(String::as_str).filter(|a| !a.starts_with('-')).collect();
+    match first {
+        // `git branch NAME` creates a branch: only the bare listing is a look.
+        "branch" => positional.len() == 1,
+        // `git remote add/rename/remove/set-url` change the repo: only the list and get-url look.
+        "remote" => positional.len() == 1 || (positional.len() == 3 && positional[1] == "get-url"),
+        _ => true,
+    }
+}
+
 /// Finds the program the way a terminal would. Rust's own lookup misses `npm.cmd` and friends on Windows.
+/// A program the agent built in the workspace is also found by its bare .exe name.
 fn find_program(root: &Path, command: &str) -> Option<PathBuf> {
     let exts: Vec<String> = if cfg!(windows) {
         std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into()).split(';').map(str::to_string).chain([String::new()]).collect()
@@ -70,7 +124,11 @@ fn find_program(root: &Path, command: &str) -> Option<PathBuf> {
         let p = Path::new(command);
         return try_at(if p.is_absolute() { p.to_path_buf() } else { root.join(p) });
     }
-    std::env::split_paths(&std::env::var_os("PATH")?).find_map(|dir| try_at(dir.join(command)))
+    let on_path = std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).find_map(|dir| try_at(dir.join(command))));
+    on_path.or_else(|| {
+        let lower = command.to_ascii_lowercase();
+        if lower.ends_with(".exe") || lower.ends_with(".com") { try_at(root.join(command)) } else { None }
+    })
 }
 
 /// Stops a process and everything it started. A plain kill on Windows leaves `npm`'s `node` child running.
@@ -89,48 +147,94 @@ pub fn kill_tree(pid: u32) {
 }
 
 #[cfg(windows)]
-fn hide_window_std(cmd: &mut std::process::Command) {
+pub(super) fn hide_window_std(cmd: &mut std::process::Command) {
     use std::os::windows::process::CommandExt;
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: no console flashing up
 }
 #[cfg(not(windows))]
-fn hide_window_std(_: &mut std::process::Command) {}
+pub(super) fn hide_window_std(_: &mut std::process::Command) {}
+
+/// The `args` list as the web checks it: a list of strings with no NUL bytes.
+fn argv_arg(args: &Value, key: &str) -> Result<Vec<String>, String> {
+    let v = &args[key];
+    if v.is_null() {
+        return Ok(Vec::new());
+    }
+    let Some(items) = v.as_array() else { return Err("args must be a list of strings, not a single string.".into()) };
+    items
+        .iter()
+        .map(|a| match a.as_str() {
+            None => Err("Every argument must be a string.".to_string()),
+            Some(s) if s.contains('\0') => Err("Arguments must not contain NUL bytes.".to_string()),
+            Some(s) => Ok(s.to_string()),
+        })
+        .collect()
+}
+
+/// The time a command may run, as the web's timeoutFor works it out: a caller's timeout_ms is honoured within 5 to 300 seconds.
+fn timeout_for(command: &str, args: &[String], asked_ms: Option<u64>) -> Duration {
+    if let Some(ms) = asked_ms.filter(|m| *m > 0) {
+        return Duration::from_millis(ms.clamp(5_000, MAX_ASKED));
+    }
+    let slow = SLOW_COMMANDS.contains(&base_name(command).as_str()) && args.iter().any(|a| SLOW_SUBCOMMANDS.contains(&a.as_str()));
+    if slow { INSTALL_LIMIT } else { RUN_LIMIT }
+}
 
 /// A command ready to start, with the line shown on the approval prompt.
 struct Launch {
     program: PathBuf,
     args: Vec<String>,
     display: String,
-    name: String,
+    /// What "always allow" remembers: the normalised name and its arguments, as JSON.
+    key: String,
     /// Needs a prompt in this approval mode.
     ask: bool,
 }
 
-fn prepare(ctx: &Ctx, args: &Value) -> Result<Launch, String> {
-    let command = str_arg(args, "command").trim();
+/// Decides before anything runs whether a command is refused, asked about, or run.
+fn prepare(ctx: &Ctx, command: &str, argv: Vec<String>) -> Result<Launch, String> {
     if command.is_empty() {
-        return Err("command is required.".into());
+        return Err("No command was given. Pass command as a string and args as a list of strings, e.g. {\"command\":\"python3\",\"args\":[\"app.py\"]}. There is no shell, so do not pass \"?\", \"true\", or a full command line in one string.".into());
     }
-    let argv = list_arg(args, "args");
     let name = base_name(command);
-    let program = find_program(&ctx.root, command).ok_or_else(|| format!("`{command}` was not found on this machine (not on PATH and not in the workspace)."))?;
-    let own_build = program.starts_with(&ctx.root);
-    let known = ALLOWED.contains(&name.as_str()) && !own_build;
-    let ask = if read_only(&name, &argv) {
-        false
-    } else if SHELLS.contains(&name.as_str()) || !known {
-        // Shells, unknown programs and freshly built binaries always go to the prompt.
-        true
-    } else {
-        ctx.settings.approval == Approval::Manual
+    if SHELLS.contains(&name.as_str()) {
+        return Err("Shells are not available. Run the interpreter directly, e.g. `python app.py` rather than `sh -c \"python app.py\"`.".into());
+    }
+    // On Windows `python3` is a Store stub; the real interpreter is `python`.
+    let lookup = if cfg!(windows) && command.eq_ignore_ascii_case("python3") { "python" } else { command };
+    let found = find_program(&ctx.root, lookup);
+    let own = found.as_ref().is_some_and(|p| p.starts_with(&ctx.root));
+    if !own && !ALLOWED.contains(&name.as_str()) {
+        return Err(format!(
+            "\"{name}\" is not an allowed command. Allowed: {}. A program you built yourself can be run by its path inside the workspace, e.g. \"build/app.exe\" — the file has to exist there first.",
+            ALLOWED.join(", ")
+        ));
+    }
+    let Some(program) = found else {
+        return Err(format!("`{command}` was not found on this machine (not on PATH and not in the workspace)."));
     };
+    // A program given by path must be one apiM located itself (a toolchain) or one built inside the workspace.
+    if !own && command.contains(['/', '\\']) && !super::build::is_toolchain(&program) {
+        return Err(format!("`{command}` is outside the workspace. Run programs by name, e.g. `node`, or by a path inside the workspace."));
+    }
+    // The agent's own builds always ask. An allowed program skips the prompt only when it merely looks, or in Auto mode.
+    let ask = own || (!read_only(&name, &argv) && ctx.settings.approval == Approval::Manual);
     let display = std::iter::once(command.to_string()).chain(argv.iter().map(|a| if a.contains(' ') { format!("\"{a}\"") } else { a.clone() })).collect::<Vec<_>>().join(" ");
-    Ok(Launch { program, args: argv, display, name, ask })
+    let key = serde_json::to_string(&std::iter::once(name).chain(argv.iter().cloned()).collect::<Vec<_>>()).unwrap_or_default();
+    Ok(Launch { program, args: argv, display, key, ask })
 }
 
+// ponytail: no per-chat venv or pip/npm containment (PYTHONUSERBASE, npm prefix under .packages); installs land in the global toolchain.
 fn command(ctx: &Ctx, launch: &Launch) -> Command {
     let mut cmd = Command::new(&launch.program);
     cmd.args(&launch.args).current_dir(&ctx.root).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+    // Only the variables a build or a test needs reach the child: API keys and the rest of apiM's environment stay here.
+    cmd.env_clear();
+    for key in CHILD_ENV {
+        if let Ok(value) = std::env::var(key) {
+            cmd.env(key, value);
+        }
+    }
     // Colour codes and pagers only add noise to captured output.
     cmd.env("NO_COLOR", "1").env("FORCE_COLOR", "0").env("GIT_PAGER", "cat").env("PAGER", "cat").env("PYTHONUNBUFFERED", "1").env("PYTHONIOENCODING", "utf-8");
     #[cfg(windows)]
@@ -138,12 +242,24 @@ fn command(ctx: &Ctx, launch: &Launch) -> Command {
     cmd
 }
 
-async fn approved(ctx: &Ctx, launch: &Launch, reason: &str) -> bool {
-    if !launch.ask || ctx.emit.approve(&launch.display, reason).await {
-        return true;
+/// Asks for approval when the command needs it. Err is the reason the command was not run.
+async fn approved(ctx: &Ctx, launch: &Launch, reason: &str) -> Result<(), &'static str> {
+    if !launch.ask {
+        return Ok(());
     }
-    crate::diagnostics::record("command_refused", &launch.display.chars().take(60).collect::<String>(), "The user declined this command.");
-    false
+    match tokio::time::timeout(APPROVAL_LIMIT, ctx.emit.approve_keyed(&launch.display, reason, &launch.key)).await {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            crate::diagnostics::record("command_refused", &launch.display.chars().take(60).collect::<String>(), "The user declined this command.");
+            Err("The user declined this command.")
+        }
+        Err(_) => Err("The user did not respond to the approval prompt within 5 minutes."),
+    }
+}
+
+/// The refusal text for a command that did not run.
+fn not_run(reason: &str) -> String {
+    format!("The command was not run. {reason} Do not retry it — explain what you were trying to do, or suggest a different approach.")
 }
 
 /// Reads a pipe to the end into a shared buffer, keeping only the newest part of a huge log.
@@ -164,14 +280,32 @@ fn pump(mut pipe: impl tokio::io::AsyncRead + Unpin + Send + 'static, into: Arc<
     })
 }
 
-/// Runs to completion or to the timeout. Returns (exit code, combined output, timed out).
-async fn run_to_end(mut child: Child, limit: Duration) -> (Option<i32>, String, bool) {
+/// Kills the process tree if a run is abandoned (Stop, or the turn ends) before it finishes.
+struct TreeGuard(Option<u32>);
+
+impl Drop for TreeGuard {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0 {
+            kill_tree(pid);
+        }
+    }
+}
+
+/// Runs to completion or to the limit (None waits as long as it takes). Returns (exit code, combined output, timed out).
+async fn run_to_end(mut child: Child, limit: Option<Duration>) -> (Option<i32>, String, bool) {
     let log = Arc::new(Mutex::new(String::new()));
     let readers = [child.stdout.take().map(|p| pump(p, log.clone())), child.stderr.take().map(|p| pump(p, log.clone()))];
     let pid = child.id();
-    let (code, timed_out) = match tokio::time::timeout(limit, child.wait()).await {
-        Ok(status) => (status.ok().and_then(|s| s.code()), false),
-        Err(_) => {
+    let mut guard = TreeGuard(pid);
+    let waited = match limit {
+        Some(limit) => tokio::time::timeout(limit, child.wait()).await.ok(),
+        None => Some(child.wait().await),
+    };
+    // Finished or timed out: the explicit kill below handles the second, so the guard has nothing left to do.
+    guard.0 = None;
+    let (code, timed_out) = match waited {
+        Some(status) => (status.ok().and_then(|s| s.code()), false),
+        None => {
             if let Some(pid) = pid {
                 tokio::task::block_in_place(|| kill_tree(pid));
             }
@@ -186,67 +320,116 @@ async fn run_to_end(mut child: Child, limit: Duration) -> (Option<i32>, String, 
     (code, out, timed_out)
 }
 
-pub async fn run_command(ctx: &Ctx, args: &Value) -> Output {
-    let launch = match prepare(ctx, args) {
-        Ok(l) => l,
-        Err(e) => return Output::fail(e),
-    };
-    if !approved(ctx, &launch, str_arg(args, "reason")).await {
-        return Output::fail(format!("The user declined to run `{}`. Do not retry it; continue another way or ask what they would prefer.", launch.display));
-    }
-    let slow = SLOW_COMMANDS.contains(&launch.name.as_str());
-    let limit = num_arg(args, "timeout_ms").map(Duration::from_millis).unwrap_or(if slow { SLOW_TIMEOUT } else { DEFAULT_TIMEOUT }).min(SLOW_TIMEOUT);
-    let child = match command(ctx, &launch).stdin(Stdio::null()).spawn() {
-        Ok(c) => c,
-        Err(e) => return Output::fail(format!("Could not start `{}`: {e}", launch.display)),
-    };
-    let (code, out, timed_out) = run_to_end(child, limit).await;
-    let out = clip(out.trim_end(), MAX_OUTPUT);
-    if timed_out {
-        return Output::fail(format!(
-            "`{}` was stopped after {}s without finishing. For something that keeps running, use start_process; for a slow job pass timeout_ms.\n{out}",
-            launch.display,
-            limit.as_secs()
-        ));
-    }
-    let code = code.unwrap_or(-1);
-    let text = format!("$ {}\nExit code {code}\n{}", launch.display, if out.is_empty() { "(no output)" } else { &out });
-    Output { ok: code == 0, ..Output::ok(text, format!("{} (exit {code})", launch.display)) }
+/// What one finished run left behind.
+pub struct Ran {
+    /// The command line as the approval card showed it.
+    pub display: String,
+    /// None when the process ended without an exit code.
+    pub code: Option<i32>,
+    /// stdout and stderr together, in the order they arrived.
+    // ponytail: the web keeps stdout and stderr apart; the two streams are interleaved here.
+    pub out: String,
+    pub timed_out: bool,
+    pub took: Duration,
+    /// Set when the program could not be started at all.
+    pub error: Option<String>,
 }
 
-pub async fn run_tests(ctx: &Ctx, args: &Value) -> Output {
-    let has = |f: &str| ctx.root.join(f).exists();
-    let filter = str_arg(args, "filter");
-    let (cmd, mut argv): (&str, Vec<&str>) = if has("Cargo.toml") {
-        ("cargo", vec!["test"])
-    } else if has("package.json") {
-        ("npm", vec!["test", "--silent"])
-    } else if has("go.mod") {
-        ("go", vec!["test", "./..."])
-    } else if has("pyproject.toml") || has("pytest.ini") || has("tests") || has("setup.py") {
-        (if find_program(&ctx.root, "pytest").is_some() { "pytest" } else { "python" }, vec![])
-    } else {
-        return Output::fail("No test setup found (looked for Cargo.toml, package.json, go.mod, pytest files). Run the tests with run_command instead.");
+/// Approves and runs one program to the end, shared by run_command, run_tests and build_project. `limit` None waits as long as it takes.
+/// Err is the refusal, ready to return to the model.
+pub async fn execute(ctx: &Ctx, program: &str, argv: Vec<String>, reason: &str, limit: Option<Duration>) -> Result<Ran, Output> {
+    let launch = prepare(ctx, program.trim(), argv).map_err(Output::fail)?;
+    approved(ctx, &launch, reason).await.map_err(|why| Output::fail(not_run(why)))?;
+    let child = match command(ctx, &launch).env("CI", "1").stdin(Stdio::null()).spawn() {
+        Ok(child) => child,
+        Err(e) => return Ok(Ran { display: launch.display, code: None, out: String::new(), timed_out: false, took: Duration::ZERO, error: Some(e.to_string()) }),
     };
-    if cmd == "python" {
-        argv.extend(["-m", "pytest"]);
+    let started = Instant::now();
+    let (code, out, timed_out) = run_to_end(child, limit).await;
+    Ok(Ran { display: launch.display, code, out, timed_out, took: started.elapsed(), error: None })
+}
+
+/// Keeps the first HEAD_CHARS and the newest part of a long output, and counts the middle, as the web's OutputBuffer does.
+fn head_tail(text: &str) -> String {
+    let total = text.chars().count();
+    if total <= MAX_OUTPUT {
+        return text.to_string();
     }
-    if cmd.contains("py") {
-        argv.push("-q");
+    let head: String = text.chars().take(HEAD_CHARS).collect();
+    let tail: String = text.chars().skip(total - (MAX_OUTPUT - HEAD_CHARS)).collect();
+    format!("{head}\n… [{} chars of output omitted] …\n{tail}", group((total - MAX_OUTPUT) as u64))
+}
+
+/// The newest `n` characters of a text.
+fn last_chars(text: &str, n: usize) -> String {
+    let total = text.chars().count();
+    text.chars().skip(total.saturating_sub(n)).collect()
+}
+
+fn or_text(text: &str, fallback: &str) -> String {
+    if text.is_empty() { fallback.to_string() } else { text.to_string() }
+}
+
+/// Formats a finished run the way the web's formatRunResult does: the status first, then the output.
+fn report(ran: &Ran) -> Output {
+    let mut parts = vec![format!("$ {}", ran.display)];
+    let (ok, summary) = if let Some(err) = &ran.error {
+        parts.push(format!("\nSTATUS: could not run - {err}"));
+        (false, format!("Failed: {}", ran.display))
+    } else if ran.timed_out {
+        parts.push("\nSTATUS: timed out and was stopped after the time limit. If this is a server/watcher use start_process; if it waits for input add a non-interactive flag (-y/--yes/--no-input); if it is genuinely slow pass a larger timeout_ms.".to_string());
+        (false, format!("Timed out: {}", ran.display))
+    } else if ran.code == Some(0) {
+        parts.push("\nSTATUS: ok (exit 0)".to_string());
+        (true, format!("Ran: {}", ran.display))
+    } else {
+        let code = ran.code.map_or("unknown".to_string(), |c| c.to_string());
+        parts.push(format!("\nSTATUS: failed (exit {code}). Read Errors/Output below, fix the actual cause, then re-run. Do not retry the identical command."));
+        (false, format!("Failed: {}", ran.display))
+    };
+    let out = ran.out.trim();
+    if !out.is_empty() {
+        parts.push(format!("\nOutput:\n{}", head_tail(out)));
+    } else if ran.error.is_none() && !ran.timed_out {
+        parts.push("\n(no output)".to_string());
     }
+    if out.chars().count() > MAX_OUTPUT {
+        parts.push("\n(output was long; the start and the end are shown, the middle is omitted)".to_string());
+    }
+    Output { ok, text: parts.join("\n"), summary, ..Default::default() }
+}
+
+pub async fn run_command(ctx: &Ctx, args: &Value) -> Output {
+    let command = str_arg(args, "command").trim();
+    let argv = match argv_arg(args, "args") {
+        Ok(argv) => argv,
+        Err(e) => return Output::fail(e),
+    };
+    let limit = timeout_for(command, &argv, num_arg(args, "timeout_ms"));
+    match execute(ctx, command, argv, str_arg(args, "reason"), Some(limit)).await {
+        Ok(ran) => report(&ran),
+        Err(refused) => refused,
+    }
+}
+
+/// The run_tests tool: the runner comes from the workspace, and the output is reduced to the verdict and the failures.
+pub async fn run_tests(ctx: &Ctx, args: &Value) -> Output {
+    let Some(runner) = testing::detect_runner(&ctx.root) else {
+        return Output { ok: false, text: "Error: no test suite found. Looked for a package.json test script, pytest config, a tests/ directory, Cargo.toml and go.mod. If tests live somewhere unusual, run them with run_command instead.".into(), summary: "No test suite found".into(), ..Default::default() };
+    };
+    let mut argv = runner.args.clone();
+    let filter = str_arg(args, "filter").trim();
     if !filter.is_empty() {
-        if cmd == "npm" {
-            argv.push("--");
-        }
-        argv.push(filter);
+        argv.push(filter.to_string());
     }
-    let call = serde_json::json!({ "command": cmd, "args": argv, "timeout_ms": 300_000, "reason": "Run the project's tests" });
-    let mut out = run_command(ctx, &call).await;
-    // Only the verdict and the failures matter: keep the end of the runner's output.
-    let tail: String = { let lines: Vec<&str> = out.text.lines().collect(); lines[lines.len().saturating_sub(80)..].join("\n") };
-    out.text = format!("{}\n{tail}", if out.ok { "TESTS PASSED" } else { "TESTS FAILED" });
-    out.summary = if out.ok { "Tests passed".into() } else { "Tests failed".into() };
-    out
+    let limit = timeout_for(&runner.command, &argv, None);
+    let ran = match execute(ctx, &runner.command, argv, "Run the project's tests", Some(limit)).await {
+        Ok(ran) => ran,
+        Err(refused) => return refused,
+    };
+    let summary = testing::parse_output(&runner.name, &ran.out, "", ran.code.unwrap_or(1));
+    // A failing suite is a successful tool call: the agent asked what the state was and got a true answer.
+    Output { ok: true, text: testing::format_summary(&summary, &format!("{}\n", ran.out)), summary: testing::headline(&summary), ..Default::default() }
 }
 
 // ---------------------------------------------------------------- background processes
@@ -254,12 +437,20 @@ pub async fn run_tests(ctx: &Ctx, args: &Value) -> Output {
 struct Proc {
     display: String,
     pid: u32,
+    /// The chat that started it: only that chat can see or stop it.
+    owner: PathBuf,
+    started: Instant,
     log: Arc<Mutex<String>>,
     /// Set once the process has exited.
     exit: Arc<Mutex<Option<i32>>>,
+    /// When it exited, for the elapsed time in its status line.
+    ended: Arc<Mutex<Option<Instant>>>,
+    /// Set when someone stopped it on purpose.
+    stopped: AtomicBool,
     stdin: tokio::sync::Mutex<Option<ChildStdin>>,
 }
 
+// ponytail: exited processes are never pruned (the web drops them after 10 minutes) and nothing idles out.
 /// Background processes the agent started. Everything still running is stopped when the app closes.
 #[derive(Default)]
 pub struct Procs {
@@ -268,16 +459,30 @@ pub struct Procs {
 }
 
 impl Procs {
-    fn get(&self, id: &str) -> Option<Arc<Proc>> {
-        self.map.lock().unwrap().get(id).cloned()
+    fn get(&self, id: &str, owner: &Path) -> Option<Arc<Proc>> {
+        self.map.lock().unwrap().get(id).filter(|p| p.owner.as_path() == owner).cloned()
     }
 
-    pub fn stop_all(&self) -> usize {
-        let running: Vec<Arc<Proc>> = self.map.lock().unwrap().values().filter(|p| p.exit.lock().unwrap().is_none()).cloned().collect();
+    /// The processes one chat started, oldest first.
+    fn owned(&self, owner: &Path) -> Vec<(String, Arc<Proc>)> {
+        let mut out: Vec<(String, Arc<Proc>)> = self.map.lock().unwrap().iter().filter(|(_, p)| p.owner.as_path() == owner).map(|(id, p)| (id.clone(), p.clone())).collect();
+        // Ids are "p1", "p2", … "p10": by number, not by text.
+        out.sort_by_key(|(id, _)| id[1..].parse::<u32>().unwrap_or(u32::MAX));
+        out
+    }
+
+    /// Stops the running processes (of one chat, or of all), and returns how many it stopped.
+    fn stop_where(&self, owner: Option<&Path>) -> usize {
+        let running: Vec<Arc<Proc>> = self.map.lock().unwrap().values().filter(|p| p.exit.lock().unwrap().is_none() && owner.is_none_or(|o| p.owner.as_path() == o)).cloned().collect();
         for p in &running {
+            p.stopped.store(true, Ordering::Relaxed);
             kill_tree(p.pid);
         }
         running.len()
+    }
+
+    pub fn stop_all(&self) -> usize {
+        self.stop_where(None)
     }
 
     /// How many are still running, for the header badge.
@@ -287,10 +492,14 @@ impl Procs {
 
     /// Every process started so far, oldest first, for the header's process list.
     pub fn list(&self) -> Vec<ProcInfo> {
-        let mut out: Vec<ProcInfo> = self.map.lock().unwrap().iter().map(|(id, p)| ProcInfo { id: id.clone(), display: p.display.clone(), pid: p.pid, exit: *p.exit.lock().unwrap(), log_tail: tail_chars(&p.log.lock().unwrap(), 2000) }).collect();
-        // Ids are "p1", "p2", … "p10": by number, not by text.
-        out.sort_by_key(|p| p.id[1..].parse::<u32>().unwrap_or(u32::MAX));
-        out
+        let mut all: Vec<(String, Arc<Proc>)> = self.map.lock().unwrap().iter().map(|(id, p)| (id.clone(), p.clone())).collect();
+        all.sort_by_key(|(id, _)| id[1..].parse::<u32>().unwrap_or(u32::MAX));
+        all.iter().map(|(id, p)| info(id, p)).collect()
+    }
+
+    /// One chat's processes, for the build's lock report.
+    pub fn list_for(&self, owner: &Path) -> Vec<ProcInfo> {
+        self.owned(owner).iter().map(|(id, p)| info(id, p)).collect()
     }
 }
 
@@ -306,6 +515,10 @@ pub struct ProcInfo {
     pub log_tail: String,
 }
 
+fn info(id: &str, p: &Proc) -> ProcInfo {
+    ProcInfo { id: id.to_string(), display: p.display.clone(), pid: p.pid, exit: *p.exit.lock().unwrap(), log_tail: tail_chars(&p.log.lock().unwrap(), 2000) }
+}
+
 /// The last `n` characters of `text`.
 fn tail_chars(text: &str, n: usize) -> String {
     let start = text.char_indices().rev().nth(n.saturating_sub(1)).map_or(0, |(at, _)| at);
@@ -318,11 +531,17 @@ impl Drop for Procs {
     }
 }
 
-fn status_line(id: &str, p: &Proc) -> String {
-    match *p.exit.lock().unwrap() {
-        None => format!("{id}: running (pid {}): {}", p.pid, p.display),
-        Some(code) => format!("{id}: exited with code {code}: {}", p.display),
-    }
+/// The status line of one process, as the web's describeProcess words it.
+fn describe(id: &str, p: &Proc) -> String {
+    let exit = *p.exit.lock().unwrap();
+    let end = p.ended.lock().unwrap().unwrap_or_else(Instant::now);
+    let seconds = end.duration_since(p.started).as_secs_f64().round() as u64;
+    let status = match exit {
+        None => format!("running ({seconds}s)"),
+        Some(_) if p.stopped.load(Ordering::Relaxed) => "stopped".to_string(),
+        Some(code) => format!("exited with code {code} after {seconds}s"),
+    };
+    format!("{id}: {} — {status}", p.display)
 }
 
 fn last_lines(text: &str, n: usize) -> String {
@@ -331,12 +550,22 @@ fn last_lines(text: &str, n: usize) -> String {
 }
 
 pub async fn start_process(ctx: &Ctx, args: &Value) -> Output {
-    let launch = match prepare(ctx, args) {
+    let program = str_arg(args, "command").trim();
+    let argv = match argv_arg(args, "args") {
+        Ok(argv) => argv,
+        Err(e) => return Output::fail(e),
+    };
+    let launch = match prepare(ctx, program, argv) {
         Ok(l) => l,
         Err(e) => return Output::fail(e),
     };
-    if !approved(ctx, &launch, str_arg(args, "reason")).await {
-        return Output::fail(format!("The user declined to start `{}`.", launch.display));
+    let owner = ctx.state_dir.clone();
+    let running: Vec<String> = ctx.procs.owned(&owner).into_iter().filter(|(_, p)| p.exit.lock().unwrap().is_none()).map(|(id, p)| format!("{id} ({})", p.display)).collect();
+    if running.len() >= MAX_RUNNING {
+        return Output::fail(format!("Already running {} background processes in this workspace, which is the limit. Stop one first: {}", running.len(), running.join(", ")));
+    }
+    if let Err(why) = approved(ctx, &launch, str_arg(args, "reason")).await {
+        return Output::fail(not_run(why));
     }
     let mut child = match command(ctx, &launch).stdin(Stdio::piped()).spawn() {
         Ok(c) => c,
@@ -350,94 +579,170 @@ pub async fn start_process(ctx: &Ctx, args: &Value) -> Output {
         pump(p, log.clone());
     }
     let exit = Arc::new(Mutex::new(None));
-    let proc = Arc::new(Proc { display: launch.display.clone(), pid: child.id().unwrap_or(0), log, exit: exit.clone(), stdin: tokio::sync::Mutex::new(child.stdin.take()) });
+    let ended = Arc::new(Mutex::new(None));
+    let proc = Arc::new(Proc {
+        display: launch.display.clone(),
+        pid: child.id().unwrap_or(0),
+        owner,
+        started: Instant::now(),
+        log: log.clone(),
+        exit: exit.clone(),
+        ended: ended.clone(),
+        stopped: AtomicBool::new(false),
+        stdin: tokio::sync::Mutex::new(child.stdin.take()),
+    });
     let id = format!("p{}", ctx.procs.next.fetch_add(1, Ordering::Relaxed) + 1);
     ctx.procs.map.lock().unwrap().insert(id.clone(), proc.clone());
     let wake = ctx.emit.clone();
     tokio::spawn(async move {
         let code = child.wait().await.ok().and_then(|s| s.code()).unwrap_or(-1);
         *exit.lock().unwrap() = Some(code);
+        *ended.lock().unwrap() = Some(Instant::now());
         wake.wake();
     });
-    // The first moments show whether it actually started.
-    tokio::time::sleep(Duration::from_millis(1500)).await;
-    let early = clip(&proc.log.lock().unwrap(), 4_000);
-    let text = format!("{}\n{}\nRead more with read_process, wait with wait_for_output, and stop it with stop_process when you are done.", status_line(&id, &proc), if early.is_empty() { "(no output yet)" } else { &early });
-    let ok = proc.exit.lock().unwrap().is_none_or(|c| c == 0);
-    Output { ok, ..Output::ok(text, format!("Started {} as {id}", launch.display)) }
+    // A process that exits inside the first seconds did not start: that is a failure, not a background job.
+    tokio::time::sleep(START_GRACE).await;
+    let shown = log_shown(&log.lock().unwrap().clone());
+    let shown = shown.trim();
+    if let Some(code) = *proc.exit.lock().unwrap() {
+        return Output { ok: false, text: format!("{} exited immediately (code {code}).\n\n{}\n\nFix the cause before trying again.", launch.display, or_text(shown, "(no output)")), summary: format!("Failed to start: {}", launch.display), ..Default::default() };
+    }
+    Output::ok(format!("Started {} — id {id}, still running.\n\n{}\n\nRead more with read_process, and stop it with stop_process when done.", launch.display, or_text(shown, "(no output yet)")), format!("Started {}", launch.display))
+}
+
+/// A log as read_process shows it: the newest SHOWN_LOG characters at most.
+fn log_shown(log: &str) -> String {
+    if log.chars().count() > SHOWN_LOG { last_chars(log, SHOWN_LOG) } else { log.to_string() }
 }
 
 pub fn read_process(ctx: &Ctx, args: &Value) -> Output {
-    let id = str_arg(args, "id");
+    let owner = ctx.state_dir.as_path();
+    let id = str_arg(args, "id").trim();
     if id.is_empty() {
-        let map = ctx.procs.map.lock().unwrap();
-        if map.is_empty() {
-            return Output::ok("No background processes.", "0 processes");
+        let all = ctx.procs.owned(owner);
+        if all.is_empty() {
+            return Output::ok("No background processes in this workspace.", "No processes");
         }
-        let mut lines: Vec<String> = map.iter().map(|(id, p)| status_line(id, p)).collect();
-        lines.sort();
-        return Output::ok(lines.join("\n"), format!("{} processes", lines.len()));
+        let lines: Vec<String> = all.iter().map(|(id, p)| describe(id, p)).collect();
+        return Output::ok(lines.join("\n"), format!("{} process{}", lines.len(), if lines.len() == 1 { "" } else { "es" }));
     }
-    let Some(p) = ctx.procs.get(id) else { return Output::fail(format!("No process {id}. Call read_process without an id to list them.")) };
-    let log = p.log.lock().unwrap().clone();
-    let body = match num_arg(args, "tail") {
-        Some(n) => last_lines(&log, n as usize),
-        None => clip(&log, MAX_OUTPUT),
+    let Some(p) = ctx.procs.get(id, owner) else {
+        return Output::fail(format!("No process with id \"{id}\" in this workspace."));
     };
-    Output::ok(format!("{}\n{}", status_line(id, &p), if body.is_empty() { "(no output)" } else { &body }), status_line(id, &p))
+    let mut body = p.log.lock().unwrap().trim().to_string();
+    let mut dropped_note = "";
+    if body.chars().count() > SHOWN_LOG {
+        body = last_chars(&body, SHOWN_LOG);
+        dropped_note = "\n\n[earlier output dropped — only the most recent is kept]";
+    }
+    let mut tail_note = String::new();
+    if let Some(n) = num_arg(args, "tail").filter(|n| *n > 0) {
+        let lines: Vec<&str> = body.split('\n').collect();
+        if lines.len() > n as usize {
+            tail_note = format!("\n\n[showing the last {n} of {} lines]", lines.len());
+            body = lines[lines.len() - n as usize..].join("\n");
+        }
+    }
+    let running = p.exit.lock().unwrap().is_none();
+    Output::ok(
+        format!("{}\n\n{}{tail_note}{dropped_note}", describe(id, &p), or_text(&body, "(no output)")),
+        if running { format!("Read {}", p.display) } else { format!("{} has stopped", p.display) },
+    )
 }
 
 pub async fn write_process(ctx: &Ctx, args: &Value) -> Output {
-    let id = str_arg(args, "id");
-    let Some(p) = ctx.procs.get(id) else { return Output::fail(format!("No process {id}.")) };
-    let mut stdin = p.stdin.lock().await;
-    let Some(pipe) = stdin.as_mut() else { return Output::fail(format!("{id} is not accepting input.")) };
-    let line = format!("{}\n", str_arg(args, "input"));
-    match pipe.write_all(line.as_bytes()).await {
-        Ok(()) => {
-            let _ = pipe.flush().await;
-            Output::ok(format!("Sent to {id}. Read its output to see what it did with the answer."), format!("Typed into {id}"))
-        }
-        Err(e) => Output::fail(format!("Could not write to {id}: {e}")),
+    let id = str_arg(args, "id").trim();
+    let Some(p) = ctx.procs.get(id, &ctx.state_dir) else {
+        return Output::fail(format!("No process with id \"{id}\" in this workspace. Use read_process with no id to list them."));
+    };
+    let exit = *p.exit.lock().unwrap();
+    let refused = if p.stopped.load(Ordering::Relaxed) {
+        Some("That process was stopped.".to_string())
+    } else {
+        exit.map(|code| format!("That process already exited (code {code})."))
+    };
+    if let Some(reason) = refused {
+        return Output::fail(format!("Could not send that: {reason}"));
     }
+    let input = str_arg(args, "input");
+    let mut stdin = p.stdin.lock().await;
+    let Some(pipe) = stdin.as_mut() else {
+        return Output::fail("Could not send that: That process is not accepting input.");
+    };
+    // The line ends with a newline, once.
+    let line = if input.ends_with('\n') { input.to_string() } else { format!("{input}\n") };
+    if let Err(e) = pipe.write_all(line.as_bytes()).await {
+        return Output::fail(format!("Could not send that: {e}"));
+    }
+    let _ = pipe.flush().await;
+    p.log.lock().unwrap().push_str(&format!("> {}\n", input.trim_end()));
+    // Give the process a moment to react, so the reply shows its answer.
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let tail = last_lines(&p.log.lock().unwrap().clone(), 15);
+    let said = input.trim();
+    Output::ok(
+        format!("Sent to {}: {said}\n\nOutput since (last 15 lines):\n{}\n\nRead it again with read_process if it needed longer to respond.", p.display, or_text(&tail, "(nothing yet)")),
+        format!("Sent \"{}\"", said.chars().take(20).collect::<String>()),
+    )
 }
 
 pub fn stop_process(ctx: &Ctx, args: &Value) -> Output {
-    let id = str_arg(args, "id");
+    let id = str_arg(args, "id").trim();
     if id == "all" {
-        let n = tokio::task::block_in_place(|| ctx.procs.stop_all());
-        return Output::ok(format!("Stopped {n} process(es)."), format!("Stopped {n} processes"));
+        let n = tokio::task::block_in_place(|| ctx.procs.stop_where(Some(ctx.state_dir.as_path())));
+        if n == 0 {
+            return Output::ok("Nothing was running.", "Stopped 0");
+        }
+        return Output::ok(format!("Stopped {n} process{}.", if n == 1 { "" } else { "es" }), format!("Stopped {n}"));
     }
-    let Some(p) = ctx.procs.get(id) else { return Output::fail(format!("No process {id}.")) };
-    if p.exit.lock().unwrap().is_some() {
-        return Output::ok(format!("{id} had already exited."), format!("{id} already exited"));
+    let Some(p) = ctx.procs.get(id, &ctx.state_dir) else {
+        return Output::fail(format!("No process with id \"{id}\" in this workspace."));
+    };
+    if p.exit.lock().unwrap().is_none() {
+        p.stopped.store(true, Ordering::Relaxed);
+        tokio::task::block_in_place(|| kill_tree(p.pid));
     }
-    tokio::task::block_in_place(|| kill_tree(p.pid));
-    Output::ok(format!("Stopped {id}: {}", p.display), format!("Stopped {id}"))
+    Output::ok(format!("Stopped {}.", p.display), format!("Stopped {}", p.display))
 }
 
 pub async fn wait_for_output(ctx: &Ctx, args: &Value) -> Output {
     let id = str_arg(args, "id");
-    let Some(p) = ctx.procs.get(id) else { return Output::fail(format!("No process {id}.")) };
+    let Some(p) = ctx.procs.get(id, &ctx.state_dir) else {
+        return Output::fail(format!("Error: no process with id \"{id}\". Use list_processes."));
+    };
     let pattern = str_arg(args, "pattern");
-    // Text first: most patterns are plain words, and `listening on (` is not a valid regex.
-    let re = if pattern.is_empty() { None } else { Some(Regex::new(pattern).unwrap_or_else(|_| Regex::new(&regex::escape(pattern)).unwrap())) };
-    let limit = Duration::from_millis(num_arg(args, "timeout_ms").unwrap_or(30_000).min(120_000));
-    let started = std::time::Instant::now();
+    // Case-insensitive; a pattern that is not a valid regex is matched as plain text.
+    let re = if pattern.is_empty() {
+        None
+    } else {
+        Some(Regex::new(&format!("(?i){pattern}")).unwrap_or_else(|_| Regex::new(&format!("(?i){}", regex::escape(pattern))).expect("escaped pattern is valid")))
+    };
+    let limit = Duration::from_millis(num_arg(args, "timeout_ms").unwrap_or(30_000).clamp(1_000, 120_000));
+    let started = Instant::now();
     loop {
         let log = p.log.lock().unwrap().clone();
         let exited = *p.exit.lock().unwrap();
-        let matched = re.as_ref().is_some_and(|r| r.is_match(&log) || log.contains(pattern));
-        if matched || exited.is_some() || started.elapsed() >= limit {
-            let verdict = if matched {
-                format!("`{pattern}` appeared after {:.1}s.", started.elapsed().as_secs_f32())
-            } else if let Some(code) = exited {
-                format!("The process exited with code {code}{}.", if re.is_some() { " before the pattern appeared" } else { "" })
-            } else {
-                format!("Timed out after {}s; the process is still running.", limit.as_secs())
+        let matched_line = re.as_ref().and_then(|r| log.lines().find(|l| r.is_match(l)).map(|l| l.trim().to_string()));
+        let outcome = if matched_line.is_some() {
+            "matched"
+        } else if exited.is_some() {
+            "exited"
+        } else if started.elapsed() >= limit {
+            "timeout"
+        } else {
+            "waiting"
+        };
+        if outcome != "waiting" {
+            let ms = started.elapsed().as_millis();
+            // ponytail: the web shows only output printed since the wait began; this shows the recent log.
+            let recent = last_chars(&log, 4_000);
+            let tail = if recent.trim().is_empty() { "\n\nIt printed nothing while waiting.".to_string() } else { format!("\n\nRecent output:\n{recent}") };
+            let (ok, text, summary) = match outcome {
+                "matched" => (true, format!("Matched after {ms}ms: {}{tail}", matched_line.unwrap_or_default()), format!("Ready after {:.1}s", started.elapsed().as_secs_f32())),
+                "exited" => (true, format!("The process exited after {ms}ms without printing that.{tail}"), "Process exited while waiting".to_string()),
+                _ => (false, format!("Timed out after {ms}ms. The process is still running but has not printed that yet.{tail}"), "Timed out waiting".to_string()),
             };
-            let ok = matched || (re.is_none() && exited == Some(0));
-            return Output { ok, ..Output::ok(format!("{verdict}\n{}", last_lines(&log, 40)), verdict) };
+            return Output { ok, ..Output::ok(text, summary) };
         }
         tokio::time::sleep(Duration::from_millis(150)).await;
     }
@@ -446,12 +751,16 @@ pub async fn wait_for_output(ctx: &Ctx, args: &Value) -> Output {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
 
     #[test]
     fn classification() {
         assert_eq!(base_name("C:\\tools\\Python.EXE"), "python");
         assert_eq!(base_name("npm.cmd"), "npm");
-        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
         assert!(read_only("git", &s(&["status"])));
         assert!(read_only("git", &s(&["--no-pager", "log", "-5"])));
         assert!(!read_only("git", &s(&["push"])));
@@ -459,6 +768,43 @@ mod tests {
         assert!(read_only("node", &s(&["--version"])));
         assert!(!read_only("node", &s(&["app.js"])));
         assert!(read_only("pip", &s(&["list"])));
+    }
+
+    #[test]
+    fn git_looks_only() {
+        assert!(!read_only("git", &s(&["branch", "newname"])));
+        assert!(read_only("git", &s(&["branch"])));
+        assert!(!read_only("git", &s(&["diff", "--output=x.patch"])));
+        assert!(!read_only("git", &s(&["diff", "--no-index", "a", "b"])));
+        assert!(!read_only("git", &s(&["log", "..\\outside"])));
+        assert!(!read_only("git", &s(&["remote", "add", "x", "url"])));
+        assert!(read_only("git", &s(&["remote", "-v"])));
+        assert!(read_only("git", &s(&["remote", "get-url", "origin"])));
+    }
+
+    #[test]
+    fn timeouts_follow_the_web_table() {
+        assert_eq!(timeout_for("npm", &s(&["install"]), None), Duration::from_secs(300));
+        assert_eq!(timeout_for("npm", &s(&["test"]), None), Duration::from_secs(60));
+        assert_eq!(timeout_for("msbuild", &s(&["x"]), None), Duration::from_secs(60));
+        assert_eq!(timeout_for("npm", &s(&["test"]), Some(1)), Duration::from_secs(5));
+        assert_eq!(timeout_for("npm", &s(&["test"]), Some(900_000)), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn output_keeps_both_ends() {
+        let long = format!("START{}END", "x".repeat(30_000));
+        let c = head_tail(&long);
+        assert!(c.starts_with("START") && c.ends_with("END") && c.contains("chars of output omitted"));
+        assert_eq!(head_tail("short"), "short");
+    }
+
+    #[test]
+    fn arguments_are_checked_like_the_web() {
+        assert_eq!(argv_arg(&json!({ "args": "app.py" }), "args").unwrap_err(), "args must be a list of strings, not a single string.");
+        assert_eq!(argv_arg(&json!({ "args": [3] }), "args").unwrap_err(), "Every argument must be a string.");
+        assert_eq!(argv_arg(&json!({ "args": ["a\u{0}b"] }), "args").unwrap_err(), "Arguments must not contain NUL bytes.");
+        assert_eq!(argv_arg(&json!({}), "args").unwrap(), Vec::<String>::new());
     }
 
     #[test]
