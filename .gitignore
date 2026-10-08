@@ -92,3 +92,6 @@ report.txt
 
 # Desktop (Rust) build output.
 /desktop/target/
+
+# graphify knowledge graph (local, regenerated with `graphify update .`).
+graphify-out/
