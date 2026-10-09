@@ -47,9 +47,17 @@ use tokio::sync::oneshot;
 /// How often a reply in progress is written to disk, so a crash loses seconds, not the answer.
 const CHECKPOINT: Duration = Duration::from_secs(5);
 
+/// The three-dot mark the window and the taskbar show (`assets/make-icon.py` draws it).
+fn icon() -> egui::IconData {
+    let picture = image::load_from_memory(include_bytes!("../../assets/icon.png")).expect("assets/icon.png is a picture").to_rgba8();
+    egui::IconData { width: picture.width(), height: picture.height(), rgba: picture.into_raw() }
+}
+
 pub fn run(rt: tokio::runtime::Runtime) -> eframe::Result {
     let shot = Shot::from_env();
     let mut viewport = egui::ViewportBuilder::default().with_title("apiM").with_inner_size([1280.0, 800.0]).with_min_inner_size([420.0, 420.0]).with_drag_and_drop(true);
+    // No system frame: `titlebar` draws the bar and the window buttons in the app's own colours.
+    viewport = viewport.with_decorations(false).with_icon(icon());
     if let Some(shot) = &shot {
         // A picture of itself, for checking the look: off screen, never focused, gone in a moment.
         viewport = viewport.with_inner_size(shot.size).with_position([-8000.0, -8000.0]).with_active(false).with_taskbar(false).with_decorations(false);
@@ -1261,8 +1269,11 @@ impl eframe::App for App {
             theme::apply(&ctx, theme::Palette::for_theme(&self.settings.theme, &self.settings.custom_theme));
         }
         let p = theme::p();
-        // The title bar wears the sidebar's colour, so the frame reads as part of the app.
-        titlebar::paint(p.bg2, p.muted, p.border);
+        titlebar::frame(p.bg2, p.border);
+        if !self.fullscreen {
+            // Room for the title bar, which is drawn last so it stays on top of dialogs.
+            egui::Panel::top("titlebar").exact_size(titlebar::HEIGHT).resizable(false).show_separator_line(false).frame(egui::Frame::new().fill(p.bg2)).show(ui, |_| {});
+        }
 
         // The sidebar slides: its content keeps its full width and is cut off, like the web app's.
         let open = ctx.animate_bool_with_time_and_easing(egui::Id::new("sidebar-open"), self.settings.sidebar_open && !self.fullscreen, 0.3, egui::emath::easing::cubic_out);
@@ -1298,6 +1309,10 @@ impl eframe::App for App {
             }
         }
         self.show_toast(&ctx);
+        if !self.fullscreen {
+            titlebar::show(&ctx);
+        }
+        titlebar::edges(&ctx);
         self.take_shot(&ctx);
     }
 }
