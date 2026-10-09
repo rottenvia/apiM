@@ -29,7 +29,7 @@ The same things as the web app, with the same look:
 - Rewind to any question (chat and files), Resume for a reply that stopped, Compare for regenerated replies
 - Slash commands, find in chat (Ctrl+F), notes to a running task (`/btw`)
 - The workspace panel with file tree, editor, diffs and restore points; the process list; import from a folder
-- Attach files, folders, pictures and clips; models that cannot see get a description of each picture
+- Attach files, folders, pictures and clips, or paste a picture or copied files with Ctrl+V; models that cannot see get a description of each picture
 - GitHub: connect a repository with a token, push, open and follow pull requests
 - MCP servers, the same 8 plugins plus your own, diagnostics, search budget
 - A terminal mode: `apim --ask "your question"` (add `--auto` to let it run commands, `--dir FOLDER` to pick the folder)
@@ -43,7 +43,7 @@ The browser tool drives a Chromium-family browser already on the PC (Edge, Chrom
 - Stills from a video clip for models that cannot watch it
 - Background commands in the sandbox
 - Pointing a chat at a folder of your own from the window (terminal mode has `--dir`; the window copies files in, as the web app does)
-- A few small web touches: the offline banner, pasting files, the resume-with-another-model menu
+- A few small web touches: the offline banner, the resume-with-another-model menu
 
 ## Where things are saved
 
@@ -69,3 +69,9 @@ npx tsx desktop/sync-from-web.mts
 ```bash
 cargo test
 ```
+
+## When it feels slow
+
+Set `APIM_PERF=4` before starting the program. It then prints, on stderr, every frame that took it longer than 4 ms to draw.
+
+Long chats stay quick because only what is on screen is laid out. A chat is read from disk and saved on other threads, so neither holds up the window.

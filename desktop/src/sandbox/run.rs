@@ -77,7 +77,8 @@ fn detached(program: &Path, args: &[String]) -> std::io::Result<std::process::Ch
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0000_0008 | 0x0000_0200); // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+        // Not DETACHED_PROCESS: with no console at all, wsl.exe opens one of its own, on top of whatever the user is doing.
+        cmd.creation_flags(0x0800_0000 | 0x0000_0200); // CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
     }
     cmd.spawn()
 }

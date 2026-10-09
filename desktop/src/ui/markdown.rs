@@ -1,18 +1,40 @@
 //! Markdown drawn the way the web app's `.prose-chat` draws it (globals.css,
 //! CodeBlock.tsx): 15px on a 25.5px line, the same margins and the same code
-//! blocks. No bullets or numbers on lists and no syntax colours: the web app
-//! shows neither.
+//! blocks. Where the web app is plain, this is not: headings step up in size,
+//! lists carry bullets, numbers and tick boxes, and inline code is tinted.
 
 use super::theme::{self, W, p};
-use super::{icons, widgets};
+use super::{icons, lazy, widgets};
 use eframe::egui::{self, Color32, CornerRadius, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use egui::text::{LayoutJob, TextFormat};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use std::iter::Peekable;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 const SIZE: f32 = 15.0;
 const LINE: f32 = 25.5;
+/// How far a list's items sit in from its marker's edge.
+const INDENT: f32 = 26.0;
+
+/// The size, line height and weight a run of text is set in.
+#[derive(Clone, Copy, PartialEq)]
+struct Face {
+    size: f32,
+    line: f32,
+    weight: f32,
+}
+
+const BODY: Face = Face { size: SIZE, line: LINE, weight: 400.0 };
+
+/// Headings step down from 22px; from the fourth level on they are body text in a heavier weight.
+fn heading(level: u8) -> Face {
+    match level {
+        1 => Face { size: 22.0, line: 31.0, weight: 650.0 },
+        2 => Face { size: 19.0, line: 28.0, weight: 650.0 },
+        3 => Face { size: 16.5, line: 26.0, weight: 650.0 },
+        _ => Face { weight: 600.0, ..BODY },
+    }
+}
 /// Half an em: the margin above and below a paragraph.
 const GAP: f32 = 7.5;
 /// Code blocks longer than this fold into a card that opens beside the chat.
@@ -25,7 +47,7 @@ pub enum Click {
     Open(String, String, String),
 }
 
-#[derive(Clone, Default, Debug, PartialEq)]
+#[derive(Clone, Default, Debug, PartialEq, Hash)]
 struct Span {
     text: String,
     bold: bool,
@@ -35,15 +57,23 @@ struct Span {
     link: Option<String>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Hash)]
 enum Block {
     Para(Vec<Span>),
     Heading(u8, Vec<Span>),
     Code { lang: String, code: String },
     Quote(Vec<Block>),
-    List(Vec<Vec<Block>>),
+    /// `start` is the first number of a numbered list.
+    List { start: Option<u64>, items: Vec<Item> },
     Rule,
     Table { head: Vec<Vec<Span>>, rows: Vec<Vec<Vec<Span>>> },
+}
+
+#[derive(Debug, PartialEq, Hash)]
+struct Item {
+    /// A task list item, and whether it is ticked.
+    task: Option<bool>,
+    blocks: Vec<Block>,
 }
 
 // ------------------------------------------------------------------ find in chat
@@ -107,7 +137,7 @@ impl Marks<'_> {
         let (ascent, height) = galley.rows.iter().find_map(|r| r.row.glyphs.first()).map_or((14.0, 18.0), |g| (g.font_ascent, g.font_height));
         let boxes = |focused: bool| {
             let ranges: Vec<_> = hits.iter().filter(|h| h.1 == focused).map(|h| h.0.clone()).collect();
-            runs(galley, &ranges).into_iter().map(move |[left, right, _, baseline]| Rect::from_min_max(pos2(left - 2.0, baseline - ascent), pos2(right + 2.0, baseline - ascent + height)).translate(origin))
+            runs(galley, &ranges).into_iter().map(move |[left, right, _, baseline, ..]| Rect::from_min_max(pos2(left - 2.0, baseline - ascent), pos2(right + 2.0, baseline - ascent + height)).translate(origin))
         };
         let mut shapes: Vec<egui::Shape> = boxes(false).map(|rect| egui::Shape::rect_filled(rect, 3.0, Color32::from_rgba_unmultiplied(201, 100, 66, 64))).collect();
         for rect in boxes(true) {
@@ -182,16 +212,26 @@ fn blocks(ev: &mut Events) -> Vec<Block> {
                         out.push(Block::Code { lang, code });
                     }
                     Tag::BlockQuote(_) => out.push(Block::Quote(blocks(ev))),
-                    Tag::List(_) => {
+                    Tag::List(start) => {
                         let mut items = Vec::new();
                         while let Some(e) = ev.next() {
                             match e {
-                                Event::Start(Tag::Item) => items.push(blocks(ev)),
+                                Event::Start(Tag::Item) => {
+                                    // The marker of a tight task item comes first; in a loose one it is inside the paragraph and stays a glyph.
+                                    let task = match ev.peek() {
+                                        Some(Event::TaskListMarker(done)) => Some(*done),
+                                        _ => None,
+                                    };
+                                    if task.is_some() {
+                                        ev.next();
+                                    }
+                                    items.push(Item { task, blocks: blocks(ev) });
+                                }
                                 Event::End(TagEnd::List(_)) => break,
                                 _ => {}
                             }
                         }
-                        out.push(Block::List(items));
+                        out.push(Block::List { start, items });
                     }
                     Tag::Table(_) => {
                         let (mut head, mut rows) = (Vec::new(), Vec::new());
@@ -313,30 +353,88 @@ fn margins(block: &Block) -> (f32, f32) {
     let through = |inner: &[Block], own: f32| (inner.first().map_or(own, |b| margins(b).0.max(own)), inner.last().map_or(own, |b| margins(b).1.max(own)));
     match block {
         Block::Para(_) | Block::Table { .. } => (GAP, GAP),
-        Block::Heading(1..=3, _) => (SIZE, GAP),
-        Block::Heading(..) | Block::Rule => (0.0, 0.0),
-        Block::Code { .. } => (12.0, 12.0),
+        Block::Heading(1, _) => (26.0, 10.0),
+        Block::Heading(2, _) => (24.0, 8.0),
+        Block::Heading(3, _) => (18.0, GAP),
+        Block::Heading(..) => (GAP, GAP),
+        Block::Code { .. } | Block::Rule => (12.0, 12.0),
         Block::Quote(inner) => through(inner, GAP),
-        Block::List(items) => (items.first().map_or(GAP, |i| through(i, GAP / 2.0).0.max(GAP)), items.last().map_or(GAP, |i| through(i, GAP / 2.0).1.max(GAP))),
+        Block::List { items, .. } => (items.first().map_or(GAP, |i| through(&i.blocks, GAP / 2.0).0.max(GAP)), items.last().map_or(GAP, |i| through(&i.blocks, GAP / 2.0).1.max(GAP))),
     }
 }
 
 /// Draws `text`. Returns what was clicked in it, if anything.
-pub fn show(ui: &mut Ui, text: &str, color: Color32, marks: &mut Option<Marks>) -> Option<Click> {
-    // ponytail: parsed again every frame it is on screen. Cache per message if long replies stutter.
-    let parsed = parse(text);
+///
+/// With `rows` (the heights of things already laid out, and a name for this text among them) a paragraph that
+/// does not show keeps its room and is not laid out, which is what keeps a very long reply quick.
+pub fn show(ui: &mut Ui, text: &str, color: Color32, marks: &mut Option<Marks>, rows: Option<(&mut lazy::Rows, egui::Id)>) -> Option<Click> {
+    let parsed = ui.memory_mut(|m| m.caches.cache::<egui::cache::FrameCache<Arc<Parsed>, Parse>>().get(text).clone());
     let mut click = None;
+    // A search marks its hits in reading order, so with one on nothing may be skipped.
+    let mut rows = rows.filter(|_| marks.is_none());
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+        let width = ui.available_width();
         // The prose box keeps its first and last margins inside itself.
-        flow(ui, &parsed, color, false, &mut click, marks);
+        let mut below = 0.0_f32;
+        for (i, block) in parsed.blocks.iter().enumerate() {
+            let (top, bottom) = margins(block);
+            ui.add_space(if i == 0 { top } else { below.max(top) });
+            below = bottom;
+            let Some((rows, name)) = rows.as_mut() else {
+                ui.push_id(i, |ui| draw(ui, block, color, 0, &mut click, marks));
+                continue;
+            };
+            let (key, print) = (name.with(i), lazy::print((width.to_bits(), parsed.prints[i])));
+            if rows.skip(ui, key, print, guess(block, width)) {
+                continue;
+            }
+            let y = ui.cursor().top();
+            ui.push_id(i, |ui| draw(ui, block, color, 0, &mut click, marks));
+            rows.store(key, print, ui.cursor().top() - y);
+        }
+        ui.add_space(below);
     });
     click
 }
 
+/// A text as blocks, and a fingerprint of each: a block that reads the same takes the same room.
+struct Parsed {
+    blocks: Vec<Block>,
+    prints: Vec<u64>,
+}
+
+/// Text is parsed once and kept for as long as it is drawn: a reply on screen is the same text frame after frame.
+#[derive(Default)]
+struct Parse;
+
+impl egui::cache::ComputerMut<&str, Arc<Parsed>> for Parse {
+    fn compute(&mut self, text: &str) -> Arc<Parsed> {
+        let blocks = parse(text);
+        Arc::new(Parsed { prints: blocks.iter().map(lazy::print).collect(), blocks })
+    }
+}
+
+/// About the room a block never laid out will take.
+fn guess(block: &Block, width: f32) -> f32 {
+    let lines = |spans: &[Span], line: f32| (spans.iter().map(|s| s.text.len()).sum::<usize>() as f32 / (width / 7.5).max(20.0)).ceil().max(1.0) * line;
+    match block {
+        Block::Para(spans) => lines(spans, LINE),
+        Block::Heading(level, spans) => lines(spans, heading(*level).line),
+        Block::Code { code, .. } => match code.split('\n').count() {
+            more if more > CARD_THRESHOLD => 58.0,
+            few => 71.0 + few as f32 * 23.8,
+        },
+        Block::Quote(inner) => inner.iter().map(|b| guess(b, width - 18.0) + GAP).sum(),
+        Block::List { items, .. } => items.iter().map(|item| item.blocks.iter().map(|b| guess(b, width - INDENT)).sum::<f32>() + GAP / 2.0).sum(),
+        Block::Rule => 1.0,
+        Block::Table { rows, .. } => (rows.len() + 1) as f32 * (LINE + 16.0),
+    }
+}
+
 /// Blocks one under another with collapsed margins. `hoisted` means the outer
-/// margins were already given to the parent.
-fn flow(ui: &mut Ui, blocks: &[Block], color: Color32, hoisted: bool, click: &mut Option<Click>, marks: &mut Option<Marks>) {
+/// margins were already given to the parent. `depth` counts the lists this is inside.
+fn flow(ui: &mut Ui, blocks: &[Block], color: Color32, hoisted: bool, depth: u8, click: &mut Option<Click>, marks: &mut Option<Marks>) {
     let mut below = 0.0_f32;
     for (i, block) in blocks.iter().enumerate() {
         let (top, bottom) = margins(block);
@@ -345,7 +443,7 @@ fn flow(ui: &mut Ui, blocks: &[Block], color: Color32, hoisted: bool, click: &mu
             0 => ui.add_space(top),
             _ => ui.add_space(below.max(top)),
         }
-        ui.push_id(i, |ui| draw(ui, block, color, click, marks));
+        ui.push_id(i, |ui| draw(ui, block, color, depth, click, marks));
         below = bottom;
     }
     if !hoisted {
@@ -366,40 +464,78 @@ pub fn indented(ui: &mut Ui, indent: f32, add: impl FnOnce(&mut Ui)) -> Rect {
     .rect
 }
 
-fn draw(ui: &mut Ui, block: &Block, color: Color32, click: &mut Option<Click>, marks: &mut Option<Marks>) {
+fn draw(ui: &mut Ui, block: &Block, color: Color32, depth: u8, click: &mut Option<Click>, marks: &mut Option<Marks>) {
     let p = p();
     match block {
-        Block::Para(spans) => text(ui, spans, color, 400.0, click, marks),
-        Block::Heading(level, spans) => text(ui, spans, color, if *level <= 3 { 650.0 } else { 400.0 }, click, marks),
+        Block::Para(spans) => text(ui, spans, color, BODY, click, marks),
+        Block::Heading(level, spans) => text(ui, spans, color, heading(*level), click, marks),
         Block::Code { lang, code } => code_block(ui, lang, code, click),
         Block::Rule => {
             let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
-            ui.painter().rect_filled(rect, 0.0, color);
+            ui.painter().rect_filled(rect, 0.0, p.border);
         }
         Block::Quote(inner) => {
             let left = ui.cursor().left();
-            let used = indented(ui, 18.0, |ui| flow(ui, inner, p.text2, true, click, marks));
-            ui.painter().rect_filled(Rect::from_min_max(pos2(left, used.top()), pos2(left + 3.0, used.bottom())), 0.0, p.accent);
+            let used = indented(ui, 18.0, |ui| flow(ui, inner, p.text2, true, depth, click, marks));
+            ui.painter().rect_filled(Rect::from_min_max(pos2(left, used.top()), pos2(left + 3.0, used.bottom())), 1.5, p.accent);
         }
-        Block::List(items) => {
+        Block::List { start, items } => {
             let mut below = 0.0_f32;
             for (i, item) in items.iter().enumerate() {
-                let top = item.first().map_or(GAP / 2.0, |b| margins(b).0.max(GAP / 2.0));
+                let top = item.blocks.first().map_or(GAP / 2.0, |b| margins(b).0.max(GAP / 2.0));
                 if i > 0 {
                     ui.add_space(below.max(top));
                 }
-                ui.push_id(i, |ui| indented(ui, SIZE * 1.5, |ui| flow(ui, item, color, true, click, marks)));
-                below = item.last().map_or(GAP / 2.0, |b| margins(b).1.max(GAP / 2.0));
+                let at = ui.cursor().min;
+                ui.push_id(i, |ui| indented(ui, INDENT, |ui| flow(ui, &item.blocks, color, true, depth + 1, click, marks)));
+                // The marker sits beside the item's first line, which is as tall as what the item starts with.
+                let first = match item.blocks.first() {
+                    Some(Block::Heading(level, _)) => heading(*level).line,
+                    _ => LINE,
+                };
+                marker(ui, at, first, item.task, start.map(|first| first + i as u64), depth);
+                below = item.blocks.last().map_or(GAP / 2.0, |b| margins(b).1.max(GAP / 2.0));
             }
         }
         Block::Table { head, rows } => table(ui, head, rows, color, marks),
     }
 }
 
-fn format(span: &Span, color: Color32, weight: f32) -> TextFormat {
+/// What stands in front of a list item whose first line starts at `at` and is `line` tall: a tick box, its
+/// number, or a bullet that changes shape with each list inside a list, as a browser's does.
+fn marker(ui: &Ui, at: egui::Pos2, line: f32, task: Option<bool>, number: Option<u64>, depth: u8) {
     let p = p();
-    let weight = if span.bold { weight.max(700.0) } else { weight };
-    let mut f = TextFormat { font_id: theme::font(SIZE, W::Regular), color, line_height: Some(LINE), italics: span.italic, ..Default::default() };
+    let painter = ui.painter();
+    // Where the eye puts the middle of a line of text: a little above the middle of its box.
+    let middle = at.y + line / 2.0 - 2.0;
+    if let Some(done) = task {
+        let tick = Rect::from_center_size(pos2(at.x + INDENT - 15.0, middle + 0.5), vec2(14.0, 14.0));
+        if done {
+            painter.rect_filled(tick, 4.0, p.accent);
+            icons::paint(ui, icons::CHECK_THIN.stroke(2.4), tick.center(), 10.0, Color32::WHITE);
+        } else {
+            painter.rect_stroke(tick, 4.0, Stroke::new(1.25, p.border_light), StrokeKind::Inside);
+        }
+    } else if let Some(number) = number {
+        // Set on the same line height as the text beside it, so the two share a baseline.
+        let mut job = LayoutJob::simple_singleline(format!("{number}."), theme::font(SIZE, W::Regular), p.text2);
+        job.sections[0].format.line_height = Some(line);
+        let label = painter.layout_job(job);
+        painter.galley(pos2(at.x + INDENT - 7.0 - label.size().x, at.y), label, p.text2);
+    } else {
+        let dot = pos2(at.x + INDENT - 12.0, middle);
+        match depth {
+            0 => painter.circle_filled(dot, 2.5, p.text2),
+            1 => painter.circle_stroke(dot, 2.4, Stroke::new(1.2, p.text2)),
+            _ => painter.rect_filled(Rect::from_center_size(dot, vec2(4.5, 4.5)), 0.5, p.muted),
+        };
+    }
+}
+
+fn format(span: &Span, color: Color32, face: Face) -> TextFormat {
+    let p = p();
+    let weight = if span.bold { face.weight.max(700.0) } else { face.weight };
+    let mut f = TextFormat { font_id: theme::font(face.size, W::Regular), color, line_height: Some(face.line), italics: span.italic, ..Default::default() };
     if weight != 400.0 {
         f.coords = egui::epaint::text::VariationCoords::new([("wght", weight)]);
     }
@@ -410,7 +546,9 @@ fn format(span: &Span, color: Color32, weight: f32) -> TextFormat {
         f.strikethrough = Stroke::new(1.0, color);
     }
     if span.code {
-        f.font_id = theme::mono(SIZE * 0.85);
+        f.font_id = theme::mono(face.size * 0.85);
+        // Tinted towards the accent, so a name in a sentence stands out without shouting.
+        f.color = theme::mix(p.accent_light, 62.0, color);
     }
     if span.link.is_some() {
         f.color = p.accent_light;
@@ -418,16 +556,17 @@ fn format(span: &Span, color: Color32, weight: f32) -> TextFormat {
     f
 }
 
-/// What inline code keeps clear on each side of its text: 5.1 of padding and the border.
-const CODE_PAD: f32 = 6.1;
+/// What inline code keeps clear on each side of its text, and above and below it.
+const CODE_PAD: f32 = 5.0;
+const CODE_RISE: f32 = 1.5;
 
-fn job(spans: &[Span], color: Color32, weight: f32, wrap: f32) -> LayoutJob {
+fn job(spans: &[Span], color: Color32, face: Face, wrap: f32) -> LayoutJob {
     let mut job = LayoutJob::default();
     job.wrap.max_width = wrap;
     let mut after_code = false;
     for span in spans {
         let lead = if span.code { CODE_PAD } else { 0.0 } + if after_code { CODE_PAD } else { 0.0 };
-        let style = format(span, color, weight);
+        let style = format(span, color, face);
         // Emoji keep their place in the line but are not drawn: `pictures` paints them in colour on top.
         let (mut at, mut lead) = (0, lead);
         for emoji in super::emoji::clusters(&span.text) {
@@ -456,16 +595,15 @@ fn pictures(ui: &Ui, galley: &egui::Galley, spans: &[Span], origin: egui::Vec2, 
         return;
     }
     let row_height = galley.rows.first().map_or(LINE, |r| r.row.size.y);
-    // One stretch per emoji: a cluster is never split across rows.
-    for ([left, right, top, _], emoji) in runs(galley, &ranges).into_iter().zip(found) {
-        super::emoji::paint(ui, emoji, pos2((left + right) / 2.0, top + row_height / 2.0) + origin, SIZE, color);
+    // One stretch per emoji: a cluster is never split across rows. It is drawn as tall as the text around it.
+    for ([left, right, top, _, _, height], emoji) in runs(galley, &ranges).into_iter().zip(found) {
+        super::emoji::paint(ui, emoji, pos2((left + right) / 2.0, top + row_height / 2.0) + origin, (height * 0.8).round().max(SIZE), color);
     }
 }
 
-/// Where the spans picked by `wanted` ended up: one stretch per span per row, as
-/// (left, right, top of the row, baseline) in the galley's own coordinates.
+/// Where the spans picked by `wanted` ended up: one stretch per span per row (see `runs`).
 /// egui's own backgrounds and underlines follow the line height, not the text, so these are drawn by hand.
-fn stretches(galley: &egui::Galley, spans: &[Span], wanted: impl Fn(&Span) -> bool) -> Vec<[f32; 4]> {
+fn stretches(galley: &egui::Galley, spans: &[Span], wanted: impl Fn(&Span) -> bool) -> Vec<[f32; 6]> {
     let mut ranges = Vec::new();
     let mut at = 0;
     for span in spans {
@@ -478,16 +616,16 @@ fn stretches(galley: &egui::Galley, spans: &[Span], wanted: impl Fn(&Span) -> bo
     runs(galley, &ranges)
 }
 
-/// Where character ranges of a laid-out text ended up: one stretch per range per
-/// row, as (left, right, top of the row, baseline) in the galley's own coordinates.
-pub fn runs(galley: &egui::Galley, ranges: &[std::ops::Range<usize>]) -> Vec<[f32; 4]> {
+/// Where character ranges of a laid-out text ended up: one stretch per range per row, as (left, right, top of
+/// the row, baseline, and the ascent and height of the font it is set in) in the galley's own coordinates.
+pub fn runs(galley: &egui::Galley, ranges: &[std::ops::Range<usize>]) -> Vec<[f32; 6]> {
     let mut out = Vec::new();
     if ranges.is_empty() {
         return out;
     }
     let mut index = 0;
     for row in &galley.rows {
-        let mut run: Option<(usize, [f32; 4])> = None;
+        let mut run: Option<(usize, [f32; 6])> = None;
         for glyph in &row.row.glyphs {
             let hit = ranges.iter().position(|r| r.contains(&index));
             let left = row.pos.x + glyph.pos.x;
@@ -495,7 +633,7 @@ pub fn runs(galley: &egui::Galley, ranges: &[std::ops::Range<usize>]) -> Vec<[f3
                 (Some((range, at)), Some(hit)) if *range == hit => at[1] = left + glyph.advance_width,
                 _ => {
                     out.extend(run.take().map(|(_, at)| at));
-                    run = hit.map(|hit| (hit, [left, left + glyph.advance_width, row.pos.y, row.pos.y + glyph.pos.y]));
+                    run = hit.map(|hit| (hit, [left, left + glyph.advance_width, row.pos.y, row.pos.y + glyph.pos.y, glyph.font_ascent, glyph.font_height]));
                 }
             }
             index += 1;
@@ -509,13 +647,14 @@ pub fn runs(galley: &egui::Galley, ranges: &[std::ops::Range<usize>]) -> Vec<[f3
 /// The boxes behind inline code and the lines under links.
 fn decorations(galley: &egui::Galley, spans: &[Span], origin: egui::Vec2) -> Vec<egui::Shape> {
     let p = p();
-    let row_height = galley.rows.first().map_or(LINE, |r| r.row.size.y);
-    let boxes = stretches(galley, spans, |s| s.code).into_iter().map(|[left, right, top, _]| {
-        let centre = top + row_height / 2.0 + 0.75;
-        let rect = Rect::from_x_y_ranges((left - CODE_PAD).max(0.0)..=right + CODE_PAD, centre - 11.4..=centre + 11.4);
-        egui::Shape::Rect(egui::epaint::RectShape::new(rect.translate(origin), 8.0, p.elevated, Stroke::new(1.0, p.border), StrokeKind::Inside))
+    // The box hugs the code's own font, the same room on every side. At the start of a line it reaches a
+    // little past the text's edge rather than squeezing its first letter.
+    let boxes = stretches(galley, spans, |s| s.code).into_iter().map(|[left, right, _, baseline, ascent, height]| {
+        let top = (baseline - ascent - CODE_RISE).round();
+        let rect = Rect::from_x_y_ranges(left - CODE_PAD..=right + CODE_PAD, top..=top + (height + CODE_RISE * 2.0).round());
+        egui::Shape::Rect(egui::epaint::RectShape::new(rect.translate(origin), 6.0, p.elevated, Stroke::new(1.0, p.border), StrokeKind::Inside))
     });
-    let lines = stretches(galley, spans, |s| s.link.is_some()).into_iter().map(|[left, right, _, baseline]| {
+    let lines = stretches(galley, spans, |s| s.link.is_some()).into_iter().map(|[left, right, _, baseline, ..]| {
         let y = (baseline + 2.0).round() + 0.5;
         egui::Shape::line_segment([pos2(left, y) + origin, pos2(right, y) + origin], Stroke::new(1.0, p.accent_light))
     });
@@ -523,8 +662,8 @@ fn decorations(galley: &egui::Galley, spans: &[Span], origin: egui::Vec2) -> Vec
 }
 
 /// A run of inline text. Selectable; links open in the browser.
-fn text(ui: &mut Ui, spans: &[Span], color: Color32, weight: f32, click: &mut Option<Click>, marks: &mut Option<Marks>) {
-    let mut job = job(spans, color, weight, ui.available_width());
+fn text(ui: &mut Ui, spans: &[Span], color: Color32, face: Face, click: &mut Option<Click>, marks: &mut Option<Marks>) {
+    let mut job = job(spans, color, face, ui.available_width());
     let hits = marks.as_mut().map_or(Vec::new(), |m| m.apply(&mut job));
     let galley = ui.painter().layout_job(job);
     // Reserved now so the boxes end up under the text.
@@ -695,7 +834,7 @@ fn table(ui: &mut Ui, head: &[Vec<Span>], rows: &[Vec<Vec<Span>>], color: Color3
     let mut natural = vec![PAD.x * 2.0 + 8.0; columns];
     for (row, is_head) in all() {
         for (i, cell) in row.iter().enumerate() {
-            let w = ui.painter().layout_job(job(cell, color, if is_head { 600.0 } else { 400.0 }, f32::INFINITY)).size().x + PAD.x * 2.0;
+            let w = ui.painter().layout_job(job(cell, color, Face { weight: if is_head { 600.0 } else { 400.0 }, ..BODY }, f32::INFINITY)).size().x + PAD.x * 2.0;
             natural[i] = natural[i].max(w);
         }
     }
@@ -709,7 +848,7 @@ fn table(ui: &mut Ui, head: &[Vec<Span>], rows: &[Vec<Vec<Span>>], color: Color3
         }
         let cells: Vec<_> = (0..columns)
             .map(|i| {
-                let mut job = job(row.get(i).map_or(&[][..], Vec::as_slice), color, if is_head { 600.0 } else { 400.0 }, (widths[i] - PAD.x * 2.0).max(8.0));
+                let mut job = job(row.get(i).map_or(&[][..], Vec::as_slice), color, Face { weight: if is_head { 600.0 } else { 400.0 }, ..BODY }, (widths[i] - PAD.x * 2.0).max(8.0));
                 let hits = marks.as_mut().map_or(Vec::new(), |m| m.apply(&mut job));
                 (ui.painter().layout_job(job), hits)
             })
@@ -747,9 +886,13 @@ mod tests {
         let Block::Para(spans) = &parsed[1] else { panic!("{:?}", parsed[1]) };
         assert!(spans[1].bold && spans[3].code && spans[5].link.as_deref() == Some("https://x.y"));
         // A tight list: text straight in the item, the nested list after it.
-        let Block::List(items) = &parsed[2] else { panic!("{:?}", parsed[2]) };
-        assert_eq!(items[0], vec![Block::Para(vec![plain("one")])]);
-        assert!(matches!(items[1].as_slice(), [Block::Para(_), Block::List(inner)] if inner.len() == 1));
+        let Block::List { start: None, items } = &parsed[2] else { panic!("{:?}", parsed[2]) };
+        assert_eq!(items[0].blocks, vec![Block::Para(vec![plain("one")])]);
+        assert!(matches!(items[1].blocks.as_slice(), [Block::Para(_), Block::List { items: inner, .. }] if inner.len() == 1));
+        // A numbered list keeps where it starts, and a task item its tick, apart from its text.
+        let numbered = parse("3. three\n4. four\n\n- [x] done\n- [ ] open\n");
+        let [Block::List { start: Some(3), items: two }, Block::List { start: None, items: tasks }] = numbered.as_slice() else { panic!("{numbered:?}") };
+        assert_eq!((two.len(), tasks[0].task, tasks[1].task, &tasks[0].blocks), (2, Some(true), Some(false), &vec![Block::Para(vec![plain("done")])]));
         assert_eq!(parsed[3], Block::Quote(vec![Block::Para(vec![plain("quoted")])]));
         assert_eq!(parsed[4], Block::Rule);
         assert_eq!(parsed[5], Block::Code { lang: "rust".into(), code: "fn main() {}".into() });
@@ -761,7 +904,7 @@ mod tests {
     fn marks_split_the_job_at_every_hit() {
         let matcher = crate::find::Matcher::new("ab", false).unwrap();
         let mut marks = Marks { matcher: &matcher, active: Some(2), seen: 1, reveal: false, shown: false };
-        let mut job = job(&[plain("xab "), Span { text: "abab".into(), bold: true, ..Default::default() }], Color32::GRAY, 400.0, 100.0);
+        let mut job = job(&[plain("xab "), Span { text: "abab".into(), bold: true, ..Default::default() }], Color32::GRAY, BODY, 100.0);
         let hits = marks.apply(&mut job);
         // Three hits; the second of this text is the message's third, the focused one.
         assert_eq!(hits, [(1..3, false), (4..6, true), (6..8, false)]);
@@ -774,11 +917,11 @@ mod tests {
     #[test]
     fn margins_collapse_like_css() {
         // h2 after p: the larger margin wins.
-        assert_eq!(margins(&Block::Heading(2, vec![])), (15.0, 7.5));
+        assert_eq!(margins(&Block::Heading(2, vec![])), (24.0, 8.0));
         // A code block first in a quote pushes its 12px out through the quote.
         assert_eq!(margins(&Block::Quote(vec![Block::Code { lang: String::new(), code: String::new() }])), (12.0, 12.0));
         // A tight list keeps the list's own half em; items sit a quarter em apart.
-        assert_eq!(margins(&Block::List(vec![vec![Block::Para(vec![])]])), (7.5, 7.5));
+        assert_eq!(margins(&Block::List { start: None, items: vec![Item { task: None, blocks: vec![Block::Para(vec![])] }] }), (7.5, 7.5));
         assert_eq!(title_of("<html><title> My page </title>").as_deref(), Some("My page"));
     }
 }

@@ -53,12 +53,12 @@ pub fn rich(ui: &mut Ui, size: f32, line: f32, color: Color32, segs: &[Seg]) -> 
     let response = ui.add(egui::Label::new(galley.clone()).selectable(false).sense(if links.is_empty() { Sense::hover() } else { Sense::click() }));
     let origin = response.rect.min.to_vec2();
     let row = galley.rows.first().map_or(line, |r| r.row.size.y);
-    let boxes = markdown::runs(&galley, &codes).into_iter().map(|[left, right, top, _]| {
+    let boxes = markdown::runs(&galley, &codes).into_iter().map(|[left, right, top, ..]| {
         let rect = Rect::from_x_y_ranges(left - 4.0..=right + 4.0, top + row / 2.0 - 9.0..=top + row / 2.0 + 9.0);
         egui::Shape::rect_filled(rect.translate(origin), 4.0, p.bg3)
     });
     let ranges: Vec<_> = links.iter().map(|(range, _)| range.clone()).collect();
-    let lines = markdown::runs(&galley, &ranges).into_iter().map(|[left, right, _, baseline]| {
+    let lines = markdown::runs(&galley, &ranges).into_iter().map(|[left, right, _, baseline, ..]| {
         let y = (baseline + 2.0).round() + 0.5;
         egui::Shape::line_segment([pos2(left, y) + origin, pos2(right, y) + origin], Stroke::new(1.0, p.accent_light))
     });

@@ -654,8 +654,16 @@ impl From<wire::Msg> for Message {
                 }
             }
         }
+        let had_steps = parts.iter().any(|p| matches!(p, Part::Tool(_)));
         let usage = w.usage.as_ref().map(Usage::from_wire).map(|mut u| {
-            u.context = w.context_tokens.unwrap_or(u.context);
+            // `usage` is summed over the reply's requests, so it is not the size of the newest one. Earlier versions
+            // saved that sum as the context size of replies with steps: such a number is dropped, not shown.
+            u.context = match w.context_tokens {
+                Some(stored) if had_steps && stored == u.prompt + u.completion => 0,
+                Some(stored) => stored,
+                None if had_steps => 0,
+                None => u.context,
+            };
             u
         });
         Message {
@@ -875,18 +883,22 @@ impl Conversation {
     }
 
     pub fn load(id: &str) -> Option<Conversation> {
+        flush();
         let slug = Self::list().into_iter().find(|c| c.id == id)?.slug;
         let w: wire::Conv = serde_json::from_slice(&std::fs::read(chats_dir().join(&slug).join("chat.json")).ok()?).ok()?;
         Some(Self::from_wire(w, slug))
     }
 
-    /// Writes the chat. The folder is named after the title and follows a rename, and the workspace folder with it.
+    /// Saves the chat. The folder is named after the title and follows a rename, and the workspace folder with it.
+    /// The file itself is written by another thread (`flush` waits for it), so a long chat does not hold up the window.
     pub fn save(&mut self) {
         let taken: std::collections::HashSet<String> = Self::list().into_iter().filter(|c| c.id != self.id).map(|c| c.slug).collect();
         let wanted = unique_slug(&self.title, &taken, &self.id);
         // A numeric suffix added to dodge a clash is not a reason to rename on every save.
         let settled = !self.slug.is_empty() && (self.slug == wanted || self.slug.trim_end_matches(|c: char| c.is_ascii_digit()).trim_end_matches('-') == slugify(&self.title));
         if !settled {
+            // Nothing may still be on its way to the old folder when it moves.
+            flush();
             let moved = self.slug.is_empty() || std::fs::rename(chats_dir().join(&self.slug), chats_dir().join(&wanted)).is_ok();
             if moved {
                 // Files can arrive before the chat is named; they follow it.
@@ -896,16 +908,23 @@ impl Conversation {
                 // A connected GitHub repository is keyed by the same folder name, so it follows too.
                 let links = data_dir().join("github").join("workspaces");
                 let _ = std::fs::rename(links.join(format!("{old}.json")), links.join(format!("{wanted}.json")));
+                LISTED.lock().unwrap().remove(&chats_dir().join(&old).join("chat.json"));
                 self.slug = wanted;
             }
         }
-        if let Ok(json) = serde_json::to_vec_pretty(&self.to_wire()) {
-            let _ = write_atomic(&chats_dir().join(&self.slug).join("chat.json"), &json);
-        }
+        let path = chats_dir().join(&self.slug).join("chat.json");
+        // The sidebar hears of the save now, not when the file lands.
+        let meta = ChatMeta { id: self.id.clone(), title: self.title.clone(), archived: self.archived, updated_at: self.updated_at, message_count: self.messages.len(), slug: self.slug.clone() };
+        let mut listed = LISTED.lock().unwrap();
+        let waiting = listed.get(&path).map_or(0, |l| l.waiting) + 1;
+        listed.insert(path.clone(), Listed { stamp: None, waiting, meta });
+        drop(listed);
+        let _ = WRITER.send(Job::Write(path, Box::new(self.to_wire())));
     }
 
     /// Removes the chat and its own folder. A folder the user picked is never touched.
     pub fn delete(id: &str) {
+        flush();
         let Some(meta) = Self::list().into_iter().find(|c| c.id == id) else { return };
         let _ = std::fs::remove_dir_all(chats_dir().join(&meta.slug));
         let _ = std::fs::remove_dir_all(data_dir().join("workspaces").join(&meta.slug));
@@ -926,22 +945,93 @@ impl Conversation {
         data_dir().join("state").join(self.own_folder())
     }
 
-    /// Newest first.
-    // ponytail: parses every chat file on each call. Cache by size and mtime (the web app does) if thousands of chats make it slow.
+    /// Newest first. A chat file is read again only when its size or time changed, as the web app does it.
     pub fn list() -> Vec<ChatMeta> {
-        let mut out: Vec<ChatMeta> = std::fs::read_dir(chats_dir())
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter(|e| e.path().is_dir())
-            .filter_map(|e| {
-                let w: wire::Summary = serde_json::from_slice(&std::fs::read(e.path().join("chat.json")).ok()?).ok()?;
-                Some(ChatMeta { id: w.id, title: w.title, archived: w.archived, updated_at: from_iso(&w.updated_at), message_count: w.messages.len(), slug: e.file_name().to_string_lossy().into_owned() })
-            })
-            .filter(|c| !c.id.is_empty())
-            .collect();
+        let dir = chats_dir();
+        let mut listed = LISTED.lock().unwrap();
+        // A chat saved a moment ago is listed from memory: its file may not be written yet.
+        let mut fresh: std::collections::BTreeMap<PathBuf, Listed> = listed.iter().filter(|(path, l)| l.waiting > 0 && path.starts_with(&dir)).map(|(path, l)| (path.clone(), l.clone())).collect();
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten().filter(|e| e.path().is_dir()) {
+            let path = entry.path().join("chat.json");
+            if fresh.contains_key(&path) {
+                continue;
+            }
+            let Some(stamp) = stamp_of(&path) else { continue };
+            let known = listed.get(&path).filter(|l| l.stamp == Some(stamp)).cloned();
+            let read = || {
+                let w: wire::Summary = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
+                let meta = ChatMeta { id: w.id, title: w.title, archived: w.archived, updated_at: from_iso(&w.updated_at), message_count: w.messages.len(), slug: entry.file_name().to_string_lossy().into_owned() };
+                Some(Listed { stamp: Some(stamp), waiting: 0, meta })
+            };
+            if let Some(l) = known.or_else(read) {
+                fresh.insert(path, l);
+            }
+        }
+        *listed = fresh;
+        let mut out: Vec<ChatMeta> = listed.values().map(|l| l.meta.clone()).filter(|c| !c.id.is_empty()).collect();
         out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         out
+    }
+}
+
+/// One chat file as the sidebar last saw it.
+#[derive(Clone)]
+struct Listed {
+    /// Size and time of the file `meta` was read from. None while a save is still to be written.
+    stamp: Option<(u64, std::time::SystemTime)>,
+    /// Saves of this chat still waiting to be written.
+    waiting: u32,
+    meta: ChatMeta,
+}
+
+static LISTED: std::sync::Mutex<std::collections::BTreeMap<PathBuf, Listed>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+fn stamp_of(path: &Path) -> Option<(u64, std::time::SystemTime)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.len(), meta.modified().ok()?))
+}
+
+enum Job {
+    Write(PathBuf, Box<wire::Conv>),
+    Flush(std::sync::mpsc::Sender<()>),
+}
+
+/// The thread that writes chat files, one after another, in the order they were saved.
+static WRITER: std::sync::LazyLock<std::sync::mpsc::Sender<Job>> = std::sync::LazyLock::new(|| {
+    let (tx, rx) = std::sync::mpsc::channel::<Job>();
+    std::thread::spawn(move || {
+        while let Ok(first) = rx.recv() {
+            let jobs: Vec<Job> = std::iter::once(first).chain(rx.try_iter()).collect();
+            for (i, job) in jobs.iter().enumerate() {
+                match job {
+                    Job::Flush(done) => {
+                        let _ = done.send(());
+                    }
+                    Job::Write(path, conv) => {
+                        // Several saves of one chat in line: only the newest is worth the disk.
+                        let newest = !jobs[i + 1..].iter().any(|later| matches!(later, Job::Write(other, _) if other == path));
+                        if newest && let Ok(json) = serde_json::to_vec_pretty(conv) {
+                            let _ = write_atomic(path, &json);
+                        }
+                        if let Some(listed) = LISTED.lock().unwrap().get_mut(path) {
+                            listed.waiting = listed.waiting.saturating_sub(1);
+                            if listed.waiting == 0 {
+                                listed.stamp = stamp_of(path);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+    tx
+});
+
+/// Waits until every chat saved so far is on disk. Call before reading chat files, and before the program ends.
+pub fn flush() {
+    let (done, wait) = std::sync::mpsc::channel();
+    if WRITER.send(Job::Flush(done)).is_ok() {
+        let _ = wait.recv();
     }
 }
 
@@ -974,6 +1064,26 @@ mod tests {
 
     use super::*;
 
+    /// Timings against real chats, read-only: `APIM_DATA_DIR=<data> cargo test --release perf_probe -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "reads the real data folder"]
+    fn perf_probe() {
+        let t = std::time::Instant::now();
+        let all = Conversation::list();
+        eprintln!("list (cold): {} chats in {:?}", all.len(), t.elapsed());
+        let t = std::time::Instant::now();
+        let again = Conversation::list();
+        eprintln!("list (again): {} chats in {:?}", again.len(), t.elapsed());
+        for meta in all.iter().take(6) {
+            let t = std::time::Instant::now();
+            let conv = Conversation::load(&meta.id).unwrap();
+            let loaded = t.elapsed();
+            let t = std::time::Instant::now();
+            let bytes = serde_json::to_vec_pretty(&conv.to_wire()).unwrap().len();
+            eprintln!("{}: load {loaded:?}, serialise {:?} ({} MB, {} messages)", meta.slug, t.elapsed(), bytes / 1_048_576, conv.messages.len());
+        }
+    }
+
     #[test]
     fn round_trip() {
         let dir = std::env::temp_dir().join(format!("apim-test-{}", new_id()));
@@ -1000,6 +1110,7 @@ mod tests {
             ..Message::new(Role::Assistant, "")
         });
         c.save();
+        flush();
         assert_eq!(c.slug, "hello-there");
         assert!(dir.join("chats/hello-there/chat.json").exists());
         let back = Conversation::load(&c.id).unwrap();
@@ -1017,6 +1128,7 @@ mod tests {
         std::fs::create_dir_all(c.workspace()).unwrap();
         c.title = "Budget".into();
         c.save();
+        flush();
         assert!(dir.join("chats/budget/chat.json").exists() && !dir.join("chats/hello-there").exists());
         assert!(dir.join("workspaces/budget").exists());
         let mut twin = Conversation::new();
@@ -1075,6 +1187,7 @@ fn snippet(content: &str, needle: &[char]) -> String {
 /// first, then the most matches, then the most recent.
 // ponytail: a linear scan of every chat.json per search. Index the text if the history grows past a few thousand chats.
 pub fn search_chats(query: &str, limit: usize) -> Vec<SearchHit> {
+    flush();
     let needle = lowered(query.trim());
     if needle.is_empty() {
         return Vec::new();
