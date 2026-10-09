@@ -68,15 +68,28 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> bool {
         let mut verdict = None;
         let command = pending.command.clone();
         let mcp = pending.mcp;
+        // A skill on its way in (`tools::skills`): what is shown is where it is from and what the check found.
+        let skill = pending.key.starts_with("skill-");
         card(
             ui,
-            icons::TERMINAL,
-            if mcp { "Call this MCP tool?" } else { "Run this command?" },
+            if skill { icons::PLUGINS } else { icons::TERMINAL },
+            if skill { "Use this skill?" } else if mcp { "Call this MCP tool?" } else { "Run this command?" },
             &pending.reason,
             |ui| {
                 ui.add_space(8.0);
                 egui::Frame::new().outer_margin(egui::Margin::symmetric(12, 0)).fill(p.bg).stroke(Stroke::new(1.0, p.border)).corner_radius(8).inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
                     ui.set_width(ui.available_width());
+                    if skill {
+                        // Its name, then the lines of the check, wrapped: nothing here is a command to scroll along.
+                        let (name, rest) = command.split_once('\n').unwrap_or((command.as_str(), ""));
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        ui.add(egui::Label::new(widgets::lines(name, 13.0, 19.0, W::Medium, p.text)).wrap());
+                        for line in rest.lines() {
+                            let warns = line.starts_with("- ") || (line.starts_with("Trust check:") && !line.contains("Nothing suspicious"));
+                            ui.add(egui::Label::new(widgets::lines(line, 12.0, 18.0, W::Regular, if warns { p.warning } else { p.text2 })).wrap());
+                        }
+                        return;
+                    }
                     egui::ScrollArea::horizontal().id_salt("command").show(ui, |ui| {
                         let mut job = egui::text::LayoutJob::default();
                         let format = |colour| egui::TextFormat { font_id: theme::mono(12.0), color: colour, line_height: Some(18.0), ..Default::default() };
@@ -89,7 +102,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> bool {
                 });
             },
             |ui| {
-                if button(ui, "Run", 13.0, W::Medium, 12.0, Color32::WHITE, p.accent, p.accent_light, Color32::TRANSPARENT, true).clicked() {
+                if button(ui, if skill { "Use it" } else { "Run" }, 13.0, W::Medium, 12.0, Color32::WHITE, p.accent, p.accent_light, Color32::TRANSPARENT, true).clicked() {
                     verdict = Some((true, false));
                 }
                 let skip = button(ui, "Skip", 13.0, W::Medium, 12.0, p.text2, Color32::TRANSPARENT, p.hover, p.border, true);
@@ -99,6 +112,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> bool {
                 }
                 if skip.clicked() {
                     verdict = Some((false, false));
+                }
+                if skill {
+                    return;
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let always = button(ui, "Always allow this", 12.0, W::Regular, 10.0, p.muted, Color32::TRANSPARENT, Color32::TRANSPARENT, Color32::TRANSPARENT, true);

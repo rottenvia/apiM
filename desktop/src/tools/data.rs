@@ -1025,7 +1025,10 @@ pub fn query_data(root: &Path, args: &Value) -> Output {
     }
     query(root, path, args).unwrap_or_else(|e| {
         let summary = if e.starts_with("ENOENT") { e.clone() } else { clip_utf16(&e, 80) };
-        bad(format!("Error: {e}"), summary)
+        // A condition written bare ("price > 10") is the usual slip: said once, with the form that works.
+        let asked = str_arg(args, "query").trim();
+        let hint = if asked.is_empty() || asked.starts_with('$') { String::new() } else { format!("\n\nThe query is JSONPath and starts with $. To keep the rows that pass a test: $[?(@.{})]", asked.trim_start_matches('@').trim_start_matches('.')) };
+        bad(format!("Error: {e}{hint}"), summary)
     })
 }
 
@@ -1037,6 +1040,8 @@ fn whole(value: &J) -> Vec<Match<'_>> {
 fn query(root: &Path, path: &str, args: &Value) -> Result<Output, String> {
     let data = load(root, path)?;
     let q = str_arg(args, "query");
+    // A count with no query counts what the file holds at the top.
+    let q = if q.is_empty() && args["count"].as_bool() == Some(true) && matches!(data.value, J::Arr(_)) { "$[*]" } else { q };
     if q.is_empty() {
         let example = if matches!(data.value, J::Arr(_)) { "[0:5]" } else { ".<key>" };
         return Ok(Output::ok(format!("{path}\n{}\n\nQuery it with JSONPath, e.g. query \"${example}\".", describe(&data)), format!("Structure of {path}")));

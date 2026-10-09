@@ -63,9 +63,19 @@ pub fn update_plan(ctx: &Ctx, args: &Value) -> Output {
     let Some(plan) = chat.plan.as_mut() else { return Output::fail("There is no plan yet. Call make_plan first.") };
     let mut problems = Vec::new();
     for u in updates {
-        let state = str_arg(u, "state");
-        let Some(step) = num_arg(u, "id").and_then(|id| plan.steps.iter_mut().find(|s| s.id as u64 == id)) else {
-            problems.push(format!("No step {}.", u["id"]));
+        // The names and words other tools use for the same thing are taken too: step for id, status for state.
+        let state = match [str_arg(u, "state"), str_arg(u, "status")].into_iter().find(|said| !said.is_empty()).unwrap_or("") {
+            "in_progress" | "in-progress" | "started" | "active" => "doing",
+            "completed" | "complete" | "finished" => "done",
+            "pending" | "not_started" => "todo",
+            other => other,
+        };
+        let number = ["id", "step", "index", "number"].iter().find_map(|key| num_arg(u, key));
+        let Some(step) = number.and_then(|id| plan.steps.iter_mut().find(|s| s.id as u64 == id)) else {
+            problems.push(match number {
+                Some(id) => format!("No step {id}: the plan has steps 1 to {}.", plan.steps.len()),
+                None => "An update needs id (the step's number) and state (todo, doing, done or blocked).".to_string(),
+            });
             continue;
         };
         match state {

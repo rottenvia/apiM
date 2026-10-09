@@ -7,6 +7,11 @@
 //! for, and a line repeated with each message. More of them wait in a catalog (assets/skills.json, and its
 //! newest copy on the project's page) to be added by the user or by the model itself (`tools::skills`), for
 //! one chat or for all.
+//!
+//! A catalog entry may also only point at a skill on GitHub (`Origin`): Claude's own skills, and the plugins
+//! written for it. Such a skill is downloaded when it is added (`crate::skillhub`), and kept in its author's
+//! words: short instructions ride in every request while it is on, as Claude's start-up hook sends them; long
+//! ones are read when the task calls for them, as Claude reads a skill.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -43,6 +48,30 @@ pub struct Plugin {
     /// Added from the catalog rather than written here.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub catalog: bool,
+    /// Where on GitHub it comes from, for a skill that does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<Origin>,
+}
+
+/// Where a downloaded skill comes from, and what came with it.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Origin {
+    /// "owner/repo".
+    pub repo: String,
+    /// The skill's file in the repository.
+    pub file: String,
+    /// A folder to carry instead of the file's own, for a repository laid out its own way.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub refs: String,
+    /// The commit it was downloaded at. Empty in the catalog, which only points.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub commit: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub licence: String,
+    /// The files it carries, kept beside it on disk: read with `skills`, action read.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
 }
 
 /// Longest a single plugin's instructions may be (about 28,000 tokens).
@@ -103,7 +132,11 @@ pub fn directives(plugins: &[Plugin], enabled: &[String]) -> String {
         used += size;
         // The guide is not sent with every request: the model is told where it is.
         let more = if p.guide.is_empty() { String::new() } else { format!(" (Its full guide: skills, action read, id {}.)", p.id) };
-        rules.push(format!("- {}: {}{more}", p.name, strip_tag(&p.prompt)));
+        rules.push(match &p.origin {
+            // A short skill from GitHub is given whole, in its author's words, as Claude's start-up hook gives it.
+            Some(origin) if p.guide.is_empty() => format!("- {} (a skill from github.com/{}, in its author's own words; where it names another assistant's tools, commands or hooks, use your own that do the same):\n{}", p.name, origin.repo, p.prompt.trim()),
+            _ => format!("- {}: {}{more}", p.name, strip_tag(&p.prompt)),
+        });
     }
     if rules.is_empty() && dropped == 0 {
         return String::new();
@@ -191,9 +224,11 @@ fn normalise(input: &Plugin) -> Result<Plugin, String> {
         description: input.description.trim().chars().take(140).collect(),
         category: if CATEGORIES.contains(&input.category.as_str()) { input.category.clone() } else { "enhancement".into() },
         prompt: prompt.into(),
-        guide: input.guide.trim().chars().take(MAX_GUIDE).collect(),
+        // A downloaded skill's instructions are kept whole through an edit of the rest.
+        guide: input.guide.trim().chars().take(if input.origin.is_some() { MAX_PLUGIN_PROMPT } else { MAX_GUIDE }).collect(),
         reminder: input.reminder.trim().chars().take(MAX_REMINDER).collect(),
         catalog: input.catalog,
+        origin: input.origin.clone(),
         ..Plugin::default()
     })
 }
@@ -222,7 +257,12 @@ pub fn save(input: &Plugin) -> Result<Plugin, String> {
 pub fn delete(id: &str) -> Result<(), String> {
     let mut all = custom();
     all.retain(|p| p.id != id);
-    write_all(&all)
+    write_all(&all)?;
+    // The files a downloaded skill carried go with it.
+    if id.starts_with("gh-") {
+        let _ = std::fs::remove_dir_all(skill_dir(id));
+    }
+    Ok(())
 }
 
 // ------------------------------------------------------------------ the catalog
@@ -251,9 +291,16 @@ fn parse_catalog(text: &str) -> Option<Vec<Plugin>> {
     }
     let listed: Vec<Plugin> = serde_json::from_str(text).ok()?;
     let fits = |p: &Plugin| {
-        let id_ok = p.id.starts_with("skill-") && p.id.len() <= 60 && p.id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+        let slug = p.id.len() <= 80 && p.id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
         let name = p.name.trim().chars().count();
-        id_ok && (1..=40).contains(&name) && !p.prompt.trim().is_empty() && p.prompt.chars().count() <= MAX_RULE && p.guide.chars().count() <= MAX_GUIDE && p.reminder.chars().count() <= MAX_REMINDER
+        if !slug || !(1..=40).contains(&name) {
+            return false;
+        }
+        match &p.origin {
+            // A pointer at a skill on GitHub: it holds no instructions of its own, and names where they are.
+            Some(origin) => p.id == skill_id(&origin.repo, &origin.file) && crate::skillhub::parse_source(&origin.repo).is_some_and(|s| s.path.is_empty()) && !origin.file.contains("..") && !origin.refs.contains("..") && p.prompt.is_empty() && !p.description.trim().is_empty(),
+            None => p.id.starts_with("skill-") && p.id.len() <= 60 && !p.prompt.trim().is_empty() && p.prompt.chars().count() <= MAX_RULE && p.guide.chars().count() <= MAX_GUIDE && p.reminder.chars().count() <= MAX_REMINDER,
+        }
     };
     let good: Vec<Plugin> = listed.into_iter().filter(fits).take(300).map(|p| Plugin { catalog: true, custom: false, legacy: false, description: p.description.chars().take(140).collect(), ..p }).collect();
     (!good.is_empty()).then_some(good)
@@ -263,7 +310,9 @@ fn parse_catalog(text: &str) -> Option<Vec<Plugin>> {
 pub async fn refresh_catalog(client: &reqwest::Client) -> bool {
     let fetch = async { client.get(CATALOG_URL).send().await.ok()?.error_for_status().ok()?.text().await.ok() };
     let Ok(Some(text)) = tokio::time::timeout(std::time::Duration::from_secs(6), fetch).await else { return false };
-    let Some(list) = parse_catalog(&text) else { return false };
+    let Some(mut list) = parse_catalog(&text) else { return false };
+    // What this build came with stays: the copy on the project's page may be older than the app, or newer.
+    list.extend(SHIPPED.iter().filter(|own| !list.iter().any(|p| p.id == own.id)).cloned().collect::<Vec<_>>());
     *FETCHED.lock().unwrap() = Some(list);
     true
 }
@@ -282,9 +331,120 @@ pub fn install(skill: &Plugin) -> Result<Plugin, String> {
     Ok(added)
 }
 
+// ------------------------------------------------------------------ skills from GitHub
+
+/// Instructions up to this long ride in every request while the skill is on; longer ones are read on demand.
+pub const INLINE: usize = 9_000;
+
+/// The id a skill from GitHub is kept under: "gh-", its repository, and the folder its file sits in when that
+/// is not the repository's own name. The same for a catalog entry and for the skill once added.
+pub fn skill_id(repo: &str, file: &str) -> String {
+    let mut folders = file.rsplit('/').skip(1);
+    let name = repo.rsplit('/').next().unwrap_or(repo);
+    let folder = folders.next().filter(|folder| !folder.eq_ignore_ascii_case(name)).unwrap_or("");
+    let mut id = String::from("gh");
+    for part in repo.split('/').chain(std::iter::once(folder)).filter(|part| !part.is_empty()) {
+        id.push('-');
+        id.extend(part.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }));
+    }
+    id.chars().take(80).collect()
+}
+
+/// Where the files a downloaded skill carries are kept.
+pub fn skill_dir(id: &str) -> PathBuf {
+    crate::store::data_dir().join("skills").join(id)
+}
+
+/// The catalog's pointer at this file of this repository, when it has one: the catalog then vouches for the source.
+pub fn listed(repo: &str, file: &str) -> Option<Plugin> {
+    catalog().into_iter().find(|p| p.origin.as_ref().is_some_and(|o| o.repo.eq_ignore_ascii_case(repo) && o.file == file))
+}
+
+/// One of the files a downloaded skill carries. None when it carries no such file.
+pub fn carried(skill: &Plugin, name: &str) -> Option<String> {
+    let origin = skill.origin.as_ref()?;
+    let known = origin.files.iter().find(|have| have.as_str() == name.trim().trim_start_matches("./"))?;
+    std::fs::read_to_string(skill_dir(&skill.id).join(known)).ok()
+}
+
+/// Adds a downloaded skill to the user's plugins, or renews the one already there, and puts its files beside it.
+pub fn install_package(found: &crate::skillhub::Found, refs: &str) -> Result<Plugin, String> {
+    let (repo, skill) = (&found.repo, &found.skill);
+    let id = skill_id(&repo.name, &skill.file);
+    let entry = listed(&repo.name, &skill.file);
+    let dir = skill_dir(&id);
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut files = Vec::new();
+    for (name, text) in &skill.carried {
+        // A name is a path inside the skill's own folder, and nothing else.
+        let safe = !name.is_empty() && name.split('/').all(|part| !part.is_empty() && part != ".." && part != "." && !part.contains(['\\', ':']));
+        let path = dir.join(name);
+        if safe && path.parent().is_some_and(|parent| std::fs::create_dir_all(parent).is_ok()) && std::fs::write(&path, text).is_ok() {
+            files.push(name.clone());
+        }
+    }
+    let long = skill.body.chars().count() > INLINE;
+    let when: String = skill.description.chars().take(600).collect();
+    let name: String = entry.as_ref().map_or(skill.name.as_str(), |e| e.name.as_str()).chars().take(40).collect();
+    let now = crate::store::iso(crate::store::now_ms());
+    let mut all = custom();
+    let created = all.iter().find(|p| p.id == id).map_or_else(|| now.clone(), |p| p.created_at.clone());
+    let added = Plugin {
+        id: id.clone(),
+        icon: entry.as_ref().map_or("🧩".to_string(), |e| e.icon.clone()),
+        description: entry.as_ref().map_or_else(|| clip(&skill.description, 200), |e| e.description.clone()),
+        category: entry.as_ref().map_or("enhancement".to_string(), |e| e.category.clone()),
+        prompt: if long { format!("Use it when: {when} Before you act on it, read its instructions in full and follow them as written; do not work from memory of them.") } else { skill.body.clone() },
+        guide: if long { skill.body.clone() } else { String::new() },
+        reminder: if long { String::new() } else { format!("{name} is on: keep to its rules in this reply.") },
+        custom: true,
+        catalog: true,
+        created_at: created,
+        updated_at: now,
+        origin: Some(Origin { repo: repo.name.clone(), file: skill.file.clone(), refs: refs.to_string(), commit: found.commit.clone(), licence: repo.licence.clone(), files }),
+        name,
+        legacy: false,
+    };
+    all.retain(|p| p.id != id);
+    all.push(added.clone());
+    write_all(&all)?;
+    Ok(added)
+}
+
+/// `text` cut to `max` characters at a word, with a mark that it was.
+fn clip(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let cut: String = text.chars().take(max).collect();
+    format!("{}…", cut.rsplit_once(' ').map_or(cut.as_str(), |(head, _)| head).trim_end_matches([',', '.', ';', ':', '—', '-']))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The catalog's pointers are ones the app can follow, a short skill is sent whole and a long one is pointed at.
+    #[test]
+    fn skills_from_github() {
+        assert_eq!(skill_id("JuliusBrussee/caveman", "skills/caveman/SKILL.md"), "gh-juliusbrussee-caveman");
+        assert_eq!(skill_id("anthropics/skills", "skills/pdf/SKILL.md"), "gh-anthropics-skills-pdf");
+        assert_eq!(skill_id("Graphify-Labs/graphify", "graphify/skill-windows.md"), "gh-graphify-labs-graphify");
+        assert_eq!(skill_id("o/solo", "SKILL.md"), "gh-o-solo");
+        let official: Vec<Plugin> = catalog().into_iter().filter(|p| p.origin.is_some()).collect();
+        for name in ["Caveman", "Ponytail", "Graphify"] {
+            assert!(official.iter().any(|p| p.name == name), "{name} is in the catalog");
+        }
+        assert!(official.len() >= 15 && listed("juliusbrussee/CAVEMAN", "skills/caveman/SKILL.md").is_some() && listed("someone/caveman", "skills/caveman/SKILL.md").is_none());
+
+        let origin = Some(Origin { repo: "o/r".into(), file: "skills/r/SKILL.md".into(), ..Origin::default() });
+        let short = Plugin { id: "gh-o-r".into(), name: "R".into(), prompt: "# R\nBe brief.".into(), origin: origin.clone(), ..Plugin::default() };
+        let long = Plugin { id: "gh-o-big".into(), name: "Big".into(), prompt: "Use it when: graphs.".into(), guide: "x".repeat(20_000), origin, ..Plugin::default() };
+        let d = directives(&[short, long], &["gh-o-r".into(), "gh-o-big".into()]);
+        assert!(d.contains("- R (a skill from github.com/o/r, in its author's own words;") && d.contains("\n# R\nBe brief."), "{d}");
+        assert!(d.contains("- Big: Use it when: graphs. (Its full guide: skills, action read, id gh-o-big.)") && !d.contains("xxxx"));
+        assert_eq!((clip("one two three", 9), clip("short", 9)), ("one two…".to_string(), "short".to_string()));
+    }
 
     #[test]
     fn directives_block() {
@@ -304,7 +464,7 @@ mod tests {
     fn skills_guides_reminders_and_scopes() {
         // The catalog that ships is well formed, and none of it collides with a built-in.
         let shipped = catalog();
-        assert!(shipped.len() >= 10 && shipped.iter().all(|s| s.catalog && s.id.starts_with("skill-") && !BUILTIN.iter().any(|b| b.id == s.id)));
+        assert!(shipped.len() >= 10 && shipped.iter().all(|s| s.catalog && (s.id.starts_with("skill-") || s.origin.is_some()) && !BUILTIN.iter().any(|b| b.id == s.id)));
         let terse = shipped.iter().find(|s| s.id == "skill-terse").unwrap().clone();
         let every = vec![terse.clone(), Plugin { id: "plain".into(), name: "Plain".into(), prompt: "Be plain.".into(), ..Plugin::default() }];
         // On for every chat first, then this chat's own, each once.

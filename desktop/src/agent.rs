@@ -1032,6 +1032,9 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
             };
             let mut text = out.text.clone();
             let strike = breaker.observe(&call.name, &key, out.ok);
+            if out.ok && (out.changed.is_some() || matches!(call.name.as_str(), "run_command" | "build_project" | "write_files" | "edit_files" | "apply_patch" | "extract_archive" | "download_file")) {
+                breaker.workspace_changed(call.name != "run_command" && call.name != "build_project");
+            }
             if strike.trip {
                 text.push_str(&loop_breaker::loop_trip_marker(&call.name));
                 let last_error = if out.summary.is_empty() { head(&out.text, 300) } else { out.summary.as_str() };

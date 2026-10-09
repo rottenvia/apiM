@@ -26,6 +26,7 @@ mod refusal;
 mod run;
 mod sandbox;
 mod search;
+mod skillhub;
 mod search_usage;
 mod slash;
 mod snapshots;
@@ -55,7 +56,75 @@ fn main() -> eframe::Result {
         headless(&args[1..]);
         return Ok(());
     }
+    if args.first().map(String::as_str) == Some("--tools") {
+        tool_calls(&args[1..]);
+        return Ok(());
+    }
     ui::run(runtime())
+}
+
+/// `apim --tools FILE [--auto] [--dir FOLDER]`: runs the tool calls listed in FILE, a JSON list of
+/// {"name", "args"}, one after another as the agent would make them, and prints what each handed back.
+/// No model is involved: this is how a tool is checked for what it does rather than for how a model uses it.
+/// Nobody answers an approval card here, so without --auto whatever would ask is declined.
+fn tool_calls(args: &[String]) {
+    #[cfg(windows)]
+    {
+        unsafe extern "system" {
+            fn AttachConsole(process: u32) -> i32;
+        }
+        unsafe { AttachConsole(u32::MAX) };
+    }
+    let mut settings = store::Settings::load();
+    let mut dir = std::env::temp_dir().join("apim-ask");
+    let mut file = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--auto" => settings.approval = store::Approval::Auto,
+            "--dir" => dir = it.next().map(Into::into).unwrap_or(dir),
+            _ => file = Some(a.clone()),
+        }
+    }
+    let calls: Vec<serde_json::Value> = file.and_then(|f| std::fs::read(f).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    if calls.is_empty() {
+        println!("Give a file holding a JSON list of {{\"name\": ..., \"args\": {{...}}}}.");
+        return;
+    }
+    let _ = std::fs::create_dir_all(&dir);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let ctx = tools::Ctx {
+        root: dir.clone(),
+        state_dir: dir.join(".apim-state"),
+        settings,
+        client: provider::client(),
+        read_chars: 20_000,
+        limits: context::tool_limits::tool_limits_for(false),
+        memory: Default::default(),
+        emit: agent::Emitter::new(tx, || {}),
+        chat: Default::default(),
+        procs: Default::default(),
+        planner: None,
+    };
+    // Whatever asks is declined, and whatever else a tool reports while it runs is dropped.
+    std::thread::spawn(move || {
+        for event in rx {
+            match event {
+                agent::Event::Approval { reply, .. } => drop(reply.send(false)),
+                agent::Event::Question { reply, .. } => drop(reply.send(String::new())),
+                _ => {}
+            }
+        }
+    });
+    let rt = runtime();
+    let limit = std::env::var("APIM_TOOL_CHARS").ok().and_then(|n| n.parse().ok()).unwrap_or(900);
+    for call in &calls {
+        let (name, args) = (call["name"].as_str().unwrap_or(""), &call["args"]);
+        let started = std::time::Instant::now();
+        let out = rt.block_on(tools::run(name, args, &ctx));
+        let text: String = out.text.chars().take(limit).collect();
+        println!("\n## {name} {}\n{} [{}] {:.1}s{}\n{text}{}", args.to_string().chars().take(160).collect::<String>(), if out.ok { "ok" } else { "FAILED" }, out.summary, started.elapsed().as_secs_f32(), out.changed.map(|p| format!(" changed {p}")).unwrap_or_default(), if out.text.chars().count() > limit { "\n…" } else { "" });
+    }
 }
 
 /// `apim --ask [--auto] [--dir FOLDER] question`: one reply in the terminal, no window.
