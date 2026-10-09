@@ -63,7 +63,9 @@ const KEEP_RECENT_RESULTS: usize = 6;
 // What the model is told on the paths below. The wording is the web app's.
 const CARRY_ON: &str = "Continue from exactly where you stopped — do not repeat anything you already wrote, do not restate the plan, and do not apologise. Carry straight on from the last character.";
 const CLAIM_RETRY: &str = "Your reply above describes tools running and reporting results — edits applied, a build coming back green, checks passing — but those tools were not called in this reply. The user reads that as work that happened. Finish this reply one of two ways: either actually call the tools now and report exactly what comes back, or add a short correction saying plainly what was and was not done. The user still sees the reply above, so do not write it out again. Do not describe output you do not have.";
-const REOPEN_BLOCKED: &str = "A blocked step means something OUTSIDE your control is in the way — a failing command, a missing file, a decision only the user can make. It is not a way to decline the task. This is ordinary creative and technical work on the user's own machine; there is nothing here to refuse. The blocked steps have been reopened. Do them now: pick a concrete approach and start with the first tool call. If your first idea for an approach seems unsuitable, use a different approach — do not stop. Only a real external obstacle may block a step, and even then ask_user first.";
+const NOTE_LEAD: &str = "[Note from the user, added while you work. If it asks something, answer it once, in a sentence or two, in your next message. If it changes what to do, follow it from here on. Then go on with the task from where you were: do not start over, and do not come back to this note in later steps.]";
+const NOTED: &str = "\n\n[The user added notes while you worked. They are above, each marked as a note from the user. One that changed the task still applies. One that asked something has been answered: do not answer it or mention it again.]";
+const REOPEN_BLOCKED: &str ="A blocked step means something OUTSIDE your control is in the way — a failing command, a missing file, a decision only the user can make. It is not a way to decline the task. This is ordinary creative and technical work on the user's own machine; there is nothing here to refuse. The blocked steps have been reopened. Do them now: pick a concrete approach and start with the first tool call. If your first idea for an approach seems unsuitable, use a different approach — do not stop. Only a real external obstacle may block a step, and even then ask_user first.";
 const BLOCKED_UNTRIED: &str = "You marked work blocked without attempting any of it. Try the steps first. If something genuinely cannot be done — a missing key, a decision only the user can make — use ask_user to ask for it directly rather than stopping.";
 const NARRATED: &str = "\n\nYou just described the next action instead of doing it. Do not narrate, plan aloud, or repeat what you already said — call the tool in this response.";
 const THINK_ONLY: [&str; 2] = [
@@ -78,8 +80,6 @@ pub enum Event {
     Content(String),
     /// A tool call still streaming its arguments. `path` is the file it names, once that much has arrived.
     ToolDraft { name: String, chars: usize, path: Option<String> },
-    /// The reply took in a "btw" note before round `round` (counted from 1).
-    NoteRead { note: String, round: usize },
     /// A request failed and try `attempt` of `attempts` starts after `wait`.
     Retry { reason: String, attempt: usize, attempts: usize, wait: Duration },
     ToolStart(ToolEvent),
@@ -321,6 +321,16 @@ fn resume_transcript(mut resume: Resume, mut messages: Vec<Value>, start: &mut S
     start.answer = resume.prior["content"].as_str().unwrap_or("").to_string();
     start.tools_used = resume.prior["toolEvents"].as_array().into_iter().flatten().filter_map(|step| step["name"].as_str().map(str::to_string)).collect();
     messages
+}
+
+/// The transcript with every clip and picture the model has already been sent replaced by a line saying so.
+/// What follows the model's last turn has not ridden yet and stays: the message being answered on the opening
+/// request, a picture a tool was just asked to show on a later one.
+fn ridden(messages: &[Value]) -> Vec<Value> {
+    let seen = messages.iter().rposition(|m| m["role"] == "assistant").map_or(0, |i| i + 1);
+    let mut out = strip_ride_along_videos(&messages[..seen], false);
+    out.extend_from_slice(&messages[seen..]);
+    out
 }
 
 /// The run's state after a tool round, as the web saves it on an unfinished reply.
@@ -617,8 +627,9 @@ async fn run_inner(mut req: Request, emit: &Emitter, procs: Arc<Procs>) -> Resul
 #[allow(clippy::too_many_arguments)]
 async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: Vec<Value>, mut groups: Vec<String>, effort: &str, conv_id: &str, notes: &Mutex<Vec<String>>, start: Start) -> Result<Ending, String> {
     let Start { mut tree, user_text, history_last_user, tool_rounds: resumed_rounds, continuations: resumed_continuations, think_nudges: resumed_think_nudges, usage: resumed_usage, answer: resumed_answer, tools_used: resumed_tools } = start;
-    // The newest note the user added mid-run: it becomes the goal the pin restates.
-    let mut steering: Option<String> = None;
+    // The user added a note mid-run. The pin points at the notes and does not restate them: a note that took the
+    // request's place there was read as the task on every later round, and a question asked in passing was answered again each time.
+    let mut noted = false;
     let (emit, s, chat) = (&ctx.emit, &ctx.settings, &ctx.chat);
     let customs = &s.custom_models;
     let thinking = effort != "none";
@@ -704,9 +715,8 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
         }
         // Anything the user said in passing joins the conversation before the next request.
         for note in std::mem::take(&mut *notes.lock().unwrap()) {
-            emit.send(Event::NoteRead { note: note.clone(), round });
-            steering = Some(note.trim().to_string());
-            messages.push(user(format!("[Note from the user while you work. Take it into account and carry on; do not start over.]\n{note}")));
+            noted = true;
+            messages.push(user(format!("{NOTE_LEAD}\n{note}")));
         }
         // Old tool output collapses to a line saying what it was, and fat call arguments to a stub; files still being worked from stay whole.
         // ponytail: the web prunes the copy it sends and keeps its transcript whole; here the result is kept, like the fold below.
@@ -738,8 +748,8 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
         // DeepSeek takes each tool turn's reasoning back as `reasoning_content`. OpenRouter's validators reject
         // the field, so its lanes get `reasoning` where a model needs it and the end of the thought as plain text elsewhere.
         let reasoning_field = if !openrouter { Some("reasoning_content") } else if lane.replay { Some("reasoning") } else { None };
-        // Videos ride once: the clip's pixels go on the request that introduces it, and every later round gets a reference line.
-        let mut wire = transcript::wire(&strip_ride_along_videos(&messages, tool_rounds == 0), reasoning_field);
+        // Clips and pictures ride once: on the request after they joined, and every later round gets a reference line.
+        let mut wire = transcript::wire(&ridden(&messages), reasoning_field);
         if qwen {
             // Qwen's template only accepts a system message at index 0: the listing, its deltas and the tail all join the first one.
             let (systems, rest): (Vec<Value>, Vec<Value>) = wire.into_iter().partition(|m| m["role"] == "system");
@@ -1069,6 +1079,10 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
                     text.push_str(stall::unchanged_read_text());
                 }
             }
+            // The same call with the same answer as one still in the transcript: a line pointing at it goes back, not the text again.
+            if let Some(pointer) = compact::repeat_of(&messages, &call.name, args_text, &out.text).filter(|_| out.ok) {
+                text.replace_range(..out.text.len(), &pointer);
+            }
             messages.push(json!({ "role": "tool", "tool_call_id": call.id, "content": text }));
             if stopped.is_some() {
                 break;
@@ -1112,11 +1126,12 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
         tree.refresh(&ctx.root, &mut messages);
         // The request is restated at the end every round, so a long run cannot drift back to an older task from the history or the summary.
         messages.retain(|m| !(m["role"] == "system" && m["content"].as_str().is_some_and(|c| c.starts_with(GOAL_PIN_MARKER))));
-        if let Some(goal) = resolve_run_goal(&user_text, history_last_user.as_deref(), steering.as_deref()) {
-            messages.push(json!({ "role": "system", "content": render_goal_pin(&goal, tool_rounds > 0) }));
+        if let Some(goal) = resolve_run_goal(&user_text, history_last_user.as_deref(), None) {
+            messages.push(json!({ "role": "system", "content": format!("{}{}", render_goal_pin(&goal, tool_rounds > 0), if noted { NOTED } else { "" }) }));
         }
         // Saved once per tool round, where the expensive, hard-to-redo work happens: a reply stopped or failed after this resumes from here.
-        emit.send(Event::Checkpoint(checkpoint(&messages, tool_rounds, continuations, think_nudges.max(resumed_think_nudges))));
+        // Without the clips that have ridden: a 40 MB video was written into the chat's file again with every round.
+        emit.send(Event::Checkpoint(checkpoint(&ridden(&messages), tool_rounds, continuations, think_nudges.max(resumed_think_nudges))));
 
         // The plan goes stale while the work moves on, or the prose just claimed a step the plan does not show.
         let current = chat.lock().unwrap().plan.clone();
@@ -1176,7 +1191,7 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
     }
     if stop_reason.is_some() {
         // An unfinished reply keeps everything up to its last word.
-        emit.send(Event::Checkpoint(checkpoint(&messages, tool_rounds, continuations, think_nudges.max(resumed_think_nudges))));
+        emit.send(Event::Checkpoint(checkpoint(&ridden(&messages), tool_rounds, continuations, think_nudges.max(resumed_think_nudges))));
     }
     Ok(Ending { finish: last_finish, incomplete: stop_reason.is_some(), stop_reason, outcomes })
 }
@@ -1702,6 +1717,24 @@ mod tests {
         assert_eq!(ran.steps, [("d1", "Helper finished · 1 round, 0 tool calls"), ("d2", "Helper finished · 1 round, 0 tool calls"), ("d3", "No task given")].map(|(id, summary)| (id.to_string(), summary.to_string())));
         // What the helpers used is counted on the reply.
         assert_eq!((ran.usage.prompt, ran.usage.completion), (200, 40));
+    }
+
+    #[test]
+    fn a_clip_rides_once_and_so_does_a_picture_a_tool_showed() {
+        let clip = json!({ "role": "user", "content": [{ "type": "text", "text": "see" }, { "type": "video_url", "video_url": { "url": "data:video/mp4;base64,QQ==" } }] });
+        let turn = json!({ "role": "assistant", "content": "", "tool_calls": [{ "id": "v1", "type": "function", "function": { "name": "view_image", "arguments": "{}" } }] });
+        let result = json!({ "role": "tool", "tool_call_id": "v1", "content": "shown" });
+        let shown = json!({ "role": "user", "content": [{ "type": "text", "text": "[tool image] The image(s) you asked to view:" }, { "type": "image_url", "image_url": { "url": "data:image/png;base64,AQID" } }] });
+        // The opening request carries the clip.
+        assert_eq!(ridden(&[clip.clone()]), [clip.clone()]);
+        // After a tool round the clip has ridden, and the picture the tool showed has not: it used to be cut too,
+        // so the model was never sent a picture it had asked to see.
+        let sent = ridden(&[clip.clone(), turn.clone(), result.clone(), shown.clone()]);
+        assert!(sent[0]["content"][1]["text"].as_str().unwrap().starts_with("[video omitted"), "{}", sent[0]);
+        assert_eq!(sent[3], shown);
+        // One round on, the picture has ridden as well.
+        let later = ridden(&[clip, turn.clone(), result, shown, turn]);
+        assert!(later[3]["content"][1]["text"].as_str().unwrap().starts_with("[earlier attachment"), "{}", later[3]);
     }
 
     #[tokio::test(flavor = "multi_thread")]

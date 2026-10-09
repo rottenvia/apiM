@@ -107,7 +107,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let left = ui.max_rect().left() + (ui.available_width() - width) / 2.0;
 
     ui.add_space(8.0);
-    super::btw::dock(app, ui, left, width);
     let top = ui.cursor().top();
     let mut menu: (&'static str, Vec<crate::slash::MenuItem>) = ("", Vec::new());
     let focused = ui.memory(|m| m.has_focus(egui::Id::new("composer-text")));

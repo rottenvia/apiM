@@ -79,6 +79,27 @@ fn dedupe(messages: &mut [Value]) -> usize {
     saved
 }
 
+/// Results below this size go back as they are: a pointer would save little and read worse.
+const REPEAT_MIN_CHARS: usize = 1_500;
+
+/// A call asked again whose answer is already in the transcript, whole and byte for byte: the line that goes
+/// back in place of the same text. The earlier copy stays where it is, so the start of the request (and the
+/// provider's cache of it) does not move, and a model that asks for one big file every round stops paying for it.
+pub fn repeat_of(messages: &[Value], name: &str, args: &str, text: &str) -> Option<String> {
+    if text.len() < REPEAT_MIN_CHARS {
+        return None;
+    }
+    // Parsed and printed again, so key order and spacing do not make two equal calls differ.
+    let canon = |args: &str| serde_json::from_str::<Value>(args).map_or_else(|_| args.to_string(), |v| v.to_string());
+    let wanted = canon(args);
+    let same: HashSet<&str> = messages.iter().flat_map(calls).filter(|c| c["function"]["name"] == name && canon(c["function"]["arguments"].as_str().unwrap_or("")) == wanted).filter_map(|c| c["id"].as_str()).collect();
+    // A guard's note may follow the earlier copy, so it only has to start with this text.
+    let held = messages.iter().any(|m| m["role"] == "tool" && same.contains(m["tool_call_id"].as_str().unwrap_or("")) && m["content"].as_str().is_some_and(|c| c.starts_with(text)));
+    // How to read on is the one line of a cut-short read worth saying twice.
+    let more = text.lines().last().filter(|l| l.starts_with("[CUT SHORT")).map_or(String::new(), |l| format!("\n{l}"));
+    held.then(|| format!("[Unchanged: {} gave this same output earlier in this conversation ({} chars, not one byte different). It is still above: work from that copy. While it is there, asking again returns this line and not the text.]{more}", describe(name, args, None), text.len()))
+}
+
 pub struct Folded {
     /// Agent rounds replaced by a summary.
     pub rounds: usize,
@@ -152,7 +173,7 @@ pub fn breakdown(messages: &[Value], tools_chars: usize) -> Vec<Bucket> {
                 let text = m["content"].as_str().unwrap_or("");
                 let label = if text.contains(crate::plugins::PROMPTS.plugin_marker.as_str()) {
                     "plugins"
-                } else if text.starts_with("Files already in the workspace") || text.starts_with("The workspace is currently empty") {
+                } else if ["Files already in the workspace", "The workspace is currently empty", "Current workspace contents", "Workspace changes since"].iter().any(|start| text.starts_with(start)) {
                     "file tree"
                 } else if text.starts_with("PLAN. Goal:") {
                     "plan"
@@ -238,6 +259,24 @@ mod tests {
         assert!(fold_at(&mut messages, usize::MAX).tokens_saved > 0);
         assert!(messages[1]["content"].as_str().unwrap().starts_with("[Folded: identical read_file(a)"));
         assert_eq!(messages[3]["content"].as_str().unwrap().len(), 500);
+    }
+
+    #[test]
+    fn a_call_asked_again_gets_a_pointer_while_its_answer_is_still_there() {
+        let body = format!("a.cpp: lines 1-90 of 120\n{}\n[CUT SHORT: you have lines 1-90 of 120. Continue with read_file {{\"path\":\"a.cpp\",\"start_line\":91}}]", "x".repeat(2_000));
+        let call = |id: &str, args: &str| json!({ "role": "assistant", "content": "", "tool_calls": [{ "id": id, "type": "function", "function": { "name": "read_file", "arguments": args } }] });
+        // The earlier answer carries a guard's note after it; the call being answered is already in the transcript, unanswered.
+        let mut messages = vec![call("1", "{\"path\":\"a.cpp\",\"end_line\":120}"), json!({ "role": "tool", "tool_call_id": "1", "content": format!("{body}\n[note]") }), call("2", "{}")];
+        let pointer = repeat_of(&messages, "read_file", "{ \"end_line\": 120, \"path\": \"a.cpp\" }", &body).unwrap();
+        assert!(pointer.starts_with("[Unchanged: read_file(a.cpp) gave this same output") && pointer.ends_with("\"start_line\":91}]"), "{pointer}");
+        assert!(pointer.len() < 500);
+        // Another range, another file's bytes, or a short answer: the text goes back.
+        assert_eq!(repeat_of(&messages, "read_file", "{\"path\":\"a.cpp\",\"start_line\":91}", &body), None);
+        assert_eq!(repeat_of(&messages, "read_file", "{\"path\":\"a.cpp\",\"end_line\":120}", &body.replace('x', "y")), None);
+        assert_eq!(repeat_of(&messages, "read_file", "{\"path\":\"a.cpp\",\"end_line\":120}", "short"), None);
+        // Once the earlier copy has been collapsed, the file is read out again.
+        messages[1]["content"] = json!("[earlier read_file result collapsed to save context]");
+        assert_eq!(repeat_of(&messages, "read_file", "{\"path\":\"a.cpp\",\"end_line\":120}", &body), None);
     }
 
     #[test]

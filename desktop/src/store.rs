@@ -1024,8 +1024,10 @@ static WRITER: std::sync::LazyLock<std::sync::mpsc::Sender<Job>> = std::sync::La
                     Job::Write(path, conv) => {
                         // Several saves of one chat in line: only the newest is worth the disk.
                         let newest = !jobs[i + 1..].iter().any(|later| matches!(later, Job::Write(other, _) if other == path));
+                        let started = std::time::Instant::now();
                         if newest && let Ok(json) = serde_json::to_vec_pretty(conv) {
                             let _ = write_atomic(path, &json);
+                            WRITE_MS.store(started.elapsed().as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
                         }
                         if let Some(listed) = LISTED.lock().unwrap().get_mut(path) {
                             listed.waiting = listed.waiting.saturating_sub(1);
@@ -1040,6 +1042,14 @@ static WRITER: std::sync::LazyLock<std::sync::mpsc::Sender<Job>> = std::sync::La
     });
     tx
 });
+
+static WRITE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How long the newest chat file took to reach the disk. A reply in progress is saved no more often than
+/// twenty times this: a chat of hundreds of megabytes was otherwise written out whole every five seconds.
+pub fn write_cost() -> std::time::Duration {
+    std::time::Duration::from_millis(WRITE_MS.load(std::sync::atomic::Ordering::Relaxed))
+}
 
 /// Waits until every chat saved so far is on disk. Call before reading chat files, and before the program ends.
 pub fn flush() {

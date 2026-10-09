@@ -2,7 +2,6 @@
 //! is no web view anywhere. The layout follows the web app's src/app/page.tsx.
 
 mod attachments;
-mod btw;
 mod bubble;
 mod chat;
 mod compare;
@@ -20,6 +19,7 @@ mod plan_panel;
 mod plugin_modal;
 mod prompts;
 mod rewind;
+mod selection;
 mod sandbox_panel;
 mod settings;
 mod settings_panels;
@@ -234,8 +234,6 @@ pub struct App {
     slash: slash_menu::State,
     /// Find in this chat. `find_open` and `find` hold whether it is open and what is typed.
     finder: find_bar::State,
-    /// "btw" notes on their way to the reply being written.
-    btw: btw::State,
     /// How many of the newest messages are laid out; "Show earlier" raises it.
     mounted: usize,
     compact_focus: String,
@@ -319,7 +317,6 @@ impl App {
             composer_rect: Rect::NOTHING,
             slash: Default::default(),
             finder: Default::default(),
-            btw: Default::default(),
             mounted: 60,
             compact_focus: String::new(),
             compact_note: None,
@@ -445,9 +442,10 @@ impl App {
                     let folder = r"C:\Users\you\AppData\Local\SomeGame\logs";
                     self.run.as_mut().unwrap().approval = Some(PendingApproval { command: folder.into(), reason: "To look at files outside this chat's folder. Nothing there is changed.".into(), key: format!("look:{}", folder.to_lowercase()), mcp: false, reply });
                 }
-                "btw" | "btw-read" => {
+                "btw" => {
+                    // A note passed to the running reply: a quiet line above it, at once.
                     self.fake_run(true);
-                    self.btw = btw::sample(part == "btw-read");
+                    self.pass_note("also keep the old tests green".into());
                 }
                 "draft" => self.draft = "Explain how the context meter decides when to compact, and show me where that lives in the code.".into(),
                 "search" => {
@@ -875,17 +873,19 @@ impl App {
         self.send(ctx, wire, attached);
     }
 
-    /// Hands a note to the reply being written without stopping it ("btw …", `/btw`).
-    /// It joins the transcript once the reply has read it.
+    /// Hands a note to the reply being written without stopping it ("btw …", `/btw`). It shows in the chat at
+    /// once, as a quiet line above the reply; the reply reads it before its next step.
     fn pass_note(&mut self, note: String) {
-        let Some(run) = &self.run else { return };
+        let Some(run) = self.run.as_ref().filter(|run| run.conv_id == self.conv.id) else { return };
         // ponytail: a picture on a note is described (or, on a native model, left out) rather than sent as pixels. Send it as a picture part if notes with screenshots matter.
         let (wire, attached) = attachments::message(&note, std::mem::take(&mut self.attachments), attachments::model_vision(&self.settings));
         run.notes.lock().unwrap().push(wire.clone());
         let mut chip = Message::new(Role::User, &note);
         chip.note = true;
         chip.attachments = attached;
-        self.btw.pass(wire, chip);
+        let at = self.conv.messages.len().saturating_sub(1);
+        self.conv.messages.insert(at, chip);
+        self.heights.values_mut().for_each(|m| m.exact = false);
         self.draft.clear();
     }
 
@@ -896,6 +896,16 @@ impl App {
             self.settings_ui.tab = 0;
             self.draft = text;
             return;
+        }
+        // Only the last reply can be resumed (`resume`): the transcript an earlier unfinished one kept is dead weight
+        // in the chat's file, megabytes of it rewritten with every save.
+        for earlier in &mut self.conv.messages {
+            earlier.other.remove("resumeState");
+        }
+        // A plan with every step done belonged to an earlier request. Left in place it stood over the new reply as
+        // if it were its plan, and was sent to the model as the plan of a task that has nothing to do with it.
+        if self.conv.plan.as_ref().is_some_and(|plan| crate::run::plan::progress(plan).complete) {
+            self.conv.plan = None;
         }
         // The transcript keeps a prompt shortcut as typed ("/review auth"); the agent gets what it stands for.
         let wire = crate::slash::wire(&text).into_owned();
@@ -1152,9 +1162,6 @@ impl App {
             Some(parked) => parked,
             None => &mut self.conv,
         };
-        // Notes the reply never got to read still show where they were said.
-        let at = conv.messages.len().saturating_sub(1);
-        conv.messages.splice(at..at, self.btw.flush());
         self.heights.values_mut().for_each(|m| m.exact = false);
         if let Some(msg) = conv.messages.last_mut() {
             // Text that had arrived and was still being typed out is kept.
@@ -1225,18 +1232,8 @@ impl App {
                 }
             }
             let Some(event) = run.inbox.pop_front() else { break };
-            // The reply read a "btw": from here on it is part of the conversation, just before the reply.
-            if let Event::NoteRead { note, round } = &event {
-                if let Some(chip) = self.btw.read(note, *round) {
-                    let at = conv.messages.len().saturating_sub(1);
-                    conv.messages.insert(at, chip);
-                    self.heights.values_mut().for_each(|m| m.exact = false);
-                }
-                continue;
-            }
             let Some(msg) = conv.messages.last_mut() else { break };
             match event {
-                Event::NoteRead { .. } => {}
                 Event::Retry { reason, attempt, attempts, wait } => run.retry = Some((format!("{reason} — retrying, try {} of {attempts}", attempt.min(attempts)), Instant::now() + wait)),
                 Event::Status(status) => run.status = status,
                 Event::Reasoning(text) => run.typing.push(false, text),
@@ -1354,9 +1351,6 @@ impl App {
             }
         }
         if finished {
-            // Notes the reply never got to read still show where they were said.
-            let at = conv.messages.len().saturating_sub(1);
-            conv.messages.splice(at..at, self.btw.flush());
             self.heights.values_mut().for_each(|m| m.exact = false);
             // Text that sat unshown for seconds is this program's doing, whatever the model's pace: it goes in the
             // problem report, so pacing that misbehaves on some stream nobody tried is found afterwards.
@@ -1369,7 +1363,7 @@ impl App {
                 crate::diagnostics::record_with("text_held", "showing a reply", &format!("Text waited {:.1} s to be shown.", held / 1000.0), serde_json::json!({ "model": model }));
             }
         }
-        if finished || run.saved.elapsed() > CHECKPOINT {
+        if finished || run.saved.elapsed() > CHECKPOINT.max(store::write_cost() * 20) {
             run.saved = Instant::now();
             conv.updated_at = store::now_ms();
             conv.save();
@@ -1532,10 +1526,18 @@ impl eframe::App for App {
         store::flush();
     }
 
-    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         // The self-portrait of a file held over the window: nothing is really dragged.
         if self.staged("drop") {
             raw_input.hovered_files = vec![egui::HoveredFile { path: Some("project.zip".into()), ..Default::default() }];
+        }
+        // `select-300-200-600-260`: a drag between two points, then Ctrl+C. What it copies is printed.
+        if let Some(shot) = self.shot.as_ref() {
+            let points: Vec<f32> = shot.state.split(',').find_map(|token| token.strip_prefix("select-")).into_iter().flat_map(|at| at.split('-')).filter_map(|n| n.parse().ok()).collect();
+            if let [x1, y1, x2, y2] = points[..] {
+                ctx.add_plugin(selection::Told);
+                selection::replay(raw_input, shot.started.elapsed(), egui::pos2(x1, y1), egui::pos2(x2, y2));
+            }
         }
         // `up-600`: the wheel is turned once, that many points back through the transcript.
         if let Some(shot) = self.shot.as_mut().filter(|shot| !shot.scrolled && shot.started.elapsed() > Duration::from_millis(400)) {
@@ -1628,6 +1630,7 @@ impl eframe::App for App {
             titlebar::show(&ctx);
         }
         titlebar::edges(&ctx);
+        selection::round(&ctx);
         self.take_shot(&ctx);
         // `APIM_PERF=4`: every frame that took the app longer than that many milliseconds to draw, on stderr.
         let took = frame_started.elapsed().as_secs_f64() * 1000.0;

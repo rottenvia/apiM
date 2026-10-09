@@ -128,7 +128,8 @@ fn tool_calls(args: &[String]) {
     }
 }
 
-/// `apim --ask [--auto] [--dir FOLDER] question`: one reply in the terminal, no window.
+/// `apim --ask [--auto] [--dir FOLDER] [--note TEXT] [--think] question`: one reply in the terminal, no window.
+/// `--note` is handed to the reply after its first step, as a "btw" typed while it works; `--think` prints its thinking.
 /// The smoke test for the whole agent path, and handy in scripts.
 fn headless(args: &[String]) {
     // A release build has no console of its own (so no black window flashes when the
@@ -144,6 +145,7 @@ fn headless(args: &[String]) {
     let mut settings = store::Settings::load();
     let mut dir = std::env::temp_dir().join("apim-ask");
     let mut words = Vec::new();
+    let (mut note, mut think) = (None, false);
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -151,6 +153,8 @@ fn headless(args: &[String]) {
             "--dir" => dir = it.next().map(Into::into).unwrap_or(dir),
             "--model" => settings.model = it.next().cloned().unwrap_or_default(),
             "--effort" => settings.effort = it.next().cloned().unwrap_or_default(),
+            "--note" => note = it.next().cloned(),
+            "--think" => think = true,
             _ => words.push(a.clone()),
         }
     }
@@ -167,14 +171,22 @@ fn headless(args: &[String]) {
         conv_id: store::new_id(),
         ..Default::default()
     };
+    let notes = request.notes.clone();
     let rt = runtime();
     rt.spawn(agent::run(request, agent::Emitter::new(tx, || {}), Arc::new(tools::exec::Procs::default())));
     for event in rx {
         use agent::Event::*;
         match event {
             Content(t) => print!("{t}"),
+            Reasoning(t) if think => print!("{}", t.replace('\n', "\n  ~ ")),
             ToolStart(t) => println!("\n> {} {}", t.name, t.args.chars().take(200).collect::<String>()),
-            ToolDone { ok, summary, .. } => println!("  {} {summary}", if ok { "ok" } else { "FAILED" }),
+            ToolDone { ok, summary, .. } => {
+                println!("  {} {summary}", if ok { "ok" } else { "FAILED" });
+                if let Some(note) = note.take() {
+                    println!("\n[note passed: {note}]");
+                    notes.lock().unwrap().push(note);
+                }
+            }
             WebSearch(_) => {}
             // Nobody is here to click: decline, and the model is told so.
             Approval { command, reply, .. } => {
@@ -196,7 +208,7 @@ fn headless(args: &[String]) {
                 println!("\n[error: {e}]");
                 break;
             }
-            Status(_) | Reasoning(_) | ToolDraft { .. } | NoteRead { .. } | State(_) | Context(_) | Checkpoint(_) | ToolProgress { .. } | Skill { .. } | Groups(_) => {}
+            Status(_) | Reasoning(_) | ToolDraft { .. } | State(_) | Context(_) | Checkpoint(_) | ToolProgress { .. } | Skill { .. } | Groups(_) => {}
         }
     }
 }

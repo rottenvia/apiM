@@ -35,7 +35,7 @@ The same things as the web app, with the same look:
 - Tools on demand and a catalog of skills, both described below: a request carries about a third of what it did, and plugins can be added, by you or by the assistant, to one chat or to all
 - A problem report (Settings, Reports) that sorts what went wrong by likely cause: the app first (crashes, frozen frames), then this PC, the provider, and a model's slips only when the same one repeats
 - A theme wall of its own: deep, tinted grounds with one vivid accent each, and the editor classics on darker grounds than the web's
-- A terminal mode: `apim --ask "your question"` (add `--auto` to let it run commands, `--dir FOLDER` to pick the folder)
+- A terminal mode: `apim --ask "your question"` (add `--auto` to let it run commands, `--dir FOLDER` to pick the folder, `--note "text"` to hand the reply a "btw" after its first step, `--think` to print its thinking)
 
 The browser tool drives a Chromium-family browser already on the PC (Edge, Chrome, Chromium, Brave or Thorium, or the one `APIM_BROWSER_PATH` names) with a throwaway profile. Nothing is bundled or downloaded.
 
@@ -48,6 +48,20 @@ The assistant runs on your own computer, and it is told so. It works at three de
 - **Asking the system.** `run_command` runs the system's own looking tools (`tasklist`, `systeminfo`, `wevtutil qe`, `reg query`, `sc query` and others; their changing forms are refused) and, on Windows, PowerShell. PowerShell's text is read first: while every command in it only looks (Get, Select, Where, Sort, Format, Measure, Test and their short names) it runs as any other command; text that could change the computer asks you in every mode, "Run automatically" included. That reading is a word list, there to catch a change made in passing; it does not hold a program the assistant writes and runs, which was always free to do what you can do.
 - **Approval.** With "Ask me first" you allow each folder outside the workspace before it is looked into ("Look in this folder?", once or for the chat) and each command. With "Run automatically" looking does not ask.
 - **Closed places.** Folders and files that keep sign-ins and keys (SSH and cloud keys, browser profiles, the system's credential stores, `.env` files, this app's own settings) are not read by a file tool or named in a PowerShell command, in any mode: what a tool reads goes to the model's provider.
+
+## What a request carries
+
+Every round of a reply sends the whole conversation again, so what stays in it is paid for every round. Three things kept a long chat far bigger than its work (measured on a real one: 1.7 million characters a round):
+
+- **The same file read again.** A model that asks for one big file every round got its text every round, 400,000 characters each time. A call asked again whose answer is still in the conversation, byte for byte, now gets one line pointing at it (`compact::repeat_of`). The earlier copy stays where it is, so the start of the request does not move and the provider's cache of it holds. Once that copy has been collapsed as old, the file is read out again.
+- **Old pastes.** A log pasted five questions ago rode whole on every round of every later reply. An earlier message of yours over 16,000 characters now goes out as its first and last 8,000, with a line saying so. The newest earlier message and the one being answered are never cut. The chat itself keeps everything.
+- **Notes to a running task** (`btw …`, `/btw`). The note took the request's place in the reminder that ends every round, so a question asked in passing was read as the task and answered again each round. The reminder now keeps the request and only points at the notes; the note itself says to answer once and go on. A note shows in the chat at once, as a quiet line above the reply: the card that came and went above the message box is gone.
+
+And two that cost disk, not tokens. An unfinished reply keeps its transcript so Resume can carry on: it held every clip sent with it (a 40 MB video, written again with every save), and replies that could no longer be resumed kept theirs for good. A clip is now left out once it has been sent, and sending a message drops the transcripts of every earlier reply. A reply in progress is saved every five seconds, or twenty times as long as the last save took, whichever is longer: a chat of hundreds of megabytes was written out whole every five seconds.
+
+A picture a tool shows the model (`view_image`, a screenshot) rides on the next request and no other. It used to be cut from that one too, with every picture that had "already ridden", so the model was never sent it.
+
+A plan with every step done is cleared when the next message is sent: it stood over the new reply as if it were its plan, and was sent to the model with it.
 
 ## Checking the tools
 
@@ -101,6 +115,10 @@ Claude's skills are folders with a `SKILL.md`: a name, when to use it, then the 
 
 What saves tokens, in order: fewer tools sent (above), then writing less code (Least Code), then fewer words (Terse). A style plugin alone could only shorten the 52 tokens of that "hi".
 
+## Selecting and copying
+
+Text in a reply, your own messages, the notices between steps, the "Context compacted" line and the words of a step row can be selected with the mouse and copied; a click on a step row's words still opens the row. A selection has rounded corners and its letters keep their colour (`ui/selection.rs`: egui draws square boxes and inks the letters in a border's grey). One limit is egui's: a selection is dropped when its first or last line scrolls out of view, because rows that do not show are not laid out.
+
 ## Not here yet
 
 - GitHub sign-in through the browser (the token field works)
@@ -148,6 +166,6 @@ Three things are written to the problem report so that slowness nobody was measu
 
 ## Checking the look without touching the window
 
-`APIM_SHOT=out.png` makes the program draw one state off screen, save a picture of it and quit. `APIM_SHOT_STATE` names the state as a comma-separated list (`settings`, `tab4`, `wait-row`, `stalled`, `plugins`, `plugin-search` with `APIM_SHOT_QUERY`, `plugin-add`, `ask-skill`, `ask-look`, `theme-midnight`, `no-sidebar`, `up-330` to turn the wheel back that many points, `maximized,f11` for full screen, and more in `ui/mod.rs`), `APIM_SHOT_CHAT` picks the chat by a part of its title, and `APIM_SHOT_SIZE=1400x900` sets the window.
+`APIM_SHOT=out.png` makes the program draw one state off screen, save a picture of it and quit. `APIM_SHOT_STATE` names the state as a comma-separated list (`settings`, `tab4`, `wait-row`, `stalled`, `plugins`, `plugin-search` with `APIM_SHOT_QUERY`, `plugin-add`, `ask-skill`, `ask-look`, `btw`, `theme-midnight`, `no-sidebar`, `up-330` to turn the wheel back that many points, `select-300-200-600-260` to drag between two points and press Ctrl+C (what it copies is printed, and kept from the real clipboard), `maximized,f11` for full screen, and more in `ui/mod.rs`), `APIM_SHOT_CHAT` picks the chat by a part of its title, and `APIM_SHOT_SIZE=1400x900` sets the window.
 
 `APIM_SHOT_STATE=send` with `APIM_SHOT_DRAFT="..."` really sends that message and takes the picture when the reply has ended. Point `APIM_DATA_DIR` at a spare folder first, so the chat it makes is not one of yours.
