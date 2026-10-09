@@ -70,10 +70,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> bool {
         let mcp = pending.mcp;
         // A skill on its way in (`tools::skills`): what is shown is where it is from and what the check found.
         let skill = pending.key.starts_with("skill-");
+        // A look outside the chat's folder (`tools::files::may_look`): what is shown is the folder.
+        let look = pending.key.starts_with("look:");
         card(
             ui,
-            if skill { icons::PLUGINS } else { icons::TERMINAL },
-            if skill { "Use this skill?" } else if mcp { "Call this MCP tool?" } else { "Run this command?" },
+            if skill { icons::PLUGINS } else if look { icons::FOLDER } else { icons::TERMINAL },
+            if skill { "Use this skill?" } else if look { "Look in this folder?" } else if mcp { "Call this MCP tool?" } else { "Run this command?" },
             &pending.reason,
             |ui| {
                 ui.add_space(8.0);
@@ -93,7 +95,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> bool {
                     egui::ScrollArea::horizontal().id_salt("command").show(ui, |ui| {
                         let mut job = egui::text::LayoutJob::default();
                         let format = |colour| egui::TextFormat { font_id: theme::mono(12.0), color: colour, line_height: Some(18.0), ..Default::default() };
-                        if !mcp {
+                        if !mcp && !look {
                             job.append("$ ", 0.0, format(p.muted));
                         }
                         job.append(&command.replace('\n', " "), 0.0, format(p.text2));
@@ -102,7 +104,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> bool {
                 });
             },
             |ui| {
-                if button(ui, if skill { "Use it" } else { "Run" }, 13.0, W::Medium, 12.0, Color32::WHITE, p.accent, p.accent_light, Color32::TRANSPARENT, true).clicked() {
+                if button(ui, if skill { "Use it" } else if look { "Allow" } else { "Run" }, 13.0, W::Medium, 12.0, Color32::WHITE, p.accent, p.accent_light, Color32::TRANSPARENT, true).clicked() {
                     verdict = Some((true, false));
                 }
                 let skip = button(ui, "Skip", 13.0, W::Medium, 12.0, p.text2, Color32::TRANSPARENT, p.hover, p.border, true);
@@ -118,7 +120,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> bool {
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let always = button(ui, "Always allow this", 12.0, W::Regular, 10.0, p.muted, Color32::TRANSPARENT, Color32::TRANSPARENT, Color32::TRANSPARENT, true);
-                    if always.on_hover_text(format!("Run this, and don't ask again for \"{command}\" in this chat")).clicked() {
+                    if always.on_hover_text(if look { format!("Allow it, and don't ask again for {command} in this chat") } else { format!("Run this, and don't ask again for \"{command}\" in this chat") }).clicked() {
                         verdict = Some((true, true));
                     }
                 });

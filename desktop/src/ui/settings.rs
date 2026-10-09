@@ -737,11 +737,11 @@ fn safety(app: &mut App, ui: &mut Ui) {
     form::helper(ui, &[Seg::T("When the assistant writes code, it can run it to check whether it works — and fix its own mistakes from the error.")]);
     ui.add_space(10.0);
     let auto = s.approval == Approval::Auto;
-    if form::option_item(ui, !auto, "Ask me first", if auto { "" } else { "Recommended" }, "You see each command and click Run or Skip before anything happens.").clicked() {
+    if form::option_item(ui, !auto, "Ask me first", if auto { "" } else { "Recommended" }, "You see each command, and each folder it looks into outside the chat's own, and click Run or Skip before anything happens.").clicked() {
         s.approval = Approval::Manual;
     }
     ui.add_space(6.0);
-    if form::option_item(ui, auto, "Run automatically", "", "Faster, and closer to how Arena feels. Nothing pauses to ask.").clicked() {
+    if form::option_item(ui, auto, "Run automatically", "", "Faster, and closer to how Arena feels. Only a system command that would change this computer still asks.").clicked() {
         s.approval = Approval::Auto;
     }
     if auto {
@@ -755,7 +755,7 @@ fn safety(app: &mut App, ui: &mut Ui) {
                 });
                 form::para(
                     ui,
-                    "Code the assistant writes will run on this computer without asking, and so will a program it builds or downloads into the chat's folder. It can start interpreters and those programs, never a shell, and each command is stopped after 30 seconds — but a program it runs has the same access to your files that you do. Keep a restore point.",
+                    "Code the assistant writes will run on this computer without asking, and so will a program it builds or downloads into the chat's folder. It can read files anywhere on this computer, except the places that keep sign-ins and keys, and run system commands that only look; one that would change or delete something still asks. Each command is stopped after a time limit — but a program it runs has the same access to your files that you do. Keep a restore point.",
                     12.0,
                     16.0,
                     W::Regular,

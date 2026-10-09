@@ -39,6 +39,16 @@ The same things as the web app, with the same look:
 
 The browser tool drives a Chromium-family browser already on the PC (Edge, Chrome, Chromium, Brave or Thorium, or the one `APIM_BROWSER_PATH` names) with a throwaway profile. Nothing is bundled or downloaded.
 
+## The computer, not only the chat's folder
+
+The assistant runs on your own computer, and it is told so. It works at three depths: its workspace (the chat's folder, where everything it creates or changes goes), the computer around it, which it can look at, and the Linux sandbox when one is set up. Asked about a crash, a slow start or a setting, it is to investigate (read the logs and crash dumps, ask the event log, check versions and what is running) and to turn to you only for what only you can do. Before this it answered such a question with a list of steps for you, because "it could not see your machine".
+
+- **What it is told about the computer** (`src/machine.rs`), read once when the app starts and sent with every request: the system and its build, the home folder and where programs keep their data, which of the usual programs are installed, the workspace's path, today's date, and how approvals are set. No chat starts by finding these out.
+- **Looking at files.** `list_files`, `read_file` and `read_files` take a path written in full (`C:\...`, `~/...`, `%LOCALAPPDATA%\...`). Outside the workspace a folder is listed one level at a time, newest files first. Writing, editing, moving and deleting stay inside the workspace.
+- **Asking the system.** `run_command` runs the system's own looking tools (`tasklist`, `systeminfo`, `wevtutil qe`, `reg query`, `sc query` and others; their changing forms are refused) and, on Windows, PowerShell. PowerShell's text is read first: while every command in it only looks (Get, Select, Where, Sort, Format, Measure, Test and their short names) it runs as any other command; text that could change the computer asks you in every mode, "Run automatically" included. That reading is a word list, there to catch a change made in passing; it does not hold a program the assistant writes and runs, which was always free to do what you can do.
+- **Approval.** With "Ask me first" you allow each folder outside the workspace before it is looked into ("Look in this folder?", once or for the chat) and each command. With "Run automatically" looking does not ask.
+- **Closed places.** Folders and files that keep sign-ins and keys (SSH and cloud keys, browser profiles, the system's credential stores, `.env` files, this app's own settings) are not read by a file tool or named in a PowerShell command, in any mode: what a tool reads goes to the model's provider.
+
 ## Checking the tools
 
 `apim --tools calls.json --auto --dir FOLDER` runs a list of tool calls (`[{"name": "edit_file", "args": {...}}, ...]`) as the agent would make them and prints what each hands back: no model in between, so a tool is judged on what it does. `APIM_TOOL_CHARS` sets how much of each result is shown. All 59 were run this way on 2026-10-09; what that changed:
@@ -48,7 +58,10 @@ The browser tool drives a Chromium-family browser already on the PC (Edge, Chrom
 - The loop breaker stopped the plain fix-and-rerun loop (edit, run the checker, edit, run it again) as "the same failing call three times". A command run again after the workspace changed is a new try.
 - `run_tests` finds tests kept beside the code (`test_x.py`), runs pytest as a module, puts a test's name behind `-k`, and says how to get pytest when it is missing.
 - Taken as meant: a process id without its `p`, a command line in one string, `update_plan` with `step`/`status`/`completed`, `query_data` with a bare condition (answered with the JSONPath that works) or a count with no query.
-- "Run automatically" asks about nothing: before, a program built or downloaded into the chat's folder still asked.
+- "Run automatically" does not ask about a program built or downloaded into the chat's folder (it did). The one thing it still asks about is a PowerShell command that could change the computer.
+- `update_plan` refused a step called done with no word on how it was checked, every time; a model that sent the same call three times had its finished run stopped by the loop breaker. It is asked once, and the second time the step is taken as done and wears "not said how it was checked". What was refused now comes first in the result, not after the whole plan. `finish` asks once in the same way.
+- `delete_file` takes a folder inside the workspace, with everything in it.
+- The check that marks a reply claiming work no tool did took "drop the dump here and I read it" for such a claim: an offer or a condition is no longer one. Its retry asks for a short correction, not the reply written out a second time.
 - The request restated at the end of every round is marked as the app's reminder: a model took it for a new message and answered it each round.
 
 Not run: `sandbox_run` and `sandbox_screenshot` (they need the WSL sandbox), `screenshot_window` on a real window, `web_search` (no key in the test folder), the GitHub tools against a real repository.
@@ -135,6 +148,6 @@ Three things are written to the problem report so that slowness nobody was measu
 
 ## Checking the look without touching the window
 
-`APIM_SHOT=out.png` makes the program draw one state off screen, save a picture of it and quit. `APIM_SHOT_STATE` names the state as a comma-separated list (`settings`, `tab4`, `wait-row`, `stalled`, `plugins`, `plugin-search` with `APIM_SHOT_QUERY`, `plugin-add`, `ask-skill`, `theme-midnight`, `no-sidebar`, `up-330` to turn the wheel back that many points, `maximized,f11` for full screen, and more in `ui/mod.rs`), `APIM_SHOT_CHAT` picks the chat by a part of its title, and `APIM_SHOT_SIZE=1400x900` sets the window.
+`APIM_SHOT=out.png` makes the program draw one state off screen, save a picture of it and quit. `APIM_SHOT_STATE` names the state as a comma-separated list (`settings`, `tab4`, `wait-row`, `stalled`, `plugins`, `plugin-search` with `APIM_SHOT_QUERY`, `plugin-add`, `ask-skill`, `ask-look`, `theme-midnight`, `no-sidebar`, `up-330` to turn the wheel back that many points, `maximized,f11` for full screen, and more in `ui/mod.rs`), `APIM_SHOT_CHAT` picks the chat by a part of its title, and `APIM_SHOT_SIZE=1400x900` sets the window.
 
 `APIM_SHOT_STATE=send` with `APIM_SHOT_DRAFT="..."` really sends that message and takes the picture when the reply has ended. Point `APIM_DATA_DIR` at a spare folder first, so the chat it makes is not one of yours.

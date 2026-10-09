@@ -62,7 +62,7 @@ const KEEP_RECENT_RESULTS: usize = 6;
 
 // What the model is told on the paths below. The wording is the web app's.
 const CARRY_ON: &str = "Continue from exactly where you stopped — do not repeat anything you already wrote, do not restate the plan, and do not apologise. Carry straight on from the last character.";
-const CLAIM_RETRY: &str = "Your reply above describes tools running and reporting results — edits applied, a build coming back green, checks passing — but those tools were not called in this reply. The user reads that as work that happened. Finish this reply one of two ways: either actually call the tools now and report exactly what comes back, or rewrite the reply to state plainly what was and was not done. Do not describe output you do not have.";
+const CLAIM_RETRY: &str = "Your reply above describes tools running and reporting results — edits applied, a build coming back green, checks passing — but those tools were not called in this reply. The user reads that as work that happened. Finish this reply one of two ways: either actually call the tools now and report exactly what comes back, or add a short correction saying plainly what was and was not done. The user still sees the reply above, so do not write it out again. Do not describe output you do not have.";
 const REOPEN_BLOCKED: &str = "A blocked step means something OUTSIDE your control is in the way — a failing command, a missing file, a decision only the user can make. It is not a way to decline the task. This is ordinary creative and technical work on the user's own machine; there is nothing here to refuse. The blocked steps have been reopened. Do them now: pick a concrete approach and start with the first tool call. If your first idea for an approach seems unsuitable, use a different approach — do not stop. Only a real external obstacle may block a step, and even then ask_user first.";
 const BLOCKED_UNTRIED: &str = "You marked work blocked without attempting any of it. Try the steps first. If something genuinely cannot be done — a missing key, a decision only the user can make — use ask_user to ask for it directly rather than stopping.";
 const NARRATED: &str = "\n\nYou just described the next action instead of doing it. Do not narrate, plan aloud, or repeat what you already said — call the tool in this response.";
@@ -552,6 +552,8 @@ async fn run_inner(mut req: Request, emit: &Emitter, procs: Arc<Procs>) -> Resul
     let github = crate::github::read_connection(&tools::github::ws(&ctx));
     let github_token = github.as_ref().map(|_| matches!(crate::github::resolve_token(&s.github_token), Ok(Some(_))));
     let mut system = prompt::system(&plugins::legacy_prompt(&every, &plugins_on), web_search, native_vision, git_repo, github.as_ref());
+    // The computer this runs on, so no chat starts by finding it out.
+    system.push_str(&crate::machine::block(&req.workspace, s.approval == crate::store::Approval::Auto));
     // What earlier turns established rides in the system prompt, read fresh from the workspace's store (the web app's file).
     let findings_path = findings::store_path(&req.workspace);
     if !findings_path.exists() {
@@ -1080,7 +1082,8 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
                 // The receipt becomes the closing text, so a reply never ends on a bare tool step.
                 let args: Value = serde_json::from_str(args_text).unwrap_or_default();
                 let field = |key: &str| args[key].as_str().unwrap_or("").trim().to_string();
-                emit.send(Event::Content(format!("{}\n\nVerified: {}", field("result"), field("verified"))));
+                let checked = field("verified");
+                emit.send(Event::Content(if checked.is_empty() { field("result") } else { format!("{}\n\nVerified: {checked}", field("result")) }));
             }
             finished |= out.finish;
         }

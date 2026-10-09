@@ -121,7 +121,12 @@ pub fn check_answer_claims(answer: &str, tools_used: &[String]) -> Option<String
         return None;
     }
     let used = |tool: &str| tools_used.iter().any(|t| t == tool);
-    if !FILE_TOOLS.iter().any(|t| used(t)) && any(&FILE_CLAIMS, answer) {
+    // "Drop the dump here and I read it" offers work, it does not report any: "read" is its own past tense, so a
+    // sentence that is an offer or a condition is left out before the claims are looked for. The web lacks this:
+    // it took that sentence for a claim, had the reply written twice, and marked the second one too.
+    static OFFER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(if|once|when|then|will|would|could|can|shall|going to|want me to|let me)\b|'ll\b").unwrap());
+    let reported: String = answer.split_inclusive(['.', '!', '?', '\n']).filter(|sentence| !OFFER.is_match(sentence)).collect();
+    if !FILE_TOOLS.iter().any(|t| used(t)) && any(&FILE_CLAIMS, &reported) {
         return Some("This reply describes reading or changing files, but no file tool ran in it — nothing on disk was touched. Treat the summary above as a proposal, not a record of work done.".into());
     }
     // An "Actions taken:" block that names a tool is a claim it ran, with no verb needed.
@@ -247,6 +252,11 @@ mod tests {
 
     #[test]
     fn claims_and_refusals_match_the_web() {
+        // An offer is not a report: the reply that set this off in a real chat, and its rewrite.
+        for offer in ["Send me the dump name, and I read the dump if you drop it in this workspace.", "Drop the .dmp into this workspace and I read it with real tools then.", "I'll read the file once you attach it."] {
+            assert_eq!(check_answer_claims(offer, &[]), None, "{offer}");
+        }
+        assert!(check_answer_claims("I read the file and fixed the bug.", &[]).is_some());
         for (i, o) in cases("check_answer_claims") {
             let used: Vec<String> = i[1].as_array().unwrap().iter().map(|t| t.as_str().unwrap().to_string()).collect();
             assert_eq!(check_answer_claims(i[0].as_str().unwrap(), &used).as_deref(), o.as_str(), "{i}");

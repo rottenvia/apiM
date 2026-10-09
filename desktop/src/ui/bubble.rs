@@ -607,14 +607,27 @@ fn failure_reason(summary: &str, target: &str) -> Option<String> {
     (!why.is_empty()).then(|| why.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
+/// Rows that open on a glyph hang six pixels into the margin each side: the glyph then stands under the first
+/// letter of the text above it, and the row's tint has room around it. Kept inside, as the web keeps them, every
+/// step sat six pixels to the right of the text it belongs to.
+fn hung(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
+    let (top, width) = (ui.cursor().min, ui.available_width());
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(pos2(top.x - 6.0, top.y), vec2(width + 12.0, 0.0))).layout(egui::Layout::top_down(egui::Align::Min)));
+    child.set_width(width + 12.0);
+    add(&mut child);
+    ui.allocate_rect(Rect::from_min_max(top, pos2(top.x + width, child.min_rect().bottom())), Sense::hover());
+}
+
 /// The rows of steps under a stretch of text. `open` holds the id of the one whose detail is showing.
 fn steps(ui: &mut Ui, tools: &[&ToolEvent], env: &mut Env, open: &mut Option<String>) {
-    for (i, tool) in tools.iter().enumerate() {
-        if i > 0 {
-            ui.add_space(2.0);
+    hung(ui, |ui| {
+        for (i, tool) in tools.iter().enumerate() {
+            if i > 0 {
+                ui.add_space(2.0);
+            }
+            ui.push_id(&tool.id, |ui| step(ui, tool, env, open));
         }
-        ui.push_id(&tool.id, |ui| step(ui, tool, env, open));
-    }
+    });
     ui.add_space(4.0);
 }
 
@@ -954,10 +967,6 @@ fn pill(ui: &mut Ui, icon: Icon, text: &str, colour: Color32, chevron: Option<bo
     response
 }
 
-fn small(text: impl Into<String>, weight: W) -> egui::RichText {
-    widgets::lines(text, 11.0, 16.5, weight, p().muted)
-}
-
 /// Tokens, cost, time: the line of small print above a reply.
 fn meta_row(ui: &mut Ui, msg: &Message, env: &Env, sources_open: &mut bool) -> bool {
     let p = p();
@@ -969,6 +978,14 @@ fn meta_row(ui: &mut Ui, msg: &Message, env: &Env, sources_open: &mut bool) -> b
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
         ui.set_row_height(22.5);
+        // Every piece of small print is placed the same way: as tall as its text, centred on the row. A label the
+        // wrapping row laid out itself sat higher when it followed a piece that was not one: the dot and "stop".
+        let word = |ui: &mut Ui, text: &str, weight: W| {
+            let label = widgets::galley(ui, text, theme::font(11.0, weight), p.muted);
+            let (rect, response) = ui.allocate_exact_size(vec2(label.size().x, 16.5), Sense::hover());
+            widgets::text_at(ui, rect.left(), rect.center().y, label);
+            response
+        };
         if let Some(effort) = effort {
             pill(ui, icons::SPARKLE, effort, p.thinking, None);
         }
@@ -986,7 +1003,7 @@ fn meta_row(ui: &mut Ui, msg: &Message, env: &Env, sources_open: &mut bool) -> b
             if cached > 0 {
                 tip += &format!("\n{} of the input was cached, billed at 1/120th the rate", chat::thousands(cached));
             }
-            plain(ui, small(format!("{} tokens", chat::thousands(used)), W::Regular)).on_hover_text(tip);
+            word(ui, &format!("{} tokens", chat::thousands(used)), W::Regular).on_hover_text(tip);
         }
         // The reply's cost is the model's plus what its web searches cost (the web's `searchUsd`), the search on its own tooltip line.
         let model = msg.usage.shown_cost(&msg.model, &env.settings.custom_models, crate::provider::deepseek_off_peak()).filter(|_| used > 0);
@@ -997,7 +1014,7 @@ fn meta_row(ui: &mut Ui, msg: &Message, env: &Env, sources_open: &mut bool) -> b
             } else {
                 format!("Model: {}\nEstimated from published rates", chat::format_cost(cost))
             };
-            plain(ui, small(chat::format_cost(cost), W::Medium)).on_hover_text(tip);
+            word(ui, &chat::format_cost(cost), W::Medium).on_hover_text(tip);
         }
         let with_icon = |ui: &mut Ui, icon: Icon, text: String, tip: String| {
             // One piece as tall as its text. A row of its own stands taller than the line, and sat low on it.
@@ -1025,7 +1042,7 @@ fn meta_row(ui: &mut Ui, msg: &Message, env: &Env, sources_open: &mut bool) -> b
         let (continued, stalls) = (count("continuedOutput") + count("continuedConnection"), count("thinkOnlyStalls"));
         if msg.finish.is_some() || continued > 0 || stalls >= 2 {
             // The dot is a piece of its own, midway between its neighbours: written into the word it leaned on it.
-            plain(ui, small("·", W::Regular));
+            word(ui, "·", W::Regular);
             let mut text = msg.finish.as_deref().unwrap_or("cut").to_string();
             if continued > 0 {
                 text += &format!(" +{continued} cont");
@@ -1033,7 +1050,7 @@ fn meta_row(ui: &mut Ui, msg: &Message, env: &Env, sources_open: &mut bool) -> b
             if stalls >= 2 {
                 text += &format!(" · thought {stalls}×, empty");
             }
-            plain(ui, small(text, W::Regular)).on_hover_text(format!(
+            word(ui, &text, W::Regular).on_hover_text(format!(
                 "Final finish_reason: {}\nOutput-limit continuations: {}\nConnection-cut continuations: {}",
                 msg.finish.as_deref().unwrap_or("none (stream ended mid-content)"),
                 count("continuedOutput"),
@@ -1430,7 +1447,7 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
             let top = ui.cursor().top();
             ui.push_id(i, |ui| {
                 if let Some((thought, live)) = think {
-                    think_row(ui, thought, *live, env);
+                    hung(ui, |ui| think_row(ui, thought, *live, env));
                 } else if let Some(notice) = notice {
                     notice_line(ui, notice);
                 } else {

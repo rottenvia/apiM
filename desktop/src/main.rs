@@ -26,6 +26,7 @@ mod refusal;
 mod run;
 mod sandbox;
 mod search;
+mod machine;
 mod skillhub;
 mod search_usage;
 mod slash;

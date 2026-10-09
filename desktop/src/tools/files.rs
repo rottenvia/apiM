@@ -11,6 +11,8 @@ const IGNORED: &[&str] = &[".history", ".snapshots", ".packages", ".analysis", "
 /// Build output, hidden only at the top of the workspace: a `build` folder deeper in is as likely to be source.
 const IGNORED_AT_ROOT: &[&str] = &["dist", "build"];
 const MAX_WALK: usize = 50_000;
+/// The largest file read as text.
+const MAX_TEXT: u64 = 64 << 20;
 const MAX_LISTED: usize = 2_000;
 use crate::snapshots::MAX_HISTORY_VERSIONS;
 
@@ -55,6 +57,108 @@ pub fn resolve(root: &Path, rel: &str) -> Result<PathBuf, String> {
     Ok(out)
 }
 
+/// `~`, `%NAME%` and `$env:NAME` at the start of a path, as a person types them.
+pub fn expand(path: &str) -> String {
+    static NAMED: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| Regex::new(r"^(?:%([A-Za-z_()0-9]+)%|\$env:([A-Za-z_()0-9]+))").unwrap());
+    let path = path.trim();
+    if let Some(rest) = path.strip_prefix('~').filter(|rest| rest.is_empty() || rest.starts_with(['/', '\\'])) {
+        return format!("{}{rest}", std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).unwrap_or_default());
+    }
+    let Some(found) = NAMED.captures(path) else { return path.to_string() };
+    let name = found.get(1).or(found.get(2)).map_or("", |m| m.as_str());
+    std::env::var(name).map_or_else(|_| path.to_string(), |value| format!("{value}{}", &path[found[0].len()..]))
+}
+
+/// Places that keep sign-ins and keys. They are not read for a model in any approval mode: what a tool reads goes
+/// to the model's provider, and a page the model was shown can ask it to go and fetch one.
+// ponytail: the common places, matched on the path alone. A program the model writes and runs is not held by it.
+const CLOSED: &[&str] = &["/.ssh", "/.gnupg", "/.aws", "/user data", "/firefox/profiles", "/microsoft/credentials", "/microsoft/protect", "/system32/config"];
+const CLOSED_FILES: &[&str] = &[".env", ".netrc", "_netrc", ".git-credentials", ".npmrc", ".pypirc"];
+pub const CLOSED_WHY: &str = "that place keeps sign-ins or keys, and apiM does not read it for a model. If the task needs one file from it, ask the user to copy that file into the workspace.";
+
+/// The same search over a command's text.
+pub fn closed_text(text: &str) -> bool {
+    let text = text.replace('\\', "/").to_lowercase();
+    CLOSED.iter().any(|part| text.contains(part)) || CLOSED_FILES.iter().any(|file| text.contains(&format!("/{file}")))
+}
+
+fn closed(path: &Path) -> bool {
+    let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let own = [crate::store::config_dir(), crate::store::data_dir()].iter().any(|dir| path == dir.join("settings.json"));
+    own || closed_text(&format!("{}/", path.display())) || CLOSED_FILES.iter().any(|file| name == *file || name.starts_with(&format!("{file}."))) || name.ends_with(".kdbx")
+}
+
+/// A path to look at: inside the workspace as `resolve` has it, or anywhere on the computer when written in full.
+/// Writing stays with `resolve`: nothing outside the workspace is changed by a file tool.
+pub fn resolve_look(root: &Path, rel: &str) -> Result<PathBuf, String> {
+    let full = expand(rel).replace('\\', "/");
+    let given = Path::new(&full);
+    if !given.is_absolute() || given.starts_with(root) {
+        return resolve(root, &full);
+    }
+    if given.components().any(|part| matches!(part, Component::ParentDir)) {
+        return Err(format!("Write the path in full, without `..`: {rel}"));
+    }
+    // A link must not lead into a closed place either.
+    if closed(given) || given.canonicalize().is_ok_and(|real| closed(&real)) {
+        return Err(format!("{rel} is not read: {CLOSED_WHY}"));
+    }
+    Ok(given.to_path_buf())
+}
+
+/// With "Ask me first", the user allows each folder outside the workspace before it is looked into: once, or for the chat.
+pub async fn may_look(ctx: &Ctx, args: &Value) -> Result<(), String> {
+    if ctx.settings.approval != crate::store::Approval::Manual {
+        return Ok(());
+    }
+    let mut allowed: Vec<PathBuf> = Vec::new();
+    for rel in std::iter::once(str_arg(args, "path").to_string()).chain(super::list_arg(args, "paths")) {
+        let Some(path) = resolve_look(&ctx.root, &rel).ok().filter(|path| !path.starts_with(&ctx.root)) else { continue };
+        let folder = if path.is_dir() { path } else { path.parent().map_or(path.clone(), Path::to_path_buf) };
+        if allowed.contains(&folder) {
+            continue;
+        }
+        let shown = folder.display().to_string().replace('/', std::path::MAIN_SEPARATOR_STR);
+        if !ctx.emit.approve_keyed(&shown, "To look at files outside this chat's folder. Nothing there is changed.", &format!("look:{}", shown.to_lowercase())).await {
+            return Err(format!("The user did not allow looking in {shown}. Do not retry it: say what you wanted from there, or ask them for the file."));
+        }
+        allowed.push(folder);
+    }
+    Ok(())
+}
+
+/// Entries shown of one folder outside the workspace.
+const MAX_OUTSIDE: usize = 400;
+
+/// One folder outside the workspace, a level at a time: its folders, then its files with their size and when they
+/// last changed, newest first. The newest log or crash dump is what a look outside is usually after.
+fn list_outside(dir: &Path) -> Output {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Output::fail(format!("Cannot list {}: there is no such folder, or it may not be read.", dir.display())) };
+    let (mut folders, mut files) = (Vec::new(), Vec::new());
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        match entry.metadata() {
+            Ok(meta) if meta.is_dir() => folders.push(name),
+            Ok(meta) => files.push((meta.modified().ok(), name, meta.len())),
+            Err(_) => {}
+        }
+    }
+    folders.sort_by_key(|name| name.to_lowercase());
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut text = format!("{} (outside the workspace: this folder only, newest files first)\n", dir.display());
+    text.extend(folders.iter().take(MAX_OUTSIDE).map(|name| format!("{name}/\n")));
+    for (when, name, size) in files.iter().take(MAX_OUTSIDE.saturating_sub(folders.len())) {
+        let when = when.map_or(String::new(), |at| chrono::DateTime::<chrono::Local>::from(at).format(", %Y-%m-%d %H:%M").to_string());
+        text.push_str(&format!("{name}  ({}{when})\n", human(*size)));
+    }
+    match folders.len() + files.len() {
+        0 => text.push_str("Nothing in it.\n"),
+        total if total > MAX_OUTSIDE => text.push_str(&format!("… and {} more.\n", total - MAX_OUTSIDE)),
+        _ => {}
+    }
+    Output::ok(text, format!("{} folders, {} files", folders.len(), files.len()))
+}
+
 fn rel_of(root: &Path, path: &Path) -> String {
     path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/")
 }
@@ -87,10 +191,13 @@ fn human(size: u64) -> String {
 }
 
 pub fn list_files(ctx: &Ctx, args: &Value) -> Output {
-    let dir = match resolve(&ctx.root, str_arg(args, "path")) {
+    let dir = match resolve_look(&ctx.root, str_arg(args, "path")) {
         Ok(d) => d,
         Err(e) => return Output::fail(e),
     };
+    if !dir.starts_with(&ctx.root) {
+        return list_outside(&dir);
+    }
     let files = walk(&ctx.root, &dir);
     if files.is_empty() {
         return Output::ok("No files here yet.", "0 files");
@@ -104,6 +211,10 @@ pub fn list_files(ctx: &Ctx, args: &Value) -> Output {
 
 /// Reads a text file. Binary files are refused with their size, UTF-16 is decoded.
 pub fn read_text(path: &Path) -> Result<String, String> {
+    // A crash dump or a disk image is not text, and reading one whole to find that out would fill the memory.
+    if let Some(size) = path.metadata().ok().map(|meta| meta.len()).filter(|size| *size > MAX_TEXT) {
+        return Err(format!("{} is {}: too large to read as text. Take the part you need with a command, or inspect_binary if it is a program.", path.display(), human(size)));
+    }
     let bytes = std::fs::read(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
     if bytes.starts_with(&[0xFF, 0xFE]) {
         let units: Vec<u16> = bytes[2..].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
@@ -158,7 +269,7 @@ fn render_read(rel: &str, text: &str, start: Option<u64>, end: Option<u64>, numb
 
 pub fn read_file(ctx: &Ctx, args: &Value) -> Output {
     let rel = str_arg(args, "path");
-    let path = match resolve(&ctx.root, rel) {
+    let path = match resolve_look(&ctx.root, rel) {
         Ok(p) => p,
         Err(e) => return Output::fail(e),
     };
@@ -221,7 +332,7 @@ pub fn read_files(ctx: &Ctx, args: &Value) -> Output {
     let mut budget = ctx.read_chars;
     let mut read = 0;
     for rel in &paths {
-        let piece = match resolve(&ctx.root, rel).and_then(|p| read_text(&p)) {
+        let piece = match resolve_look(&ctx.root, rel).and_then(|p| read_text(&p)) {
             Ok(text) => {
                 read += 1;
                 render_read(rel, &text, None, None, false, budget.max(2_000))
@@ -320,6 +431,7 @@ pub fn delete_file(ctx: &Ctx, args: &Value) -> Output {
     let rel = str_arg(args, "path");
     let path = match resolve(&ctx.root, rel) {
         Ok(p) if p.is_file() => p,
+        Ok(p) if p.is_dir() && p != ctx.root => return delete_folder(ctx, rel, &p),
         Ok(_) => return Output::fail(format!("{rel} is not a file in the workspace.")),
         Err(e) => return Output::fail(e),
     };
@@ -329,6 +441,25 @@ pub fn delete_file(ctx: &Ctx, args: &Value) -> Output {
     backup(ctx, rel, &path);
     match std::fs::remove_file(&path) {
         Ok(()) => Output::ok(format!("Deleted {rel}. undo_file brings it back."), format!("Deleted {rel}")).changed(rel),
+        Err(e) => Output::fail(format!("Cannot delete {rel}: {e}")),
+    }
+}
+
+/// A folder goes with everything in it: a model cleaning up after itself otherwise deleted file by file, or
+/// reached for a script to do it. Each file is kept first, so undo_file brings any of them back.
+fn delete_folder(ctx: &Ctx, rel: &str, dir: &Path) -> Output {
+    let inside = walk(&ctx.root, dir);
+    if inside.len() > 500 {
+        return Output::fail(format!("{rel} holds {} files: too many to delete in one step. Delete the parts of it you made, by name.", inside.len()));
+    }
+    if let Some(e) = std::iter::once(rel).chain(inside.iter().map(|(file, _)| file.as_str())).find_map(|file| protected(file).err()) {
+        return Output::fail(e);
+    }
+    for (file, _) in &inside {
+        backup(ctx, file, &ctx.root.join(file));
+    }
+    match std::fs::remove_dir_all(dir) {
+        Ok(()) => Output::ok(format!("Deleted the folder {rel} with the {} file(s) in it. undo_file brings a file back by its path.", inside.len()), format!("Deleted {}/", rel.trim_end_matches(['/', '\\']))).changed(rel),
         Err(e) => Output::fail(format!("Cannot delete {rel}: {e}")),
     }
 }
@@ -831,6 +962,52 @@ mod tests {
         let mut s = EditSpec { include_anchors: true, ..Default::default() };
         f(&mut s);
         s
+    }
+
+    #[test]
+    fn the_computer_can_be_looked_at_and_its_keys_cannot() {
+        let dir = crate::tools::scratch("look");
+        let (root, out) = (dir.join("ws"), dir.join("elsewhere"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(out.join("logs")).unwrap();
+        std::fs::write(out.join("crash.log"), "boom\n").unwrap();
+        std::fs::write(out.join(".env"), "KEY=1\n").unwrap();
+        let full = |name: &str| out.join(name).to_string_lossy().into_owned();
+        // A full path reaches outside to look; a relative one still cannot climb out, and nothing is written there.
+        assert_eq!(resolve_look(&root, &full("crash.log")).unwrap(), out.join("crash.log"));
+        assert!(resolve_look(&root, "../elsewhere/crash.log").is_err() && resolve(&root, &full("crash.log")).is_err());
+        assert!(resolve_look(&root, &full(".env")).unwrap_err().contains("keeps sign-ins or keys"));
+        assert!(closed(Path::new("C:/Users/x/.ssh/id_ed25519")) && closed(Path::new("C:/Users/x/AppData/Local/Vendor/Browser/User Data/Default/Cookies")) && !closed(Path::new("C:/Users/x/AppData/Local/Game/logs/a.log")));
+        assert!(closed_text(r"Get-Content C:\Users\x\.ssh\id_rsa") && !closed_text("Get-Process | Sort-Object CPU"));
+        unsafe { std::env::set_var("APIM_TEST_PLACE", &out) };
+        assert_eq!(Path::new(&expand("%APIM_TEST_PLACE%/crash.log")), out.join("crash.log"));
+        assert_eq!(Path::new(&expand("$env:APIM_TEST_PLACE/crash.log")), out.join("crash.log"));
+        // A folder inside the workspace is deleted whole; the workspace itself and anything outside are not.
+        std::fs::create_dir_all(root.join("gone/deep")).unwrap();
+        std::fs::write(root.join("gone/deep/a.txt"), "a").unwrap();
+        let ws = crate::tools::test_ctx(&root, crate::store::Approval::Auto);
+        let deleted = delete_file(&ws, &serde_json::json!({ "path": "gone" }));
+        assert!(deleted.ok && deleted.summary == "Deleted gone/" && !root.join("gone").exists(), "{}", deleted.text);
+        assert!(!delete_file(&ws, &serde_json::json!({ "path": "." })).ok && !delete_file(&ws, &serde_json::json!({ "path": out.to_string_lossy() })).ok && out.exists());
+        // Outside, one folder is listed at a time, folders first; and the file reads as any other.
+        let ctx = crate::tools::test_ctx(&root, crate::store::Approval::Auto);
+        let listed = list_files(&ctx, &serde_json::json!({ "path": out.to_string_lossy() }));
+        assert!(listed.ok && listed.text.contains("logs/\n") && listed.text.contains("crash.log  (5 B, 20") && listed.summary == "1 folders, 2 files", "{}", listed.text);
+        assert!(read_file(&ctx, &serde_json::json!({ "path": full("crash.log") })).text.contains("boom"));
+    }
+
+    /// With "Ask me first" a look outside waits for the user; here nobody answers, so it is declined.
+    #[tokio::test]
+    async fn a_look_outside_is_asked_about_first() {
+        let dir = crate::tools::scratch("ask");
+        let (root, out) = (dir.join("ws"), dir.join("elsewhere"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+        let outside = serde_json::json!({ "path": out.to_string_lossy() });
+        let ask = crate::tools::test_ctx(&root, crate::store::Approval::Manual);
+        assert!(may_look(&ask, &outside).await.unwrap_err().starts_with("The user did not allow looking in "));
+        assert!(may_look(&ask, &serde_json::json!({ "path": "notes.txt", "paths": ["a.rs"] })).await.is_ok());
+        assert!(may_look(&crate::tools::test_ctx(&root, crate::store::Approval::Auto), &outside).await.is_ok());
     }
 
     #[test]
