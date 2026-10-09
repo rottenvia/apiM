@@ -60,14 +60,28 @@ pub fn edges(ctx: &egui::Context) {
     }
 }
 
+/// Lays an overlay's darkness over the bar as well, in the same frame as over the rest of the window. The bar is
+/// drawn above every dialog so that it can still move and close the window; left bright, it stood out as a frame
+/// around a dimmed window. `owner` names whose darkness this is: two dialogs darken twice, as their scrims do.
+pub fn dim(ctx: &egui::Context, owner: egui::Id, dark: Color32) {
+    // No bar in full screen.
+    if dark.a() == 0 || ctx.input(|i| i.viewport().fullscreen.unwrap_or(false)) {
+        return;
+    }
+    let window = ctx.content_rect();
+    let bar = Rect::from_min_size(window.min, vec2(window.width(), HEIGHT));
+    // Painted on the one layer above the bar's; it takes no clicks, so the bar's buttons still work under it.
+    ctx.layer_painter(egui::LayerId::new(egui::Order::Debug, owner.with("bar"))).rect_filled(bar, 0.0, dark);
+}
+
 /// Draws the bar over everything else, so the window can be moved, minimised and closed while a dialog is open.
-/// `dim` is how dark that dialog made the window (0..255): the bar darkens with it.
-pub fn show(ctx: &egui::Context, dim: u8) {
+pub fn show(ctx: &egui::Context) {
     let p = p();
     let window = ctx.content_rect();
     let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
     let gripped = press_gripped(ctx);
-    egui::Area::new(egui::Id::new("titlebar")).order(egui::Order::Tooltip).fixed_pos(window.min).show(ctx, |ui| {
+    // Not faded in as egui would: for the window's first moments the bar let what is under it show through.
+    egui::Area::new(egui::Id::new("titlebar")).order(egui::Order::Tooltip).fixed_pos(window.min).fade_in(false).show(ctx, |ui| {
         let (bar, held) = ui.allocate_exact_size(vec2(window.width(), HEIGHT), Sense::click_and_drag());
         ui.painter().rect_filled(bar, 0.0, p.bg2);
         if !gripped {
@@ -119,9 +133,6 @@ pub fn show(ctx: &egui::Context, dim: u8) {
             if button.clicked() && !gripped {
                 ctx.send_viewport_cmd(command);
             }
-        }
-        if dim > 0 {
-            ui.painter().rect_filled(bar, 0.0, Color32::from_black_alpha(dim));
         }
     });
 }

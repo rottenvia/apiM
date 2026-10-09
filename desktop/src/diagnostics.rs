@@ -103,7 +103,7 @@ pub fn cause(kind: &str, subject: &str, detail: &str) -> Cause {
     let has = |words: &[&str]| words.iter().any(|word| text.contains(word));
     let starts = |words: &[&str]| words.iter().any(|word| text.starts_with(word));
     match kind {
-        "ui_error" | "ui_freeze" => Cause::App,
+        "ui_error" | "ui_freeze" | "text_held" => Cause::App,
         "api_error" => Cause::Provider,
         "run_stopped" if subject == "spending limit" => Cause::Routine,
         "unverified_claim" | "limit_hit" | "browser_blocked" | "run_stopped" => Cause::Model,
@@ -287,6 +287,7 @@ pub fn kind_label(kind: &str) -> &str {
         "run_stopped" => "Stopped early",
         "ui_error" => "Crash",
         "ui_freeze" => "Window froze",
+        "text_held" => "Text held back",
         "unverified_claim" => "Claimed work no tool did",
         other => other,
     }

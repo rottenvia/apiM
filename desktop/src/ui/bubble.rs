@@ -695,15 +695,17 @@ fn step(ui: &mut Ui, tool: &ToolEvent, env: &mut Env, open: &mut Option<String>)
     let reason = if failed { failure_reason(&tool.summary, target_text) } else { None };
     let remark = if running && !tool.summary.is_empty() {
         // A helper's progress: "round 2 · 5 tool calls · read_file, search_files".
-        Some((format!("· {}", tool.summary), p.muted, 0.45))
+        Some((tool.summary.clone(), p.muted, 0.45))
     } else if !running && !failed && wide && !tool.summary.is_empty() && (target_text.is_empty() || !tool.summary.contains(target_text)) && tool.summary != d.done {
-        Some((format!("· {}", tool.summary), p.muted, 0.45))
+        Some((tool.summary.clone(), p.muted, 0.45))
     } else {
         None
     };
     let room = (right - x - 6.0).max(0.0);
-    let remark = remark.map(|(text, colour, share)| widgets::clipped(ui, text.lines().next().unwrap_or(""), theme::font(12.0, W::Regular), colour, room * share));
-    let remark_width = remark.as_ref().map_or(0.0, |g| g.size().x + 8.0);
+    // A dot midway between the step and the remark.
+    let dot = widgets::galley(ui, "·", theme::font(12.0, W::Regular), p.muted);
+    let remark = remark.map(|(text, colour, share)| widgets::clipped(ui, text.lines().next().unwrap_or(""), theme::font(12.0, W::Regular), colour, room * share - dot.size().x - 12.0));
+    let remark_width = remark.as_ref().map_or(0.0, |g| g.size().x + dot.size().x + 12.0);
     if !target_text.is_empty() {
         x += 6.0;
         let width = (room - remark_width).max(0.0);
@@ -713,7 +715,9 @@ fn step(ui: &mut Ui, tool: &ToolEvent, env: &mut Env, open: &mut Option<String>)
         x += widgets::text_at(ui, x, row.center().y, galley);
     }
     if let Some(remark) = remark {
-        widgets::text_at(ui, x + 8.0, row.center().y, remark);
+        x += 6.0;
+        x += widgets::text_at(ui, x, row.center().y, dot) + 6.0;
+        widgets::text_at(ui, x, row.center().y, remark);
     }
     if expandable {
         let spot = pos2(row.right() - 6.0 - open_width - 6.0, row.center().y);
@@ -1018,7 +1022,9 @@ fn meta_row(ui: &mut Ui, msg: &Message, env: &Env, sources_open: &mut bool) -> b
         let count = |key: &str| ending.and_then(|e| e[key].as_u64()).unwrap_or(0);
         let (continued, stalls) = (count("continuedOutput") + count("continuedConnection"), count("thinkOnlyStalls"));
         if msg.finish.is_some() || continued > 0 || stalls >= 2 {
-            let mut text = format!("· {}", msg.finish.as_deref().unwrap_or("cut"));
+            // The dot is a piece of its own, midway between its neighbours: written into the word it leaned on it.
+            plain(ui, small("·", W::Regular));
+            let mut text = msg.finish.as_deref().unwrap_or("cut").to_string();
             if continued > 0 {
                 text += &format!(" +{continued} cont");
             }
@@ -1331,8 +1337,9 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
     if !inline_thinking {
         let reasoning = msg.reasoning();
         let thinking_now = env.live && matches!(msg.parts.last(), Some(Part::Thinking { ms: 0, .. }));
-        // A finished reply that was asked to think shows the box even when no thinking came back.
-        let asked = !env.live && msg.effort.as_deref().is_some_and(|e| !e.is_empty() && e != "none");
+        // A reply that was asked to think shows the box even when no thinking came back: from its first words on,
+        // so nothing moves when it ends (the box used to arrive with the last word and push the text down).
+        let asked = msg.effort.as_deref().is_some_and(|e| !e.is_empty() && e != "none") && (!env.live || !text.trim().is_empty());
         if !reasoning.trim().is_empty() || asked {
             gap(ui, 12.0);
             thinking_panel(ui, &reasoning, msg.reasoning_ms, thinking_now, env, msg.usage.reasoning);

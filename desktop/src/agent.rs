@@ -1153,6 +1153,11 @@ fn strip_media_body(body: &mut Map<String, Value>) -> bool {
     body.get_mut("messages").and_then(Value::as_array_mut).is_some_and(|messages| transcript::strip_media(messages))
 }
 
+/// Text that took over four seconds and came at under 15 characters a second (four tokens): too slow to read along with.
+fn crawled(secs: f64, chars: usize) -> bool {
+    secs >= 4.0 && (chars as f64) < secs * 15.0
+}
+
 /// One model round, with what the web does around the request: backoff on transient failures, a second shape
 /// for a body the host rejected, patience with a rate limit, and another try for a stream that never said
 /// anything. Returns the round and whether it had to run without its tools.
@@ -1170,16 +1175,25 @@ async fn call_model(client: &reqwest::Client, target: &Target, body: &mut Map<St
     loop {
         let mut announced = "";
         let mut shown = String::new();
+        // When text first and last came in this round, and how much of it.
+        let mut pace: Option<(Instant, Instant, usize)> = None;
+        let mut heard = |text: &str| {
+            let now = Instant::now();
+            let (_, last, chars) = pace.get_or_insert((now, now, 0));
+            (*last, *chars) = (now, *chars + text.chars().count());
+        };
         let mut echo = dedup.as_mut();
         let wire = Value::Object(body.clone());
         let result = provider::stream(client, target, &wire, cut_drafts, |delta| match delta {
             Delta::Reasoning(t) => {
+                heard(t);
                 if std::mem::take(&mut gap) {
                     emit.send(Event::Reasoning("\n\n".into()));
                 }
                 emit.send(Event::Reasoning(t.to_string()))
             }
             Delta::Content(t) => {
+                heard(t);
                 let text = match echo.as_mut() {
                     Some(dedup) => dedup.push(t),
                     None => t.to_string(),
@@ -1198,6 +1212,11 @@ async fn call_model(client: &reqwest::Client, target: &Target, body: &mut Map<St
         .await;
         let e = match result {
             Ok(mut round) => {
+                // A reply that crawled in (a busy provider) reads as the app being slow: it goes in the problem
+                // report under the provider, so the two can be told apart afterwards.
+                if let Some((secs, chars)) = pace.map(|(first, last, chars)| (last.duration_since(first).as_secs_f64(), chars)).filter(|(secs, chars)| crawled(*secs, *chars)) {
+                    log_with("api_error", "slow stream", &format!("The model sent {chars} characters of text in {secs:.0} s."), json!({ "model": target.api_model, "charsPerSecond": (chars as f64 / secs).round() }));
+                }
                 if let Some(dedup) = echo {
                     // The web never releases a continuation shorter than 24 characters; here what is held comes out when the round ends.
                     let rest = dedup.finish();

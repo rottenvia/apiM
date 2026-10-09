@@ -141,6 +141,8 @@ struct Run {
     notes: Arc<Mutex<Vec<String>>>,
     thinking: Stopwatch,
     started: Instant,
+    /// When the agent last reported anything: a reply gone quiet says so (`chat::wait_rows`).
+    heard: Instant,
     saved: Instant,
 }
 
@@ -423,6 +425,12 @@ impl App {
                     self.fake_run(true);
                     self.run.as_mut().unwrap().drafting = Some(Drafting { name: "write_file".into(), chars: 4210, path: Some("desktop/src/ui/chat.rs".into()), since: Instant::now() });
                 }
+                "stalled" => {
+                    // Text came, then nothing for five seconds.
+                    self.fake_run(true);
+                    let run = self.run.as_mut().unwrap();
+                    (run.status, run.heard) = ("Writing", Instant::now().checked_sub(Duration::from_secs(5)).unwrap_or_else(Instant::now));
+                }
                 "btw" | "btw-read" => {
                     self.fake_run(true);
                     self.btw = btw::sample(part == "btw-read");
@@ -507,6 +515,7 @@ impl App {
             notes: Default::default(),
             thinking: Stopwatch::new(),
             started: Instant::now(),
+            heard: Instant::now(),
             // Far enough ahead that the checkpoint never writes this chat to disk.
             saved: Instant::now() + Duration::from_secs(3600),
         });
@@ -941,6 +950,7 @@ impl App {
             notes,
             thinking: Stopwatch::new(),
             started,
+            heard: Instant::now(),
             saved: Instant::now(),
         });
         self.focus_composer = true;
@@ -1145,6 +1155,7 @@ impl App {
     fn pump(&mut self, ctx: &egui::Context) {
         let Some(run) = self.run.as_mut() else { return };
         for event in run.rx.try_iter() {
+            run.heard = Instant::now();
             // Anything coming back answers the request that was waiting, and ends a retry's countdown.
             if matches!(event, Event::Reasoning(_) | Event::Content(_) | Event::ToolDraft { .. } | Event::ToolStart(_)) {
                 run.retry = None;
@@ -1302,6 +1313,16 @@ impl App {
             let at = conv.messages.len().saturating_sub(1);
             conv.messages.splice(at..at, self.btw.flush());
             self.heights.values_mut().for_each(|m| m.exact = false);
+            // Text that sat unshown for seconds is this program's doing, whatever the model's pace: it goes in the
+            // problem report, so pacing that misbehaves on some stream nobody tried is found afterwards.
+            let held = run.typing.worst_wait;
+            if PERF.is_some() {
+                eprintln!("text waited {held:.0} ms at most");
+            }
+            if watched && held > 2_000.0 {
+                let model = conv.messages.last().map(|m| m.model.clone()).unwrap_or_default();
+                crate::diagnostics::record_with("text_held", "showing a reply", &format!("Text waited {:.1} s to be shown.", held / 1000.0), serde_json::json!({ "model": model }));
+            }
         }
         if finished || run.saved.elapsed() > CHECKPOINT {
             run.saved = Instant::now();
@@ -1551,15 +1572,12 @@ impl eframe::App for App {
             }
         }
         self.show_toast(&ctx);
-        // What dims the window for a dialog dims the bar as well; taken every frame, bar or no bar.
-        let dim = overlay::take_dim(&ctx);
         if !self.fullscreen {
-            titlebar::show(&ctx, dim);
+            titlebar::show(&ctx);
         }
         titlebar::edges(&ctx);
         self.take_shot(&ctx);
         // `APIM_PERF=4`: every frame that took the app longer than that many milliseconds to draw, on stderr.
-        static PERF: std::sync::LazyLock<Option<f64>> = std::sync::LazyLock::new(|| std::env::var("APIM_PERF").ok().and_then(|ms| ms.parse().ok()));
         let took = frame_started.elapsed().as_secs_f64() * 1000.0;
         if PERF.is_some_and(|limit| took > limit) {
             eprintln!("frame {took:.1} ms");
@@ -1625,6 +1643,9 @@ impl App {
         }
     }
 }
+
+/// `APIM_PERF=4`: the slow-frame limit in milliseconds, and the switch for everything else timed on stderr.
+static PERF: std::sync::LazyLock<Option<f64>> = std::sync::LazyLock::new(|| std::env::var("APIM_PERF").ok().and_then(|ms| ms.parse().ok()));
 
 /// A piece of the reply's text goes into it: thinking into the thought being had, prose after it.
 fn write_text(msg: &mut Message, watch: &mut Stopwatch, prose: bool, text: String) {
