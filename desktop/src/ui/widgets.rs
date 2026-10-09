@@ -33,6 +33,15 @@ pub fn text_at(ui: &Ui, x: f32, y: f32, galley: Arc<Galley>) -> f32 {
     size.x
 }
 
+/// `text_at` for words worth copying: they can be selected. True when they were clicked rather than dragged
+/// over, so that a row drawn under them can act as if the click had reached it.
+pub fn text_at_copy(ui: &mut Ui, x: f32, y: f32, galley: Arc<Galley>) -> (f32, bool) {
+    let size = galley.size();
+    let rect = egui::Rect::from_min_size(pos2(x, (y - size.y / 2.0).round()), size);
+    let clicked = ui.new_child(egui::UiBuilder::new().max_rect(rect)).add(egui::Label::new(galley).selectable(true)).clicked();
+    (size.x, clicked)
+}
+
 /// Text in the app's sans face.
 pub fn text(s: impl Into<String>, size: f32, weight: W, color: Color32) -> RichText {
     RichText::new(s).font(theme::font(size, weight)).color(color)

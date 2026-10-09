@@ -44,14 +44,38 @@ pub fn media_windows(turns: &[(Role, String, Vec<Attachment>)], native: bool) ->
     windows
 }
 
+/// An earlier message of the user's longer than this goes out as its two ends.
+const OLD_PASTE_CHARS: usize = 16_000;
+
+/// A long paste in an earlier message (a log, a file), cut to its first and last 8,000 characters: the reply after
+/// it has read it and says what it found, and whole it rode again on every round of every later reply. The
+/// user's newest earlier message, and the one being answered, are never cut.
+// ponytail: the cut text stays in the chat and cannot be asked back by a tool. Save long pastes into the
+// workspace and name the file here if models turn out to need a middle again.
+fn old_paste(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.len() <= OLD_PASTE_CHARS {
+        return text.into();
+    }
+    let (mut head, mut tail) = (OLD_PASTE_CHARS / 2, text.len() - OLD_PASTE_CHARS / 2);
+    while !text.is_char_boundary(head) {
+        head -= 1;
+    }
+    while !text.is_char_boundary(tail) {
+        tail += 1;
+    }
+    format!("{}\n\n[… {} characters of this earlier message are left out here: it was a long paste, and the reply that follows it has read it whole. Ask the user for it again if you need a part of it …]\n\n{}", &text[..head], tail - head, &text[tail..]).into()
+}
+
 /// The conversation the model reads for this turn: the earlier turns, then the message being answered, built the way the
 /// web's `buildUserContent` builds each user turn.
 pub fn wire_turns(history: &[(Role, String, Vec<Attachment>)], text: &str, images: &[Attachment], vision: Vision) -> Vec<Value> {
     let mut out = Vec::new();
-    for ((role, past, attached), window) in history.iter().zip(media_windows(history, vision == Vision::Native)) {
+    let newest_asked = history.iter().rposition(|(role, ..)| *role == Role::User);
+    for (i, ((role, past, attached), window)) in history.iter().zip(media_windows(history, vision == Vision::Native)).enumerate() {
         if *role == Role::User {
             let media: Vec<Media> = attached.iter().map(Media::from).collect();
-            let content = build_user_content(past, &media, vision, window);
+            let past = if Some(i) == newest_asked { past.as_str().into() } else { old_paste(past) };
+            let content = build_user_content(&past, &media, vision, window);
             if user_has_content(&content) {
                 out.push(json!({ "role": "user", "content": content }));
             }
@@ -96,6 +120,20 @@ mod tests {
     fn a_question_with_a_picture_reads_as_text_to_a_model_that_cannot_see() {
         let picture = Attachment { name: "ui.png".into(), kind: "image".into(), data_url: Some("data:image/png;base64,AQID".into()), ..Default::default() };
         assert_eq!(wire_turns(&[], "Look", std::slice::from_ref(&picture), Vision::None), vec![json!({ "role": "user", "content": "Look" })]);
+    }
+
+    /// A log pasted two questions ago rides as its two ends; the newest earlier message and the question ride whole.
+    #[test]
+    fn an_old_long_paste_goes_out_as_its_ends() {
+        let paste = format!("START {} я END", "ж".repeat(20_000));
+        let turn = |role, text: &str| (role, text.to_string(), Vec::new());
+        let history = [turn(Role::User, &paste), turn(Role::Assistant, "read it"), turn(Role::User, &paste), turn(Role::Assistant, "again")];
+        let sent = wire_turns(&history, &paste, &[], Vision::None);
+        let old = sent[0]["content"].as_str().unwrap();
+        assert!(old.starts_with("START ж") && old.ends_with("ж я END") && old.contains("characters of this earlier message are left out"), "{}", &old[..60]);
+        assert!(old.len() < OLD_PASTE_CHARS + 400);
+        assert_eq!((sent[2]["content"].as_str(), sent[4]["content"].as_str()), (Some(paste.as_str()), Some(paste.as_str())));
+        assert_eq!(old_paste("short"), "short");
     }
 
     /// An earlier reply's tool steps and reasoning are not part of what replays: only its prose is.

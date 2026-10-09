@@ -647,7 +647,14 @@ fn step(ui: &mut Ui, tool: &ToolEvent, env: &mut Env, open: &mut Option<String>)
 
     let (row, response) = ui.allocate_exact_size(vec2(ui.available_width(), 29.0), if expandable { Sense::click() } else { Sense::hover() });
     let hovered = ui.rect_contains_pointer(row);
-    let t = if expandable { widgets::fade(ui, response.id, response.hovered()) } else { 0.0 };
+    // The pointer over the row, its words included: they are widgets of their own now, so they can be selected.
+    let t = if expandable { widgets::fade(ui, response.id, response.contains_pointer()) } else { 0.0 };
+    let mut words_clicked = false;
+    let mut words = |ui: &mut Ui, x: f32, galley| {
+        let (width, clicked) = widgets::text_at_copy(ui, x, row.center().y, galley);
+        words_clicked |= clicked;
+        width
+    };
     if expandable {
         ui.painter().rect_filled(row, 8.0, alpha(p.hover, 60.0 * t));
     }
@@ -701,7 +708,8 @@ fn step(ui: &mut Ui, tool: &ToolEvent, env: &mut Env, open: &mut Option<String>)
         job.sections.iter_mut().for_each(|s| s.format.font_id = theme::font(13.0, W::Medium));
         x += widgets::text_at(ui, x, row.center().y, ui.painter().layout_job(job));
     } else {
-        x += widgets::text_at(ui, x, row.center().y, widgets::galley(ui, verb, theme::font(13.0, W::Medium), base));
+        let verb = widgets::galley(ui, verb, theme::font(13.0, W::Medium), base);
+        x += words(ui, x, verb);
     }
 
     // The trailing remark: what came of it. Why a step failed is told under the row, where it has room.
@@ -727,12 +735,12 @@ fn step(ui: &mut Ui, tool: &ToolEvent, env: &mut Env, open: &mut Option<String>)
         let colour = base.gamma_multiply(0.75);
         let one_line = target_text.lines().next().unwrap_or("");
         let galley = if mono { clip_head(ui, one_line, theme::mono(12.0), colour, width) } else { widgets::clipped(ui, one_line, theme::font(13.0, W::Regular), colour, width) };
-        x += widgets::text_at(ui, x, row.center().y, galley);
+        x += words(ui, x, galley);
     }
     if let Some(remark) = remark {
         x += 6.0;
         x += widgets::text_at(ui, x, row.center().y, dot) + 6.0;
-        widgets::text_at(ui, x, row.center().y, remark);
+        words(ui, x, remark);
     }
     if expandable {
         let spot = pos2(row.right() - 6.0 - open_width - 6.0, row.center().y);
@@ -748,7 +756,7 @@ fn step(ui: &mut Ui, tool: &ToolEvent, env: &mut Env, open: &mut Option<String>)
         }
     }
     if expandable {
-        if response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+        if response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() || words_clicked {
             *open = if is_open { None } else { Some(tool.id.clone()) };
         }
     }
@@ -1248,7 +1256,7 @@ fn notice_line(ui: &mut Ui, text: &str) {
     if text.starts_with("Context compacted") {
         chat::divider(ui, text, "Older steps of this reply are summarised for the model. It sees the summary plus what comes after this line.");
     } else {
-        ui.add(egui::Label::new(widgets::lines(text, 12.0, 19.5, W::Regular, p().muted)).wrap().selectable(false));
+        ui.add(egui::Label::new(widgets::lines(text, 12.0, 19.5, W::Regular, p().muted)).wrap().selectable(true));
     }
 }
 

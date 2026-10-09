@@ -439,7 +439,7 @@ pub fn divider(ui: &mut egui::Ui, text: &str, tip: &str) {
     let line = Stroke::new(1.0, p.border);
     ui.painter().hline(egui::Rangef::new(rect.left() + 16.0, x - 12.0), rect.center().y, line);
     ui.painter().hline(egui::Rangef::new(x + width + 12.0, rect.right() - 16.0), rect.center().y, line);
-    widgets::text_at(ui, x, rect.center().y, label);
+    widgets::text_at_copy(ui, x, rect.center().y, label);
     response.on_hover_text(tip);
 }
 
