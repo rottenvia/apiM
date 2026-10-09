@@ -26,6 +26,17 @@ pub fn format_plan(plan: &Plan) -> String {
     out
 }
 
+/// Left on a step called done with no word on how it was checked: said once, it is asked for; said twice, the step
+/// is taken as done and wears `UNCHECKED`. Refusing it every time stopped a finished run at its last call (the loop
+/// breaker's third identical failure), which cost the user the answer to save a line of bookkeeping.
+const CLAIMED: &str = "called done, how it was checked not said yet";
+const UNCHECKED: &str = "not said how it was checked";
+
+/// The first of `keys` the model filled in: the names other tools use for the same thing are taken too.
+fn said<'a>(u: &'a Value, keys: &[&str]) -> &'a str {
+    keys.iter().map(|key| str_arg(u, key).trim()).find(|text| !text.is_empty()).unwrap_or("")
+}
+
 fn publish(ctx: &Ctx) {
     ctx.emit.state(ctx.chat.lock().unwrap().clone());
 }
@@ -78,23 +89,30 @@ pub fn update_plan(ctx: &Ctx, args: &Value) -> Output {
             });
             continue;
         };
+        let (checked, blocker) = (said(u, &["verified", "verification", "evidence", "checked", "check", "how", "proof", "note"]), said(u, &["blocker", "reason", "note"]));
         match state {
-            "done" if str_arg(u, "verified").trim().is_empty() => {
-                problems.push(format!("Step {} is not done until you say how you checked it (verified).", step.id));
+            "done" if checked.is_empty() && step.note != CLAIMED => {
+                step.note = CLAIMED.to_string();
+                problems.push(format!("Step {} is not marked done: say how you checked it, e.g. {{\"id\":{},\"state\":\"done\",\"verified\":\"ran it, saw 4 passed\"}}.", step.id, step.id));
             }
-            "blocked" if str_arg(u, "blocker").trim().is_empty() => {
+            "blocked" if blocker.is_empty() => {
                 problems.push(format!("Step {} needs a blocker: what outside your control is in the way.", step.id));
             }
             "todo" | "doing" | "done" | "blocked" => {
                 step.state = state.to_string();
-                step.note = str_arg(u, if state == "done" { "verified" } else { "blocker" }).trim().to_string();
+                step.note = match state {
+                    "done" if checked.is_empty() => UNCHECKED.to_string(),
+                    "done" => checked.to_string(),
+                    _ => blocker.to_string(),
+                };
             }
             other => problems.push(format!("Unknown state `{other}` for step {}.", step.id)),
         }
     }
     let done = plan.steps.iter().filter(|s| s.state == "done").count();
-    let text = format!("{}{}", format_plan(plan), problems.join("\n"));
-    let summary = format!("Plan: {done}/{} done", plan.steps.len());
+    // What was refused comes first: after a whole plan it went unread, and the same call came back.
+    let text = if problems.is_empty() { format_plan(plan) } else { format!("NOT RECORDED:\n{}\nSend only those steps again. Everything else in this call was recorded.\n\n{}", problems.join("\n"), format_plan(plan)) };
+    let summary = problems.first().map_or_else(|| format!("Plan: {done}/{} done", plan.steps.len()), |first| first.chars().take(160).collect());
     drop(chat);
     publish(ctx);
     Output { ok: problems.is_empty(), ..Output::ok(text, summary) }
@@ -147,14 +165,23 @@ pub fn note_finding(ctx: &Ctx, args: &Value) -> Output {
 
 pub fn finish(ctx: &Ctx, args: &Value) -> Output {
     let result = str_arg(args, "result").trim();
-    if result.is_empty() || str_arg(args, "verified").trim().is_empty() {
+    if result.is_empty() {
         return Output::fail("finish needs result (what was done) and verified (how each claim was checked).");
     }
     let mut chat = ctx.chat.lock().unwrap();
     let open: Vec<String> = chat.plan.iter().flat_map(|p| &p.steps).filter(|s| s.state != "done").map(|s| format!("{}. {} [{}]", s.id, s.text, s.state)).collect();
-    if !open.is_empty() && !chat.finish_bounced {
+    // Asked for once, both of them: a second finish ends the run as it stands rather than loop on the paperwork.
+    let unchecked = str_arg(args, "verified").trim().is_empty();
+    if (unchecked || !open.is_empty()) && !chat.finish_bounced {
         chat.finish_bounced = true;
-        return Output::fail(format!("The plan still has open steps:\n{}\nFinish them, or call finish again to end anyway and say plainly what was not done.", open.join("\n")));
+        let mut why = Vec::new();
+        if unchecked {
+            why.push("finish needs verified: how each claim in result was checked.".to_string());
+        }
+        if !open.is_empty() {
+            why.push(format!("The plan still has open steps:\n{}\nFinish them, or call finish again to end anyway and say plainly what was not done.", open.join("\n")));
+        }
+        return Output::fail(why.join("\n"));
     }
     Output { finish: true, ..Output::ok("Run finished.", "Finished") }
 }
@@ -209,6 +236,23 @@ pub fn view_image(ctx: &Ctx, args: &Value) -> Output {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A step called done with no word on how it was checked is asked about once, then taken with a note: the
+    /// same call sent twice never becomes the third identical failure that stops a run.
+    #[test]
+    fn a_done_step_without_its_check_is_asked_about_once() {
+        let ctx = crate::tools::test_ctx(&std::env::temp_dir(), crate::store::Approval::Auto);
+        let steps = serde_json::json!({ "goal": "ship", "steps": ["write", "test", "tidy"] });
+        assert!(make_plan(&ctx, &steps).ok);
+        let bare = serde_json::json!({ "updates": [{ "id": 1, "state": "done", "evidence": "ran it" }, { "id": 2, "status": "completed" }] });
+        let first = update_plan(&ctx, &bare);
+        assert!(!first.ok && first.text.starts_with("NOT RECORDED:\nStep 2 is not marked done") && first.summary.starts_with("Step 2 is not marked done"), "{}", first.text);
+        let second = update_plan(&ctx, &bare);
+        assert!(second.ok && second.text.contains("[x] 1. write (ran it)") && second.text.contains("[x] 2. test (not said how it was checked)"), "{}", second.text);
+        // finish: the same once-only question, then the run ends as it stands.
+        let bye = serde_json::json!({ "result": "shipped" });
+        assert!(!finish(&ctx, &bye).ok && finish(&ctx, &bye).finish);
+    }
 
     #[test]
     fn plan_renders() {

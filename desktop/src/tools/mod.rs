@@ -139,6 +139,17 @@ static SCHEMAS: LazyLock<Vec<Value>> = LazyLock::new(|| {
         all.retain(|t| t["function"]["name"] != "browse");
     }
     for t in &mut all {
+        // What this build does beyond the web's wording: it runs on the user's own computer and can look at all of it.
+        let more = match t["function"]["name"].as_str().unwrap_or("") {
+            "list_files" | "read_file" | "read_files" => " A path written in full (C:\\..., ~/..., %LOCALAPPDATA%\\...) reaches anywhere on the user's computer, to look only; list_files then shows that one folder, newest files first.",
+            "delete_file" => " A folder inside the workspace is deleted with everything in it.",
+            "run_command" if cfg!(windows) => " For questions about the computer itself there are the system's own looking tools (tasklist, systeminfo, wevtutil qe, reg query, sc query) and PowerShell, given as one string: {\"command\":\"powershell\",\"args\":[\"Get-WinEvent -LogName Application -MaxEvents 20 | Format-List TimeCreated,ProviderName,Message\"]}.",
+            "run_command" => " For questions about the computer itself there are the system's own looking tools (ps, uname, df, free, uptime).",
+            _ => "",
+        };
+        if !more.is_empty() {
+            t["function"]["description"] = Value::String(format!("{}{more}", t["function"]["description"].as_str().unwrap_or("")));
+        }
         // Options this build cannot honour are removed, so the model never asks for them.
         if t["function"]["name"] == "start_process" {
             if let Some(props) = t["function"]["parameters"]["properties"].as_object_mut() {
@@ -148,6 +159,34 @@ static SCHEMAS: LazyLock<Vec<Value>> = LazyLock::new(|| {
     }
     all
 });
+
+/// A tool context for tests. Nobody listens for approval cards, so every one of them is declined.
+#[cfg(test)]
+pub fn test_ctx(root: &std::path::Path, approval: crate::store::Approval) -> Ctx {
+    let (tx, _) = std::sync::mpsc::channel();
+    Ctx {
+        root: root.to_path_buf(),
+        state_dir: root.to_path_buf(),
+        settings: Settings { approval, ..Settings::default() },
+        client: reqwest::Client::builder().no_proxy().build().unwrap(),
+        read_chars: 20_000,
+        emit: Emitter::new(tx, || {}),
+        chat: Arc::new(Mutex::new(ChatState::default())),
+        procs: Arc::new(exec::Procs::default()),
+        planner: None,
+        limits: crate::context::tool_limits::tool_limits_for(false),
+        memory: Default::default(),
+    }
+}
+
+/// An empty folder of its own for one test.
+#[cfg(test)]
+pub fn scratch(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("apim-tools-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
 
 #[cfg(test)]
 pub fn implemented(name: &str) -> bool {
@@ -194,6 +233,11 @@ pub async fn run(name: &str, args: &Value, ctx: &Ctx) -> Output {
     // A command may rewrite, reformat or generate anything: after one the disk is the only truth.
     if matches!(name, "run_command" | "run_tests" | "start_process" | "build_project") {
         ctx.memory.invalidate_all();
+    }
+    if matches!(name, "list_files" | "read_file" | "read_files") {
+        if let Err(why) = files::may_look(ctx, args).await {
+            return Output::fail(why);
+        }
     }
     match name {
         "list_files" => sync(files::list_files),

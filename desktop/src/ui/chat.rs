@@ -493,7 +493,9 @@ fn wait_rows(ui: &mut egui::Ui, run: &super::Run, has_output: bool) {
     let facts = |ui: &mut egui::Ui, facts: &[String], tip: &str| {
         for fact in facts {
             ui.label(widgets::text("·", 11.0, W::Regular, p.muted));
-            let said = ui.label(widgets::text(fact.as_str(), 11.0, W::Regular, p.muted));
+            // One line, cut short when the column is narrow: wrapped, it grew taller than its row and, centred on
+            // it, ran up over the step above.
+            let said = ui.add(egui::Label::new(widgets::text(fact.as_str(), 11.0, W::Regular, p.muted)).truncate());
             if !tip.is_empty() {
                 said.on_hover_text(tip);
             }
@@ -501,7 +503,7 @@ fn wait_rows(ui: &mut egui::Ui, run: &super::Run, has_output: bool) {
     };
     let glow = |ui: &mut egui::Ui, text: String| {
         let job = shimmer(ui, &text, 13.0);
-        ui.label(job);
+        ui.add(egui::Label::new(job).truncate());
     };
     // A failed request counts down to its next try.
     let retry = run.retry.as_ref().map(|(text, until)| format!("{text} in {}s", until.saturating_duration_since(Instant::now()).as_secs_f32().ceil()));
@@ -521,7 +523,7 @@ fn wait_rows(ui: &mut egui::Ui, run: &super::Run, has_output: bool) {
             // A retry takes the word's place rather than adding a line.
             match &retry {
                 Some(text) => {
-                    let said = ui.label(widgets::lines(text.as_str(), 13.0, 20.0, W::Regular, p.warning));
+                    let said = ui.add(egui::Label::new(widgets::lines(text.as_str(), 13.0, 20.0, W::Regular, p.warning)).truncate());
                     if let Some((r, _)) = &sent {
                         said.on_hover_text(format!("Request body: {}", body(r)));
                     }
@@ -533,14 +535,14 @@ fn wait_rows(ui: &mut egui::Ui, run: &super::Run, has_output: bool) {
         if let Some((r, (chars, described))) = sent.as_ref().filter(|(_, (chars, _))| *chars >= 100_000) {
             row(ui, 0.0, &mut |ui| {
                 let tip = format!("Request {} body: {}{}", r.number, body(r), if *chars >= 400_000 { "\nBig context — the first token can take a while" } else { "" });
-                ui.label(small(format!("Request {} · {described}{}", r.number, heavy(*chars)), p.muted)).on_hover_text(tip);
+                ui.add(egui::Label::new(small(format!("Request {} · {described}{}", r.number, heavy(*chars)), p.muted)).truncate()).on_hover_text(tip);
             });
         }
         return;
     }
     if let Some(text) = retry {
         row(ui, 0.0, &mut |ui| {
-            ui.label(small(text.clone(), p.warning));
+            ui.add(egui::Label::new(small(text.clone(), p.warning)).truncate());
         });
     }
     if let Some(draft) = run.drafting.as_ref().filter(|d| d.chars > 0) {
