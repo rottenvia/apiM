@@ -1,222 +1,24 @@
 [
- {
-  "id": "apim",
-  "name": "apiM",
-  "bg": "#191715",
-  "surface": "#2a2723",
-  "text": "#ede9e2",
-  "accent": "#c96442",
-  "overrides": {
-   "--color-bg-primary": "#191715",
-   "--color-bg-secondary": "#141210",
-   "--color-bg-tertiary": "#201e1b",
-   "--color-bg-elevated": "#2a2723",
-   "--color-bg-hover": "#33302a",
-   "--color-border": "#2c2924",
-   "--color-border-light": "#403c34",
-   "--color-text-primary": "#ede9e2",
-   "--color-text-secondary": "#a29d92",
-   "--color-text-muted": "#6d685d",
-   "--color-accent": "#c96442",
-   "--color-accent-light": "#d97f5d",
-   "--color-accent-glow": "rgba(201, 100, 66, 0.14)",
-   "--color-success": "#7ba478",
-   "--color-warning": "#cfa25a",
-   "--color-danger": "#cf6a5f",
-   "--color-info": "#6f98bd",
-   "--color-search": "#6ba3a0",
-   "--color-search-glow": "rgba(107, 163, 160, 0.12)",
-   "--color-thinking": "#cfa25a",
-   "--color-thinking-glow": "rgba(207, 162, 90, 0.12)"
-  }
- },
- {
-  "id": "serika",
-  "name": "Serika Dark",
-  "bg": "#323437",
-  "surface": "#3d3f43",
-  "text": "#d1d0c5",
-  "accent": "#e2b714"
- },
- {
-  "id": "nord",
-  "name": "Nord",
-  "bg": "#2e3440",
-  "surface": "#3b4252",
-  "text": "#eceff4",
-  "accent": "#88c0d0",
-  "overrides": {
-   "--color-success": "#a3be8c",
-   "--color-warning": "#ebcb8b",
-   "--color-danger": "#bf616a",
-   "--color-thinking": "#ebcb8b"
-  }
- },
- {
-  "id": "dracula",
-  "name": "Dracula",
-  "bg": "#282a36",
-  "surface": "#343746",
-  "text": "#f8f8f2",
-  "accent": "#bd93f9",
-  "overrides": {
-   "--color-success": "#50fa7b",
-   "--color-warning": "#f1fa8c",
-   "--color-danger": "#ff5555",
-   "--color-search": "#8be9fd",
-   "--color-thinking": "#ffb86c"
-  }
- },
- {
-  "id": "gruvbox",
-  "name": "Gruvbox",
-  "bg": "#282828",
-  "surface": "#3c3836",
-  "text": "#ebdbb2",
-  "accent": "#fabd2f",
-  "overrides": {
-   "--color-success": "#b8bb26",
-   "--color-warning": "#fabd2f",
-   "--color-danger": "#fb4934",
-   "--color-search": "#8ec07c",
-   "--color-thinking": "#fe8019"
-  }
- },
- {
-  "id": "tokyo",
-  "name": "Tokyo Night",
-  "bg": "#1a1b26",
-  "surface": "#24283b",
-  "text": "#c0caf5",
-  "accent": "#7aa2f7",
-  "overrides": {
-   "--color-success": "#9ece6a",
-   "--color-warning": "#e0af68",
-   "--color-danger": "#f7768e",
-   "--color-search": "#7dcfff",
-   "--color-thinking": "#bb9af7"
-  }
- },
- {
-  "id": "mocha",
-  "name": "Catppuccin",
-  "bg": "#1e1e2e",
-  "surface": "#313244",
-  "text": "#cdd6f4",
-  "accent": "#cba6f7",
-  "overrides": {
-   "--color-success": "#a6e3a1",
-   "--color-warning": "#f9e2af",
-   "--color-danger": "#f38ba8",
-   "--color-search": "#89dceb",
-   "--color-thinking": "#fab387"
-  }
- },
- {
-  "id": "everforest",
-  "name": "Everforest",
-  "bg": "#2d353b",
-  "surface": "#3d484d",
-  "text": "#d3c6aa",
-  "accent": "#a7c080",
-  "overrides": {
-   "--color-success": "#a7c080",
-   "--color-warning": "#e69875",
-   "--color-danger": "#e67e80",
-   "--color-search": "#7fbbb3",
-   "--color-thinking": "#e69875"
-  }
- },
- {
-  "id": "rosepine",
-  "name": "Rosé Pine",
-  "bg": "#191724",
-  "surface": "#26233a",
-  "text": "#e0def4",
-  "accent": "#eb6f92",
-  "overrides": {
-   "--color-success": "#9ccfd8",
-   "--color-warning": "#f6c177",
-   "--color-danger": "#eb6f92",
-   "--color-search": "#9ccfd8",
-   "--color-thinking": "#f6c177"
-  }
- },
- {
-  "id": "solarized",
-  "name": "Solarized",
-  "bg": "#002b36",
-  "surface": "#073642",
-  "text": "#eee8d5",
-  "accent": "#268bd2",
-  "overrides": {
-   "--color-success": "#859900",
-   "--color-warning": "#b58900",
-   "--color-danger": "#dc322f",
-   "--color-search": "#2aa198",
-   "--color-thinking": "#cb4b16"
-  }
- },
- {
-  "id": "monokai",
-  "name": "Monokai",
-  "bg": "#272822",
-  "surface": "#3e3d32",
-  "text": "#f8f8f2",
-  "accent": "#a6e22e",
-  "overrides": {
-   "--color-success": "#a6e22e",
-   "--color-warning": "#e6db74",
-   "--color-danger": "#f92672",
-   "--color-search": "#66d9ef",
-   "--color-thinking": "#fd971f"
-  }
- },
- {
-  "id": "matrix",
-  "name": "Green Screen",
-  "bg": "#0a0f0a",
-  "surface": "#121a12",
-  "text": "#d6f5d6",
-  "accent": "#33dd55",
-  "overrides": {
-   "--color-success": "#33dd55",
-   "--color-warning": "#d8e64e",
-   "--color-danger": "#ff5555",
-   "--color-search": "#4ee6c3",
-   "--color-thinking": "#d8e64e"
-  }
- },
- {
-  "id": "paper",
-  "name": "Paper",
-  "bg": "#f2eee4",
-  "surface": "#e7e0d0",
-  "text": "#38332a",
-  "accent": "#b3541e",
-  "overrides": {
-   "--color-success": "#4d7c43",
-   "--color-warning": "#9a6b1f",
-   "--color-danger": "#b3402e",
-   "--color-info": "#3d6f9e",
-   "--color-search": "#2f7f78",
-   "--color-thinking": "#9a6b1f"
-  }
- },
- {
-  "id": "frost",
-  "name": "Frost",
-  "bg": "#eceff4",
-  "surface": "#e0e6ef",
-  "text": "#2e3440",
-  "accent": "#5e81ac",
-  "overrides": {
-   "--color-success": "#5a8a5a",
-   "--color-warning": "#9a7b2d",
-   "--color-danger": "#bf616a",
-   "--color-info": "#5e81ac",
-   "--color-search": "#4d7f8a",
-   "--color-thinking": "#9a7b2d"
-  }
- }
+  {"id": "apim", "name": "apiM", "bg": "#191715", "surface": "#2a2723", "text": "#ede9e2", "accent": "#c96442", "overrides": {"--color-bg-primary": "#191715", "--color-bg-secondary": "#141210", "--color-bg-tertiary": "#201e1b", "--color-bg-elevated": "#2a2723", "--color-bg-hover": "#33302a", "--color-border": "#2c2924", "--color-border-light": "#403c34", "--color-text-primary": "#ede9e2", "--color-text-secondary": "#a29d92", "--color-text-muted": "#6d685d", "--color-accent": "#c96442", "--color-accent-light": "#d97f5d", "--color-accent-glow": "rgba(201, 100, 66, 0.14)", "--color-success": "#7ba478", "--color-warning": "#cfa25a", "--color-danger": "#cf6a5f", "--color-info": "#6f98bd", "--color-search": "#6ba3a0", "--color-search-glow": "rgba(107, 163, 160, 0.12)", "--color-thinking": "#cfa25a", "--color-thinking-glow": "rgba(207, 162, 90, 0.12)"}},
+  {"id": "oled", "name": "OLED Black", "bg": "#000000", "surface": "#0c0d10", "text": "#f2f4f8", "accent": "#2f9bff", "overrides": {"--color-success": "#3ddc84", "--color-warning": "#ffc247", "--color-danger": "#ff5263", "--color-info": "#2f9bff", "--color-search": "#35d6e6", "--color-thinking": "#ffc247"}},
+  {"id": "matrix", "name": "Green Screen", "bg": "#0a0f0a", "surface": "#121a12", "text": "#d6f5d6", "accent": "#33dd55", "overrides": {"--color-success": "#33dd55", "--color-warning": "#d8e64e", "--color-danger": "#ff5555", "--color-search": "#4ee6c3", "--color-thinking": "#d8e64e"}},
+  {"id": "midnight", "name": "Midnight", "bg": "#060916", "surface": "#0e1429", "text": "#dbe4ff", "accent": "#6b7cff", "overrides": {"--color-success": "#3ddc97", "--color-warning": "#ffc857", "--color-danger": "#ff5d6c", "--color-info": "#6b7cff", "--color-search": "#38d6e8", "--color-thinking": "#ffc857"}},
+  {"id": "amethyst", "name": "Amethyst", "bg": "#0c0716", "surface": "#17102b", "text": "#ece3ff", "accent": "#b56bff", "overrides": {"--color-success": "#5fe3a1", "--color-warning": "#ffcf66", "--color-danger": "#ff6b8b", "--color-info": "#7aa5ff", "--color-search": "#6fd6ff", "--color-thinking": "#ffb86b"}},
+  {"id": "ember", "name": "Ember", "bg": "#120805", "surface": "#21110b", "text": "#ffe8db", "accent": "#ff6b35", "overrides": {"--color-success": "#7ddc6b", "--color-warning": "#ffc145", "--color-danger": "#ff4d4d", "--color-info": "#5cb8ff", "--color-search": "#4fd1c5", "--color-thinking": "#ffc145"}},
+  {"id": "sakura", "name": "Sakura", "bg": "#13070f", "surface": "#23101c", "text": "#ffe2f0", "accent": "#ff5fa2", "overrides": {"--color-success": "#6ee7a8", "--color-warning": "#ffd166", "--color-danger": "#ff5470", "--color-info": "#8fb4ff", "--color-search": "#7cd4ff", "--color-thinking": "#ffd166"}},
+  {"id": "abyss", "name": "Abyss", "bg": "#03100f", "surface": "#091d1b", "text": "#d7fbf5", "accent": "#1fe0c4", "overrides": {"--color-success": "#4ade80", "--color-warning": "#f5d547", "--color-danger": "#ff6161", "--color-info": "#38bdf8", "--color-search": "#38bdf8", "--color-thinking": "#f5d547"}},
+  {"id": "amber", "name": "Amber Terminal", "bg": "#0f0a02", "surface": "#1d1506", "text": "#ffe8bf", "accent": "#ffb000", "overrides": {"--color-success": "#b6e04a", "--color-warning": "#ffb000", "--color-danger": "#ff5b3d", "--color-info": "#6cc4ff", "--color-search": "#5fd3c4", "--color-thinking": "#ffd75e"}},
+  {"id": "crimson", "name": "Crimson", "bg": "#0f0405", "surface": "#1f0a0d", "text": "#ffe3e3", "accent": "#ff3b4f", "overrides": {"--color-success": "#5ee08a", "--color-warning": "#ffb347", "--color-danger": "#ff7a59", "--color-info": "#6cb6ff", "--color-search": "#5cc8ff", "--color-thinking": "#ffb347"}},
+  {"id": "tokyo", "name": "Tokyo Night", "bg": "#0f101b", "surface": "#1a1d30", "text": "#c8d3ff", "accent": "#7aa2f7", "overrides": {"--color-success": "#9ece6a", "--color-warning": "#e0af68", "--color-danger": "#f7768e", "--color-search": "#7dcfff", "--color-thinking": "#bb9af7"}},
+  {"id": "mocha", "name": "Catppuccin", "bg": "#12121e", "surface": "#1f2036", "text": "#d5ddff", "accent": "#cba6f7", "overrides": {"--color-success": "#a6e3a1", "--color-warning": "#f9e2af", "--color-danger": "#f38ba8", "--color-search": "#89dceb", "--color-thinking": "#fab387"}},
+  {"id": "dracula", "name": "Dracula", "bg": "#151621", "surface": "#222437", "text": "#f8f8f2", "accent": "#bd93f9", "overrides": {"--color-success": "#50fa7b", "--color-warning": "#f1fa8c", "--color-danger": "#ff5555", "--color-search": "#8be9fd", "--color-thinking": "#ffb86c"}},
+  {"id": "rosepine", "name": "Rosé Pine", "bg": "#130f1e", "surface": "#211c33", "text": "#e6e2fa", "accent": "#eb6f92", "overrides": {"--color-success": "#9ccfd8", "--color-warning": "#f6c177", "--color-danger": "#eb6f92", "--color-search": "#9ccfd8", "--color-thinking": "#f6c177"}},
+  {"id": "nord", "name": "Nord", "bg": "#1a2231", "surface": "#253044", "text": "#e8eef7", "accent": "#88c0d0", "overrides": {"--color-success": "#a3be8c", "--color-warning": "#ebcb8b", "--color-danger": "#d06a75", "--color-search": "#8fbcbb", "--color-thinking": "#ebcb8b"}},
+  {"id": "solarized", "name": "Solarized", "bg": "#00212b", "surface": "#06323e", "text": "#eee8d5", "accent": "#2aa1e8", "overrides": {"--color-success": "#9fb700", "--color-warning": "#d9a400", "--color-danger": "#f0524f", "--color-search": "#2ec4b6", "--color-thinking": "#e8642a"}},
+  {"id": "gruvbox", "name": "Gruvbox", "bg": "#1a1510", "surface": "#2b231a", "text": "#f2e3bd", "accent": "#fabd2f", "overrides": {"--color-success": "#b8bb26", "--color-warning": "#fabd2f", "--color-danger": "#fb4934", "--color-search": "#8ec07c", "--color-thinking": "#fe8019"}},
+  {"id": "everforest", "name": "Everforest", "bg": "#131b16", "surface": "#1f2a23", "text": "#dbd0b2", "accent": "#a7c080", "overrides": {"--color-success": "#a7c080", "--color-warning": "#e69875", "--color-danger": "#e67e80", "--color-search": "#7fbbb3", "--color-thinking": "#e69875"}},
+  {"id": "monokai", "name": "Monokai", "bg": "#161710", "surface": "#25261a", "text": "#f8f8f2", "accent": "#a6e22e", "overrides": {"--color-success": "#a6e22e", "--color-warning": "#e6db74", "--color-danger": "#f92672", "--color-search": "#66d9ef", "--color-thinking": "#fd971f"}},
+  {"id": "serika", "name": "Serika Dark", "bg": "#16171a", "surface": "#232428", "text": "#dbd9cb", "accent": "#f2c200", "overrides": {"--color-success": "#9ccc65", "--color-warning": "#f2c200", "--color-danger": "#ef6a5b", "--color-search": "#5fc1c9", "--color-thinking": "#f2c200"}},
+  {"id": "paper", "name": "Paper", "bg": "#f2eee4", "surface": "#e7e0d0", "text": "#38332a", "accent": "#b3541e", "overrides": {"--color-success": "#4d7c43", "--color-warning": "#9a6b1f", "--color-danger": "#b3402e", "--color-info": "#3d6f9e", "--color-search": "#2f7f78", "--color-thinking": "#9a6b1f"}},
+  {"id": "frost", "name": "Frost", "bg": "#eceff4", "surface": "#e0e6ef", "text": "#2e3440", "accent": "#5e81ac", "overrides": {"--color-success": "#5a8a5a", "--color-warning": "#9a7b2d", "--color-danger": "#bf616a", "--color-info": "#5e81ac", "--color-search": "#4d7f8a", "--color-thinking": "#9a7b2d"}}
 ]

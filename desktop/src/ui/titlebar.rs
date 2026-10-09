@@ -61,7 +61,8 @@ pub fn edges(ctx: &egui::Context) {
 }
 
 /// Draws the bar over everything else, so the window can be moved, minimised and closed while a dialog is open.
-pub fn show(ctx: &egui::Context) {
+/// `dim` is how dark that dialog made the window (0..255): the bar darkens with it.
+pub fn show(ctx: &egui::Context, dim: u8) {
     let p = p();
     let window = ctx.content_rect();
     let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
@@ -118,6 +119,9 @@ pub fn show(ctx: &egui::Context) {
             if button.clicked() && !gripped {
                 ctx.send_viewport_cmd(command);
             }
+        }
+        if dim > 0 {
+            ui.painter().rect_filled(bar, 0.0, Color32::from_black_alpha(dim));
         }
     });
 }

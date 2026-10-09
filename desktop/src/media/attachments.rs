@@ -461,7 +461,8 @@ pub fn build_message_with_attachments(text: &str, attachments: &[Attached], visi
         }
     }
     let typed = super::js_trim(text);
-    if typed.is_empty() { blocks.join("\n\n") } else { format!("{}\n\n{typed}", blocks.join("\n\n")) }
+    // A picture sent as pixels leaves no block behind: the message is then the words alone, not two blank lines and the words.
+    if typed.is_empty() || blocks.is_empty() { format!("{}{typed}", blocks.join("\n\n")) } else { format!("{}\n\n{typed}", blocks.join("\n\n")) }
 }
 
 #[cfg(test)]

@@ -1079,8 +1079,13 @@ mod tests {
             let conv = Conversation::load(&meta.id).unwrap();
             let loaded = t.elapsed();
             let t = std::time::Instant::now();
-            let bytes = serde_json::to_vec_pretty(&conv.to_wire()).unwrap().len();
-            eprintln!("{}: load {loaded:?}, serialise {:?} ({} MB, {} messages)", meta.slug, t.elapsed(), bytes / 1_048_576, conv.messages.len());
+            let wire = conv.to_wire();
+            let copied = t.elapsed();
+            let bytes = serde_json::to_vec_pretty(&wire).unwrap().len();
+            eprintln!("{}: load {loaded:?}, copy for saving {copied:?}, serialise {:?} ({} MB, {} messages)", meta.slug, t.elapsed(), bytes / 1_048_576, conv.messages.len());
+            let t = std::time::Instant::now();
+            let files = crate::snapshots::list_files(&conv.workspace()).len();
+            eprintln!("    workspace: {files} files listed in {:?}", t.elapsed());
         }
     }
 

@@ -67,36 +67,6 @@ pub struct Env<'a, 'm> {
     pub marks: Option<markdown::Marks<'m>>,
     /// Heights of the rows inside replies: a row that does not show is not laid out.
     pub rows: &'a mut lazy::Rows,
-    pub typed: &'a mut Typed,
-}
-
-/// How much of the reply being written is on screen. Its text arrives in bursts and is let out at an even pace.
-#[derive(Default)]
-pub struct Typed {
-    /// Which stretch of text this is about.
-    key: u64,
-    /// Characters of it shown so far.
-    shown: f32,
-}
-
-impl Typed {
-    /// The start of `text` to show this frame, a little more than the frame before.
-    fn reveal<'t>(&mut self, ui: &Ui, key: u64, text: &'t str) -> &'t str {
-        let total = text.chars().count() as f32;
-        if self.key != key {
-            // A stretch first met long (a chat opened in the middle of a reply) is simply there; a new one starts empty.
-            *self = Typed { key, shown: if total > 600.0 { total } else { 0.0 } };
-        }
-        if self.shown >= total {
-            self.shown = total;
-            return text;
-        }
-        // Catches up with what has arrived in about a fifth of a second, and never crawls.
-        let pace = ((total - self.shown) * 6.0).max(60.0);
-        self.shown = (self.shown + ui.input(|i| i.stable_dt).min(0.05) * pace).min(total);
-        ui.ctx().request_repaint();
-        text.char_indices().nth(self.shown as usize).map_or(text, |(at, _)| &text[..at])
-    }
 }
 
 pub fn show(ui: &mut Ui, msg: &Message, env: &mut Env) {
@@ -231,7 +201,9 @@ fn user(ui: &mut Ui, msg: &Message, env: &mut Env) {
     let column = ui.max_rect();
     let room = (env.cap - PAD.x * 2.0).max(80.0);
     let editing = env.editing.as_ref().is_some_and(|(id, _)| *id == msg.id);
-    let body = msg.text();
+    // Blank lines around a question are not part of it (older chats kept two in front of one sent with a picture).
+    let whole = msg.text();
+    let body = whole.trim_matches(['\n', '\r']);
 
     let font = theme::font(15.0, W::Regular);
     let job_of = |text: &str| {
@@ -244,7 +216,7 @@ fn user(ui: &mut Ui, msg: &Message, env: &mut Env) {
     // and a search opens it so its matches can be marked.
     let all_id = ui.id().with("all");
     let unfolded = env.marks.is_some() || ui.data(|d| d.get_temp::<bool>(all_id)).unwrap_or(false);
-    let shown = fold(&body, unfolded);
+    let shown = fold(body, unfolded);
     let folded = shown.len() < body.len();
     // Find in this chat marks its matches in a question as it does in a reply.
     let mut body_job = job_of(shown);
@@ -397,14 +369,14 @@ fn user(ui: &mut Ui, msg: &Message, env: &mut Env) {
                 *env.action = Some(Action::RewindOpen(msg.id.clone()));
             }
             if !env.busy && action_btn(ui, icons::RENAME.stroke(1.9), "Edit", "Edit and resend", 24.0, false, None).clicked() {
-                *env.editing = Some((msg.id.clone(), body.clone()));
+                *env.editing = Some((msg.id.clone(), body.to_string()));
             }
             let copied_id = id.with("copied");
             let done = ui.data(|d| d.get_temp::<f64>(copied_id)).is_some_and(|at| ui.input(|i| i.time) - at < 1.2);
             if action_btn(ui, if done { icons::CHECK_THIN.stroke(1.9) } else { icons::COPY_USER }, if done { "Copied" } else { "Copy" }, "Copy message text", 24.0, false, None).clicked() {
                 let now = ui.input(|i| i.time);
                 ui.data_mut(|d| d.insert_temp(copied_id, now));
-                *env.action = Some(Action::Copy(body.clone()));
+                *env.action = Some(Action::Copy(body.to_string()));
             }
         }
     }
@@ -703,7 +675,8 @@ fn step(ui: &mut Ui, tool: &ToolEvent, env: &mut Env, open: &mut Option<String>)
     };
     icons::paint(ui, icon, glyph.center(), 13.0, ink);
 
-    let open_width = if can_open { 46.0 } else { 0.0 };
+    // Room for "Open" on every row that unfolds, so the arrows of a run of steps stand in one column.
+    let open_width = if can_open || expandable { 46.0 } else { 0.0 };
     let right = row.right() - 6.0 - open_width - if expandable { 20.0 } else { 0.0 };
     let mut x = glyph.right() + 8.0;
     let previewed = tool.summary.starts_with("Preview");
@@ -800,7 +773,18 @@ fn step(ui: &mut Ui, tool: &ToolEvent, env: &mut Env, open: &mut Option<String>)
             }
             let uri = super::file_uri(&full);
             let max = vec2(ui.available_width().min(560.0), 360.0);
-            let shown = ui.add(egui::Image::new(uri.clone()).max_size(max).corner_radius(12).sense(Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Open full size");
+            let picture = egui::Image::new(uri.clone()).corner_radius(12).sense(Sense::click());
+            let picture = match super::trim::of(ui.ctx(), &full) {
+                // Its size is not known yet, and a guess would make the chat jump when it is.
+                super::trim::Look::Pending => return,
+                super::trim::Look::Unreadable => picture.max_size(max),
+                // Only the part with something in it, at its own size: never blown up, shrunk to fit when it must be.
+                super::trim::Look::Ready(trim) => {
+                    let fit = (max.x / trim.size.x).min(max.y / trim.size.y).min(1.0);
+                    picture.uv(trim.uv).maintain_aspect_ratio(false).fit_to_exact_size((trim.size * fit).max(vec2(1.0, 1.0)))
+                }
+            };
+            let shown = ui.add(picture).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Open full size");
             ui.painter().rect_stroke(shown.rect, 12.0, Stroke::new(1.0, if shown.hovered() { alpha(p.accent_light, 60.0) } else { p.border }), StrokeKind::Inside);
             if shown.clicked() {
                 *env.action = Some(Action::Image(name.clone(), uri));
@@ -892,8 +876,7 @@ fn thinking_panel(ui: &mut Ui, text: &str, ms: u64, live: bool, env: &mut Env, u
                     plain(ui, widgets::lines("Thinking was enabled, but no reasoning text was received for this reply.", 13.0, 20.0, W::Regular, p.muted.gamma_multiply(0.6)));
                 });
             } else {
-                let shown = if live { env.typed.reveal(ui, lazy::print(("thinking", id)), text) } else { text };
-                thought_body(ui, shown, live, 320.0, egui::Margin { left: 12, right: 12, top: 0, bottom: 10 });
+                thought_body(ui, text, live, 320.0, egui::Margin { left: 12, right: 12, top: 0, bottom: 10 });
             }
         }
     });
@@ -943,8 +926,7 @@ fn think_row(ui: &mut Ui, text: &str, live: bool, env: &mut Env) {
             ui.data_mut(|d| d.insert_temp(id, !open));
         }
         if open {
-            let shown = if live { env.typed.reveal(ui, lazy::print(("think", id)), text) } else { text };
-            thought_body(ui, shown, live, 288.0, egui::Margin { left: 36, right: 12, top: 0, bottom: 10 });
+            thought_body(ui, text, live, 288.0, egui::Margin { left: 36, right: 12, top: 0, bottom: 10 });
         }
     });
 }
@@ -1012,13 +994,12 @@ fn meta_row(ui: &mut Ui, msg: &Message, env: &Env, sources_open: &mut bool) -> b
             plain(ui, small(chat::format_cost(cost), W::Medium)).on_hover_text(tip);
         }
         let with_icon = |ui: &mut Ui, icon: Icon, text: String, tip: String| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                icons::show(ui, icon, 9.0, p.muted);
-                plain(ui, small(text, W::Regular));
-            })
-            .response
-            .on_hover_text(tip);
+            // One piece as tall as its text. A row of its own stands taller than the line, and sat low on it.
+            let label = widgets::galley(ui, &text, theme::font(11.0, W::Regular), p.muted);
+            let (rect, response) = ui.allocate_exact_size(vec2(13.0 + label.size().x, 16.5), Sense::hover());
+            icons::paint(ui, icon, pos2(rect.left() + 4.5, rect.center().y), 9.0, p.muted);
+            widgets::text_at(ui, rect.left() + 13.0, rect.center().y, label);
+            response.on_hover_text(tip);
         };
         if msg.duration_ms > 0 {
             with_icon(ui, icons::CLOCK, chat::format_duration(msg.duration_ms), "Time from sending to the last token".into());
@@ -1246,10 +1227,8 @@ fn notice_line(ui: &mut Ui, text: &str) {
     }
 }
 
-/// Markdown, with what was clicked in it passed on. `stretch` names this text among everything in the chat;
-/// `typing` says it is the part of a reply still being written.
-fn prose(ui: &mut Ui, text: &str, colour: Color32, env: &mut Env, stretch: u64, typing: bool) {
-    let text = if typing { env.typed.reveal(ui, stretch, text) } else { text };
+/// Markdown, with what was clicked in it passed on. `stretch` names this text among everything in the chat.
+fn prose(ui: &mut Ui, text: &str, colour: Color32, env: &mut Env, stretch: u64) {
     let (shown, pending) = match pending_fence(text).filter(|_| env.live) {
         Some((before, lang, lines)) => (before, Some((lang, lines))),
         None => (text, None),
@@ -1432,6 +1411,8 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
                 think.as_ref().map(|(thought, live)| (thought.len(), *live)),
                 notice.map(str::len),
                 tools.iter().map(|tool| (tool.ok, tool.image.is_some(), tool.summary.len(), tool.args.len(), open.as_deref() == Some(tool.id.as_str()))).collect::<Vec<_>>(),
+                // A row that shows a picture is as tall as what is known of that picture.
+                tools.iter().any(|tool| tool.name == "show_image").then(super::trim::generation),
             ));
             let guess = 40.0 + tools.len() as f32 * 31.0 + (chars as f32 / (width / 7.5).max(20.0)).ceil() * 25.5;
             if !writing && env.rows.skip(ui, key, print, guess) {
@@ -1446,12 +1427,12 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
                 } else {
                     let said = texts.concat();
                     let has_text = !said.trim().is_empty();
-                    let (stretch, typing) = (lazy::print((&msg.id, i)), writing && tools.is_empty());
+                    let stretch = lazy::print((&msg.id, i));
                     // Side by side only with something on both sides, room for it, and no table to squeeze.
                     if split && has_text && !tools.is_empty() && !has_table(&said) && ui.ctx().content_rect().width() >= 768.0 {
                         let full = Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), 0.0));
                         let mut left = ui.new_child(egui::UiBuilder::new().max_rect(full.with_max_x(full.right() - 321.0 - 24.0)).layout(egui::Layout::top_down(egui::Align::Min)));
-                        prose(&mut left, &said, colour, env, stretch, false);
+                        prose(&mut left, &said, colour, env, stretch);
                         let mut right = ui.new_child(egui::UiBuilder::new().max_rect(full.with_min_x(full.right() - 320.0 + 24.0)).layout(egui::Layout::top_down(egui::Align::Min)));
                         steps(&mut right, tools, env, &mut open);
                         let bottom = left.min_rect().bottom().max(right.min_rect().bottom());
@@ -1459,7 +1440,7 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
                         ui.allocate_rect(full.with_max_y(bottom), Sense::hover());
                     } else {
                         if has_text {
-                            prose(ui, &said, colour, env, stretch, typing);
+                            prose(ui, &said, colour, env, stretch);
                             if !tools.is_empty() {
                                 ui.add_space(8.0);
                             }
@@ -1480,7 +1461,7 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
         }
         if !text.is_empty() {
             gap(ui, 12.0);
-            prose(ui, &text, colour, env, lazy::print((&msg.id, usize::MAX)), env.live);
+            prose(ui, &text, colour, env, lazy::print((&msg.id, usize::MAX)));
         }
         for part in &msg.parts {
             if let Part::Notice(notice) = part {

@@ -15,6 +15,7 @@ mod icons;
 mod lazy;
 mod markdown;
 mod overlay;
+mod pacer;
 mod plan_panel;
 mod plugin_modal;
 mod prompts;
@@ -26,6 +27,7 @@ mod sidebar;
 mod slash_menu;
 pub mod theme;
 mod titlebar;
+mod trim;
 mod widgets;
 mod docks;
 mod github;
@@ -121,6 +123,10 @@ struct Round {
 /// A reply being generated.
 struct Run {
     rx: mpsc::Receiver<Event>,
+    /// What the agent reported that the window has not taken up yet. Text goes on to `typing` as its turn
+    /// comes; anything that adds a row or ends the reply waits here until the text before it is on screen.
+    inbox: std::collections::VecDeque<Event>,
+    typing: pacer::Typing,
     handle: tokio::task::JoinHandle<()>,
     conv_id: String,
     status: &'static str,
@@ -162,13 +168,17 @@ struct Shot {
     state: String,
     started: Instant,
     asked: bool,
+    /// The `send` and `f11` states have done their one thing.
+    acted: bool,
+    /// The `up-N` state has turned the wheel.
+    scrolled: bool,
 }
 
 impl Shot {
     fn from_env() -> Option<Shot> {
         let path = PathBuf::from(std::env::var_os("APIM_SHOT")?);
         let size = std::env::var("APIM_SHOT_SIZE").ok().and_then(|s| s.split_once('x').and_then(|(w, h)| Some([w.parse().ok()?, h.parse().ok()?]))).unwrap_or([1280.0, 800.0]);
-        Some(Shot { path, size, state: std::env::var("APIM_SHOT_STATE").unwrap_or_default(), started: Instant::now(), asked: false })
+        Some(Shot { path, size, state: std::env::var("APIM_SHOT_STATE").unwrap_or_default(), started: Instant::now(), asked: false, acted: false, scrolled: false })
     }
 }
 
@@ -205,7 +215,6 @@ pub struct App {
     /// The chat being read from disk, so a long one does not hold up the window.
     opening: Option<Opening>,
     /// How much of the reply being written is shown yet: its text is let out evenly rather than in bursts.
-    typed: bubble::Typed,
     ctx: egui::Context,
     /// Ctrl+V was down on the last frame, so one press pastes once.
     paste_held: bool,
@@ -213,6 +222,10 @@ pub struct App {
     side: sidebar::State,
     popover: Popover,
     fullscreen: bool,
+    /// The window was maximised when it went full screen, and goes back to that.
+    was_maximized: bool,
+    /// How many pictures had been looked at (`trim`) when the transcript was last measured.
+    trims_seen: u64,
     /// Where the composer sat last frame: its popovers hang above it.
     composer_rect: Rect,
     /// The command menu above the message box, and the line a command leaves there.
@@ -233,6 +246,8 @@ pub struct App {
     tail_measured: bool,
     /// Files of the workspace on screen, refreshed when a tool changes something.
     files: Vec<(String, u64)>,
+    /// A listing of the workspace on its way from another thread (`workspace::refresh`).
+    listing: Option<mpsc::Receiver<workspace::Listing>>,
     files_stale: bool,
     /// The workspace rail and what hangs off it: the files slide-over, the header chips, the copy dialog.
     ws: workspace::State,
@@ -291,13 +306,14 @@ impl App {
             scroll_y: 0.0,
             anchor: 0.0,
             opening: None,
-            typed: Default::default(),
             ctx: cc.egui_ctx.clone(),
             paste_held: false,
             dialog: Dialog::None,
             side: sidebar::State::default(),
             popover: Popover::None,
             fullscreen: false,
+            was_maximized: false,
+            trims_seen: 0,
             composer_rect: Rect::NOTHING,
             slash: Default::default(),
             finder: Default::default(),
@@ -311,6 +327,7 @@ impl App {
             jump_to_latest: false,
             tail_measured: false,
             files: Vec::new(),
+            listing: None,
             files_stale: true,
             ws: Default::default(),
             sandbox: None,
@@ -334,7 +351,7 @@ impl App {
 
     /// Puts the window in the state a self-portrait was asked for.
     fn stage_shot(&mut self) {
-        let Some(shot) = self.shot.as_ref().map(|s| Shot { path: s.path.clone(), size: s.size, state: s.state.clone(), started: s.started, asked: s.asked }) else { return };
+        let Some(shot) = self.shot.as_ref().map(|s| Shot { path: s.path.clone(), size: s.size, state: s.state.clone(), started: s.started, asked: s.asked, acted: s.acted, scrolled: s.scrolled }) else { return };
         let state = shot.state.clone();
         self.focus_composer = false;
         if let Ok(wanted) = std::env::var("APIM_SHOT_CHAT") {
@@ -445,6 +462,8 @@ impl App {
                     self.conv.plan = Some(store::Plan { goal: "Ship the importer with tests".into(), steps: vec![step(1, "Read the current parser", "done", "read src/parser.rs in full"), step(2, "Add the CSV path", "done", ""), step(3, "Cover it with tests", "doing", ""), last] });
                 }
                 tab if tab.starts_with("tab") => self.settings_ui.tab = tab[3..].parse().unwrap_or(0),
+                // `theme-midnight`: worn for the picture only, never saved.
+                t if t.starts_with("theme-") => self.settings.theme = t[6..].into(),
                 t if t.starts_with("sandbox") => sandbox_panel::stage(self, t),
                 t if t.starts_with("local") => settings_panels::stage(self, t),
                 other => workspace::stage(self, other),
@@ -475,6 +494,8 @@ impl App {
         let (_tx, rx) = mpsc::channel();
         self.run = Some(Run {
             rx,
+            inbox: Default::default(),
+            typing: Default::default(),
             handle: self.rt.spawn(std::future::pending::<()>()),
             conv_id: self.conv.id.clone(),
             status: "Thinking",
@@ -907,6 +928,8 @@ impl App {
         let handle = self.rt.spawn(agent::run(request, Emitter::new(tx, move || wake.request_repaint()), self.procs.clone()));
         self.run = Some(Run {
             rx,
+            inbox: Default::default(),
+            typing: Default::default(),
             handle,
             conv_id: self.conv.id.clone(),
             status: "Thinking",
@@ -1084,7 +1107,7 @@ impl App {
     }
 
     fn stop(&mut self) {
-        let Some(run) = self.run.take() else { return };
+        let Some(mut run) = self.run.take() else { return };
         run.handle.abort();
         let conv = match self.parked.as_mut() {
             Some(parked) => parked,
@@ -1095,6 +1118,10 @@ impl App {
         conv.messages.splice(at..at, self.btw.flush());
         self.heights.values_mut().for_each(|m| m.exact = false);
         if let Some(msg) = conv.messages.last_mut() {
+            // Text that had arrived and was still being typed out is kept.
+            for (prose, text) in run.typing.release_all() {
+                write_text(msg, &mut run.thinking, prose, text);
+            }
             finish_message(msg, run.started);
             for part in &mut msg.parts {
                 if let Part::Tool(t) = part {
@@ -1117,13 +1144,47 @@ impl App {
     /// Applies everything the agent reported since the last frame.
     fn pump(&mut self, ctx: &egui::Context) {
         let Some(run) = self.run.as_mut() else { return };
-        let events: Vec<Event> = run.rx.try_iter().collect();
+        for event in run.rx.try_iter() {
+            // Anything coming back answers the request that was waiting, and ends a retry's countdown.
+            if matches!(event, Event::Reasoning(_) | Event::Content(_) | Event::ToolDraft { .. } | Event::ToolStart(_)) {
+                run.retry = None;
+                if let Some(request) = &mut run.request {
+                    request.answered = true;
+                }
+            }
+            // The pace is set by when text comes in, wherever it stands in line.
+            if let Event::Reasoning(text) | Event::Content(text) = &event {
+                run.typing.arrived(text);
+            }
+            run.inbox.push_back(event);
+        }
+        // A reply to a chat that is not the one on screen has nobody to type for.
+        let watched = self.parked.is_none();
         let conv = match self.parked.as_mut() {
             Some(parked) => parked,
             None => &mut self.conv,
         };
         let mut finished = false;
-        for event in events {
+        loop {
+            // Text is typed out at the pace it arrives. What says how the work is going passes it by; anything
+            // that adds a row or ends the reply waits until the text before it is on screen, so nothing overtakes it.
+            let waits = match run.inbox.front() {
+                None => break,
+                Some(Event::Reasoning(_) | Event::Content(_)) => false,
+                Some(Event::Status(_) | Event::Usage(_) | Event::Context(_) | Event::ToolDraft { .. } | Event::ToolProgress { .. } | Event::Retry { .. } | Event::Checkpoint(_)) => false,
+                Some(_) => true,
+            };
+            if waits && run.typing.waiting() {
+                if watched {
+                    break;
+                }
+                if let Some(msg) = conv.messages.last_mut() {
+                    for (prose, text) in run.typing.release_all() {
+                        write_text(msg, &mut run.thinking, prose, text);
+                    }
+                }
+            }
+            let Some(event) = run.inbox.pop_front() else { break };
             // The reply read a "btw": from here on it is part of the conversation, just before the reply.
             if let Event::NoteRead { note, round } = &event {
                 if let Some(chip) = self.btw.read(note, *round) {
@@ -1133,32 +1194,13 @@ impl App {
                 }
                 continue;
             }
-            // Anything coming back answers the request that was waiting, and ends a retry's countdown.
-            if matches!(event, Event::Reasoning(_) | Event::Content(_) | Event::ToolDraft { .. } | Event::ToolStart(_)) {
-                run.retry = None;
-                if let Some(request) = &mut run.request {
-                    request.answered = true;
-                }
-            }
             let Some(msg) = conv.messages.last_mut() else { break };
             match event {
                 Event::NoteRead { .. } => {}
                 Event::Retry { reason, attempt, attempts, wait } => run.retry = Some((format!("{reason} — retrying, try {} of {attempts}", attempt.min(attempts)), Instant::now() + wait)),
                 Event::Status(status) => run.status = status,
-                Event::Reasoning(text) => {
-                    run.thinking.start();
-                    match msg.parts.last_mut() {
-                        Some(Part::Thinking { text: so_far, ms: 0 }) => so_far.push_str(&text),
-                        _ => msg.parts.push(Part::Thinking { text, ms: 0 }),
-                    }
-                }
-                Event::Content(text) => {
-                    close_thinking(msg, &mut run.thinking);
-                    match msg.parts.last_mut() {
-                        Some(Part::Text(so_far)) => so_far.push_str(&text),
-                        _ => msg.parts.push(Part::Text(text)),
-                    }
-                }
+                Event::Reasoning(text) => run.typing.push(false, text),
+                Event::Content(text) => run.typing.push(true, text),
                 Event::ToolDraft { name, chars, path } => {
                     // The clock runs from the call's first byte; a new call starts it again.
                     let since = run.drafting.as_ref().filter(|d| d.name == name && d.chars <= chars).map_or_else(Instant::now, |d| d.since);
@@ -1240,6 +1282,19 @@ impl App {
                     msg.incomplete = true;
                     finished = true;
                 }
+            }
+            if finished {
+                break;
+            }
+        }
+        // This frame's share of the text. With a row waiting behind it, it is typed out quickly instead.
+        if let Some(msg) = conv.messages.last_mut().filter(|_| !finished) {
+            let pieces = if watched { run.typing.release(!run.inbox.is_empty()) } else { run.typing.release_all() };
+            for (prose, text) in pieces {
+                write_text(msg, &mut run.thinking, prose, text);
+            }
+            if run.typing.waiting() || !run.inbox.is_empty() {
+                ctx.request_repaint();
             }
         }
         if finished {
@@ -1323,6 +1378,22 @@ impl App {
         let _ = ctx;
     }
 
+    /// F11 and the header's button. A maximised window is put back first: Windows keeps a maximised window off
+    /// the taskbar's strip even when it is told to fill the screen, and that strip was left black.
+    fn toggle_fullscreen(&mut self, ctx: &egui::Context) {
+        self.fullscreen = !self.fullscreen;
+        if self.fullscreen {
+            self.was_maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+            if self.was_maximized && !self.staged("f11-raw") {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
+            }
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
+        if !self.fullscreen && std::mem::take(&mut self.was_maximized) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+        }
+    }
+
     /// The web app has exactly two global shortcuts, so this does too; F11 is the browser's own.
     fn shortcuts(&mut self, ctx: &egui::Context) {
         let pressed = |key| ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, key));
@@ -1333,15 +1404,38 @@ impl App {
             self.dialog = Dialog::Search;
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F11)) {
-            self.fullscreen = !self.fullscreen;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
+            self.toggle_fullscreen(ctx);
         }
     }
 
     /// The self-portrait: wait for the first frames to settle, ask for the pixels, save them, leave.
     fn take_shot(&mut self, ctx: &egui::Context) {
-        let Some(shot) = self.shot.as_mut() else { return };
+        if self.shot.is_none() {
+            return;
+        }
         ctx.request_repaint();
+        // `send` really sends `APIM_SHOT_DRAFT` and waits for the reply to end (`APIM_PERF` times its frames);
+        // `maximized` and `f11` put the window through what the title bar's button and the key do.
+        let settled = self.shot.as_ref().is_some_and(|shot| shot.started.elapsed() > Duration::from_millis(300));
+        if settled && !std::mem::replace(&mut self.shot.as_mut().unwrap().acted, true) {
+            if self.staged("send") {
+                self.submit(ctx);
+            }
+            if self.staged("maximized") {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+            }
+        }
+        if self.staged("f11") || self.staged("f11-raw") {
+            let waited = self.shot.as_ref().map_or(Duration::ZERO, |shot| shot.started.elapsed());
+            if waited > Duration::from_millis(700) && !self.fullscreen {
+                self.toggle_fullscreen(ctx);
+            }
+        }
+        if self.staged("send") && self.run.is_some() {
+            self.shot.as_mut().unwrap().started = Instant::now() - Duration::from_millis(400);
+            return;
+        }
+        let Some(shot) = self.shot.as_mut() else { return };
         if !shot.asked && shot.started.elapsed() > Duration::from_millis(std::env::var("APIM_SHOT_WAIT").ok().and_then(|ms| ms.parse().ok()).unwrap_or(1200)) {
             shot.asked = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
@@ -1377,6 +1471,15 @@ impl eframe::App for App {
         if self.staged("drop") {
             raw_input.hovered_files = vec![egui::HoveredFile { path: Some("project.zip".into()), ..Default::default() }];
         }
+        // `up-600`: the wheel is turned once, that many points back through the transcript.
+        if let Some(shot) = self.shot.as_mut().filter(|shot| !shot.scrolled && shot.started.elapsed() > Duration::from_millis(400)) {
+            shot.scrolled = true;
+            if let Some(points) = shot.state.split(',').find_map(|token| token.strip_prefix("up-")?.parse::<f32>().ok()) {
+                let over = raw_input.screen_rect.map_or(egui::pos2(700.0, 400.0), |screen| screen.center());
+                raw_input.events.push(egui::Event::PointerMoved(over));
+                raw_input.events.push(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(0.0, points), phase: egui::TouchPhase::Move, modifiers: Default::default() });
+            }
+        }
         // The self-portrait of a chat being read backwards: the wheel turns over the transcript on every frame
         // (`APIM_PERF` then tells how long the frames took).
         if self.staged("scroll") && self.shot.as_ref().is_some_and(|shot| shot.started.elapsed() > Duration::from_millis(400)) {
@@ -1389,6 +1492,10 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let frame_started = Instant::now();
+        // A picture turned out to be mostly border and takes less room now: what was measured with it is measured again.
+        if std::mem::replace(&mut self.trims_seen, trim::generation()) != trim::generation() {
+            self.remeasure();
+        }
         self.pump(&ctx);
         self.pump_summary();
         self.pump_open();
@@ -1411,7 +1518,7 @@ impl eframe::App for App {
         }
 
         // The sidebar slides: its content keeps its full width and is cut off, like the web app's.
-        let open = ctx.animate_bool_with_time_and_easing(egui::Id::new("sidebar-open"), self.settings.sidebar_open && !self.fullscreen, 0.3, egui::emath::easing::cubic_out);
+        let open = ctx.animate_bool_with_time_and_easing(egui::Id::new("sidebar-open"), self.settings.sidebar_open, 0.3, egui::emath::easing::cubic_out);
         if open > 0.0 {
             let width = (sidebar::WIDTH * open).round();
             egui::Panel::left("sidebar").exact_size(width).resizable(false).show_separator_line(false).frame(egui::Frame::new().fill(p.bg2)).show(ui, |ui| {
@@ -1423,7 +1530,7 @@ impl eframe::App for App {
             });
         }
         // A fixed rail, and only when the window has room for it (the web hides it under 1024).
-        if self.settings.workspace_open && !self.fullscreen && ctx.content_rect().width() >= 1024.0 {
+        if self.settings.workspace_open && ctx.content_rect().width() >= 1024.0 {
             egui::Panel::right("workspace").exact_size(workspace::WIDTH).resizable(false).show_separator_line(false).frame(egui::Frame::new().fill(p.bg2)).show(ui, |ui| workspace::show(self, ui));
         }
         egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg)).show(ui, |ui| {
@@ -1444,8 +1551,10 @@ impl eframe::App for App {
             }
         }
         self.show_toast(&ctx);
+        // What dims the window for a dialog dims the bar as well; taken every frame, bar or no bar.
+        let dim = overlay::take_dim(&ctx);
         if !self.fullscreen {
-            titlebar::show(&ctx);
+            titlebar::show(&ctx, dim);
         }
         titlebar::edges(&ctx);
         self.take_shot(&ctx);
@@ -1454,6 +1563,32 @@ impl eframe::App for App {
         let took = frame_started.elapsed().as_secs_f64() * 1000.0;
         if PERF.is_some_and(|limit| took > limit) {
             eprintln!("frame {took:.1} ms");
+        }
+        // A frame that held the window still goes in the problem report with what was going on. Not the first
+        // seconds (fonts, the first chat), not a self-portrait, and at most one a minute: one cause, one line.
+        static BORN: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(Instant::now);
+        static TOLD: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+        if took > 250.0 && self.shot.is_none() && BORN.elapsed() > Duration::from_secs(5) && TOLD.lock().unwrap().is_none_or(|at| at.elapsed() > Duration::from_secs(60)) {
+            *TOLD.lock().unwrap() = Some(Instant::now());
+            let doing = if self.opening.is_some() {
+                "opening a chat"
+            } else if self.run.is_some() {
+                "during a reply"
+            } else if self.dialog != Dialog::None {
+                "in a dialog"
+            } else {
+                "idle"
+            };
+            crate::diagnostics::record_with("ui_freeze", doing, &format!("One frame took {took:.0} ms."), serde_json::json!({ "messages": self.conv.messages.len(), "files": self.files.len() }));
+        }
+        // And every wait of over 40 ms between one frame and the next while a reply is being written: time lost
+        // outside this function (painting, the system) shows up here and nowhere else.
+        static LAST: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+        if PERF.is_some() {
+            let since = LAST.lock().unwrap().replace(frame_started).map_or(0.0, |last| frame_started.duration_since(last).as_secs_f64() * 1000.0);
+            if since > 40.0 && self.run.is_some() {
+                eprintln!("gap {since:.0} ms ({})", self.run.as_ref().map_or("", |run| run.status));
+            }
         }
     }
 }
@@ -1487,6 +1622,23 @@ impl App {
         });
         if dismiss {
             self.toast = None;
+        }
+    }
+}
+
+/// A piece of the reply's text goes into it: thinking into the thought being had, prose after it.
+fn write_text(msg: &mut Message, watch: &mut Stopwatch, prose: bool, text: String) {
+    if prose {
+        close_thinking(msg, watch);
+        match msg.parts.last_mut() {
+            Some(Part::Text(so_far)) => so_far.push_str(&text),
+            _ => msg.parts.push(Part::Text(text)),
+        }
+    } else {
+        watch.start();
+        match msg.parts.last_mut() {
+            Some(Part::Thinking { text: so_far, ms: 0 }) => so_far.push_str(&text),
+            _ => msg.parts.push(Part::Thinking { text, ms: 0 }),
         }
     }
 }

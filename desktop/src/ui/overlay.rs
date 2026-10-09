@@ -23,6 +23,12 @@ pub enum State {
     Gone,
 }
 
+/// How dark the overlays of this frame made the window (0..255), and forgets it. The title bar is drawn over
+/// everything, so it darkens itself by as much: left bright, it stood out as a frame around a dimmed window.
+pub fn take_dim(ctx: &egui::Context) -> u8 {
+    ctx.data_mut(|d| d.remove_temp::<u8>(egui::Id::new("window-dim"))).unwrap_or(0)
+}
+
 /// The shared mechanics: a dimmed window, something on top that animates in and
 /// out, closed by Esc or a click on the dimmed part. `place` gets how far in it
 /// is (0..1) and returns where the content goes; `add` may set its flag to close, or
@@ -50,7 +56,13 @@ fn overlay_with(ctx: &egui::Context, name: &str, secs: f32, dim: u8, esc: bool, 
     let mut close = esc && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
     egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(screen.min).show(ctx, |ui| {
         let scrim = ui.allocate_rect(screen, Sense::click());
-        ui.painter().rect_filled(screen, 0.0, Color32::from_black_alpha((dim as f32 * if exit { dimmed } else { 1.0 }) as u8));
+        let dark = (dim as f32 * if exit { dimmed } else { 1.0 }) as u8;
+        ui.painter().rect_filled(screen, 0.0, Color32::from_black_alpha(dark));
+        // Two overlays, one over the other, darken as two layers of glass do.
+        ctx.data_mut(|d| {
+            let so_far = d.get_temp::<u8>(egui::Id::new("window-dim")).unwrap_or(0) as u32;
+            d.insert_temp(egui::Id::new("window-dim"), (so_far + dark as u32 - so_far * dark as u32 / 255) as u8);
+        });
         let content = place(screen, t);
         // Asked before the content is drawn, so the content can refuse by clearing the flag (unsaved edits).
         if scrim.clicked() && scrim.interact_pointer_pos().is_some_and(|at| !content.contains(at)) {

@@ -977,7 +977,9 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, tool_defs: 
                 Err(e) => tools::Output { summary: "Invalid tool arguments".into(), ..tools::Output::fail(format!("Error: arguments were not valid JSON ({e})")) },
             };
             if !out.ok {
-                log("tool_failed", &call.name, if out.summary.is_empty() { &out.text } else { &out.summary });
+                // Which model, and the names of what it passed (never the values): "path,new_text" explains a refused edit.
+                let passed = serde_json::from_str::<Value>(args_text).ok().and_then(|v| v.as_object().map(|map| map.keys().cloned().collect::<Vec<_>>().join(","))).unwrap_or_default();
+                log_with("tool_failed", &call.name, if out.summary.is_empty() { &out.text } else { &out.summary }, json!({ "model": target.model.id, "args": passed, "round": tool_rounds }));
             }
             emit.send(Event::ToolDone { id: call.id.clone(), ok: out.ok, summary: out.summary.clone(), image: out.image.clone(), changed: out.changed.clone() });
             if let Some(found) = out.search.as_ref().filter(|_| out.ok) {

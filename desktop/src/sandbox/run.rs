@@ -193,32 +193,24 @@ pub async fn run_command(wsl: &Path, workspace_id: &str, workspace_win_dir: &Pat
     }
 }
 
-/// A background command started in the sandbox: its child, the log so far, and whether it had already exited.
-pub struct Background {
-    pub child: Child,
-    pub log: Arc<Mutex<Vec<u8>>>,
-    pub exited_at_start: bool,
-}
-
-/// Starts a long-running command and waits 3 s to see whether it died at once. The child is not killed on drop.
-pub async fn start_background(wsl: &Path, workspace_id: &str, workspace_win_dir: &Path, script: &str) -> Result<Background, (String, bool)> {
+/// Starts a long-running command (a server, a watcher, a window) in the sandbox and hands back its process with
+/// its output pipes untaken: the process list keeps it (`exec::Procs::adopt`), so read_process and stop_process
+/// work on it. The child is not killed on drop.
+pub async fn start_background(wsl: &Path, workspace_id: &str, workspace_win_dir: &Path, script: &str) -> Result<Child, (String, bool)> {
     let sb = ensure(wsl)?;
     let (inv, stdin) = wrap_for_sandbox(&sb.distro, &sb.display, workspace_id, &workspace_win_dir.to_string_lossy(), script, &[]);
     let mut cmd = Command::new(wsl);
     cmd.args(&inv.args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     hide(&mut cmd);
     let mut child = cmd.spawn().map_err(|e| (format!("Could not run in the sandbox: {e}"), false))?;
-    let log = Arc::new(Mutex::new(Vec::new()));
-    for p in [child.stdout.take().map(|p| pump(p, log.clone())), child.stderr.take().map(|p| pump(p, log.clone()))].into_iter().flatten() {
-        drop(p);
+    // Too long for the command line: the script goes in through stdin, which then has to close, so this one
+    // process cannot be written to later.
+    if let Some(text) = stdin {
+        if let Some(mut pipe) = child.stdin.take() {
+            let _ = pipe.write_all(text.as_bytes()).await;
+        }
     }
-    if let Some(mut pipe) = child.stdin.take() {
-        let text = stdin.unwrap_or_default();
-        let _ = pipe.write_all(text.as_bytes()).await;
-    }
-    tokio::time::sleep(Duration::from_secs(3)).await;
-    let exited_at_start = child.try_wait().ok().flatten().is_some();
-    Ok(Background { child, log, exited_at_start })
+    Ok(child)
 }
 
 /// The file name a screenshot is saved under: the last path part, cleaned, else sandbox-<ms>.png. Mirrors the web.

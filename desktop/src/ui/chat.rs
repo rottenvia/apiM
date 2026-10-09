@@ -90,8 +90,7 @@ pub fn header(app: &mut App, ui: &mut egui::Ui) {
         ui.spacing_mut().item_spacing.x = 6.0;
         let tip = if app.fullscreen { "Exit full screen" } else { "Full screen" };
         if widgets::icon_btn(ui, if app.fullscreen { icons::FULLSCREEN_EXIT } else { icons::FULLSCREEN }, tip).clicked() {
-            app.fullscreen = !app.fullscreen;
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(app.fullscreen));
+            app.toggle_fullscreen(ui.ctx());
         }
         if widgets::icon_btn(ui, icons::FIND, "Find in this chat (Ctrl+F)").clicked() {
             app.find_open = !app.find_open;
@@ -204,7 +203,7 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
                         ui.label(small(format_duration(totals.ms), p.muted)).on_hover_text("Total time spent generating");
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(small(format!("{} messages", totals.messages), p.muted));
+                        ui.label(small(format!("{} message{}", totals.messages, if totals.messages == 1 { "" } else { "s" }), p.muted));
                     });
                 });
                 ui.add_space(12.0);
@@ -225,7 +224,10 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
             ui.add_space(8.0 + gap);
         }
 
-        let App { conv, heights, rows, typed, run, settings, editing, rewind, .. } = app;
+        let App { conv, heights, rows, run, settings, editing, rewind, .. } = app;
+        // What a live reply is doing is said right under it; a question to the user keeps its distance.
+        let asking = run.as_ref().is_some_and(|r| r.approval.is_some() || r.question.is_some());
+        let tail_gap = if running && !asking { gap.min(6.0) } else { gap };
         let (plan, rewind) = (conv.plan.as_ref(), rewind.as_ref());
         // Bubbles stop at three quarters of the column; a narrow window gives them a little more.
         let cap = column * if ui.ctx().content_rect().width() < 768.0 { 0.85 } else { 0.75 };
@@ -261,7 +263,7 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
                 rows.guessed = false;
                 let mut marks = matcher.as_ref().filter(|_| hits > 0).map(|matcher| markdown::Marks { matcher, active: focused, seen: 0, reveal: wanted, shown: false });
                 column_in(ui, !shows, &mut |ui| {
-                    let mut env = bubble::Env { settings, workspace: &workspace, live, newest: i == last, busy: running, cap, thinking_secs, editing, action: &mut action, plan, rewind, marks: marks.take(), rows, typed };
+                    let mut env = bubble::Env { settings, workspace: &workspace, live, newest: i == last, busy: running, cap, thinking_secs, editing, action: &mut action, plan, rewind, marks: marks.take(), rows };
                     ui.push_id(&msg.id, |ui| bubble::show(ui, msg, &mut env));
                     marks = env.marks.take();
                 });
@@ -294,7 +296,7 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
                     column_ui(ui, &mut |ui| divider(ui, &text, "Everything above is summarised for the model. It sees the summary plus what comes after this line."));
                     ui.add_space(16.0);
                 }
-                None => ui.add_space(gap),
+                None => ui.add_space(if i == last { tail_gap } else { gap }),
             }
         }
 
@@ -468,12 +470,13 @@ fn wait_rows(ui: &mut egui::Ui, run: &super::Run, has_output: bool) {
     let p = p();
     let row = |ui: &mut egui::Ui, top: f32, add: &mut dyn FnMut(&mut egui::Ui)| {
         ui.add_space(top);
-        ui.horizontal(|ui| {
+        // As tall as its text: a row of the usual height would stand off from the reply it speaks for.
+        ui.allocate_ui_with_layout(vec2(ui.available_width(), 20.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
             ui.add_space(16.0);
             ui.spacing_mut().item_spacing.x = 8.0;
             add(ui);
         });
-        ui.add_space(8.0);
+        ui.add_space(6.0);
     };
     let mark = |ui: &mut egui::Ui| {
         ui.label(widgets::lines("✻", 13.0, 20.0, W::Regular, p.accent));
@@ -496,7 +499,7 @@ fn wait_rows(ui: &mut egui::Ui, run: &super::Run, has_output: bool) {
             "Searching" => "Searching the web",
             _ => "Thinking",
         };
-        row(ui, 8.0, &mut |ui| {
+        row(ui, 0.0, &mut |ui| {
             mark(ui);
             // A retry takes the word's place rather than adding a line.
             match &retry {
@@ -511,7 +514,7 @@ fn wait_rows(ui: &mut egui::Ui, run: &super::Run, has_output: bool) {
             ui.label(widgets::text(format!("· {}s", run.started.elapsed().as_secs()), 11.0, W::Regular, p.muted));
         });
         if let Some((r, (chars, described))) = sent.as_ref().filter(|(_, (chars, _))| *chars >= 100_000) {
-            row(ui, 4.0, &mut |ui| {
+            row(ui, 0.0, &mut |ui| {
                 let tip = format!("Request {} body: {}{}", r.number, body(r), if *chars >= 400_000 { "\nBig context — the first token can take a while" } else { "" });
                 ui.label(small(format!("Request {} · {described}{}", r.number, heavy(*chars)), p.muted)).on_hover_text(tip);
             });

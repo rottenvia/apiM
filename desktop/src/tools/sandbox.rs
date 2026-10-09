@@ -50,14 +50,6 @@ pub async fn sandbox_run_with(wsl: &Path, ctx: &Ctx, args: &Value) -> Output {
     }
     let background = args["background"].as_bool() == Some(true);
     let display = display_line(&script, background);
-    if background {
-        // ponytail: a background run must be adopted into exec::Procs (its map is private); refused until that hook exists.
-        return outcome(
-            false,
-            "Background sandbox commands are not wired into the process list in this build, so nothing was started. Run the command in the foreground instead; it waits up to timeout_ms (at most 20 minutes).".into(),
-            "Sandbox background is not available".into(),
-        );
-    }
     // Same gate as run_command: Auto mode runs it, otherwise the card asks. "Always allow" is remembered by the key.
     if ctx.settings.approval != Approval::Auto {
         let reason = str_arg(args, "reason").trim();
@@ -72,6 +64,21 @@ pub async fn sandbox_run_with(wsl: &Path, ctx: &Ctx, args: &Value) -> Output {
         if let Some(why) = decline {
             return outcome(false, format!("The sandbox command was not run. {why} Do not retry it — explain what you were trying to do."), format!("Skipped: {display}"));
         }
+    }
+    if background {
+        // A server, a watcher or a window: started, left running, and kept in the process list like any other.
+        let child = match run::start_background(wsl, &workspace_id(ctx), &ctx.root, &script).await {
+            Ok(child) => child,
+            Err((error, needs_setup)) => return outcome(false, if needs_setup { format!("{error} Ask the user to run /sandbox and set it up once.") } else { error }, "Sandbox start failed".into()),
+        };
+        let listed = format!("sandbox: {}", script.chars().take(60).collect::<String>());
+        let (id, died, log) = ctx.procs.adopt(ctx.state_dir.clone(), listed, child, ctx.emit.clone(), Duration::from_secs(3)).await;
+        ctx.memory.invalidate_all();
+        let first = |most: usize, none: &str| if log.trim().is_empty() { none.to_string() } else { log.chars().take(most).collect() };
+        return match died {
+            Some(_) => outcome(false, format!("The sandbox process exited immediately.\n{}", first(2000, "(no output)")), "Sandbox process exited at once".into()),
+            None => outcome(true, format!("Started in the sandbox as {id}. First output:\n{}\nScreenshot it with sandbox_screenshot; read it with read_process {id}.", first(1500, "(none yet)")), format!("Sandbox process {id}")),
+        };
     }
     let timeout_ms = args["timeout_ms"].as_f64().map(|v| v.max(0.0) as u64);
     let r = run::run_command(wsl, &workspace_id(ctx), &ctx.root, &script, timeout_ms).await;
