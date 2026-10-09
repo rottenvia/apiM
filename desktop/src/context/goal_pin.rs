@@ -36,7 +36,7 @@ pub fn resolve_run_goal(user_text: &str, history_last_user: Option<&str>, steeri
 pub fn render_goal_pin(goal: &str, mid_run: bool) -> String {
     let capped = if js_len(goal) > MAX_GOAL_CHARS { format!("{}\n…[request truncated — the full text is the newest user turn above]…", js_head(goal, MAX_GOAL_CHARS)) } else { goal.to_string() };
     let lead = if mid_run {
-        format!("You are mid-task on this request — nothing new has been asked. Do not restart, re-survey or re-read to re-orient: your plan, notes, the files you read and your last steps are all above. Take the next step. Older turns and the {HISTORY_SUMMARY_MARKER} block are background for a different, finished task if they differ.")
+        format!("You are mid-task on this request — nothing new has been asked. This block is the app's standing reminder, repeated every round: it is not a message from the user, so do not acknowledge it, answer it again or mention it. Do not restart, re-survey or re-read to re-orient: your plan, notes, the files you read and your last steps are all above. Take the next step. Older turns and the {HISTORY_SUMMARY_MARKER} block are background for a different, finished task if they differ.")
     } else {
         format!("Answer THIS request. Older turns and the {HISTORY_SUMMARY_MARKER} block are background — if they describe a different task, that task is over or paused; do not resume it unasked.")
     };

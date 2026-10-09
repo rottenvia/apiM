@@ -93,6 +93,9 @@ export function renderGoalPin(goal: string, midRun = false): string {
    */
   const lead = midRun
     ? `You are mid-task on this request — nothing new has been asked. ` +
+      // Restated as a system turn, some hosts hand it over as a user turn: a model then answered it every round.
+      `This block is the app's standing reminder, repeated every round: it is not a message from the user, ` +
+      `so do not acknowledge it, answer it again or mention it. ` +
       `Do not restart, re-survey or re-read to re-orient: your plan, notes, ` +
       `the files you read and your last steps are all above. Take the next ` +
       `step. Older turns and the ${HISTORY_SUMMARY_MARKER} block are ` +

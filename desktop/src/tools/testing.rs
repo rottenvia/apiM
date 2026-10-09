@@ -100,6 +100,11 @@ pub fn detect_runner(dir: &Path) -> Option<TestRunner> {
             return Some(runner("pytest", "pytest", &["-q", "--no-header", "-rN", d], format!("a {d}/ directory exists")));
         }
     }
+    // Past the web's markers: a small project keeps its tests beside the code, test_x.py or x_test.py.
+    let beside = std::fs::read_dir(dir).ok().and_then(|entries| entries.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).find(|name| name.ends_with(".py") && (name.starts_with("test_") || name.ends_with("_test.py"))));
+    if let Some(file) = beside {
+        return Some(runner("pytest", "pytest", &["-q", "--no-header", "-rN"], format!("{file} is a test file")));
+    }
     if exists("Cargo.toml") {
         return Some(runner("cargo test", "cargo", &["test"], "Cargo.toml is present".into()));
     }

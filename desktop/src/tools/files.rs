@@ -455,6 +455,12 @@ pub fn apply_edit(content: &str, spec: &EditSpec) -> Result<Applied, String> {
     let lines: Vec<&str> = content.split('\n').collect();
     let total = lines.len();
 
+    // An end with no start, next to an anchor: a model that meant a range and dropped half of it. Replacing the one
+    // line it did name is how a block ends up doubled, so it is told what to send instead.
+    if spec.start_line.is_none() && spec.start_anchor.is_none() && spec.old_text.is_none() && spec.end_anchor.is_some() {
+        let at = spec.end_line.map(|n| format!(" (you passed end_line {n})")).unwrap_or_default();
+        return Err(format!("The region has an end but no start{at}. To replace lines A to B send start_line A and end_line B and no anchors; to delete them send the same with new_text \"\". For one line, send start_line and end_line with the same number."));
+    }
     // A lone end_line means that one line.
     if let Some(start) = spec.start_line.or(spec.end_line) {
         let end = spec.end_line.unwrap_or(start);
@@ -588,7 +594,18 @@ fn describe(rel: &str, content: &str, a: &Applied, preview: bool) -> String {
         let shown: String = (a.first..=a.last.min(a.first + 39)).filter_map(|n| old.get(n - 1).map(|l| format!("{n} | {l}\n"))).collect();
         format!("PREVIEW, nothing written. {rel}: lines {}-{} would be replaced by {} line(s):\n{shown}", a.first, a.last, a.new_lines)
     } else {
-        format!("{rel}: replaced lines {}-{} with {} line(s). Now:\n{}", a.first, a.last, a.new_lines, snippet(&a.content, a.first, a.new_lines))
+        // What went, as well as what is there now: an edit by line numbers that are a few lines off replaces
+        // the wrong text and looks like a success, and the model finds out rounds later, if at all.
+        let gone: Vec<&str> = (a.first..=a.last).filter_map(|n| old.get(n - 1).copied()).collect();
+        let was = if gone.is_empty() {
+            String::new()
+        } else if gone.iter().all(|l| l.trim().is_empty()) {
+            " They were blank: if you meant other lines, undo_file puts this back.".to_string()
+        } else {
+            let shown: String = gone.iter().take(4).map(|l| format!("  - {}\n", l.trim_end().chars().take(120).collect::<String>())).collect();
+            format!(" They read:\n{shown}{}", if gone.len() > 4 { format!("  … and {} more\n", gone.len() - 4) } else { String::new() })
+        };
+        format!("{rel}: replaced lines {}-{} with {} line(s).{was}{}Now:\n{}", a.first, a.last, a.new_lines, if was.ends_with('\n') || was.is_empty() { if was.is_empty() { " " } else { "" } } else { "\n" }, snippet(&a.content, a.first, a.new_lines))
     }
 }
 
@@ -605,11 +622,20 @@ fn edit_one(ctx: &Ctx, rel: &str, specs: &[&EditSpec], preview: bool) -> Vec<Res
     let results = specs
         .iter()
         .map(|spec| {
-            apply_edit(&content, spec).map(|applied| {
+            apply_edit(&content, spec).and_then(|applied| {
+                if applied.content == content {
+                    // Reported as done, this sends a model round in circles: it reads "Edited" and the file is as it was.
+                    return Err(format!(
+                        "Nothing changed: lines {}-{} already read exactly as new_text. If lines around them are wrong (a doubled line, a leftover), name the whole range with start_line and end_line; new_text \"\" deletes it. The file now:\n{}",
+                        applied.first,
+                        applied.last,
+                        snippet(&content, applied.first, applied.new_lines)
+                    ));
+                }
                 let text = describe(rel, &content, &applied, preview);
                 content = applied.content;
                 changed = true;
-                text
+                Ok(text)
             })
         })
         .collect();
@@ -847,6 +873,14 @@ mod tests {
         let a = apply_edit(src, &spec(|s| { s.start_line = Some(2); s.end_line = Some(3); s.new_text = String::new() })).unwrap();
         assert_eq!(a.content, "start\nend\ntail");
         assert!(apply_edit(src, &spec(|s| { s.start_line = Some(9); })).is_err());
+        // The result names what was replaced, and says so when that was nothing but blank lines.
+        let told = describe("f", "a\n\nb", &apply_edit("a\n\nb", &spec(|s| { s.start_line = Some(2); s.new_text = "x".into() })).unwrap(), false);
+        assert!(told.starts_with("f: replaced lines 2-2 with 1 line(s). They were blank: if you meant other lines, undo_file puts this back.\nNow:\n1 | a\n2 | x"), "{told}");
+        let told = describe("f", "a\nb", &apply_edit("a\nb", &spec(|s| { s.old_text = Some("b".into()); s.new_text = "c".into() })).unwrap(), false);
+        assert!(told.starts_with("f: replaced lines 2-2 with 1 line(s). They read:\n  - b\nNow:\n1 | a\n2 | c"), "{told}");
+        // Half a range (an end, no start) is refused rather than taken for one line.
+        let half = apply_edit(src, &spec(|s| { s.end_line = Some(3); s.end_anchor = Some("end".into()); s.new_text = "Z".into() })).unwrap_err();
+        assert!(half.contains("end but no start") && half.contains("end_line 3"), "{half}");
     }
 
     #[test]

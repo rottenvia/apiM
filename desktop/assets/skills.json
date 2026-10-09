@@ -1,5 +1,258 @@
 [
   {
+    "id": "gh-juliusbrussee-caveman",
+    "name": "Caveman",
+    "icon": "🪨",
+    "category": "token-saving",
+    "description": "Official, by Julius Brussee. Terse replies: answer first, no filler, code and errors kept exact.",
+    "prompt": "",
+    "origin": {
+      "repo": "JuliusBrussee/caveman",
+      "file": "skills/caveman/SKILL.md"
+    }
+  },
+  {
+    "id": "gh-dietrichgebert-ponytail",
+    "name": "Ponytail",
+    "icon": "✂️",
+    "category": "token-saving",
+    "description": "Official, by Dietrich Gebert. The lazy senior developer: the least code that works, nothing unasked.",
+    "prompt": "",
+    "origin": {
+      "repo": "DietrichGebert/ponytail",
+      "file": "skills/ponytail/SKILL.md"
+    }
+  },
+  {
+    "id": "gh-graphify-labs-graphify",
+    "name": "Graphify",
+    "icon": "🕸️",
+    "category": "enhancement",
+    "description": "Official. Builds a knowledge graph of a codebase and answers from it. Needs its program: pip install graphifyy.",
+    "prompt": "",
+    "origin": {
+      "repo": "Graphify-Labs/graphify",
+      "file": "graphify/skill-windows.md",
+      "refs": "graphify/skills/claude/references"
+    }
+  },
+  {
+    "id": "gh-juliusbrussee-caveman-caveman-commit",
+    "name": "Caveman Commit",
+    "icon": "📝",
+    "category": "formatting",
+    "description": "Official, from Caveman. Short commit messages that say what changed and why.",
+    "prompt": "",
+    "origin": {
+      "repo": "JuliusBrussee/caveman",
+      "file": "skills/caveman-commit/SKILL.md"
+    }
+  },
+  {
+    "id": "gh-juliusbrussee-caveman-caveman-review",
+    "name": "Caveman Review",
+    "icon": "🔍",
+    "category": "enhancement",
+    "description": "Official, from Caveman. Code review as one line per finding, the worst first.",
+    "prompt": "",
+    "origin": {
+      "repo": "JuliusBrussee/caveman",
+      "file": "skills/caveman-review/SKILL.md"
+    }
+  },
+  {
+    "id": "gh-dietrichgebert-ponytail-ponytail-review",
+    "name": "Ponytail Review",
+    "icon": "🔎",
+    "category": "enhancement",
+    "description": "Official, from Ponytail. Reviews a change for code that did not need to be written.",
+    "prompt": "",
+    "origin": {
+      "repo": "DietrichGebert/ponytail",
+      "file": "skills/ponytail-review/SKILL.md"
+    }
+  },
+  {
+    "id": "gh-anthropics-skills-pdf",
+    "name": "PDF",
+    "icon": "📄",
+    "category": "enhancement",
+    "description": "Anthropic's own. Read, merge, split and fill PDF files, or make new ones, with the scripts it brings.",
+    "prompt": "",
+    "origin": {
+      "repo": "anthropics/skills",
+      "file": "skills/pdf/SKILL.md"
+    }
+  },
+  {
+    "id": "gh-anthropics-skills-docx",
+    "name": "Word documents",
+    "icon": "📃",
+    "category": "enhancement",
+    "description": "Anthropic's own. Create and edit .docx files, with tracked changes and comments.",
+    "prompt": "",
+    "origin": {
+      "repo": "anthropics/skills",
+      "file": "skills/docx/SKILL.md"
+    }
+  },
+  {
+    "id": "gh-anthropics-skills-xlsx",
+    "name": "Spreadsheets",
+    "icon": "📊",
+    "category": "enhancement",
+    "description": "Anthropic's own. Create, edit and analyse .xlsx files, formulas included.",
+    "prompt": "",
+    "origin": {
+      "repo": "anthropics/skills",
+      "file": "skills/xlsx/SKILL.md"
+    }
+  },
+  {
+    "id": "gh-anthropics-skills-pptx",
+    "name": "Presentations",
+    "icon": "📑",
+    "category": "enhancement",
+    "description": "Anthropic's own. Create and edit .pptx slide decks.",
+    "prompt": "",
+    "origin": {
+      "repo": "anthropics/skills",
+      "file": "skills/pptx/SKILL.md"
+    }
+  },
+  {
+    "id": "gh-anthropics-skills-frontend-design",
+    "name": "Frontend Design",
+    "icon": "🎨",
+    "category": "enhancement",
+    "description": "Anthropic's own. Web pages and interfaces with a look of their own instead of the usual template.",
+    "prompt": "",
+    "origin": {
+      "repo": "anthropics/skills",
+      "file": "skills/frontend-design/SKILL.md"
+    }
+  },
+  {
+    "id": "gh-anthropics-skills-webapp-testing",
+    "name": "Web App Testing",
+    "icon": "🧪",
+    "category": "enhancement",
+    "description": "Anthropic's own. Tests a local web app in a real browser with Playwright.",
+    "prompt": "",
+    "origin": {
+      "repo": "anthropics/skills",
+      "file": "skills/webapp-testing/SKILL.md"
+    }
+  },
+  {
+    "id": "gh-anthropics-skills-mcp-builder",
+    "name": "MCP Builder",
+    "icon": "🔌",
+    "category": "enhancement",
+    "description": "Anthropic's own. A guide to building good MCP servers, in Python or TypeScript.",
+    "prompt": "",
+    "origin": {
+      "repo": "anthropics/skills",
+      "file": "skills/mcp-builder/SKILL.md"
+    }
+  },
+  {
+    "id": "gh-anthropics-skills-skill-creator",
+    "name": "Skill Creator",
+    "icon": "🛠️",
+    "category": "enhancement",
+    "description": "Anthropic's own. How to write a new skill, and test and improve one.",
+    "prompt": "",
+    "origin": {
+      "repo": "anthropics/skills",
+      "file": "skills/skill-creator/SKILL.md"
+    }
+  },
+  {
+    "id": "gh-anthropics-skills-doc-coauthoring",
+    "name": "Doc Co-authoring",
+    "icon": "✍️",
+    "category": "enhancement",
+    "description": "Anthropic's own. A step-by-step way to write a spec, proposal or decision document together.",
+    "prompt": "",
+    "origin": {
+      "repo": "anthropics/skills",
+      "file": "skills/doc-coauthoring/SKILL.md"
+    }
+  },
+  {
+    "id": "gh-anthropics-skills-web-artifacts-builder",
+    "name": "Web Artifacts Builder",
+    "icon": "🧱",
+    "category": "enhancement",
+    "description": "Anthropic's own. Larger single-page web apps built with React, Tailwind and shadcn/ui.",
+    "prompt": "",
+    "origin": {
+      "repo": "anthropics/skills",
+      "file": "skills/web-artifacts-builder/SKILL.md"
+    }
+  },
+  {
+    "id": "gh-anthropics-skills-claude-api",
+    "name": "Claude API",
+    "icon": "🤖",
+    "category": "enhancement",
+    "description": "Anthropic's own. Reference for building on the Claude API: models, tools, streaming, caching.",
+    "prompt": "",
+    "origin": {
+      "repo": "anthropics/skills",
+      "file": "skills/claude-api/SKILL.md"
+    }
+  },
+  {
+    "id": "gh-anthropics-skills-algorithmic-art",
+    "name": "Algorithmic Art",
+    "icon": "🌀",
+    "category": "enhancement",
+    "description": "Anthropic's own. Generative art in p5.js, with seeds and parameters to explore.",
+    "prompt": "",
+    "origin": {
+      "repo": "anthropics/skills",
+      "file": "skills/algorithmic-art/SKILL.md"
+    }
+  },
+  {
+    "id": "gh-anthropics-skills-canvas-design",
+    "name": "Canvas Design",
+    "icon": "🖌️",
+    "category": "enhancement",
+    "description": "Anthropic's own. Posters and visual pieces as .png or .pdf, designed rather than laid out.",
+    "prompt": "",
+    "origin": {
+      "repo": "anthropics/skills",
+      "file": "skills/canvas-design/SKILL.md"
+    }
+  },
+  {
+    "id": "gh-anthropics-skills-theme-factory",
+    "name": "Theme Factory",
+    "icon": "🎭",
+    "category": "formatting",
+    "description": "Anthropic's own. Ready colour and type themes for slides, documents and pages.",
+    "prompt": "",
+    "origin": {
+      "repo": "anthropics/skills",
+      "file": "skills/theme-factory/SKILL.md"
+    }
+  },
+  {
+    "id": "gh-anthropics-skills-internal-comms",
+    "name": "Internal Comms",
+    "icon": "📣",
+    "category": "formatting",
+    "description": "Anthropic's own. Status reports, updates, newsletters and FAQs in a company's usual formats.",
+    "prompt": "",
+    "origin": {
+      "repo": "anthropics/skills",
+      "file": "skills/internal-comms/SKILL.md"
+    }
+  },
+  {
     "id": "skill-terse",
     "name": "Terse",
     "icon": "⚡",

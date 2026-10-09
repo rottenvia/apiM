@@ -196,6 +196,15 @@ fn prepare(ctx: &Ctx, command: &str, argv: Vec<String>) -> Result<Launch, String
     if command.is_empty() {
         return Err("No command was given. Pass command as a string and args as a list of strings, e.g. {\"command\":\"python3\",\"args\":[\"app.py\"]}. There is no shell, so do not pass \"?\", \"true\", or a full command line in one string.".into());
     }
+    // A whole command line in one string, from a model that forgot the list: taken apart when it is plain
+    // words and no program of that very name exists (a path may hold a space).
+    let one_line = argv.is_empty() && command.contains(' ') && !command.contains(['"', '\'']) && find_program(&ctx.root, command).is_none();
+    let (command, argv) = if one_line {
+        let mut words = command.split_whitespace();
+        (words.next().unwrap_or(""), words.map(str::to_string).collect())
+    } else {
+        (command, argv)
+    };
     let name = base_name(command);
     if SHELLS.contains(&name.as_str()) {
         return Err("Shells are not available. Run the interpreter directly, e.g. `python app.py` rather than `sh -c \"python app.py\"`.".into());
@@ -228,8 +237,9 @@ fn prepare(ctx: &Ctx, command: &str, argv: Vec<String>) -> Result<Launch, String
     if !own && command.contains(['/', '\\']) && !super::build::is_toolchain(&program) {
         return Err(format!("`{command}` is outside the workspace. Run programs by name, e.g. `node`, or by a path inside the workspace."));
     }
-    // The agent's own builds always ask. An allowed program skips the prompt only when it merely looks, or in Auto mode.
-    let ask = own || (!read_only(&name, &argv) && ctx.settings.approval == Approval::Manual);
+    // "Run automatically" asks about nothing. Otherwise a program from the workspace (built there, or downloaded) always
+    // asks, and an allowed program asks unless it merely looks.
+    let ask = ctx.settings.approval == Approval::Manual && (own || !read_only(&name, &argv));
     let display = std::iter::once(command.to_string()).chain(argv.iter().map(|a| if a.contains(' ') { format!("\"{a}\"") } else { a.clone() })).collect::<Vec<_>>().join(" ");
     let key = serde_json::to_string(&std::iter::once(name).chain(argv.iter().cloned()).collect::<Vec<_>>()).unwrap_or_default();
     Ok(Launch { program, args: argv, display, key, ask })
@@ -450,15 +460,29 @@ pub async fn run_tests(ctx: &Ctx, args: &Value) -> Output {
         return Output { ok: false, text: "Error: no test suite found. Looked for a package.json test script, pytest config, a tests/ directory, Cargo.toml and go.mod. If tests live somewhere unusual, run them with run_command instead.".into(), summary: "No test suite found".into(), ..Default::default() };
     };
     let mut argv = runner.args.clone();
+    let mut command = runner.command.clone();
+    let pytest = runner.name == "pytest";
+    // pytest is often there as a module with no program of its own on PATH.
+    if pytest && find_program(&ctx.root, "pytest").is_none() {
+        command = "python".into();
+        argv.splice(0..0, ["-m".to_string(), "pytest".to_string()]);
+    }
     let filter = str_arg(args, "filter").trim();
     if !filter.is_empty() {
+        // pytest takes a path as it is; a test's name goes behind -k, or it is looked for as a file.
+        if pytest && !filter.contains(['/', '\\', ':']) && !filter.ends_with(".py") {
+            argv.push("-k".into());
+        }
         argv.push(filter.to_string());
     }
-    let limit = timeout_for(&runner.command, &argv, None);
-    let ran = match execute(ctx, &runner.command, argv, "Run the project's tests", Some(limit)).await {
+    let limit = timeout_for(&command, &argv, None);
+    let ran = match execute(ctx, &command, argv, "Run the project's tests", Some(limit)).await {
         Ok(ran) => ran,
         Err(refused) => return refused,
     };
+    if ran.out.contains("No module named pytest") {
+        return Output::fail("pytest is not installed on this machine, so the tests could not run. Install it (run_command: pip install pytest), then call run_tests again.");
+    }
     let summary = testing::parse_output(&runner.name, &ran.out, "", ran.code.unwrap_or(1));
     // A failing suite is a successful tool call: the agent asked what the state was and got a true answer.
     Output { ok: true, text: testing::format_summary(&summary, &format!("{}\n", ran.out)), summary: testing::headline(&summary), ..Default::default() }
@@ -492,7 +516,9 @@ pub struct Procs {
 
 impl Procs {
     fn get(&self, id: &str, owner: &Path) -> Option<Arc<Proc>> {
-        self.map.lock().unwrap().get(id).filter(|p| p.owner.as_path() == owner).cloned()
+        // "1" for "p1": the number alone is what a model often sends back.
+        let id = if !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) { format!("p{id}") } else { id.to_string() };
+        self.map.lock().unwrap().get(&id).filter(|p| p.owner.as_path() == owner).cloned()
     }
 
     /// The processes one chat started, oldest first.

@@ -210,7 +210,8 @@ struct Placed {
 
 pattern!(FENCE_OPEN, r"(?i)^\s*```[a-z]*\s*\n");
 pattern!(FENCE_CLOSE, r"\n```\s*$");
-pattern!(HUNK_HEADER, r"^@@\s*-(\d+)(?:,\d+)?\s+\+\d+(?:,\d+)?\s*@@");
+// The numbers may be missing: a bare `@@` (some tools write no others) starts a hunk that is found by its lines alone.
+pattern!(HUNK_HEADER, r"^@@(?:\s*-(\d+)(?:,\d+)?\s+\+\d+(?:,\d+)?\s*@@)?");
 pattern!(PATCH_TARGET, r"(?m)^\+\+\+ (?:b/)?(\S+)");
 
 /// A unified diff as hunks. Tolerates what a model wraps around one: `diff --git` lines, `---`/`+++` headers.
@@ -221,7 +222,8 @@ fn parse_patch(text: &str) -> Vec<Hunk<'_>> {
             continue;
         }
         if let Some(header) = HUNK_HEADER.captures(line) {
-            hunks.push(Hunk { starts_at: header[1].parse().unwrap_or(usize::MAX / 4), expected: Vec::new(), replacement: Vec::new() });
+            // With no line stated the search starts at the top.
+            hunks.push(Hunk { starts_at: header.get(1).map_or(1, |n| n.as_str().parse().unwrap_or(usize::MAX / 4)), expected: Vec::new(), replacement: Vec::new() });
             continue;
         }
         let Some(hunk) = hunks.last_mut() else { continue };
@@ -317,7 +319,9 @@ pub fn apply_patch(root: &Path, args: &Value) -> Output {
     let original = String::from_utf8_lossy(&old);
     let unfenced = FENCE_OPEN.replace(patch, "");
     let text = FENCE_CLOSE.replace(&unfenced, "");
-    let hunks = parse_patch(&text);
+    // The newline a patch ends with is not one more blank line of the file: read as one, it made every hunk
+    // that is not at the very end of its file miss.
+    let hunks = parse_patch(text.trim_end_matches(['\n', '\r']));
     if hunks.is_empty() {
         return bad("Error: No @@ hunks found. A unified diff needs at least one hunk header like `@@ -10,6 +10,7 @@`, followed by lines prefixed with ' ', '-' or '+'.", format!("Patch did not apply to {rel}"));
     }

@@ -53,11 +53,21 @@ pub struct LoopObservation {
     pub trip: bool,
 }
 
-/// One per reply. Only the call itself succeeding clears its strikes.
+/// One per reply. The call itself succeeding clears its strikes, and so does the workspace changing under it.
 #[derive(Default)]
 pub struct LoopBreaker(HashMap<String, u32>);
 
+/// Tools whose result depends on what is in the workspace, not only on their arguments.
+const COMMANDS: [&str; 5] = ["run_command", "run_tests", "build_project", "start_process", "verify_file"];
+
 impl LoopBreaker {
+    /// Something else succeeded and changed the workspace: a file was written (`files`), or a command ran.
+    /// The web lacks this, and stopped the plain fix-and-rerun loop: edit, run the checker, edit, run it again.
+    /// A changed file makes every earlier failure a new question; a command that ran only those of other commands.
+    pub fn workspace_changed(&mut self, files: bool) {
+        self.0.retain(|key, _| !files && !COMMANDS.iter().any(|name| key.strip_prefix(name).is_some_and(|rest| rest.starts_with('\n'))));
+    }
+
     pub fn observe(&mut self, name: &str, args: &Value, ok: bool) -> LoopObservation {
         let key = fingerprint(name, args);
         if ok {
@@ -92,6 +102,23 @@ pub fn loop_trip_user_note(tool: &str, last_error: &str) -> String {
 mod tests {
     use super::*;
     use crate::run::cases;
+
+    /// The checker fails, a file is fixed, the checker fails on the next thing: that is work, not a loop.
+    #[test]
+    fn a_rerun_after_a_change_is_a_new_try() {
+        let (check, edit) = (serde_json::json!({ "command": "lint" }), serde_json::json!({ "path": "a", "old_text": "x" }));
+        let mut breaker = LoopBreaker::default();
+        for _ in 0..4 {
+            assert!(!breaker.observe("run_command", &check, false).trip);
+            breaker.workspace_changed(true);
+        }
+        // With nothing changed in between, the third identical failure still stops the run.
+        assert_eq!((1..=3).map(|_| breaker.observe("run_command", &check, false).trip).collect::<Vec<_>>(), [false, false, true]);
+        // Another command having run clears a command's strikes, not a failing edit's.
+        breaker.observe("edit_file", &edit, false);
+        breaker.workspace_changed(false);
+        assert_eq!((breaker.observe("run_command", &check, false).repeats, breaker.observe("edit_file", &edit, false).repeats), (1, 2));
+    }
 
     #[test]
     fn matches_the_web() {

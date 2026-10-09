@@ -755,7 +755,7 @@ fn safety(app: &mut App, ui: &mut Ui) {
                 });
                 form::para(
                     ui,
-                    "Code the assistant writes will run on this computer without asking. It can only start real interpreters, never a shell, and each command is stopped after 30 seconds — but a program it runs has the same access to your files that you do. Keep a restore point.",
+                    "Code the assistant writes will run on this computer without asking, and so will a program it builds or downloads into the chat's folder. It can start interpreters and those programs, never a shell, and each command is stopped after 30 seconds — but a program it runs has the same access to your files that you do. Keep a restore point.",
                     12.0,
                     16.0,
                     W::Regular,
@@ -774,6 +774,9 @@ fn safety(app: &mut App, ui: &mut Ui) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 12.0;
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // The row is as tall as the number box from the start: laid out first, "sec" would otherwise be
+            // centred on a shorter row and sit above the number's middle.
+            ui.set_min_height(36.0);
             ui.add(egui::Label::new(widgets::lines("sec", 12.0, 18.0, W::Regular, p.text2)).selectable(false));
             ui.scope(|ui| {
                 ui.set_width(64.0);

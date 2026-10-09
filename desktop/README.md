@@ -39,6 +39,20 @@ The same things as the web app, with the same look:
 
 The browser tool drives a Chromium-family browser already on the PC (Edge, Chrome, Chromium, Brave or Thorium, or the one `APIM_BROWSER_PATH` names) with a throwaway profile. Nothing is bundled or downloaded.
 
+## Checking the tools
+
+`apim --tools calls.json --auto --dir FOLDER` runs a list of tool calls (`[{"name": "edit_file", "args": {...}}, ...]`) as the agent would make them and prints what each hands back: no model in between, so a tool is judged on what it does. `APIM_TOOL_CHARS` sets how much of each result is shown. All 59 were run this way on 2026-10-09; what that changed:
+
+- `edit_file` reported "Edited" for an edit that left the file as it was, and took half a range (an end, no start) for one line. A model then looped: thirteen such edits in one chat. Both are refused now, with the lines as they stand; and every edit says what it replaced, so one that landed on the wrong lines is seen at once.
+- `apply_patch` missed every hunk that was not at the end of its file when the patch ended in a newline, and refused a bare `@@` header.
+- The loop breaker stopped the plain fix-and-rerun loop (edit, run the checker, edit, run it again) as "the same failing call three times". A command run again after the workspace changed is a new try.
+- `run_tests` finds tests kept beside the code (`test_x.py`), runs pytest as a module, puts a test's name behind `-k`, and says how to get pytest when it is missing.
+- Taken as meant: a process id without its `p`, a command line in one string, `update_plan` with `step`/`status`/`completed`, `query_data` with a bare condition (answered with the JSONPath that works) or a count with no query.
+- "Run automatically" asks about nothing: before, a program built or downloaded into the chat's folder still asked.
+- The request restated at the end of every round is marked as the app's reminder: a model took it for a new message and answered it each round.
+
+Not run: `sandbox_run` and `sandbox_screenshot` (they need the WSL sandbox), `screenshot_window` on a real window, `web_search` (no key in the test folder), the GitHub tools against a real repository.
+
 ## Tools on demand
 
 The agent has 59 tools, and their descriptions used to ride in every request: 57,000 characters, about 14,000 tokens, on every round. A plain "hi" cost 15,760 tokens to answer in 52. Now a request carries the twelve everyday tools (list, read, write, edit, search, run a command, the plan, ask, finish, web search), and the rest wait in eleven groups: files, code, processes, web, pictures, git, sandbox, data, memory, binary, helpers.
@@ -60,7 +74,17 @@ A plugin is a standing instruction. Here it can also carry a longer guide, which
 
 - **In Plugins**, each card says where it applies: Off, This chat, or All chats. The list can be searched, and under the built-in ones is the catalog; putting a catalog skill on a chat adds it to your plugins.
 - **By asking.** The assistant has a `skills` tool: "find a skill that keeps answers short and add it to this chat", "install Least Code for all chats", "switch Terse off". It searches, installs and follows the skill from its next words. Switching one on for every chat asks you first unless commands run automatically.
-- **The catalog** ships with the app (`assets/skills.json`, twelve skills) and is refreshed from the copy of that file on the project's main branch, so a skill added there reaches every copy of the app. A downloaded entry is text on its way into the model's instructions: it is kept only when well formed and of modest size, nothing in it is run, and an installed skill is a copy that later changes to the catalog do not rewrite.
+- **The catalog** ships with the app (`assets/skills.json`) and is added to from the copy of that file on the project's main branch, so a skill added there reaches every copy of the app. It holds apiM's own twelve skills, and pointers at official ones on GitHub (below). A downloaded entry is text on its way into the model's instructions: it is kept only when well formed and of modest size, nothing in it is run, and an installed skill is a copy that later changes to the catalog do not rewrite.
+
+### Official skills, from GitHub
+
+Claude's skills are folders with a `SKILL.md`: a name, when to use it, then the instructions in their author's words, and the files those point at. apiM takes them the same way (`src/skillhub.rs`), so what you get is the real thing and not a retelling:
+
+- **Which.** The catalog points at Caveman (JuliusBrussee/caveman), Ponytail (DietrichGebert/ponytail), Graphify (Graphify-Labs/graphify) and Anthropic's own (anthropics/skills: PDF, Word, spreadsheets, slides, frontend design and more). Any other repository works by its address: type `owner/repo` or a github.com link into the search box of Plugins, or tell the assistant "install owner/repo".
+- **How it is applied.** A short skill (up to 9,000 characters, as Caveman and Ponytail are) rides whole in every request while it is on, which is what Claude's start-up hook does with it, plus one reminder line per message. A long one (Graphify is 44,000) is named with its "use when" line, and the assistant reads it in full when a task calls for it, as Claude reads a skill. The files a skill carries are kept beside it in `data/skills/<id>/` and read one at a time (`skills`, action read, `file`).
+- **The trust check.** Before anything is added you see where it comes from (stars, licence, last change, whether the catalog names that source) and what a search of its text found: instructions to drop other instructions, hidden characters, sending or reading secrets, downloading and running code in one step, turning a safety check off, an unreadable encoded block. "Check caveman's trust" asks for the same without adding. It cannot prove a skill harmless, and says so. A skill the check calls bad is never added unseen, even when commands run automatically.
+- **What is not taken.** A plugin's hooks, commands and MCP servers: apiM runs nothing from a skill. A script it carries is text; it runs only if the assistant is told to run it, under the usual approval. Graphify needs its own program (`pip install graphifyy`).
+- **GitHub's limit.** Unsigned, GitHub answers 60 requests an hour, three per repository; a repository looked at is remembered for ten minutes, and with a GitHub account connected the requests are signed (5,000 an hour). With the limit spent, a skill the catalog names still installs: its text is read and checked, its standing and carried files are not, and the check says so.
 
 What saves tokens, in order: fewer tools sent (above), then writing less code (Least Code), then fewer words (Terse). A style plugin alone could only shorten the 52 tokens of that "hi".
 
@@ -111,6 +135,6 @@ Three things are written to the problem report so that slowness nobody was measu
 
 ## Checking the look without touching the window
 
-`APIM_SHOT=out.png` makes the program draw one state off screen, save a picture of it and quit. `APIM_SHOT_STATE` names the state as a comma-separated list (`settings`, `tab4`, `wait-row`, `stalled`, `plugins`, `plugin-search` with `APIM_SHOT_QUERY`, `theme-midnight`, `no-sidebar`, `up-330` to turn the wheel back that many points, `maximized,f11` for full screen, and more in `ui/mod.rs`), `APIM_SHOT_CHAT` picks the chat by a part of its title, and `APIM_SHOT_SIZE=1400x900` sets the window.
+`APIM_SHOT=out.png` makes the program draw one state off screen, save a picture of it and quit. `APIM_SHOT_STATE` names the state as a comma-separated list (`settings`, `tab4`, `wait-row`, `stalled`, `plugins`, `plugin-search` with `APIM_SHOT_QUERY`, `plugin-add`, `ask-skill`, `theme-midnight`, `no-sidebar`, `up-330` to turn the wheel back that many points, `maximized,f11` for full screen, and more in `ui/mod.rs`), `APIM_SHOT_CHAT` picks the chat by a part of its title, and `APIM_SHOT_SIZE=1400x900` sets the window.
 
 `APIM_SHOT_STATE=send` with `APIM_SHOT_DRAFT="..."` really sends that message and takes the picture when the reply has ended. Point `APIM_DATA_DIR` at a spare folder first, so the chat it makes is not one of yours.
