@@ -24,6 +24,7 @@ mod settings_panels;
 mod sidebar;
 mod slash_menu;
 pub mod theme;
+mod titlebar;
 mod widgets;
 mod docks;
 mod github;
@@ -1260,6 +1261,8 @@ impl eframe::App for App {
             theme::apply(&ctx, theme::Palette::for_theme(&self.settings.theme, &self.settings.custom_theme));
         }
         let p = theme::p();
+        // The title bar wears the sidebar's colour, so the frame reads as part of the app.
+        titlebar::paint(p.bg2, p.muted, p.border);
 
         // The sidebar slides: its content keeps its full width and is cut off, like the web app's.
         let open = ctx.animate_bool_with_time_and_easing(egui::Id::new("sidebar-open"), self.settings.sidebar_open && !self.fullscreen, 0.3, egui::emath::easing::cubic_out);
