@@ -940,6 +940,20 @@ impl Conversation {
         self.folder.clone().unwrap_or_else(|| data_dir().join("workspaces").join(self.own_folder()))
     }
 
+    /// A list of names kept with the chat: "skills" (the plugins on for this chat alone) and "toolGroups"
+    /// (the tool groups it has loaded).
+    pub fn names(&self, key: &str) -> Vec<String> {
+        self.other.get(key).and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default()
+    }
+
+    pub fn set_names(&mut self, key: &str, names: Vec<String>) {
+        if names.is_empty() {
+            self.other.remove(key);
+        } else {
+            self.other.insert(key.into(), serde_json::json!(names));
+        }
+    }
+
     /// Undo history and other per-chat files that must not sit in the workspace.
     pub fn state_dir(&self) -> PathBuf {
         data_dir().join("state").join(self.own_folder())

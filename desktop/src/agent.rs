@@ -96,6 +96,11 @@ pub enum Event {
     Context(Vec<Bucket>),
     /// The plan or findings changed.
     State(ChatState),
+    /// The model switched a plugin on or off, for this chat or (`all`) for every chat. An empty id: only the
+    /// user's list of plugins changed.
+    Skill { id: String, all: bool, on: bool },
+    /// The tool groups this chat has loaded so far.
+    Groups(Vec<String>),
     /// A one-line note shown in the reply: retrying, continuing, context trimmed.
     Notice(String),
     /// The transcript so far, in the shape of the web's `resumeState`: kept on the reply so Resume can replay it.
@@ -540,11 +545,13 @@ async fn run_inner(mut req: Request, emit: &Emitter, procs: Arc<Procs>) -> Resul
     };
 
     let every = plugins::all(&s.custom_plugins);
-    let directives = plugins::directives(&every, &s.enabled_plugins);
+    // On for every chat, and on for this one alone.
+    let plugins_on = plugins::enabled_for(&s.enabled_plugins, &req.chat.skills);
+    let directives = plugins::directives(&every, &plugins_on);
     // A repository connected through the GitHub dialog, and whether there is a token to push with.
     let github = crate::github::read_connection(&tools::github::ws(&ctx));
     let github_token = github.as_ref().map(|_| matches!(crate::github::resolve_token(&s.github_token), Ok(Some(_))));
-    let mut system = prompt::system(&plugins::legacy_prompt(&every, &s.enabled_plugins), web_search, native_vision, git_repo, github.as_ref());
+    let mut system = prompt::system(&plugins::legacy_prompt(&every, &plugins_on), web_search, native_vision, git_repo, github.as_ref());
     // What earlier turns established rides in the system prompt, read fresh from the workspace's store (the web app's file).
     let findings_path = findings::store_path(&req.workspace);
     if !findings_path.exists() {
@@ -573,6 +580,8 @@ async fn run_inner(mut req: Request, emit: &Emitter, procs: Arc<Procs>) -> Resul
         messages.push(json!({ "role": "system", "content": summary }));
     }
     messages.extend(crate::context::transcript::wire_turns(&req.history, &req.text, &req.images, target.model.vision));
+    // The enabled plugins' reminders ride at the end of the newest message, where a model that has drifted reads them last.
+    remind(&mut messages, &plugins::reminders(&every, &plugins_on));
 
     let mut start = Start { user_text: req.text.clone(), history_last_user: req.history_last_user.clone(), ..Default::default() };
     if let Some(resume) = resume {
@@ -581,12 +590,19 @@ async fn run_inner(mut req: Request, emit: &Emitter, procs: Arc<Procs>) -> Resul
     // A current listing, last: the files have moved on since a resumed reply stopped, and its saved listing goes.
     start.tree = Tree::open(&req.workspace, &mut messages);
 
-    let mut tool_defs = tools::definitions(web_search, native_vision, git_repo, github_token);
+    let mut all_tools = tools::definitions(web_search, native_vision, git_repo, github_token);
     // Read-only helpers with their own context.
-    tool_defs.push(delegate_tool());
+    all_tools.push(delegate_tool());
+    all_tools.push(tools::skills::schema());
     // Tools lent by the MCP servers switched on in Settings ride after the built-in ones.
-    tool_defs.extend(mcp::tools_for_model(&ctx.client, &crate::store::data_dir()).await);
-    let mut end = drive(&target, &ctx, messages, tool_defs, effort, &req.conv_id, &req.notes, start).await?;
+    all_tools.extend(mcp::tools_for_model(&ctx.client, &crate::store::data_dir()).await);
+    // Not all of them are sent (`tools::groups`): the everyday ones, and the groups this chat has loaded, a
+    // connected repository calls for, or the message names.
+    let mut groups = req.chat.groups.clone();
+    for group in github.iter().map(|_| "git".to_string()).chain(tools::groups::hinted(&req.text)) {
+        tools::groups::add(&mut groups, &group);
+    }
+    let mut end = drive(&target, &ctx, messages, all_tools, groups, effort, &req.conv_id, &req.notes, start).await?;
     // The lessons pass: skipped when nothing ran, since nothing was demonstrated. Detached, so the reply ends without waiting for it.
     let outcomes = std::mem::take(&mut end.outcomes);
     if let (false, Some(helper)) = (outcomes.is_empty(), provider::helper_target(s)) {
@@ -597,7 +613,7 @@ async fn run_inner(mut req: Request, emit: &Emitter, procs: Arc<Procs>) -> Resul
 
 /// The loop itself, once the endpoint, the tools and the opening messages are settled.
 #[allow(clippy::too_many_arguments)]
-async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, tool_defs: Vec<Value>, effort: &str, conv_id: &str, notes: &Mutex<Vec<String>>, start: Start) -> Result<Ending, String> {
+async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: Vec<Value>, mut groups: Vec<String>, effort: &str, conv_id: &str, notes: &Mutex<Vec<String>>, start: Start) -> Result<Ending, String> {
     let Start { mut tree, user_text, history_last_user, tool_rounds: resumed_rounds, continuations: resumed_continuations, think_nudges: resumed_think_nudges, usage: resumed_usage, answer: resumed_answer, tools_used: resumed_tools } = start;
     // The newest note the user added mid-run: it becomes the goal the pin restates.
     let mut steering: Option<String> = None;
@@ -608,7 +624,10 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, tool_defs: 
     let openrouter = target.provider == ProviderId::Openrouter;
     let window = models::context_window(&target.model.id, customs);
     let window_chars = window as usize * 7 / 2;
-    let tools_chars = json!(tool_defs).to_string().len();
+    // What is sent of the tools: the everyday ones and the groups loaded so far. `groups_sent` tells when that has grown.
+    let mut tool_defs = tools::groups::offered(&all_tools, &groups);
+    let mut tools_chars = json!(tool_defs).to_string().len();
+    let mut groups_sent = ctx.chat.lock().unwrap().groups.len();
     let output_rate = models::rates(&target.model.id, customs).map(|rates| rates.2);
     let notice = |text: &str| emit.send(Event::Notice(text.to_string()));
     let done_steps = || chat.lock().unwrap().plan.as_ref().map_or(0, |p| plan::progress(p).done);
@@ -674,6 +693,13 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, tool_defs: 
             break;
         }
 
+        // A group loaded last round is sent from this one on, and kept with the chat.
+        if groups.len() != groups_sent {
+            groups_sent = groups.len();
+            tool_defs = tools::groups::offered(&all_tools, &groups);
+            tools_chars = json!(tool_defs).to_string().len();
+            emit.send(Event::Groups(groups.clone()));
+        }
         // Anything the user said in passing joins the conversation before the next request.
         for note in std::mem::take(&mut *notes.lock().unwrap()) {
             emit.send(Event::NoteRead { note: note.clone(), round });
@@ -917,6 +943,9 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, tool_defs: 
             break;
         }
         tool_rounds += 1;
+        if tool_rounds >= tools::groups::LONG_WORK_ROUNDS {
+            tools::groups::FOR_LONG_WORK.iter().for_each(|group| drop(tools::groups::add(&mut groups, group)));
+        }
         let mut turn = assistant(&content, &reasoning);
         turn["tool_calls"] = calls.iter().map(|c| json!({ "id": c.id, "type": "function", "function": { "name": c.name, "arguments": if c.args.trim().is_empty() { "{}" } else { &c.args } } })).collect();
         messages.push(turn);
@@ -937,7 +966,13 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, tool_defs: 
                 emit.send(Event::ToolStart(ToolEvent { id: call.id.clone(), name: call.name.clone(), args: args_text.to_string(), ..Default::default() }));
             }
             let parsed = serde_json::from_str::<Value>(args_text);
+            // The instructions name tools whose group may not be loaded yet: such a call runs, and brings its group.
+            tools::groups::note_use(&call.name, &mut groups);
             let out = match &parsed {
+                Ok(args) if call.name == "load_tools" => {
+                    tools_used.push(call.name.clone());
+                    tools::groups::load(args, &all_tools, &mut groups)
+                }
                 Ok(args) if call.name == "delegate" => {
                     tools_used.push(call.name.clone());
                     if reports.is_none() {
@@ -950,7 +985,8 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, tool_defs: 
                             }
                             jobs.push((other.id.clone(), task, max_rounds));
                         }
-                        let (done, used, cost) = run_helpers(target, ctx, &tool_defs, &tree.shown, jobs, &lane, spend.limit.map(|limit| limit - spend.spent)).await;
+                        // A helper has a context of its own: it is offered everything, as it always was.
+                        let (done, used, cost) = run_helpers(target, ctx, &all_tools, &tree.shown, jobs, &lane, spend.limit.map(|limit| limit - spend.spent)).await;
                         // What the helpers used is the reply's: its totals show it and its spending limit counts it.
                         // Its window is the helpers' own, not this reply's.
                         usage.add(Usage { context: 0, ..used });
@@ -1153,6 +1189,22 @@ fn strip_media_body(body: &mut Map<String, Value>) -> bool {
     body.get_mut("messages").and_then(Value::as_array_mut).is_some_and(|messages| transcript::strip_media(messages))
 }
 
+/// Adds a line to the newest user message: its text, or the text part of one that carries pictures.
+fn remind(messages: &mut [Value], line: &str) {
+    if line.is_empty() {
+        return;
+    }
+    let Some(newest) = messages.iter_mut().rev().find(|m| m["role"] == "user") else { return };
+    let text = match &mut newest["content"] {
+        Value::Array(parts) => parts.iter_mut().rev().find(|part| part["type"] == "text").map(|part| &mut part["text"]),
+        content => Some(content),
+    };
+    if let Some(Value::String(text)) = text {
+        text.push_str("\n\n");
+        text.push_str(line);
+    }
+}
+
 /// Text that took over four seconds and came at under 15 characters a second (four tokens): too slow to read along with.
 fn crawled(secs: f64, chars: usize) -> bool {
     secs >= 4.0 && (chars as f64) < secs * 15.0
@@ -1182,6 +1234,9 @@ async fn call_model(client: &reqwest::Client, target: &Target, body: &mut Map<St
             let (_, last, chars) = pace.get_or_insert((now, now, 0));
             (*last, *chars) = (now, *chars + text.chars().count());
         };
+        // A paragraph of the answer the model labelled as its carried thought is thinking, and goes where thinking goes.
+        let mut carried = transcript::CarriedEcho::default();
+        let mut thought_aloud = String::new();
         let mut echo = dedup.as_mut();
         let wire = Value::Object(body.clone());
         let result = provider::stream(client, target, &wire, cut_drafts, |delta| match delta {
@@ -1194,9 +1249,14 @@ async fn call_model(client: &reqwest::Client, target: &Target, body: &mut Map<St
             }
             Delta::Content(t) => {
                 heard(t);
+                let (said, aside) = carried.push(t);
+                if !aside.is_empty() {
+                    thought_aloud.push_str(&aside);
+                    emit.send(Event::Reasoning(aside));
+                }
                 let text = match echo.as_mut() {
-                    Some(dedup) => dedup.push(t),
-                    None => t.to_string(),
+                    Some(dedup) => dedup.push(&said),
+                    None => said,
                 };
                 if !text.is_empty() {
                     if announced != "Writing" {
@@ -1217,15 +1277,25 @@ async fn call_model(client: &reqwest::Client, target: &Target, body: &mut Map<St
                 if let Some((secs, chars)) = pace.map(|(first, last, chars)| (last.duration_since(first).as_secs_f64(), chars)).filter(|(secs, chars)| crawled(*secs, *chars)) {
                     log_with("api_error", "slow stream", &format!("The model sent {chars} characters of text in {secs:.0} s."), json!({ "model": target.api_model, "charsPerSecond": (chars as f64 / secs).round() }));
                 }
-                if let Some(dedup) = echo {
+                let (said, aside) = carried.finish();
+                if !aside.is_empty() {
+                    thought_aloud.push_str(&aside);
+                    emit.send(Event::Reasoning(aside));
+                }
+                let rest = match echo {
                     // The web never releases a continuation shorter than 24 characters; here what is held comes out when the round ends.
-                    let rest = dedup.finish();
-                    if !rest.is_empty() {
-                        shown.push_str(&rest);
-                        emit.send(Event::Content(rest));
-                    }
+                    Some(dedup) => dedup.push(&said) + &dedup.finish(),
+                    None => said,
+                };
+                if !rest.is_empty() {
+                    shown.push_str(&rest);
+                    emit.send(Event::Content(rest));
                 }
                 round.content = shown;
+                if !thought_aloud.is_empty() {
+                    // It is carried to the next round as the thought it was.
+                    round.reasoning = [round.reasoning.trim_end(), thought_aloud.as_str()].iter().filter(|part| !part.is_empty()).copied().collect::<Vec<_>>().join("\n\n");
+                }
                 let without_tools = !body.contains_key("tools");
                 if let Some((status, detail)) = recovered {
                     log_with("api_error", "openrouter_rejection_recovery", &detail, json!({ "status": status }));
@@ -1828,13 +1898,13 @@ mod tests {
             limits: tool_limits_for(false),
             memory: Default::default(),
             emit: Emitter::new(tx, || {}),
-            chat: Arc::new(Mutex::new(ChatState { plan: None, findings: Vec::new(), finish_bounced: false })),
+            chat: Arc::new(Mutex::new(ChatState::default())),
             procs: Arc::new(Procs::default()),
             planner: None,
         };
         let target = target_for(base);
         let (opening, start) = open(&dir);
-        let end = drive(&target, &ctx, opening, vec![json!({ "type": "function", "function": { "name": "read_file" } })], effort, "test", &Mutex::new(Vec::new()), start).await.unwrap();
+        let end = drive(&target, &ctx, opening, vec![json!({ "type": "function", "function": { "name": "read_file" } })], Vec::new(), effort, "test", &Mutex::new(Vec::new()), start).await.unwrap();
         drop(ctx);
         let mut ran = Ran { text: String::new(), end, notices: Vec::new(), sent: Vec::new(), checkpoints: Vec::new(), usage: Usage::default(), steps: Vec::new() };
         for event in rx.try_iter() {

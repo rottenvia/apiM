@@ -30,6 +30,8 @@ Batch the changes that belong together. move_file renames in one step instead of
     if native_vision {
         p.push_str(" You can also view_image to look at a screenshot or mockup saved in the workspace.");
     }
+    // Tools on demand (`tools::groups`): the paragraphs above name tools that are not sent until their group is loaded.
+    p.push_str("\n\nOnly your everyday tools are listed for you in full. The other tools these instructions name come in groups, listed under load_tools: load a group the moment a task calls for one of its tools, and it stays for the rest of the chat. Never tell the user something cannot be done before checking those groups.");
     if let Some(c) = github {
         // The web app's paragraph for a workspace connected to GitHub, under the same condition: a stored connection.
         p.push_str(&format!(

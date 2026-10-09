@@ -72,7 +72,76 @@ pub fn carried_thought(reasoning: &str) -> String {
         }
         end = format!("…{cut}");
     }
-    format!("[My reasoning at this step, condensed — what I concluded and decided:]\n{end}")
+    format!("{CARRIED_MARK} — what I concluded and decided:]\n{end}")
+}
+
+/// How a carried thought opens.
+const CARRIED_MARK: &str = "[My reasoning at this step, condensed";
+
+/// Sorts a reply's text as it streams into what it says and what it thinks aloud. A model that is shown its
+/// own carried thoughts (`carried_thought`) takes up the habit and opens paragraphs of its answer with the
+/// same label; such a paragraph is thinking, and the label is no part of either.
+#[derive(Default)]
+pub struct CarriedEcho {
+    /// Text not sorted yet: the start of a line that may still turn out to be the label, or the tail of a thought.
+    held: String,
+    inside: bool,
+    mid_line: bool,
+}
+
+impl CarriedEcho {
+    /// Takes the next piece of the reply. Returns (what it says, what it thinks aloud) of the text so far settled.
+    pub fn push(&mut self, text: &str) -> (String, String) {
+        self.held.push_str(text);
+        let (mut said, mut aside) = (String::new(), String::new());
+        loop {
+            if self.inside {
+                // A carried thought runs to the first blank line.
+                if let Some(end) = self.held.find("\n\n") {
+                    aside.push_str(&self.held[..end]);
+                    self.held.drain(..end + 2);
+                    (self.inside, self.mid_line) = (false, false);
+                } else {
+                    // A line end is kept back: it may be half of that blank line.
+                    let keep = self.held.len() - self.held.ends_with('\n') as usize;
+                    aside.push_str(&self.held[..keep]);
+                    self.held.drain(..keep);
+                    break;
+                }
+            } else if self.mid_line {
+                // The rest of a line that is not the label: out it goes, and what follows starts a line.
+                match self.held.find('\n') {
+                    Some(end) => {
+                        said.push_str(&self.held[..=end]);
+                        self.held.drain(..=end);
+                        self.mid_line = false;
+                    }
+                    None => {
+                        said.push_str(&self.held);
+                        self.held.clear();
+                        break;
+                    }
+                }
+            } else if self.held.starts_with(CARRIED_MARK) {
+                // The label line itself is dropped, once all of it is here.
+                let Some(end) = self.held.find('\n') else { break };
+                self.held.drain(..=end);
+                self.inside = true;
+            } else if self.held.is_empty() || CARRIED_MARK.starts_with(self.held.as_str()) {
+                // Nothing yet, or what could still become the label: wait for more.
+                break;
+            } else {
+                self.mid_line = true;
+            }
+        }
+        (said, aside)
+    }
+
+    /// The reply has ended: what was still held is settled as what it is so far.
+    pub fn finish(&mut self) -> (String, String) {
+        let rest = std::mem::take(&mut self.held);
+        if self.inside { (String::new(), rest.trim_end().to_string()) } else if rest.starts_with(CARRIED_MARK) { (String::new(), String::new()) } else { (rest, String::new()) }
+    }
 }
 
 fn with_carried(reasoning: &str, content: &Value) -> Value {
@@ -183,6 +252,31 @@ pub fn strip_media(messages: &mut [Value]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// However the stream is cut into pieces, the label never shows, its paragraph is thinking, and the rest is the answer.
+    #[test]
+    fn a_carried_thought_echoed_in_the_answer_is_sorted_out() {
+        let reply = "Here goes.\n\n[My reasoning at this step, condensed — what I concluded and decided:]\nThe file is written.\nRun it next.\n\nDone: it prints [hello].\n[My reasoning at this step, condensed — what I concluded and decided:]\nAll good.";
+        for size in [1, 2, 3, 7, 40, 1_000] {
+            let mut echo = CarriedEcho::default();
+            let (mut said, mut aside) = (String::new(), Vec::new());
+            let chars: Vec<char> = reply.chars().collect();
+            for piece in chars.chunks(size) {
+                let (s, a) = echo.push(&piece.iter().collect::<String>());
+                said.push_str(&s);
+                aside.push(a);
+            }
+            let (s, a) = echo.finish();
+            said.push_str(&s);
+            aside.push(a);
+            assert_eq!(said, "Here goes.\n\nDone: it prints [hello].\n", "in pieces of {size}");
+            assert_eq!(aside.concat(), "The file is written.\nRun it next.All good.", "in pieces of {size}");
+        }
+        // A reply with no label in it passes through whole, brackets and all.
+        let mut echo = CarriedEcho::default();
+        let (said, aside) = echo.push("[My notes]\nplain");
+        assert_eq!((said + &echo.finish().0, aside), ("[My notes]\nplain".to_string(), String::new()));
+    }
     use crate::run::cases;
 
     #[test]

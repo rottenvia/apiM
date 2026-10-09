@@ -1,7 +1,9 @@
-//! The Plugins dialog (src/components/PluginsModal.tsx): the list with its
-//! switches, and the editor for the user's own plugins.
+//! The Plugins dialog (src/components/PluginsModal.tsx): the list, and the editor for the user's own plugins.
+//!
+//! Past the web's: a plugin is put where the user wants it (off, this chat, every chat) rather than switched
+//! on for all, the list can be searched, and under it is the catalog of skills that can be added.
 
-use super::form::{self, Btn, Input, Switch};
+use super::form::{self, Btn, Input};
 use super::overlay::{self, Card};
 use super::settings::{close_btn, part};
 use super::theme::{self, W, alpha, p};
@@ -13,13 +15,37 @@ use eframe::egui::{self, Color32, CursorIcon, Rect, Sense, Stroke, Ui, pos2, vec
 pub struct State {
     /// The plugin being written or changed. None shows the list.
     editor: Option<Draft>,
+    /// What the list is narrowed to.
+    query: String,
 }
 
 impl State {
     /// The dialog with the editor open on a blank plugin.
     pub fn writing() -> State {
-        State { editor: Some(Draft::blank()) }
+        State { editor: Some(Draft::blank()), ..State::default() }
     }
+
+    /// The list narrowed to `query`, for self-portraits.
+    pub fn searching(query: &str) -> State {
+        State { query: query.into(), ..State::default() }
+    }
+}
+
+/// Where a plugin applies.
+#[derive(Clone, Copy, PartialEq)]
+enum Scope {
+    Off,
+    Chat,
+    All,
+}
+
+/// Which list a card is in.
+#[derive(Clone, Copy, PartialEq)]
+enum From {
+    Yours,
+    BuiltIn,
+    /// Not added yet.
+    Catalog,
 }
 
 struct Draft {
@@ -74,7 +100,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) -> bool {
         ui.painter().hline(foot.x_range(), foot.top() + 0.5, line);
 
         let (title, sub) = match &app.plugin_ui.editor {
-            None => ("Plugins", "Active styles are sent as a dedicated system instruction every round"),
+            None => ("Plugins", "Standing instructions for the assistant. Each applies where you put it: this chat, or all of them"),
             Some(d) => (if d.id.is_empty() { "New plugin" } else { "Edit plugin" }, "Instructions added to the system prompt when enabled"),
         };
         part(ui, head, |ui| {
@@ -140,7 +166,9 @@ pub fn show(app: &mut App, ctx: &egui::Context) -> bool {
 
         if save {
             let Some(draft) = app.plugin_ui.editor.as_mut() else { return };
-            let typed = Plugin { id: draft.id.clone(), name: draft.name.clone(), icon: draft.icon.clone(), description: draft.description.clone(), category: draft.category.clone(), prompt: draft.prompt.clone(), ..Plugin::default() };
+            // A skill from the catalog keeps its guide and reminder through an edit of the rest.
+            let kept = app.settings.custom_plugins.iter().find(|q| !draft.id.is_empty() && q.id == draft.id).cloned().unwrap_or_default();
+            let typed = Plugin { id: draft.id.clone(), name: draft.name.clone(), icon: draft.icon.clone(), description: draft.description.clone(), category: draft.category.clone(), prompt: draft.prompt.clone(), guide: kept.guide, reminder: kept.reminder, catalog: kept.catalog, ..Plugin::default() };
             match plugins::save(&typed) {
                 Ok(_) => {
                     app.settings.custom_plugins = plugins::custom();
@@ -156,14 +184,15 @@ pub fn show(app: &mut App, ctx: &egui::Context) -> bool {
     shown == overlay::State::Open
 }
 
-/// "2 active · ~310 tokens per request" at the foot of the list.
+/// "2 active here · ~310 tokens per request" at the foot of the list: what is on for this chat, its own and everyone's.
 fn active_line(app: &App, ui: &mut Ui) {
     let p = p();
     let every = plugins::all(&app.settings.custom_plugins);
-    let on: Vec<&Plugin> = every.iter().filter(|q| app.settings.enabled_plugins.contains(&q.id)).collect();
-    let chars: usize = on.iter().map(|q| q.prompt.chars().count()).sum();
+    let here = plugins::enabled_for(&app.settings.enabled_plugins, &app.conv.names("skills"));
+    let on: Vec<&Plugin> = every.iter().filter(|q| here.contains(&q.id)).collect();
+    let chars: usize = on.iter().map(|q| q.prompt.chars().count() + q.reminder.chars().count()).sum();
     let over = chars > plugins::MAX_PLUGIN_TOTAL;
-    let mut text = format!("{} active", on.len());
+    let mut text = format!("{} active here", on.len());
     if !on.is_empty() {
         text += &format!(" · ~{} tokens per request", plugins::grouped(tokens(chars)));
         if over {
@@ -184,30 +213,123 @@ fn heading(ui: &mut Ui, text: &str, below: f32) {
 
 fn list(app: &mut App, ui: &mut Ui) {
     let p = p();
-    let custom = app.settings.custom_plugins.clone();
-    let (current, classic): (Vec<&Plugin>, Vec<&Plugin>) = plugins::BUILTIN.iter().partition(|q| !q.legacy);
+    // The catalog on the project's page may have grown since this build: asked for once, the first time the list is opened.
+    static ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !ASKED.swap(true, std::sync::atomic::Ordering::Relaxed) && app.shot.is_none() {
+        let ctx = ui.ctx().clone();
+        app.rt.spawn(async move {
+            if plugins::refresh_catalog(&reqwest::Client::new()).await {
+                ctx.request_repaint();
+            }
+        });
+    }
+    Input::new("Search plugins and the catalog").pad(12, 9).fill(p.bg).focus(alpha(p.accent, 60.0)).show(ui, "plugin-search", &mut app.plugin_ui.query);
+    ui.add_space(16.0);
+    let query = app.plugin_ui.query.trim().to_lowercase();
+    let wanted = |q: &Plugin| query.is_empty() || format!("{} {} {}", q.name, q.description, q.category).to_lowercase().contains(&query);
+    let custom: Vec<Plugin> = app.settings.custom_plugins.iter().filter(|q| wanted(q)).cloned().collect();
+    let (current, classic): (Vec<&Plugin>, Vec<&Plugin>) = plugins::BUILTIN.iter().filter(|q| wanted(q)).partition(|q| !q.legacy);
+    // What can still be added: the catalog, less what is already among the user's own.
+    let more: Vec<Plugin> = plugins::catalog().into_iter().filter(|c| wanted(c) && !app.settings.custom_plugins.iter().any(|q| q.id == c.id)).collect();
+    if custom.is_empty() && current.is_empty() && classic.is_empty() && more.is_empty() {
+        form::para(ui, &format!("Nothing here matches \"{}\".", app.plugin_ui.query.trim()), 13.0, 20.0, W::Regular, p.muted);
+        return;
+    }
     if !custom.is_empty() {
         heading(ui, "Your plugins", 8.0);
         for plugin in &custom {
-            card(app, ui, plugin, true);
+            card(app, ui, plugin, From::Yours);
             ui.add_space(8.0);
         }
         ui.add_space(8.0);
     }
-    heading(ui, "Built in", 8.0);
-    for plugin in current {
-        card(app, ui, plugin, false);
-        ui.add_space(8.0);
-    }
-    ui.add_space(8.0);
-    heading(ui, "Classic", 4.0);
-    form::para(ui, "The original wording, kept so an older chat can be continued in the voice it was written in. These sit earlier in the prompt than the current versions, so they carry less weight.", 11.0, 16.0, W::Regular, p.muted);
-    ui.add_space(8.0);
-    for (i, plugin) in classic.into_iter().enumerate() {
-        if i > 0 {
+    if !current.is_empty() {
+        heading(ui, "Built in", 8.0);
+        for plugin in current {
+            card(app, ui, plugin, From::BuiltIn);
             ui.add_space(8.0);
         }
-        card(app, ui, plugin, false);
+        ui.add_space(8.0);
+    }
+    if !more.is_empty() {
+        heading(ui, "Catalog", 4.0);
+        form::para(ui, "Skills you can add. Put one on this chat or on all chats and it joins your plugins; the assistant can add them too when you ask it to.", 11.0, 16.0, W::Regular, p.muted);
+        ui.add_space(8.0);
+        for plugin in &more {
+            card(app, ui, plugin, From::Catalog);
+            ui.add_space(8.0);
+        }
+        ui.add_space(8.0);
+    }
+    if !classic.is_empty() {
+        heading(ui, "Classic", 4.0);
+        form::para(ui, "The original wording, kept so an older chat can be continued in the voice it was written in. These sit earlier in the prompt than the current versions, so they carry less weight.", 11.0, 16.0, W::Regular, p.muted);
+        ui.add_space(8.0);
+        for (i, plugin) in classic.into_iter().enumerate() {
+            if i > 0 {
+                ui.add_space(8.0);
+            }
+            card(app, ui, plugin, From::BuiltIn);
+        }
+    }
+}
+
+/// Where a plugin applies, as three places to click: off, this chat, every chat. Returns the one clicked when it
+/// is not where the plugin already is.
+fn scope_pick(ui: &mut Ui, key: &str, now: Scope) -> Option<Scope> {
+    let p = p();
+    let places = [(Scope::Off, "Off", "Not used"), (Scope::Chat, "This chat", "Used in this chat only"), (Scope::All, "All chats", "Used in every chat")];
+    let labels: Vec<_> = places.iter().map(|(_, label, _)| widgets::galley(ui, label, theme::font(11.0, W::Medium), Color32::WHITE)).collect();
+    let widths: Vec<f32> = labels.iter().map(|label| label.size().x + 18.0).collect();
+    let (track, _) = ui.allocate_exact_size(vec2(widths.iter().sum::<f32>() + 4.0, 26.0), Sense::hover());
+    ui.painter().rect(track, 9.0, alpha(p.bg, 60.0), Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
+    let mut picked = None;
+    let mut x = track.left() + 2.0;
+    for (((scope, name, tip), label), width) in places.into_iter().zip(labels).zip(widths) {
+        let rect = Rect::from_min_size(pos2(x, track.top() + 2.0), vec2(width, 22.0));
+        x += width;
+        let response = ui.interact(rect, ui.id().with(("scope", key, name)), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+        let chosen = scope == now;
+        let t = widgets::fade(ui, response.id, response.hovered());
+        if chosen {
+            ui.painter().rect_filled(rect, 7.0, if scope == Scope::Off { p.hover } else { alpha(p.accent, 22.0) });
+        }
+        let ink = match (chosen, scope) {
+            (true, Scope::Off) => p.text2,
+            (true, _) => p.accent_light,
+            (false, _) => widgets::lerp(p.muted, p.text, t),
+        };
+        ui.painter().galley_with_override_text_color(pos2((rect.center().x - label.size().x / 2.0).round(), (rect.center().y - label.size().y / 2.0).round()), label, ink);
+        if response.on_hover_text(tip).clicked() && !chosen {
+            picked = Some(scope);
+        }
+    }
+    picked
+}
+
+/// Puts a plugin where the user chose. One from the catalog joins the user's own first.
+fn place(app: &mut App, plugin: &Plugin, from: From, to: Scope) {
+    if from == From::Catalog {
+        if let Err(why) = plugins::install(plugin) {
+            app.toast(format!("Couldn't add {}: {why}", plugin.name));
+            return;
+        }
+        app.settings.custom_plugins = plugins::custom();
+    }
+    let before = app.conv.names("skills");
+    let mut chat: Vec<String> = before.iter().filter(|id| *id != &plugin.id).cloned().collect();
+    app.settings.enabled_plugins.retain(|id| id != &plugin.id);
+    match to {
+        Scope::All => app.settings.enabled_plugins.push(plugin.id.clone()),
+        Scope::Chat => chat.push(plugin.id.clone()),
+        Scope::Off => {}
+    }
+    if chat != before {
+        app.conv.set_names("skills", chat);
+        // A chat nothing was said in yet is not on disk, and is not put there for this.
+        if !app.conv.messages.is_empty() {
+            app.conv.save();
+        }
     }
 }
 
@@ -224,14 +346,22 @@ fn hover_btn(ui: &mut Ui, icon: icons::Icon, seen: bool, danger: bool, tip: &str
     response.on_hover_text(tip)
 }
 
-fn card(app: &mut App, ui: &mut Ui, plugin: &Plugin, yours: bool) {
+fn card(app: &mut App, ui: &mut Ui, plugin: &Plugin, from: From) {
     let p = p();
-    let on = app.settings.enabled_plugins.contains(&plugin.id);
+    let yours = from == From::Yours;
+    let now = if app.settings.enabled_plugins.contains(&plugin.id) {
+        Scope::All
+    } else if app.conv.names("skills").contains(&plugin.id) {
+        Scope::Chat
+    } else {
+        Scope::Off
+    };
+    let on = now != Scope::Off;
     // Hovered last frame: the card's size is only known once it is laid out.
     let seen_id = ui.id().with(("plugin-card", &plugin.id));
     let hovered = ui.data(|d| d.get_temp::<Rect>(seen_id)).is_some_and(|r| ui.rect_contains_pointer(r));
     let (fill, border) = if on { (alpha(p.accent, 7.0), alpha(p.accent, 40.0)) } else { (alpha(p.bg3, 40.0), p.border) };
-    let mut toggle = false;
+    let mut picked = None;
     let frame = egui::Frame::new().fill(fill).stroke(Stroke::new(1.0, border)).corner_radius(12).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
@@ -244,15 +374,19 @@ fn card(app: &mut App, ui: &mut Ui, plugin: &Plugin, yours: bool) {
             ui.add_space(12.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                ui.allocate_ui_with_layout(vec2(36.0, 28.0), egui::Layout::left_to_right(egui::Align::Center), |ui| toggle = form::switch(ui, Switch::D, on).clicked());
+                picked = scope_pick(ui, &plugin.id, now);
                 if yours {
-                    if hover_btn(ui, icons::TRASH.stroke(1.8), hovered, true, "Delete").clicked() {
+                    if hover_btn(ui, icons::TRASH.stroke(1.8), hovered, true, if plugin.catalog { "Remove (it stays in the catalog)" } else { "Delete" }).clicked() {
                         let _ = plugins::delete(&plugin.id);
                         app.settings.custom_plugins = plugins::custom();
-                        app.settings.enabled_plugins.retain(|id| id != &plugin.id);
+                        picked = Some(Scope::Off);
                     }
                     if hover_btn(ui, icons::RENAME.stroke(1.8), hovered, false, "Edit").clicked() {
                         app.plugin_ui.editor = Some(Draft::from(plugin, false));
+                    }
+                } else if from == From::Catalog {
+                    if hover_btn(ui, icons::PLUS.stroke(2.0), hovered, false, "Add to your plugins, switched off").clicked() && plugins::install(plugin).is_ok() {
+                        app.settings.custom_plugins = plugins::custom();
                     }
                 } else if hover_btn(ui, icons::COPY_SMALL, hovered, false, "Duplicate as your own").clicked() {
                     app.plugin_ui.editor = Some(Draft::from(plugin, true));
@@ -261,7 +395,7 @@ fn card(app: &mut App, ui: &mut Ui, plugin: &Plugin, yours: bool) {
                 ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
-                        let badge = widgets::galley(ui, "YOURS", theme::font(9.0, W::Regular), p.muted);
+                        let badge = widgets::galley(ui, if plugin.catalog { "FROM THE CATALOG" } else { "YOURS" }, theme::font(9.0, W::Regular), p.muted);
                         let room = ui.available_width() - if yours { badge.size().x + 16.0 } else { 0.0 };
                         let name = widgets::clipped(ui, &plugin.name, theme::font(14.0, W::Medium), p.text, room);
                         let (at, _) = ui.allocate_exact_size(vec2(name.size().x, 20.0), Sense::hover());
@@ -281,12 +415,10 @@ fn card(app: &mut App, ui: &mut Ui, plugin: &Plugin, yours: bool) {
         });
     });
     ui.data_mut(|d| d.insert_temp(seen_id, frame.response.rect));
-    if toggle {
-        if on {
-            app.settings.enabled_plugins.retain(|id| id != &plugin.id);
-        } else {
-            app.settings.enabled_plugins.push(plugin.id.clone());
-        }
+    if let Some(to) = picked {
+        // A plugin just deleted is only taken off the lists.
+        let gone = yours && !app.settings.custom_plugins.iter().any(|q| q.id == plugin.id);
+        place(app, plugin, if gone { From::BuiltIn } else { from }, to);
     }
 }
 

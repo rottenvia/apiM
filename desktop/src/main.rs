@@ -126,7 +126,7 @@ fn headless(args: &[String]) {
                 println!("\n[error: {e}]");
                 break;
             }
-            Status(_) | Reasoning(_) | ToolDraft { .. } | NoteRead { .. } | State(_) | Context(_) | Checkpoint(_) | ToolProgress { .. } => {}
+            Status(_) | Reasoning(_) | ToolDraft { .. } | NoteRead { .. } | State(_) | Context(_) | Checkpoint(_) | ToolProgress { .. } | Skill { .. } | Groups(_) => {}
         }
     }
 }

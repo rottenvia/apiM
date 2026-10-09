@@ -441,6 +441,8 @@ impl App {
                     self.search = dialogs::Search::asking(&std::env::var("APIM_SHOT_QUERY").unwrap_or_default());
                 }
                 "plugin-editor" => self.plugin_ui = plugin_modal::State::writing(),
+                // `plugins,plugin-search` with APIM_SHOT_QUERY: the list narrowed to it (the catalog shows with "skill" or a name in it).
+                "plugin-search" => self.plugin_ui = plugin_modal::State::searching(&std::env::var("APIM_SHOT_QUERY").unwrap_or_default()),
                 "auto-run" => self.settings.approval = store::Approval::Auto,
                 "split" => self.settings.reply_layout = "split".into(),
                 "interrupted" => {
@@ -906,7 +908,7 @@ impl App {
         }
         // "auto" is settled per message, and the reply is labelled with what it got.
         reply.effort = Some(if self.settings.effort == "auto" { crate::prompt::auto_effort(&wire).to_string() } else { self.settings.effort.clone() });
-        reply.plugins_used = self.settings.enabled_plugins.clone();
+        reply.plugins_used = crate::plugins::enabled_for(&self.settings.enabled_plugins, &self.conv.names("skills"));
         self.conv.messages.push(reply);
         self.conv.updated_at = store::now_ms();
         self.conv.save();
@@ -921,12 +923,24 @@ impl App {
             images: attached.into_iter().filter(|a| a.kind == "image").collect(),
             workspace: self.conv.workspace(),
             state_dir: self.conv.state_dir(),
-            chat: ChatState { plan: self.conv.plan.clone(), findings: self.conv.findings.clone(), finish_bounced: false },
+            chat: self.chat_state(),
             conv_id: self.conv.id.clone(),
             notes: Default::default(),
             resume: None,
         };
         self.start_run(ctx, request, Instant::now());
+    }
+
+    /// What a reply is told of this chat: its plan and findings, the plugins on for it and for every chat, and the tool groups it has loaded.
+    fn chat_state(&self) -> ChatState {
+        ChatState {
+            plan: self.conv.plan.clone(),
+            findings: self.conv.findings.clone(),
+            skills: self.conv.names("skills"),
+            skills_all: self.settings.enabled_plugins.clone(),
+            groups: self.conv.names("toolGroups"),
+            ..Default::default()
+        }
     }
 
     /// Starts the agent on `request`. What it reports fills the chat's last message, timed from `started`.
@@ -985,7 +999,7 @@ impl App {
             images: question.attachments.iter().filter(|a| a.kind == "image").cloned().collect(),
             workspace: self.conv.workspace(),
             state_dir: self.conv.state_dir(),
-            chat: ChatState { plan: self.conv.plan.clone(), findings: self.conv.findings.clone(), finish_bounced: false },
+            chat: self.chat_state(),
             conv_id: self.conv.id.clone(),
             notes: Default::default(),
             resume: Some(agent::Resume { prior, note, usage: last.usage }),
@@ -1182,7 +1196,7 @@ impl App {
             let waits = match run.inbox.front() {
                 None => break,
                 Some(Event::Reasoning(_) | Event::Content(_)) => false,
-                Some(Event::Status(_) | Event::Usage(_) | Event::Context(_) | Event::ToolDraft { .. } | Event::ToolProgress { .. } | Event::Retry { .. } | Event::Checkpoint(_)) => false,
+                Some(Event::Status(_) | Event::Usage(_) | Event::Context(_) | Event::ToolDraft { .. } | Event::ToolProgress { .. } | Event::Retry { .. } | Event::Checkpoint(_) | Event::Skill { .. } | Event::Groups(_)) => false,
                 Some(_) => true,
             };
             if waits && run.typing.waiting() {
@@ -1268,6 +1282,22 @@ impl App {
                 Event::State(state) => {
                     conv.plan = state.plan;
                     conv.findings = state.findings;
+                }
+                Event::Groups(groups) => conv.set_names("toolGroups", groups),
+                Event::Skill { id, all, on } => {
+                    // The model added or switched a plugin (`tools::skills`). It may have added one to the user's own, too.
+                    self.settings.custom_plugins = crate::plugins::custom();
+                    let mut list = if all { std::mem::take(&mut self.settings.enabled_plugins) } else { conv.names("skills") };
+                    list.retain(|have| *have != id);
+                    if on && !id.is_empty() {
+                        list.push(id);
+                    }
+                    if all {
+                        self.settings.enabled_plugins = list;
+                        self.settings.save();
+                    } else {
+                        conv.set_names("skills", list);
+                    }
                 }
                 Event::Notice(note) => {
                     close_thinking(msg, &mut run.thinking);
@@ -1547,14 +1577,21 @@ impl eframe::App for App {
                 ui.set_clip_rect(rect);
                 let full = Rect::from_min_size(rect.min, vec2(sidebar::WIDTH, rect.height()));
                 ui.scope_builder(egui::UiBuilder::new().max_rect(full), |ui| sidebar::show(self, ui));
-                ui.painter().vline(rect.right() - 0.5, rect.y_range(), egui::Stroke::new(1.0, p.border));
             });
         }
         // A fixed rail, and only when the window has room for it (the web hides it under 1024).
-        if self.settings.workspace_open && ctx.content_rect().width() >= 1024.0 {
+        let rail = self.settings.workspace_open && ctx.content_rect().width() >= 1024.0;
+        if rail {
             egui::Panel::right("workspace").exact_size(workspace::WIDTH).resizable(false).show_separator_line(false).frame(egui::Frame::new().fill(p.bg2)).show(ui, |ui| workspace::show(self, ui));
         }
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg)).show(ui, |ui| {
+        // The chat is a rounded card set into the window's chrome (the bar, the sidebar, the rail), with a strip of
+        // chrome wherever it would otherwise touch the window's own edge. It used to be the square hole the panels
+        // left, ruled off from them by two bright lines.
+        let edge = |covered: f32| ((1.0 - covered) * CARD_GAP).round() as i8;
+        let around = egui::Margin { left: edge(open), right: edge(rail as u8 as f32), top: edge(!self.fullscreen as u8 as f32), bottom: CARD_GAP as i8 };
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg2).inner_margin(around)).show(ui, |ui| {
+            let card = ui.max_rect();
+            ui.painter().rect(card, CARD_ROUND, p.bg, egui::Stroke::new(1.0, theme::alpha(p.border, 70.0)), egui::StrokeKind::Inside);
             let bar = egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 0));
             egui::Panel::top("header").exact_size(56.0).show_separator_line(false).frame(bar).show(ui, |ui| ui.horizontal_centered(|ui| chat::header(self, ui)));
             egui::Panel::bottom("composer").show_separator_line(false).resizable(false).frame(egui::Frame::NONE).show(ui, |ui| composer::show(self, ui));
@@ -1643,6 +1680,10 @@ impl App {
         }
     }
 }
+
+/// The chat's card: how far it stands off the window's edge, and how round its corners are.
+const CARD_GAP: f32 = 8.0;
+const CARD_ROUND: f32 = 12.0;
 
 /// `APIM_PERF=4`: the slow-frame limit in milliseconds, and the switch for everything else timed on stderr.
 static PERF: std::sync::LazyLock<Option<f64>> = std::sync::LazyLock::new(|| std::env::var("APIM_PERF").ok().and_then(|ms| ms.parse().ok()));
