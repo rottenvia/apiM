@@ -3,7 +3,7 @@
 //! (ImageLightbox.tsx). Also the two frames other overlays are built from.
 
 use super::theme::{self, W, alpha, p};
-use super::{App, icons, widgets};
+use super::{App, icons, titlebar, widgets};
 use eframe::egui::{self, Color32, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use std::time::Instant;
 
@@ -23,12 +23,6 @@ pub enum State {
     Gone,
 }
 
-/// How dark the overlays of this frame made the window (0..255), and forgets it. The title bar is drawn over
-/// everything, so it darkens itself by as much: left bright, it stood out as a frame around a dimmed window.
-pub fn take_dim(ctx: &egui::Context) -> u8 {
-    ctx.data_mut(|d| d.remove_temp::<u8>(egui::Id::new("window-dim"))).unwrap_or(0)
-}
-
 /// The shared mechanics: a dimmed window, something on top that animates in and
 /// out, closed by Esc or a click on the dimmed part. `place` gets how far in it
 /// is (0..1) and returns where the content goes; `add` may set its flag to close, or
@@ -37,7 +31,7 @@ fn overlay(ctx: &egui::Context, name: &str, secs: f32, dim: u8, esc: bool, place
     overlay_with(ctx, name, secs, dim, esc, true, place, add)
 }
 
-/// `exit: false` is the web's dialogs that vanish at once: the dim does not fade and closing skips the way out.
+/// `exit: false` is the web's dialogs that vanish at once: closing skips the way out.
 fn overlay_with(ctx: &egui::Context, name: &str, secs: f32, dim: u8, esc: bool, exit: bool, place: impl FnOnce(Rect, f32) -> Rect, add: impl FnOnce(&mut egui::Ui, &mut bool)) -> State {
     let id = egui::Id::new(name);
     let closing_id = id.with("closing");
@@ -50,19 +44,18 @@ fn overlay_with(ctx: &egui::Context, name: &str, secs: f32, dim: u8, esc: bool, 
         ctx.data_mut(|d| d.insert_temp(open_id, true));
     }
     let t = ctx.animate_bool_with_time_and_easing(id.with("in"), !closing, secs, egui::emath::easing::cubic_out);
-    // The dimming takes the web's 150 ms however long the content travels (the code viewer slides for 300).
-    let dimmed = ctx.animate_bool_with_time(id.with("dim"), !closing, 0.15);
+    // The window darkens in a fifth of a second, easing out, however long the content travels (the code viewer
+    // slides for 300 ms).
+    let dimmed = ctx.animate_bool_with_time_and_easing(id.with("dim"), !closing, 0.2, egui::emath::easing::cubic_out);
     let screen = ctx.content_rect();
     let mut close = esc && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
-    egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(screen.min).show(ctx, |ui| {
+    // egui would fade a new area in by itself, on a clock of its own. One clock darkens everything here: on two,
+    // the title bar went dark at once and the rest of the window followed it.
+    egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(screen.min).fade_in(false).show(ctx, |ui| {
         let scrim = ui.allocate_rect(screen, Sense::click());
-        let dark = (dim as f32 * if exit { dimmed } else { 1.0 }) as u8;
-        ui.painter().rect_filled(screen, 0.0, Color32::from_black_alpha(dark));
-        // Two overlays, one over the other, darken as two layers of glass do.
-        ctx.data_mut(|d| {
-            let so_far = d.get_temp::<u8>(egui::Id::new("window-dim")).unwrap_or(0) as u32;
-            d.insert_temp(egui::Id::new("window-dim"), (so_far + dark as u32 - so_far * dark as u32 / 255) as u8);
-        });
+        let dark = Color32::from_black_alpha((dim as f32 * dimmed) as u8);
+        ui.painter().rect_filled(screen, 0.0, dark);
+        titlebar::dim(ctx, id, dark);
         let content = place(screen, t);
         // Asked before the content is drawn, so the content can refuse by clearing the flag (unsaved edits).
         if scrim.clicked() && scrim.interact_pointer_pos().is_some_and(|at| !content.contains(at)) {

@@ -225,9 +225,11 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
         }
 
         let App { conv, heights, rows, run, settings, editing, rewind, .. } = app;
-        // What a live reply is doing is said right under it; a question to the user keeps its distance.
+        // What a live reply is doing is said under it, as far from it as a step is from the text before it: a
+        // reply that ends in text keeps room of its own under its last line, one that is only its label has none.
+        // A question to the user keeps its distance.
         let asking = run.as_ref().is_some_and(|r| r.approval.is_some() || r.question.is_some());
-        let tail_gap = if running && !asking { gap.min(6.0) } else { gap };
+        let tail_gap = if !running || asking { gap } else if has_output { 6.0 } else { 18.0 };
         let (plan, rewind) = (conv.plan.as_ref(), rewind.as_ref());
         // Bubbles stop at three quarters of the column; a narrow window gives them a little more.
         let cap = column * if ui.ctx().content_rect().width() < 768.0 { 0.85 } else { 0.75 };
@@ -464,6 +466,9 @@ fn describe_request(buckets: &[Bucket]) -> (u64, String) {
     (chars, out)
 }
 
+/// How long a reply may say nothing, mid-text, before the row under it says it is waiting.
+const QUIET: Duration = Duration::from_secs(2);
+
 /// The lines under a reply that is still on its way (StatusRow, RetryBanner, RequestSizeLine, WaitRow
 /// and DraftRow in ChatArea.tsx): "✻ Thinking… · 12s" and its kin.
 fn wait_rows(ui: &mut egui::Ui, run: &super::Run, has_output: bool) {
@@ -473,15 +478,27 @@ fn wait_rows(ui: &mut egui::Ui, run: &super::Run, has_output: bool) {
         // As tall as its text: a row of the usual height would stand off from the reply it speaks for.
         ui.allocate_ui_with_layout(vec2(ui.available_width(), 20.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
             ui.add_space(16.0);
-            ui.spacing_mut().item_spacing.x = 8.0;
+            ui.spacing_mut().item_spacing.x = 6.0;
             add(ui);
         });
         ui.add_space(6.0);
     };
     let mark = |ui: &mut egui::Ui| {
         ui.label(widgets::lines("✻", 13.0, 20.0, W::Regular, p.accent));
+        ui.add_space(2.0);
     };
     let small = |text: String, colour| widgets::lines(text, 11.0, 16.0, W::Regular, colour);
+    // The small print after the glowing words. Each fact follows a dot that stands midway between its neighbours:
+    // written into the text ("· 4.2k chars") the dot leaned on the word after it.
+    let facts = |ui: &mut egui::Ui, facts: &[String], tip: &str| {
+        for fact in facts {
+            ui.label(widgets::text("·", 11.0, W::Regular, p.muted));
+            let said = ui.label(widgets::text(fact.as_str(), 11.0, W::Regular, p.muted));
+            if !tip.is_empty() {
+                said.on_hover_text(tip);
+            }
+        }
+    };
     let glow = |ui: &mut egui::Ui, text: String| {
         let job = shimmer(ui, &text, 13.0);
         ui.label(job);
@@ -511,7 +528,7 @@ fn wait_rows(ui: &mut egui::Ui, run: &super::Run, has_output: bool) {
                 }
                 None => glow(ui, format!("{stage}…")),
             }
-            ui.label(widgets::text(format!("· {}s", run.started.elapsed().as_secs()), 11.0, W::Regular, p.muted));
+            facts(ui, &[format!("{}s", run.started.elapsed().as_secs())], "");
         });
         if let Some((r, (chars, described))) = sent.as_ref().filter(|(_, (chars, _))| *chars >= 100_000) {
             row(ui, 0.0, &mut |ui| {
@@ -531,14 +548,22 @@ fn wait_rows(ui: &mut egui::Ui, run: &super::Run, has_output: bool) {
         row(ui, 0.0, &mut |ui| {
             mark(ui);
             glow(ui, format!("{}…", drafting_label(&draft.name, draft.path.as_deref())));
-            ui.label(widgets::text(format!("· {size} · {}s", draft.since.elapsed().as_secs()), 11.0, W::Regular, p.muted));
+            facts(ui, &[size.clone(), format!("{}s", draft.since.elapsed().as_secs())], "");
         });
     } else if let Some((r, (chars, described))) = sent.as_ref().filter(|(r, _)| !r.answered) {
         row(ui, 0.0, &mut |ui| {
             mark(ui);
             glow(ui, "Waiting for the model…".into());
-            ui.label(widgets::text(format!("· {}s · {described}{}", r.fired.elapsed().as_secs(), heavy(*chars)), 11.0, W::Regular, p.muted))
-                .on_hover_text("The next round was sent. The provider is reading it (a big request can take a while) before the first token comes back.");
+            let tip = "The next round was sent. The provider is reading it (a big request can take a while) before the first token comes back.";
+            facts(ui, &[format!("{}s", r.fired.elapsed().as_secs()), format!("{described}{}", heavy(*chars))], tip);
+        });
+    } else if matches!(run.status, "Writing" | "Thinking") && run.retry.is_none() && run.approval.is_none() && run.question.is_none() && run.heard.elapsed() >= QUIET {
+        // Mid-reply and nothing has come for a while: the provider is slow, and saying so tells it from a window
+        // that has stopped.
+        row(ui, 0.0, &mut |ui| {
+            mark(ui);
+            glow(ui, "Waiting for the model…".into());
+            facts(ui, &[format!("{}s", run.heard.elapsed().as_secs())], "Nothing has come from the model for this long. The reply goes on when it sends more.");
         });
     }
 }

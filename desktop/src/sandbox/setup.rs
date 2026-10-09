@@ -749,6 +749,8 @@ mod tests {
 
     #[test]
     fn one_job_at_a_time() {
+        // The job slot is one for the whole program: not while a neighbouring test has a job in it.
+        let _turn = crate::sandbox::test_lock();
         begin(JobKind::Check).unwrap();
         assert_eq!(begin(JobKind::Setup), Err("A sandbox job is already running.".to_string()));
         finish(true, None);

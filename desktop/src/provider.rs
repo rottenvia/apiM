@@ -359,7 +359,12 @@ pub async fn stream(client: &reqwest::Client, target: &Target, body: &Value, cut
             let line: Vec<u8> = buf.drain(..=pos).collect();
             let line = String::from_utf8_lossy(&line);
             let Some(payload) = line.trim().strip_prefix("data:").map(str::trim) else { continue };
-            if payload.is_empty() || payload == "[DONE]" {
+            if payload == "[DONE]" {
+                // The last frame there is. A host that keeps the connection open after it would otherwise hold the
+                // reply unfinished until the idle limit.
+                break 'stream;
+            }
+            if payload.is_empty() {
                 continue;
             }
             // Malformed frames are ignored rather than aborting the reply.
