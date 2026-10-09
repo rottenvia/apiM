@@ -236,6 +236,16 @@ fn prepare(ctx: &Ctx, command: &str, argv: Vec<String>) -> Result<Launch, String
 }
 
 // ponytail: no per-chat venv or pip/npm containment (PYTHONUSERBASE, npm prefix under .packages); installs land in the global toolchain.
+/// Why a program could not be started. Windows refuses a starting folder whose path runs past about 250
+/// characters with "The directory name is invalid", which reads as a broken runner: the real cause is said instead.
+fn start_error(e: &std::io::Error, folder: &Path) -> String {
+    let long = folder.as_os_str().len();
+    if cfg!(windows) && e.raw_os_error() == Some(267) && long > 240 {
+        return format!("the workspace folder's path is {long} characters long, more than Windows allows for the folder a program starts in (about 250). Nothing is wrong with the command: the app's data folder has to sit at a shorter path. Tell the user so.");
+    }
+    e.to_string()
+}
+
 fn command(ctx: &Ctx, launch: &Launch) -> Command {
     let mut cmd = Command::new(&launch.program);
     cmd.args(&launch.args).current_dir(&ctx.root).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
@@ -353,7 +363,7 @@ pub async fn execute(ctx: &Ctx, program: &str, argv: Vec<String>, reason: &str, 
     approved(ctx, &launch, reason).await.map_err(|why| Output::fail(not_run(why)))?;
     let child = match command(ctx, &launch).env("CI", "1").stdin(Stdio::null()).spawn() {
         Ok(child) => child,
-        Err(e) => return Ok(Ran { display: launch.display, code: None, out: String::new(), timed_out: false, took: Duration::ZERO, error: Some(e.to_string()) }),
+        Err(e) => return Ok(Ran { display: launch.display, code: None, out: String::new(), timed_out: false, took: Duration::ZERO, error: Some(start_error(&e, &ctx.root)) }),
     };
     let started = Instant::now();
     let (code, out, timed_out) = run_to_end(child, limit).await;
@@ -628,7 +638,7 @@ pub async fn start_process(ctx: &Ctx, args: &Value) -> Output {
     }
     let child = match command(ctx, &launch).stdin(Stdio::piped()).spawn() {
         Ok(c) => c,
-        Err(e) => return Output::fail(format!("Could not start `{}`: {e}", launch.display)),
+        Err(e) => return Output::fail(format!("Could not start `{}`: {}", launch.display, start_error(&e, &ctx.root))),
     };
     // A process that exits inside the first seconds did not start: that is a failure, not a background job.
     let (id, died, shown) = ctx.procs.adopt(owner, launch.display.clone(), child, ctx.emit.clone(), START_GRACE).await;

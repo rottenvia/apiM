@@ -463,6 +463,8 @@ fn describe(name: &str, args: &str) -> Display {
         "inspect_page" => (Web, "Inspecting", "Inspected"),
         "http_request" => (Web, "Requesting", "Requested"),
         "download_file" => (Web, "Downloading", "Downloaded"),
+        "load_tools" => (Plan, "Loading tools", "Loaded tools"),
+        "skills" => (Note, "Looking at skills", "Skills"),
         "make_plan" => (Plan, "Planning", "Planned"),
         "update_plan" => (Plan, "Updating plan", "Updated plan"),
         "note_finding" | "note_binary" => (Note, "Noting", "Noted"),

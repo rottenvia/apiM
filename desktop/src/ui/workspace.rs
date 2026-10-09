@@ -201,7 +201,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     refresh(app);
     let full = ui.max_rect();
     let rule = Stroke::new(1.0, p.border);
-    ui.painter().vline(full.left() + 0.5, full.y_range(), rule);
     let (x0, count) = (full.left(), app.files.len());
     let total: u64 = app.files.iter().map(|f| f.1).sum();
     if app.ws.history_on && app.ws.snapshots_for.as_ref().is_none_or(|(chat, files)| *chat != app.conv.id || *files != count) {

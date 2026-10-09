@@ -2,6 +2,11 @@
 //! Built-ins come from assets/plugins.json (synced from the web app); the user's
 //! own live in data/plugins.json, the file the web app keeps them in
 //! (src/lib/plugins.ts, src/lib/plugin-store.ts).
+//!
+//! Here a plugin can be more than its instruction (a "skill"): a longer guide that is sent only when asked
+//! for, and a line repeated with each message. More of them wait in a catalog (assets/skills.json, and its
+//! newest copy on the project's page) to be added by the user or by the model itself (`tools::skills`), for
+//! one chat or for all.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -29,6 +34,15 @@ pub struct Plugin {
     pub created_at: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub updated_at: String,
+    /// A longer manual, sent only when asked for (`skills`, read): `prompt` is what rides in every request.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub guide: String,
+    /// One line repeated with each new message, for models that drift from a style after a few turns.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reminder: String,
+    /// Added from the catalog rather than written here.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub catalog: bool,
 }
 
 /// Longest a single plugin's instructions may be (about 28,000 tokens).
@@ -87,7 +101,9 @@ pub fn directives(plugins: &[Plugin], enabled: &[String]) -> String {
             continue;
         }
         used += size;
-        rules.push(format!("- {}: {}", p.name, strip_tag(&p.prompt)));
+        // The guide is not sent with every request: the model is told where it is.
+        let more = if p.guide.is_empty() { String::new() } else { format!(" (Its full guide: skills, action read, id {}.)", p.id) };
+        rules.push(format!("- {}: {}{more}", p.name, strip_tag(&p.prompt)));
     }
     if rules.is_empty() && dropped == 0 {
         return String::new();
@@ -106,6 +122,19 @@ pub fn directives(plugins: &[Plugin], enabled: &[String]) -> String {
         PROMPTS.plugin_marker,
         rules.join("\n")
     )
+}
+
+/// What is on for a reply: the plugins on for every chat, then those on for this chat alone.
+pub fn enabled_for(all_chats: &[String], this_chat: &[String]) -> Vec<String> {
+    let mut on = all_chats.to_vec();
+    on.extend(this_chat.iter().filter(|id| !all_chats.contains(id)).cloned());
+    on
+}
+
+/// The reminders of the enabled plugins as one bracketed line for the end of the newest message. Empty when none has one.
+pub fn reminders(plugins: &[Plugin], enabled: &[String]) -> String {
+    let lines: Vec<&str> = enabled.iter().filter_map(|id| plugins.iter().find(|p| &p.id == id)).map(|p| p.reminder.trim()).filter(|line| !line.is_empty()).collect();
+    if lines.is_empty() { String::new() } else { format!("[Standing instructions, still in force. {}]", lines.join(" ")) }
 }
 
 /// Enabled classic plugins, appended to the persona exactly as they used to be.
@@ -162,6 +191,9 @@ fn normalise(input: &Plugin) -> Result<Plugin, String> {
         description: input.description.trim().chars().take(140).collect(),
         category: if CATEGORIES.contains(&input.category.as_str()) { input.category.clone() } else { "enhancement".into() },
         prompt: prompt.into(),
+        guide: input.guide.trim().chars().take(MAX_GUIDE).collect(),
+        reminder: input.reminder.trim().chars().take(MAX_REMINDER).collect(),
+        catalog: input.catalog,
         ..Plugin::default()
     })
 }
@@ -193,6 +225,63 @@ pub fn delete(id: &str) -> Result<(), String> {
     write_all(&all)
 }
 
+// ------------------------------------------------------------------ the catalog
+
+/// Where the newest catalog is read from: assets/skills.json as it stands on the project's main branch, so a
+/// skill added there reaches every copy of the app without a new build.
+const CATALOG_URL: &str = "https://raw.githubusercontent.com/rottenvia/apiM/main/desktop/assets/skills.json";
+/// The most a catalog entry may hold: a rule rides in every request, a guide is read when asked for.
+const MAX_RULE: usize = 1_200;
+const MAX_GUIDE: usize = 12_000;
+const MAX_REMINDER: usize = 160;
+
+static SHIPPED: LazyLock<Vec<Plugin>> = LazyLock::new(|| parse_catalog(include_str!("../assets/skills.json")).expect("assets/skills.json is a catalog"));
+static FETCHED: std::sync::Mutex<Option<Vec<Plugin>>> = std::sync::Mutex::new(None);
+
+/// The skills that can be added: the list downloaded since the app started, else the one it came with.
+pub fn catalog() -> Vec<Plugin> {
+    FETCHED.lock().unwrap().clone().unwrap_or_else(|| SHIPPED.clone())
+}
+
+/// A catalog is text on its way into the model's instructions, and the downloaded one comes from the internet:
+/// an entry is kept only when it is well formed and of modest size. Nothing in one is ever run.
+fn parse_catalog(text: &str) -> Option<Vec<Plugin>> {
+    if text.len() > 600_000 {
+        return None;
+    }
+    let listed: Vec<Plugin> = serde_json::from_str(text).ok()?;
+    let fits = |p: &Plugin| {
+        let id_ok = p.id.starts_with("skill-") && p.id.len() <= 60 && p.id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+        let name = p.name.trim().chars().count();
+        id_ok && (1..=40).contains(&name) && !p.prompt.trim().is_empty() && p.prompt.chars().count() <= MAX_RULE && p.guide.chars().count() <= MAX_GUIDE && p.reminder.chars().count() <= MAX_REMINDER
+    };
+    let good: Vec<Plugin> = listed.into_iter().filter(fits).take(300).map(|p| Plugin { catalog: true, custom: false, legacy: false, description: p.description.chars().take(140).collect(), ..p }).collect();
+    (!good.is_empty()).then_some(good)
+}
+
+/// Downloads the newest catalog. False, and the list in hand stays, when offline or when what came back is not one.
+pub async fn refresh_catalog(client: &reqwest::Client) -> bool {
+    let fetch = async { client.get(CATALOG_URL).send().await.ok()?.error_for_status().ok()?.text().await.ok() };
+    let Ok(Some(text)) = tokio::time::timeout(std::time::Duration::from_secs(6), fetch).await else { return false };
+    let Some(list) = parse_catalog(&text) else { return false };
+    *FETCHED.lock().unwrap() = Some(list);
+    true
+}
+
+/// Adds a catalog skill to the user's plugins, under the id it has in the catalog. It is a copy: a later
+/// change to the catalog does not rewrite what the user has.
+pub fn install(skill: &Plugin) -> Result<Plugin, String> {
+    let mut all = custom();
+    if let Some(have) = all.iter().find(|p| p.id == skill.id) {
+        return Ok(have.clone());
+    }
+    let now = crate::store::iso(crate::store::now_ms());
+    let added = Plugin { id: skill.id.clone(), custom: true, created_at: now.clone(), updated_at: now, ..normalise(skill)? };
+    all.push(added.clone());
+    write_all(&all)?;
+    Ok(added)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,6 +298,30 @@ mod tests {
         // A classic plugin rides inline instead, tag and all.
         let legacy = legacy_prompt(&all, &["caveman".into(), "legacy-critic".into()]);
         assert_eq!(legacy, all.iter().find(|p| p.id == "legacy-critic").unwrap().prompt);
+    }
+
+    #[test]
+    fn skills_guides_reminders_and_scopes() {
+        // The catalog that ships is well formed, and none of it collides with a built-in.
+        let shipped = catalog();
+        assert!(shipped.len() >= 10 && shipped.iter().all(|s| s.catalog && s.id.starts_with("skill-") && !BUILTIN.iter().any(|b| b.id == s.id)));
+        let terse = shipped.iter().find(|s| s.id == "skill-terse").unwrap().clone();
+        let every = vec![terse.clone(), Plugin { id: "plain".into(), name: "Plain".into(), prompt: "Be plain.".into(), ..Plugin::default() }];
+        // On for every chat first, then this chat's own, each once.
+        let on = enabled_for(&["plain".into()], &["skill-terse".into(), "plain".into()]);
+        assert_eq!(on, ["plain", "skill-terse"]);
+        let d = directives(&every, &on);
+        // The rule is sent; the guide is only pointed at.
+        assert!(d.contains("- Terse: Answer first") && d.contains("(Its full guide: skills, action read, id skill-terse.)") && !d.contains("Terse, in full."));
+        assert_eq!(reminders(&every, &on), "[Standing instructions, still in force. Terse: answer first, no filler.]");
+        assert_eq!(reminders(&every, &["plain".into()]), "");
+
+        // A downloaded list is taken only entry by well-formed entry.
+        let entry = |id: &str, name: &str, prompt: &str| format!(r#"{{"id":"{id}","name":"{name}","prompt":"{prompt}","custom":true,"legacy":true}}"#);
+        let mixed = format!("[{},{},{},{}]", entry("skill-ok", "Ok", "Do."), entry("caveman", "Clash", "Do."), entry("skill-Bad Id", "Bad", "Do."), entry("skill-long", "Long", &"x".repeat(MAX_RULE + 1)));
+        let kept = parse_catalog(&mixed).unwrap();
+        assert_eq!(kept.iter().map(|p| (p.id.as_str(), p.catalog, p.custom, p.legacy)).collect::<Vec<_>>(), [("skill-ok", true, false, false)]);
+        assert!(parse_catalog("not json").is_none() && parse_catalog("[]").is_none() && parse_catalog(&entry("skill-x", "X", "Do.")).is_none());
     }
 
     #[test]

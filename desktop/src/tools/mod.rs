@@ -11,9 +11,11 @@ pub mod exec;
 pub mod files;
 pub mod git;
 pub mod github;
+pub mod groups;
 pub mod plan;
 pub mod recall;
 pub mod sandbox;
+pub mod skills;
 pub mod testing;
 pub mod web;
 
@@ -30,6 +32,11 @@ pub struct ChatState {
     pub findings: Vec<Finding>,
     /// `finish` was already bounced once for open plan steps.
     pub finish_bounced: bool,
+    /// The plugins on for this chat alone and for every chat, as this reply knows them (`skills` changes both).
+    pub skills: Vec<String>,
+    pub skills_all: Vec<String>,
+    /// The tool groups this chat has loaded (`groups`).
+    pub groups: Vec<String>,
 }
 
 /// Everything a tool may touch.
@@ -239,6 +246,7 @@ pub async fn run(name: &str, args: &Value, ctx: &Ctx) -> Output {
         "http_request" => web::http_request(ctx, args).await,
         "download_file" => web::download_file(ctx, args).await,
         "web_search" => web::web_search(ctx, args).await,
+        "skills" => skills::run(ctx, args).await,
         "git_pull_base" | "github_push" | "github_create_pr" | "github_pr_status" => github::run(ctx, name, args).await,
         n if n.starts_with("git_") => git::run(ctx, n, args).await,
         _ => Output::fail(format!("Unknown tool: {name}. Use one of the tools you were given.")),

@@ -350,7 +350,8 @@ fn row(app: &mut App, ui: &mut egui::Ui, running: bool, is_note: bool, has_keys:
         app.settings.save();
     }
 
-    let on = app.settings.enabled_plugins.len();
+    // On for every chat, or for this one alone.
+    let on = crate::plugins::enabled_for(&app.settings.enabled_plugins, &app.conv.names("skills")).len();
     let label = match (wide, on) {
         (true, 0) => "Plugins".to_string(),
         (true, n) => format!("Plugins · {n}"),
