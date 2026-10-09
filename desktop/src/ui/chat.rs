@@ -3,8 +3,9 @@
 
 use super::theme::{self, W, mix, p};
 use super::widgets;
+use super::lazy::{self, Measured};
 use super::{App, Dialog, bubble, composer, icons, markdown};
-use crate::store::{Bucket, Role};
+use crate::store::{Bucket, Message, Part, Role};
 use eframe::egui::{self, Color32, Rect, Sense, Stroke, pos2, vec2};
 use std::time::{Duration, Instant};
 
@@ -70,7 +71,7 @@ pub fn shimmer(ui: &egui::Ui, text: &str, size: f32) -> egui::text::LayoutJob {
         let format = egui::TextFormat { font_id: theme::font(size, W::Regular), color: dim.lerp_to_gamma(bright, near), line_height: Some(20.0), ..Default::default() };
         job.append(&ch.to_string(), 0.0, format);
     }
-    ui.ctx().request_repaint_after(Duration::from_millis(40));
+    ui.ctx().request_repaint();
     job
 }
 
@@ -123,7 +124,10 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
     let left = area.left() + (area.width() - column) / 2.0;
     let totals = app.totals();
     let mut action = None;
+    // Going to the end of a chat takes two steps when it was just opened: its last messages are measured out of
+    // sight first (over as many frames as that needs), then one more pass lands on the end they turned out to have.
     let jump = std::mem::take(&mut app.jump_to_latest);
+    let landing = jump && std::mem::take(&mut app.tail_measured);
 
     // Find in this chat: how many matches each message holds, and which of them is the focused one.
     // ponytail: counted again every frame the bar is open; cache per (chat, query) if a long chat stutters.
@@ -146,24 +150,45 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
 
     // Each chat keeps its own place, and a chat opened for the first time starts at its end.
     let mut scroll = egui::ScrollArea::vertical().id_salt(("transcript", &app.conv.id)).auto_shrink(false).stick_to_bottom(true);
+    // Heights measured out of sight last frame are taken up now. Where a message sat above the window the view
+    // moves by as much as it changed, so what is on screen stays where it is.
+    let mut shift = std::mem::take(&mut app.anchor);
+    for m in app.heights.values_mut() {
+        if let Some(next) = m.next.take() {
+            if m.above {
+                shift += next - m.height;
+            }
+            m.height = next;
+        }
+    }
     if app.staged("top") {
         scroll = scroll.vertical_scroll_offset(0.0);
     } else if jump {
         // Past the end: clamped to it, and the view then follows the reply as it grows.
         scroll = scroll.vertical_scroll_offset(1e9);
+    } else if shift != 0.0 {
+        scroll = scroll.vertical_scroll_offset((app.scroll_y + shift).max(0.0));
     }
+    // What this frame may spend measuring messages nobody is looking at. A chat just opened gets more: nothing
+    // of it shows until its end is measured.
+    app.rows.begin(Duration::from_millis(if landing { 0 } else if jump { 12 } else { 4 }));
+    // (how far the view has to follow next frame, lay this frame out again before showing it, more to measure, the end is measured)
+    let (mut anchor, mut redo, mut unmeasured, mut tail_ready) = (0.0_f32, false, false, true);
     let out = scroll.show(ui, |ui| {
         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
         ui.add_space(24.0);
-        let column_ui = |ui: &mut egui::Ui, add: &mut dyn FnMut(&mut egui::Ui)| {
+        // `unseen` lays it out without drawing it, to learn its height.
+        let column_in = |ui: &mut egui::Ui, unseen: bool, add: &mut dyn FnMut(&mut egui::Ui)| {
             let top = ui.cursor().top();
             let rect = Rect::from_min_size(pos2(left, top), vec2(column, 0.0));
-            let used = ui.scope_builder(egui::UiBuilder::new().max_rect(rect.with_max_y(f32::INFINITY)), |ui| {
+            let builder = egui::UiBuilder::new().max_rect(rect.with_max_y(f32::INFINITY));
+            let used = ui.scope_builder(if unseen { builder.invisible() } else { builder }, |ui| {
                 ui.set_width(column);
                 add(ui);
             });
             ui.advance_cursor_after_rect(Rect::from_min_max(pos2(area.left(), top), pos2(area.right(), used.response.rect.bottom())));
         };
+        let column_ui = |ui: &mut egui::Ui, add: &mut dyn FnMut(&mut egui::Ui)| column_in(ui, false, add);
 
         if totals.tokens > 0 {
             column_ui(ui, &mut |ui| {
@@ -192,7 +217,7 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
         let workspace = app.conv.workspace();
         // The line under the last message a manual /compact covered.
         let compacted = app.conv.summary.as_ref().filter(|s| s.manual).map(|s| (s.up_to_id.clone(), s.covered_turns));
-        let has_output = app.conv.messages.last().is_some_and(|m| m.role == Role::Assistant && (!m.text().trim().is_empty() || !m.reasoning().trim().is_empty()));
+        let has_output = app.conv.messages.last().is_some_and(|m| m.role == Role::Assistant && (!m.loose_reasoning.trim().is_empty() || m.parts.iter().any(|part| matches!(part, Part::Text(text) | Part::Thinking { text, .. } if !text.trim().is_empty()))));
         // Until something comes back the rows sit close together (`space-y-1`), then at the usual 24.
         let gap = if running && !has_output { 4.0 } else { 24.0 };
         if start > 0 {
@@ -200,36 +225,67 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
             ui.add_space(8.0 + gap);
         }
 
-        let App { conv, heights, run, settings, editing, rewind, .. } = app;
+        let App { conv, heights, rows, typed, run, settings, editing, rewind, .. } = app;
         let (plan, rewind) = (conv.plan.as_ref(), rewind.as_ref());
         // Bubbles stop at three quarters of the column; a narrow window gives them a little more.
         let cap = column * if ui.ctx().content_rect().width() < 768.0 { 0.85 } else { 0.75 };
         let thinking_secs = run.as_ref().and_then(|r| r.thinking.secs());
+        let split = settings.reply_layout == "split";
+        // A message with matches is laid out differently, so it is measured apart.
+        fn key_for(hits: usize, msg: &Message) -> std::borrow::Cow<'_, str> {
+            if hits > 0 { format!("{}#find", msg.id).into() } else { msg.id.as_str().into() }
+        }
+        let key_of = |i: usize, msg| key_for(counts.get(i).copied().unwrap_or(0), msg);
+        // What a message's height hangs on besides its width.
+        let print_of = |i: usize, msg: &Message| lazy::print((running, i == last, msg.parts.len(), msg.incomplete, msg.error.is_some(), split));
+        // Messages still to be measured are measured out of sight, the four nearest the end first: reading starts there.
+        let pending: Vec<usize> = (start..=last).rev().filter(|&i| !heights.get(key_of(i, &conv.messages[i]).as_ref()).is_some_and(|m| m.exact && m.width == column && m.print == print_of(i, &conv.messages[i]))).take(if landing { 0 } else { 4 }).collect();
         for (i, msg) in conv.messages.iter().enumerate().skip(start) {
             let live = running && i == last;
             let hits = counts.get(i).copied().unwrap_or(0);
             let focused = located.filter(|at| at.0 == i).map(|at| at.1);
             let wanted = reveal && focused.is_some();
-            // A message with matches is laid out differently, so it is measured apart.
-            let key: std::borrow::Cow<str> = if hits > 0 { format!("{}#find", msg.id).into() } else { msg.id.as_str().into() };
-            // Replies off screen are not laid out at all: they keep their measured height.
-            let kept = heights.get(key.as_ref()).copied().filter(|&(w, h)| !live && !wanted && w == column && !ui.is_rect_visible(Rect::from_min_size(ui.cursor().min, vec2(area.width(), h))));
-            if let Some((_, h)) = kept {
-                ui.allocate_space(vec2(area.width(), h));
+            let (key, print) = (key_of(i, msg), print_of(i, msg));
+            let known = heights.get(key.as_ref()).copied();
+            let exact = known.is_some_and(|m| m.exact && m.width == column && m.print == print);
+            let room = known.map_or_else(|| guess(msg, cap), |m| m.height);
+            let rect = Rect::from_min_size(ui.cursor().min, vec2(area.width(), room));
+            // On the frame that jumps to the end nothing is where it will be, so nothing counts as showing.
+            let shows = !jump && (live || wanted || ui.is_rect_visible(rect));
+            if !shows && (exact || !(pending.contains(&i) && rows.has_time())) {
+                // Off screen: it keeps its room. One not measured yet waits its turn at the height it had, or a guess.
+                ui.allocate_space(rect.size());
+                unmeasured |= !exact;
             } else {
                 let top = ui.cursor().top();
+                rows.guessed = false;
                 let mut marks = matcher.as_ref().filter(|_| hits > 0).map(|matcher| markdown::Marks { matcher, active: focused, seen: 0, reveal: wanted, shown: false });
-                column_ui(ui, &mut |ui| {
-                    let mut env = bubble::Env { settings, workspace: &workspace, live, newest: i == last, busy: running, cap, thinking_secs, editing, action: &mut action, plan, rewind, marks: marks.take() };
+                column_in(ui, !shows, &mut |ui| {
+                    let mut env = bubble::Env { settings, workspace: &workspace, live, newest: i == last, busy: running, cap, thinking_secs, editing, action: &mut action, plan, rewind, marks: marks.take(), rows, typed };
                     ui.push_id(&msg.id, |ui| bubble::show(ui, msg, &mut env));
                     marks = env.marks.take();
                 });
-                let used = Rect::from_min_max(pos2(left, top), pos2(left + column, ui.cursor().top()));
-                // The match sits where nothing marks it (inside code): show its message at least.
-                if wanted && !marks.is_some_and(|m| m.shown) {
-                    ui.scroll_to_rect(used, Some(egui::Align::Center));
+                let height = ui.cursor().top() - top;
+                if shows {
+                    // The match sits where nothing marks it (inside code): show its message at least.
+                    if wanted && !marks.is_some_and(|m| m.shown) {
+                        ui.scroll_to_rect(Rect::from_min_max(pos2(left, top), pos2(left + column, top + height)), Some(egui::Align::Center));
+                    }
+                    // It came into view from above at a height that was only a guess: what is under it must not jump.
+                    if !exact && !live && rect.top() < ui.clip_rect().top() && (height - room).abs() > 0.5 {
+                        anchor += height - room;
+                        redo = true;
+                    }
+                    heights.insert(key.into_owned(), Measured { width: column, height, print, exact: true, next: None, above: false });
+                } else {
+                    // Measured out of sight. It keeps the room it had for this frame; the next one takes the new height up.
+                    ui.add_space(room - height);
+                    heights.insert(key.into_owned(), Measured { width: column, height: room, print, exact: !rows.guessed, next: Some(height), above: rect.bottom() <= ui.clip_rect().top() });
+                    unmeasured = true;
                 }
-                heights.insert(key.into_owned(), (column, used.height()));
+            }
+            if i + 3 > last {
+                tail_ready &= heights.get(key_of(i, msg).as_ref()).is_some_and(|m| m.exact);
             }
             match compacted.as_ref().filter(|(id, _)| *id == msg.id && !live) {
                 Some((_, turns)) => {
@@ -263,6 +319,21 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
     if more {
         app.mounted += 60;
     }
+    app.scroll_y = out.state.offset.y;
+    app.anchor = anchor;
+    if jump && !landing {
+        // Jump again: to go on measuring its end, or, with that done, to land on it.
+        app.jump_to_latest = true;
+        app.tail_measured = tail_ready;
+    }
+    if redo || landing || (jump && tail_ready) {
+        // This pass put things where they will not stay (or nowhere at all): it is laid out again before anyone sees it.
+        ui.ctx().request_discard("the transcript settled");
+    }
+    if unmeasured || jump {
+        ui.ctx().request_repaint();
+    }
+    opening_pill(app, ui, area);
 
     // Jump to latest: only when scrolled away from the end.
     let distance = out.content_size.y - out.state.offset.y - out.inner_rect.height();
@@ -300,6 +371,39 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
         Some(bubble::Action::PlanClear) => app.edit_plan(true),
         None => {}
     }
+}
+
+/// About the room a message never laid out will take: enough to place it until it is measured.
+fn guess(msg: &Message, width: f32) -> f32 {
+    let per_line = (width / 7.5).max(20.0);
+    60.0 + msg
+        .parts
+        .iter()
+        .map(|part| match part {
+            Part::Text(text) => 15.0 + (text.len() as f32 / per_line).ceil() * 25.5,
+            Part::Tool(_) => 31.0,
+            Part::Thinking { .. } => 40.0,
+            Part::Notice(_) => 32.0,
+        })
+        .sum::<f32>()
+}
+
+/// "Opening…" over the transcript, once the chat that was clicked has taken a moment to read from disk.
+fn opening_pill(app: &App, ui: &mut egui::Ui, area: Rect) {
+    let Some(opening) = app.opening.as_ref() else { return };
+    let waited = opening.since.elapsed();
+    if waited < Duration::from_millis(150) {
+        ui.ctx().request_repaint_after(Duration::from_millis(150) - waited);
+        return;
+    }
+    let p = p();
+    let title = app.chats.iter().find(|c| c.id == opening.id).map_or("chat", |c| c.title.as_str());
+    let short: String = if title.chars().count() > 36 { format!("{}…", title.chars().take(35).collect::<String>()) } else { title.to_string() };
+    let label = ui.painter().layout_job(shimmer(ui, &format!("Opening {short}…"), 13.0));
+    let rect = Rect::from_center_size(pos2(area.center().x, area.top() + 28.0), vec2(label.size().x + 28.0, 34.0));
+    ui.painter().add(egui::Shadow { offset: [0, 6], blur: 20, spread: 0, color: Color32::from_black_alpha(102) }.as_shape(rect, egui::CornerRadius::same(17)));
+    ui.painter().rect(rect, 17.0, p.elevated, Stroke::new(1.0, p.border_light), egui::StrokeKind::Inside);
+    widgets::text_at(ui, rect.left() + 14.0, rect.center().y, label);
 }
 
 /// "Show 60 earlier of 212": older messages stay out of the layout until asked for. True when clicked.

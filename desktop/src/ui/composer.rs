@@ -300,7 +300,7 @@ fn row(app: &mut App, ui: &mut egui::Ui, running: bool, is_note: bool, has_keys:
             separator(ui);
         }
 
-        let (used, estimated) = app.context_used();
+        let (used, estimated, _) = app.context_used();
         let window = models::context_window(&app.settings.model, &app.settings.custom_models);
         let pct = if window > 0 { (used.unwrap_or(0) as f32 / window as f32 * 100.0).min(100.0) } else { 0.0 };
         let pct_label = if pct > 0.0 && pct < 1.0 { "<1".to_string() } else { format!("{}", pct.round() as u32) };
@@ -587,7 +587,7 @@ fn context_panel(app: &mut App, ui: &mut egui::Ui) {
     let p = p();
     let model = models::resolve(&app.settings.model, &app.settings.custom_models);
     let window = models::context_window(&app.settings.model, &app.settings.custom_models);
-    let (used, estimated) = app.context_used();
+    let (used, estimated, compacted) = app.context_used();
     let tokens = used.unwrap_or(0);
     let pct = if window > 0 { (tokens as f32 / window as f32 * 100.0).min(100.0) } else { 0.0 };
     let pct_label = if pct > 0.0 && pct < 1.0 { "<1".to_string() } else { format!("{}", pct.round() as u32) };
@@ -644,6 +644,7 @@ fn context_panel(app: &mut App, ui: &mut egui::Ui) {
         ui.add_space(8.0);
         let about = match used {
             None => format!("Fills as the chat grows. {} holds {} tokens.", model.short_label, format_tokens(window)),
+            Some(_) if compacted => format!("About what the next request to {} will carry, now that the chat is compacted: the summary and what was said since.", model.short_label),
             Some(_) => format!("What the newest request to {} carried{}. The next message adds to it.", model.short_label, if estimated { " (estimated from its size)" } else { "" }),
         };
         ui.add(egui::Label::new(small(about, p.muted)).wrap());
@@ -702,7 +703,7 @@ fn context_panel(app: &mut App, ui: &mut egui::Ui) {
         ui.add_space(12.0);
         widgets::rule(ui);
         ui.add_space(10.0);
-        let blocked = if app.running_here() { Some("Compact is available once the reply finishes.") } else if !app.can_compact() { Some("Nothing to compact yet.") } else { None };
+        let blocked = if app.running_here() { Some("Compact is available once the reply finishes.") } else { crate::summary::compact_blocker(&app.conv) };
         match blocked {
             Some(why) => {
                 ui.label(small(why.into(), p.muted));

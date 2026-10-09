@@ -208,7 +208,7 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &ChatMeta, action: &mut Option<Ac
     }
     let selecting = app.side.selecting;
     let menu_open = app.side.menu.as_ref().is_some_and(|(id, _)| *id == chat.id);
-    let current = app.conv.id == chat.id;
+    let current = app.current_id() == chat.id;
     let running = app.run.as_ref().is_some_and(|r| r.conv_id == chat.id);
 
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 42.0), Sense::click());

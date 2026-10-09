@@ -74,6 +74,12 @@ pub fn shape<'a>(messages: &'a [Message], stored: Option<&HistorySummary>) -> Sh
     Shape { verbatim: open[open.len().saturating_sub(VERBATIM_MAX)..].to_vec(), pending: pending.to_vec() }
 }
 
+/// Characters of history the next request carries: the stored summary and the turns sent word for word
+/// (the web's `historyChars`).
+pub fn history_chars(messages: &[Message], stored: Option<&HistorySummary>) -> usize {
+    stored.map_or(0, |s| render(s).len()) + shape(messages, stored).verbatim.iter().map(|m| m.text().len() + 16).sum::<usize>()
+}
+
 pub fn should_refresh(pending: &[&Message]) -> bool {
     !pending.is_empty() && (pending.len() >= TRIGGER_TURNS || pending.iter().map(|m| m.text().len()).sum::<usize>() >= TRIGGER_CHARS)
 }

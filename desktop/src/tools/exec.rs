@@ -381,12 +381,20 @@ fn or_text(text: &str, fallback: &str) -> String {
     if text.is_empty() { fallback.to_string() } else { text.to_string() }
 }
 
+/// The line of a failed command's output that says why: the last one naming an error, else the last one at all.
+fn telling_line(out: &str) -> Option<String> {
+    let lines: Vec<&str> = out.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
+    let names_error = |line: &&&str| ["error", "failed", "fatal", "panic", "exception", "not found", "cannot", "denied"].iter().any(|word| line.to_lowercase().contains(word));
+    let line = lines.iter().rev().find(names_error).or(lines.last())?;
+    Some(if line.chars().count() > 240 { format!("{}…", line.chars().take(239).collect::<String>()) } else { line.to_string() })
+}
+
 /// Formats a finished run the way the web's formatRunResult does: the status first, then the output.
 fn report(ran: &Ran) -> Output {
     let mut parts = vec![format!("$ {}", ran.display)];
     let (ok, summary) = if let Some(err) = &ran.error {
         parts.push(format!("\nSTATUS: could not run - {err}"));
-        (false, format!("Failed: {}", ran.display))
+        (false, format!("Could not run: {err}"))
     } else if ran.timed_out {
         parts.push("\nSTATUS: timed out and was stopped after the time limit. If this is a server/watcher use start_process; if it waits for input add a non-interactive flag (-y/--yes/--no-input); if it is genuinely slow pass a larger timeout_ms.".to_string());
         (false, format!("Timed out: {}", ran.display))
@@ -396,7 +404,10 @@ fn report(ran: &Ran) -> Output {
     } else {
         let code = ran.code.map_or("unknown".to_string(), |c| c.to_string());
         parts.push(format!("\nSTATUS: failed (exit {code}). Read Errors/Output below, fix the actual cause, then re-run. Do not retry the identical command."));
-        (false, format!("Failed: {}", ran.display))
+        (false, match telling_line(&ran.out) {
+            Some(why) => format!("Exit {code}: {why}"),
+            None => format!("Exit {code}"),
+        })
     };
     let out = ran.out.trim();
     if !out.is_empty() {

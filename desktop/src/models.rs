@@ -242,7 +242,7 @@ impl Usage {
         self.cache_hit += round.cache_hit;
         self.cache_miss += round.cache_miss;
         self.reasoning += round.reasoning;
-        if round.prompt > 0 {
+        if round.context > 0 {
             self.context = round.context;
         }
     }

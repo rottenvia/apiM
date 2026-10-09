@@ -952,7 +952,8 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, tool_defs: 
                         }
                         let (done, used, cost) = run_helpers(target, ctx, &tool_defs, &tree.shown, jobs, &lane, spend.limit.map(|limit| limit - spend.spent)).await;
                         // What the helpers used is the reply's: its totals show it and its spending limit counts it.
-                        usage.add(used);
+                        // Its window is the helpers' own, not this reply's.
+                        usage.add(Usage { context: 0, ..used });
                         spend.spent += cost;
                         emit.send(Event::Usage(usage));
                         reports = Some(done);

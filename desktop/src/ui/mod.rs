@@ -12,6 +12,7 @@ mod emoji;
 mod find_bar;
 mod form;
 mod icons;
+mod lazy;
 mod markdown;
 mod overlay;
 mod plan_panel;
@@ -137,10 +138,19 @@ struct Run {
     saved: Instant,
 }
 
+/// A chat on its way in from disk.
+struct Opening {
+    id: String,
+    since: Instant,
+    rx: mpsc::Receiver<Option<Conversation>>,
+}
+
 /// A summary being written in the background: the automatic one, or `/compact`.
 struct SummaryJob {
     conv_id: String,
     manual: bool,
+    /// Characters of history the next request would have carried without it (`/compact` says what it saved).
+    before: usize,
     rx: mpsc::Receiver<Result<HistorySummary, String>>,
 }
 
@@ -185,8 +195,20 @@ pub struct App {
     attach_error: Option<String>,
     /// Commands the user said never to ask about again, per chat.
     always_allow: HashMap<String, std::collections::HashSet<String>>,
-    /// Measured height of each message at a given width, so off-screen ones are skipped.
-    heights: HashMap<String, (f32, f32)>,
+    /// What each message took when it was last laid out, so the ones off screen are skipped.
+    heights: HashMap<String, lazy::Measured>,
+    /// The same for the rows inside long replies.
+    rows: lazy::Rows,
+    /// Where the transcript is scrolled to, and how far it has to follow messages above it that changed height.
+    scroll_y: f32,
+    anchor: f32,
+    /// The chat being read from disk, so a long one does not hold up the window.
+    opening: Option<Opening>,
+    /// How much of the reply being written is shown yet: its text is let out evenly rather than in bursts.
+    typed: bubble::Typed,
+    ctx: egui::Context,
+    /// Ctrl+V was down on the last frame, so one press pastes once.
+    paste_held: bool,
     dialog: Dialog,
     side: sidebar::State,
     popover: Popover,
@@ -207,6 +229,8 @@ pub struct App {
     find_open: bool,
     find: String,
     jump_to_latest: bool,
+    /// The jump to the end has measured the chat's last messages and now only has to land on them.
+    tail_measured: bool,
     /// Files of the workspace on screen, refreshed when a tool changes something.
     files: Vec<(String, u64)>,
     files_stale: bool,
@@ -241,6 +265,12 @@ impl App {
         theme::apply(&cc.egui_ctx, theme::Palette::for_theme(&settings.theme, &settings.custom_theme));
         egui_extras::install_image_loaders(&cc.egui_ctx);
         cc.egui_ctx.set_zoom_factor(settings.zoom.clamp(0.6, 2.0));
+        cc.egui_ctx.options_mut(|o| {
+            // A notch of the wheel moves as far as it does in a browser (egui's own 40 feels like wading).
+            o.input_options.line_scroll_speed = 100.0;
+            // The transcript may ask for a frame to be laid out again before it is shown (`chat::messages`).
+            o.max_passes = std::num::NonZeroUsize::new(3).unwrap();
+        });
         let mut app = App {
             rt,
             chats: Conversation::list(),
@@ -257,6 +287,13 @@ impl App {
             attach_error: None,
             always_allow: HashMap::new(),
             heights: HashMap::new(),
+            rows: Default::default(),
+            scroll_y: 0.0,
+            anchor: 0.0,
+            opening: None,
+            typed: Default::default(),
+            ctx: cc.egui_ctx.clone(),
+            paste_held: false,
             dialog: Dialog::None,
             side: sidebar::State::default(),
             popover: Popover::None,
@@ -272,6 +309,7 @@ impl App {
             find_open: false,
             find: String::new(),
             jump_to_latest: false,
+            tail_measured: false,
             files: Vec::new(),
             files_stale: true,
             ws: Default::default(),
@@ -301,8 +339,8 @@ impl App {
         self.focus_composer = false;
         if let Ok(wanted) = std::env::var("APIM_SHOT_CHAT") {
             let found = self.chats.iter().find(|c| c.id == wanted || c.title.to_lowercase().contains(&wanted.to_lowercase())).map(|c| c.id.clone());
-            if let Some(id) = found {
-                self.open_chat(&id);
+            if let Some(conv) = found.and_then(|id| Conversation::load(&id)) {
+                self.show_chat(conv);
             }
         }
         for part in state.split(',') {
@@ -488,7 +526,8 @@ impl App {
         if self.running_here() {
             self.parked = Some(std::mem::take(&mut self.conv));
         }
-        self.heights.clear();
+        self.forget_layout();
+        self.opening = None;
         self.files_stale = true;
         self.focus_composer = true;
         self.popover = Popover::None;
@@ -507,15 +546,49 @@ impl App {
         self.conv = Conversation::new();
     }
 
+    /// Heights belong to the chat on screen: another chat starts with none.
+    fn forget_layout(&mut self) {
+        self.heights.clear();
+        self.rows.clear();
+        (self.scroll_y, self.anchor) = (0.0, 0.0);
+    }
+
+    /// Something about the messages changed: they keep their room until each is measured again.
+    fn remeasure(&mut self) {
+        self.heights.values_mut().for_each(|m| m.exact = false);
+    }
+
+    /// The chat the sidebar marks: the one on screen, or the one on its way in.
+    fn current_id(&self) -> &str {
+        self.opening.as_ref().map_or(&self.conv.id, |o| &o.id)
+    }
+
+    /// Opens a chat. It is read from disk on another thread: the one on screen stays until it is here.
     fn open_chat(&mut self, id: &str) {
         if id == self.conv.id {
+            self.opening = None;
             return;
         }
+        if let Some(parked) = self.parked.take_if(|p| p.id == id) {
+            return self.show_chat(parked);
+        }
+        let (tx, rx) = mpsc::channel();
+        let (id, wake) = (id.to_string(), self.ctx.clone());
+        self.opening = Some(Opening { id: id.clone(), since: Instant::now(), rx });
+        std::thread::spawn(move || {
+            let _ = tx.send(Conversation::load(&id));
+            wake.request_repaint();
+        });
+    }
+
+    fn pump_open(&mut self) {
+        let Some(loaded) = self.opening.as_ref().and_then(|o| o.rx.try_recv().ok()) else { return };
+        self.show_chat(loaded.unwrap_or_else(Conversation::new));
+    }
+
+    fn show_chat(&mut self, conv: Conversation) {
         self.leave_current();
-        self.conv = match self.parked.take_if(|p| p.id == id) {
-            Some(parked) => parked,
-            None => Conversation::load(id).unwrap_or_else(Conversation::new),
-        };
+        self.conv = conv;
         self.editing = None;
         self.jump_to_latest = true;
     }
@@ -528,7 +601,7 @@ impl App {
             Conversation::delete(id);
             if &self.conv.id == id {
                 self.conv = Conversation::new();
-                self.heights.clear();
+                self.forget_layout();
                 self.files_stale = true;
             }
         }
@@ -592,16 +665,24 @@ impl App {
 
     // ------------------------------------------------------------ context
 
-    /// Tokens the newest request occupied in the model's window, and whether that is a guess.
-    fn context_used(&self) -> (Option<u64>, bool) {
-        if let Some(m) = self.conv.messages.iter().rev().find(|m| m.usage.context > 0) {
-            return (Some(m.usage.context), false);
+    /// Tokens the newest request occupied in the model's window, and whether that is a guess. The third is true
+    /// when the chat was compacted since that request: the number is then what the next one is expected to carry.
+    fn context_used(&self) -> (Option<u64>, bool, bool) {
+        let tokens = |chars: u64| (chars as f64 / 3.6) as u64;
+        let newest = self.conv.messages.iter().rposition(|m| m.usage.context > 0 || !m.context_breakdown.is_empty());
+        let compacted = self.conv.summary.as_ref().filter(|s| s.manual).and_then(|s| Some((s, self.conv.messages.iter().position(|m| m.id == s.up_to_id)?)));
+        if let Some((summary, covered)) = compacted.filter(|(_, covered)| newest.is_none_or(|n| n <= *covered)) {
+            // What every request carries whatever the chat holds, then the summary, then what was said since.
+            let fixed: u64 = newest.map_or(0, |n| self.conv.messages[n].context_breakdown.iter().filter(|b| matches!(b.label.as_str(), "instructions" | "tool schemas" | "plugins")).map(|b| b.chars).sum());
+            let since: usize = self.conv.messages[covered + 1..].iter().map(|m| m.text().len() + 16).sum();
+            return (Some(tokens(fixed + (summary::render(summary).len() + since) as u64)), true, true);
         }
-        if self.conv.messages.is_empty() {
-            return (None, false);
+        match newest.map(|n| &self.conv.messages[n]) {
+            Some(m) if m.usage.context > 0 => (Some(m.usage.context), false, false),
+            Some(m) => (Some(tokens(m.context_breakdown.iter().map(|b| b.chars).sum())), true, false),
+            None if self.conv.messages.is_empty() => (None, false, false),
+            None => (Some(tokens(self.conv.messages.iter().map(|m| m.text().len() as u64).sum())), true, false),
         }
-        let chars: usize = self.conv.messages.iter().map(|m| m.text().len()).sum();
-        (Some((chars as f64 / 3.6) as u64), true)
     }
 
     fn context_breakdown(&self) -> Vec<Bucket> {
@@ -630,10 +711,6 @@ impl App {
         self.summary_job.as_ref().is_some_and(|j| j.manual && j.conv_id == self.conv.id)
     }
 
-    fn can_compact(&self) -> bool {
-        summary::compact_blocker(&self.conv).is_none()
-    }
-
     /// `/compact`: one summary replaces the conversation for the model. The transcript stays on screen.
     fn compact(&mut self, ctx: &egui::Context, focus: String) {
         if self.running_here() {
@@ -651,11 +728,12 @@ impl App {
         let (tx, rx) = mpsc::channel();
         let wake = ctx.clone();
         let (messages, stored, settings) = (self.conv.messages.clone(), self.conv.summary.clone(), self.settings.clone());
+        let before = summary::history_chars(&self.conv.messages, self.conv.summary.as_ref());
         self.rt.spawn(async move {
             let _ = tx.send(summary::compact(messages, stored, settings, focus).await);
             wake.request_repaint();
         });
-        self.summary_job = Some(SummaryJob { conv_id: self.conv.id.clone(), manual: true, rx });
+        self.summary_job = Some(SummaryJob { conv_id: self.conv.id.clone(), manual: true, before, rx });
         self.compact_note = None;
     }
 
@@ -679,7 +757,7 @@ impl App {
             let _ = tx.send(summary::refresh(stored, pending, settings).await.ok_or_else(String::new));
             wake.request_repaint();
         });
-        self.summary_job = Some(SummaryJob { conv_id: conv_id.to_string(), manual: false, rx });
+        self.summary_job = Some(SummaryJob { conv_id: conv_id.to_string(), manual: false, before: 0, rx });
     }
 
     fn pump_summary(&mut self) {
@@ -689,6 +767,7 @@ impl App {
         match result {
             Ok(fresh) => {
                 let turns = fresh.covered_turns.unwrap_or(0);
+                let after = summary::render(&fresh).len();
                 // A chat that changed underneath (retry, delete) keeps its old summary.
                 self.with_chat(&job.conv_id, |c| {
                     if c.messages.iter().any(|m| m.id == fresh.up_to_id) {
@@ -696,7 +775,9 @@ impl App {
                     }
                 });
                 if job.manual && job.conv_id == self.conv.id {
-                    self.compact_note = Some((true, format!("Compacted {turns} messages into a summary. The model now starts from it.")));
+                    // Sizes as the web app words them: about 3.6 characters to a token.
+                    let k = |chars: usize| if chars >= 3600 { format!("{}k", (chars as f64 / 3600.0).round()) } else { format!("{}", (chars as f64 / 3.6).round()) };
+                    self.compact_note = Some((true, format!("Compacted {turns} messages — history went from ~{} to ~{} tokens. The model now starts from the summary.", k(job.before), k(after))));
                     self.compact_focus.clear();
                 }
             }
@@ -881,7 +962,7 @@ impl App {
         let reply = self.conv.messages.last_mut().expect("checked above");
         (reply.incomplete, reply.error, reply.finish, reply.model) = (false, None, None, model);
         let started = Instant::now().checked_sub(Duration::from_millis(reply.duration_ms)).unwrap_or_else(Instant::now);
-        self.heights.clear();
+        self.remeasure();
         self.start_run(ctx, request, started);
         Ok(())
     }
@@ -900,7 +981,7 @@ impl App {
             self.conv.messages.pop();
         }
         if let Some(question) = self.conv.messages.pop() {
-            self.heights.clear();
+            self.remeasure();
             self.send(ctx, question.text(), question.attachments);
         }
     }
@@ -921,7 +1002,7 @@ impl App {
         }
         let Some((start, end)) = self.exchange(id) else { return };
         self.conv.messages.drain(start..end);
-        self.heights.clear();
+        self.remeasure();
         self.conv.updated_at = store::now_ms();
         self.conv.save();
         self.refresh_chats();
@@ -961,7 +1042,7 @@ impl App {
         if self.conv.summary.as_ref().is_some_and(|s| !self.conv.messages.iter().any(|m| m.id == s.up_to_id)) {
             self.conv.summary = None;
         }
-        self.heights.clear();
+        self.remeasure();
         self.conv.updated_at = store::now_ms();
         self.conv.save();
         self.refresh_chats();
@@ -986,7 +1067,7 @@ impl App {
                 step.note.clear();
             }
         }
-        self.heights.clear();
+        self.remeasure();
         self.conv.save();
     }
 
@@ -998,7 +1079,7 @@ impl App {
         let Some((start, _)) = self.exchange(id) else { return };
         let attached = std::mem::take(&mut self.conv.messages[start].attachments);
         self.conv.messages.truncate(start);
-        self.heights.clear();
+        self.remeasure();
         self.send(ctx, text, attached);
     }
 
@@ -1012,7 +1093,7 @@ impl App {
         // Notes the reply never got to read still show where they were said.
         let at = conv.messages.len().saturating_sub(1);
         conv.messages.splice(at..at, self.btw.flush());
-        self.heights.clear();
+        self.heights.values_mut().for_each(|m| m.exact = false);
         if let Some(msg) = conv.messages.last_mut() {
             finish_message(msg, run.started);
             for part in &mut msg.parts {
@@ -1048,7 +1129,7 @@ impl App {
                 if let Some(chip) = self.btw.read(note, *round) {
                     let at = conv.messages.len().saturating_sub(1);
                     conv.messages.insert(at, chip);
-                    self.heights.clear();
+                    self.heights.values_mut().for_each(|m| m.exact = false);
                 }
                 continue;
             }
@@ -1165,7 +1246,7 @@ impl App {
             // Notes the reply never got to read still show where they were said.
             let at = conv.messages.len().saturating_sub(1);
             conv.messages.splice(at..at, self.btw.flush());
-            self.heights.clear();
+            self.heights.values_mut().for_each(|m| m.exact = false);
         }
         if finished || run.saved.elapsed() > CHECKPOINT {
             run.saved = Instant::now();
@@ -1201,6 +1282,45 @@ impl App {
     fn take_drops(&mut self, ctx: &egui::Context) {
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
         dropped.into_iter().for_each(|p| attachments::add(self, p));
+    }
+
+    /// Ctrl+V with a picture or files on the clipboard attaches them. egui pastes text and says nothing of a
+    /// press that found none, so the key is read from the system and the clipboard looked at here.
+    // ponytail: Windows only, because that is where the key can be asked for. Elsewhere pictures come in by drag or the paperclip.
+    fn take_paste(&mut self, ctx: &egui::Context) {
+        #[cfg(windows)]
+        {
+            #[link(name = "user32")]
+            unsafe extern "system" {
+                fn GetAsyncKeyState(key: i32) -> i16;
+            }
+            // SAFETY: the call takes a key code (V) and returns that key's state; it touches nothing else.
+            let down = ctx.input(|i| i.focused && i.modifiers.command && !i.modifiers.alt) && unsafe { GetAsyncKeyState(0x56) } < 0;
+            if !down || std::mem::replace(&mut self.paste_held, true) {
+                self.paste_held &= down;
+                return;
+            }
+            if self.dialog != Dialog::None {
+                return;
+            }
+            let Ok(mut clipboard) = arboard::Clipboard::new() else { return };
+            // Text was pasted by egui already; a picture copied along with it is not wanted twice.
+            if clipboard.get_text().is_ok_and(|text| !text.is_empty()) {
+                return;
+            }
+            if let Ok(picture) = clipboard.get_image() {
+                let path = std::env::temp_dir().join("apim-paste").join(format!("pasted-{}.png", store::new_id()));
+                let saved = std::fs::create_dir_all(path.parent().unwrap_or(&path)).is_ok() && image::save_buffer(&path, &picture.bytes, picture.width as u32, picture.height as u32, image::ColorType::Rgba8).is_ok();
+                match saved {
+                    true => attachments::add(self, path),
+                    false => self.toast("Could not read the picture on the clipboard."),
+                }
+            } else if let Ok(files) = clipboard.get().file_list() {
+                files.into_iter().for_each(|file| attachments::add(self, file));
+            }
+        }
+        #[cfg(not(windows))]
+        let _ = ctx;
     }
 
     /// The web app has exactly two global shortcuts, so this does too; F11 is the browser's own.
@@ -1247,18 +1367,33 @@ impl App {
 }
 
 impl eframe::App for App {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Chats are written by another thread: the last save has to land before the program goes.
+        store::flush();
+    }
+
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         // The self-portrait of a file held over the window: nothing is really dragged.
         if self.staged("drop") {
             raw_input.hovered_files = vec![egui::HoveredFile { path: Some("project.zip".into()), ..Default::default() }];
         }
+        // The self-portrait of a chat being read backwards: the wheel turns over the transcript on every frame
+        // (`APIM_PERF` then tells how long the frames took).
+        if self.staged("scroll") && self.shot.as_ref().is_some_and(|shot| shot.started.elapsed() > Duration::from_millis(400)) {
+            let over = raw_input.screen_rect.map_or(egui::pos2(700.0, 400.0), |screen| screen.center());
+            raw_input.events.push(egui::Event::PointerMoved(over));
+            raw_input.events.push(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(0.0, 45.0), phase: egui::TouchPhase::Move, modifiers: Default::default() });
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        let frame_started = Instant::now();
         self.pump(&ctx);
         self.pump_summary();
+        self.pump_open();
         self.take_drops(&ctx);
+        self.take_paste(&ctx);
         self.shortcuts(&ctx);
         if self.run.is_some() || self.summary_job.is_some() {
             // Keeps the elapsed time moving between tokens.
@@ -1314,6 +1449,12 @@ impl eframe::App for App {
         }
         titlebar::edges(&ctx);
         self.take_shot(&ctx);
+        // `APIM_PERF=4`: every frame that took the app longer than that many milliseconds to draw, on stderr.
+        static PERF: std::sync::LazyLock<Option<f64>> = std::sync::LazyLock::new(|| std::env::var("APIM_PERF").ok().and_then(|ms| ms.parse().ok()));
+        let took = frame_started.elapsed().as_secs_f64() * 1000.0;
+        if PERF.is_some_and(|limit| took > limit) {
+            eprintln!("frame {took:.1} ms");
+        }
     }
 }
 

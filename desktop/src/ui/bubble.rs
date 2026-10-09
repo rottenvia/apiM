@@ -2,6 +2,7 @@
 //! MessageTimeline.tsx and ToolActivity.tsx, measure for measure.
 
 use super::icons::{self, Icon};
+use super::lazy;
 use super::markdown::{self, Click};
 use super::theme::{self, W, alpha, p};
 use super::{chat, widgets};
@@ -9,8 +10,9 @@ use crate::models;
 use crate::refusal::{self, RefusalSource};
 use crate::store::{Message, Part, Role, Settings, ToolEvent};
 use eframe::egui::{self, Color32, CornerRadius, Rect, Response, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
+use std::borrow::Cow;
 use std::path::Path;
-use std::time::Duration;
+use std::sync::Arc;
 
 pub enum Action {
     /// Answer the last question again.
@@ -63,6 +65,38 @@ pub struct Env<'a, 'm> {
     pub plan: Option<&'a crate::store::Plan>,
     /// Find in this chat: the query to mark in this message, when it has matches.
     pub marks: Option<markdown::Marks<'m>>,
+    /// Heights of the rows inside replies: a row that does not show is not laid out.
+    pub rows: &'a mut lazy::Rows,
+    pub typed: &'a mut Typed,
+}
+
+/// How much of the reply being written is on screen. Its text arrives in bursts and is let out at an even pace.
+#[derive(Default)]
+pub struct Typed {
+    /// Which stretch of text this is about.
+    key: u64,
+    /// Characters of it shown so far.
+    shown: f32,
+}
+
+impl Typed {
+    /// The start of `text` to show this frame, a little more than the frame before.
+    fn reveal<'t>(&mut self, ui: &Ui, key: u64, text: &'t str) -> &'t str {
+        let total = text.chars().count() as f32;
+        if self.key != key {
+            // A stretch first met long (a chat opened in the middle of a reply) is simply there; a new one starts empty.
+            *self = Typed { key, shown: if total > 600.0 { total } else { 0.0 } };
+        }
+        if self.shown >= total {
+            self.shown = total;
+            return text;
+        }
+        // Catches up with what has arrived in about a fifth of a second, and never crawls.
+        let pace = ((total - self.shown) * 6.0).max(60.0);
+        self.shown = (self.shown + ui.input(|i| i.stable_dt).min(0.05) * pace).min(total);
+        ui.ctx().request_repaint();
+        text.char_indices().nth(self.shown as usize).map_or(text, |(at, _)| &text[..at])
+    }
 }
 
 pub fn show(ui: &mut Ui, msg: &Message, env: &mut Env) {
@@ -88,7 +122,7 @@ pub fn dots(ui: &mut Ui, size: f32, colour: Color32) {
         let lift = ((0.5 - phase).abs() * 2.0) as f32;
         ui.painter().circle_filled(pos2(rect.left() + size / 2.0 + i as f32 * (size + 3.0), rect.bottom() - size / 2.0 - lift * size * 0.25), size / 2.0, colour);
     }
-    ui.ctx().request_repaint_after(Duration::from_millis(33));
+    ui.ctx().request_repaint();
 }
 
 // ------------------------------------------------------------------ user
@@ -134,6 +168,22 @@ fn decode_data_url(url: &str) -> Option<Vec<u8>> {
     use base64::Engine;
     let (_, data) = url.split_once(";base64,")?;
     base64::engine::general_purpose::STANDARD.decode(data).ok()
+}
+
+/// A question longer than this (in bytes) shows only its start.
+const FOLD_OVER: usize = 6_000;
+/// What it shows folded, and the most it shows unfolded: laying out more than that stalls the window.
+const FOLDED: usize = 1_200;
+const UNFOLDED: usize = 100_000;
+
+/// The part of a long question that is shown: its start, up to a line end when one is near.
+fn fold(text: &str, unfolded: bool) -> &str {
+    if text.len() <= FOLD_OVER {
+        return text;
+    }
+    let Some((at, _)) = text.char_indices().nth(if unfolded { UNFOLDED } else { FOLDED }) else { return text };
+    let cut = &text[..at];
+    if unfolded { cut } else { cut.rfind('\n').filter(|line_end| *line_end > at / 2).map_or(cut, |line_end| &cut[..line_end]) }
 }
 
 /// A text action under a bubble: 24 high, 11px, an 11px icon.
@@ -190,8 +240,14 @@ fn user(ui: &mut Ui, msg: &Message, env: &mut Env) {
         job
     };
     let layout = |ui: &Ui, text: &str| ui.painter().layout_job(job_of(text));
+    // A pasted log can run to hundreds of thousands of characters: it shows its start until asked for the rest,
+    // and a search opens it so its matches can be marked.
+    let all_id = ui.id().with("all");
+    let unfolded = env.marks.is_some() || ui.data(|d| d.get_temp::<bool>(all_id)).unwrap_or(false);
+    let shown = fold(&body, unfolded);
+    let folded = shown.len() < body.len();
     // Find in this chat marks its matches in a question as it does in a reply.
-    let mut body_job = job_of(&body);
+    let mut body_job = job_of(shown);
     let hits = env.marks.as_mut().filter(|_| !editing).map_or(Vec::new(), |marks| marks.apply(&mut body_job));
     let galley = ui.painter().layout_job(body_job);
 
@@ -203,7 +259,10 @@ fn user(ui: &mut Ui, msg: &Message, env: &mut Env) {
         .filter_map(|(i, a)| {
             let url = a.data_url.as_deref().filter(|_| a.kind == "image")?;
             let uri = format!("bytes://{}-{i}", msg.id);
-            ui.ctx().include_bytes(uri.clone(), decode_data_url(url)?);
+            // Decoded once: egui keeps the bytes under this address.
+            if ui.ctx().try_load_bytes(&uri).is_err() {
+                ui.ctx().include_bytes(uri.clone(), decode_data_url(url)?);
+            }
             let size = egui::Image::new(uri.clone()).load_and_calc_size(ui, vec2(192.0, 96.0)).map_or(vec2(96.0, 96.0), |s| vec2((s.x * 96.0 / s.y.max(1.0)).min(192.0), 96.0));
             Some((uri, size, a.name.as_str()))
         })
@@ -274,6 +333,14 @@ fn user(ui: &mut Ui, msg: &Message, env: &mut Env) {
                         let label = ui.add(egui::Label::new(galley.clone()).selectable(true));
                         if let Some(marks) = env.marks.as_mut().filter(|_| !hits.is_empty()) {
                             marks.paint(ui, under, &galley, &hits, label.rect.min.to_vec2());
+                        }
+                        if folded || (unfolded && body.len() > FOLD_OVER) {
+                            ui.add_space(6.0);
+                            let words = if !unfolded { format!("Show all · {} characters", chat::thousands(body.chars().count() as u64)) } else if folded { format!("Show less · the first {} characters are shown", chat::thousands(UNFOLDED as u64)) } else { "Show less".to_string() };
+                            let toggle = ui.add(egui::Label::new(widgets::lines(words, 12.0, 18.0, W::Medium, p.accent_light)).selectable(false).sense(Sense::click()));
+                            if toggle.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                                ui.data_mut(|d| d.insert_temp(all_id, !unfolded));
+                            }
                         }
                     }
                 })
@@ -542,6 +609,30 @@ fn clip_head(ui: &Ui, text: &str, font: egui::FontId, colour: Color32, width: f3
     widgets::galley(ui, &tail, font, colour)
 }
 
+/// What a step row shows and what its detail pane holds, read from the step's arguments once and kept while the
+/// row is on screen: the arguments of a written file are that file, and parsing them every frame is slow.
+#[derive(Default)]
+struct Described;
+
+impl egui::cache::ComputerMut<(&str, &str), Arc<(Display, Option<String>)>> for Described {
+    fn compute(&mut self, (name, args): (&str, &str)) -> Arc<(Display, Option<String>)> {
+        Arc::new((describe(name, args), step_body(args)))
+    }
+}
+
+/// Why a step failed, in the words worth reading: without "Failed:" and without the command the row already names.
+/// None when that leaves nothing to say.
+fn failure_reason(summary: &str, target: &str) -> Option<String> {
+    let mut why = summary.trim();
+    for lead in ["Failed:", "Error:", "Failed to start:"] {
+        why = why.strip_prefix(lead).unwrap_or(why).trim_start();
+    }
+    if !target.is_empty() {
+        why = why.strip_prefix(target).unwrap_or(why).trim_start_matches([':', ' ', '—', '-']);
+    }
+    (!why.is_empty()).then(|| why.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
 /// The rows of steps under a stretch of text. `open` holds the id of the one whose detail is showing.
 fn steps(ui: &mut Ui, tools: &[&ToolEvent], env: &mut Env, open: &mut Option<String>) {
     for (i, tool) in tools.iter().enumerate() {
@@ -555,12 +646,13 @@ fn steps(ui: &mut Ui, tools: &[&ToolEvent], env: &mut Env, open: &mut Option<Str
 
 fn step(ui: &mut Ui, tool: &ToolEvent, env: &mut Env, open: &mut Option<String>) {
     let p = p();
-    let d = describe(&tool.name, &tool.args);
+    let described = ui.memory_mut(|m| m.caches.cache::<egui::cache::FrameCache<Arc<(Display, Option<String>)>, Described>>().get((tool.name.as_str(), tool.args.as_str())).clone());
+    let d = &described.0;
     let running = tool.ok.is_none();
     let failed = tool.ok == Some(false);
     let target = tool.changed_path.clone().or(d.target.clone());
     let mono = d.mono && !(tool.changed_path.is_some() && d.target.is_none());
-    let body = step_body(&tool.args).filter(|b| !b.trim().is_empty() && !running && Some(b.trim()) != d.target.as_deref());
+    let body = described.1.as_deref().filter(|b| !b.trim().is_empty() && !running && Some(b.trim()) != d.target.as_deref());
     let expandable = body.is_some();
     let is_open = expandable && open.as_deref() == Some(tool.id.as_str());
     let changed = tool.changed_path.is_some() || d.kind == Kind::Write;
@@ -577,7 +669,7 @@ fn step(ui: &mut Ui, tool: &ToolEvent, env: &mut Env, open: &mut Option<String>)
     // The glyph: what kind of step, and how it went.
     let glyph = Rect::from_min_size(pos2(row.left() + 6.0, row.center().y - 10.0), vec2(20.0, 20.0));
     let pulse = if running {
-        ui.ctx().request_repaint_after(Duration::from_millis(50));
+        ui.ctx().request_repaint();
         0.75 + 0.25 * (ui.input(|i| i.time) / 1.5 * std::f64::consts::TAU).sin() as f32
     } else {
         1.0
@@ -624,12 +716,11 @@ fn step(ui: &mut Ui, tool: &ToolEvent, env: &mut Env, open: &mut Option<String>)
         x += widgets::text_at(ui, x, row.center().y, widgets::galley(ui, verb, theme::font(13.0, W::Medium), base));
     }
 
-    // The trailing remark: why it failed, or what came of it.
+    // The trailing remark: what came of it. Why a step failed is told under the row, where it has room.
     let target_text = target.as_deref().unwrap_or("");
     let wide = ui.ctx().content_rect().width() >= 640.0;
-    let remark = if failed && !tool.summary.is_empty() {
-        Some((format!("— {}", tool.summary), base.gamma_multiply(0.8), 0.5))
-    } else if running && !tool.summary.is_empty() {
+    let reason = if failed { failure_reason(&tool.summary, target_text) } else { None };
+    let remark = if running && !tool.summary.is_empty() {
         // A helper's progress: "round 2 · 5 tool calls · read_file, search_files".
         Some((format!("· {}", tool.summary), p.muted, 0.45))
     } else if !running && !failed && wide && !tool.summary.is_empty() && (target_text.is_empty() || !tool.summary.contains(target_text)) && tool.summary != d.done {
@@ -670,6 +761,17 @@ fn step(ui: &mut Ui, tool: &ToolEvent, env: &mut Env, open: &mut Option<String>)
         }
     }
 
+    if let Some(reason) = reason {
+        markdown::indented(ui, 34.0, |ui| {
+            let mut job = egui::text::LayoutJob::simple(reason, theme::font(12.0, W::Regular), base.gamma_multiply(0.8), ui.available_width() - 8.0);
+            job.sections[0].format.line_height = Some(18.0);
+            // Three lines say what went wrong; the rest is in the step's detail and the model's own account.
+            job.wrap = egui::text::TextWrapping { max_width: ui.available_width() - 8.0, max_rows: 3, break_anywhere: false, overflow_character: Some('…') };
+            ui.add(egui::Label::new(job).selectable(true));
+        });
+        ui.add_space(4.0);
+    }
+
     if let Some(body) = body.filter(|_| is_open) {
         ui.add_space(4.0);
         markdown::indented(ui, 32.0, |ui| {
@@ -686,8 +788,8 @@ fn step(ui: &mut Ui, tool: &ToolEvent, env: &mut Env, open: &mut Option<String>)
         ui.add_space(4.0);
     }
 
-    // A picture the step showed the user.
-    if let Some(path) = tool.image.as_ref().filter(|_| tool.ok == Some(true)) {
+    // A picture the step showed the user. A capture or a look is for the model: only `show_image` puts one in the chat.
+    if let Some(path) = tool.image.as_ref().filter(|_| tool.ok == Some(true) && tool.name == "show_image") {
         let full = if path.is_absolute() { path.clone() } else { env.workspace.join(path) };
         let name = path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
         ui.add_space(6.0);
@@ -740,7 +842,7 @@ fn thought_body(ui: &mut Ui, text: &str, live: bool, max_height: f32, margin: eg
 }
 
 /// The box at the top of a reply that has no steps (`.thinking-shell`).
-fn thinking_panel(ui: &mut Ui, text: &str, ms: u64, live: bool, env: &Env, usage_reasoning: u64) {
+fn thinking_panel(ui: &mut Ui, text: &str, ms: u64, live: bool, env: &mut Env, usage_reasoning: u64) {
     let p = p();
     let id = ui.id().with("thinking");
     // A reply watched live opens on its own; one from history starts closed.
@@ -790,14 +892,15 @@ fn thinking_panel(ui: &mut Ui, text: &str, ms: u64, live: bool, env: &Env, usage
                     plain(ui, widgets::lines("Thinking was enabled, but no reasoning text was received for this reply.", 13.0, 20.0, W::Regular, p.muted.gamma_multiply(0.6)));
                 });
             } else {
-                thought_body(ui, text, live, 320.0, egui::Margin { left: 12, right: 12, top: 0, bottom: 10 });
+                let shown = if live { env.typed.reveal(ui, lazy::print(("thinking", id)), text) } else { text };
+                thought_body(ui, shown, live, 320.0, egui::Margin { left: 12, right: 12, top: 0, bottom: 10 });
             }
         }
     });
 }
 
 /// One stretch of thinking between steps (`ThinkRow`).
-fn think_row(ui: &mut Ui, text: &str, live: bool, env: &Env) {
+fn think_row(ui: &mut Ui, text: &str, live: bool, env: &mut Env) {
     let p = p();
     if text.trim().is_empty() && !live {
         return;
@@ -840,7 +943,8 @@ fn think_row(ui: &mut Ui, text: &str, live: bool, env: &Env) {
             ui.data_mut(|d| d.insert_temp(id, !open));
         }
         if open {
-            thought_body(ui, text, live, 288.0, egui::Margin { left: 36, right: 12, top: 0, bottom: 10 });
+            let shown = if live { env.typed.reveal(ui, lazy::print(("think", id)), text) } else { text };
+            thought_body(ui, shown, live, 288.0, egui::Margin { left: 36, right: 12, top: 0, bottom: 10 });
         }
     });
 }
@@ -1040,6 +1144,65 @@ fn interrupted(ui: &mut Ui, msg: &Message, env: &mut Env) {
     });
 }
 
+/// What went wrong and the small print behind it: the first sentence of an error, and the rest.
+fn split_error(error: &str) -> (String, String) {
+    let text = error.trim();
+    // The sentence ends at its first full stop or line break, or where a provider's raw reply starts.
+    let end = [". ", "\n", ": {", " {\""].iter().filter_map(|mark| text.find(mark).map(|at| at + usize::from(*mark == ". "))).min().unwrap_or(text.len());
+    let (head, rest) = text.split_at(end);
+    if head.chars().count() > 220 {
+        let cut = head.char_indices().nth(200).map_or(head.len(), |(at, _)| at);
+        return (format!("{}…", &text[..cut]), text[cut..].trim().to_string());
+    }
+    (head.trim().to_string(), rest.trim_start_matches([':', ' ', '\n']).trim().to_string())
+}
+
+/// A reply that ended in an error: what went wrong in plain sight, the provider's small print behind "Details".
+fn error_card(ui: &mut Ui, error: &str) {
+    let p = p();
+    let (what, details) = split_error(error);
+    let id = ui.id().with("error-details");
+    let mut open: bool = ui.data(|d| d.get_temp(id)).unwrap_or(false);
+    egui::Frame::new().fill(alpha(p.danger, 7.0)).stroke(Stroke::new(1.0, alpha(p.danger, 30.0))).corner_radius(12).inner_margin(egui::Margin::symmetric(12, 10)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            ui.vertical(|ui| {
+                ui.add_space(2.0);
+                icons::show(ui, icons::WARNING.stroke(1.9), 15.0, p.danger);
+            });
+            ui.vertical(|ui| {
+                ui.set_width(ui.available_width());
+                ui.add(egui::Label::new(widgets::lines(what, 13.0, 19.5, W::Medium, p.danger)).wrap().selectable(true));
+                if details.is_empty() {
+                    return;
+                }
+                ui.add_space(4.0);
+                let toggle = ui.add(egui::Label::new(widgets::lines(if open { "Hide details" } else { "Details" }, 11.0, 16.5, W::Medium, p.muted)).selectable(false).sense(Sense::click()));
+                if toggle.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    open = !open;
+                    ui.data_mut(|d| d.insert_temp(id, open));
+                }
+                if open {
+                    ui.add_space(6.0);
+                    egui::Frame::new().fill(p.bg).stroke(Stroke::new(1.0, p.border)).corner_radius(8).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        egui::ScrollArea::vertical().id_salt("error").max_height(180.0).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            let shown: String = details.chars().take(8_000).collect();
+                            let mut job = egui::text::LayoutJob::simple(shown, theme::mono(11.5), p.text2, ui.available_width());
+                            job.sections[0].format.line_height = Some(18.0);
+                            // A provider's reply is often one unbroken line: it wraps wherever it must.
+                            job.wrap.break_anywhere = true;
+                            ui.add(egui::Label::new(job).selectable(true));
+                        });
+                    });
+                }
+            });
+        });
+    });
+}
+
 /// Splits a reply still being written at a code fence that has not closed yet.
 /// Returns the text before it, and the language and line count of the open block.
 fn pending_fence(text: &str) -> Option<(&str, &str, usize)> {
@@ -1083,13 +1246,15 @@ fn notice_line(ui: &mut Ui, text: &str) {
     }
 }
 
-/// Markdown, with what was clicked in it passed on.
-fn prose(ui: &mut Ui, text: &str, colour: Color32, env: &mut Env) {
+/// Markdown, with what was clicked in it passed on. `stretch` names this text among everything in the chat;
+/// `typing` says it is the part of a reply still being written.
+fn prose(ui: &mut Ui, text: &str, colour: Color32, env: &mut Env, stretch: u64, typing: bool) {
+    let text = if typing { env.typed.reveal(ui, stretch, text) } else { text };
     let (shown, pending) = match pending_fence(text).filter(|_| env.live) {
         Some((before, lang, lines)) => (before, Some((lang, lines))),
         None => (text, None),
     };
-    match markdown::show(ui, shown, colour, &mut env.marks) {
+    match markdown::show(ui, shown, colour, &mut env.marks, Some((&mut *env.rows, egui::Id::new(stretch)))) {
         Some(Click::Link(url)) => *env.action = Some(Action::Link(url)),
         Some(Click::Copy(code)) => *env.action = Some(Action::Copy(code)),
         Some(Click::Open(title, lang, code)) => *env.action = Some(Action::OpenCode(title, lang, code)),
@@ -1120,7 +1285,7 @@ fn assistant(ui: &mut Ui, msg: &Message, env: &mut Env) {
 }
 
 /// One timeline row: its prose fragments, the tools it ran, its reasoning (and whether that is still streaming), its notice.
-type TimelineRow<'a> = (Vec<&'a str>, Vec<&'a ToolEvent>, Option<(String, bool)>, Option<&'a str>);
+type TimelineRow<'a> = (Vec<&'a str>, Vec<&'a ToolEvent>, Option<(Cow<'a, str>, bool)>, Option<&'a str>);
 
 /// Groups a reply's parts into timeline rows, as the web's `buildTimelineRows` does: prose keeps adding to its row until a
 /// tool or reasoning comes, a tool joins the row above it unless reasoning came last, and reasoning split across parts reads
@@ -1133,10 +1298,10 @@ pub fn timeline_rows(parts: &[Part], live: bool) -> Vec<TimelineRow<'_>> {
                 let streaming = live && *ms == 0 && i + 1 == parts.len();
                 match rows.last_mut() {
                     Some((_, _, Some((thought, flag)), None)) => {
-                        thought.push_str(text);
+                        thought.to_mut().push_str(text);
                         *flag = streaming;
                     }
-                    _ => rows.push((Vec::new(), Vec::new(), Some((text.clone(), streaming)), None)),
+                    _ => rows.push((Vec::new(), Vec::new(), Some((Cow::Borrowed(text.as_str()), streaming)), None)),
                 }
             }
             Part::Notice(text) => rows.push((Vec::new(), Vec::new(), None, Some(text.as_str()))),
@@ -1243,6 +1408,7 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
         // The classic layout (Settings → Theme): prose on the left, its steps on the right, a rule between rows.
         let split = env.settings.reply_layout == "split";
         let mut after_think = false;
+        let width = ui.available_width();
         for (i, (texts, tools, think, notice)) in rows.iter().enumerate() {
             if i > 0 {
                 let after = after_think && think.is_none();
@@ -1255,6 +1421,23 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
                 }
             }
             after_think = think.is_some();
+            // The row a live reply is writing is always laid out; any other only while it shows.
+            let writing = env.live && i + 1 == rows.len();
+            let key = egui::Id::new((&msg.id, i));
+            let chars: usize = texts.iter().map(|text| text.len()).sum();
+            let print = lazy::print((
+                width.to_bits(),
+                split,
+                chars,
+                think.as_ref().map(|(thought, live)| (thought.len(), *live)),
+                notice.map(str::len),
+                tools.iter().map(|tool| (tool.ok, tool.image.is_some(), tool.summary.len(), tool.args.len(), open.as_deref() == Some(tool.id.as_str()))).collect::<Vec<_>>(),
+            ));
+            let guess = 40.0 + tools.len() as f32 * 31.0 + (chars as f32 / (width / 7.5).max(20.0)).ceil() * 25.5;
+            if !writing && env.rows.skip(ui, key, print, guess) {
+                continue;
+            }
+            let top = ui.cursor().top();
             ui.push_id(i, |ui| {
                 if let Some((thought, live)) = think {
                     think_row(ui, thought, *live, env);
@@ -1263,11 +1446,12 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
                 } else {
                     let said = texts.concat();
                     let has_text = !said.trim().is_empty();
+                    let (stretch, typing) = (lazy::print((&msg.id, i)), writing && tools.is_empty());
                     // Side by side only with something on both sides, room for it, and no table to squeeze.
                     if split && has_text && !tools.is_empty() && !has_table(&said) && ui.ctx().content_rect().width() >= 768.0 {
                         let full = Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), 0.0));
                         let mut left = ui.new_child(egui::UiBuilder::new().max_rect(full.with_max_x(full.right() - 321.0 - 24.0)).layout(egui::Layout::top_down(egui::Align::Min)));
-                        prose(&mut left, &said, colour, env);
+                        prose(&mut left, &said, colour, env, stretch, false);
                         let mut right = ui.new_child(egui::UiBuilder::new().max_rect(full.with_min_x(full.right() - 320.0 + 24.0)).layout(egui::Layout::top_down(egui::Align::Min)));
                         steps(&mut right, tools, env, &mut open);
                         let bottom = left.min_rect().bottom().max(right.min_rect().bottom());
@@ -1275,7 +1459,7 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
                         ui.allocate_rect(full.with_max_y(bottom), Sense::hover());
                     } else {
                         if has_text {
-                            prose(ui, &said, colour, env);
+                            prose(ui, &said, colour, env, stretch, typing);
                             if !tools.is_empty() {
                                 ui.add_space(8.0);
                             }
@@ -1286,6 +1470,7 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
                     }
                 }
             });
+            env.rows.store(key, print, ui.cursor().top() - top);
         }
     } else {
         let tools: Vec<&ToolEvent> = msg.parts.iter().filter_map(|part| if let Part::Tool(t) = part { Some(t) } else { None }).collect();
@@ -1295,7 +1480,7 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
         }
         if !text.is_empty() {
             gap(ui, 12.0);
-            prose(ui, &text, colour, env);
+            prose(ui, &text, colour, env, lazy::print((&msg.id, usize::MAX)), env.live);
         }
         for part in &msg.parts {
             if let Part::Notice(notice) = part {
@@ -1315,9 +1500,7 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
 
     if let Some(error) = &msg.error {
         gap(ui, 12.0);
-        ui.add_space(7.5);
-        ui.add(egui::Label::new(widgets::lines(error.as_str(), 15.0, 25.5, W::Regular, p.danger)).wrap().selectable(true));
-        ui.add_space(7.5);
+        error_card(ui, error);
     }
     if env.live {
         return;
@@ -1405,6 +1588,11 @@ mod tests {
         assert_eq!(describe("my_new-tool", "{}").done, "My new tool");
         assert_eq!(describe("mcp__files__read_text", "{}").done, "MCP read_text");
         assert_eq!(step_body(r#"{"command":"git","args":["commit","-m","two words"]}"#).as_deref(), Some(r#"git commit -m "two words""#));
+        // A failure says why, not the command the row already shows; an echo of the command says nothing.
+        assert_eq!(failure_reason("Failed: cmake --build x", "cmake --build x"), None);
+        assert_eq!(failure_reason("Exit 1: main.cpp(42): error C3861", "cmake --build x").as_deref(), Some("Exit 1: main.cpp(42): error C3861"));
+        assert_eq!(split_error("OpenRouter returned 429: rate limit exceeded. Provider said: {\"error\":1}"), ("OpenRouter returned 429: rate limit exceeded.".into(), "Provider said: {\"error\":1}".into()));
+        assert_eq!(split_error("Network error"), ("Network error".into(), String::new()));
     }
 
     #[test]
@@ -1414,5 +1602,8 @@ mod tests {
         assert_eq!(pending_fence("Here:\n```rust\nfn a() {}\nfn b() {}"), Some(("Here:", "rust", 2)));
         assert_eq!(pending_fence("Here:\n```rust\nfn a() {}\n```\ndone"), None);
         assert_eq!(pending_fence("inline ``` is not a fence"), None);
+        // A long question folds at a line end near the limit; a short one is left alone.
+        let pasted = format!("{}\n{}", "a".repeat(1_000), "b".repeat(20_000));
+        assert_eq!((fold("short", false), fold(&pasted, false).len(), fold(&pasted, true).len()), ("short", 1_000, pasted.len()));
     }
 }
