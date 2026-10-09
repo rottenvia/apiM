@@ -37,6 +37,8 @@ mod ui;
 use std::sync::Arc;
 
 fn runtime() -> tokio::runtime::Runtime {
+    // First thing, so a crash anywhere after this is in the problem report.
+    diagnostics::watch_for_crashes();
     tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("async runtime")
 }
 

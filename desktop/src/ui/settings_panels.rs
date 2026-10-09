@@ -154,7 +154,7 @@ pub fn reports(app: &mut App, ui: &mut Ui) {
     ui.add_space(8.0);
     form::helper(
         ui,
-        &[Seg::T("Failures are recorded as they happen — tools that errored, commands refused, runs that hit a limit. Grouped by how often each one occurs, so the thing worth fixing first is at the top. This never leaves your machine, and API keys are stripped before anything is written.")],
+        &[Seg::T("Failures are recorded as they happen: crashes, frames that froze the window, tools that errored, API errors, runs that hit a limit. What points at the app comes first, then this PC and the provider. A model's own slip (a wrong path, a search with no match) is listed only once it keeps happening the same way. This never leaves your machine, and API keys are stripped before anything is written.")],
     );
     ui.add_space(12.0);
     let report = st.report.get_or_insert_with(crate::diagnostics::report);
@@ -162,7 +162,7 @@ pub fn reports(app: &mut App, ui: &mut Ui) {
     if report.groups.is_empty() {
         form::boxed(ui, p.bg3, p.border, 12, (12, 16), |ui| {
             ui.vertical_centered(|ui| {
-                form::para(ui, "Nothing recorded yet.", 13.0, 19.5, W::Regular, p.text2);
+                form::para(ui, if total == 0 { "Nothing recorded yet." } else { "Nothing that looks like a problem." }, 13.0, 19.5, W::Regular, p.text2);
                 ui.add_space(4.0);
                 form::para(ui, "Failures will show up here as they happen.", 11.0, 16.5, W::Regular, p.muted);
             });
@@ -187,8 +187,12 @@ pub fn reports(app: &mut App, ui: &mut Ui) {
                         ui.vertical(|ui| {
                             let mut job = egui::text::LayoutJob::default();
                             job.wrap = egui::text::TextWrapping { max_width: ui.available_width(), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
-                            let format = |font, color| egui::TextFormat { font_id: font, color, line_height: Some(19.5), ..Default::default() };
-                            job.append(crate::diagnostics::kind_label(&group.kind), 0.0, format(theme::font(13.0, W::Medium), p.text));
+                            // Three sizes on one line: each sits on the line's middle, or the small one rides high.
+                            let format = |font, color| egui::TextFormat { font_id: font, color, line_height: Some(19.5), valign: egui::Align::Center, ..Default::default() };
+                            // Whose problem it most likely is: the app's own in the accent, the rest quietly.
+                            let whose = group.cause;
+                            job.append(whose.label(), 0.0, format(theme::font(11.0, W::Semibold), if whose == crate::diagnostics::Cause::App { p.accent_light } else { p.muted }));
+                            job.append(crate::diagnostics::kind_label(&group.kind), 8.0, format(theme::font(13.0, W::Medium), p.text));
                             job.append(&group.subject, 6.0, format(theme::mono(12.0), p.text2));
                             ui.add(egui::Label::new(job).selectable(false));
                             ui.add_space(2.0);
@@ -219,7 +223,8 @@ pub fn reports(app: &mut App, ui: &mut Ui) {
     });
     if total > 0 {
         ui.add_space(8.0);
-        form::para(ui, &format!("{total} event{} recorded. Export and paste it into a chat to have the problems read back to you.", if total == 1 { "" } else { "s" }), 11.0, 16.5, W::Regular, p.muted);
+        let ordinary = if report.left_out > 0 { format!(", {} of them ordinary slips left out of this list", report.left_out) } else { String::new() };
+        form::para(ui, &format!("{total} event{} recorded{ordinary}. Export and paste it into a chat to have the problems read back to you.", if total == 1 { "" } else { "s" }), 11.0, 16.5, W::Regular, p.muted);
     }
     if reload {
         st.report = None;

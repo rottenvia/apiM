@@ -1,5 +1,8 @@
-//! Colours and fonts: the web app's design tokens (src/app/globals.css) and its
-//! theme wall (src/lib/themes.ts), so both versions look the same.
+//! Colours and fonts: the web app's design tokens (src/app/globals.css) and the
+//! recipe of its theme wall (src/lib/themes.ts). The stock theme is the web's own;
+//! the wall itself (assets/themes.json) is this app's: deep, tinted grounds with a
+//! vivid accent, and the editor classics on darker grounds than their originals,
+//! which read as grey on most panels.
 
 use eframe::egui::{self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Stroke, TextStyle};
 use serde::Deserialize;
@@ -345,6 +348,11 @@ mod tests {
         let mid = mix(Color32::BLACK, 50.0, white);
         assert!(mid.r() > 90 && mid.r() < 110, "oklab midpoint of black and white is about #636363, got {mid:?}");
         assert_eq!(hex("#abc"), Some(Color32::from_rgb(0xaa, 0xbb, 0xcc)));
-        assert!(THEMES.len() > 5 && Palette::for_theme("nord", &Default::default()).bg == hex("#2e3440").unwrap());
+        assert!(THEMES.len() > 5 && Palette::for_theme("nord", &Default::default()).bg == hex("#1a2231").unwrap());
+        // Every dark theme on the wall keeps its ground dark enough to read as a colour, not as grey, and no two share a look.
+        let dark: Vec<&ThemeDef> = THEMES.iter().filter(|t| Palette::for_theme(&t.id, &Default::default()).is_dark()).collect();
+        assert!(dark.iter().all(|t| to_oklab(hex(&t.bg).unwrap())[0] < 0.26), "a ground lighter than that washes out");
+        let looks: std::collections::HashSet<(&str, &str)> = THEMES.iter().map(|t| (t.bg.as_str(), t.accent.as_str())).collect();
+        assert_eq!(looks.len(), THEMES.len());
     }
 }

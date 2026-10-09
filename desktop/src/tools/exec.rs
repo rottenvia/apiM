@@ -507,6 +507,41 @@ impl Procs {
         self.stop_where(None)
     }
 
+    /// Takes a started process into the list, so read_process, write_process and stop_process work on it, and
+    /// gives it up to `grace` to show whether it stays up. Returns its id, its exit code when it did not, and
+    /// what it has printed so far.
+    pub async fn adopt(&self, owner: PathBuf, display: String, mut child: Child, wake: crate::agent::Emitter, grace: Duration) -> (String, Option<i32>, String) {
+        let log = Arc::new(Mutex::new(String::new()));
+        if let Some(p) = child.stdout.take() {
+            pump(p, log.clone());
+        }
+        if let Some(p) = child.stderr.take() {
+            pump(p, log.clone());
+        }
+        let exit = Arc::new(Mutex::new(None));
+        let ended = Arc::new(Mutex::new(None));
+        let proc = Arc::new(Proc { display, pid: child.id().unwrap_or(0), owner, started: Instant::now(), log: log.clone(), exit: exit.clone(), ended: ended.clone(), stopped: AtomicBool::new(false), stdin: tokio::sync::Mutex::new(child.stdin.take()) });
+        let id = format!("p{}", self.next.fetch_add(1, Ordering::Relaxed) + 1);
+        self.map.lock().unwrap().insert(id.clone(), proc.clone());
+        tokio::spawn(async move {
+            let code = child.wait().await.ok().and_then(|s| s.code()).unwrap_or(-1);
+            *exit.lock().unwrap() = Some(code);
+            *ended.lock().unwrap() = Some(Instant::now());
+            wake.wake();
+        });
+        // One that is gone already need not be waited out.
+        let until = Instant::now() + grace;
+        while Instant::now() < until && proc.exit.lock().unwrap().is_none() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        // Its last words may still be in the pipe.
+        if proc.exit.lock().unwrap().is_some() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let shown = log_shown(&log.lock().unwrap().clone());
+        (id, *proc.exit.lock().unwrap(), shown)
+    }
+
     /// How many are still running, for the header badge.
     pub fn running(&self) -> usize {
         self.map.lock().unwrap().values().filter(|p| p.exit.lock().unwrap().is_none()).count()
@@ -591,44 +626,14 @@ pub async fn start_process(ctx: &Ctx, args: &Value) -> Output {
     if let Err(why) = approved(ctx, &launch, str_arg(args, "reason")).await {
         return Output::fail(not_run(why));
     }
-    let mut child = match command(ctx, &launch).stdin(Stdio::piped()).spawn() {
+    let child = match command(ctx, &launch).stdin(Stdio::piped()).spawn() {
         Ok(c) => c,
         Err(e) => return Output::fail(format!("Could not start `{}`: {e}", launch.display)),
     };
-    let log = Arc::new(Mutex::new(String::new()));
-    if let Some(p) = child.stdout.take() {
-        pump(p, log.clone());
-    }
-    if let Some(p) = child.stderr.take() {
-        pump(p, log.clone());
-    }
-    let exit = Arc::new(Mutex::new(None));
-    let ended = Arc::new(Mutex::new(None));
-    let proc = Arc::new(Proc {
-        display: launch.display.clone(),
-        pid: child.id().unwrap_or(0),
-        owner,
-        started: Instant::now(),
-        log: log.clone(),
-        exit: exit.clone(),
-        ended: ended.clone(),
-        stopped: AtomicBool::new(false),
-        stdin: tokio::sync::Mutex::new(child.stdin.take()),
-    });
-    let id = format!("p{}", ctx.procs.next.fetch_add(1, Ordering::Relaxed) + 1);
-    ctx.procs.map.lock().unwrap().insert(id.clone(), proc.clone());
-    let wake = ctx.emit.clone();
-    tokio::spawn(async move {
-        let code = child.wait().await.ok().and_then(|s| s.code()).unwrap_or(-1);
-        *exit.lock().unwrap() = Some(code);
-        *ended.lock().unwrap() = Some(Instant::now());
-        wake.wake();
-    });
     // A process that exits inside the first seconds did not start: that is a failure, not a background job.
-    tokio::time::sleep(START_GRACE).await;
-    let shown = log_shown(&log.lock().unwrap().clone());
+    let (id, died, shown) = ctx.procs.adopt(owner, launch.display.clone(), child, ctx.emit.clone(), START_GRACE).await;
     let shown = shown.trim();
-    if let Some(code) = *proc.exit.lock().unwrap() {
+    if let Some(code) = died {
         return Output { ok: false, text: format!("{} exited immediately (code {code}).\n\n{}\n\nFix the cause before trying again.", launch.display, or_text(shown, "(no output)")), summary: format!("Failed to start: {}", launch.display), ..Default::default() };
     }
     Output::ok(format!("Started {} — id {id}, still running.\n\n{}\n\nRead more with read_process, and stop it with stop_process when done.", launch.display, or_text(shown, "(no output yet)")), format!("Started {}", launch.display))
@@ -779,6 +784,21 @@ mod tests {
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()
+    }
+
+    /// A process something else started (a command in the sandbox) joins the list: its output is kept, its end
+    /// is noticed, and only the chat that owns it sees it.
+    #[tokio::test]
+    async fn a_process_started_elsewhere_is_taken_in() {
+        let procs = Procs::default();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut cmd = if cfg!(windows) { Command::new("cmd") } else { Command::new("sh") };
+        cmd.args([if cfg!(windows) { "/c" } else { "-c" }, "echo adopted"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let owner = PathBuf::from("chat-a");
+        let (id, died, log) = procs.adopt(owner.clone(), "sandbox: echo adopted".into(), cmd.spawn().unwrap(), crate::agent::Emitter::new(tx, || {}), Duration::from_secs(10)).await;
+        assert_eq!((id.as_str(), died, log.trim()), ("p1", Some(0), "adopted"));
+        assert_eq!(procs.list_for(&owner).iter().map(|p| (p.display.as_str(), p.exit)).collect::<Vec<_>>(), [("sandbox: echo adopted", Some(0))]);
+        assert!(procs.list_for(Path::new("chat-b")).is_empty());
     }
 
     #[test]

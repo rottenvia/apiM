@@ -117,13 +117,42 @@ fn local_time(iso: &str, format: &str) -> String {
     chrono::DateTime::parse_from_rfc3339(iso).map_or(String::new(), |t| t.with_timezone(&chrono::Local).format(format).to_string())
 }
 
+/// A workspace's files, listed and laid out as a tree: (the workspace, its files, the tree, the folders in it).
+pub type Listing = (std::path::PathBuf, Vec<(String, u64)>, Vec<Node>, Vec<String>);
+
+fn list(workspace: std::path::PathBuf) -> Listing {
+    let files: Vec<(String, u64)> = snapshots::list_files(&workspace).into_iter().map(|(path, size, _)| (path, size)).collect();
+    let tree = filetree::collapse_chains(filetree::build(&files));
+    let dirs = filetree::dir_paths(&tree);
+    (workspace, files, tree, dirs)
+}
+
 /// Reads the file list again when something changed it, and notes what the running reply wrote.
 /// Both the rail and the header call it; whichever is drawn first does the work.
 pub fn refresh(app: &mut App) {
     if std::mem::take(&mut app.files_stale) {
-        app.files = snapshots::list_files(&app.conv.workspace()).into_iter().map(|(path, size, _)| (path, size)).collect();
-        app.ws.tree = filetree::collapse_chains(filetree::build(&app.files));
-        app.ws.dirs = filetree::dir_paths(&app.ws.tree);
+        let workspace = app.conv.workspace();
+        if app.shot.is_some() && !app.staged("send") {
+            // A self-portrait is taken of the first frames: it cannot wait for another thread.
+            (_, app.files, app.ws.tree, app.ws.dirs) = list(workspace);
+        } else {
+            // A workspace of thousands of files takes tens of milliseconds to list, and it is listed again after
+            // every step of a reply: not on the thread that draws. A newer listing replaces one still on its way.
+            let (tx, rx) = std::sync::mpsc::channel();
+            let ctx = app.ctx.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(list(workspace));
+                ctx.request_repaint();
+            });
+            app.listing = Some(rx);
+        }
+    }
+    if let Some(Ok((workspace, files, tree, dirs))) = app.listing.as_ref().map(|rx| rx.try_recv()) {
+        app.listing = None;
+        // Not one for a chat that has been left since.
+        if workspace == app.conv.workspace() {
+            (app.files, app.ws.tree, app.ws.dirs) = (files, tree, dirs);
+        }
     }
     // The marks belong to one chat and go when it is left.
     if app.ws.changed.0 != app.conv.id {
