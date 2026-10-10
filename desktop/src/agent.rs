@@ -534,6 +534,10 @@ async fn run_inner(mut req: Request, emit: &Emitter, procs: Arc<Procs>) -> Resul
     let resume = req.resume.take();
     let s = &req.settings;
     let target = provider::resolve_target(&s.model, s)?;
+    // Which of OpenRouter's endpoints serves this model: picked once, said once.
+    if let Some(picked) = provider::choose_endpoint(&provider::client(), &target).await {
+        emit.send(Event::Notice(picked));
+    }
     // The in-app sidecar is started on demand, and its window checked, before the request goes out (chat/route.ts:822-841).
     if target.provider == ProviderId::Local && local::engine::is_managed_engine_url(&target.base_url) {
         local::engine::chat_ready().await?;

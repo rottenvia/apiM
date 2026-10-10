@@ -183,8 +183,18 @@ pub fn context_window(id: &str, customs: &[CustomModel]) -> u64 {
     }
 }
 
+/// What the endpoint picked for a model charges (`provider::choose_endpoint`): these come before the catalog's prices.
+static ENDPOINT_RATES: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, (f64, f64, f64)>>> = std::sync::LazyLock::new(Default::default);
+
+pub fn set_endpoint_rates(id: &str, rates: (f64, f64, f64)) {
+    ENDPOINT_RATES.lock().unwrap().insert(id.to_string(), rates);
+}
+
 /// USD per 1M tokens: (input, cached input, output). None when unknown.
 pub fn rates(id: &str, customs: &[CustomModel]) -> Option<(f64, f64, f64)> {
+    if let Some(picked) = ENDPOINT_RATES.lock().unwrap().get(id) {
+        return Some(*picked);
+    }
     Some(match id {
         "deepseek-v4-pro" => (0.435, 0.003625, 0.87),
         "deepseek-v4-flash" => (0.14, 0.0028, 0.28),
