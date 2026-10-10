@@ -65,7 +65,8 @@ pub fn run(rt: tokio::runtime::Runtime) -> eframe::Result {
         // A picture of itself, for checking the look: off screen, never focused, gone in a moment.
         viewport = viewport.with_inner_size(shot.size).with_position([-8000.0, -8000.0]).with_active(false).with_taskbar(false).with_decorations(false);
     }
-    let options = eframe::NativeOptions { viewport, renderer: eframe::Renderer::Glow, ..Default::default() };
+    let vsync = *PACE == Pace::Driver;
+    let options = eframe::NativeOptions { viewport, renderer: eframe::Renderer::Glow, glow_options: eframe::egui_glow::GlowConfiguration { vsync, ..Default::default() }, ..Default::default() };
     eframe::run_native("apiM", options, Box::new(move |cc| Ok(Box::new(App::new(cc, rt, shot)))))
 }
 
@@ -924,12 +925,6 @@ impl App {
 
         let mut user = Message::new(Role::User, &text);
         user.attachments = attached.clone();
-        // A restore point before the question, so Rewind can put the files back. Failing must not block the reply.
-        // ponytail: copied on this thread; a workspace of many large new files makes sending pause.
-        let workspace = self.conv.workspace();
-        if let Ok(snapshot) = crate::snapshots::create(&workspace, &text.chars().take(80).collect::<String>(), &[]) {
-            crate::snapshots::link_restore_point(&workspace, &mut user.other, snapshot.as_ref());
-        }
         self.conv.messages.push(user);
         let mut reply = Message::new(Role::Assistant, "");
         reply.model = self.settings.model.clone();
@@ -957,6 +952,8 @@ impl App {
             conv_id: self.conv.id.clone(),
             notes: Default::default(),
             resume: None,
+            // A restore point before the question, so Rewind can put the files back (`agent::run` makes it).
+            restore_label: Some(text.chars().take(80).collect()),
         };
         self.start_run(ctx, request, Instant::now());
     }
@@ -1033,6 +1030,7 @@ impl App {
             conv_id: self.conv.id.clone(),
             notes: Default::default(),
             resume: Some(agent::Resume { prior, note, usage: last.usage }),
+            restore_label: None,
         };
         // The reply goes back to being written: what it has stays, the rest is added to it, by the model chosen now.
         let model = self.settings.model.clone();
@@ -1223,7 +1221,7 @@ impl App {
             let waits = match run.inbox.front() {
                 None => break,
                 Some(Event::Reasoning(_) | Event::Content(_)) => false,
-                Some(Event::Status(_) | Event::Usage(_) | Event::Context(_) | Event::ToolDraft { .. } | Event::ToolProgress { .. } | Event::Retry { .. } | Event::Checkpoint(_) | Event::Skill { .. } | Event::Groups(_)) => false,
+                Some(Event::Status(_) | Event::Usage(_) | Event::Context(_) | Event::ToolDraft { .. } | Event::ToolProgress { .. } | Event::Retry { .. } | Event::Checkpoint(_) | Event::Skill { .. } | Event::Groups(_) | Event::RestorePoint(_)) => false,
                 Some(_) => true,
             };
             if waits && run.typing.waiting() {
@@ -1237,6 +1235,17 @@ impl App {
                 }
             }
             let Some(event) = run.inbox.pop_front() else { break };
+            // The restore point belongs to the question, not to the reply being filled.
+            let event = match event {
+                Event::RestorePoint(snapshot) => {
+                    let workspace = conv.workspace();
+                    if let Some(question) = conv.messages.iter_mut().rev().find(|m| m.role == Role::User && !m.note) {
+                        crate::snapshots::link_restore_point(&workspace, &mut question.other, snapshot.as_ref());
+                    }
+                    continue;
+                }
+                other => other,
+            };
             let Some(msg) = conv.messages.last_mut() else { break };
             match event {
                 Event::Retry { reason, attempt, attempts, wait } => run.retry = Some((format!("{reason} — retrying, try {} of {attempts}", attempt.min(attempts)), Instant::now() + wait)),
@@ -1301,6 +1310,8 @@ impl App {
                     conv.findings = state.findings;
                 }
                 Event::Groups(groups) => conv.set_names("toolGroups", groups),
+                // Taken above, for the question.
+                Event::RestorePoint(_) => {}
                 Event::ModelAdded(model) => {
                     // Same id, same entry: this replaces rather than duplicates. The model in use is not changed.
                     match self.settings.custom_models.iter().position(|c| c.api_model == model.api_model) {
@@ -1486,7 +1497,13 @@ impl App {
         if self.shot.is_none() {
             return;
         }
-        ctx.request_repaint();
+        // `calm` leaves the frames to whatever asks for them, as when nobody touches the window: with `APIM_PERF`
+        // that counts what a reply being waited on draws.
+        if self.staged("calm") {
+            ctx.request_repaint_after(Duration::from_millis(250));
+        } else {
+            ctx.request_repaint();
+        }
         // `send` really sends `APIM_SHOT_DRAFT` and waits for the reply to end (`APIM_PERF` times its frames);
         // `maximized` and `f11` put the window through what the title bar's button and the key do.
         let settled = self.shot.as_ref().is_some_and(|shot| shot.started.elapsed() > Duration::from_millis(300));
@@ -1537,6 +1554,7 @@ impl eframe::App for App {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         // Chats are written by another thread: the last save has to land before the program goes.
         store::flush();
+        perf_summary();
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
@@ -1572,7 +1590,13 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        // Frames that follow one another are held to the screen's pace here; one drawn after a pause is not held.
+        static STARTED: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+        if *PACE == Pace::Dwm && STARTED.lock().unwrap().is_some_and(|at| at.elapsed() < Duration::from_millis(50)) {
+            wait_for_screen();
+        }
         let frame_started = Instant::now();
+        *STARTED.lock().unwrap() = Some(frame_started);
         // A picture turned out to be mostly border and takes less room now: what was measured with it is measured again.
         if std::mem::replace(&mut self.trims_seen, trim::generation()) != trim::generation() {
             self.remeasure();
@@ -1675,6 +1699,12 @@ impl eframe::App for App {
             if since > 40.0 && self.run.is_some() {
                 eprintln!("gap {since:.0} ms ({})", self.run.as_ref().map_or("", |run| run.status));
             }
+            // Both are kept for the summary printed when the program leaves: how long the app took to lay a frame
+            // out, and how long it was from one frame to the next, which is what the eye gets.
+            TIMES.lock().unwrap().push((took as f32, since as f32));
+            if since > 25.0 && self.shot.is_some() && BORN.elapsed() > Duration::from_secs(1) {
+                eprintln!("late {since:.0} ms at {:.1} s (app {took:.1} ms)", BORN.elapsed().as_secs_f32());
+            }
         }
     }
 }
@@ -1718,6 +1748,79 @@ const CARD_ROUND: f32 = 12.0;
 
 /// `APIM_PERF=4`: the slow-frame limit in milliseconds, and the switch for everything else timed on stderr.
 static PERF: std::sync::LazyLock<Option<f64>> = std::sync::LazyLock::new(|| std::env::var("APIM_PERF").ok().and_then(|ms| ms.parse().ok()));
+
+/// What holds frames to the screen's pace.
+#[derive(Clone, Copy, PartialEq)]
+enum Pace {
+    /// OpenGL's own wait for the screen (`APIM_VSYNC=driver`), and what every system but Windows uses.
+    Driver,
+    /// The wait is asked of Windows' compositor instead (`wait_for_screen`).
+    Dwm,
+    /// None: as fast as it can draw (`APIM_VSYNC=off`). With `APIM_PERF` this shows what a frame really costs.
+    Off,
+}
+
+static PACE: std::sync::LazyLock<Pace> = std::sync::LazyLock::new(|| match std::env::var("APIM_VSYNC").as_deref() {
+    Ok("driver") => Pace::Driver,
+    Ok("off") => Pace::Off,
+    _ if cfg!(windows) => Pace::Dwm,
+    _ => Pace::Driver,
+});
+
+/// Blocks until Windows has put the next picture on the screen. With OpenGL's own wait the graphics driver
+/// spins: a reply being written kept one processor core at 97% for 1.2 ms of work a frame, 143 frames a second,
+/// on a PC with a 143 Hz screen. Asked of the compositor, the wait is a sleep.
+fn wait_for_screen() {
+    #[cfg(windows)]
+    {
+        #[link(name = "dwmapi")]
+        unsafe extern "system" {
+            fn DwmFlush() -> i32;
+        }
+        // The compositor answers within one frame of the screen. When it fails, or takes far longer (a screen
+        // that is switched off, a remote session), it is not asked again for two seconds: the window must not
+        // stand still waiting for a picture nobody is shown.
+        static NOT_BEFORE: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+        if NOT_BEFORE.lock().unwrap().is_none_or(|at| Instant::now() >= at) {
+            let asked = Instant::now();
+            // SAFETY: takes nothing and touches no memory of ours.
+            if unsafe { DwmFlush() } >= 0 && asked.elapsed() < Duration::from_millis(120) {
+                return;
+            }
+            *NOT_BEFORE.lock().unwrap() = Some(Instant::now() + Duration::from_secs(2));
+            return;
+        }
+    }
+    // No compositor to ask: a short sleep still keeps the frames from running free.
+    std::thread::sleep(Duration::from_millis(6));
+}
+
+/// (the app's own time, the time since the frame before) of every frame, in milliseconds, while `APIM_PERF` is set.
+static TIMES: std::sync::Mutex<Vec<(f32, f32)>> = std::sync::Mutex::new(Vec::new());
+
+/// `APIM_PERF`: one line when the program leaves. The first second is left out: fonts and the first chat.
+fn perf_summary() {
+    let times = TIMES.lock().unwrap();
+    let mut seen = 0.0;
+    let kept: Vec<(f32, f32)> = times
+        .iter()
+        .copied()
+        .skip_while(|(_, gap)| {
+            seen += gap;
+            seen < 1000.0
+        })
+        .collect();
+    if kept.is_empty() {
+        return;
+    }
+    let spread = |mut of: Vec<f32>| {
+        of.sort_by(f32::total_cmp);
+        let at = |share: f32| of[((of.len() - 1) as f32 * share) as usize];
+        format!("p50 {:.1} p95 {:.1} p99 {:.1} max {:.1}", at(0.5), at(0.95), at(0.99), at(1.0))
+    };
+    let late = kept.iter().filter(|(_, gap)| *gap > 25.0).count();
+    eprintln!("frames {} | app ms {} | frame-to-frame ms {} | over 25 ms: {late}", kept.len(), spread(kept.iter().map(|t| t.0).collect()), spread(kept.iter().map(|t| t.1).collect()));
+}
 
 /// A piece of the reply's text goes into it: thinking into the thought being had, prose after it.
 fn write_text(msg: &mut Message, watch: &mut Stopwatch, prose: bool, text: String) {

@@ -107,6 +107,8 @@ pub enum Event {
     Notice(String),
     /// The transcript so far, in the shape of the web's `resumeState`: kept on the reply so Resume can replay it.
     Checkpoint(Value),
+    /// The restore point saved before the reply began, for its question (None: there were no files to save).
+    RestorePoint(Option<crate::snapshots::SnapshotInfo>),
     Done { finish: Option<String>, incomplete: bool, stop_reason: Option<String> },
     Error(String),
 }
@@ -177,6 +179,8 @@ pub struct Request {
     pub notes: Arc<Mutex<Vec<String>>>,
     /// Set to carry on an interrupted reply to this message instead of answering it from the start.
     pub resume: Option<Resume>,
+    /// Set for a new question: the workspace is saved as a restore point under this label before the reply starts.
+    pub restore_label: Option<String>,
 }
 
 /// An interrupted reply to carry on.
@@ -443,7 +447,16 @@ async fn learn(client: reqwest::Client, helper: Target, workspace: PathBuf, outc
 // ponytail: no run registry (the web's runs.begin / touch / end, `context::runs`). Stop aborts this task from the window, and
 // Resume reads the transcript saved on the reply, so nothing here has to find a run by its message id. Wire it in when a run
 // can outlive the window that started it: the registry's idle and age limits are then what stops a wedged one.
-pub async fn run(req: Request, emit: Emitter, procs: Arc<Procs>) {
+pub async fn run(mut req: Request, emit: Emitter, procs: Arc<Procs>) {
+    // The files as they are before the reply touches them, so Rewind can put them back. It was made on the
+    // window's thread when the message was sent: with 1,700 files the window stood still for 0.3 s at every send,
+    // and a new 100 MB file is read, hashed and copied. Failing must not block the reply.
+    if let Some(label) = req.restore_label.take() {
+        let workspace = req.workspace.clone();
+        if let Ok(Ok(snapshot)) = tokio::task::spawn_blocking(move || crate::snapshots::create(&workspace, &label, &[])).await {
+            emit.send(Event::RestorePoint(snapshot));
+        }
+    }
     match run_inner(req, &emit, procs).await {
         Ok(end) => emit.send(Event::Done { finish: end.finish, incomplete: end.incomplete, stop_reason: end.stop_reason }),
         Err(message) => emit.send(Event::Error(message)),

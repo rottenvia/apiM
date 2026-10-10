@@ -254,7 +254,30 @@ cargo test
 
 ## When it feels slow
 
-Set `APIM_PERF=4` before starting the program. It then prints, on stderr, every frame that took it longer than 4 ms to draw, every wait of over 40 ms between two frames while a reply is being written, and, when a reply ends, the longest any of its text waited to be shown.
+Set `APIM_PERF=4` before starting the program. It then prints, on stderr, every frame that took it longer than 4 ms to draw, every wait of over 40 ms between two frames while a reply is being written, and, when a reply ends, the longest any of its text waited to be shown. When the program leaves it prints one line more: how many frames it drew, how long the app took over one (median, 95th, 99th, longest), and the same for the time from one frame to the next, which is what the eye gets.
+
+With a self-portrait this is a bench (`APIM_SHOT_STATE`): `scroll` turns the wheel on every frame, `stalled` makes the chat's last reply a running one, `wait-row` adds a reply that is being waited on, and `calm` leaves the frames to whatever asks for them, as when nobody touches the window. `APIM_VSYNC=off` draws as fast as it can, which shows what a frame really costs; `APIM_VSYNC=driver` goes back to OpenGL's own wait for the screen.
+
+What that bench found on a PC with a 143 Hz screen, on a copy of a chat whose last reply had 500 steps:
+
+- **A reply being written kept one processor core at 97%.** Laying a frame out took the app 0.4 ms and drawing it 0.8 ms more. The rest was the graphics driver, which spins while it waits for the screen, and the dots under a reply asked for a new frame every frame: 143 a second for as long as the reply ran, hours for a long one. Frames are now held to the screen's pace by asking Windows' compositor (`DwmFlush`), which sleeps: scrolling keeps its 143 frames a second (frame to frame 6.9 ms median, 7.1 ms at the 99th, the same as before) on a quarter of a core. When the compositor does not answer within a frame or so (a screen that is off), it is left alone for two seconds and a short sleep paces the frames. And the slow animations (the dots, the pulse of a running step, the light over a status) ask for thirty frames a second, eight while another window has the keyboard: a reply being waited on now costs about a twelfth of a core.
+- **Sending froze the window.** The restore point taken before each question was made on the window's thread: 0.2 to 0.3 s with 1,700 files in the chat's folder, and a new 100 MB file is read, hashed and copied. It is made by the reply's own task now, before its first request; the question gets its restore point a moment later.
+- **Deleting a chat froze it too**: 1.4 s for one whose folder held 660 MB. The chat leaves the list at once and its folders are cleared on another thread.
+
+### Odd input, every tool
+
+`apim.exe --tools calls.json` with 89 calls nobody would make on purpose (a folder read as a file, a picture that is only named .png, a file in an older encoding, emoji at every place text is cut, 2 MB on stdin, a search for a word 60 times in one line) crashed nothing, and showed six answers that were wrong or no help:
+
+- A search stopped at its 60 matches inside one file said "60 matches in 0 files".
+- Reading a folder, or no path at all, said "Access is denied. (os error 5)". It says it is a folder, or that the path is missing.
+- A file that is not there was named without its folder, and nothing more. It is named as asked for, with where files of that name are: a reply asked three times for one two folders away.
+- A file in an older encoding (Latin-1, Windows-1251) was shown under "EXACT" with its other letters as "�", and an edit wrote those back: the file was destroyed. It is shown with a line saying so; `edit_file` and `replace_in_files` leave it alone and say why.
+- A file that only ends in .png went to the model as a picture; a provider turns the whole request away for one it cannot open. A picture is now known by its first bytes.
+- `edit_file` told of text that matches in several places did not say how to change them all (`replace_in_files`).
+
+Fourteen ordinary tasks run the same night (tests, a bug fix, a CSV summary, a web page, C in the sandbox, a local server, a plan, names in Cyrillic) all ended right.
+
+A second build folder keeps all of this off the program that is open: `CARGO_TARGET_DIR=target-bench cargo build --release` (add `CARGO_PROFILE_RELEASE_LTO=off CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16` to build in one minute instead of three), run with `APIM_DATA_DIR` pointing at a spare folder that holds a copy of the chat.
 
 Long chats stay quick because only what is on screen is laid out. A chat is read from disk and saved on other threads, so neither holds up the window.
 
