@@ -569,6 +569,9 @@ fn target_of(name: &str, args: &str) -> (Option<String>, bool) {
     (s("message").or_else(|| s("title")).or_else(|| s("claim")).or_else(|| s("reason")), false)
 }
 
+/// Set by the self-portrait state `open-step`.
+pub static SHOT_OPEN_STEP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// What the detail pane under a step shows: the command, or the text it wrote or searched for.
 fn step_body(args: &str) -> Option<String> {
     let a: serde_json::Value = serde_json::from_str(args).ok()?;
@@ -791,14 +794,26 @@ fn step(ui: &mut Ui, tool: &ToolEvent, env: &mut Env, open: &mut Option<String>)
 
     if let Some(body) = body.filter(|_| is_open) {
         ui.add_space(4.0);
+        // The self-portrait brings the step it unfolded into view.
+        if SHOT_OPEN_STEP.load(std::sync::atomic::Ordering::Relaxed) {
+            ui.scroll_to_cursor(Some(egui::Align::Center));
+        }
         markdown::indented(ui, 32.0, |ui| {
-            egui::Frame::new().fill(p.bg).stroke(Stroke::new(1.0, p.border)).corner_radius(8).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
+            // The text scrolls under the frame's own edge, so a line half out of view is cut at the border and not
+            // in mid air twelve points inside it: the room above and below the text is inside what scrolls.
+            egui::Frame::new().fill(p.bg).stroke(Stroke::new(1.0, p.border)).corner_radius(8).inner_margin(egui::Margin { left: 12, right: 4, top: 1, bottom: 1 }).show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                egui::ScrollArea::both().id_salt("detail").max_height(264.0).show(ui, |ui| {
+                // As wide as the frame whatever the text: shrunk to its longest line, the bar stood in the middle of the box.
+                let scroll = egui::ScrollArea::both().id_salt("detail").max_height(286.0).auto_shrink([false, true]);
+                // The self-portrait shows the bars without a pointer over them.
+                let scroll = if SHOT_OPEN_STEP.load(std::sync::atomic::Ordering::Relaxed) { scroll.scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible) } else { scroll };
+                scroll.show(ui, |ui| {
                     let shown: String = body.chars().take(40_000).collect();
                     let mut job = egui::text::LayoutJob::simple(shown, theme::mono(12.0), p.text2, f32::INFINITY);
                     job.sections[0].format.line_height = Some(19.5);
+                    ui.add_space(11.0);
                     ui.add(egui::Label::new(job).selectable(true).extend());
+                    ui.add_space(11.0);
                 });
             });
         });
@@ -1433,6 +1448,13 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
 
     let open_id = ui.id().with("open-step");
     let mut open: Option<String> = ui.data(|d| d.get_temp(open_id));
+    // The self-portrait `open-step`: each reply's last step with a long detail is unfolded.
+    if open.is_none() && SHOT_OPEN_STEP.load(std::sync::atomic::Ordering::Relaxed) {
+        open = msg.parts.iter().rev().find_map(|part| match part {
+            Part::Tool(tool) if step_body(&tool.args).is_some_and(|body| body.lines().count() > 20) => Some(tool.id.clone()),
+            _ => None,
+        });
+    }
     let was_open = open.clone();
 
     if timeline {

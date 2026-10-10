@@ -256,7 +256,7 @@ cargo test
 
 Set `APIM_PERF=4` before starting the program. It then prints, on stderr, every frame that took it longer than 4 ms to draw, every wait of over 40 ms between two frames while a reply is being written, and, when a reply ends, the longest any of its text waited to be shown. When the program leaves it prints one line more: how many frames it drew, how long the app took over one (median, 95th, 99th, longest), and the same for the time from one frame to the next, which is what the eye gets.
 
-With a self-portrait this is a bench (`APIM_SHOT_STATE`): `scroll` turns the wheel on every frame, `stalled` makes the chat's last reply a running one, `wait-row` adds a reply that is being waited on, and `calm` leaves the frames to whatever asks for them, as when nobody touches the window. `APIM_VSYNC=off` draws as fast as it can, which shows what a frame really costs; `APIM_VSYNC=driver` goes back to OpenGL's own wait for the screen.
+With a self-portrait this is a bench (`APIM_SHOT_STATE`): `scroll` turns the wheel on every frame, `stalled` makes the chat's last reply a running one, `open-step` unfolds each reply's last step with a long detail and brings it into view (its scroll bars drawn without a pointer over them), `wait-row` adds a reply that is being waited on, and `calm` leaves the frames to whatever asks for them, as when nobody touches the window. `APIM_VSYNC=off` draws as fast as it can, which shows what a frame really costs; `APIM_VSYNC=driver` goes back to OpenGL's own wait for the screen.
 
 What that bench found on a PC with a 143 Hz screen, on a copy of a chat whose last reply had 500 steps:
 
