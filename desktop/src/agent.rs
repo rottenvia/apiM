@@ -101,6 +101,8 @@ pub enum Event {
     Skill { id: String, all: bool, on: bool },
     /// The tool groups this chat has loaded so far.
     Groups(Vec<String>),
+    /// The model put an OpenRouter model in the user's list (`add_model`).
+    ModelAdded(crate::models::CustomModel),
     /// A one-line note shown in the reply: retrying, continuing, context trimmed.
     Notice(String),
     /// The transcript so far, in the shape of the web's `resumeState`: kept on the reply so Resume can replay it.
@@ -623,6 +625,7 @@ async fn run_inner(mut req: Request, emit: &Emitter, procs: Arc<Procs>) -> Resul
     // Read-only helpers with their own context.
     all_tools.push(delegate_tool());
     all_tools.push(tools::skills::schema());
+    all_tools.push(tools::add_model_schema());
     // Tools lent by the MCP servers switched on in Settings ride after the built-in ones.
     all_tools.extend(mcp::tools_for_model(&ctx.client, &crate::store::data_dir()).await);
     // Not all of them are sent (`tools::groups`): the everyday ones, and the groups this chat has loaded, a

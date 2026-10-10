@@ -59,6 +59,12 @@ OpenRouter serves one model from many endpoints, at different prices and speeds 
 
 The next two cheapest fast-enough endpoints are kept as spares for when the first is down; nothing else is used, so every token stays on a known price. The pick is made once per model while the app runs and said in the reply that made it: a pick that moved between replies would lose the provider's cache each time. Cost figures and the spending limit use the picked endpoint's prices. Free models and other `:variant` ids are left to OpenRouter's own routing. The three numbers (`GOOD_TPS`, `FASTER`, `DEARER`) are at the top of the code that picks.
 
+## Adding a model from a link
+
+Paste a model's openrouter.ai link (or its id, `author/model-name`) into the chat and say to add it: the model in the chat calls `add_model`, the app checks the id with OpenRouter, and the model is in the model menu, with its context window, prices and abilities as OpenRouter lists them. The conversation stays on the model it was on. Settings → Models does the same by hand. The tool is only sent when a message names it or holds such a link, so it costs nothing otherwise.
+
+What an added model gets is what every model gets, because none of it is written per model: the endpoint pick above (not for `:free` and other `:variant` ids), its real prices in the cost figures, and everything under "What a request carries". What it does not get: handling written for one model's habits (the two catalog models have some: DeepSeek is handed its thinking back, GLM's thinking cannot be switched off), and a cache on providers that only cache what a request marks for it (Anthropic's models, for one): the app sends no such marks, so there every round is paid at the full input price.
+
 ## What a request carries
 
 Every round of a reply sends the whole conversation again, so what stays in it is paid for every round. Three things kept a long chat far bigger than its work (measured on a real one: 1.7 million characters a round):

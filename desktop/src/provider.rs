@@ -516,6 +516,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_model_page_link_gives_its_id() {
+        for (given, id) in [
+            ("https://openrouter.ai/z-ai/glm-5.3-flash", "z-ai/glm-5.3-flash"),
+            ("openrouter.ai/z-ai/glm-5.3-flash/providers?sort=price#top", "z-ai/glm-5.3-flash"),
+            ("https://openrouter.ai/models/meta/llama-9:free", "meta/llama-9:free"),
+            ("https://openrouter.ai/meta/llama-9%3Afree/api", "meta/llama-9:free"),
+            ("  deepseek/deepseek-v4.1-flash ", "deepseek/deepseek-v4.1-flash"),
+        ] {
+            assert_eq!(slug_from_link(given), id);
+            assert!(models::valid_slug(&slug_from_link(given)));
+        }
+        // A link to something that is not a model page is no id, and the check with OpenRouter says so.
+        assert!(!models::valid_slug(&slug_from_link("https://openrouter.ai/")));
+    }
+
+    #[test]
     fn the_cheapest_fast_enough_endpoint_is_picked_unless_a_little_more_buys_much_more_speed() {
         let endpoint = |tag: &str, (input, cached, output): (&str, &str, &str), tps: u32| json!({ "tag": tag, "provider_name": tag, "status": 0, "context_length": 1_048_576, "uptime_last_1d": 100, "supported_parameters": ["tools"], "pricing": { "prompt": input, "input_cache_read": cached, "completion": output }, "throughput_last_30m": { "p50": tps } });
         let picked = |endpoints: Vec<Value>| best_endpoints(&json!({ "data": { "endpoints": endpoints } })).into_iter().map(|e| e.tag).collect::<Vec<_>>();
@@ -635,6 +651,40 @@ pub struct Verified {
     pub supports_tools: bool,
     pub supports_vision: bool,
     pub supports_thinking: bool,
+}
+
+impl Verified {
+    /// The entry this model becomes in the user's list. `old` is the entry it replaces: what the user set on it is kept.
+    pub fn custom(&self, label: &str, old: Option<&models::CustomModel>) -> Option<models::CustomModel> {
+        let api_model = self.id.trim();
+        if api_model.len() > 128 || !models::valid_slug(api_model) {
+            return None;
+        }
+        let label = label.trim();
+        let label: String = if label.is_empty() { if self.name.is_empty() { api_model.to_string() } else { self.name.clone() } } else { label.to_string() };
+        Some(models::CustomModel {
+            api_model: api_model.to_string(),
+            label: label.chars().take(60).collect(),
+            // Natives get the picture itself; anything else gets a description of it.
+            vision: if self.supports_vision { models::Vision::Native } else { models::Vision::Helper },
+            max_output_tokens: old.map_or(65_536, |o| o.max_output_tokens),
+            context_length: self.context_length,
+            input_price: self.input_price,
+            output_price: self.output_price,
+            open_limits: old.is_some_and(|o| o.open_limits),
+        })
+    }
+}
+
+/// The model id in an OpenRouter page link (`https://openrouter.ai/z-ai/glm-5.3-flash/providers?tab=1`), or the text
+/// itself when it is no link.
+pub fn slug_from_link(text: &str) -> String {
+    let text = text.trim();
+    let Some((_, path)) = text.split_once("openrouter.ai/") else { return text.to_string() };
+    let path = path.split(['?', '#']).next().unwrap_or("").replace("%3A", ":").replace("%3a", ":");
+    // Older links carry `/models/` first; newer ones start at the author.
+    let mut parts = path.split('/').filter(|part| !part.is_empty() && *part != "models");
+    format!("{}/{}", parts.next().unwrap_or(""), parts.next().unwrap_or(""))
 }
 
 fn shape_verified(entry: &Value, wire: &str) -> Verified {

@@ -391,23 +391,7 @@ fn model(app: &mut App, ui: &mut Ui) {
 
 /// A checked model as the entry the app keeps.
 fn to_custom(found: &Verified, label: &str, old: Option<&CustomModel>) -> Option<CustomModel> {
-    let api_model = found.id.trim();
-    if api_model.len() > 128 || !models::valid_slug(api_model) {
-        return None;
-    }
-    let label = label.trim();
-    let label: String = if label.is_empty() { if found.name.is_empty() { api_model.to_string() } else { found.name.clone() } } else { label.to_string() };
-    Some(CustomModel {
-        api_model: api_model.to_string(),
-        label: label.chars().take(60).collect(),
-        // Natives get the picture itself; anything else gets a description of it.
-        vision: if found.supports_vision { Vision::Native } else { Vision::Helper },
-        max_output_tokens: old.map_or(65_536, |o| o.max_output_tokens),
-        context_length: found.context_length,
-        input_price: found.input_price,
-        output_price: found.output_price,
-        open_limits: old.is_some_and(|o| o.open_limits),
-    })
+    found.custom(label, old)
 }
 
 fn price_line(found: &Verified) -> String {
