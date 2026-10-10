@@ -211,11 +211,13 @@ pub fn list_files(ctx: &Ctx, args: &Value) -> Output {
 
 /// Reads a text file. Binary files are refused with their size, UTF-16 is decoded.
 pub fn read_text(path: &Path) -> Result<String, String> {
+    // The file's name, not where the workspace sits on the disk: the whole path filled the step's line and cut the reason off.
+    let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
     // A crash dump or a disk image is not text, and reading one whole to find that out would fill the memory.
     if let Some(size) = path.metadata().ok().map(|meta| meta.len()).filter(|size| *size > MAX_TEXT) {
-        return Err(format!("{} is {}: too large to read as text. Take the part you need with a command, or inspect_binary if it is a program.", path.display(), human(size)));
+        return Err(format!("{} is {}: too large to read as text. Take the part you need with a command, or inspect_binary if it is a program.", name, human(size)));
     }
-    let bytes = std::fs::read(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+    let bytes = std::fs::read(path).map_err(|e| format!("Cannot read {name}: {e}"))?;
     if bytes.starts_with(&[0xFF, 0xFE]) {
         let units: Vec<u16> = bytes[2..].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
         return Ok(String::from_utf16_lossy(&units));

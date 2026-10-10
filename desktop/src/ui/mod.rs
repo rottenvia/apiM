@@ -1504,7 +1504,7 @@ impl App {
                 self.toggle_fullscreen(ctx);
             }
         }
-        if self.staged("send") && self.run.is_some() {
+        if self.staged("send") && (self.run.is_some() || self.summary_job.is_some()) {
             self.shot.as_mut().unwrap().started = Instant::now() - Duration::from_millis(400);
             return;
         }
