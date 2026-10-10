@@ -50,7 +50,14 @@ fn describe(name: &str, args: &str, result: Option<&str>) -> String {
     if target.is_empty() { format!("{name}{outcome}") } else { format!("{name}({target}){outcome}") }
 }
 
-/// Same call, byte-identical output: older copies become a pointer at the newest one.
+/// `whole` followed by nothing, or by a note in brackets (a guard's "you already read this"): the same output.
+fn same_output(longer: &str, whole: &str) -> bool {
+    longer.strip_prefix(whole).is_some_and(|rest| rest.is_empty() || rest.trim_start().starts_with('['))
+}
+
+/// One tool, the same output: older copies become a pointer at the newest one. The arguments are not compared:
+/// a file asked for whole twice, with another last line the second time, came back as the same 400,000
+/// characters, counted as two calls, and both copies rode on every round.
 fn dedupe(messages: &mut [Value]) -> usize {
     let mut call_by_id: HashMap<String, (String, String)> = HashMap::new();
     for m in messages.iter() {
@@ -59,19 +66,20 @@ fn dedupe(messages: &mut [Value]) -> usize {
         }
     }
     // Newest first, so the first copy seen is the one that stays.
-    let mut seen: HashSet<(String, String, String)> = HashSet::new();
+    let mut seen: HashMap<String, Vec<String>> = HashMap::new();
     let mut saved = 0;
     for m in messages.iter_mut().rev() {
         if m["role"] != "tool" || len(&m["content"]) <= DEDUP_MIN_CHARS {
             continue;
         }
         let Some((name, args)) = call_by_id.get(m["tool_call_id"].as_str().unwrap_or("")) else { continue };
-        // Parsed and printed again, so key order and spacing do not make two equal calls differ.
-        let canon = serde_json::from_str::<Value>(args).map_or_else(|_| args.clone(), |v| v.to_string());
         let content = m["content"].as_str().unwrap_or("").to_string();
         let before = content.len();
-        if !seen.insert((name.clone(), canon, content)) {
-            let pointer = format!("[Folded: identical {} result — same call, byte-identical output. The latest copy is below; use it instead of re-fetching.]", describe(name, args, None));
+        let kept = seen.entry(name.clone()).or_default();
+        if !kept.iter().any(|k| same_output(k, &content) || same_output(&content, k)) {
+            kept.push(content);
+        } else {
+            let pointer = format!("[Folded: identical {} result — byte-identical output. The latest copy is below; use it instead of re-fetching.]", describe(name, args, None));
             saved += before.saturating_sub(pointer.len());
             m["content"] = json!(pointer);
         }
@@ -82,19 +90,15 @@ fn dedupe(messages: &mut [Value]) -> usize {
 /// Results below this size go back as they are: a pointer would save little and read worse.
 const REPEAT_MIN_CHARS: usize = 1_500;
 
-/// A call asked again whose answer is already in the transcript, whole and byte for byte: the line that goes
-/// back in place of the same text. The earlier copy stays where it is, so the start of the request (and the
+/// A call whose answer is already in the transcript as the answer to a call of the same tool, whole and byte
+/// for byte: the line that goes back in place of the same text. The earlier copy stays where it is, so the start of the request (and the
 /// provider's cache of it) does not move, and a model that asks for one big file every round stops paying for it.
 pub fn repeat_of(messages: &[Value], name: &str, args: &str, text: &str) -> Option<String> {
     if text.len() < REPEAT_MIN_CHARS {
         return None;
     }
-    // Parsed and printed again, so key order and spacing do not make two equal calls differ.
-    let canon = |args: &str| serde_json::from_str::<Value>(args).map_or_else(|_| args.to_string(), |v| v.to_string());
-    let wanted = canon(args);
-    let same: HashSet<&str> = messages.iter().flat_map(calls).filter(|c| c["function"]["name"] == name && canon(c["function"]["arguments"].as_str().unwrap_or("")) == wanted).filter_map(|c| c["id"].as_str()).collect();
-    // A guard's note may follow the earlier copy, so it only has to start with this text.
-    let held = messages.iter().any(|m| m["role"] == "tool" && same.contains(m["tool_call_id"].as_str().unwrap_or("")) && m["content"].as_str().is_some_and(|c| c.starts_with(text)));
+    let same: HashSet<&str> = messages.iter().flat_map(calls).filter(|c| c["function"]["name"] == name).filter_map(|c| c["id"].as_str()).collect();
+    let held = messages.iter().any(|m| m["role"] == "tool" && same.contains(m["tool_call_id"].as_str().unwrap_or("")) && m["content"].as_str().is_some_and(|c| same_output(c, text)));
     // How to read on is the one line of a cut-short read worth saying twice.
     let more = text.lines().last().filter(|l| l.starts_with("[CUT SHORT")).map_or(String::new(), |l| format!("\n{l}"));
     held.then(|| format!("[Unchanged: {} gave this same output earlier in this conversation ({} chars, not one byte different). It is still above: work from that copy. While it is there, asking again returns this line and not the text.]{more}", describe(name, args, None), text.len()))
@@ -251,6 +255,30 @@ mod tests {
     }
 
     #[test]
+    fn a_read_with_a_note_on_its_end_still_folds() {
+        let body = "x".repeat(DEDUP_MIN_CHARS + 50);
+        // Asked with another last line each time, as the model did: the text that came back is what counts.
+        let call = |id: &str| json!({ "role": "assistant", "content": "", "tool_calls": [{ "id": id, "type": "function", "function": { "name": "read_file", "arguments": format!("{{\"path\":\"a.cpp\",\"end_line\":\"{id}\"}}") } }] });
+        let result = |id: &str, text: String| json!({ "role": "tool", "tool_call_id": id, "content": text });
+        // The older copy carries the note, the newer one does not: it was the other way round too.
+        for (older, newer) in [(format!("{body}
+
+[Harness: you already read this.]"), body.clone()), (body.clone(), format!("{body}
+
+[Harness: you already read this.]"))] {
+            let mut messages = vec![call("a"), result("a", older), call("b"), result("b", newer.clone())];
+            assert!(dedupe(&mut messages) > 0);
+            assert!(messages[1]["content"].as_str().unwrap().starts_with("[Folded:"), "{}", messages[1]);
+            assert_eq!(messages[3]["content"], json!(newer));
+        }
+        // Another file's text is left alone, and so is a longer output that only starts the same.
+        for older in ["y".repeat(DEDUP_MIN_CHARS + 50), format!("{body} and more")] {
+            let mut other = vec![call("a"), result("a", older), call("b"), result("b", body.clone())];
+            assert_eq!(dedupe(&mut other), 0);
+        }
+    }
+
+    #[test]
     fn identical_results_fold_to_a_pointer() {
         let body = "x".repeat(500);
         let call = |id: &str| json!({ "role": "assistant", "content": "", "tool_calls": [{ "id": id, "type": "function", "function": { "name": "read_file", "arguments": "{\"path\":\"a\"}" } }] });
@@ -270,8 +298,10 @@ mod tests {
         let pointer = repeat_of(&messages, "read_file", "{ \"end_line\": 120, \"path\": \"a.cpp\" }", &body).unwrap();
         assert!(pointer.starts_with("[Unchanged: read_file(a.cpp) gave this same output") && pointer.ends_with("\"start_line\":91}]"), "{pointer}");
         assert!(pointer.len() < 500);
-        // Another range, another file's bytes, or a short answer: the text goes back.
-        assert_eq!(repeat_of(&messages, "read_file", "{\"path\":\"a.cpp\",\"start_line\":91}", &body), None);
+        // Asked with another last line and answered with the same text: a pointer too.
+        assert!(repeat_of(&messages, "read_file", "{\"path\":\"a.cpp\",\"end_line\":130}", &body).is_some());
+        // Another tool, another file's bytes, or a short answer: the text goes back.
+        assert_eq!(repeat_of(&messages, "search_files", "{\"path\":\"a.cpp\"}", &body), None);
         assert_eq!(repeat_of(&messages, "read_file", "{\"path\":\"a.cpp\",\"end_line\":120}", &body.replace('x', "y")), None);
         assert_eq!(repeat_of(&messages, "read_file", "{\"path\":\"a.cpp\",\"end_line\":120}", "short"), None);
         // Once the earlier copy has been collapsed, the file is read out again.

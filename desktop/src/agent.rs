@@ -295,6 +295,7 @@ fn resume_transcript(mut resume: Resume, mut messages: Vec<Value>, start: &mut S
         Some(state) => {
             (start.tool_rounds, start.continuations, start.think_nudges) = (state.tool_rounds as usize, state.continuations, state.think_nudges.unwrap_or(0));
             messages = state.messages;
+            crate::context::transcript::cut_old_pastes(&mut messages);
             EXACT_RESUME_INSTRUCTION.to_string()
         }
         None => {
