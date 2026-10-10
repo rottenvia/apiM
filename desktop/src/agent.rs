@@ -673,9 +673,15 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
     let mut spend = Budget::new(s.budget_usd);
     let mut last_round_cost = 0.0;
     let mut last_finish = None;
+    // GLM takes a thought back in `reasoning` as well, and gets the end of each there. That end used to ride as
+    // the turn's own words; shown a hundred of its turns opening with a thought, the model began to think in its
+    // replies (five thousand characters of "Wait… Hmm… Actually…" in the answer, 373 in the thought box).
+    // ponytail: seen on Relace only (a replayed thought is counted in the next prompt). Other families keep the
+    // words until the same is seen for them; an endpoint that rejects the field falls back to the words by itself.
+    let thought_ends = openrouter && target.api_model.to_ascii_lowercase().starts_with("z-ai/");
     let mut lane = Lane {
         mandatory: openrouter && provider::openrouter_reasoning_mandatory(&target.model.id),
-        replay: openrouter && target.api_model.to_ascii_lowercase().starts_with("deepseek/"),
+        replay: openrouter && (target.api_model.to_ascii_lowercase().starts_with("deepseek/") || thought_ends),
         ..Default::default()
     };
     // The round cap, a guard against a model that never stops calling tools (a run that is getting somewhere earns
@@ -713,7 +719,7 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
         round += 1;
         if round > round_cap {
             let done = done_steps();
-            if stall::should_extend_round_cap(cap_extensions, done.saturating_sub(steps_at_check) as u32, changes_since_check) {
+            if stall::should_run_on(cap_extensions, done.saturating_sub(steps_at_check) as u32, changes_since_check, last_round_cost, spend.spent, spend.limit) {
                 cap_extensions += 1;
                 round_cap += stall::CAP_EXTENSION_ROUNDS;
                 (steps_at_check, changes_since_check) = (done, 0);
@@ -775,7 +781,7 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
         // the field, so its lanes get `reasoning` where a model needs it and the end of the thought as plain text elsewhere.
         let reasoning_field = if !openrouter { Some("reasoning_content") } else if lane.replay { Some("reasoning") } else { None };
         // Clips and pictures ride once: on the request after they joined, and every later round gets a reference line.
-        let mut wire = transcript::wire(&ridden(&messages), reasoning_field);
+        let mut wire = transcript::wire(&ridden(&messages), reasoning_field, thought_ends);
         if qwen {
             // Qwen's template only accepts a system message at index 0: the listing, its deltas and the tail all join the first one.
             let (systems, rest): (Vec<Value>, Vec<Value>) = wire.into_iter().partition(|m| m["role"] == "system");

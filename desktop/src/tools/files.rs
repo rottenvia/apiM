@@ -870,47 +870,87 @@ pub fn search_files(ctx: &Ctx, args: &Value) -> Output {
         Ok(r) => r,
         Err(e) => return Output::fail(e),
     };
-    let files = match searchable(ctx, str_arg(args, "glob")) {
-        Ok(f) => f,
-        Err(e) => return Output::fail(e),
+    let filter = str_arg(args, "glob");
+    let Some(matcher) = (if filter.is_empty() { Some(None) } else { glob(filter).map(Some) }) else { return Output::fail(format!("Bad glob: {filter}")) };
+    // `path` keeps the search to one file or folder. A model that knows the file names it there, and was told
+    // "no matches" for text the file held: the argument was not read, and the file was over the size to search.
+    let scope = str_arg(args, "path").replace('\\', "/");
+    let scope = scope.trim().trim_start_matches("./").trim_matches('/');
+    let inside: Vec<(String, u64)> = walk(&ctx.root, &ctx.root).into_iter().filter(|(p, _)| scope.is_empty() || p == scope || p.strip_prefix(scope).is_some_and(|rest| rest.starts_with('/'))).collect();
+    if inside.is_empty() && !scope.is_empty() {
+        return Output::fail(format!("Nothing at {scope} to search: path is a file or a folder of the workspace."));
+    }
+    // A file asked for by name is searched whatever its size.
+    let named = inside.len() == 1 && inside[0].0 == scope;
+    let (files, big): (Vec<_>, Vec<_>) = inside.into_iter().filter(|(p, _)| matcher.as_ref().is_none_or(|g| g.is_match(p))).partition(|(_, size)| named || *size <= ctx.limits.searchable_bytes);
+    let left_out = match big.as_slice() {
+        [] => String::new(),
+        big => format!(
+            "\n[Not searched, over {}: {}{}. Name one in path to search it.]",
+            human(ctx.limits.searchable_bytes),
+            big.iter().take(5).map(|(p, size)| format!("{p} ({})", human(*size))).collect::<Vec<_>>().join(", "),
+            if big.len() > 5 { format!(" and {} more", big.len() - 5) } else { String::new() }
+        ),
     };
     let context = num_arg(args, "context").unwrap_or(0).min(ctx.limits.search_context) as usize;
     let mut out = String::new();
     let (mut hits, mut in_files) = (0, 0);
-    'files: for rel in &files {
+    'files: for (rel, _) in &files {
         let Ok(text) = read_text(&ctx.root.join(rel)) else { continue };
         let lines: Vec<&str> = text.lines().collect();
         let mut found = false;
         let mut printed_to = 0;
         for (i, line) in lines.iter().enumerate() {
-            if !re.is_match(line) {
-                continue;
-            }
-            if hits >= cap {
-                out.push_str(&format!("[Stopped at {cap} matches. Narrow the query or add a glob.]\n"));
-                break 'files;
-            }
-            hits += 1;
-            found = true;
-            let from = i.saturating_sub(context).max(printed_to);
-            let to = (i + context + 1).min(lines.len());
-            for (n, l) in lines.iter().enumerate().take(to).skip(from) {
-                let mark = if n == i { ':' } else { '-' };
-                let shown: String = l.chars().take(400).collect();
-                out.push_str(&format!("{rel}{mark}{}{mark} {shown}\n", n + 1));
-            }
-            printed_to = to;
-            if context > 0 {
-                out.push_str("--\n");
+            // A line too long to show (minified code, a packed payload) gives each match with the text round it.
+            let long = line.len() > SHOWN_LINE_CHARS;
+            let mut next = 0;
+            for m in re.find_iter(line).take(if long { usize::MAX } else { 1 }) {
+                if m.start() < next {
+                    continue;
+                }
+                if hits >= cap {
+                    out.push_str(&format!("[Stopped at {cap} matches. Narrow the query or add a glob.]\n"));
+                    break 'files;
+                }
+                hits += 1;
+                found = true;
+                if long {
+                    let (shown, end) = around(line, m.start());
+                    out.push_str(&format!("{rel}:{}: [byte {} of a {}-byte line] {shown}\n", i + 1, m.start() + 1, line.len()));
+                    next = end;
+                    continue;
+                }
+                let from = i.saturating_sub(context).max(printed_to);
+                let to = (i + context + 1).min(lines.len());
+                for (n, l) in lines.iter().enumerate().take(to).skip(from) {
+                    let mark = if n == i { ':' } else { '-' };
+                    let shown: String = l.chars().take(SHOWN_LINE_CHARS).collect();
+                    out.push_str(&format!("{rel}{mark}{}{mark} {shown}\n", n + 1));
+                }
+                printed_to = to;
+                if context > 0 {
+                    out.push_str("--\n");
+                }
             }
         }
         in_files += found as usize;
     }
+    let s = |n: usize| if n == 1 { "" } else { "s" };
     if hits == 0 {
-        return Output::ok(format!("No matches for `{query}` in {} files.", files.len()), "0 matches");
+        return Output::ok(format!("No matches for `{query}` in {} file{}.{left_out}", files.len(), s(files.len())), "0 matches");
     }
-    let summary = format!("{hits} matches in {in_files} files");
-    Output::ok(format!("{summary}\n{out}"), summary)
+    let summary = format!("{hits} match{} in {in_files} file{}", if hits == 1 { "" } else { "es" }, s(in_files));
+    Output::ok(format!("{summary}\n{out}{}", left_out.trim_start()), summary)
+}
+
+/// Characters of one line a search shows.
+const SHOWN_LINE_CHARS: usize = 400;
+
+/// That much of a long line around byte `at`, and the byte it ends at.
+fn around(line: &str, at: usize) -> (String, usize) {
+    let start = line[..at].char_indices().rev().nth(119).map_or(0, |(i, _)| i);
+    let end = line[start..].char_indices().nth(SHOWN_LINE_CHARS).map_or(line.len(), |(i, _)| start + i);
+    (format!("{}{}{}", if start > 0 { "…" } else { "" }, &line[start..end], if end < line.len() { "…" } else { "" }), end)
 }
 
 pub fn replace_in_files(ctx: &Ctx, args: &Value) -> Output {
@@ -959,6 +999,24 @@ pub fn replace_in_files(ctx: &Ctx, args: &Value) -> Output {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_search_reads_a_named_file_of_any_size_and_shows_what_it_found_in_a_long_line() {
+        let root = crate::tools::scratch("search");
+        std::fs::create_dir_all(root.join("analysis")).unwrap();
+        // One line, over the size a search reads unasked, with the word far inside it twice.
+        let packed = format!("{}KG=function(I){}KG_end", "a;".repeat(300_000), "b;".repeat(400));
+        std::fs::write(root.join("analysis/payload.lua"), &packed).unwrap();
+        std::fs::write(root.join("notes.txt"), "nothing here\n").unwrap();
+        let ctx = crate::tools::test_ctx(&root, crate::store::Approval::Auto);
+        let all = search_files(&ctx, &serde_json::json!({ "query": "KG" })).text;
+        assert!(all.starts_with("No matches for `KG` in 1 file.") && all.contains("Not searched, over 512.0 KB: analysis/payload.lua (586.7 KB)") && all.contains("Name one in path"), "{all}");
+        let named = search_files(&ctx, &serde_json::json!({ "query": "KG", "path": "analysis/payload.lua", "case_sensitive": true })).text;
+        assert!(named.starts_with("2 matches in 1 file\n") && named.contains("a;KG=function(I)b;") && named.contains("b;KG_end") && named.len() < 1500, "{named}");
+        let folder = search_files(&ctx, &serde_json::json!({ "query": "nothing", "path": "analysis" })).text;
+        assert!(folder.starts_with("No matches") && search_files(&ctx, &serde_json::json!({ "query": "nothing" })).text.contains("notes.txt:1: nothing here"), "{folder}");
+        assert!(!search_files(&ctx, &serde_json::json!({ "query": "x", "path": "gone" })).ok);
+    }
 
     fn spec(f: impl FnOnce(&mut EditSpec)) -> EditSpec {
         let mut s = EditSpec { include_anchors: true, ..Default::default() };

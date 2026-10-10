@@ -60,7 +60,7 @@ pub fn harden_args(args: &str) -> String {
 }
 
 /// The end of a step's reasoning, where the decision is, cut on a sentence or line boundary.
-pub fn carried_thought(reasoning: &str) -> String {
+fn thought_end(reasoning: &str) -> String {
     // JS looks behind for the sentence end; this engine cannot, so the mark is matched and stepped over.
     static BREAK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[.!?\n]\s+\S").unwrap());
     let text = reasoning.trim();
@@ -72,7 +72,12 @@ pub fn carried_thought(reasoning: &str) -> String {
         }
         end = format!("…{cut}");
     }
-    format!("{CARRIED_MARK} — what I concluded and decided:]\n{end}")
+    end
+}
+
+/// That end as part of a turn's own words, under a label saying what it is.
+pub fn carried_thought(reasoning: &str) -> String {
+    format!("{CARRIED_MARK} — what I concluded and decided:]\n{}", thought_end(reasoning))
 }
 
 /// How a carried thought opens.
@@ -155,7 +160,8 @@ fn with_carried(reasoning: &str, content: &Value) -> Value {
 /// The transcript as one provider takes it. Reasoning rides back only on turns that called a tool, in
 /// `reasoning_field` (DeepSeek's `reasoning_content`, OpenRouter's `reasoning`). With no field, the end of the
 /// reasoning rides as the turn's own words instead, or the model re-derives the whole task every round.
-pub fn wire(messages: &[Value], reasoning_field: Option<&str>) -> Vec<Value> {
+/// `ends` sends only the end of each thought in the field: what the words would have carried, kept out of them.
+pub fn wire(messages: &[Value], reasoning_field: Option<&str>, ends: bool) -> Vec<Value> {
     messages
         .iter()
         .map(|m| match m["role"].as_str() {
@@ -168,6 +174,11 @@ pub fn wire(messages: &[Value], reasoning_field: Option<&str>) -> Vec<Value> {
                 let mut out = json!({ "role": "assistant", "content": m["content"], "tool_calls": calls });
                 let reasoning = m["reasoning_content"].as_str().unwrap_or("");
                 match reasoning_field {
+                    Some(field) if ends => {
+                        if !reasoning.trim().is_empty() {
+                            out[field] = json!(thought_end(reasoning));
+                        }
+                    }
                     Some(field) if !reasoning.is_empty() => out[field] = json!(reasoning),
                     None if !reasoning.trim().is_empty() => out["content"] = with_carried(reasoning, &m["content"]),
                     _ => {}
@@ -303,12 +314,17 @@ mod tests {
             { "role": "user", "content": [{ "type": "text", "text": "see" }] },
         ]);
         for (i, o) in cases("serialize_for_api") {
-            assert_eq!(json!(wire(turns.as_array().unwrap(), i.as_str())), o, "{i}");
+            assert_eq!(json!(wire(turns.as_array().unwrap(), i.as_str(), false)), o, "{i}");
         }
         // An endpoint that rejects the replayed field gets the same condensed form the web re-serialises to.
-        let mut replayed = wire(turns.as_array().unwrap(), Some("reasoning"));
+        // The end of a thought in the field: the words stay the words, and a long thought is cut to its end.
+        let long = json!([{ "role": "assistant", "content": "Narration.", "reasoning_content": format!("{} So I read it.", "First I look. ".repeat(200)), "tool_calls": [{ "id": "c", "function": { "name": "read_file", "arguments": "{}" } }] }]);
+        let ended = &wire(long.as_array().unwrap(), Some("reasoning"), true)[0];
+        let end = ended["reasoning"].as_str().unwrap();
+        assert!(ended["content"] == "Narration." && end.starts_with('…') && end.ends_with("So I read it.") && end.chars().count() <= CARRIED_THOUGHT_CHARS + 1 && !end.contains(CARRIED_MARK), "{ended}");
+        let mut replayed = wire(turns.as_array().unwrap(), Some("reasoning"), false);
         assert!(condense_reasoning(&mut replayed));
-        assert_eq!(json!(replayed), json!(wire(turns.as_array().unwrap(), None)));
+        assert_eq!(json!(replayed), json!(wire(turns.as_array().unwrap(), None, false)));
         assert!(!condense_reasoning(&mut replayed));
     }
 

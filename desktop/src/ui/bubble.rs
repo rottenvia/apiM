@@ -530,6 +530,11 @@ fn target_of(name: &str, args: &str) -> (Option<String>, bool) {
         return (Some(plural(steps.len(), "step")), false);
     }
     if let Some(command) = a["command"].as_str() {
+        // A sandbox command comes with a line saying why, and that is what the row says: the command itself is a
+        // script that opens with `cd /ws/…`, and its first line cut at the head read "…0-kb-3-line && python3 - <<'EOF'".
+        if let Some(why) = s("reason").filter(|_| name == "sandbox_run") {
+            return (Some(why), false);
+        }
         let rest = a["args"].as_array().into_iter().flatten().map(|v| v.as_str().map_or_else(|| v.to_string(), str::to_string));
         return (Some(std::iter::once(command.to_string()).chain(rest).collect::<Vec<_>>().join(" ")), true);
     }
@@ -719,7 +724,7 @@ fn step(ui: &mut Ui, tool: &ToolEvent, env: &mut Env, open: &mut Option<String>)
     let remark = if running && !tool.summary.is_empty() {
         // A helper's progress: "round 2 · 5 tool calls · read_file, search_files".
         Some((tool.summary.clone(), p.muted, 0.45))
-    } else if !running && !failed && wide && !tool.summary.is_empty() && (target_text.is_empty() || !tool.summary.contains(target_text)) && tool.summary != d.done {
+    } else if !running && !failed && wide && !tool.summary.is_empty() && (target_text.is_empty() || !tool.summary.contains(target_text)) && tool.summary != d.done && tool.summary != "Sandbox command finished" {
         Some((tool.summary.clone(), p.muted, 0.45))
     } else {
         None
@@ -1384,11 +1389,6 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
         // The card keeps 10px under it where the other blocks keep 12.
         ui.add_space(-2.0);
     }
-    if msg.incomplete && !env.live {
-        gap(ui, 12.0);
-        interrupted(ui, msg, env);
-    }
-
     // Who refused, when a reply was blocked: apiM adds no content rules of its own.
     if !env.live && !failed {
         let model = models::resolve(&msg.model, &env.settings.custom_models);
@@ -1520,6 +1520,11 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
     if env.live {
         return;
     }
+    // Under the reply, where its reader is: above two hundred steps nobody found Resume.
+    if msg.incomplete {
+        gap(ui, 12.0);
+        interrupted(ui, msg, env);
+    }
 
     let delete_tip = "Delete this reply and your question — both forget it";
     if env.newest && !failed && !text.is_empty() {
@@ -1595,6 +1600,8 @@ mod tests {
         assert_eq!(describe("write_files", r#"{"files":[{},{}]}"#).target.as_deref(), Some("2 files"));
         assert_eq!(describe("edit_files", r#"{"edits":[{}]}"#).target.as_deref(), Some("1 edit"));
         assert_eq!(describe("run_command", r#"{"command":"cargo","args":["test","-q"]}"#).target.as_deref(), Some("cargo test -q"));
+        assert_eq!(describe("sandbox_run", r#"{"command":"cd /ws/a && python3 - <<'EOF'\nprint(1)\nEOF","reason":"Count the lines"}"#).target.as_deref(), Some("Count the lines"));
+        assert_eq!(describe("sandbox_run", r#"{"command":"ls"}"#).target.as_deref(), Some("ls"));
         assert_eq!(describe("fetch_url", r#"{"url":"https://example.com/a"}"#).target.as_deref(), Some("example.com/a"));
         let search = describe("web_search", r#"{"query":"rust egui"}"#);
         assert_eq!((search.target.as_deref(), search.mono), (Some("rust egui"), false));

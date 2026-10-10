@@ -127,7 +127,7 @@
   "type": "function",
   "function": {
    "name": "search_files",
-   "description": "Find text across every file in the workspace at once, with the file and line number of each match. Use this to locate where something is defined or used, instead of reading files one by one — it is far cheaper than guessing which file to open. Query is PLAIN TEXT by default. Only set regex:true when you intentionally want a pattern; an ordinary word or a symbol like '.', '(', '+' or '?' is NOT a regex and will error if you mark it one - leave regex off for normal searches.",
+   "description": "Find text across every file in the workspace at once, with the file and line number of each match. Use this to locate where something is defined or used, instead of reading files one by one — it is far cheaper than guessing which file to open. Query is PLAIN TEXT by default. Only set regex:true when you intentionally want a pattern; an ordinary word or a symbol like '.', '(', '+' or '?' is NOT a regex and will error if you mark it one - leave regex off for normal searches. A match inside a very long line (minified or packed code) comes back with the text around it, one entry per match.",
    "parameters": {
     "type": "object",
     "properties": {
@@ -146,6 +146,10 @@
      "glob": {
       "type": "string",
       "description": "Only search matching paths, e.g. \"*.py\" or \"src/*\"."
+     },
+     "path": {
+      "type": "string",
+      "description": "Only search this file or folder, e.g. \"src\" or \"build/app.min.js\". A file named here is searched whatever its size; without it, files over 512 KB are left out and the result names them."
      },
      "context": {
       "type": "number",

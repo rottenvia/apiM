@@ -37,7 +37,7 @@ The same things as the web app, with the same look:
 - Tools on demand and a catalog of skills, both described below: a request carries about a third of what it did, and plugins can be added, by you or by the assistant, to one chat or to all
 - A problem report (Settings, Reports) that sorts what went wrong by likely cause: the app first (crashes, frozen frames), then this PC, the provider, and a model's slips only when the same one repeats
 - A theme wall of its own: deep, tinted grounds with one vivid accent each, and the editor classics on darker grounds than the web's
-- A terminal mode: `apim --ask "your question"` (add `--auto` to let it run commands, `--dir FOLDER` to pick the folder, `--note "text"` to hand the reply a "btw" after its first step, `--think` to print its thinking)
+- A terminal mode: `apim --ask "your question"` (add `--auto` to let it run commands, `--dir FOLDER` to pick the folder, `--note "text"` to hand the reply a "btw" after its first step, `--think` to print its thinking, every line of it marked `~`)
 
 The browser tool drives a Chromium-family browser already on the PC (Edge, Chrome, Chromium, Brave or Thorium, or the one `APIM_BROWSER_PATH` names) with a throwaway profile. Nothing is bundled or downloaded.
 
@@ -108,6 +108,19 @@ Three more, found by running the same long task before and after:
 A reply the app was closed under (or that died with it) came back with its steps and no word that it had stopped: no Resume. A reply still holding the transcript it was being written from is now read as unfinished, and Resume carries on from its last saved step.
 
 A plan with every step done is cleared when the next message is sent: it stood over the new reply as if it were its plan, and was sent to the model with it.
+
+## A long reply that stopped
+
+Found in one real reply: 160 rounds of work in a sandbox, 48 minutes, $0.27, stopped with two of six plan steps done and no visible way on.
+
+- **Resume was out of sight.** "This reply stopped before it finished", with its Resume button, was drawn above the reply's steps: over two hundred of them. At the bottom, where the reader is, there was one grey line. The panel is now under the reply. (The web still draws it above.)
+- **The ceiling on rounds follows the money.** A reply gets 64 rounds, and 32 more up to three times while it is getting somewhere (a plan step done, or three files changed, since the last check): 160 at most. That ceiling is there for the money, and 160 rounds of a cheap model cost a quarter of a dollar. Past it a reply that is still getting somewhere now runs on: up to the spending limit when one is set in Settings, else while it has cost under $1 (`stall::should_run_on`). A model whose price is not known stays at 160. One plan step that takes 120 rounds still pauses the reply and says so: that is the check for work that goes in circles.
+- **"Treat it as invented" on real work.** The closing text is held against the tools that ran. Running a command only counted for `run_command`, so a reply that did everything in the sandbox was told its results were invented. `sandbox_run` counts, and a shell counts as having read and written files.
+- **A search that said "No matches" for text that was there.** `search_files` left out files over 512 KB without a word, and did not read the `path` a model naturally passes. The result now names the files it left out; `path` keeps the search to one file or folder, and a file named there is searched whatever its size. A match inside a very long line (minified or packed code) comes back with the text around it, one entry per match: it used to show the line's first 400 characters, wherever the match was.
+- **Sandbox steps said nothing.** A row read "Ran in sandbox …0-kb-3-line && python3 - <<'EOF' · Sandbox command finished". It now shows the reason the command was given with, and the last line the command printed.
+- **Thinking typed as the answer.** GLM does not take its thinking back the way DeepSeek does, so the end of each thought rode back to it as the opening words of its own earlier turns. Shown a hundred turns that open with a thought, it began to think in its replies: 5,000 characters of "Wait… Hmm… Actually…" as answer text, 373 in the thought box. OpenRouter passes a `reasoning` field on to GLM (seen on Relace: a replayed thought is counted in the next prompt), so the end of each thought now rides there and the words stay words. Same size, same cost. Other families keep the old way until the same is seen for them; an endpoint that rejects the field falls back by itself.
+
+The workspace panel's title is gone: five buttons left it 26 pixels, and it read "W…".
 
 ## Checking the tools
 
