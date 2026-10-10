@@ -513,14 +513,14 @@ fn report(ran: &Ran) -> Output {
         parts.push(format!("\nSTATUS: could not run - {err}"));
         (false, format!("Could not run: {err}"))
     } else if ran.timed_out {
-        parts.push("\nSTATUS: timed out and was stopped after the time limit. If this is a server/watcher use start_process; if it waits for input add a non-interactive flag (-y/--yes/--no-input); if it is genuinely slow pass a larger timeout_ms.".to_string());
+        parts.push("\nSTATUS: timed out and was stopped after the time limit. If this is a server/watcher use start_process; if it waits for input add a non-interactive flag (-y/--yes/--no-input); if it is genuinely slow pass a larger timeout_ms. What a program had not flushed is lost when it is stopped: have a long job write to a file, and read the file.".to_string());
         (false, format!("Timed out: {}", ran.display))
     } else if ran.code == Some(0) {
-        parts.push("\nSTATUS: ok (exit 0)".to_string());
+        parts.push(format!("\nSTATUS: ok (exit 0){}", crate::sandbox::run::took(ran.took)));
         (true, format!("Ran: {}", ran.display))
     } else {
         let code = ran.code.map_or("unknown".to_string(), |c| c.to_string());
-        parts.push(format!("\nSTATUS: failed (exit {code}). Read Errors/Output below, fix the actual cause, then re-run. Do not retry the identical command."));
+        parts.push(format!("\nSTATUS: failed (exit {code}){}. Read Errors/Output below, fix the actual cause, then re-run. Do not retry the identical command.", crate::sandbox::run::took(ran.took)));
         (false, match telling_line(&ran.out) {
             Some(why) => format!("Exit {code}: {why}"),
             None => format!("Exit {code}"),

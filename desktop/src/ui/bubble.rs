@@ -195,6 +195,18 @@ fn action_btn(ui: &mut Ui, icon: Icon, label: &str, tip: &str, height: f32, dang
     if tip.is_empty() { response } else { response.on_hover_text(tip) }
 }
 
+/// What the user typed, without the note that hands a large attached file to the model (its size, its first
+/// lines, which tool reads the rest): the file's chip says it is there. Only notes that end in a fixed sentence
+/// are taken off. A small file shown whole stays, since nothing marks where it ends and the words begin.
+fn without_file_notes(text: &str) -> &str {
+    let mut rest = text;
+    while rest.starts_with("Attached file: ") && rest.lines().next().is_some_and(|line| line.contains("too large to show whole")) {
+        let Some(end) = ["or process it with a script.", "run a script against the file."].iter().filter_map(|last| rest.find(last).map(|at| at + last.len())).min() else { break };
+        rest = rest[end..].trim_start_matches(['\n', '\r']);
+    }
+    rest
+}
+
 fn user(ui: &mut Ui, msg: &Message, env: &mut Env) {
     let p = p();
     const PAD: egui::Vec2 = vec2(16.0, 10.0);
@@ -203,7 +215,7 @@ fn user(ui: &mut Ui, msg: &Message, env: &mut Env) {
     let editing = env.editing.as_ref().is_some_and(|(id, _)| *id == msg.id);
     // Blank lines around a question are not part of it (older chats kept two in front of one sent with a picture).
     let whole = msg.text();
-    let body = whole.trim_matches(['\n', '\r']);
+    let body = if msg.attachments.is_empty() { &whole } else { without_file_notes(&whole) }.trim_matches(['\n', '\r']);
 
     let font = theme::font(15.0, W::Regular);
     let job_of = |text: &str| {
@@ -1043,12 +1055,15 @@ fn meta_row(ui: &mut Ui, msg: &Message, env: &Env, sources_open: &mut bool) -> b
         let context: u64 = msg.other.get("contextChars").and_then(|v| v.as_u64()).unwrap_or_else(|| msg.context_breakdown.iter().map(|b| b.chars).sum());
         if context > 0 {
             let k = |n: u64| if n >= 1000 { format!("{:.0}k", n as f64 / 1000.0) } else { n.to_string() };
-            let mut tip = "Context sent with the final request".to_string();
+            // Tokens where the provider counted them, the number the ring by the message box shows. This read
+            // "~352k ctx" beside a ring at 15% of a million: it was the count of characters.
+            let tokens = msg.usage.context;
+            let mut tip = if tokens > 0 { format!("Context sent with the final request: {} tokens", chat::thousands(tokens)) } else { "Context sent with the final request, in characters".to_string() };
             if !msg.context_breakdown.is_empty() {
-                tip += ":";
+                tip += if tokens > 0 { ". By part, in characters:" } else { ":" };
                 msg.context_breakdown.iter().for_each(|b| tip += &format!("\n{} {}", b.label, k(b.chars)));
             }
-            with_icon(ui, icons::LINES, if context >= 1000 { format!("~{} ctx", k(context)) } else { format!("{context} ctx") }, tip);
+            with_icon(ui, icons::LINES, if tokens > 0 { format!("~{} ctx", k(tokens)) } else { format!("~{} chars", k(context)) }, tip);
         }
         let ending = msg.raw_ending.as_ref();
         let count = |key: &str| ending.and_then(|e| e[key].as_u64()).unwrap_or(0);
@@ -1056,7 +1071,8 @@ fn meta_row(ui: &mut Ui, msg: &Message, env: &Env, sources_open: &mut bool) -> b
         if msg.finish.is_some() || continued > 0 || stalls >= 2 {
             // The dot is a piece of its own, midway between its neighbours: written into the word it leaned on it.
             word(ui, "·", W::Regular);
-            let mut text = msg.finish.as_deref().unwrap_or("cut").to_string();
+            // A reply stopped between two steps ended its last round on "tool_calls": true, and no use to a reader.
+            let mut text = if msg.incomplete && msg.finish.as_deref() == Some("tool_calls") { "unfinished" } else { msg.finish.as_deref().unwrap_or("cut") }.to_string();
             if continued > 0 {
                 text += &format!(" +{continued} cont");
             }
@@ -1602,6 +1618,10 @@ mod tests {
         assert_eq!(describe("run_command", r#"{"command":"cargo","args":["test","-q"]}"#).target.as_deref(), Some("cargo test -q"));
         assert_eq!(describe("sandbox_run", r#"{"command":"cd /ws/a && python3 - <<'EOF'\nprint(1)\nEOF","reason":"Count the lines"}"#).target.as_deref(), Some("Count the lines"));
         assert_eq!(describe("sandbox_run", r#"{"command":"ls"}"#).target.as_deref(), Some("ls"));
+        // The note for a large attached file is the model's; the bubble keeps the user's words.
+        let note = "Attached file: uploads/a.txt (592.0 KB, 3 lines, 606,231 characters) — saved in the workspace; too large to show whole.\nFirst 3 lines:\n```txt\nx\n\ny\n```\nRead more with read_file path=\"uploads/a.txt\" start_line=… end_line=…, find things with search_files, or process it with a script.";
+        assert_eq!(without_file_notes(&format!("{note}\n\n{note}\n\nfix it\n\nplease")), "fix it\n\nplease");
+        assert_eq!((without_file_notes(note), without_file_notes("Attached file: a.rs\n```rs\nfn main(){}\n```\n\nwhy")), ("", "Attached file: a.rs\n```rs\nfn main(){}\n```\n\nwhy"));
         assert_eq!(describe("fetch_url", r#"{"url":"https://example.com/a"}"#).target.as_deref(), Some("example.com/a"));
         let search = describe("web_search", r#"{"query":"rust egui"}"#);
         assert_eq!((search.target.as_deref(), search.mono), (Some("rust egui"), false));

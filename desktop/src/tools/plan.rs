@@ -59,7 +59,7 @@ pub fn make_plan(ctx: &Ctx, args: &Value) -> Output {
         })
         .collect();
     let plan = Plan { goal: goal.to_string(), steps };
-    let text = format!("{}\nWork it step by step. Mark progress with update_plan in the same turn as your next real tool call.", format_plan(&plan));
+    let text = format!("{}\nWork it step by step. Mark progress with update_plan in the same turn as your next real tool call. Before the first step that builds something, look for what already exists for this exact problem (a tool, a library, a write-up) and try that first.", format_plan(&plan));
     let summary = format!("Plan: {} steps", plan.steps.len());
     chat.plan = Some(plan);
     chat.finish_bounced = false;

@@ -240,6 +240,11 @@ pub fn step_budget_nudge(due: &StepDue) -> String {
     )
 }
 
+/// Asked with every checkpoint, after the web's own questions. A reply spent thirty rounds turning one language
+/// into another by hand before it fetched that language's interpreter, wrote a tokenizer a parser already did, and
+/// looked for a published tool at round 119; a dozen of its runs ended at a time limit with nothing printed.
+pub const STEP_BACK: &str = " Two more things to check. Are you building by hand something that exists (an interpreter, a parser, a formatter, a published tool for this exact problem)? Look for it now. And how long does one experiment take? If a run takes over a minute or ends at a time limit, make it small and bounded before you go on.";
+
 /// What the user is shown when the run pauses at the last checkpoint.
 pub fn step_budget_user_note(due: &StepDue) -> String {
     format!("Paused: step {} (\"{}\") ran {} tool rounds ({} min) through {} checkpoints without being completed. Read where it got to above, then press Resume to let it carry on, or tell it which way to go.", due.id, head(&due.text, 120), due.rounds, due.minutes, due.level)

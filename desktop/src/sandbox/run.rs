@@ -138,6 +138,7 @@ pub async fn run_command(wsl: &Path, workspace_id: &str, workspace_win_dir: &Pat
     };
     let (inv, stdin) = wrap_for_sandbox(&sb.distro, &sb.display, workspace_id, &workspace_win_dir.to_string_lossy(), script, &[]);
     let limit = timeout_ms.unwrap_or(SANDBOX_RUN_MS).max(1_000).min(SANDBOX_MAX_MS);
+    let started = std::time::Instant::now();
 
     let mut cmd = Command::new(wsl);
     cmd.args(&inv.args).stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
@@ -171,9 +172,11 @@ pub async fn run_command(wsl: &Path, workspace_id: &str, workspace_win_dir: &Pat
         return RunResult {
             ok: false,
             content: format!(
-                "The sandbox command was stopped after {}s.\n{}\nIf it is a server or watcher, start it in the background instead.",
+                "The sandbox command was stopped after {}s.\n{}\n{}If it is a server or watcher, start it in the background instead.",
                 (limit as f64 / 1000.0).round() as u64,
-                or_no_output(&trimmed)
+                or_no_output(&trimmed),
+                // A model waited out a dozen of these, five minutes once, before it saw why nothing came back.
+                if trimmed.trim().is_empty() { "Nothing it printed reached here: a program writing to a pipe holds its output in a buffer, and being stopped loses it. Run it bounded and line-buffered (timeout 60 stdbuf -oL …), or writing to a file you then read (… > out.log 2>&1). " } else { "" }
             ),
             summary: "Sandbox command timed out".into(),
         };
@@ -190,7 +193,7 @@ pub async fn run_command(wsl: &Path, workspace_id: &str, workspace_win_dir: &Pat
     let last: Option<String> = trimmed.lines().rev().map(str::trim).find(|line| !line.is_empty() && *line != "…(truncated)").map(|line| line.chars().take(100).collect());
     RunResult {
         ok: code == Some(0),
-        content: format!("[sandbox {}] exit {code_text}\n{}", sb.distro, or_no_output(&trimmed)),
+        content: format!("[sandbox {}] exit {code_text}{}\n{}", sb.distro, took(started.elapsed()), or_no_output(&trimmed)),
         summary: match (code == Some(0), last) {
             (true, Some(last)) => last,
             (true, None) => "Sandbox command finished".into(),
@@ -198,6 +201,12 @@ pub async fn run_command(wsl: &Path, workspace_id: &str, workspace_win_dir: &Pat
             (false, None) => format!("Sandbox exit {code_text}"),
         },
     }
+}
+
+/// " · took 42s" for a run of ten seconds or more: the model has no clock, and how long one experiment takes
+/// decides how many it can afford.
+pub fn took(elapsed: Duration) -> String {
+    if elapsed.as_secs() >= 10 { format!(" · took {}s", elapsed.as_secs()) } else { String::new() }
 }
 
 /// Starts a long-running command (a server, a watcher, a window) in the sandbox and hands back its process with
@@ -328,6 +337,7 @@ mod tests {
         assert!(ok.ok, "{}", ok.content);
         assert_eq!(ok.content, "[sandbox apim-sandbox] exit 0\nhello from fake\n");
         assert_eq!(ok.summary, "hello from fake");
+        assert_eq!((took(Duration::from_secs(9)), took(Duration::from_secs(124))), (String::new(), " · took 124s".to_string()));
         let failed = run_command(&wsl, "chat-1", &dir, "FAIL now", None).await;
         assert!(!failed.ok);
         assert!(failed.summary.starts_with("Sandbox exit 3"), "{}", failed.summary);
@@ -336,7 +346,7 @@ mod tests {
         assert!(cannot.content.ends_with(WINDOWS_FALLBACK));
         let slow = run_command(&wsl, "chat-1", &dir, "SLEEP", Some(1_000)).await;
         assert_eq!(slow.summary, "Sandbox command timed out");
-        assert!(slow.content.starts_with("The sandbox command was stopped after 1s.\n(no output)\nIf it is a server"));
+        assert!(slow.content.starts_with("The sandbox command was stopped after 1s.\n(no output)\nNothing it printed reached here") && slow.content.ends_with("start it in the background instead."));
         let big = run_command(&wsl, "chat-1", &dir, "BIG", None).await;
         assert!(big.content.ends_with("\n…(truncated)"));
         let shot = screenshot(&wsl, "chat-1", &dir, Some("../gui.png"), 1, false, Some(0.0)).await.unwrap();
