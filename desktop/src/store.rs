@@ -602,7 +602,9 @@ fn utf16_len(text: &str) -> usize {
 impl From<wire::Msg> for Message {
     fn from(w: wire::Msg) -> Message {
         let reasoning = w.reasoning_content.unwrap_or_default();
-        let incomplete = w.incomplete;
+        // A reply still holding the transcript it was being written from never ended: the app was closed or died under
+        // it, and nothing marked it. Unmarked, it came back with no word that it had stopped and no Resume.
+        let incomplete = w.incomplete || (w.role == Role::Assistant && w.other.contains_key("resumeState"));
         let mut order: Vec<String> = Vec::new();
         let mut tools: std::collections::HashMap<String, ToolEvent> = w
             .tool_events
@@ -1115,6 +1117,17 @@ mod tests {
             let files = crate::snapshots::list_files(&conv.workspace()).len();
             eprintln!("    workspace: {files} files listed in {:?}", t.elapsed());
         }
+    }
+
+    #[test]
+    fn a_reply_the_app_died_under_reads_as_unfinished() {
+        let stored = |extra: serde_json::Value| {
+            let mut m = serde_json::json!({ "id": "a1", "role": "assistant", "content": "", "toolEvents": [{ "id": "t1", "name": "write_file", "args": "{}", "ok": true, "summary": "Wrote n01.txt" }], "timeline": [{ "kind": "tool", "id": "t1" }] });
+            m.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            Message::from_web(&m)
+        };
+        assert!(stored(serde_json::json!({ "resumeState": { "messages": [{ "role": "user", "content": "go" }], "toolRounds": 1, "continuations": 0 } })).incomplete);
+        assert!(!stored(serde_json::json!({})).incomplete);
     }
 
     #[test]

@@ -64,7 +64,11 @@ pub fn normalize_openai_base(url: &str) -> String {
 }
 
 pub fn resolve_target(model_id: &str, s: &Settings) -> Result<Target, String> {
-    let model = models::resolve(model_id, &s.custom_models);
+    let mut model = models::resolve(model_id, &s.custom_models);
+    // The endpoints picked for it may allow less output than the model's page says.
+    if let Some((_, Some(cap))) = CHOSEN.lock().unwrap().get(&model.id) {
+        model.max_output_tokens = model.max_output_tokens.min(*cap);
+    }
     let (style, api_key, base_url, api_model) = match model.provider {
         ProviderId::Openrouter => {
             let key = s.openrouter();
@@ -103,6 +107,8 @@ struct Endpoint {
     rates: (f64, f64, f64),
     /// Tokens a second, the middle of the last half hour; 0 when not known.
     tps: f64,
+    /// The most it writes in one answer; 0 when not listed.
+    max_output: u64,
 }
 
 /// From this speed up an endpoint is picked on price alone.
@@ -123,44 +129,67 @@ impl Endpoint {
 /// Where to send a model's requests, the endpoint to use first: the cheapest that is fast enough, or one a little dearer
 /// and much faster. The next cheapest follow it, for when it is down. Left out: endpoints that are down or kept failing
 /// today, ones that cannot call tools, and ones with a cut-down context window.
-fn best_endpoints(listing: &Value) -> Vec<Endpoint> {
+fn best_endpoints(listing: &Value, only: Option<&str>) -> Vec<Endpoint> {
     let all = listing["data"]["endpoints"].as_array().map_or(&[][..], Vec::as_slice);
     let widest = all.iter().filter_map(|e| e["context_length"].as_u64()).max().unwrap_or(0);
     let dollars = |per_token: &Value| per_token.as_str().and_then(|s| s.parse::<f64>().ok()).map(|p| p * 1e6);
     let mut usable: Vec<Endpoint> = all
         .iter()
-        .filter(|e| e["status"] == 0 && e["supported_parameters"].as_array().is_some_and(|p| p.iter().any(|x| x == "tools")))
-        .filter(|e| e["context_length"].as_u64().unwrap_or(0) >= widest / 10 * 9 && e["uptime_last_1d"].as_f64().unwrap_or(100.0) >= 98.0)
+        .filter(|e| match only {
+            Some(tag) => e["tag"] == tag,
+            None => e["status"] == 0 && e["supported_parameters"].as_array().is_some_and(|p| p.iter().any(|x| x == "tools")) && e["context_length"].as_u64().unwrap_or(0) >= widest / 10 * 9 && e["uptime_last_1d"].as_f64().unwrap_or(100.0) >= 98.0,
+        })
         .filter_map(|e| {
             let input = dollars(&e["pricing"]["prompt"])?;
             let rates = (input, dollars(&e["pricing"]["input_cache_read"]).unwrap_or(input), dollars(&e["pricing"]["completion"]).unwrap_or(0.0));
-            Some(Endpoint { tag: e["tag"].as_str()?.to_string(), name: e["provider_name"].as_str().unwrap_or("").to_string(), rates, tps: e["throughput_last_30m"]["p50"].as_f64().unwrap_or(0.0) })
+            Some(Endpoint { tag: e["tag"].as_str()?.to_string(), name: e["provider_name"].as_str().unwrap_or("").to_string(), rates, tps: e["throughput_last_30m"]["p50"].as_f64().unwrap_or(0.0), max_output: e["max_completion_tokens"].as_u64().unwrap_or(0) })
         })
         .collect();
     usable.sort_by(|a, b| a.price().total_cmp(&b.price()));
     usable.dedup_by(|a, b| a.tag == b.tag);
+    if only.is_some() {
+        return usable;
+    }
     let Some(cheap) = usable.iter().find(|e| e.tps >= GOOD_TPS).or(usable.first()).cloned() else { return Vec::new() };
     let first = usable.iter().filter(|e| e.price() <= cheap.price() * DEARER && e.tps >= cheap.tps * FASTER).max_by(|a, b| a.tps.total_cmp(&b.tps)).cloned().unwrap_or(cheap);
     let spares: Vec<Endpoint> = usable.into_iter().filter(|e| e.tag != first.tag && e.tps >= GOOD_TPS).take(2).collect();
     std::iter::once(first).chain(spares).collect()
 }
 
-/// The endpoints picked for each model since the app started.
-static CHOSEN: LazyLock<Mutex<HashMap<String, Value>>> = LazyLock::new(Default::default);
+/// The endpoints picked for each model since the app started, and the most output all of them allow.
+static CHOSEN: LazyLock<Mutex<HashMap<String, (Value, Option<u32>)>>> = LazyLock::new(Default::default);
 
 /// Picks where an OpenRouter model's requests go, from OpenRouter's own list of who serves it at what price and speed.
 /// Once per model while the app runs: a choice that moved between replies would lose the provider's cache each time.
-/// The first time it says what it picked. Free and other `:variant` models are left to OpenRouter's own routing.
+/// It says what it picked when that is not what it picked last (`endpoints.json` in the data folder remembers that and its prices): said on
+/// every start, the line stood in the first reply of every session. Free and other `:variant` models are left to
+/// OpenRouter's own routing.
 pub async fn choose_endpoint(client: &reqwest::Client, target: &Target) -> Option<String> {
     if target.provider != ProviderId::Openrouter || target.api_model.contains(':') || CHOSEN.lock().unwrap().contains_key(&target.model.id) {
         return None;
     }
     let listing: Value = client.get(format!("{}/models/{}/endpoints", target.base_url, target.api_model)).bearer_auth(&target.api_key).timeout(Duration::from_secs(8)).send().await.ok()?.json().await.ok()?;
-    let order = best_endpoints(&listing);
+    // `APIM_ENDPOINT=streamlake/fp8` keeps every OpenRouter model to the endpoint with that tag, when it serves the model:
+    // for comparing endpoints, and for someone who trusts one.
+    let named = std::env::var("APIM_ENDPOINT").ok().filter(|tag| !tag.trim().is_empty());
+    let order = Some(best_endpoints(&listing, named.as_deref().map(str::trim))).filter(|named| !named.is_empty()).unwrap_or_else(|| best_endpoints(&listing, None));
     let first = order.first().filter(|e| e.price() > 0.0)?;
     models::set_endpoint_rates(&target.model.id, first.rates);
     let tags: Vec<&str> = order.iter().map(|e| e.tag.as_str()).collect();
-    CHOSEN.lock().unwrap().insert(target.model.id.clone(), json!({ "order": tags, "allow_fallbacks": false }));
+    // An endpoint asked for more output than it allows is dropped by OpenRouter before the request is tried ("No endpoints
+    // found"): one of them allows 128,000 tokens where the model's page says 131,072. The request asks for what all of them allow.
+    let cap = order.iter().map(|e| e.max_output).filter(|max| *max > 0).min().map(|max| max.min(u32::MAX as u64) as u32);
+    CHOSEN.lock().unwrap().insert(target.model.id.clone(), (json!({ "order": tags, "allow_fallbacks": false }), cap));
+    let remembered = models::endpoints_file();
+    let mut last: Map<String, Value> = std::fs::read(&remembered).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
+    let now = json!({ "tag": first.tag, "rates": [first.rates.0, first.rates.1, first.rates.2] });
+    let before = last.insert(target.model.id.clone(), now.clone());
+    if before.as_ref() != Some(&now) {
+        let _ = std::fs::write(&remembered, Value::Object(last).to_string());
+    }
+    if before.is_some_and(|before| before["tag"] == now["tag"]) {
+        return None;
+    }
     let usd = |v: f64| format!("{v:.4}").trim_end_matches('0').trim_end_matches('.').to_string();
     let speed = if first.tps > 0.0 { format!(", {} tokens a second", first.tps.round()) } else { String::new() };
     Some(format!("{} runs on {} ({}): ${} in, ${} cached, ${} out per million tokens{speed}", target.model.label, first.name, first.tag, usd(first.rates.0), usd(first.rates.1), usd(first.rates.2)))
@@ -170,7 +199,7 @@ pub async fn choose_endpoint(client: &reqwest::Client, target: &Target) -> Optio
 /// catalog models (the list could not be read). `allow_fallbacks: false` keeps every token on known prices;
 /// customs whose list could not be read and the free lane auto-route.
 pub fn openrouter_provider_for(model_id: &str) -> Option<Value> {
-    if let Some(chosen) = CHOSEN.lock().unwrap().get(model_id) {
+    if let Some((chosen, _)) = CHOSEN.lock().unwrap().get(model_id) {
         return Some(chosen.clone());
     }
     let tag = match model_id {
@@ -534,7 +563,8 @@ mod tests {
     #[test]
     fn the_cheapest_fast_enough_endpoint_is_picked_unless_a_little_more_buys_much_more_speed() {
         let endpoint = |tag: &str, (input, cached, output): (&str, &str, &str), tps: u32| json!({ "tag": tag, "provider_name": tag, "status": 0, "context_length": 1_048_576, "uptime_last_1d": 100, "supported_parameters": ["tools"], "pricing": { "prompt": input, "input_cache_read": cached, "completion": output }, "throughput_last_30m": { "p50": tps } });
-        let picked = |endpoints: Vec<Value>| best_endpoints(&json!({ "data": { "endpoints": endpoints } })).into_iter().map(|e| e.tag).collect::<Vec<_>>();
+        let listing = |endpoints: Vec<Value>| json!({ "data": { "endpoints": endpoints } });
+        let picked = |endpoints: Vec<Value>| best_endpoints(&listing(endpoints), None).into_iter().map(|e| e.tag).collect::<Vec<_>>();
         // Prices and speeds as OpenRouter listed them for one model: dollars per token.
         let slow = endpoint("open-inference/fp4", ("0.000000044", "0.00000001", "0.00000045"), 25);
         let relace = endpoint("relace", ("0.00000004", "0.0000000125", "0.0000005"), 67);
@@ -551,7 +581,9 @@ mod tests {
         // The same list with the fast one's cached price cut: a tenth dearer than the cheapest, twice the speed.
         let mut sail_cut = sail;
         sail_cut["pricing"]["input_cache_read"] = json!("0.0000000125");
-        assert_eq!(picked(vec![sail_cut, streamlake, slow.clone(), relace])[0], "sail-research/us");
+        assert_eq!(picked(vec![sail_cut, streamlake.clone(), slow.clone(), relace])[0], "sail-research/us");
+        // Named by the user: that one and no other, slow or not.
+        assert_eq!(best_endpoints(&listing(vec![slow.clone(), streamlake.clone()]), Some("open-inference/fp4")).len(), 1);
         // Nothing fast enough: the cheapest. Nothing at all: no pin.
         assert_eq!(picked(vec![slow]), ["open-inference/fp4"]);
         assert!(picked(Vec::new()).is_empty());

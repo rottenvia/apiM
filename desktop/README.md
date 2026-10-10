@@ -57,7 +57,14 @@ OpenRouter serves one model from many endpoints, at different prices and speeds 
 - **Or one a little dearer and much faster**: up to a quarter more money for at least one and a half times the speed.
 - Never one that is down, that failed more than 2% of the last day, that cannot call tools, or that has a smaller context window than the others.
 
-The next two cheapest fast-enough endpoints are kept as spares for when the first is down; nothing else is used, so every token stays on a known price. The pick is made once per model while the app runs and said in the reply that made it: a pick that moved between replies would lose the provider's cache each time. Cost figures and the spending limit use the picked endpoint's prices. Free models and other `:variant` ids are left to OpenRouter's own routing. The three numbers (`GOOD_TPS`, `FASTER`, `DEARER`) are at the top of the code that picks.
+The next two cheapest fast-enough endpoints are kept as spares for when the first is down; nothing else is used, so every token stays on a known price. The pick is made once per model while the app runs: a pick that moved between replies would lose the provider's cache each time. It is said in a reply only when it is not the one picked last time (`endpoints.json` in the data folder remembers the pick and its prices). Cost figures and the spending limit use the picked endpoint's prices, in every session. Free models and other `:variant` ids are left to OpenRouter's own routing. The three numbers (`GOOD_TPS`, `FASTER`, `DEARER`) are at the top of the code that picks.
+
+Two things the list does not say outright, both met on the first day:
+
+- An endpoint may allow less output than the model's page says (128,000 tokens where the page says 131,072). Asked for more, OpenRouter drops the endpoint before trying it and answers "No endpoints found". A request asks for no more than every picked endpoint allows, and if the picked ones still cannot take a request, the pin is dropped for that reply and OpenRouter routes it.
+- What an endpoint really costs depends on how well it caches, which is not listed. Measured on one 24-step task with GLM 5.3 Flash: Relace $0.028, Sail Research $0.042, StreamLake $0.044, each caching 70% to 85% of the input. The pick (Relace) was the cheapest of the three in fact as well as on paper.
+
+`APIM_ENDPOINT=streamlake/fp8` keeps every OpenRouter model to the endpoint with that tag, when it serves the model: for comparing endpoints, or for keeping to one you trust.
 
 ## Adding a model from a link
 
@@ -89,6 +96,14 @@ A read that did not fit says where to read on. A model that asks again from the 
 And two that cost disk, not tokens. An unfinished reply keeps its transcript so Resume can carry on: it held every clip sent with it (a 40 MB video, written again with every save), and replies that could no longer be resumed kept theirs for good. A clip is now left out once it has been sent, and sending a message drops the transcripts of every earlier reply. A reply in progress is saved every five seconds, or twenty times as long as the last save took, whichever is longer: a chat of hundreds of megabytes was written out whole every five seconds.
 
 A picture a tool shows the model (`view_image`, a screenshot) rides on the next request and no other. It used to be cut from that one too, with every picture that had "already ridden", so the model was never sent it.
+
+Three more, found by running the same long task before and after:
+
+- **A short answer asked again.** A reply that ended in under forty characters after its steps ("Done.", the one word that was asked for) was read as "the model wrote nothing", asked again twice, a whole request each time, and then marked as stopped mid-task. A short answer is now an answer; only a round with no words at all is picked up.
+- **"Are you guessing?" after the work.** A run of eight steps with no plan and no question is reminded to ask before building on a guess. The reminder waited until the model had stopped, which is when the work is done: it cost one more request on every long reply, and the model answered it under its answer ("nothing is ambiguous"). It now rides a request the run makes anyway.
+- **Half price on screen.** In DeepSeek's off-peak hours the cost shown was halved for every model, OpenRouter's too, where nothing is discounted. It is halved for DeepSeek's own API only.
+
+A reply the app was closed under (or that died with it) came back with its steps and no word that it had stopped: no Resume. A reply still holding the transcript it was being written from is now read as unfinished, and Resume carries on from its last saved step.
 
 A plan with every step done is cleared when the next message is sent: it stood over the new reply as if it were its plan, and was sent to the model with it.
 
@@ -197,4 +212,4 @@ Three things are written to the problem report so that slowness nobody was measu
 
 `APIM_SHOT=out.png` makes the program draw one state off screen, save a picture of it and quit. `APIM_SHOT_STATE` names the state as a comma-separated list (`settings`, `tab4`, `wait-row`, `stalled`, `plugins`, `plugin-search` with `APIM_SHOT_QUERY`, `plugin-add`, `ask-skill`, `ask-look`, `btw`, `theme-midnight`, `no-sidebar`, `up-330` to turn the wheel back that many points, `select-300-200-600-260` to drag between two points and press Ctrl+C (what it copies is printed, and kept from the real clipboard), `maximized,f11` for full screen, and more in `ui/mod.rs`), `APIM_SHOT_CHAT` picks the chat by a part of its title, and `APIM_SHOT_SIZE=1400x900` sets the window.
 
-`APIM_SHOT_STATE=send` with `APIM_SHOT_DRAFT="..."` really sends that message and takes the picture when the reply has ended. Point `APIM_DATA_DIR` at a spare folder first, so the chat it makes is not one of yours.
+`APIM_SHOT_STATE=send` with `APIM_SHOT_DRAFT="..."` really sends that message and takes the picture when the reply (or the compaction, for `/compact`) has ended. From Git Bash a draft that starts with `/` is rewritten into a path (`/compact` arrives as `C:/Program Files/Git/compact` and is sent as a message): set `MSYS2_ENV_CONV_EXCL=APIM_SHOT_DRAFT` first. Point `APIM_DATA_DIR` at a spare folder first, so the chat it makes is not one of yours.

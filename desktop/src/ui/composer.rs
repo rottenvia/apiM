@@ -486,7 +486,7 @@ fn popovers(app: &mut App, ctx: &egui::Context) {
                             }
                         }
                     }
-                    if option(ui, "＋ Add any OpenRouter model…", false, Some(p.accent_light), &[("Paste an id in Settings → Model and it lands here.", 12.0, 20.0, p.text2, false)]) {
+                    if option(ui, "＋ Add any OpenRouter model…", false, Some(p.accent_light), &[("Paste its openrouter.ai link in the chat and ask to add it, or an id in Settings → Model.", 12.0, 20.0, p.text2, false)]) {
                         app.popover = Popover::None;
                         app.dialog = Dialog::Settings;
                         app.settings_ui.tab = 1;
@@ -705,6 +705,8 @@ fn context_panel(app: &mut App, ui: &mut egui::Ui) {
         ui.add_space(10.0);
         let blocked = if app.running_here() { Some("Compact is available once the reply finishes.") } else { crate::summary::compact_blocker(&app.conv) };
         match blocked {
+            // Right after a compaction "nothing new to compact" is true and beside the point: the line below says what it did.
+            Some(_) if app.compact_note.as_ref().is_some_and(|(done, _)| *done) => {}
             Some(why) => {
                 ui.label(small(why.into(), p.muted));
             }

@@ -535,11 +535,13 @@ fn over_budget(spend: &mut Budget, last_round_cost: f64, rounds: usize, emit: &E
 async fn run_inner(mut req: Request, emit: &Emitter, procs: Arc<Procs>) -> Result<Ending, String> {
     let resume = req.resume.take();
     let s = &req.settings;
-    let target = provider::resolve_target(&s.model, s)?;
-    // Which of OpenRouter's endpoints serves this model: picked once, said once.
+    let mut target = provider::resolve_target(&s.model, s)?;
+    // Which of OpenRouter's endpoints serves this model: picked once, and said when the pick is a new one.
     if let Some(picked) = provider::choose_endpoint(&provider::client(), &target).await {
         emit.send(Event::Notice(picked));
     }
+    // The pick can cap the output: read again with it.
+    target = provider::resolve_target(&s.model, s)?;
     // The in-app sidecar is started on demand, and its window checked, before the request goes out (chat/route.ts:822-841).
     if target.provider == ProviderId::Local && local::engine::is_managed_engine_url(&target.base_url) {
         local::engine::chat_ready().await?;
@@ -905,14 +907,6 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
             }
             let current = chat.lock().unwrap().plan.clone();
             let progress = current.as_ref().map(plan::progress);
-            if current.is_none() && !asked_early && tool_rounds >= 8 && !tools_used.iter().any(|tool| tool == "ask_user") {
-                // A long build with no plan and no question asked rests on an interpretation nobody confirmed. Said once.
-                asked_early = true;
-                messages.push(user(format!(
-                    "You are {tool_rounds} rounds in, you have not written a plan, and you have not asked anything. If any part of what you are building rests on a guess about what was wanted — the platform, the shape of the interface, what \"done\" means — call ask_user NOW, with concrete options. One question here is far cheaper than continuing in the wrong direction. If nothing is genuinely ambiguous, ignore this and carry on."
-                )));
-                continue;
-            }
             if let (Some(current), Some(p), false) = (&current, &progress, nudged_incomplete) {
                 let stuck = p.blocked > 0;
                 let untried = p.done == 0 && tool_rounds <= 2;
@@ -959,6 +953,9 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
             match revive::detect_premature_stop(&stop) {
                 // A cut think is not asked again where switching thinking off cannot be the cure.
                 Some(Premature::ThinkingCut) if qwen || force_no_thinking => halt = Some(Halt::Premature(Premature::ThinkingCut)),
+                // A short answer is an answer: "Done." after the work, or the one word that was asked for. Read as "nothing
+                // was written", it was asked again twice, a whole request each time, and then marked as stopped mid-task.
+                Some(Premature::EmptyAfterWork) if !content.trim().is_empty() => {}
                 Some(reason) if auto_revives < revive::MAX_AUTO_REVIVES => {
                     auto_revives += 1;
                     messages.push(user(revive::revive_instruction(reason, ran_without_tools)));
@@ -1177,6 +1174,15 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
         if current.as_ref().is_some_and(|p| !plan::progress(p).complete) && (rounds_since_plan_update >= plan::PLAN_STALE_AFTER_TOOL_ROUNDS || claimed) {
             harness.push(plan::build_stale_plan_nudge(rounds_since_plan_update, claimed));
         }
+        // A long build with no plan and no question asked rests on an interpretation nobody confirmed. Said once, on a
+        // request the run makes anyway. It used to wait until the model had stopped: the work was done by then, and it
+        // cost a whole extra round on every long reply to have the model answer "nothing is ambiguous" under its answer.
+        if current.is_none() && !asked_early && tool_rounds >= 8 && !tools_used.iter().any(|tool| tool == "ask_user") {
+            asked_early = true;
+            harness.push(format!(
+                "You are {tool_rounds} rounds in, you have not written a plan, and you have not asked anything. If any part of what you are building rests on a guess about what was wanted — the platform, the shape of the interface, what \"done\" means — call ask_user NOW, with concrete options. One question here is far cheaper than continuing in the wrong direction. If nothing is genuinely ambiguous, ignore this and carry on: do not answer it."
+            ));
+        }
         // One step that has run a long time gets a checkpoint, then another, then the run pauses for the user.
         let (watch, due) = plan::watch_step(step_watch.take(), current.as_ref(), tool_rounds, started.elapsed().as_millis() as u64);
         step_watch = watch;
@@ -1367,8 +1373,10 @@ async fn call_model(client: &reqwest::Client, target: &Target, body: &mut Map<St
         let detail = retry::extract_rejection_detail(&e.detail, 300);
         let said = detail.to_lowercase();
 
-        // The cheap pinned endpoint is rate limited: any other one beats no answer, for the rest of the run.
-        if status == 429 && body.remove("provider").is_some() {
+        // The cheap pinned endpoint is rate limited, or none of the pinned ones can take this request (OpenRouter drops an
+        // endpoint for a picture it cannot read, a window too small, more output than it allows): any other one beats
+        // no answer, for the rest of the run.
+        if (status == 429 || (status == 404 && said.contains("no endpoints found"))) && body.remove("provider").is_some() {
             lane.unpinned = true;
             emit.send(Event::Notice("This model's usual provider is busy, so OpenRouter picks another one for this reply. It can cost a little more.".into()));
             continue;
@@ -2028,6 +2036,14 @@ mod tests {
         // The second failure carried the warning in the result the model read before its third try.
         let read = sent[2]["messages"].as_array().unwrap().iter().rev().find(|m| m["role"] == "tool").unwrap()["content"].as_str().unwrap().to_string();
         assert!(read.contains("[Harness: this exact `read_file` call has now failed twice"), "{read}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_short_answer_after_tools_ends_the_reply() {
+        // One request for the step and one for the answer: a third would mean the answer was asked again.
+        let (text, end, notices, sent) = reply(vec![sse(&[calls("list_files", "{}")]), sse(&[says("Done.", Some("stop"))])], "none", None).await;
+        assert_eq!((text.as_str(), sent.len()), ("Done.", 2));
+        assert!(notices.is_empty() && !end.incomplete && end.stop_reason.is_none(), "{notices:?}");
     }
 
     #[tokio::test(flavor = "multi_thread")]

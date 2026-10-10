@@ -183,8 +183,19 @@ pub fn context_window(id: &str, customs: &[CustomModel]) -> u64 {
     }
 }
 
+/// Where the endpoint picked for each model, and what it charges, is remembered between sessions.
+pub fn endpoints_file() -> std::path::PathBuf {
+    crate::store::data_dir().join("endpoints.json")
+}
+
 /// What the endpoint picked for a model charges (`provider::choose_endpoint`): these come before the catalog's prices.
-static ENDPOINT_RATES: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, (f64, f64, f64)>>> = std::sync::LazyLock::new(Default::default);
+/// Read back from the last session's pick at the start: a session that had not sent a reply yet showed every earlier
+/// reply at the catalog's prices, and the same reply at the endpoint's once one was sent.
+static ENDPOINT_RATES: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, (f64, f64, f64)>>> = std::sync::LazyLock::new(|| {
+    let saved: serde_json::Value = if cfg!(test) { Default::default() } else { std::fs::read(endpoints_file()).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default() };
+    let rates = |entry: &serde_json::Value| Some((entry["rates"][0].as_f64()?, entry["rates"][1].as_f64()?, entry["rates"][2].as_f64()?));
+    std::sync::Mutex::new(saved.as_object().into_iter().flatten().filter_map(|(id, entry)| Some((id.clone(), rates(entry)?))).collect())
+});
 
 pub fn set_endpoint_rates(id: &str, rates: (f64, f64, f64)) {
     ENDPOINT_RATES.lock().unwrap().insert(id.to_string(), rates);
@@ -262,11 +273,12 @@ impl Usage {
         self.shown_cost(model_id, customs, false)
     }
 
-    /// What a reply is shown to have cost. In DeepSeek's off-peak hours input and output are
-    /// halved and cached input is not — for every model, exactly as the web app's `estimateCost` has it.
+    /// What a reply is shown to have cost. In DeepSeek's off-peak hours input and output are halved and cached
+    /// input is not, on DeepSeek's own API. The web app's `estimateCost` halves every model then, and so did
+    /// this: an OpenRouter reply read as half of what it was billed for those hours of the day.
     pub fn shown_cost(&self, model_id: &str, customs: &[CustomModel], off_peak: bool) -> Option<f64> {
         let (input, cached, output) = rates(model_id, customs)?;
-        let factor = if off_peak { 0.5 } else { 1.0 };
+        let factor = if off_peak && resolve(model_id, customs).provider == ProviderId::Deepseek { 0.5 } else { 1.0 };
         let miss = if self.cache_miss > 0 { self.cache_miss } else { self.prompt.saturating_sub(self.cache_hit) };
         Some((miss as f64 * input * factor + self.cache_hit as f64 * cached + self.completion as f64 * output * factor) / 1e6)
     }
@@ -303,7 +315,9 @@ mod tests {
         assert_eq!(context_window("custom:a/b", &customs), 200_000);
         let u = Usage { prompt: 1_000_000, completion: 1_000_000, ..Default::default() };
         assert_eq!(u.cost("custom:a/b", &customs), Some(18.0));
-        assert_eq!(u.shown_cost("custom:a/b", &customs, true), Some(9.0));
+        // Off-peak is DeepSeek's own discount: an OpenRouter model costs the same at any hour.
+        assert_eq!(u.shown_cost("custom:a/b", &customs, true), Some(18.0));
+        assert_eq!(u.shown_cost("deepseek-v4-flash", &[], true).map(|usd| (usd * 100.0).round()), u.cost("deepseek-v4-flash", &[]).map(|usd| (usd * 50.0).round()));
         // DeepSeek reports its cache hits twice over; the price follows the web app's reading of that.
         let wire = serde_json::json!({ "prompt_tokens": 1000, "completion_tokens": 100, "prompt_cache_hit_tokens": 600, "prompt_cache_miss_tokens": 400, "prompt_tokens_details": { "cached_tokens": 600 } });
         let u = Usage::from_wire(&wire);
