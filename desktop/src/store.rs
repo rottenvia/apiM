@@ -932,9 +932,16 @@ impl Conversation {
     pub fn delete(id: &str) {
         flush();
         let Some(meta) = Self::list().into_iter().find(|c| c.id == id) else { return };
-        let _ = std::fs::remove_dir_all(chats_dir().join(&meta.slug));
-        let _ = std::fs::remove_dir_all(data_dir().join("workspaces").join(&meta.slug));
-        let _ = std::fs::remove_dir_all(data_dir().join("state").join(&meta.slug));
+        // The chat leaves the list with its file. Its folders are cleared off the window's thread: a workspace
+        // can hold hundreds of megabytes, and the window stood still for 1.4 s while one was deleted.
+        // ponytail: a program closed in that second leaves what was not yet removed; sweep folders without a chat.json at start if that shows.
+        let folders = [chats_dir().join(&meta.slug), data_dir().join("workspaces").join(&meta.slug), data_dir().join("state").join(&meta.slug)];
+        let _ = std::fs::remove_file(folders[0].join("chat.json"));
+        std::thread::spawn(move || {
+            for folder in folders {
+                let _ = std::fs::remove_dir_all(folder);
+            }
+        });
     }
 
     fn own_folder(&self) -> &str {

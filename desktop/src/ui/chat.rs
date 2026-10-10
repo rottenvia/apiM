@@ -71,7 +71,7 @@ pub fn shimmer(ui: &egui::Ui, text: &str, size: f32) -> egui::text::LayoutJob {
         let format = egui::TextFormat { font_id: theme::font(size, W::Regular), color: dim.lerp_to_gamma(bright, near), line_height: Some(20.0), ..Default::default() };
         job.append(&ch.to_string(), 0.0, format);
     }
-    ui.ctx().request_repaint();
+    widgets::tick(ui);
     job
 }
 

@@ -211,8 +211,25 @@ pub fn list_files(ctx: &Ctx, args: &Value) -> Output {
 
 /// Reads a text file. Binary files are refused with their size, UTF-16 is decoded.
 pub fn read_text(path: &Path) -> Result<String, String> {
+    decode(path).map(|(text, _)| text)
+}
+
+/// For a file about to be changed and written back: one that is not UTF-8 is refused. Its other bytes come out
+/// of `read_text` as "\u{fffd}", and writing that back is what destroys a file in an older encoding.
+pub fn read_text_exact(path: &Path) -> Result<String, String> {
+    match decode(path)? {
+        (_, true) => Err(format!("{} is not UTF-8 text (it holds bytes in an older encoding), so changing it here would damage it. Change it with a script that reads and writes it in its own encoding.", path.file_name().unwrap_or(path.as_os_str()).to_string_lossy())),
+        (text, false) => Ok(text),
+    }
+}
+
+/// The text of a file, and whether bytes that are not UTF-8 had to be replaced to show it.
+fn decode(path: &Path) -> Result<(String, bool), String> {
     // The file's name, not where the workspace sits on the disk: the whole path filled the step's line and cut the reason off.
     let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
+    if path.is_dir() {
+        return Err(format!("{name} is a folder, not a file: list_files shows what is in it."));
+    }
     // A crash dump or a disk image is not text, and reading one whole to find that out would fill the memory.
     if let Some(size) = path.metadata().ok().map(|meta| meta.len()).filter(|size| *size > MAX_TEXT) {
         return Err(format!("{} is {}: too large to read as text. Take the part you need with a command, or inspect_binary if it is a program.", name, human(size)));
@@ -220,13 +237,24 @@ pub fn read_text(path: &Path) -> Result<String, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("Cannot read {name}: {e}"))?;
     if bytes.starts_with(&[0xFF, 0xFE]) {
         let units: Vec<u16> = bytes[2..].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-        return Ok(String::from_utf16_lossy(&units));
+        return Ok((String::from_utf16_lossy(&units), false));
     }
     if bytes.iter().take(8000).any(|&b| b == 0) {
-        return Err(format!("{} is a binary file ({}). read_file only reads text.", path.display(), human(bytes.len() as u64)));
+        return Err(format!("{name} is a binary file ({}). read_file only reads text.", human(bytes.len() as u64)));
     }
     let text = String::from_utf8_lossy(&bytes);
-    Ok(text.strip_prefix('\u{feff}').unwrap_or(&text).to_string())
+    Ok((text.strip_prefix('\u{feff}').unwrap_or(&text).to_string(), matches!(text, std::borrow::Cow::Owned(_))))
+}
+
+/// What to say of a file that is not there: where files of that name are, when there are any. A reply asked three
+/// times for a file under the wrong folder, the right one two folders away.
+fn missing(ctx: &Ctx, rel: &str) -> String {
+    let wanted = rel.replace('\\', "/").rsplit('/').next().unwrap_or(rel).to_lowercase();
+    let same: Vec<String> = walk(&ctx.root, &ctx.root).into_iter().map(|(path, _)| path).filter(|path| path.rsplit('/').next().is_some_and(|name| name.to_lowercase() == wanted)).take(3).collect();
+    match same.is_empty() {
+        true => format!("{rel} does not exist. list_files shows what is there."),
+        false => format!("{rel} does not exist. A file of that name is at: {}.", same.join(", ")),
+    }
 }
 
 /// A line longer than this is shown by its start. A read that asked for the first five lines of a one-line file
@@ -309,8 +337,14 @@ pub fn read_file(ctx: &Ctx, args: &Value) -> Output {
     };
     let (start, end) = (num_arg(args, "start_line"), num_arg(args, "end_line"));
     let ranged = start.is_some() || end.is_some();
-    match read_text(&path) {
-        Ok(text) => {
+    if rel.trim().is_empty() {
+        return Output::fail("path is required.");
+    }
+    if !path.exists() {
+        return Output::fail(missing(ctx, rel));
+    }
+    match decode(&path) {
+        Ok((text, lossy)) => {
             // A whole-file read of something this reply just wrote is answered from the run's memory. The memory is a
             // shortcut, never a second source of truth: the bytes are checked against the disk first, so an edit, a
             // command or the user's editor cannot make it lie.
@@ -320,6 +354,10 @@ pub fn read_file(ctx: &Ctx, args: &Value) -> Output {
                 ctx.memory.invalidate(rel);
             }
             let mut out = render_read(rel, &text, start, end, bool_arg(args, "line_numbers"), if recalled { usize::MAX } else { ctx.read_chars });
+            if lossy {
+                // Not the file's exact text, and said so: "EXACT" over a line of "caf\u{fffd}" invited an edit that would have written the \u{fffd} back.
+                out = format!("{}\n[NOT UTF-8: this file is in an older encoding, and its bytes that are not valid UTF-8 show as \u{fffd}. edit_file refuses it: change it with a script that reads and writes it in its own encoding.]", out.replacen(": EXACT, all ", ": all ", 1));
+            }
             let header = out.find('\n').unwrap_or(out.len());
             // ponytail: nothing reads this back yet. The web uses it to hand a small file over whole on its first range read
             // and only then (tools.ts SMALL_FILE_LINES); port that with `already_served_whole` when slice-walking costs rounds.
@@ -409,6 +447,9 @@ fn write_checked(ctx: &Ctx, rel: &str, content: &str) -> Result<String, String> 
         return Err("path is required.".into());
     }
     protected(rel)?;
+    if path.is_dir() {
+        return Err(format!("{rel} is a folder. Name a file inside it."));
+    }
     backup(ctx, rel, &path);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
@@ -690,7 +731,7 @@ pub fn apply_edit(content: &str, spec: &EditSpec) -> Result<Applied, String> {
     }
     if exact.len() > 1 {
         let at: Vec<String> = exact.iter().take(6).map(|i| (content[..*i].matches('\n').count() + 1).to_string()).collect();
-        return Err(format!("old_text matches {} places (lines {}). Include a neighbouring line so it identifies one.", exact.len(), at.join(", ")));
+        return Err(format!("old_text matches {} places (lines {}). Include a neighbouring line so it identifies one, or change every one of them with replace_in_files.", exact.len(), at.join(", ")));
     }
 
     // 2. Whole lines, ignoring indentation and inner spacing.
@@ -711,7 +752,7 @@ pub fn apply_edit(content: &str, spec: &EditSpec) -> Result<Applied, String> {
         }
         [] => Err(nearest_miss(&lines, &have, &want)),
         many => Err(format!(
-            "old_text matches {} places (lines {}). Include a neighbouring line so it identifies one.",
+            "old_text matches {} places (lines {}). Include a neighbouring line so it identifies one, or change every one of them with replace_in_files.",
             many.len(),
             many.iter().take(6).map(|i| (i + 1).to_string()).collect::<Vec<_>>().join(", ")
         )),
@@ -776,7 +817,7 @@ fn describe(rel: &str, content: &str, a: &Applied, preview: bool) -> String {
 
 /// Reads, edits and (unless previewing) writes one file, keeping its line endings.
 fn edit_one(ctx: &Ctx, rel: &str, specs: &[&EditSpec], preview: bool) -> Vec<Result<String, String>> {
-    let loaded = resolve(&ctx.root, rel).and_then(|p| read_text(&p));
+    let loaded = resolve(&ctx.root, rel).and_then(|p| read_text_exact(&p));
     let Ok(original) = loaded else {
         let e = loaded.unwrap_err();
         return specs.iter().map(|_| Err(e.clone())).collect();
@@ -945,6 +986,8 @@ pub fn search_files(ctx: &Ctx, args: &Value) -> Output {
                     break 'files;
                 }
                 hits += 1;
+                // Counted at its first match: one the search stopped in was left out, and 60 matches were "in 0 files".
+                in_files += !found as usize;
                 found = true;
                 if long {
                     let (shown, end) = around(line, m.start());
@@ -965,7 +1008,6 @@ pub fn search_files(ctx: &Ctx, args: &Value) -> Output {
                 }
             }
         }
-        in_files += found as usize;
     }
     let s = |n: usize| if n == 1 { "" } else { "s" };
     if hits == 0 {
@@ -1003,8 +1045,17 @@ pub fn replace_in_files(ctx: &Ctx, args: &Value) -> Output {
     let preview = bool_arg(args, "preview");
     let mut report = String::new();
     let (mut total, mut touched) = (0, 0);
+    let mut skipped: Vec<&str> = Vec::new();
     for rel in &files {
-        let Ok(text) = read_text(&ctx.root.join(rel)) else { continue };
+        let text = match read_text_exact(&ctx.root.join(rel)) {
+            Ok(text) => text,
+            // Left alone and named: skipped in silence, a file that held the text read as "does not appear".
+            Err(e) if e.contains("not UTF-8") => {
+                skipped.push(rel.as_str());
+                continue;
+            }
+            Err(_) => continue,
+        };
         let count = re.find_iter(&text).count();
         if count == 0 {
             continue;
@@ -1021,16 +1072,44 @@ pub fn replace_in_files(ctx: &Ctx, args: &Value) -> Output {
         touched += 1;
         report.push_str(&format!("{rel}: {count}\n"));
     }
+    let left = if skipped.is_empty() { String::new() } else { format!("\n[Left alone, not UTF-8 text: {}. Change these with a script that keeps their encoding.]", skipped.join(", ")) };
     if total == 0 {
-        return Output::ok(format!("`{find}` does not appear in {} files. Nothing changed.", files.len()), "0 replacements");
+        return Output::ok(format!("`{find}` does not appear in {} files. Nothing changed.{left}", files.len() - skipped.len()), "0 replacements");
     }
     let summary = format!("{}{total} replacements in {touched} files", if preview { "PREVIEW: " } else { "" });
-    Output::ok(format!("{summary}\n{report}"), summary)
+    Output::ok(format!("{summary}\n{report}{}", left.trim_start()), summary)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What an odd-input run of every tool turned up: none of these crashed, each said the wrong thing.
+    #[test]
+    fn a_folder_a_missing_file_and_an_old_encoding_are_named_for_what_they_are() {
+        let root = crate::tools::scratch("odd");
+        std::fs::create_dir_all(root.join("sub/deep")).unwrap();
+        std::fs::write(root.join("sub/deep/a b.txt"), "x\n").unwrap();
+        std::fs::write(root.join("latin1.txt"), b"caf\xe9 na\xefve\n").unwrap();
+        std::fs::write(root.join("line.txt"), format!("{}\n", "ab".repeat(40_000))).unwrap();
+        let ctx = crate::tools::test_ctx(&root, crate::store::Approval::Auto);
+        let read = |path: &str| read_file(&ctx, &serde_json::json!({ "path": path })).text;
+        assert!(read("sub").starts_with("sub is a folder, not a file") && read("") == "path is required.", "{}", read("sub"));
+        assert_eq!(read("wrong/a b.txt"), "wrong/a b.txt does not exist. A file of that name is at: sub/deep/a b.txt.");
+        assert_eq!(read("gone.txt"), "gone.txt does not exist. list_files shows what is there.");
+        // Shown, never called exact, and never written back: its other bytes would come back as U+FFFD.
+        let old = read("latin1.txt");
+        assert!(old.starts_with("latin1.txt: all 1 lines") && old.contains("[NOT UTF-8:"), "{old}");
+        let edit = edit_file(&ctx, &serde_json::json!({ "path": "latin1.txt", "old_text": "caf", "new_text": "tea" }));
+        let swept = replace_in_files(&ctx, &serde_json::json!({ "find": "caf", "replace": "tea", "glob": "*.txt" })).text;
+        assert!(!edit.ok && edit.text.contains("not UTF-8 text") && swept.contains("Left alone, not UTF-8 text: latin1.txt"), "{} / {swept}", edit.text);
+        assert_eq!(std::fs::read(root.join("latin1.txt")).unwrap(), b"caf\xe9 na\xefve\n");
+        assert!(!write_file(&ctx, &serde_json::json!({ "path": "sub", "content": "x" })).ok);
+        // A search stopped at its cap inside a file still counts that file.
+        let capped = search_files(&ctx, &serde_json::json!({ "query": "ab", "path": "line.txt" })).text;
+        assert!(capped.starts_with("60 matches in 1 file\n"), "{}", &capped[..60]);
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn a_search_reads_a_named_file_of_any_size_and_shows_what_it_found_in_a_long_line() {

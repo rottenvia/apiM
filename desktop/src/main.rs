@@ -195,7 +195,7 @@ fn headless(args: &[String]) {
                     notes.lock().unwrap().push(note);
                 }
             }
-            WebSearch(_) => {}
+            WebSearch(_) | RestorePoint(_) => {}
             // Nobody is here to click: decline, and the model is told so.
             Approval { command, reply, .. } => {
                 println!("\n  (declined, pass --auto to allow: {command})");

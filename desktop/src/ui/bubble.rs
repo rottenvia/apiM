@@ -92,7 +92,7 @@ pub fn dots(ui: &mut Ui, size: f32, colour: Color32) {
         let lift = ((0.5 - phase).abs() * 2.0) as f32;
         ui.painter().circle_filled(pos2(rect.left() + size / 2.0 + i as f32 * (size + 3.0), rect.bottom() - size / 2.0 - lift * size * 0.25), size / 2.0, colour);
     }
-    ui.ctx().request_repaint();
+    widgets::tick(ui);
 }
 
 // ------------------------------------------------------------------ user
@@ -680,7 +680,7 @@ fn step(ui: &mut Ui, tool: &ToolEvent, env: &mut Env, open: &mut Option<String>)
     // The glyph: what kind of step, and how it went.
     let glyph = Rect::from_min_size(pos2(row.left() + 6.0, row.center().y - 10.0), vec2(20.0, 20.0));
     let pulse = if running {
-        ui.ctx().request_repaint();
+        widgets::tick(ui);
         0.75 + 0.25 * (ui.input(|i| i.time) / 1.5 * std::f64::consts::TAU).sin() as f32
     } else {
         1.0

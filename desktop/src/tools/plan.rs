@@ -208,6 +208,13 @@ fn image_path(ctx: &Ctx, args: &Value) -> Result<std::path::PathBuf, String> {
     if !path.is_file() {
         return Err(format!("{rel} does not exist in the workspace."));
     }
+    // By its bytes, not its name: a file that only ends in .png went to the model as a picture, and a provider
+    // turns the whole request away for one it cannot open.
+    let mut head = [0u8; 32];
+    let read = std::fs::File::open(&path).and_then(|mut file| std::io::Read::read(&mut file, &mut head)).unwrap_or(0);
+    if image::guess_format(&head[..read]).is_err() {
+        return Err(format!("{rel} is not a picture: its bytes are not png, jpeg, gif, webp or bmp data."));
+    }
     Ok(path)
 }
 
@@ -236,6 +243,18 @@ pub fn view_image(ctx: &Ctx, args: &Value) -> Output {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A picture is known by its bytes: a provider turns the whole request away for a file that only has the name.
+    #[test]
+    fn a_file_that_is_only_named_png_is_not_shown_as_a_picture() {
+        let root = crate::tools::scratch("picture");
+        std::fs::write(root.join("fake.png"), [7u8; 400]).unwrap();
+        std::fs::write(root.join("real.png"), b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR").unwrap();
+        let ctx = crate::tools::test_ctx(&root, crate::store::Approval::Auto);
+        assert!(view_image(&ctx, &serde_json::json!({ "path": "fake.png" })).text.contains("is not a picture"));
+        assert!(view_image(&ctx, &serde_json::json!({ "path": "real.png" })).ok);
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     /// A step called done with no word on how it was checked is asked about once, then taken with a note: the
     /// same call sent twice never becomes the third identical failure that stops a run.

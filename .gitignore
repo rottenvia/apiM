@@ -92,6 +92,8 @@ report.txt
 
 # Desktop (Rust) build output.
 /desktop/target/
+# A second build folder, for testing while the app itself is open and its program file cannot be replaced.
+/desktop/target-bench/
 
 # graphify knowledge graph (local, regenerated with `graphify update .`).
 graphify-out/

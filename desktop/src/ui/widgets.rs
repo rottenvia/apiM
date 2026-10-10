@@ -11,6 +11,16 @@ pub fn fade(ui: &Ui, id: egui::Id, on: bool) -> f32 {
     ui.ctx().animate_bool_with_time(id, on, 0.15)
 }
 
+/// Asks for the next frame of a slow animation (the bouncing dots, the pulse of a running step, the light that
+/// runs over a status): thirty a second. Asked for every frame, a reply being waited on drew at the screen's
+/// full rate, 143 frames a second on one PC, for as long as it ran. (egui takes a sixtieth of a second off the wait.)
+/// Eight a second while another window has the keyboard: a game in front should not share the graphics card
+/// with dots nobody is watching.
+pub fn tick(ui: &Ui) {
+    let wait = if ui.input(|i| i.focused) { 50 } else { 140 };
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(wait));
+}
+
 pub fn lerp(a: Color32, b: Color32, t: f32) -> Color32 {
     a.lerp_to_gamma(b, t)
 }
