@@ -122,6 +122,35 @@ Found in one real reply: 160 rounds of work in a sandbox, 48 minutes, $0.27, sto
 
 The workspace panel's title is gone: five buttons left it 26 pixels, and it read "W…".
 
+## Carrying a big task through
+
+The same reply, read round by round (201 rounds, 82 minutes, $0.39, two of six plan steps done), lost most of its rounds in four ways. None of them is about the task; each is about how the work was prepared:
+
+- **It acted on a guess.** It installed one language's runtime before looking at the file, then noticed the file was written for another, and still spent thirty rounds converting the file by hand before it fetched the right interpreter.
+- **It built what exists.** A pretty-printer written three times, a tokenizer reworked for twenty-five rounds until a real parser did the job in three, and a search for published tools at round 119 instead of round 2.
+- **It fixed one error a round.** Eight rounds went to eight stray brackets in one file, each found by running the whole thing again.
+- **It waited blind.** A dozen runs ended at a time limit with nothing printed, one of them five minutes long, before it saw that a stopped program loses what it has not flushed.
+
+What the app now gives a model for this:
+
+- **Standing instructions for a big task** (`assets/prompts.json`, `workLoop`): look before you assume; find before you write; name the check that proves the goal and what is handed over if only part is reached; keep experiments short; step back on a timer.
+- **At plan time** `make_plan` answers with one line more: look for what already exists for this exact problem and try that first.
+- **At a checkpoint** (a plan step forty rounds old) two questions are added to the web's: are you building by hand something that exists, and how long does one experiment take (`plan::STEP_BACK`).
+- **A run stopped at its time limit with nothing printed** says why nothing came and how to run it so the output survives: bounded, line-buffered, or into a file.
+- **A run of ten seconds or more says how long it took.** The model has no clock.
+- **The sandbox says what it holds** (python, node, gcc, git, gdb and the rest), so no round goes to finding out, and its description says to fetch a real tool before writing a stand-in.
+- **The sandbox's node works on WSL 1.** Ubuntu's own does not start there ("Exec format error"); setup now checks it and puts node's official build in /opt/node when it does not (`wsl::NODE_REPAIR`).
+
+Measured on a look-alike task (a 78,000-character line of minified JavaScript: restore it readable and prove it behaves the same), one run each, GLM 5.3 Flash at high effort: the build before these changes wrote its own formatter and repaired it three times, 17 requests and $0.022; the build with them installed a published formatter, 7 requests and $0.011. Both proved the result.
+
+Three things the screen said wrongly about that reply:
+
+- The line under a reply read "~352k ctx" beside a ring at 15% of a million. It was the count of characters. It now shows tokens where the provider counted them ("~152k ctx").
+- The thinking sent back to the model was counted in no part of the context breakdown: a third of the request.
+- A reply stopped between two steps showed its last round's raw ending, "tool_calls". It reads "unfinished".
+
+And a message sent with a large file showed the note written for the model (the file's size, its first lines, which tool reads the rest) above the words that were typed. The bubble now shows the file's chip and the words.
+
 ## Checking the tools
 
 `apim --tools calls.json --auto --dir FOLDER` runs a list of tool calls (`[{"name": "edit_file", "args": {...}}, ...]`) as the agent would make them and prints what each hands back: no model in between, so a tool is judged on what it does. `APIM_TOOL_CHARS` sets how much of each result is shown. All 59 were run this way on 2026-10-09; what that changed:

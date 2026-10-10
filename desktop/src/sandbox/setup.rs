@@ -590,6 +590,9 @@ fn run_setup(p: Paths) -> Result<(), String> {
     if apt.code != Some(0) || !apt.output.contains("apim-wsl-setup-ok") {
         return Err(failure("Installing the tools", &apt));
     }
+    let mut node_args = args(&["-d", SANDBOX_DISTRO, "-u", "root", "--cd", "/", "--exec", "bash", "-c"]);
+    node_args.push(wsl::NODE_REPAIR.into());
+    run_logged(&p.wsl, &node_args, None, Duration::from_secs(600));
     self_check(&p);
     Ok(())
 }

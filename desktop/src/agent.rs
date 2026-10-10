@@ -1199,7 +1199,7 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
                 break;
             }
             log_with("run_stopped", "step budget checkpoint", &format!("Step {}: {} rounds, {} min (checkpoint {}).", due.id, due.rounds, due.minutes, due.level), json!({ "rounds": tool_rounds }));
-            harness.push(plan::step_budget_nudge(&due));
+            harness.push(format!("{}{}", plan::step_budget_nudge(&due), plan::STEP_BACK));
         }
         // Code drafted in thought is paid for again as the file's content: say so, with the count.
         let drafted = stall::drafted_code_lines(&reasoning);

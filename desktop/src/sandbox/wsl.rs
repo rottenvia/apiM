@@ -202,6 +202,17 @@ pub fn sandbox_wsl_conf() -> String {
     "[automount]\nenabled = false\nmountFsTab = false\n\n[interop]\nenabled = false\nappendWindowsPath = false\n\n[user]\ndefault = root\n".to_string()
 }
 
+/// Run after the packages are in. Ubuntu's own node does not start on WSL 1 ("cannot execute binary file: Exec
+/// format error", on a real PC); node's official build does. It goes to /opt/node with links in /usr/local/bin,
+/// which comes first on the path. Always exits 0: a sandbox without node still does everything else.
+pub const NODE_REPAIR: &str = r#"node -e 1 >/dev/null 2>&1 && exit 0
+echo "node from apt does not start here; fetching node's own build"
+mkdir -p /opt/node
+curl -fsSL https://nodejs.org/dist/v20.11.1/node-v20.11.1-linux-x64.tar.xz -o /tmp/node.tar.xz && tar -xJf /tmp/node.tar.xz -C /opt/node --strip-components=1 && ln -sf /opt/node/bin/node /opt/node/bin/npm /opt/node/bin/npx /usr/local/bin/
+rm -f /tmp/node.tar.xz
+if /usr/local/bin/node -e 1 >/dev/null 2>&1; then echo "node $(/usr/local/bin/node --version) installed"; else echo "node still does not start"; fi
+exit 0"#;
+
 pub fn wsl_setup_script() -> String {
     format!(
         "set -e\nexport DEBIAN_FRONTEND=noninteractive\napt-get update\napt-get install -y --no-install-recommends {}\nmkdir -p /ws\necho \"apim-wsl-setup-ok\"",

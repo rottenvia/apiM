@@ -203,7 +203,8 @@ pub fn breakdown(messages: &[Value], tools_chars: usize) -> Vec<Bucket> {
             }
             "assistant" => {
                 add("history", len(&m["content"]));
-                add("reasoning", len(&m["reasoning_content"]));
+                // OpenRouter's lanes send a thought back as `reasoning`: a third of a long request, and it was counted nowhere.
+                add("reasoning", len(&m["reasoning_content"]) + len(&m["reasoning"]));
                 add("tool calls", calls(m).iter().map(|c| len(&c["function"]["arguments"]) + len(&c["function"]["name"])).sum());
             }
             "tool" => add("tool results", len(&m["content"])),
