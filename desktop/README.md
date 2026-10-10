@@ -49,6 +49,16 @@ The assistant runs on your own computer, and it is told so. It works at three de
 - **Approval.** With "Ask me first" you allow each folder outside the workspace before it is looked into ("Look in this folder?", once or for the chat) and each command. With "Run automatically" looking does not ask.
 - **Closed places.** Folders and files that keep sign-ins and keys (SSH and cloud keys, browser profiles, the system's credential stores, `.env` files, this app's own settings) are not read by a file tool or named in a PowerShell command, in any mode: what a tool reads goes to the model's provider.
 
+## Which endpoint an OpenRouter model runs on
+
+OpenRouter serves one model from many endpoints, at different prices and speeds (33 for GLM 5.3 Flash, input from $0.04 to $0.225 a million tokens). The app used to keep each catalog model on one endpoint written into the code. It now reads OpenRouter's list for the model (`/models/<id>/endpoints`, with your key: the speeds are only in the signed-in answer) and picks (`provider::choose_endpoint`):
+
+- **The cheapest endpoint that is fast enough**: 40 tokens a second or more over the last half hour. "Cheapest" is what a request of this app costs there, not the input price alone: of the tokens it sends, about seven in ten are read from the cache, three are new, and one token is written per hundred sent.
+- **Or one a little dearer and much faster**: up to a quarter more money for at least one and a half times the speed.
+- Never one that is down, that failed more than 2% of the last day, that cannot call tools, or that has a smaller context window than the others.
+
+The next two cheapest fast-enough endpoints are kept as spares for when the first is down; nothing else is used, so every token stays on a known price. The pick is made once per model while the app runs and said in the reply that made it: a pick that moved between replies would lose the provider's cache each time. Cost figures and the spending limit use the picked endpoint's prices. Free models and other `:variant` ids are left to OpenRouter's own routing. The three numbers (`GOOD_TPS`, `FASTER`, `DEARER`) are at the top of the code that picks.
+
 ## What a request carries
 
 Every round of a reply sends the whole conversation again, so what stays in it is paid for every round. Three things kept a long chat far bigger than its work (measured on a real one: 1.7 million characters a round):

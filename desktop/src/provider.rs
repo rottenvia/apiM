@@ -9,6 +9,7 @@ use futures_util::StreamExt;
 use serde_json::{Map, Value, json};
 use crate::run::{reasoning_stream, retry, stall};
 use std::collections::{BTreeSet, HashMap};
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 pub const DEFAULT_LOCAL_BASE_URL: &str = "http://127.0.0.1:18765/v1";
@@ -93,9 +94,85 @@ pub fn resolve_target(model_id: &str, s: &Settings) -> Result<Target, String> {
     Ok(Target { provider: model.provider, model, style, api_key, base_url: base_url.trim_end_matches('/').to_string(), api_model })
 }
 
-/// Pinned cheapest OpenRouter endpoint per catalog model. `allow_fallbacks: false`
-/// keeps every token on the pinned price; customs and the free lane auto-route.
+/// One way OpenRouter can serve a model, from its endpoints list.
+#[derive(Clone, Debug, PartialEq)]
+struct Endpoint {
+    tag: String,
+    name: String,
+    /// Dollars per million tokens: input, cached input, output.
+    rates: (f64, f64, f64),
+    /// Tokens a second, the middle of the last half hour; 0 when not known.
+    tps: f64,
+}
+
+/// From this speed up an endpoint is picked on price alone.
+const GOOD_TPS: f64 = 40.0;
+/// One and a half times the speed is worth a quarter more money, and no more than that.
+const FASTER: f64 = 1.5;
+const DEARER: f64 = 1.25;
+
+impl Endpoint {
+    /// What this app pays there per million tokens it sends.
+    // ponytail: the mix is the one measured over long agent runs (seven tokens in ten read from the cache, one written per
+    // hundred sent), not the chat's own. Weigh by the chat's last reply if short chats turn out to pick badly.
+    fn price(&self) -> f64 {
+        0.3 * self.rates.0 + 0.7 * self.rates.1 + 0.01 * self.rates.2
+    }
+}
+
+/// Where to send a model's requests, the endpoint to use first: the cheapest that is fast enough, or one a little dearer
+/// and much faster. The next cheapest follow it, for when it is down. Left out: endpoints that are down or kept failing
+/// today, ones that cannot call tools, and ones with a cut-down context window.
+fn best_endpoints(listing: &Value) -> Vec<Endpoint> {
+    let all = listing["data"]["endpoints"].as_array().map_or(&[][..], Vec::as_slice);
+    let widest = all.iter().filter_map(|e| e["context_length"].as_u64()).max().unwrap_or(0);
+    let dollars = |per_token: &Value| per_token.as_str().and_then(|s| s.parse::<f64>().ok()).map(|p| p * 1e6);
+    let mut usable: Vec<Endpoint> = all
+        .iter()
+        .filter(|e| e["status"] == 0 && e["supported_parameters"].as_array().is_some_and(|p| p.iter().any(|x| x == "tools")))
+        .filter(|e| e["context_length"].as_u64().unwrap_or(0) >= widest / 10 * 9 && e["uptime_last_1d"].as_f64().unwrap_or(100.0) >= 98.0)
+        .filter_map(|e| {
+            let input = dollars(&e["pricing"]["prompt"])?;
+            let rates = (input, dollars(&e["pricing"]["input_cache_read"]).unwrap_or(input), dollars(&e["pricing"]["completion"]).unwrap_or(0.0));
+            Some(Endpoint { tag: e["tag"].as_str()?.to_string(), name: e["provider_name"].as_str().unwrap_or("").to_string(), rates, tps: e["throughput_last_30m"]["p50"].as_f64().unwrap_or(0.0) })
+        })
+        .collect();
+    usable.sort_by(|a, b| a.price().total_cmp(&b.price()));
+    usable.dedup_by(|a, b| a.tag == b.tag);
+    let Some(cheap) = usable.iter().find(|e| e.tps >= GOOD_TPS).or(usable.first()).cloned() else { return Vec::new() };
+    let first = usable.iter().filter(|e| e.price() <= cheap.price() * DEARER && e.tps >= cheap.tps * FASTER).max_by(|a, b| a.tps.total_cmp(&b.tps)).cloned().unwrap_or(cheap);
+    let spares: Vec<Endpoint> = usable.into_iter().filter(|e| e.tag != first.tag && e.tps >= GOOD_TPS).take(2).collect();
+    std::iter::once(first).chain(spares).collect()
+}
+
+/// The endpoints picked for each model since the app started.
+static CHOSEN: LazyLock<Mutex<HashMap<String, Value>>> = LazyLock::new(Default::default);
+
+/// Picks where an OpenRouter model's requests go, from OpenRouter's own list of who serves it at what price and speed.
+/// Once per model while the app runs: a choice that moved between replies would lose the provider's cache each time.
+/// The first time it says what it picked. Free and other `:variant` models are left to OpenRouter's own routing.
+pub async fn choose_endpoint(client: &reqwest::Client, target: &Target) -> Option<String> {
+    if target.provider != ProviderId::Openrouter || target.api_model.contains(':') || CHOSEN.lock().unwrap().contains_key(&target.model.id) {
+        return None;
+    }
+    let listing: Value = client.get(format!("{}/models/{}/endpoints", target.base_url, target.api_model)).bearer_auth(&target.api_key).timeout(Duration::from_secs(8)).send().await.ok()?.json().await.ok()?;
+    let order = best_endpoints(&listing);
+    let first = order.first().filter(|e| e.price() > 0.0)?;
+    models::set_endpoint_rates(&target.model.id, first.rates);
+    let tags: Vec<&str> = order.iter().map(|e| e.tag.as_str()).collect();
+    CHOSEN.lock().unwrap().insert(target.model.id.clone(), json!({ "order": tags, "allow_fallbacks": false }));
+    let usd = |v: f64| format!("{v:.4}").trim_end_matches('0').trim_end_matches('.').to_string();
+    let speed = if first.tps > 0.0 { format!(", {} tokens a second", first.tps.round()) } else { String::new() };
+    Some(format!("{} runs on {} ({}): ${} in, ${} cached, ${} out per million tokens{speed}", target.model.label, first.name, first.tag, usd(first.rates.0), usd(first.rates.1), usd(first.rates.2)))
+}
+
+/// The endpoints a model's requests are kept to: the ones `choose_endpoint` picked, else a pinned one for the
+/// catalog models (the list could not be read). `allow_fallbacks: false` keeps every token on known prices;
+/// customs whose list could not be read and the free lane auto-route.
 pub fn openrouter_provider_for(model_id: &str) -> Option<Value> {
+    if let Some(chosen) = CHOSEN.lock().unwrap().get(model_id) {
+        return Some(chosen.clone());
+    }
     let tag = match model_id {
         "glm-5.3-flash" => "inference-net/fp4",
         "deepseek-v4.1-flash" => "morph",
@@ -437,6 +514,32 @@ pub async fn stream(client: &reqwest::Client, target: &Target, body: &Value, cut
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_cheapest_fast_enough_endpoint_is_picked_unless_a_little_more_buys_much_more_speed() {
+        let endpoint = |tag: &str, (input, cached, output): (&str, &str, &str), tps: u32| json!({ "tag": tag, "provider_name": tag, "status": 0, "context_length": 1_048_576, "uptime_last_1d": 100, "supported_parameters": ["tools"], "pricing": { "prompt": input, "input_cache_read": cached, "completion": output }, "throughput_last_30m": { "p50": tps } });
+        let picked = |endpoints: Vec<Value>| best_endpoints(&json!({ "data": { "endpoints": endpoints } })).into_iter().map(|e| e.tag).collect::<Vec<_>>();
+        // Prices and speeds as OpenRouter listed them for one model: dollars per token.
+        let slow = endpoint("open-inference/fp4", ("0.000000044", "0.00000001", "0.00000045"), 25);
+        let relace = endpoint("relace", ("0.00000004", "0.0000000125", "0.0000005"), 67);
+        let streamlake = endpoint("streamlake/fp8", ("0.000000069", "0.0000000138", "0.00000023"), 45);
+        let sail = endpoint("sail-research/us", ("0.000000045", "0.0000000285", "0.0000006"), 136);
+        let mut down = endpoint("siliconflow/fp8", ("0.00000001", "0.00000001", "0.00000001"), 90);
+        down["status"] = json!(-5);
+        let mut small = endpoint("reka", ("0.00000001", "0.00000001", "0.00000001"), 90);
+        small["context_length"] = json!(262_144);
+        let mut no_tools = endpoint("plain", ("0.00000001", "0.00000001", "0.00000001"), 90);
+        no_tools["supported_parameters"] = json!(["max_tokens"]);
+        // The cheapest of all is too slow; the next is fast enough, and nothing within a quarter more is half as fast again.
+        assert_eq!(picked(vec![sail.clone(), streamlake.clone(), slow.clone(), relace.clone(), down, small, no_tools]), ["relace", "streamlake/fp8", "sail-research/us"]);
+        // The same list with the fast one's cached price cut: a tenth dearer than the cheapest, twice the speed.
+        let mut sail_cut = sail;
+        sail_cut["pricing"]["input_cache_read"] = json!("0.0000000125");
+        assert_eq!(picked(vec![sail_cut, streamlake, slow.clone(), relace])[0], "sail-research/us");
+        // Nothing fast enough: the cheapest. Nothing at all: no pin.
+        assert_eq!(picked(vec![slow]), ["open-inference/fp4"]);
+        assert!(picked(Vec::new()).is_empty());
+    }
 
     #[test]
     fn local_base_normalised() {
