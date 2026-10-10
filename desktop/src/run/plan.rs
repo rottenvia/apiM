@@ -93,7 +93,7 @@ static TOOL_CLAIMS: LazyLock<Vec<(&'static [&'static str], Vec<Regex>)>> = LazyL
             ]),
         ),
         (
-            &["run_command", "run_tests", "start_process", "write_process", "read_process"][..],
+            &["run_command", "run_tests", "start_process", "write_process", "read_process", "sandbox_run"][..],
             compile(&[
                 r"(?i)\b(run_command|run_tests|write_process)\b[^.\n]{0,40}\b(returned|came back|gave|exited|failed|passed)",
                 r"(?i)\b(ran|executed)\s+(the\s+)?(tests?|command|script)\b[^.\n]{0,30}\b(and|which|it)\b",
@@ -126,7 +126,8 @@ pub fn check_answer_claims(answer: &str, tools_used: &[String]) -> Option<String
     // it took that sentence for a claim, had the reply written twice, and marked the second one too.
     static OFFER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(if|once|when|then|will|would|could|can|shall|going to|want me to|let me)\b|'ll\b").unwrap());
     let reported: String = answer.split_inclusive(['.', '!', '?', '\n']).filter(|sentence| !OFFER.is_match(sentence)).collect();
-    if !FILE_TOOLS.iter().any(|t| used(t)) && any(&FILE_CLAIMS, &reported) {
+    // A shell reads and writes files too: the web lacks this, and called a reply that worked in the sandbox invented.
+    if !FILE_TOOLS.iter().chain(&["run_command", "sandbox_run"]).any(|t| used(t)) && any(&FILE_CLAIMS, &reported) {
         return Some("This reply describes reading or changing files, but no file tool ran in it — nothing on disk was touched. Treat the summary above as a proposal, not a record of work done.".into());
     }
     // An "Actions taken:" block that names a tool is a claim it ran, with no verb needed.
@@ -257,6 +258,8 @@ mod tests {
             assert_eq!(check_answer_claims(offer, &[]), None, "{offer}");
         }
         assert!(check_answer_claims("I read the file and fixed the bug.", &[]).is_some());
+        // A reply that worked in the sandbox ran its commands and wrote its files there.
+        assert_eq!(check_answer_claims("Ran the script and it exited 1. I created the file again.", &["sandbox_run".to_string()]), None);
         for (i, o) in cases("check_answer_claims") {
             let used: Vec<String> = i[1].as_array().unwrap().iter().map(|t| t.as_str().unwrap().to_string()).collect();
             assert_eq!(check_answer_claims(i[0].as_str().unwrap(), &used).as_deref(), o.as_str(), "{i}");

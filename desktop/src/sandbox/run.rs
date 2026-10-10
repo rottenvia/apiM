@@ -186,10 +186,17 @@ pub async fn run_command(wsl: &Path, workspace_id: &str, workspace_win_dir: &Pat
         };
     }
     let code_text = code.map_or("null".to_string(), |c| (c as u32).to_string());
+    // The step's row says what the command said last: its answer, or the error it died of.
+    let last: Option<String> = trimmed.lines().rev().map(str::trim).find(|line| !line.is_empty() && *line != "…(truncated)").map(|line| line.chars().take(100).collect());
     RunResult {
         ok: code == Some(0),
         content: format!("[sandbox {}] exit {code_text}\n{}", sb.distro, or_no_output(&trimmed)),
-        summary: if code == Some(0) { "Sandbox command finished".into() } else { format!("Sandbox exit {code_text}") },
+        summary: match (code == Some(0), last) {
+            (true, Some(last)) => last,
+            (true, None) => "Sandbox command finished".into(),
+            (false, Some(last)) => format!("Sandbox exit {code_text}: {last}"),
+            (false, None) => format!("Sandbox exit {code_text}"),
+        },
     }
 }
 
@@ -320,10 +327,10 @@ mod tests {
         let ok = run_command(&wsl, "chat-1", &dir, "echo hi", None).await;
         assert!(ok.ok, "{}", ok.content);
         assert_eq!(ok.content, "[sandbox apim-sandbox] exit 0\nhello from fake\n");
-        assert_eq!(ok.summary, "Sandbox command finished");
+        assert_eq!(ok.summary, "hello from fake");
         let failed = run_command(&wsl, "chat-1", &dir, "FAIL now", None).await;
         assert!(!failed.ok);
-        assert_eq!(failed.summary, "Sandbox exit 3");
+        assert!(failed.summary.starts_with("Sandbox exit 3"), "{}", failed.summary);
         let cannot = run_command(&wsl, "chat-1", &dir, "CANNOT", None).await;
         assert_eq!(cannot.summary, "Sandbox cannot start on this PC");
         assert!(cannot.content.ends_with(WINDOWS_FALLBACK));

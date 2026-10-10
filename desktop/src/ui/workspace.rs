@@ -210,11 +210,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let st = &app.ws;
     let mut act = None;
 
-    // The header: 56 with its rule. Five 38px buttons leave the title 26px, so it is cut short here as it is on the web.
+    // The header: 56 with its rule. Five 38px buttons leave a title 26px: the web cuts it to "W…", here the folder says it.
     let mid = full.top() + 27.5;
     ui.painter().hline(full.x_range(), full.top() + 55.5, rule);
     icons::paint(ui, icons::FOLDER_PLAIN, pos2(x0 + 13.0 + 7.5, mid), 15.0, p.muted);
-    widgets::text_at(ui, x0 + 36.0, mid, widgets::clipped(ui, "Workspace", theme::font(13.0, W::Medium), p.text, 26.0));
     let download_tip = if count == 0 { "Nothing to download yet" } else { "Download everything as a .zip" };
     let buttons = [
         (icons::GITHUB, 14.0, "Connect a GitHub repository", true, Act::Github),

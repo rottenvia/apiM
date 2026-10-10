@@ -326,9 +326,21 @@ pub const MAX_CAP_EXTENSIONS: u32 = 3;
 /// Successful world-changing calls since the last check that count as progress.
 pub const CAP_PROGRESS_CHANGES: u32 = 3;
 
+/// What a reply may cost and still be given rounds past its last extension, when no spending limit is set. The
+/// ceiling on rounds is there for the money: 160 rounds of a cheap model cost a quarter of a dollar.
+pub const CHEAP_REPLY_USD: f64 = 1.0;
+
 /// Should a run that just hit its round cap keep going? Real progress since the last check earns another block.
 pub fn should_extend_round_cap(extensions_used: u32, steps_done_since_check: u32, changes_since_check: u32) -> bool {
     extensions_used < MAX_CAP_EXTENSIONS && (steps_done_since_check > 0 || changes_since_check >= CAP_PROGRESS_CHANGES)
+}
+
+/// The same question with the money in it. Past the counted extensions a reply that still gets somewhere runs on:
+/// up to the spending limit when one is set, else while it has cost under `CHEAP_REPLY_USD`. A price nobody knows
+/// is not cheap. A step that never finishes is still paused by its own budget (`plan::watch_step`).
+pub fn should_run_on(extensions_used: u32, steps_done_since_check: u32, changes_since_check: u32, last_round_cost: f64, spent: f64, limit: Option<f64>) -> bool {
+    let paid_for = last_round_cost > 0.0 && (limit.is_some() || spent < CHEAP_REPLY_USD);
+    should_extend_round_cap(if paid_for { 0 } else { extensions_used }, steps_done_since_check, changes_since_check)
 }
 
 pub const CODE_DRAFT_NUDGE_MARKER: &str = "[Harness: code drafted in reasoning]";
@@ -491,6 +503,10 @@ mod tests {
         for (i, o) in cases("preview_observe") {
             assert_eq!(preview.observe(i[0].as_str().unwrap(), i[1].as_bool().unwrap(), i[2].as_str().unwrap()).as_deref(), o.as_str(), "{i}");
         }
+        // The reply that stopped at 160 rounds had cost $0.27 and was still writing files: it runs on. A dear one,
+        // one of unknown price and one that changed nothing do not.
+        assert!(should_run_on(MAX_CAP_EXTENSIONS, 0, 3, 0.002, 0.27, None) && should_run_on(MAX_CAP_EXTENSIONS, 1, 0, 0.02, 1.2, Some(5.0)));
+        assert!(!should_run_on(MAX_CAP_EXTENSIONS, 0, 3, 0.02, 1.2, None) && !should_run_on(MAX_CAP_EXTENSIONS, 0, 3, 0.0, 0.0, None) && !should_run_on(0, 0, 0, 0.002, 0.1, None));
         for (i, o) in cases("should_extend_round_cap") {
             let n = |k: usize| i[k].as_u64().unwrap() as u32;
             assert_eq!(should_extend_round_cap(n(0), n(1), n(2)), o, "{i}");

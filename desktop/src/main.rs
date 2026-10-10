@@ -174,11 +174,19 @@ fn headless(args: &[String]) {
     let notes = request.notes.clone();
     let rt = runtime();
     rt.spawn(agent::run(request, agent::Emitter::new(tx, || {}), Arc::new(tools::exec::Procs::default())));
+    // Every line of a thought is marked, its first too: unmarked, it read as the reply's own words.
+    let mut thinking = false;
     for event in rx {
         use agent::Event::*;
+        if !matches!(event, Reasoning(_)) {
+            thinking = false;
+        }
         match event {
             Content(t) => print!("{t}"),
-            Reasoning(t) if think => print!("{}", t.replace('\n', "\n  ~ ")),
+            Reasoning(t) if think => {
+                print!("{}{}", if thinking { "" } else { "\n  ~ " }, t.replace('\n', "\n  ~ "));
+                thinking = true;
+            }
             ToolStart(t) => println!("\n> {} {}", t.name, t.args.chars().take(200).collect::<String>()),
             ToolDone { ok, summary, .. } => {
                 println!("  {} {summary}", if ok { "ok" } else { "FAILED" });
