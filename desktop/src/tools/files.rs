@@ -229,6 +229,25 @@ pub fn read_text(path: &Path) -> Result<String, String> {
     Ok(text.strip_prefix('\u{feff}').unwrap_or(&text).to_string())
 }
 
+/// A line longer than this is shown by its start. A read that asked for the first five lines of a one-line file
+/// got all 217,000 characters of it, and they rode in every request of the 218 rounds that followed.
+pub const READ_LINE_CHARS: usize = 8_000;
+
+/// `text` with every line over `READ_LINE_CHARS` cut to its start and what is missing said at its end; None when no line is that long.
+pub fn cut_long_lines(text: &str) -> Option<String> {
+    if !text.lines().any(|line| line.len() > READ_LINE_CHARS) {
+        return None;
+    }
+    let cut = |line: &str| match line.len() > READ_LINE_CHARS {
+        true => {
+            let end = line.floor_char_boundary(READ_LINE_CHARS);
+            format!("{} [… {} more characters of this line are not shown]", &line[..end], line.len() - end)
+        }
+        false => line.to_string(),
+    };
+    Some(text.split('\n').map(cut).collect::<Vec<_>>().join("\n"))
+}
+
 /// One file as the model sees it: a header saying which lines of how many, then the text.
 fn render_read(rel: &str, text: &str, start: Option<u64>, end: Option<u64>, numbered: bool, budget: usize) -> String {
     let lines: Vec<&str> = text.lines().collect();
@@ -237,8 +256,10 @@ fn render_read(rel: &str, text: &str, start: Option<u64>, end: Option<u64>, numb
     let last = (end.unwrap_or(total as u64) as usize).clamp(first.min(total), total);
     let width = total.to_string().len();
     let mut body = String::new();
-    let mut shown_to = first.saturating_sub(1);
+    let (mut shown_to, mut long) = (first.saturating_sub(1), 0);
     for (i, line) in lines.iter().enumerate().take(last).skip(first - 1) {
+        let cut = cut_long_lines(line);
+        let line = cut.as_deref().unwrap_or(line);
         if body.len() + line.len() > budget && i + 1 > first {
             break;
         }
@@ -248,12 +269,15 @@ fn render_read(rel: &str, text: &str, start: Option<u64>, end: Option<u64>, numb
         body.push_str(line);
         body.push('\n');
         shown_to = i + 1;
+        long += cut.is_some() as usize;
     }
     if total == 0 {
         return format!("{rel}: empty file");
     }
     let whole = first == 1 && shown_to == total;
-    let header = if whole {
+    let header = if whole && long > 0 {
+        format!("{rel}: all {total} lines, {} chars, long lines cut", text.len())
+    } else if whole {
         format!("{rel}: EXACT, all {total} lines, {} chars", text.len())
     } else {
         format!("{rel}: lines {first}-{shown_to} of {total}")
@@ -266,7 +290,15 @@ fn render_read(rel: &str, text: &str, start: Option<u64>, end: Option<u64>, numb
     } else {
         String::new()
     };
-    format!("{header}\n{body}{notice}")
+    let cut = match long {
+        0 => String::new(),
+        n => format!(
+            "\n[LONG LINES: {n} of these lines {} over {READ_LINE_CHARS} characters and show only {} start. To find text inside one, call search_files with \"path\":\"{rel}\": it shows what surrounds each match. To work on the whole line, run a script over the file. edit_file cannot match text that is not shown.]",
+            if n == 1 { "is" } else { "are" },
+            if n == 1 { "its" } else { "their" }
+        ),
+    };
+    format!("{header}\n{body}{notice}{cut}")
 }
 
 pub fn read_file(ctx: &Ctx, args: &Value) -> Output {
@@ -1127,5 +1159,10 @@ mod tests {
         let cut = render_read("f", text, None, None, true, 10);
         assert!(cut.contains("lines 1-2 of 4") && cut.contains("\"start_line\":3"), "{cut}");
         assert!(render_read("f", text, Some(3), Some(4), true, 1000).contains("3 | l3"));
+        // The peek at a one-line dump: its start, how much is missing and how to reach it. Never the word EXACT.
+        let dump = format!("{}\nshort\n", "9,".repeat(100_000));
+        let peek = render_read("d.json", &dump, None, Some(5), false, 400_000);
+        assert!(peek.len() < READ_LINE_CHARS + 600 && peek.starts_with("d.json: all 2 lines, 200007 chars, long lines cut") && peek.contains("192000 more characters") && peek.contains("[LONG LINES: 1 of these lines is over 8000"), "{}", &peek[peek.len() - 400..]);
+        assert!(cut_long_lines("short\nlines").is_none() && cut_long_lines(&dump).unwrap().ends_with("not shown]\nshort\n"));
     }
 }

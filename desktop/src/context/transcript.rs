@@ -85,6 +85,16 @@ pub fn cut_old_pastes(messages: &mut [Value]) {
     }
 }
 
+/// A saved transcript taken up again: tool results from before reads cut their long lines are cut the same way
+/// (`tools::files::cut_long_lines`). One such result was a third of every request for as long as its chat ran.
+pub fn cut_long_result_lines(messages: &mut [Value]) {
+    for m in messages.iter_mut().filter(|m| m["role"] == "tool") {
+        if let Some(cut) = m["content"].as_str().and_then(crate::tools::files::cut_long_lines) {
+            m["content"] = Value::String(cut);
+        }
+    }
+}
+
 /// The conversation the model reads for this turn: the earlier turns, then the message being answered, built the way the
 /// web's `buildUserContent` builds each user turn.
 pub fn wire_turns(history: &[(Role, String, Vec<Attachment>)], text: &str, images: &[Attachment], vision: Vision) -> Vec<Value> {

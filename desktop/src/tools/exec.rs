@@ -465,13 +465,34 @@ pub struct Ran {
 
 /// Approves and runs one program to the end, shared by run_command, run_tests and build_project. `limit` None waits as long as it takes.
 /// Err is the refusal, ready to return to the model.
-pub async fn execute(ctx: &Ctx, program: &str, argv: Vec<String>, reason: &str, limit: Option<Duration>) -> Result<Ran, Output> {
-    let launch = prepare(ctx, program.trim(), argv).map_err(Output::fail)?;
+/// `stdin` is text for the program's standard input: `python -` runs it as a script, in one call and with no file
+/// left behind. A reply wrote some fifty one-off scripts as files and ran each in a second round.
+pub async fn execute(ctx: &Ctx, program: &str, argv: Vec<String>, reason: &str, limit: Option<Duration>, stdin: Option<&str>) -> Result<Ran, Output> {
+    let mut launch = prepare(ctx, program.trim(), argv).map_err(Output::fail)?;
+    let short = match stdin {
+        Some(text) => format!("{} <<stdin ({} lines)", launch.display, text.lines().count()),
+        None => launch.display.clone(),
+    };
+    if let Some(text) = stdin {
+        // The user approves the script itself, not the dash that stands for it, and "always allow" remembers that script only.
+        launch.display = format!("{short}\n{}", text.chars().take(2_000).collect::<String>());
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(text, &mut hasher);
+        launch.key.push_str(&format!("#{:x}", std::hash::Hasher::finish(&hasher)));
+    }
     approved(ctx, &launch, reason).await.map_err(|why| Output::fail(not_run(why)))?;
-    let child = match command(ctx, &launch).env("CI", "1").stdin(Stdio::null()).spawn() {
+    launch.display = short;
+    let mut child = match command(ctx, &launch).env("CI", "1").stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() }).spawn() {
         Ok(child) => child,
         Err(e) => return Ok(Ran { display: launch.display, code: None, out: String::new(), timed_out: false, took: Duration::ZERO, error: Some(start_error(&e, &ctx.root)) }),
     };
+    if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
+        // Written from the side: a program that prints before it has read everything must not hold the write up.
+        let text = text.to_string();
+        tokio::spawn(async move {
+            let _ = pipe.write_all(text.as_bytes()).await;
+        });
+    }
     let started = Instant::now();
     let (code, out, timed_out) = run_to_end(child, limit).await;
     Ok(Ran { display: launch.display, code, out, timed_out, took: started.elapsed(), error: None })
@@ -545,7 +566,7 @@ pub async fn run_command(ctx: &Ctx, args: &Value) -> Output {
         Err(e) => return Output::fail(e),
     };
     let limit = timeout_for(command, &argv, num_arg(args, "timeout_ms"));
-    match execute(ctx, command, argv, str_arg(args, "reason"), Some(limit)).await {
+    match execute(ctx, command, argv, str_arg(args, "reason"), Some(limit), Some(str_arg(args, "stdin")).filter(|text| !text.is_empty())).await {
         Ok(ran) => report(&ran),
         Err(refused) => refused,
     }
@@ -573,7 +594,7 @@ pub async fn run_tests(ctx: &Ctx, args: &Value) -> Output {
         argv.push(filter.to_string());
     }
     let limit = timeout_for(&command, &argv, None);
-    let ran = match execute(ctx, &command, argv, "Run the project's tests", Some(limit)).await {
+    let ran = match execute(ctx, &command, argv, "Run the project's tests", Some(limit), None).await {
         Ok(ran) => ran,
         Err(refused) => return refused,
     };
