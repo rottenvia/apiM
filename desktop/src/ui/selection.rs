@@ -134,7 +134,8 @@ mod tests {
         let fill = Color32::from_rgb(1, 2, 3);
         let ctx = egui::Context::default();
         let mut galley = None;
-        let _ = ctx.run_ui(Default::default(), |ui| galley = Some(ui.painter().layout_no_wrap("hello there".into(), egui::FontId::proportional(14.0), Color32::WHITE)));
+        // The font picture the frame made is thrown away here: a debug build of egui panics on one dropped unseen.
+        ctx.run_ui(Default::default(), |ui| galley = Some(ui.painter().layout_no_wrap("hello there".into(), egui::FontId::proportional(14.0), Color32::WHITE))).textures_delta.clear();
         let mut text = TextShape::new(pos2(10.0, 100.0), galley.unwrap(), Color32::WHITE);
         let inked = (Color32::from_rgb(9, 9, 9), Color32::WHITE);
         assert!(take_boxes(&mut text, fill, inked).is_empty());

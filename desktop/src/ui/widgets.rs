@@ -310,13 +310,32 @@ pub fn segmented(ui: &mut Ui, items: &[(&str, usize)], active: usize) -> Option<
 /// A sidebar footer link: icon, label, full width, 12 radius.
 pub fn side_link(ui: &mut Ui, icon: Icon, label: &str, tip: &str) -> Response {
     let p = p();
-    let (rect, response) = clickable(ui, vec2(ui.available_width(), 40.0));
+    let (rect, response) = clickable(ui, vec2(ui.available_width(), RAIL_FOOT_ROW));
     let t = fade(ui, response.id, response.hovered());
-    ui.painter().rect_filled(rect, 12.0, lerp(Color32::TRANSPARENT, p.bg3, t));
+    ui.painter().rect_filled(rect, RAIL_ROUND, lerp(Color32::TRANSPARENT, p.bg3, t));
     let fg = lerp(p.text2, p.text, t);
-    icons::paint(ui, icon, pos2(rect.left() + 12.0 + 8.0, rect.center().y), 16.0, fg);
-    text_at(ui, rect.left() + 12.0 + 16.0 + 10.0, rect.center().y, galley(ui, label, theme::font(14.0, W::Regular), fg));
+    icons::paint(ui, icon, pos2(rect.left() + RAIL_PAD + 7.5, rect.center().y), 15.0, fg);
+    text_at(ui, rect.left() + RAIL_PAD + 15.0 + 9.0, rect.center().y, galley(ui, label, theme::font(RAIL_TEXT, W::Regular), fg));
     if tip.is_empty() { response } else { response.on_hover_text(tip) }
+}
+
+// The two rails, the chats on the left and the files on the right, are one design: the same space from the
+// edge, the same row, the same letters, the same links at the foot. Each was a faithful copy of its own web
+// component, and side by side they read as two apps (14px rows of 42 against 12px rows of 30).
+/// From a rail's edge to its rows, and from a row's edge to what is in it.
+pub const RAIL_INSET: f32 = 12.0;
+pub const RAIL_PAD: f32 = 10.0;
+/// A row of either list, and the room kept at the right for the scroll bar.
+pub const RAIL_ROW: f32 = 32.0;
+pub const RAIL_BAR: f32 = 10.0;
+pub const RAIL_ROUND: f32 = 8.0;
+/// Names in either list; the small grey figures beside them.
+pub const RAIL_TEXT: f32 = 13.0;
+pub const RAIL_SMALL: f32 = 11.0;
+/// A link at the foot of a rail, and the foot that holds `rows` of them under its rule.
+pub const RAIL_FOOT_ROW: f32 = 36.0;
+pub fn rail_foot(rows: usize) -> f32 {
+    1.0 + 10.0 + RAIL_FOOT_ROW * rows as f32 + 10.0
 }
 
 /// A row in a dropdown menu: 14px icon, 13px label.

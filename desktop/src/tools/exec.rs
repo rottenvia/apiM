@@ -298,6 +298,10 @@ fn prepare(ctx: &Ctx, command: &str, argv: Vec<String>) -> Result<Launch, String
     if SHELLS.contains(&name.as_str()) {
         return Err(format!("Shells are not available. Run the interpreter directly, e.g. `python app.py` rather than `sh -c \"python app.py\"`.{}", if cfg!(windows) { " For a question to the system itself use powershell, with the command as one string in args." } else { "" }));
     }
+    // No shell reads `>out.txt` or `|` either: the program gets them as words ("Error opening ./>_NBUF_OUT.txt").
+    if let Some(word) = argv.iter().map(|a| a.trim()).find(|a| matches!(*a, "|" | "&&" | "<") || a.starts_with('>') || a.starts_with("2>") || a.starts_with("1>") || a.starts_with("&>")) {
+        return Err(format!("There is no shell here, so `{word}` would reach the program as a plain argument and redirect nothing. The output comes back to you as the result. To keep it in a file, have the program write the file itself."));
+    }
     if let Some((_, forms)) = LOOKING_FORMS.iter().find(|(tool, _)| *tool == name) {
         let first = argv.first().map(|word| word.to_ascii_lowercase()).unwrap_or_default();
         if !forms.contains(&first.as_str()) {
@@ -561,12 +565,22 @@ fn report(ran: &Ran) -> Output {
 
 pub async fn run_command(ctx: &Ctx, args: &Value) -> Output {
     let command = str_arg(args, "command").trim();
-    let argv = match argv_arg(args, "args") {
+    let mut argv = match argv_arg(args, "args") {
         Ok(argv) => argv,
         Err(e) => return Output::fail(e),
     };
+    let mut stdin = str_arg(args, "stdin").to_string();
+    // The dash means "the script is on stdin". Written after the dash as one more argument, the script reached
+    // nobody: python started its prompt on an empty stdin and "exit 0" came back. The reply read that as stdin being
+    // broken and wrote each of its next forty checks to a file, with a second round to run it.
+    if stdin.is_empty() && argv.first().is_some_and(|a| a == "-") {
+        match argv.get(1) {
+            Some(script) if script.contains('\n') => stdin = argv.remove(1),
+            _ => return Output::fail("`-` tells the program to read its script from stdin, and no stdin was given. The script goes in \"stdin\": {\"command\":\"python\",\"args\":[\"-\"],\"stdin\":\"print(1)\"}."),
+        }
+    }
     let limit = timeout_for(command, &argv, num_arg(args, "timeout_ms"));
-    match execute(ctx, command, argv, str_arg(args, "reason"), Some(limit), Some(str_arg(args, "stdin")).filter(|text| !text.is_empty())).await {
+    match execute(ctx, command, argv, str_arg(args, "reason"), Some(limit), Some(stdin.as_str()).filter(|text| !text.is_empty())).await {
         Ok(ran) => report(&ran),
         Err(refused) => refused,
     }
@@ -973,6 +987,20 @@ mod tests {
             assert!(prep(Approval::Auto, "powershell", &["-EncodedCommand", "AAAA"]).is_err() && prep(Approval::Auto, "powershell", &["Get-Content ~/.ssh/id_rsa"]).is_err());
             assert!(prep(Approval::Auto, "cmd", &["/c", "dir"]).err().unwrap().contains("use powershell"));
         }
+        // A redirect is a shell's doing: said before the program takes `>out.txt` for a file to open.
+        assert!(prep(Approval::Auto, "python", &["a.py", ">out.txt"]).err().unwrap().starts_with("There is no shell here, so `>out.txt`"));
+        assert!(prep(Approval::Auto, "python a.py 2>&1", &[]).is_err() && prep(Approval::Auto, "python", &["-c", "print(1 > 0)"]).is_ok());
+    }
+
+    /// A script written as the argument after the dash is run as the script it is, and a dash with no script is refused.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_script_after_the_dash_goes_to_stdin() {
+        let dir = crate::tools::scratch("dash");
+        let ctx = crate::tools::test_ctx(&dir, Approval::Auto);
+        let ran = run_command(&ctx, &json!({ "command": "python", "args": ["-", "import sys\nprint('ran', len(sys.argv))"] })).await;
+        assert!(ran.ok && ran.text.contains("<<stdin (2 lines)") && ran.text.contains("ran 1"), "{}", ran.text);
+        let bare = run_command(&ctx, &json!({ "command": "python", "args": ["-"] })).await;
+        assert!(!bare.ok && bare.text.contains("no stdin was given"), "{}", bare.text);
     }
     use serde_json::json;
 

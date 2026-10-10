@@ -120,7 +120,16 @@ Found in one real reply: 160 rounds of work in a sandbox, 48 minutes, $0.27, sto
 - **Sandbox steps said nothing.** A row read "Ran in sandbox …0-kb-3-line && python3 - <<'EOF' · Sandbox command finished". It now shows the reason the command was given with, and the last line the command printed.
 - **Thinking typed as the answer.** GLM does not take its thinking back the way DeepSeek does, so the end of each thought rode back to it as the opening words of its own earlier turns. Shown a hundred turns that open with a thought, it began to think in its replies: 5,000 characters of "Wait… Hmm… Actually…" as answer text, 373 in the thought box. OpenRouter passes a `reasoning` field on to GLM (seen on Relace: a replayed thought is counted in the next prompt), so the end of each thought now rides there and the words stay words. Same size, same cost. Other families keep the old way until the same is seen for them; an endpoint that rejects the field falls back by itself.
 
-The workspace panel's title is gone: five buttons left it 26 pixels, and it read "W…".
+## The two side panels
+
+The chat list on the left and the files on the right were each a faithful copy of its own web component, and side by side they read as two apps: 14px names in rows of 42 against 12px names in rows of 30, a lettered tile before each file, five buttons 40 apart behind a lone folder, Download twice. They are one design now (`widgets::RAIL_*`):
+
+- the same 12 from the edge, the same row (32, two apart), the same 13px names and 11px figures, the same row lit under the pointer;
+- both lists start at one height, so a row on the left stands level with a row on the right;
+- the files panel says "Files" where the left one has "New chat", with its buttons in one group at the right edge and the way out a little apart. Download is at the foot only, as a link like "Settings" on the other side. The history button stays lit while restore points are shown, and the title reads "History";
+- a file has a small page before its name, in the column where a folder has its picture, so the names of one folder stand in one line.
+
+The web still draws them its own way.
 
 ## Carrying a big task through
 
@@ -162,6 +171,19 @@ Three things the screen said wrongly about that reply:
 - A reply stopped between two steps showed its last round's raw ending, "tool_calls". It reads "unfinished". One that closed properly with the finish tool showed the same word; it reads "stop".
 
 And a message sent with a large file showed the note written for the model (the file's size, its first lines, which tool reads the rest) above the words that were typed. The bubble now shows the file's chip and the words.
+
+### The same chat, a fourth time
+
+The reply after that ran 148 rounds and died on "OpenRouter API error (400): Provider returned error". Read round by round:
+
+- **Two answers of 600,000 characters ended it.** The model changed a few words in a generated file whose one line holds a 600,000-character program. `edit_file` shows the lines around a change so the model can check it, and it showed that line whole, twice. The next request was 1.8 MB and the provider turned it away without a reason. Lines beside an edit are now cut as a read cuts them (`files::describe`), and a saved reply taken up again has them cut too, so Resume works on that chat.
+- **The error said nothing.** A refusal that is only OpenRouter's envelope now carries the provider's own words when it sent any, and a refused request over 400,000 characters says its size: "(the request was 1.8 MB)".
+- **It answered the same question twenty-two times.** Every round ends with a note restating the request, so a long run cannot drift to an older task. The request was a question ("so what do we do to get …?"), it was the last thing each round read, and the reply kept answering it: "Answer (same as before): …", "User asked again: …", under a note that already said not to. The request now stands quoted inside the note, and the note ends on what to do (`goal_pin::render_goal_pin`; the web's wording is unchanged). Measured on a made-up transcript of thirteen rounds with the chat's two plugins on and the habit already begun, forty samples of each wording: the old one got the plan said again in 3 and some remark in 10; the new one got the next tool call and no words in all 40.
+- **One slip cost forty rounds.** Its first one-call script went in as an argument after the dash (`args: ["-", "<script>"]`). Python opened its prompt on an empty stdin and "exit 0" came back with the banner; the model concluded "stdin got swallowed" and wrote every later check to a file, with a second round to run it. A script after the dash is now run as the script it is, and a dash with no script is refused with the right call.
+- **A plan in words is no plan.** The reply opened with "Plan, 5 steps" as text and never called `make_plan`: the user saw no plan, and no step was ever counted. A numbered plan written into a reply that goes on working is now answered once with a note to put it in `make_plan` (`plan::wrote_plan_in_words`), and the note at round eight of a reply with no plan asks for one too.
+- **`>out.txt` reached the program as a word.** There is no shell, so luau answered "Error opening ./>_NBUF_OUT.txt" and printed 30,000 characters of numbers. A redirect or a pipe among the arguments is now refused before anything runs, with the reason.
+
+On screen, the row of that first script read "Ran python - · Ran: python - "". A script among a command's words is now named by its size: "python - <<stdin (10 lines)".
 
 ## Checking the tools
 

@@ -35,12 +35,14 @@ pub fn resolve_run_goal(user_text: &str, history_last_user: Option<&str>, steeri
 /// ask, so the model stops re-surveying the workspace every round.
 pub fn render_goal_pin(goal: &str, mid_run: bool) -> String {
     let capped = if js_len(goal) > MAX_GOAL_CHARS { format!("{}\n…[request truncated — the full text is the newest user turn above]…", js_head(goal, MAX_GOAL_CHARS)) } else { goal.to_string() };
-    let lead = if mid_run {
-        format!("You are mid-task on this request — nothing new has been asked. This block is the app's standing reminder, repeated every round: it is not a message from the user, so do not acknowledge it, answer it again or mention it. Do not restart, re-survey or re-read to re-orient: your plan, notes, the files you read and your last steps are all above. Take the next step. Older turns and the {HISTORY_SUMMARY_MARKER} block are background for a different, finished task if they differ.")
-    } else {
-        format!("Answer THIS request. Older turns and the {HISTORY_SUMMARY_MARKER} block are background — if they describe a different task, that task is over or paused; do not resume it unasked.")
-    };
-    format!("{GOAL_PIN_MARKER}\n{lead}\n\n{capped}")
+    if mid_run {
+        // Not the web's wording. There the request is the last thing a round reads, and a request that is a question was
+        // answered again and again: "Answer (same as before): …" twenty-two times in one reply of 150 rounds, under a note
+        // that already said not to. Here the request is quoted inside the note, and the note ends on what to do.
+        let quoted = capped.lines().map(|line| format!("> {line}")).collect::<Vec<_>>().join("\n");
+        return format!("{GOAL_PIN_MARKER}\nA note from the app, added to every round. It is not a message from the user and nothing new has been asked: do not acknowledge it, do not answer the request again, do not mention it. You are in the middle of the work on this request:\n\n{quoted}\n\nYour plan, notes, the files you read and your last steps are all above: do not restart, re-survey or re-read to re-orient. Older turns and the {HISTORY_SUMMARY_MARKER} block are background for a different, finished task if they differ. Take the next step of the work now.");
+    }
+    format!("{GOAL_PIN_MARKER}\nAnswer THIS request. Older turns and the {HISTORY_SUMMARY_MARKER} block are background — if they describe a different task, that task is over or paused; do not resume it unasked.\n\n{capped}")
 }
 
 #[cfg(test)]
@@ -53,6 +55,14 @@ mod tests {
     fn replays_the_web_functions() {
         check("goal_pin.substantiveUserText", |i| json!(substantive_user_text(i.as_str())));
         check("goal_pin.resolveRunGoal", |i| json!(resolve_run_goal(i["userText"].as_str().unwrap(), i["historyLastUser"].as_str(), i["steeringText"].as_str())));
-        check("goal_pin.renderGoalPin", |i| json!(render_goal_pin(i["goal"].as_str().unwrap(), i["mid"].as_bool().unwrap())));
+        // The opening block is the web's, word for word; mid-run the wording is the desktop's own.
+        for (spec, want) in crate::context::testkit::cases("goal_pin.renderGoalPin") {
+            let spec = crate::context::testkit::expand(&spec);
+            if !spec["mid"].as_bool().unwrap() {
+                assert_eq!(crate::context::testkit::compact(&json!(render_goal_pin(spec["goal"].as_str().unwrap(), false))), want);
+            }
+        }
+        let mid = render_goal_pin("so what do we do\nto get it all?", true);
+        assert!(mid.contains("\n\n> so what do we do\n> to get it all?\n\n") && mid.ends_with("Take the next step of the work now."), "{mid}");
     }
 }
