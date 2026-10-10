@@ -15,6 +15,8 @@ cargo run --release
 
 The program ends up at `desktop/target/release/apim.exe`. You can copy that one file anywhere.
 
+Settings says at its foot when the program was built ("Built 2026-10-10 17:18"): the way to tell whether a window, a copy or a pinned shortcut is the newest build. A shortcut pinned to `target/release/apim.exe` opens whatever was built last; a copy made elsewhere stays as old as the day it was copied, and a window left open stays the build it was started from.
+
 Open **Settings** and paste an OpenRouter or DeepSeek key. Keys stay on your PC.
 
 ## What it does
