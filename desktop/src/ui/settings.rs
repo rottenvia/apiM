@@ -142,7 +142,9 @@ pub fn show(app: &mut App, ctx: &egui::Context) -> bool {
                         }
                         ui.add_space(12.0);
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            form::line(ui, "Saved automatically as you change them.", 11.0, 16.5, W::Regular, p.muted);
+                            // When this program was built: the way to tell a window or a pinned shortcut from an older one.
+                            let built = Some(env!("APIM_BUILT")).filter(|time| !time.is_empty()).map_or(String::new(), |time| format!(" Built {time}."));
+                            form::line(ui, &format!("Saved automatically as you change them.{built}"), 11.0, 16.5, W::Regular, p.muted);
                         });
                     });
                 });
