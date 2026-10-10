@@ -413,6 +413,7 @@ impl App {
                     self.conv.summary = covered.map(|up_to_id| HistorySummary { text: String::new(), up_to_id, dropped_turns: 0, updated_at: String::new(), covered_turns: Some(12), manual: true, revised: false });
                 }
                 "wait-row" => self.fake_run(false),
+                "open-step" => bubble::SHOT_OPEN_STEP.store(true, std::sync::atomic::Ordering::Relaxed),
                 "wait-retry" => {
                     self.fake_run(false);
                     self.run.as_mut().unwrap().retry = Some(("The provider is overloaded (503) — retrying, try 2 of 3".into(), Instant::now() + Duration::from_secs(8)));

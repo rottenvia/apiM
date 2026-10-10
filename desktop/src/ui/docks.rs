@@ -266,7 +266,7 @@ fn processes(app: &mut App, ui: &mut egui::Ui) {
                     egui::Frame::new().fill(p.bg).stroke(Stroke::new(1.0, p.border)).corner_radius(8).inner_margin(egui::Margin::same(8)).outer_margin(egui::Margin::symmetric(14, 0)).show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         // 192 at most, its padding and border included.
-                        egui::ScrollArea::both().id_salt(("output", &proc.id)).max_height(174.0).show(ui, |ui| {
+                        egui::ScrollArea::both().id_salt(("output", &proc.id)).max_height(174.0).auto_shrink([false, true]).show(ui, |ui| {
                             let words = if output.is_empty() { "(no output)" } else { output };
                             ui.add(egui::Label::new(widgets::lines(words, 11.0, 17.875, W::Regular, p.text2).font(theme::mono(11.0))).extend());
                         });
