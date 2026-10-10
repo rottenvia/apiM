@@ -104,19 +104,33 @@ fn digest_turn(m: &Message) -> String {
     if media.is_empty() { format!("{who}: {text}") } else { format!("{who}: {text}\nShared: {}", media.join(" ")) }
 }
 
-/// The newest turns that fit, oldest first, and how many older ones were left out.
-fn digest(pending: &[&Message]) -> (String, usize) {
+/// Why a summarising call gave nothing to store.
+enum Miss {
+    Nothing,
+    /// The model answered, and the answer declines to write a summary.
+    Declined,
+}
+
+/// A reply that opens by declining. One was stored as a chat's summary, and from then on it stood in for the
+/// whole conversation on every request.
+pub fn declined(text: &str) -> bool {
+    let opening = text.trim_start().chars().take(40).collect::<String>().to_lowercase().replace('\u{2019}', "'");
+    crate::refusal::looks_like_model_refusal(text) || ["i'm not going to", "i am not going to", "i can't", "i cannot", "i won't", "i will not", "sorry", "i'm sorry"].iter().any(|start| opening.starts_with(start))
+}
+
+/// The newest turns that fit in `room` characters, oldest first, and how many older ones were left out.
+fn digest(pending: &[&Message], room: usize) -> (String, usize) {
     let mut kept: Vec<String> = Vec::new();
     let mut chars = 0;
     for m in pending.iter().rev() {
         let line = digest_turn(m);
         let size = line.chars().count();
-        if chars + size > DIGEST_MAX_CHARS && !kept.is_empty() {
+        if chars + size > room && !kept.is_empty() {
             break;
         }
-        kept.push(cut(&line, DIGEST_MAX_CHARS - chars).to_string());
-        chars += size.min(DIGEST_MAX_CHARS - chars);
-        if chars >= DIGEST_MAX_CHARS {
+        kept.push(cut(&line, room - chars).to_string());
+        chars += size.min(room - chars);
+        if chars >= room {
             break;
         }
     }
@@ -125,9 +139,9 @@ fn digest(pending: &[&Message]) -> (String, usize) {
     (kept.join("\n\n"), dropped)
 }
 
-/// One summarising call. None when the provider gave nothing usable.
-async fn run(previous: Option<&str>, pending: &[Message], target: &Target, system: &str, max_tokens: u32, max_chars: usize) -> Option<(String, usize)> {
-    let (text, dropped) = digest(&pending.iter().collect::<Vec<_>>());
+/// One summarising call, reading up to `room` characters of turns.
+async fn run(previous: Option<&str>, pending: &[Message], target: &Target, system: &str, max_tokens: u32, max_chars: usize, room: usize) -> Result<(String, usize), Miss> {
+    let (text, dropped) = digest(&pending.iter().collect::<Vec<_>>(), room);
     let mut body = Map::new();
     body.insert("model".into(), json!(target.api_model));
     body.insert("stream".into(), json!(true));
@@ -139,21 +153,32 @@ async fn run(previous: Option<&str>, pending: &[Message], target: &Target, syste
     }
     let mandatory = target.provider == ProviderId::Openrouter && provider::openrouter_reasoning_mandatory(&target.model.id);
     provider::apply_thinking(&mut body, target.style, false, "none", mandatory);
-    let round = provider::stream_round(&provider::client(), target, &Value::Object(body), |_| {}).await.ok()?;
-    let out = round.content.trim();
-    (!out.is_empty()).then(|| (cut(out, max_chars).to_string(), dropped))
+    let round = provider::stream_round(&provider::client(), target, &Value::Object(body), |_| {}).await.map_err(|_| Miss::Nothing)?;
+    match round.content.trim() {
+        "" => Err(Miss::Nothing),
+        out if declined(out) => Err(Miss::Declined),
+        out => Ok((cut(out, max_chars).to_string(), dropped)),
+    }
 }
 
-/// The automatic summary: folds `pending` into what is stored. None leaves the chat as it was.
-pub async fn refresh(stored: Option<HistorySummary>, pending: Vec<Message>, settings: Settings) -> Option<HistorySummary> {
-    let target = provider::resolve_target(&settings.model, &settings).ok()?;
+fn declined_note(target: &Target) -> String {
+    format!("{} declined to summarise this chat. Nothing was changed.", target.model.label)
+}
+
+/// The automatic summary: folds `pending` into what is stored. An error leaves the chat as it was, and has
+/// words only when the model declined: asking again on every message would be paid for each time.
+pub async fn refresh(stored: Option<HistorySummary>, pending: Vec<Message>, settings: Settings) -> Result<HistorySummary, String> {
+    let target = provider::resolve_target(&settings.model, &settings).map_err(|_| String::new())?;
     // A /compact summary stands in for the whole chat: rolling it with the 300-word prompt would squash it on the next refresh.
     let manual = stored.as_ref().is_some_and(|s| s.manual);
     let (system, max_tokens, max_chars) = if manual { (compact_system(""), 2000, COMPACT_TEXT_MAX_CHARS) } else { (SUMMARY_SYSTEM.to_string(), 700, TEXT_MAX_CHARS) };
-    let (text, dropped) = run(stored.as_ref().map(|s| s.text.as_str()), &pending, &target, &system, max_tokens, max_chars).await?;
-    Some(HistorySummary {
+    let (text, dropped) = run(stored.as_ref().map(|s| s.text.as_str()), &pending, &target, &system, max_tokens, max_chars, DIGEST_MAX_CHARS).await.map_err(|miss| match miss {
+        Miss::Declined => declined_note(&target),
+        Miss::Nothing => String::new(),
+    })?;
+    Ok(HistorySummary {
         text,
-        up_to_id: pending.last()?.id.clone(),
+        up_to_id: pending.last().ok_or_else(String::new)?.id.clone(),
         dropped_turns: stored.as_ref().map_or(0, |s| s.dropped_turns) + dropped as u32,
         updated_at: crate::store::iso(crate::store::now_ms()),
         covered_turns: manual.then(|| stored.as_ref().and_then(|s| s.covered_turns).unwrap_or(0) + pending.len() as u32),
@@ -180,12 +205,15 @@ pub async fn compact(messages: Vec<Message>, stored: Option<HistorySummary>, set
     let covered = stored.as_ref().and_then(|s| messages.iter().position(|m| m.id == s.up_to_id));
     let uncovered = &messages[covered.map_or(0, |i| i + 1)..];
 
-    // Chunks the summariser can read in one go; a chat too long for eight of them loses its oldest part.
+    // Chunks the summariser can read in one go; a chat too long for eight of them loses its oldest part. A chunk is a quarter
+    // of the model's window: at a fixed 60,000 characters, eight of them read the newest thirty-odd turns of a long chat and
+    // counted the rest as skipped, whatever the model could hold.
+    let room = DIGEST_MAX_CHARS.max(crate::models::context_window(&target.model.id, &settings.custom_models) as usize * 7 / 8);
     let mut chunks: Vec<&[Message]> = Vec::new();
     let (mut start, mut chars) = (0, 0);
     for (i, m) in uncovered.iter().enumerate() {
         let size = digest_turn(m).chars().count() + 2;
-        if i > start && chars + size > DIGEST_MAX_CHARS {
+        if i > start && chars + size > room {
             chunks.push(&uncovered[start..i]);
             (start, chars) = (i, 0);
         }
@@ -200,8 +228,10 @@ pub async fn compact(messages: Vec<Message>, stored: Option<HistorySummary>, set
     let mut text = stored.as_ref().map(|s| s.text.clone());
     let mut dropped = skipped;
     for (i, chunk) in chunks.iter().enumerate() {
-        let Some((fresh, d)) = run(text.as_deref(), chunk, &target, &system, 4000, COMPACT_TEXT_MAX_CHARS).await else {
-            return Err(if i == 0 { format!("{provider} did not return a summary. Nothing was changed — try again.") } else { format!("{provider} stopped partway through. Nothing was changed — try again.") });
+        let (fresh, d) = match run(text.as_deref(), chunk, &target, &system, 4000, COMPACT_TEXT_MAX_CHARS, room).await {
+            Ok(done) => done,
+            Err(Miss::Declined) => return Err(declined_note(&target)),
+            Err(Miss::Nothing) => return Err(if i == 0 { format!("{provider} did not return a summary. Nothing was changed — try again.") } else { format!("{provider} stopped partway through. Nothing was changed — try again.") }),
         };
         text = Some(fresh);
         dropped += d;
@@ -254,9 +284,17 @@ mod tests {
     }
 
     #[test]
+    fn a_reply_that_declines_is_not_a_summary() {
+        assert!(declined("I'm not going to continue summarizing or advancing this project. What is being built here is…"));
+        assert!(declined("  I can\u{2019}t help with that."));
+        // A summary may say what could not be done.
+        assert!(!declined("Goal: fix the login page.\nCurrent state: I can't reproduce the crash yet; the form posts.\nNext steps: add a log line."));
+    }
+
+    #[test]
     fn digest_keeps_the_newest_turns() {
         let five = turns(5, 25_000);
-        let (text, dropped) = digest(&five.iter().collect::<Vec<_>>());
+        let (text, dropped) = digest(&five.iter().collect::<Vec<_>>(), DIGEST_MAX_CHARS);
         // Each turn is cut to 20k plus its label: two fit whole in 60k, a third would not.
         assert_eq!(dropped, 3);
         assert!(text.chars().count() <= DIGEST_MAX_CHARS + 4);

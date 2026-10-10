@@ -194,6 +194,8 @@ pub struct App {
     parked: Option<Conversation>,
     run: Option<Run>,
     summary_job: Option<SummaryJob>,
+    /// Chats whose model declined the automatic summary: not asked again until the app restarts.
+    summary_declined: std::collections::HashSet<String>,
     procs: Arc<Procs>,
     draft: String,
     attachments: Vec<attachments::Pending>,
@@ -293,6 +295,7 @@ impl App {
             parked: None,
             run: None,
             summary_job: None,
+            summary_declined: Default::default(),
             procs: Arc::new(Procs::default()),
             draft: String::new(),
             attachments: Vec::new(),
@@ -784,7 +787,7 @@ impl App {
 
     /// Older turns are folded into the summary once enough of them have piled up behind the newest eight.
     fn refresh_summary(&mut self, ctx: &egui::Context, conv_id: &str) {
-        if self.summary_job.is_some() {
+        if self.summary_job.is_some() || self.summary_declined.contains(conv_id) {
             return;
         }
         let conv = match &self.parked {
@@ -799,7 +802,7 @@ impl App {
         let wake = ctx.clone();
         let (stored, pending, settings) = (conv.summary.clone(), shape.pending.iter().map(|m| (*m).clone()).collect::<Vec<_>>(), self.settings.clone());
         self.rt.spawn(async move {
-            let _ = tx.send(summary::refresh(stored, pending, settings).await.ok_or_else(String::new));
+            let _ = tx.send(summary::refresh(stored, pending, settings).await);
             wake.request_repaint();
         });
         self.summary_job = Some(SummaryJob { conv_id: conv_id.to_string(), manual: false, before: 0, rx });
@@ -827,6 +830,8 @@ impl App {
                 }
             }
             Err(problem) if job.manual => self.compact_note = Some((false, problem)),
+            // Only a decline comes with words: the same turns would be sent, paid for and declined again on every message.
+            Err(problem) if !problem.is_empty() => drop(self.summary_declined.insert(job.conv_id)),
             Err(_) => {}
         }
     }
