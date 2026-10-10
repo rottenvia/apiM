@@ -66,6 +66,25 @@ fn old_paste(text: &str) -> std::borrow::Cow<'_, str> {
     format!("{}\n\n[… {} characters of this earlier message are left out here: it was a long paste, and the reply that follows it has read it whole. Ask the user for it again if you need a part of it …]\n\n{}", &text[..head], tail - head, &text[tail..]).into()
 }
 
+/// A saved transcript taken up again (Resume): the long pastes in the turns before the request it answers are cut
+/// as `wire_turns` cuts them. One saved before that cut existed carried them whole into every round after Resume.
+pub fn cut_old_pastes(messages: &mut [Value]) {
+    // The run starts at the first turn that calls a tool; the request is the user message before it, and the one before that is the newest earlier one.
+    let run = messages.iter().position(|m| m["tool_calls"].as_array().is_some_and(|c| !c.is_empty())).unwrap_or(messages.len());
+    let asked: Vec<usize> = (0..run).filter(|&i| messages[i]["role"] == "user").collect();
+    for &i in &asked[..asked.len().saturating_sub(2)] {
+        let cut = |text: &mut Value| {
+            if let Some(short) = text.as_str().map(old_paste).filter(|s| matches!(s, std::borrow::Cow::Owned(_))) {
+                *text = Value::String(short.into_owned());
+            }
+        };
+        match &mut messages[i]["content"] {
+            Value::Array(parts) => parts.iter_mut().for_each(|part| cut(&mut part["text"])),
+            text => cut(text),
+        }
+    }
+}
+
 /// The conversation the model reads for this turn: the earlier turns, then the message being answered, built the way the
 /// web's `buildUserContent` builds each user turn.
 pub fn wire_turns(history: &[(Role, String, Vec<Attachment>)], text: &str, images: &[Attachment], vision: Vision) -> Vec<Value> {
@@ -92,6 +111,27 @@ pub fn wire_turns(history: &[(Role, String, Vec<Attachment>)], text: &str, image
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_resumed_transcript_loses_its_old_pastes_and_keeps_the_request() {
+        let long = "p".repeat(OLD_PASTE_CHARS * 3);
+        let mut messages = vec![
+            json!({ "role": "system", "content": long }),
+            json!({ "role": "user", "content": long }),
+            json!({ "role": "assistant", "content": "read it" }),
+            json!({ "role": "user", "content": [{ "type": "text", "text": long }] }),
+            json!({ "role": "assistant", "content": "and that" }),
+            json!({ "role": "user", "content": long }),
+            json!({ "role": "user", "content": long }),
+            json!({ "role": "assistant", "content": "", "tool_calls": [{ "id": "a", "type": "function", "function": { "name": "read_file", "arguments": "{}" } }] }),
+            json!({ "role": "user", "content": long }),
+        ];
+        cut_old_pastes(&mut messages);
+        let size = |m: &Value| m["content"].as_str().or(m["content"][0]["text"].as_str()).unwrap().len();
+        // Two earlier pastes are cut; the newest earlier message, the request, what came during the run and the instructions are whole.
+        assert!(size(&messages[1]) < OLD_PASTE_CHARS + 400 && size(&messages[3]) < OLD_PASTE_CHARS + 400);
+        assert!([0, 5, 6, 8].iter().all(|&i| size(&messages[i]) == long.len()));
+    }
 
     /// The web's replay, case by case. Each pair is [input, output]: a stored chat with the question being answered, and what
     /// the web sends for it (the summary first, then the window). `transcript_fixtures.json` was dumped from the TypeScript
