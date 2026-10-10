@@ -79,6 +79,12 @@ pub const GROUPS: &[Group] = &[
         hints: &[".exe", ".dll", "a binary", "decompile", "disassembl", "reverse engineer", "malware", "deobfuscat"],
     },
     Group {
+        name: "models",
+        what: "the app's model list: add an OpenRouter model from its link or id",
+        tools: &["add_model"],
+        hints: &["openrouter.ai/", "add model", "add this model", "add the model", "install model", "install this model", "model list"],
+    },
+    Group {
         name: "helpers",
         what: "a read-only helper with a context of its own, for broad surveys and research",
         tools: &["delegate"],
@@ -201,7 +207,8 @@ mod tests {
         for group in GROUPS {
             for tool in group.tools {
                 assert_eq!(GROUPS.iter().filter(|other| other.tools.contains(tool)).count(), 1, "{tool} is in two groups");
-                assert!(*tool == "delegate" || crate::tools::implemented(tool), "{tool} has no handler");
+                // `delegate` and `add_model` are the desktop's own: their schemas are not in the list shared with the web.
+                assert!(["delegate", "add_model"].contains(tool) || crate::tools::implemented(tool), "{tool} has no handler");
             }
         }
         // What a first request carries: under a third of what all sixty descriptions weighed.

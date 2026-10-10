@@ -1301,6 +1301,14 @@ impl App {
                     conv.findings = state.findings;
                 }
                 Event::Groups(groups) => conv.set_names("toolGroups", groups),
+                Event::ModelAdded(model) => {
+                    // Same id, same entry: this replaces rather than duplicates. The model in use is not changed.
+                    match self.settings.custom_models.iter().position(|c| c.api_model == model.api_model) {
+                        Some(i) => self.settings.custom_models[i] = model,
+                        None => self.settings.custom_models.push(model),
+                    }
+                    self.settings.save();
+                }
                 Event::Skill { id, all, on } => {
                     // The model added or switched a plugin (`tools::skills`). It may have added one to the user's own, too.
                     self.settings.custom_plugins = crate::plugins::custom();

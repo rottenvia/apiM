@@ -196,6 +196,45 @@ pub fn implemented(name: &str) -> bool {
 /// The tool list for one request. A tool that cannot work is withheld rather than
 /// offered: a model given one calls it, gets an error, and tries something worse.
 /// `github` is None for a workspace with no connected repository, else whether a GitHub token is at hand.
+pub fn add_model_schema() -> Value {
+    serde_json::json!({ "type": "function", "function": {
+        "name": "add_model",
+        "description": "Adds an OpenRouter model to the user's model list in this app, so they can pick it in the model menu. Call it when the user gives an openrouter.ai model link or a model id (author/model-name, optionally with :free) and asks to add, install or try that model. The app checks the id with OpenRouter and takes the context window, prices and abilities from there. This conversation stays on its current model.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "model": { "type": "string", "description": "The model's openrouter.ai link, or its id (author/model-name)." },
+                "name": { "type": "string", "description": "A display name, if the user asked for one. Default: OpenRouter's name for the model." }
+            },
+            "required": ["model"]
+        }
+    } })
+}
+
+/// `add_model`: checks the id with OpenRouter and hands the app the entry for its list (`Event::ModelAdded`).
+async fn add_model(ctx: &Ctx, args: &Value) -> Output {
+    let slug = crate::provider::slug_from_link(args["model"].as_str().unwrap_or(""));
+    if let Some(have) = crate::models::all(&[]).into_iter().find(|m| m.api_model == slug) {
+        return Output::ok(format!("{} is already in the model list, as one of the app's own models. Nothing was added.", have.label), format!("{} is already there", have.label));
+    }
+    let found = match crate::provider::verify_openrouter(&slug, &ctx.settings.openrouter()).await {
+        Ok(found) => found,
+        Err(why) => return Output::fail(why),
+    };
+    let old = ctx.settings.custom_models.iter().find(|c| c.api_model == found.id.trim());
+    let Some(model) = found.custom(args["name"].as_str().unwrap_or(""), old) else { return Output::fail(format!("OpenRouter's id \"{}\" cannot be used as a model id here.", found.id)) };
+    ctx.emit.send(crate::agent::Event::ModelAdded(model.clone()));
+    let price = match (found.input_price, found.output_price) {
+        (Some(i), Some(o)) if i == 0.0 && o == 0.0 => "free".to_string(),
+        (Some(i), Some(o)) => format!("${i} in and ${o} out per million tokens at list price; the app picks the cheapest fast endpoint when it is first used"),
+        _ => "price not listed".to_string(),
+    };
+    let window = found.context_length.map_or("window not listed".to_string(), |n| format!("{n} tokens of context"));
+    let tools = if found.supports_tools { "" } else { " OpenRouter lists no tool support for it: it can chat here, and its tool calls will be refused." };
+    let verb = if old.is_some() { "Updated" } else { "Added" };
+    Output::ok(format!("{verb} {} ({}) in the model list: {window}, {price}.{tools} The user picks it in the model menu or with /model. This conversation stays on its current model.", model.label, model.api_model), format!("{verb} {}", model.label))
+}
+
 pub fn definitions(web_search: bool, native_vision: bool, git_repo: bool, github: Option<bool>) -> Vec<Value> {
     SCHEMAS
         .iter()
@@ -291,6 +330,7 @@ pub async fn run(name: &str, args: &Value, ctx: &Ctx) -> Output {
         "download_file" => web::download_file(ctx, args).await,
         "web_search" => web::web_search(ctx, args).await,
         "skills" => skills::run(ctx, args).await,
+        "add_model" => add_model(ctx, args).await,
         "git_pull_base" | "github_push" | "github_create_pr" | "github_pr_status" => github::run(ctx, name, args).await,
         n if n.starts_with("git_") => git::run(ctx, n, args).await,
         _ => Output::fail(format!("Unknown tool: {name}. Use one of the tools you were given.")),
