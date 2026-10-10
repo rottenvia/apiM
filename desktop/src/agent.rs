@@ -712,7 +712,7 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
     // Thinking is off for the rest of the run, or for the next round only; the next round continues cut-off prose.
     // A reply that already burned its output on thinking is not told it may think again when resumed.
     let (mut force_no_thinking, mut no_think_next, mut continuation_pending) = (resumed_think_nudges > 0, false, false);
-    let (mut claim_retried, mut asked_early, mut nudged_incomplete, mut ran_without_tools) = (false, false, false, false);
+    let (mut claim_retried, mut asked_early, mut asked_plan, mut nudged_incomplete, mut ran_without_tools) = (false, false, false, false, false);
     // The guards: one call failing identically, calls that add nothing, a read-only streak, whole-file rewrites, a preview taken for an edit.
     let mut breaker = LoopBreaker::default();
     let mut stalls = StallTracker::default();
@@ -1212,10 +1212,16 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
         // A long build with no plan and no question asked rests on an interpretation nobody confirmed. Said once, on a
         // request the run makes anyway. It used to wait until the model had stopped: the work was done by then, and it
         // cost a whole extra round on every long reply to have the model answer "nothing is ambiguous" under its answer.
+        // A plan written into the reply as text is no plan to the app: said once, the round it happens.
+        let planless = current.as_ref().is_none_or(|p| plan::progress(p).complete);
+        if planless && !asked_plan && plan::wrote_plan_in_words(&content) {
+            asked_plan = true;
+            harness.push(plan::PLAN_IN_WORDS_NUDGE.to_string());
+        }
         if current.is_none() && !asked_early && tool_rounds >= 8 && !tools_used.iter().any(|tool| tool == "ask_user") {
             asked_early = true;
             harness.push(format!(
-                "You are {tool_rounds} rounds in, you have not written a plan, and you have not asked anything. If any part of what you are building rests on a guess about what was wanted — the platform, the shape of the interface, what \"done\" means — call ask_user NOW, with concrete options. One question here is far cheaper than continuing in the wrong direction. If nothing is genuinely ambiguous, ignore this and carry on: do not answer it."
+                "You are {tool_rounds} rounds in, you have not written a plan, and you have not asked anything. If more than a few steps of work remain, put them in make_plan in the same turn as your next tool call: the plan is what the user watches, and what keeps a long task on course. If any part of what you are building rests on a guess about what was wanted — the platform, the shape of the interface, what \"done\" means — call ask_user NOW, with concrete options. One question here is far cheaper than continuing in the wrong direction. If neither applies, carry on: do not answer this."
             ));
         }
         // One step that has run a long time gets a checkpoint, then another, then the run pauses for the user.
@@ -1508,9 +1514,12 @@ async fn call_model(client: &reqwest::Client, target: &Target, body: &mut Map<St
             continue;
         }
 
+        // A body turned away with no reason given is most often one too large: its size is said, so the cause can be seen.
+        let sent = if matches!(status, 400 | 413 | 422) { Value::Object(original).to_string().len() } else { 0 };
         return Err(match e.kind {
             Failure::Unreachable if e.retryable => provider::unreachable_message(name, attempt),
             Failure::TimedOut => provider::timed_out_message(name, attempt),
+            _ if sent > 400_000 => format!("{} (the request was {:.1} MB)", e.message, sent as f64 / 1e6),
             _ => e.message,
         });
     }
@@ -1839,7 +1848,7 @@ mod tests {
         for request in &sent[1..] {
             // One pin however many rounds ran, and it is the last thing read.
             let pins = sent_systems(request, GOAL_PIN_MARKER);
-            assert!(pins.len() == 1 && pins[0].contains("You are mid-task on this request") && pins[0].ends_with(ask), "{pins:?}");
+            assert!(pins.len() == 1 && pins[0].contains("in the middle of the work on this request") && pins[0].contains(&format!("\n> {ask}\n")), "{pins:?}");
             assert_eq!(request["messages"].as_array().unwrap().last().unwrap()["content"], pins[0]);
         }
     }

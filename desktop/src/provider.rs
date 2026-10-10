@@ -263,7 +263,10 @@ pub fn http_error(status: u16, provider: &str, detail: &str) -> String {
     if refusal::is_provider_content_block(detail) {
         return refusal::provider_content_block_message(provider, detail);
     }
+    // "Provider returned error" is OpenRouter's envelope and says nothing: the provider's own words ride along when it sent any.
+    let inner = crate::run::retry::extract_rejection_detail(detail, 300);
     let detail = refusal::readable_detail(detail);
+    let detail = if detail.eq_ignore_ascii_case("provider returned error") && inner != detail { format!("{detail}: {inner}") } else { detail };
     match status {
         401 => format!("Your {provider} API key was rejected. Check it in Settings."),
         402 => format!("Your {provider} account has insufficient balance. Everything done so far is saved. Add credit and press Try again."),
@@ -630,6 +633,9 @@ mod tests {
         assert!(http_error(400, "DeepSeek", "Content Exists Risk").contains("its own content filter"));
         assert!(http_error(401, "OpenRouter", "").contains("key was rejected"));
         assert_eq!(http_error(400, "X", r#"{"error":{"message":"bad"}}"#), "X API error (400): bad");
+        let wrapped = r#"{"error":{"message":"Provider returned error","code":400,"metadata":{"raw":"{\"error\":{\"message\":\"prompt is too long\"}}"}}}"#;
+        assert_eq!(http_error(400, "OpenRouter", wrapped), "OpenRouter API error (400): Provider returned error: prompt is too long");
+        assert_eq!(http_error(400, "OpenRouter", r#"{"error":{"message":"Provider returned error"}}"#), "OpenRouter API error (400): Provider returned error");
     }
 }
 

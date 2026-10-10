@@ -796,7 +796,7 @@ fn snippet(content: &str, first: usize, new_lines: usize) -> String {
 
 fn describe(rel: &str, content: &str, a: &Applied, preview: bool) -> String {
     let old: Vec<&str> = content.split('\n').collect();
-    if preview {
+    let told = if preview {
         let shown: String = (a.first..=a.last.min(a.first + 39)).filter_map(|n| old.get(n - 1).map(|l| format!("{n} | {l}\n"))).collect();
         format!("PREVIEW, nothing written. {rel}: lines {}-{} would be replaced by {} line(s):\n{shown}", a.first, a.last, a.new_lines)
     } else {
@@ -812,7 +812,10 @@ fn describe(rel: &str, content: &str, a: &Applied, preview: bool) -> String {
             format!(" They read:\n{shown}{}", if gone.len() > 4 { format!("  … and {} more\n", gone.len() - 4) } else { String::new() })
         };
         format!("{rel}: replaced lines {}-{} with {} line(s).{was}{}Now:\n{}", a.first, a.last, a.new_lines, if was.ends_with('\n') || was.is_empty() { if was.is_empty() { " " } else { "" } } else { "\n" }, snippet(&a.content, a.first, a.new_lines))
-    }
+    };
+    // The lines around an edit are shown as a read shows them. A file holding a 600,000-character line came back whole
+    // with each of two edits, and the request after them was more than the provider would take: the reply ended there.
+    cut_long_lines(&told).unwrap_or(told)
 }
 
 /// Reads, edits and (unless previewing) writes one file, keeping its line endings.
@@ -1226,6 +1229,10 @@ mod tests {
         assert!(told.starts_with("f: replaced lines 2-2 with 1 line(s). They were blank: if you meant other lines, undo_file puts this back.\nNow:\n1 | a\n2 | x"), "{told}");
         let told = describe("f", "a\nb", &apply_edit("a\nb", &spec(|s| { s.old_text = Some("b".into()); s.new_text = "c".into() })).unwrap(), false);
         assert!(told.starts_with("f: replaced lines 2-2 with 1 line(s). They read:\n  - b\nNow:\n1 | a\n2 | c"), "{told}");
+        // A line too long to read is cut beside an edit as it is in a read.
+        let wide = format!("a\n{}\nb", "x".repeat(30_000));
+        let told = describe("f", &wide, &apply_edit(&wide, &spec(|s| { s.old_text = Some("a".into()); s.new_text = "c".into() })).unwrap(), false);
+        assert!(told.len() < READ_LINE_CHARS + 500 && told.contains("more characters of this line are not shown"), "{}", told.len());
         // Half a range (an end, no start) is refused rather than taken for one line.
         let half = apply_edit(src, &spec(|s| { s.end_line = Some(3); s.end_anchor = Some("end".into()); s.new_text = "Z".into() })).unwrap_err();
         assert!(half.contains("end but no start") && half.contains("end_line 3"), "{half}");

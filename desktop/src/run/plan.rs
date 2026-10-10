@@ -155,6 +155,17 @@ pub fn step_claimed_complete(round_text: &str) -> bool {
     CLAIM.find(round_text).is_some_and(|claim| !NEGATION.is_match(claim.as_str()))
 }
 
+/// A plan laid out in the reply's own words: three numbered points or more, in a text that calls them a plan or steps.
+/// One reply opened with "Plan, 5 steps", worked 150 rounds on them and never called make_plan: nothing showed the
+/// user where it was, and no step was ever counted as finished.
+pub fn wrote_plan_in_words(round_text: &str) -> bool {
+    static POINT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^\s*\d+[.)]\s+\S").unwrap());
+    static NAMED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(plan|steps?)\b").unwrap());
+    POINT.find_iter(round_text).count() >= 3 && NAMED.is_match(round_text)
+}
+
+pub const PLAN_IN_WORDS_NUDGE: &str = "You laid your plan out as text in the reply, and no plan is on record: the user sees no plan, and nothing tracks which step you are on. Call make_plan with those steps now, IN THE SAME TURN as your next real tool call, then mark each step with update_plan as it ends. Do not write the plan out again.";
+
 /// System note for the next round: names the count and demands the tool call, since prose does not count.
 pub fn build_stale_plan_nudge(rounds_since_update: usize, claimed: bool) -> String {
     let claim = if claimed { " You just claimed a finished step in prose; record it with evidence via update_plan, or retract it." } else { "" };
@@ -265,6 +276,9 @@ mod tests {
             assert_eq!(check_answer_claims(offer, &[]), None, "{offer}");
         }
         assert!(check_answer_claims("I read the file and fixed the bug.", &[]).is_some());
+        // A plan in the reply's words is seen; a numbered list that is no plan, and a plan of two points, are not.
+        assert!(wrote_plan_in_words("Plan, 5 steps. This is what remains:\n\n1. **Fix the parser** — it breaks.\n2. Finish the table.\n3. Run it.\n\nStart now."));
+        assert!(!wrote_plan_in_words("Three causes:\n1. A slow disk.\n2. A cold cache.\n3. A big file.") && !wrote_plan_in_words("My plan:\n1. Read it.\n2. Fix it."));
         // A reply that worked in the sandbox ran its commands and wrote its files there.
         assert_eq!(check_answer_claims("Ran the script and it exited 1. I created the file again.", &["sandbox_run".to_string()]), None);
         for (i, o) in cases("check_answer_claims") {

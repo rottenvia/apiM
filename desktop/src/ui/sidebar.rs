@@ -1,7 +1,7 @@
 //! The chat list on the left: src/components/Sidebar.tsx, control for control.
 
 use super::theme::{self, W, alpha, p};
-use super::widgets::{self, fade, lerp};
+use super::widgets::{self, RAIL_BAR, RAIL_INSET, RAIL_PAD, RAIL_ROUND, RAIL_ROW, RAIL_TEXT, fade, lerp, rail_foot};
 use super::{App, Dialog, icons};
 use crate::store::ChatMeta;
 use eframe::egui::{self, Color32, CursorIcon, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
@@ -9,7 +9,6 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 pub const WIDTH: f32 = 288.0;
-const FOOTER: f32 = 12.0 + 40.0 * 3.0 + 12.0 + 1.0;
 const MENU_WIDTH: f32 = 192.0;
 
 pub const EXPORT_FORMATS: [(&str, &str, &str); 4] = [("md", "Markdown", ".md"), ("json", "JSON", ".json"), ("txt", "Plain text", ".txt"), ("html", "Web page", ".html")];
@@ -94,16 +93,17 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         selection_bar(app, ui, &visible, &selected_here, &mut action);
     }
 
-    let list_height = (full.bottom() - ui.cursor().top() - FOOTER).max(40.0);
+    let foot = rail_foot(3);
+    let list_height = (full.bottom() - ui.cursor().top() - foot).max(40.0);
     ui.spacing_mut().item_spacing.y = 0.0;
     egui::ScrollArea::vertical().id_salt("chats").auto_shrink(false).max_height(list_height).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
-        // Rows are 42 tall with 2 between them; the last 10 of the width is the scrollbar's.
+        // Rows with 2 between them; the last of the width is the scroll bar's.
         for chat in &visible {
             ui.add_space(2.0);
             ui.horizontal(|ui| {
-                ui.add_space(12.0);
-                ui.allocate_ui(vec2(WIDTH - 24.0 - 10.0, 42.0), |ui| row(app, ui, chat, &mut action));
+                ui.add_space(RAIL_INSET);
+                ui.allocate_ui(vec2(WIDTH - RAIL_INSET * 2.0 - RAIL_BAR, RAIL_ROW), |ui| row(app, ui, chat, &mut action));
             });
         }
         ui.add_space(2.0);
@@ -120,9 +120,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     });
 
     // Footer: pinned to the bottom of the column.
-    let footer = Rect::from_min_max(pos2(full.left(), full.bottom() - FOOTER), pos2(full.left() + WIDTH, full.bottom()));
-    ui.painter().hline(footer.x_range(), footer.top() + 0.5, Stroke::new(1.0, p.border));
-    ui.scope_builder(egui::UiBuilder::new().max_rect(footer.shrink2(vec2(12.0, 0.0)).with_min_y(footer.top() + 13.0)), |ui| {
+    let footer = Rect::from_min_max(pos2(full.left(), full.bottom() - foot), pos2(full.left() + WIDTH, full.bottom()));
+    ui.painter().hline(footer.x_range().shrink(RAIL_INSET), footer.top() + 0.5, Stroke::new(1.0, p.border));
+    ui.scope_builder(egui::UiBuilder::new().max_rect(footer.shrink2(vec2(RAIL_INSET, 0.0)).with_min_y(footer.top() + 11.0)), |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         if widgets::side_link(ui, icons::IMPORT, "Import chats", "Import a chat from a JSON export").clicked() {
             app.import_chats();
@@ -211,10 +211,10 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &ChatMeta, action: &mut Option<Ac
     let current = app.current_id() == chat.id;
     let running = app.run.as_ref().is_some_and(|r| r.conv_id == chat.id);
 
-    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 42.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), RAIL_ROW), Sense::click());
     let response = response.on_hover_cursor(CursorIcon::PointingHand);
     // The dots sit on top of the row, so the row counts as hovered while they are.
-    let dots = Rect::from_center_size(pos2(rect.right() - 12.0 - 12.0, rect.center().y), vec2(24.0, 24.0));
+    let dots = Rect::from_center_size(pos2(rect.right() - 4.0 - 12.0, rect.center().y), vec2(24.0, 24.0));
     let hovered = ui.rect_contains_pointer(rect);
 
     // Hover applies at once; only the fade-out is eased (see .conv-row).
@@ -227,9 +227,9 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &ChatMeta, action: &mut Option<Ac
     } else {
         (lerp(Color32::TRANSPARENT, p.bg3, t), lerp(Color32::TRANSPARENT, p.border, t), lerp(p.text2, p.text, t))
     };
-    ui.painter().rect(rect, 8.0, fill, Stroke::new(1.0, border), StrokeKind::Inside);
+    ui.painter().rect(rect, RAIL_ROUND, fill, Stroke::new(1.0, border), StrokeKind::Inside);
 
-    let mut x = rect.left() + 13.0;
+    let mut x = rect.left() + RAIL_PAD;
     if selecting {
         let on = app.side.selected.contains(&chat.id);
         let box_rect = Rect::from_center_size(pos2(x + 8.0, rect.center().y), vec2(16.0, 16.0));
@@ -242,8 +242,8 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &ChatMeta, action: &mut Option<Ac
         x += 16.0 + 4.0;
     }
     let show_dots = !selecting && (hovered || menu_open);
-    let right = rect.right() - 13.0 - if !selecting { 24.0 + 4.0 } else { 0.0 } - if running { 8.0 + 8.0 } else { 0.0 };
-    widgets::text_at(ui, x, rect.center().y, widgets::clipped(ui, &chat.title, theme::font(14.0, W::Regular), fg, right - x));
+    let right = rect.right() - if !selecting { 4.0 + 24.0 + 4.0 } else { RAIL_PAD } - if running { 8.0 + 8.0 } else { 0.0 };
+    widgets::text_at(ui, x, rect.center().y, widgets::clipped(ui, &chat.title, theme::font(RAIL_TEXT, W::Regular), fg, right - x));
 
     if running {
         // Still working in the background: a dot with a slow ping around it.
@@ -297,14 +297,14 @@ fn rename_box(app: &mut App, ui: &mut egui::Ui, chat: &ChatMeta, action: &mut Op
     let mut done = false;
     let mut cancelled = false;
     ui.vertical(|ui| {
-        ui.add_space(4.0);
+        ui.add_space(2.0);
         egui::Frame::new()
             .fill(p.bg)
             .stroke(Stroke::new(1.0, if duplicate { alpha(p.danger, 60.0) } else { alpha(p.accent, 40.0) }))
-            .corner_radius(8)
-            .inner_margin(egui::Margin::symmetric(6, 4))
+            .corner_radius(RAIL_ROUND as u8)
+            .inner_margin(egui::Margin::symmetric(RAIL_PAD as i8 - 1, 4))
             .show(ui, |ui| {
-                let edit = ui.add(egui::TextEdit::singleline(&mut app.side.draft).font(theme::font(14.0, W::Regular)).desired_width(f32::INFINITY).frame(egui::Frame::NONE));
+                let edit = ui.add(egui::TextEdit::singleline(&mut app.side.draft).font(theme::font(RAIL_TEXT, W::Regular)).desired_width(f32::INFINITY).frame(egui::Frame::NONE));
                 if std::mem::take(&mut app.side.focus_draft) {
                     edit.request_focus();
                 }
@@ -322,7 +322,7 @@ fn rename_box(app: &mut App, ui: &mut egui::Ui, chat: &ChatMeta, action: &mut Op
                 ui.add(egui::Label::new(widgets::lines("Another chat is already called that. Every chat needs its own name — its files live in a folder named after it.", 11.0, 16.0, W::Regular, p.danger)).wrap());
             });
         }
-        ui.add_space(4.0);
+        ui.add_space(2.0);
     });
     if cancelled {
         app.side.editing = None;
@@ -401,7 +401,7 @@ fn menu(app: &mut App, ctx: &egui::Context, action: &mut Option<Action>) {
         });
     });
     // A click anywhere else closes it. The dots button toggles it itself.
-    let dots = Rect::from_center_size(pos2(row.right() - 24.0, row.center().y), vec2(24.0, 24.0));
+    let dots = Rect::from_center_size(pos2(row.right() - 16.0, row.center().y), vec2(24.0, 24.0));
     let outside = ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|at| !area.response.rect.contains(at) && !dots.contains(at)));
     if close || outside || app.side.editing.is_some() {
         app.side.menu = None;

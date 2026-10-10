@@ -3,6 +3,7 @@
 //! Everything else that shows the workspace hangs off the state kept here.
 
 use super::theme::{self, W, alpha, p};
+use super::widgets::{RAIL_BAR, RAIL_INSET, RAIL_PAD, RAIL_ROUND, RAIL_ROW, RAIL_SMALL, RAIL_TEXT, rail_foot};
 use super::{App, chat, docks, github, icons, import_files, widgets, workspace_panel};
 use crate::filetree::{self, Node};
 use crate::snapshots::{self, SnapshotInfo};
@@ -13,6 +14,8 @@ use std::sync::Arc;
 
 /// 17.5rem, the left border included.
 pub const WIDTH: f32 = 280.0;
+/// A button of the header: a square tile.
+const HEAD_BTN: f32 = 30.0;
 
 #[derive(Default)]
 pub struct State {
@@ -210,32 +213,35 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let st = &app.ws;
     let mut act = None;
 
-    // The header: 56 with its rule. Five 38px buttons leave a title 26px: the web cuts it to "W…", here the folder says it.
+    // The header, 56 like the chat's own bar: the panel's name where the left rail has "New chat", and its buttons in
+    // one group at the right edge, the way out a little apart. They were five tiles 40 apart behind a lone folder,
+    // with Download among them and again at the foot.
     let mid = full.top() + 27.5;
-    ui.painter().hline(full.x_range(), full.top() + 55.5, rule);
-    icons::paint(ui, icons::FOLDER_PLAIN, pos2(x0 + 13.0 + 7.5, mid), 15.0, p.muted);
-    let download_tip = if count == 0 { "Nothing to download yet" } else { "Download everything as a .zip" };
+    let lead = x0 + RAIL_INSET + RAIL_PAD;
+    icons::paint(ui, icons::FOLDER_PLAIN, pos2(lead + 7.5, mid), 15.0, p.text2);
+    widgets::text_at(ui, lead + 15.0 + 8.0, mid, widgets::galley(ui, if st.history_on { "History" } else { "Files" }, theme::font(13.5, W::Medium), p.text));
     let buttons = [
-        (icons::GITHUB, 14.0, "Connect a GitHub repository", true, Act::Github),
-        (icons::HISTORY, 14.0, "Earlier versions of this workspace", true, Act::History),
-        (icons::COPY_FILES, 15.0, "Copy files from another chat", true, Act::Import),
-        (icons::DOWNLOAD_TRAY, 14.0, download_tip, count > 0, Act::Download),
-        (icons::CLOSE, 14.0, "Hide the workspace panel", true, Act::Close),
+        (icons::CLOSE, 13.0, "Hide the workspace panel", false, Act::Close),
+        (icons::COPY_FILES, 15.0, "Copy files from another chat", false, Act::Import),
+        (icons::HISTORY, 14.0, if st.history_on { "Back to the files" } else { "Earlier versions of this workspace" }, st.history_on, Act::History),
+        (icons::GITHUB, 14.0, "Connect a GitHub repository", false, Act::Github),
     ];
-    for (i, (icon, size, tip, enabled, what)) in buttons.into_iter().enumerate() {
-        let rect = Rect::from_min_size(pos2(x0 + 70.0 + 40.0 * i as f32, full.top() + 8.5), vec2(38.0, 38.0));
-        if head_btn(ui, rect, i, icon, size, tip, enabled) {
+    let mut right = full.right() - RAIL_INSET;
+    for (i, (icon, size, tip, on, what)) in buttons.into_iter().enumerate() {
+        let rect = Rect::from_min_size(pos2(right - HEAD_BTN, mid - HEAD_BTN / 2.0), vec2(HEAD_BTN, HEAD_BTN));
+        right = rect.left() - if i == 0 { 8.0 } else { 2.0 };
+        if head_btn(ui, rect, i, icon, size, tip, on) {
             act = Some(what);
         }
     }
 
-    // What is here: "12 files · 3.4 KB", and the switch for every folder at once.
+    // What is here: "12 files · 3.4 KB", and the switch for every folder at once. On the line where the left rail has
+    // its Chats / Archive switch, so both lists start at one height.
     let toggle = count > 0 && !st.history_on;
-    let line = if toggle { 20.5 } else { 16.5 };
-    let strip = full.top() + 56.0;
-    let small = theme::font(11.0, W::Regular);
-    let (mut x, y) = (x0 + 13.0, strip + 12.0 + line / 2.0);
-    x += widgets::text_at(ui, x, y, widgets::galley(ui, &chat::thousands(count as u64), small.clone(), p.text2)) + 6.0;
+    let strip = Rect::from_min_size(pos2(x0 + RAIL_INSET, full.top() + 55.0), vec2(WIDTH - RAIL_INSET * 2.0 - RAIL_BAR, 30.0));
+    let small = theme::font(12.0, W::Regular);
+    let (mut x, y) = (strip.left() + RAIL_PAD, strip.center().y);
+    x += widgets::text_at(ui, x, y, widgets::galley(ui, &chat::thousands(count as u64), small.clone(), p.text2)) + 5.0;
     x += widgets::text_at(ui, x, y, widgets::galley(ui, if count == 1 { "file" } else { "files" }, small.clone(), p.muted)) + 6.0;
     if total > 0 {
         x += widgets::text_at(ui, x, y, widgets::galley(ui, "·", small.clone(), p.muted.gamma_multiply(0.4))) + 6.0;
@@ -245,35 +251,28 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         // With no folders at all this reads "Collapse all", as the web's does.
         let all_open = st.dirs.iter().all(|dir| st.open.contains(dir));
         let label = widgets::galley(ui, if all_open { "Collapse all" } else { "Expand all" }, small, Color32::WHITE);
-        let rect = Rect::from_min_size(pos2(x0 + 268.0 - label.size().x - 12.0, strip + 12.0), vec2(label.size().x + 12.0, 20.5));
+        // Its last letter stands over the figures at the end of the rows.
+        let rect = Rect::from_min_size(pos2(strip.right() - RAIL_PAD - label.size().x - 6.0, y - 11.0), vec2(label.size().x + 12.0, 22.0));
         let response = ui.interact(rect, ui.id().with("every-folder"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Expand or collapse every folder");
         if response.hovered() {
-            ui.painter().rect_filled(rect, 4.0, p.hover);
+            ui.painter().rect_filled(rect, 6.0, p.hover);
         }
         ui.painter().galley_with_override_text_color(pos2(rect.left() + 6.0, (rect.center().y - label.size().y / 2.0).round()), label, if response.hovered() { p.text } else { p.muted });
         if response.clicked() {
             act = Some(Act::ToggleAll(all_open));
         }
     }
-    let top = strip + 12.0 + line + 8.0;
+    let top = strip.bottom() + 14.0;
 
-    // Download, said in words, under everything.
-    let bottom = if count > 0 { full.bottom() - 53.0 } else { full.bottom() };
+    // Download, said in words, at the foot: a link like the left rail's own.
+    let bottom = full.bottom() - if count > 0 { rail_foot(1) } else { 0.0 };
     if count > 0 {
-        ui.painter().hline(full.x_range(), bottom + 0.5, rule);
-        let rect = Rect::from_min_size(pos2(x0 + 9.0, bottom + 9.0), vec2(WIDTH - 17.0, 36.0));
-        let response = ui.interact(rect, ui.id().with("download-all"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Download everything as a .zip");
-        let t = widgets::fade(ui, response.id, response.hovered());
-        ui.painter().rect(rect, 8.0, widgets::lerp(Color32::TRANSPARENT, p.hover, t), Stroke::new(1.0, widgets::lerp(p.border, p.border_light, t)), StrokeKind::Inside);
-        let ink = widgets::lerp(p.text2, p.text, t);
-        let words = widgets::galley(ui, "Download all files", theme::font(12.0, W::Medium), ink);
-        let number = widgets::galley(ui, &format!("({count})"), theme::font(12.0, W::Medium), p.muted);
-        let mut x = rect.center().x - (13.0 + 8.0 + words.size().x + 8.0 + number.size().x) / 2.0;
-        icons::paint(ui, icons::DOWNLOAD_TRAY.stroke(1.8), pos2(x + 6.5, rect.center().y), 13.0, ink);
-        x += 13.0 + 8.0;
-        x += widgets::text_at(ui, x, rect.center().y, words) + 8.0;
-        widgets::text_at(ui, x, rect.center().y, number);
-        if response.clicked() {
+        ui.painter().hline(full.x_range().shrink(RAIL_INSET), bottom + 0.5, rule);
+        let mut foot = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_max(pos2(x0 + RAIL_INSET, bottom + 11.0), pos2(full.right() - RAIL_INSET, full.bottom()))));
+        let link = widgets::side_link(&mut foot, icons::DOWNLOAD_TRAY, "Download all files", "Download everything as a .zip");
+        let number = widgets::galley(ui, &chat::thousands(count as u64), theme::font(RAIL_SMALL, W::Regular), p.muted);
+        widgets::text_at(ui, link.rect.right() - RAIL_PAD - number.size().x, link.rect.center().y, number);
+        if link.clicked() {
             act = Some(Act::Download);
         }
     }
@@ -318,14 +317,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-/// `.sidebar-icon-btn`: 38 square and muted, a bordered tile under the pointer. A disabled one is at 40% and dead.
-fn head_btn(ui: &mut egui::Ui, rect: Rect, n: usize, icon: icons::Icon, size: f32, tip: &str, enabled: bool) -> bool {
+/// A tile of the header: muted, bordered under the pointer, and held lit while what it switches is on.
+fn head_btn(ui: &mut egui::Ui, rect: Rect, n: usize, icon: icons::Icon, size: f32, tip: &str, on: bool) -> bool {
     let p = p();
-    let response = ui.interact(rect, ui.id().with(("workspace-head", n)), if enabled { Sense::click() } else { Sense::hover() }).on_hover_cursor(if enabled { CursorIcon::PointingHand } else { CursorIcon::NotAllowed });
-    let t = widgets::fade(ui, response.id, response.hovered());
-    let dim = if enabled { 1.0 } else { 0.4 };
-    ui.painter().rect(rect, 8.0, widgets::lerp(Color32::TRANSPARENT, p.bg3, t).gamma_multiply(dim), Stroke::new(1.0, widgets::lerp(Color32::TRANSPARENT, p.border, t).gamma_multiply(dim)), StrokeKind::Inside);
-    icons::paint(ui, icon, rect.center(), size, widgets::lerp(p.muted, p.text, t).gamma_multiply(dim));
+    let response = ui.interact(rect, ui.id().with(("workspace-head", n)), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+    let t = if on { 1.0 } else { widgets::fade(ui, response.id, response.hovered()) };
+    ui.painter().rect(rect, RAIL_ROUND, widgets::lerp(Color32::TRANSPARENT, p.bg3, t), Stroke::new(1.0, widgets::lerp(Color32::TRANSPARENT, p.border, t)), StrokeKind::Inside);
+    icons::paint(ui, icon, rect.center(), size, widgets::lerp(p.muted, p.text, t));
     response.on_hover_text(tip).clicked()
 }
 
@@ -333,8 +331,8 @@ fn head_btn(ui: &mut egui::Ui, rect: Rect, n: usize, icon: icons::Icon, size: f3
 fn empty(ui: &mut egui::Ui, first: &str, second: &str) {
     let (left, top) = (ui.max_rect().left(), ui.cursor().top());
     for (i, line) in [first, second].into_iter().enumerate() {
-        let text = widgets::galley(ui, line, theme::font(12.0, W::Regular), p().muted);
-        widgets::text_at(ui, left + 140.5 - text.size().x / 2.0, top + 24.0 + 19.5 * i as f32 + 9.75, text);
+        let text = widgets::galley(ui, line, theme::font(RAIL_TEXT - 1.0, W::Regular), p().muted);
+        widgets::text_at(ui, left + WIDTH / 2.0 - text.size().x / 2.0, top + 24.0 + 19.5 * i as f32 + 9.75, text);
     }
     ui.advance_cursor_after_rect(Rect::from_min_size(pos2(left, top), vec2(WIDTH, 24.0 + 39.0 + 24.0)));
 }
@@ -342,7 +340,9 @@ fn empty(ui: &mut egui::Ui, first: &str, second: &str) {
 /// `.list-row`: the strip under the pointer, there at once and fading out. Returns how far lit it is.
 fn row_light(ui: &egui::Ui, rect: Rect, id: egui::Id, hovered: bool) -> f32 {
     let t = widgets::fade(ui, id, hovered);
-    ui.painter().rect_filled(rect, 8.0, p().hover.gamma_multiply(if hovered { 1.0 } else { t }));
+    // Lit as a chat's row is on the other rail.
+    let lit = if hovered { 1.0 } else { t };
+    ui.painter().rect(rect, RAIL_ROUND, p().bg3.gamma_multiply(lit), Stroke::new(1.0, p().border.gamma_multiply(lit)), StrokeKind::Inside);
     t
 }
 
@@ -350,8 +350,8 @@ fn row_light(ui: &egui::Ui, rect: Rect, id: egui::Id, hovered: bool) -> f32 {
 fn tree_rows(ui: &mut egui::Ui, nodes: &[Node], depth: usize, st: &State, act: &mut Option<Act>) {
     let p = p();
     for node in nodes {
-        // `w-full` with the row's -8px margin: 255 wide, starting 5px into the panel and stopping 20 short of its edge.
-        let rect = Rect::from_min_size(pos2(ui.max_rect().left() + 5.0, ui.cursor().top()), vec2(255.0, 30.0));
+        // Two between rows, as between chats: the rows of the two rails keep one step.
+        let rect = Rect::from_min_size(pos2(ui.max_rect().left() + RAIL_INSET, ui.cursor().top() + 2.0), vec2(WIDTH - RAIL_INSET * 2.0 - RAIL_BAR, RAIL_ROW));
         ui.advance_cursor_after_rect(rect);
         let open = node.is_dir && st.open.contains(&node.path);
         if ui.is_rect_visible(rect) {
@@ -359,31 +359,31 @@ fn tree_rows(ui: &mut egui::Ui, nodes: &[Node], depth: usize, st: &State, act: &
             let hovered = response.hovered();
             let t = row_light(ui, rect, response.id, hovered);
             let ink = if hovered { p.text } else { p.text2 };
-            let (mid, right) = (rect.center().y, rect.right() - 8.0);
+            let (mid, right) = (rect.center().y, rect.right() - RAIL_PAD);
+            // The turn mark, the picture, the name. A file has no turn mark and keeps the place of one, so the pictures
+            // and the names of a folder's rows stand in one line: a lettered tile used to start where the mark does.
+            let left = rect.left() + RAIL_PAD - 4.0 + depth as f32 * 14.0;
+            let (picture, name_left) = (pos2(left + 11.0 + 4.0 + 7.0, mid), left + 11.0 + 4.0 + 14.0 + 7.0);
             if node.is_dir {
-                let left = rect.left() + depth as f32 * 12.0;
                 let turn = ui.ctx().animate_bool_with_time(response.id.with("open"), open, 0.15);
                 icons::paint_turned(ui, icons::CHEVRON_RIGHT.stroke(2.4), pos2(left + 5.5, mid), 11.0, p.muted, turn * std::f32::consts::FRAC_PI_2);
-                icons::paint(ui, icons::FOLDER_PLAIN, pos2(left + 17.0 + 6.5, mid), 13.0, p.muted);
-                let files = widgets::galley(ui, &node.file_count.to_string(), theme::font(11.0, W::Regular), p.muted);
+                icons::paint(ui, icons::FOLDER_PLAIN, picture, 14.0, widgets::lerp(p.muted, p.text2, t));
+                let files = widgets::galley(ui, &node.file_count.to_string(), theme::font(RAIL_SMALL, W::Regular), p.muted);
                 let files_left = right - files.size().x;
                 widgets::text_at(ui, files_left, mid, files);
-                widgets::text_at(ui, left + 36.0, mid, widgets::clipped(ui, &node.name, theme::font(12.0, W::Regular), ink, files_left - 6.0 - (left + 36.0)));
+                widgets::text_at(ui, name_left, mid, widgets::clipped(ui, &node.name, theme::font(RAIL_TEXT, W::Regular), ink, files_left - 8.0 - name_left));
                 if response.on_hover_text(node.path.as_str()).clicked() {
                     *act = Some(Act::Toggle(node.path.clone()));
                 }
             } else {
-                let left = rect.left() + depth as f32 * 12.0 + 8.0;
-                let tile = Rect::from_min_size(pos2(left, mid - 9.0), vec2(22.0, 18.0));
-                ui.painter().rect(tile, 4.0, p.bg3, Stroke::new(1.0, widgets::lerp(p.border, p.border_light, t)), StrokeKind::Inside);
-                let letters = badge_text(ui, badge(&node.path, true), true);
-                widgets::text_at(ui, tile.center().x - letters.size().x / 2.0, mid, letters);
+                // What the last reply wrote is drawn in the accent, picture and name.
+                let changed = st.is_changed(&node.path);
+                icons::paint(ui, icons::FILE, picture, 14.0, if changed { p.accent_light } else { widgets::lerp(p.muted, p.text2, t) });
                 // The size is always there and only shows under the pointer, so the name never moves.
-                let size = widgets::galley(ui, &format_bytes(node.size), theme::font(11.0, W::Regular), p.muted.gamma_multiply(t));
+                let size = widgets::galley(ui, &format_bytes(node.size), theme::font(RAIL_SMALL, W::Regular), p.muted.gamma_multiply(t));
                 let size_left = right - size.size().x;
                 widgets::text_at(ui, size_left, mid, size);
-                let ink = if st.is_changed(&node.path) { p.accent_light } else { ink };
-                widgets::text_at(ui, left + 30.0, mid, widgets::clipped(ui, &node.name, theme::mono(12.0), ink, size_left - 8.0 - (left + 30.0)));
+                widgets::text_at(ui, name_left, mid, widgets::clipped(ui, &node.name, theme::font(RAIL_TEXT, W::Regular), if changed { p.accent_light } else { ink }, size_left - 8.0 - name_left));
                 if response.on_hover_text(node.path.as_str()).clicked() {
                     *act = Some(Act::Open(node.path.clone()));
                 }
@@ -398,24 +398,23 @@ fn tree_rows(ui: &mut egui::Ui, nodes: &[Node], depth: usize, st: &State, act: &
 /// One restore point: what it was saved before, when, how many files, and Restore under the pointer.
 fn history_row(ui: &mut egui::Ui, snapshot: &SnapshotInfo, act: &mut Option<Act>) {
     let p = p();
-    // A block row: its -8px margins widen it on both sides.
-    let rect = Rect::from_min_size(pos2(ui.max_rect().left() + 5.0, ui.cursor().top()), vec2(271.0, 54.5));
+    let rect = Rect::from_min_size(pos2(ui.max_rect().left() + RAIL_INSET, ui.cursor().top() + 2.0), vec2(WIDTH - RAIL_INSET * 2.0 - RAIL_BAR, 52.0));
     ui.advance_cursor_after_rect(rect);
     if !ui.is_rect_visible(rect) {
         return;
     }
     let id = ui.id().with(("snapshot", &snapshot.id));
     let t = row_light(ui, rect, id, ui.rect_contains_pointer(rect));
-    let (left, right) = (rect.left() + 8.0, rect.right() - 8.0);
+    let (left, right) = (rect.left() + RAIL_PAD, rect.right() - RAIL_PAD);
     let label = Rect::from_min_size(pos2(left, rect.top() + 6.0), vec2(right - left, 18.0));
-    widgets::text_at(ui, left, label.center().y, widgets::clipped(ui, &snapshot.label, theme::font(12.0, W::Regular), p.text2, label.width()));
+    widgets::text_at(ui, left, label.center().y, widgets::clipped(ui, &snapshot.label, theme::font(RAIL_TEXT, W::Regular), p.text2, label.width()));
     ui.interact(label, id.with("label"), Sense::hover()).on_hover_text(snapshot.label.as_str());
     let files = snapshot.file_count;
     let when = format!("{} · {files} file{}", local_time(&snapshot.created_at, "%H:%M"), if files == 1 { "" } else { "s" });
     let mid = rect.top() + 6.0 + 18.0 + 2.0 + 11.25;
-    widgets::text_at(ui, left, mid, widgets::galley(ui, &when, theme::font(11.0, W::Regular), p.muted));
+    widgets::text_at(ui, left, mid, widgets::galley(ui, &when, theme::font(RAIL_SMALL, W::Regular), p.muted));
 
-    let words = widgets::galley(ui, "Restore", theme::font(11.0, W::Regular), Color32::WHITE);
+    let words = widgets::galley(ui, "Restore", theme::font(RAIL_SMALL, W::Regular), Color32::WHITE);
     let button = Rect::from_min_size(pos2(right - words.size().x - 14.0, mid - 11.25), vec2(words.size().x + 14.0, 22.5));
     let response = ui.interact(button, id.with("restore"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
     let lit = widgets::fade(ui, response.id, response.hovered());

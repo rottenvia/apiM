@@ -547,8 +547,18 @@ fn target_of(name: &str, args: &str) -> (Option<String>, bool) {
         if let Some(why) = s("reason").filter(|_| name == "sandbox_run") {
             return (Some(why), false);
         }
-        let rest = a["args"].as_array().into_iter().flatten().map(|v| v.as_str().map_or_else(|| v.to_string(), str::to_string));
-        return (Some(std::iter::once(command.to_string()).chain(rest).collect::<Vec<_>>().join(" ")), true);
+        // A script among the words is named by its size, as the result names it: the row has one line, and it read
+        // `python -` beside `Ran: python - "`.
+        let mut words = vec![command.to_string()];
+        for v in a["args"].as_array().into_iter().flatten() {
+            let word = v.as_str().map_or_else(|| v.to_string(), str::to_string);
+            let fed = if words.last().is_some_and(|last| last == "-") { "stdin" } else { "script" };
+            words.push(if word.contains('\n') { format!("<<{fed} ({} lines)", word.lines().count()) } else { word });
+        }
+        if let Some(text) = a["stdin"].as_str().filter(|text| !text.is_empty()) {
+            words.push(format!("<<stdin ({} lines)", text.lines().count()));
+        }
+        return (Some(words.join(" ")), true);
     }
     if let Some(symbol) = s("name").filter(|_| matches!(name, "find_references" | "read_symbol")) {
         return (Some(path.map_or(symbol.clone(), |p| format!("{symbol} in {p}"))), true);
