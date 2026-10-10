@@ -324,6 +324,18 @@ fn resume_transcript(mut resume: Resume, mut messages: Vec<Value>, start: &mut S
     messages
 }
 
+/// The call for the lines a cut-short read left out, from the last line of its answer, with the end and the numbering the model asked for.
+fn read_on(name: &str, args: &str, text: &str) -> Option<Value> {
+    let next = text.lines().last()?.split_once("Continue with read_file ")?.1.strip_suffix(']')?;
+    let (mut next, asked) = (serde_json::from_str::<Value>(next).ok()?, serde_json::from_str::<Value>(args).ok()?);
+    for key in ["end_line", "line_numbers"] {
+        if !asked[key].is_null() {
+            next[key] = asked[key].clone();
+        }
+    }
+    (name == "read_file").then_some(next)
+}
+
 /// The transcript with every clip and picture the model has already been sent replaced by a line saying so.
 /// What follows the model's last turn has not ridden yet and stays: the message being answered on the opening
 /// request, a picture a tool was just asked to show on a later one.
@@ -722,7 +734,11 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
         // Old tool output collapses to a line saying what it was, and fat call arguments to a stub; files still being worked from stay whole.
         // ponytail: the web prunes the copy it sends and keeps its transcript whole; here the result is kept, like the fold below.
         // Its `context_pruned` event is ignored by its page, so nothing is shown here either.
-        let pruned = match prune_transcript(&messages, &if qwen { QWEN_PRUNE } else { pruning::Options::default() }).0 {
+        // Eight at a time, so the provider's cache of the request holds between collapses; all that is due on the first round, when a
+        // resumed reply's cache is cold anyway. And a file read whole stays while it is the newest read of it: one larger than the
+        // budget was collapsed after eight results and read again, 400,000 characters each time.
+        let options = pruning::Options { batch: if round == 1 { 1 } else { pruning::COLLAPSE_BATCH }, file_read_budget: pruning::FILE_READ_BUDGET_CHARS.max(ctx.read_chars * 5 / 4), ..Default::default() };
+        let pruned = match prune_transcript(&messages, &if qwen { QWEN_PRUNE } else { options }).0 {
             Cow::Owned(pruned) => Some(pruned),
             Cow::Borrowed(_) => None,
         };
@@ -1081,7 +1097,20 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
                 }
             }
             // The same call with the same answer as one still in the transcript: a line pointing at it goes back, not the text again.
-            if let Some(pointer) = compact::repeat_of(&messages, &call.name, args_text, &out.text).filter(|_| out.ok) {
+            if let Some(mut pointer) = compact::repeat_of(&messages, &call.name, args_text, &out.text).filter(|_| out.ok) {
+                // A read that did not fit, asked again from the same line: the model wants the lines it was not given, and asking
+                // the same way returns the same first part for ever. They are read for it, once, when they are all that is left.
+                if let Some(next) = read_on(&call.name, args_text, &out.text) {
+                    let rest = tools::run("read_file", &next, ctx).await;
+                    let held = messages.iter().any(|m| m["role"] == "tool" && m["content"].as_str().is_some_and(|c| c.contains(&rest.text)));
+                    if rest.ok && !held && !rest.text.contains("
+[CUT SHORT") {
+                        pointer = format!("{}
+
+[The lines that answer left out, read now:]
+{}", pointer.lines().next().unwrap_or(""), rest.text);
+                    }
+                }
                 text.replace_range(..out.text.len(), &pointer);
             }
             messages.push(json!({ "role": "tool", "tool_call_id": call.id, "content": text }));
@@ -1718,6 +1747,18 @@ mod tests {
         assert_eq!(ran.steps, [("d1", "Helper finished · 1 round, 0 tool calls"), ("d2", "Helper finished · 1 round, 0 tool calls"), ("d3", "No task given")].map(|(id, summary)| (id.to_string(), summary.to_string())));
         // What the helpers used is counted on the reply.
         assert_eq!((ran.usage.prompt, ran.usage.completion), (200, 40));
+    }
+
+    #[test]
+    fn a_cut_short_read_asked_again_is_read_on() {
+        let cut = "a.cpp: lines 1-90 of 120
+ 1 | x
+[CUT SHORT: you have lines 1-90 of 120. Continue with read_file {\"path\":\"a.cpp\",\"start_line\":91}]";
+        assert_eq!(read_on("read_file", "{\"path\":\"a.cpp\",\"line_numbers\":true,\"end_line\":120}", cut), Some(json!({ "path": "a.cpp", "start_line": 91, "end_line": 120, "line_numbers": true })));
+        // A read that fitted has nothing left out, and nothing is read on for another tool.
+        assert_eq!(read_on("read_file", "{\"path\":\"a.cpp\"}", "a.cpp: EXACT, all 3 lines, 9 chars
+ 1 | x"), None);
+        assert_eq!(read_on("search_files", "{}", cut), None);
     }
 
     #[test]

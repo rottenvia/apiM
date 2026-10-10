@@ -21,6 +21,11 @@ pub const PRUNE_THRESHOLD_CHARS: usize = 24_000;
 /// File reads (and whole-file writes) the agent is still working from stay verbatim, up to this many characters, newest first.
 pub const FILE_READ_BUDGET_CHARS: usize = 150_000;
 
+/// How many old results collapse at once when the caller asks for it (`Options::batch`). A collapse changes a message in
+/// the middle of the request, and the provider's cache of everything after it is lost: one a round meant the newest
+/// eight results were paid in full on every round (measured: 32% of the input cached over 24 reads, 9% of each round).
+pub const COLLAPSE_BATCH: usize = 8;
+
 const FILE_READ_TOOLS: [&str; 2] = ["read_file", "read_files"];
 const FILE_WRITE_TOOLS: [&str; 9] = ["write_file", "write_files", "edit_file", "edit_files", "apply_patch", "replace_in_files", "move_file", "delete_file", "undo_file"];
 /// Writes whose arguments ARE the whole file (not a diff).
@@ -33,16 +38,18 @@ pub struct Options {
     pub threshold_chars: usize,
     /// 0 turns read retention off.
     pub file_read_budget: usize,
+    /// Old results collapse in groups of this many. 1 collapses each as soon as it is old, as the web does.
+    pub batch: usize,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { keep_verbatim: KEEP_VERBATIM_RESULTS, min_chars: MIN_COLLAPSE_CHARS, threshold_chars: PRUNE_THRESHOLD_CHARS, file_read_budget: FILE_READ_BUDGET_CHARS }
+        Options { keep_verbatim: KEEP_VERBATIM_RESULTS, min_chars: MIN_COLLAPSE_CHARS, threshold_chars: PRUNE_THRESHOLD_CHARS, file_read_budget: FILE_READ_BUDGET_CHARS, batch: 1 }
     }
 }
 
 /// The small-window preset for local Qwen models (src/lib/local-context.ts).
-pub const QWEN_PRUNE: Options = Options { keep_verbatim: 3, min_chars: 600, threshold_chars: 8_000, file_read_budget: 0 };
+pub const QWEN_PRUNE: Options = Options { keep_verbatim: 3, min_chars: 600, threshold_chars: 8_000, file_read_budget: 0, batch: 1 };
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PruneStats {
@@ -176,7 +183,8 @@ pub fn retained_file_content(messages: &[Value], budget: usize) -> Retained {
             continue;
         }
         let Some(content) = content else { continue };
-        if content.starts_with("[earlier") || content.starts_with("[Folded") || failed {
+        // A line standing in for the text is not a read of it: counted as one, "[Unchanged" made the copy it points at an old read, and that copy was collapsed.
+        if content.starts_with("[earlier") || content.starts_with("[Folded") || content.starts_with("[Unchanged") || failed {
             continue;
         }
         let paths = read_paths(args);
@@ -253,7 +261,8 @@ pub fn prune_transcript<'a>(messages: &'a [Value], o: &Options) -> (Cow<'a, [Val
     }
     let results: Vec<usize> = (0..messages.len()).filter(|&i| messages[i]["role"] == "tool").collect();
     // Result collapsing needs old results to exist; argument stubbing does not.
-    let mut collapsible: HashSet<usize> = if results.len() <= o.keep_verbatim { HashSet::new() } else { results[..results.len() - o.keep_verbatim].iter().copied().collect() };
+    let batch = o.batch.max(1);
+    let mut collapsible: HashSet<usize> = results[..results.len().saturating_sub(o.keep_verbatim) / batch * batch].iter().copied().collect();
     let retained = retained_file_content(messages, o.file_read_budget);
     for i in &retained.reads {
         collapsible.remove(i);
@@ -321,7 +330,7 @@ mod tests {
     fn options(o: &Value) -> Options {
         let d = Options::default();
         let n = |k: &str, d: usize| o[k].as_u64().map_or(d, |x| x as usize);
-        Options { keep_verbatim: n("keepVerbatim", d.keep_verbatim), min_chars: n("minChars", d.min_chars), threshold_chars: n("thresholdChars", d.threshold_chars), file_read_budget: n("fileReadBudget", d.file_read_budget) }
+        Options { keep_verbatim: n("keepVerbatim", d.keep_verbatim), min_chars: n("minChars", d.min_chars), threshold_chars: n("thresholdChars", d.threshold_chars), file_read_budget: n("fileReadBudget", d.file_read_budget), batch: d.batch }
     }
 
     #[test]
@@ -346,6 +355,30 @@ mod tests {
         let m = vec![json!({"role": "user", "content": "hi"}), json!({"role": "tool", "tool_call_id": "x", "content": "y".repeat(5000)})];
         let (out, stats) = prune_transcript(&m, &Options::default());
         assert!(matches!(out, Cow::Borrowed(_)) && stats == PruneStats::default());
+    }
+
+    /// `n` rounds of one command each, every answer big enough to collapse.
+    fn rounds(n: usize) -> Vec<Value> {
+        (0..n).flat_map(|i| [json!({ "role": "assistant", "content": "", "tool_calls": [{ "id": format!("c{i}"), "type": "function", "function": { "name": "run_command", "arguments": "{}" } }] }), json!({ "role": "tool", "tool_call_id": format!("c{i}"), "content": format!("{i}{}", "y".repeat(4_000)) })]).collect()
+    }
+
+    #[test]
+    fn old_results_collapse_a_batch_at_a_time() {
+        let o = Options { batch: COLLAPSE_BATCH, ..Options::default() };
+        let collapsed = |n: usize| prune_transcript(&rounds(n), &o).1.collapsed;
+        // Nothing changes until a whole batch is old, so the request starts the same for the rounds between and stays cached.
+        assert_eq!([8, 15, 16, 23, 24].map(collapsed), [0, 0, 8, 8, 16]);
+        // One at a time, as the web does, when no batch is asked for.
+        assert_eq!(prune_transcript(&rounds(15), &Options::default()).1.collapsed, 7);
+    }
+
+    #[test]
+    fn a_line_standing_in_for_a_read_does_not_retire_the_read() {
+        let read = |id: &str| json!({ "role": "assistant", "content": "", "tool_calls": [{ "id": id, "type": "function", "function": { "name": "read_file", "arguments": "{\"path\":\"a.cpp\"}" } }] });
+        let mut m = vec![read("r1"), json!({ "role": "tool", "tool_call_id": "r1", "content": "z".repeat(9_000) }), read("r2"), json!({ "role": "tool", "tool_call_id": "r2", "content": "[Unchanged: read_file(a.cpp) gave this same output earlier.]" })];
+        m.extend(rounds(9));
+        let (out, _) = prune_transcript(&m, &Options::default());
+        assert_eq!(out[1], m[1], "the copy the line points at is still the newest read of the file");
     }
 
     #[test]
