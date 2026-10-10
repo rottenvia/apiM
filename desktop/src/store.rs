@@ -618,7 +618,10 @@ impl From<wire::Msg> for Message {
                 (t.id.clone(), ToolEvent { id: t.id, name: t.name, args: t.args, ok: t.ok.or(Some(!incomplete)), summary: t.summary, image, image_url, caption, changed_path: t.changed_path })
             })
             .collect();
-        let thinking_ms = w.reasoning_ms.unwrap_or(0).max(1);
+        // The reply's thinking time, shared out over its thinks. Each used to get all of it, and ending a resumed reply adds
+        // them up: the total was multiplied by the number of thinks on every Resume (one reply reached 783 hours).
+        let thinks = w.timeline.iter().flatten().filter(|step| matches!(step, wire::Step::Think { .. })).count().max(1) as u64;
+        let thinking_ms = (w.reasoning_ms.unwrap_or(0) / thinks).max(1);
         let mut parts = Vec::new();
         let mut loose_reasoning = String::new();
         match w.timeline {
@@ -1135,7 +1138,7 @@ mod tests {
                 Part::Thinking { text: "more".into(), ms: 5 },
                 Part::Text("b".into()),
             ],
-            reasoning_ms: 5,
+            reasoning_ms: 10,
             ..Message::new(Role::Assistant, "")
         });
         c.save();
