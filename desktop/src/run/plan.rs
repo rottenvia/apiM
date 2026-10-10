@@ -243,7 +243,9 @@ pub fn step_budget_nudge(due: &StepDue) -> String {
 /// Asked with every checkpoint, after the web's own questions. A reply spent thirty rounds turning one language
 /// into another by hand before it fetched that language's interpreter, wrote a tokenizer a parser already did, and
 /// looked for a published tool at round 119; a dozen of its runs ended at a time limit with nothing printed.
-pub const STEP_BACK: &str = " Two more things to check. Are you building by hand something that exists (an interpreter, a parser, a formatter, a published tool for this exact problem)? Look for it now. And how long does one experiment take? If a run takes over a minute or ends at a time limit, make it small and bounded before you go on.";
+/// Asked about "something that exists", a later reply answered for its whole project ("a custom tool is justified")
+/// while it rewrote a regular-expression walker of an if-tree six times, a parser for that language two folders away.
+pub const STEP_BACK: &str = " Two more things to check. Name the script you have been writing or fixing in these rounds: the script itself, not the project. If it parses, tokenizes, walks, formats or converts a known language or format, a program that does this exists, perhaps already in this workspace: use that instead (an interpreter, a parser, a formatter, a published tool for this exact problem). And how long does one experiment take? If a run takes over a minute or ends at a time limit, make it small and bounded before you go on.";
 
 /// What the user is shown when the run pauses at the last checkpoint.
 pub fn step_budget_user_note(due: &StepDue) -> String {

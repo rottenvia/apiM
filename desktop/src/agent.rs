@@ -205,6 +205,8 @@ enum Halt {
     OutputCeiling,
     CutsExhausted,
     Budget,
+    /// No spending limit, and a dollar went by with no plan step finished: what was spent since, and whether any step was.
+    StepSpend(f64, bool),
 }
 
 /// What a run learns about its endpoint along the way. Each stays for the rest of the reply.
@@ -298,6 +300,7 @@ fn resume_transcript(mut resume: Resume, mut messages: Vec<Value>, start: &mut S
             (start.tool_rounds, start.continuations, start.think_nudges) = (state.tool_rounds as usize, state.continuations, state.think_nudges.unwrap_or(0));
             messages = state.messages;
             crate::context::transcript::cut_old_pastes(&mut messages);
+            crate::context::transcript::cut_long_result_lines(&mut messages);
             EXACT_RESUME_INSTRUCTION.to_string()
         }
         None => {
@@ -688,6 +691,9 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
     // extensions, `stall::should_extend_round_cap`), and what the run has done since it was last checked.
     let mut round_cap = ctx.limits.agent_rounds as usize;
     let (mut cap_extensions, mut changes_since_check, mut steps_at_check) = (0u32, 0u32, done_steps());
+    // The steps done when the reply began, and what had been spent when the plan last moved one on: with no spending
+    // limit a reply runs on while each dollar finishes a step.
+    let (steps_at_start, mut steps_paid, mut spent_at_step) = (done_steps(), done_steps(), 0.0f64);
     // How often each kind of rescue has been used on this reply.
     let (mut continuations, mut stream_cuts, mut think_nudges, mut draft_cutovers, mut auto_revives, mut refusal_reopens) = (resumed_continuations, 0u32, 0u32, 0u32, 0u32, 0u32);
     // Thinking is off for the rest of the run, or for the next round only; the next round continues cut-off prose.
@@ -719,13 +725,19 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
         round += 1;
         if round > round_cap {
             let done = done_steps();
-            if stall::should_run_on(cap_extensions, done.saturating_sub(steps_at_check) as u32, changes_since_check, last_round_cost, spend.spent, spend.limit) {
+            if done > steps_paid {
+                (steps_paid, spent_at_step) = (done, spend.spent);
+            }
+            let (steps, since_step) = (done.saturating_sub(steps_at_check) as u32, spend.spent - spent_at_step);
+            if stall::should_run_on(cap_extensions, steps, changes_since_check, last_round_cost, since_step, spend.limit) {
                 cap_extensions += 1;
                 round_cap += stall::CAP_EXTENSION_ROUNDS;
                 (steps_at_check, changes_since_check) = (done, 0);
             } else {
-                log("limit_hit", "tool rounds", &format!("Stopped after {} tool rounds.", round - 1));
-                halt = Some(Halt::Premature(Premature::RoundCap));
+                log("limit_hit", "tool rounds", &format!("Stopped after {} tool rounds, ${since_step:.2} since the last finished step.", round - 1));
+                // Rounds were left to earn, and only the money said no: say that, not "every tool round".
+                let by_money = stall::paused_by_money(steps, changes_since_check, last_round_cost);
+                halt = Some(if by_money { Halt::StepSpend(since_step, done > steps_at_start) } else { Halt::Premature(Premature::RoundCap) });
                 break;
             }
         }
@@ -1177,7 +1189,11 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
         let current = chat.lock().unwrap().plan.clone();
         rounds_since_plan_update = if plan_touched { 0 } else { rounds_since_plan_update + 1 };
         let claimed = plan::step_claimed_complete(&content);
-        if current.as_ref().is_some_and(|p| !plan::progress(p).complete) && (rounds_since_plan_update >= plan::PLAN_STALE_AFTER_TOOL_ROUNDS || claimed) {
+        // A plan that already shows the step being worked on has nothing new to record until that step ends: asked
+        // every six rounds, one reply answered `{"id":1,"state":"doing"}` twenty-five times over.
+        let working = current.as_ref().is_some_and(|p| p.steps.iter().any(|step| step.state == "doing"));
+        let stale = rounds_since_plan_update >= plan::PLAN_STALE_AFTER_TOOL_ROUNDS * if working { 4 } else { 1 };
+        if current.as_ref().is_some_and(|p| !plan::progress(p).complete) && (stale || claimed) {
             harness.push(plan::build_stale_plan_nudge(rounds_since_plan_update, claimed));
         }
         // A long build with no plan and no question asked rests on an interpretation nobody confirmed. Said once, on a
@@ -1233,6 +1249,7 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
         Halt::ThinkCeiling => "It thought through the whole output budget three times without writing anything — Resume continues with thinking switched off".to_string(),
         Halt::OutputCeiling => "The answer hit the output limit before it finished".to_string(),
         Halt::CutsExhausted => "The connection kept dropping before the answer finished".to_string(),
+        Halt::StepSpend(since, any) => stall::step_spend_notice(since, any),
         Halt::Budget => format!("Stopped at your ${} spending limit — the work so far is saved, use Resume to continue", fixed(spend.limit.unwrap_or(0.0), 2)),
     });
     if let (Some(reason), true) = (&mut stop_reason, lane.degraded > 0) {

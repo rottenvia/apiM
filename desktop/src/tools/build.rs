@@ -789,7 +789,7 @@ pub async fn build_project(ctx: &Ctx, args: &Value) -> Output {
 
     let mut logs: Vec<String> = Vec::new();
     if let Some(r) = &planned.restore {
-        let ran = match exec::execute(ctx, &r.command, r.args.clone(), "Restore packages before the build", Some(RESTORE_LIMIT)).await {
+        let ran = match exec::execute(ctx, &r.command, r.args.clone(), "Restore packages before the build", Some(RESTORE_LIMIT), None).await {
             Ok(ran) => ran,
             Err(refused) => return refused,
         };
@@ -799,7 +799,7 @@ pub async fn build_project(ctx: &Ctx, args: &Value) -> Output {
         }
     }
 
-    let mut run = match exec::execute(ctx, &runner.command, runner.args.clone(), "Build the project", None).await {
+    let mut run = match exec::execute(ctx, &runner.command, runner.args.clone(), "Build the project", None, None).await {
         Ok(ran) => ran,
         Err(refused) => return refused,
     };
@@ -809,7 +809,7 @@ pub async fn build_project(ctx: &Ctx, args: &Value) -> Output {
     if !no_retry && diagnosis.as_ref().is_some_and(|d| d.retryable) {
         let first = run;
         let first_rule = diagnosis.as_ref().map(|d| d.rule.clone()).unwrap_or_default();
-        run = match exec::execute(ctx, &runner.command, runner.args.clone(), "Build the project", None).await {
+        run = match exec::execute(ctx, &runner.command, runner.args.clone(), "Build the project", None, None).await {
             Ok(ran) => ran,
             Err(refused) => return refused,
         };

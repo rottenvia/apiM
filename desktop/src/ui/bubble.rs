@@ -1072,7 +1072,12 @@ fn meta_row(ui: &mut Ui, msg: &Message, env: &Env, sources_open: &mut bool) -> b
             // The dot is a piece of its own, midway between its neighbours: written into the word it leaned on it.
             word(ui, "·", W::Regular);
             // A reply stopped between two steps ended its last round on "tool_calls": true, and no use to a reader.
-            let mut text = if msg.incomplete && msg.finish.as_deref() == Some("tool_calls") { "unfinished" } else { msg.finish.as_deref().unwrap_or("cut") }.to_string();
+            // One that closed with the finish tool ended on "tool_calls" as well, and it ended properly.
+            let mut text = match msg.finish.as_deref() {
+                Some("tool_calls") => if msg.incomplete { "unfinished" } else { "stop" },
+                finish => finish.unwrap_or("cut"),
+            }
+            .to_string();
             if continued > 0 {
                 text += &format!(" +{continued} cont");
             }

@@ -326,9 +326,11 @@ pub const MAX_CAP_EXTENSIONS: u32 = 3;
 /// Successful world-changing calls since the last check that count as progress.
 pub const CAP_PROGRESS_CHANGES: u32 = 3;
 
-/// What a reply may cost and still be given rounds past its last extension, when no spending limit is set. The
-/// ceiling on rounds is there for the money: 160 rounds of a cheap model cost a quarter of a dollar.
-pub const CHEAP_REPLY_USD: f64 = 1.0;
+/// What a reply may spend without finishing a plan step and still be given rounds past its last extension, when no
+/// spending limit is set. The ceiling on rounds is there for the money: 160 rounds of a cheap model cost a quarter
+/// of a dollar. It was a ceiling on the whole reply first, and paused one at $1.03 three rounds after it had
+/// finished its second step.
+pub const SPEND_PER_STEP_USD: f64 = 1.0;
 
 /// Should a run that just hit its round cap keep going? Real progress since the last check earns another block.
 pub fn should_extend_round_cap(extensions_used: u32, steps_done_since_check: u32, changes_since_check: u32) -> bool {
@@ -336,11 +338,23 @@ pub fn should_extend_round_cap(extensions_used: u32, steps_done_since_check: u32
 }
 
 /// The same question with the money in it. Past the counted extensions a reply that still gets somewhere runs on:
-/// up to the spending limit when one is set, else while it has cost under `CHEAP_REPLY_USD`. A price nobody knows
-/// is not cheap. A step that never finishes is still paused by its own budget (`plan::watch_step`).
-pub fn should_run_on(extensions_used: u32, steps_done_since_check: u32, changes_since_check: u32, last_round_cost: f64, spent: f64, limit: Option<f64>) -> bool {
-    let paid_for = last_round_cost > 0.0 && (limit.is_some() || spent < CHEAP_REPLY_USD);
+/// up to the spending limit when one is set, else while what it spent since its last finished plan step is under
+/// `SPEND_PER_STEP_USD` (a reply with no plan: since it began). A price nobody knows is not cheap. A step that
+/// never finishes is still paused by its own budget (`plan::watch_step`).
+pub fn should_run_on(extensions_used: u32, steps_done_since_check: u32, changes_since_check: u32, last_round_cost: f64, spent_since_step: f64, limit: Option<f64>) -> bool {
+    let paid_for = last_round_cost > 0.0 && (limit.is_some() || spent_since_step < SPEND_PER_STEP_USD);
     should_extend_round_cap(if paid_for { 0 } else { extensions_used }, steps_done_since_check, changes_since_check)
+}
+
+/// A reply that may not run on: was it the money that said no, with rounds still there to earn?
+pub fn paused_by_money(steps_done_since_check: u32, changes_since_check: u32, last_round_cost: f64) -> bool {
+    last_round_cost > 0.0 && should_extend_round_cap(0, steps_done_since_check, changes_since_check)
+}
+
+/// What the user reads when the money rule, not the rounds, paused a reply.
+pub fn step_spend_notice(spent_since_step: f64, any_step_done: bool) -> String {
+    let since = if any_step_done { "since the last finished plan step" } else { "with no plan step finished" };
+    format!("Paused: ${spent_since_step:.2} spent {since}, and no spending limit is set — Resume to carry on, or set a limit in Settings to let a reply run up to it")
 }
 
 pub const CODE_DRAFT_NUDGE_MARKER: &str = "[Harness: code drafted in reasoning]";
@@ -507,6 +521,9 @@ mod tests {
         // one of unknown price and one that changed nothing do not.
         assert!(should_run_on(MAX_CAP_EXTENSIONS, 0, 3, 0.002, 0.27, None) && should_run_on(MAX_CAP_EXTENSIONS, 1, 0, 0.02, 1.2, Some(5.0)));
         assert!(!should_run_on(MAX_CAP_EXTENSIONS, 0, 3, 0.02, 1.2, None) && !should_run_on(MAX_CAP_EXTENSIONS, 0, 3, 0.0, 0.0, None) && !should_run_on(0, 0, 0, 0.002, 0.1, None));
+        // The reply paused at $1.03 was still changing files: the money paused it. One that changed nothing, or of unknown price, ran out of rounds.
+        assert!(paused_by_money(0, 3, 0.005) && !paused_by_money(0, 0, 0.005) && !paused_by_money(1, 3, 0.0));
+        assert!(step_spend_notice(1.03, true).starts_with("Paused: $1.03 spent since the last finished plan step") && step_spend_notice(1.0, false).contains("with no plan step finished"));
         for (i, o) in cases("should_extend_round_cap") {
             let n = |k: usize| i[k].as_u64().unwrap() as u32;
             assert_eq!(should_extend_round_cap(n(0), n(1), n(2)), o, "{i}");
