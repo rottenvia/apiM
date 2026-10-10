@@ -814,7 +814,8 @@ impl Conversation {
             folder: desktop.folder,
             plan: desktop.plan,
             findings: desktop.findings,
-            summary: w.history_summary,
+            // A stored "summary" that is the model declining to write one is no summary: the turns go out as they would with none.
+            summary: w.history_summary.filter(|s| !crate::summary::declined(&s.text)),
             slug,
             other: w.other,
         }

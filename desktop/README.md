@@ -64,6 +64,12 @@ Two more were found by reading what that chat was billed: 28 million tokens for 
 
 A read that did not fit says where to read on. A model that asks again from the first line gets the same first part again, however often it asks: five rounds in a row in that chat. The lines the first answer left out are now read for it and sent with the pointer, once, when they are all that is left of the file.
 
+**Who writes the summary.** The chat's own model, the one picked in the model menu, in a call of its own with thinking off: it is sent the summary prompt and the turns, and nothing else (`summary.rs`). That goes for the summary kept up as a chat grows and for `/compact`. Three things were wrong with it:
+
+- A model that answered by declining had its answer stored as the summary, and from then on that answer stood in for the whole conversation on every request. A reply that opens by declining is no longer stored: `/compact` says the model declined and changes nothing, the automatic summary is not asked for again in that chat until the app restarts (every message would pay for the same call), and a chat that already holds such a "summary" is read as having none.
+- `/compact` read 60,000 characters a call, eight calls at most, whatever the model: the newest thirty-odd turns of a long chat, the rest counted as skipped. A call now reads a quarter of the model's window (875,000 characters for a million-token model). Eight calls stay the limit, so a compaction has a known highest price, and each call is one request of that size.
+- The summary itself stays short on purpose (800 words for `/compact`, 300 for the automatic one): it rides on every later request.
+
 And two that cost disk, not tokens. An unfinished reply keeps its transcript so Resume can carry on: it held every clip sent with it (a 40 MB video, written again with every save), and replies that could no longer be resumed kept theirs for good. A clip is now left out once it has been sent, and sending a message drops the transcripts of every earlier reply. A reply in progress is saved every five seconds, or twenty times as long as the last save took, whichever is longer: a chat of hundreds of megabytes was written out whole every five seconds.
 
 A picture a tool shows the model (`view_image`, a screenshot) rides on the next request and no other. It used to be cut from that one too, with every picture that had "already ridden", so the model was never sent it.
