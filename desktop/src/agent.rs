@@ -293,6 +293,23 @@ struct Start {
     tools_used: Vec<String>,
 }
 
+/// The turns before the question, as the chat holds them now, in place of the copy a saved transcript opened
+/// with. A reply stopped at 579,000 tokens, 223,000 of them the chat's older turns: the user compacted the chat
+/// and pressed Resume, and the saved transcript sent every one of those turns again, summary or no summary.
+/// Only when the question is the very one being resumed, and what stands before it has shrunk by a fifth or more:
+/// otherwise the transcript goes out as it was saved, and the provider's cache of it still holds.
+// ponytail: a question with a picture is not matched (the saved copy holds a line in the picture's place), so
+// such a reply resumes with its old opening. Compare the texts alone if that shows.
+fn refresh_opening(saved: &mut Vec<Value>, fresh: Vec<Value>) {
+    let size = |list: &[Value]| list.iter().map(|m| m["content"].to_string().len()).sum::<usize>();
+    let Some(first_round) = saved.iter().position(|m| m["role"] == "assistant" && m["tool_calls"].as_array().is_some_and(|calls| !calls.is_empty())) else { return };
+    let Some(question) = saved[..first_round].iter().rposition(|m| m["role"] == "user") else { return };
+    if fresh.last().is_none_or(|ask| ask["role"] != "user" || ask["content"] != saved[question]["content"]) || size(&saved[..=question]) < size(&fresh) * 5 / 4 {
+        return;
+    }
+    saved.splice(..=question, fresh);
+}
+
 /// The opening messages of a resumed reply: its saved transcript (the web's `resumeState`) in place of the fresh ones,
 /// or the fresh ones followed by a transcript rebuilt from what the reply stored; then the brief to carry on.
 /// With nothing to carry forward the fresh messages come back untouched and the question is simply answered again.
@@ -302,7 +319,8 @@ fn resume_transcript(mut resume: Resume, mut messages: Vec<Value>, start: &mut S
     let brief = match saved {
         Some(state) => {
             (start.tool_rounds, start.continuations, start.think_nudges) = (state.tool_rounds as usize, state.continuations, state.think_nudges.unwrap_or(0));
-            messages = state.messages;
+            let fresh = std::mem::replace(&mut messages, state.messages);
+            refresh_opening(&mut messages, fresh);
             crate::context::transcript::cut_old_pastes(&mut messages);
             crate::context::transcript::cut_long_result_lines(&mut messages);
             EXACT_RESUME_INSTRUCTION.to_string()
@@ -1752,6 +1770,25 @@ mod tests {
         assert_eq!(sent_systems(&sent[0], "Workspace changes since").len(), 0);
         assert_eq!(sent_systems(&sent[1], "Workspace changes since"), deltas[..1]);
         assert!(deltas.len() == 2 && deltas[0].ends_with("  + a.txt  (5B)") && deltas[1].ends_with("  + b.txt  (5B)"), "{deltas:?}");
+    }
+
+    /// A chat compacted after its reply stopped: Resume opens with the summary, and keeps every round of the reply.
+    #[test]
+    fn a_resumed_reply_opens_with_the_history_as_it_is_now() {
+        let ask = "Carry on with the port";
+        let round = [json!({ "role": "assistant", "content": "", "tool_calls": [{ "id": "r1", "type": "function", "function": { "name": "read_file", "arguments": "{}" } }] }), json!({ "role": "tool", "tool_call_id": "r1", "content": "file text" })];
+        let old_turns = [user(&"an old question ".repeat(400)), json!({ "role": "assistant", "content": "an old answer ".repeat(400) })];
+        let saved: Vec<Value> = [json!({ "role": "system", "content": "old rules" })].into_iter().chain(old_turns.clone()).chain([user(ask)]).chain(round.clone()).collect();
+        let fresh = vec![json!({ "role": "system", "content": "rules" }), json!({ "role": "system", "content": "[Conversation summary — older turns]\nshort" }), user(ask)];
+        let mut resumed = saved.clone();
+        refresh_opening(&mut resumed, fresh.clone());
+        assert_eq!(resumed, fresh.iter().cloned().chain(round.clone()).collect::<Vec<_>>());
+        // Another question, or an opening no smaller than the saved one: the transcript stays as it was saved.
+        let mut other = saved.clone();
+        refresh_opening(&mut other, vec![json!({ "role": "system", "content": "rules" }), user("Something else")]);
+        let mut same = saved.clone();
+        refresh_opening(&mut same, saved[..4].to_vec());
+        assert!(other == saved && same == saved);
     }
 
     #[tokio::test(flavor = "multi_thread")]

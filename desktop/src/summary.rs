@@ -67,9 +67,12 @@ pub struct Shape<'a> {
 /// Splits the turns after the stored summary into the tail sent verbatim and what should be summarised.
 /// Only turns that replay count, as in the web's `shapeHistory`: an interrupted or errored reply is not in the window.
 pub fn shape<'a>(messages: &'a [Message], stored: Option<&HistorySummary>) -> Shape<'a> {
-    let kept: Vec<&'a Message> = messages.iter().filter(|m| transcript::replays(m)).collect();
-    let covered = stored.and_then(|s| kept.iter().position(|m| m.id == s.up_to_id));
-    let open = &kept[covered.map_or(0, |i| i + 1)..];
+    // Where the summary ends is looked for among all the messages, not only those that replay. A /compact names the
+    // chat's last message, and when that was a reply that had stopped (which does not replay) it was never found:
+    // the summary covered nothing, and every older turn went out again beside it. One such compaction read 976
+    // messages for seven minutes and changed nothing in what the next request carried.
+    let covered = stored.and_then(|s| messages.iter().position(|m| m.id == s.up_to_id));
+    let open: Vec<&'a Message> = messages[covered.map_or(0, |i| i + 1)..].iter().filter(|m| transcript::replays(m)).collect();
     let pending = &open[..open.len().saturating_sub(VERBATIM_TURNS)];
     Shape { verbatim: open[open.len().saturating_sub(VERBATIM_MAX)..].to_vec(), pending: pending.to_vec() }
 }
@@ -142,6 +145,11 @@ fn digest(pending: &[&Message], room: usize) -> (String, usize) {
 /// One summarising call, reading up to `room` characters of turns.
 async fn run(previous: Option<&str>, pending: &[Message], target: &Target, system: &str, max_tokens: u32, max_chars: usize, room: usize) -> Result<(String, usize), Miss> {
     let (text, dropped) = digest(&pending.iter().collect::<Vec<_>>(), room);
+    Ok((ask(previous, &text, target, system, max_tokens, max_chars).await?, dropped))
+}
+
+/// The call itself: what was summarised before, the new text, and the summary that comes back.
+async fn ask(previous: Option<&str>, text: &str, target: &Target, system: &str, max_tokens: u32, max_chars: usize) -> Result<String, Miss> {
     let mut body = Map::new();
     body.insert("model".into(), json!(target.api_model));
     body.insert("stream".into(), json!(true));
@@ -157,7 +165,7 @@ async fn run(previous: Option<&str>, pending: &[Message], target: &Target, syste
     match round.content.trim() {
         "" => Err(Miss::Nothing),
         out if declined(out) => Err(Miss::Declined),
-        out => Ok((cut(out, max_chars).to_string(), dropped)),
+        out => Ok(cut(out, max_chars).to_string()),
     }
 }
 
@@ -200,7 +208,9 @@ pub fn compact_blocker(conv: &Conversation) -> Option<&'static str> {
 }
 
 /// `/compact`: the whole conversation becomes one summary. The transcript on screen is untouched.
-pub async fn compact(messages: Vec<Message>, stored: Option<HistorySummary>, settings: Settings, focus: String) -> Result<HistorySummary, String> {
+/// `progress(done, of)` is told as each call ends: a long chat is several calls, and the button used to say
+/// "Compacting…" for seven minutes with nothing to tell a working compaction from a hung one.
+pub async fn compact(messages: Vec<Message>, stored: Option<HistorySummary>, settings: Settings, focus: String, progress: impl Fn(usize, usize)) -> Result<HistorySummary, String> {
     let target = provider::resolve_target(&settings.model, &settings)?;
     let covered = stored.as_ref().and_then(|s| messages.iter().position(|m| m.id == s.up_to_id));
     let uncovered = &messages[covered.map_or(0, |i| i + 1)..];
@@ -225,19 +235,47 @@ pub async fn compact(messages: Vec<Message>, stored: Option<HistorySummary>, set
 
     let system = compact_system(&focus);
     let provider = target.provider.name();
-    let mut text = stored.as_ref().map(|s| s.text.clone());
+    let previous = stored.as_ref().map(|s| s.text.clone());
     let mut dropped = skipped;
-    for (i, chunk) in chunks.iter().enumerate() {
-        let (fresh, d) = match run(text.as_deref(), chunk, &target, &system, 4000, COMPACT_TEXT_MAX_CHARS, room).await {
-            Ok(done) => done,
-            Err(Miss::Declined) => return Err(declined_note(&target)),
-            Err(Miss::Nothing) => return Err(if i == 0 { format!("{provider} did not return a summary. Nothing was changed — try again.") } else { format!("{provider} stopped partway through. Nothing was changed — try again.") }),
-        };
-        text = Some(fresh);
+    let missed = |miss: Miss, first: bool| match miss {
+        Miss::Declined => declined_note(&target),
+        Miss::Nothing if first => format!("{provider} did not return a summary. Nothing was changed — try again."),
+        Miss::Nothing => format!("{provider} stopped partway through. Nothing was changed — try again."),
+    };
+    let text = if let [only] = chunks {
+        progress(0, 1);
+        let (fresh, d) = run(previous.as_deref(), only, &target, &system, 4000, COMPACT_TEXT_MAX_CHARS, room).await.map_err(|miss| missed(miss, true))?;
         dropped += d;
-    }
+        fresh
+    } else {
+        // Several parts: each is read on its own, all at the same time, and one last call folds what they came to,
+        // oldest first, into the summary. One after another, each carrying the summary so far, eight parts of a
+        // 976-message chat took seven minutes: the wait is now the slowest part and the folding.
+        let of = chunks.len() + 1;
+        let done = std::sync::atomic::AtomicUsize::new(0);
+        progress(0, of);
+        let parts = futures_util::future::join_all(chunks.iter().enumerate().map(|(i, chunk)| {
+            let system = format!("{system}\n\nThese turns are part {} of {} of one long chat, oldest part first. Summarise this part by the same rules; the parts are put together afterwards, so keep what a later part may build on (names, paths, decisions, numbers, what is unfinished).", i + 1, chunks.len());
+            let (target, done, progress) = (&target, &done, &progress);
+            async move {
+                let part = run(None, chunk, target, &system, 4000, COMPACT_TEXT_MAX_CHARS, room).await;
+                progress(done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1, of);
+                part
+            }
+        }))
+        .await;
+        let mut condensed = Vec::new();
+        for (i, part) in parts.into_iter().enumerate() {
+            let (text, d) = part.map_err(|miss| missed(miss, false))?;
+            dropped += d;
+            condensed.push(format!("[Part {} of {} of the chat, already condensed]\n{text}", i + 1, chunks.len()));
+        }
+        let folded = ask(previous.as_deref(), &condensed.join("\n\n"), &target, &system, 4000, COMPACT_TEXT_MAX_CHARS).await.map_err(|miss| missed(miss, false))?;
+        progress(of, of);
+        folded
+    };
     Ok(HistorySummary {
-        text: text.unwrap_or_default(),
+        text,
         up_to_id: messages.last().map(|m| m.id.clone()).unwrap_or_default(),
         dropped_turns: stored.as_ref().map_or(0, |s| s.dropped_turns) + dropped as u32,
         updated_at: crate::store::iso(crate::store::now_ms()),
@@ -281,6 +319,13 @@ mod tests {
         assert!(!should_refresh(&s.pending));
         assert!(should_refresh(&turns(1, 4_000).iter().collect::<Vec<_>>()));
         assert!(!should_refresh(&[]));
+        // A /compact made over a reply that had stopped names that reply, which does not replay: everything before it is covered all the same.
+        let mut stopped = turns(20, 10);
+        stopped[19].incomplete = true;
+        let s = shape(&stopped, Some(&HistorySummary { up_to_id: "19".into(), ..Default::default() }));
+        assert_eq!((s.verbatim.len(), s.pending.len()), (0, 0));
+        assert!(transcript::history_before(&stopped, 18, Some(&HistorySummary { up_to_id: "19".into(), ..Default::default() })).is_empty());
+        assert_eq!(transcript::history_before(&stopped, 18, Some(&HistorySummary { up_to_id: "9".into(), ..Default::default() })).len(), 8);
     }
 
     #[test]

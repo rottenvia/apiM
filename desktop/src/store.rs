@@ -812,7 +812,15 @@ impl Conversation {
             archived: w.archived,
             created_at: from_iso(&w.created_at),
             updated_at: from_iso(&w.updated_at),
-            messages: w.messages.into_iter().map(Message::from).collect(),
+            messages: {
+                // Only the last reply can be resumed (`App::resume`): the transcript an earlier unfinished one kept is
+                // dead weight. One chat's file held 155 MB of it across its replies, read into memory and written out
+                // again with every save. Whether a reply ended is read before this (`Message::from`).
+                let mut messages: Vec<Message> = w.messages.into_iter().map(Message::from).collect();
+                let earlier = messages.len().saturating_sub(1);
+                messages[..earlier].iter_mut().for_each(|m| drop(m.other.remove("resumeState")));
+                messages
+            },
             folder: desktop.folder,
             plan: desktop.plan,
             findings: desktop.findings,
@@ -1124,6 +1132,19 @@ mod tests {
             let files = crate::snapshots::list_files(&conv.workspace()).len();
             eprintln!("    workspace: {files} files listed in {:?}", t.elapsed());
         }
+    }
+
+    /// Only the newest reply keeps the transcript it can be resumed from; an earlier one still reads as unfinished.
+    #[test]
+    fn a_loaded_chat_keeps_only_its_last_saved_transcript() {
+        let state = serde_json::json!({ "messages": [{ "role": "user", "content": "go" }], "toolRounds": 1, "continuations": 0 });
+        let reply = |id: &str| serde_json::json!({ "id": id, "role": "assistant", "content": "partly", "createdAt": "2026-01-01T00:00:00.000Z", "resumeState": state });
+        let ask = |id: &str| serde_json::json!({ "id": id, "role": "user", "content": "do it", "createdAt": "2026-01-01T00:00:00.000Z" });
+        let wire: wire::Conv = serde_json::from_value(serde_json::json!({ "id": "c", "title": "t", "createdAt": "2026-01-01T00:00:00.000Z", "updatedAt": "2026-01-01T00:00:00.000Z", "messages": [ask("u1"), reply("a1"), ask("u2"), reply("a2")] })).unwrap();
+        let chat = Conversation::from_wire(wire, "t".into());
+        let kept: Vec<bool> = chat.messages.iter().map(|m| m.other.contains_key("resumeState")).collect();
+        assert_eq!(kept, [false, false, false, true]);
+        assert!(chat.messages[1].incomplete && chat.messages[3].incomplete);
     }
 
     #[test]
