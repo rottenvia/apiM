@@ -267,11 +267,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     // Download, said in words, at the foot: a link like the left rail's own.
     let bottom = full.bottom() - if count > 0 { rail_foot(1) } else { 0.0 };
     if count > 0 {
-        ui.painter().hline(full.x_range().shrink(RAIL_INSET), bottom + 0.5, rule);
-        let mut foot = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_max(pos2(x0 + RAIL_INSET, bottom + 11.0), pos2(full.right() - RAIL_INSET, full.bottom()))));
+        ui.painter().hline(full.x_range(), bottom + 0.5, rule);
+        let mut foot = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_max(pos2(x0 + RAIL_INSET, bottom + 13.0), pos2(full.right() - RAIL_INSET, full.bottom()))));
         let link = widgets::side_link(&mut foot, icons::DOWNLOAD_TRAY, "Download all files", "Download everything as a .zip");
         let number = widgets::galley(ui, &chat::thousands(count as u64), theme::font(RAIL_SMALL, W::Regular), p.muted);
-        widgets::text_at(ui, link.rect.right() - RAIL_PAD - number.size().x, link.rect.center().y, number);
+        widgets::text_at(ui, link.rect.right() - 12.0 - number.size().x, link.rect.center().y, number);
         if link.clicked() {
             act = Some(Act::Download);
         }

@@ -1,5 +1,6 @@
-//! The plan card inside a reply: the goal, how far along it is, and the steps
-//! (src/components/PlanPanel.tsx, src/lib/plan-view.ts).
+//! The plan card: the goal, how far along it is, and the steps (src/components/PlanPanel.tsx,
+//! src/lib/plan-view.ts). The chat's own plan is pinned above the composer; a reply brought over from the web
+//! app draws the plan it carries.
 
 use super::form::Btn;
 use super::theme::{self, W, alpha, p};
@@ -71,8 +72,9 @@ fn or_untitled(text: &str) -> &str {
     if text.is_empty() { "Untitled step" } else { text }
 }
 
-/// Draws the card. `can_act` shows the footer that reopens or clears a blocked plan.
-pub fn show(ui: &mut Ui, view: &View, can_act: bool) -> Option<Act> {
+/// Draws the card. `can_act` shows the footer that reopens or clears a blocked plan. `pinned` is the card above
+/// the composer: folded until it is clicked, and its steps scroll past a height so the chat keeps its room.
+pub fn show(ui: &mut Ui, view: &View, can_act: bool, pinned: bool) -> Option<Act> {
     let p = p();
     let total = view.steps.len();
     let done = view.steps.iter().filter(|s| s.state == "done").count();
@@ -81,10 +83,10 @@ pub fn show(ui: &mut Ui, view: &View, can_act: bool) -> Option<Act> {
     let current = view.steps.iter().find(|s| s.state == "doing").or_else(|| view.steps.iter().find(|s| s.state == "todo"));
     let open_id = ui.id().with("plan-open");
     // Short plans start open, long ones folded; after that the click decides.
-    let mut open: bool = ui.data(|d| d.get_temp(open_id)).unwrap_or(total <= 6);
+    let mut open: bool = ui.data(|d| d.get_temp(open_id)).unwrap_or(!pinned && total <= 6);
     let mut act = None;
 
-    let frame = egui::Frame::new().fill(alpha(p.bg2, 60.0)).stroke(Stroke::new(1.0, p.border)).corner_radius(12);
+    let frame = egui::Frame::new().fill(if pinned { p.bg2 } else { alpha(p.bg2, 60.0) }).stroke(Stroke::new(1.0, p.border)).corner_radius(12);
     frame.show(ui, |ui| {
         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
         let width = ui.available_width();
@@ -129,7 +131,8 @@ pub fn show(ui: &mut Ui, view: &View, can_act: bool) -> Option<Act> {
         };
         if open {
             rule(ui);
-            egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
+            let steps = |ui: &mut Ui| {
+                egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
                 ui.set_width(width - 24.0);
                 for step in &view.steps {
                     ui.add_space(4.0);
@@ -171,7 +174,15 @@ pub fn show(ui: &mut Ui, view: &View, can_act: bool) -> Option<Act> {
                     });
                     ui.add_space(4.0);
                 }
-            });
+                });
+            };
+            if pinned {
+                // The panel it sits in offers last frame's height: without a floor of its own the list stayed two lines tall.
+                let cap = (ui.ctx().content_rect().height() * 0.4).max(120.0);
+                egui::ScrollArea::vertical().id_salt("plan-steps").max_height(cap).min_scrolled_height(cap).show(ui, steps);
+            } else {
+                steps(ui);
+            }
         }
         if blocked > 0 && can_act {
             rule(ui);

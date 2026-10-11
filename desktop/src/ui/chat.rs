@@ -230,7 +230,7 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
         // A question to the user keeps its distance.
         let asking = run.as_ref().is_some_and(|r| r.approval.is_some() || r.question.is_some());
         let tail_gap = if !running || asking { gap } else if has_output { 6.0 } else { 18.0 };
-        let (plan, rewind) = (conv.plan.as_ref(), rewind.as_ref());
+        let rewind = rewind.as_ref();
         // Bubbles stop at three quarters of the column; a narrow window gives them a little more.
         let cap = column * if ui.ctx().content_rect().width() < 768.0 { 0.85 } else { 0.75 };
         let thinking_secs = run.as_ref().and_then(|r| r.thinking.secs());
@@ -265,7 +265,7 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
                 rows.guessed = false;
                 let mut marks = matcher.as_ref().filter(|_| hits > 0).map(|matcher| markdown::Marks { matcher, active: focused, seen: 0, reveal: wanted, shown: false });
                 column_in(ui, !shows, &mut |ui| {
-                    let mut env = bubble::Env { settings, workspace: &workspace, live, newest: i == last, busy: running, cap, thinking_secs, editing, action: &mut action, plan, rewind, marks: marks.take(), rows };
+                    let mut env = bubble::Env { settings, workspace: &workspace, live, newest: i == last, busy: running, cap, thinking_secs, editing, action: &mut action, rewind, marks: marks.take(), rows };
                     ui.push_id(&msg.id, |ui| bubble::show(ui, msg, &mut env));
                     marks = env.marks.take();
                 });

@@ -10,7 +10,7 @@
 
 use crate::compact;
 use crate::context::findings::{self, NewFinding};
-use crate::context::goal_pin::{GOAL_PIN_MARKER, render_goal_pin, resolve_run_goal};
+use crate::context::goal_pin::{GOAL_PIN_MARKER, render_goal_pin, render_work_state, resolve_run_goal};
 use crate::context::prune::{self as pruning, QWEN_PRUNE, prune_transcript};
 use crate::context::rebuild_resume::{EXACT_RESUME_INSTRUCTION, ResumeState, rebuild_resume_from_stored, rebuilt_resume_instruction};
 use crate::context::refine::{self, KnownLesson, Outcome};
@@ -815,8 +815,19 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
             // The 80K sidecar window: only the copy on the wire is fitted, so the stored transcript keeps every round (route.ts 2778-2788).
             // ponytail: the web passes whether the workspace is on; here any tool definition sent counts toward the tool reserve.
             wire = local::context::fit_for_local_context(wire, local::context::local_message_budget(!tool_defs.is_empty())).messages;
-        } else if !tail.is_empty() {
-            wire.push(json!({ "role": "system", "content": tail }));
+        } else {
+            // With the work under way, the request, the plan and the nudges go into the newest tool result
+            // (`render_work_state` says why). The pin stays a message of its own in the saved transcript.
+            let pinned = wire.last().is_some_and(|m| m["role"] == "system" && m["content"].as_str().is_some_and(|c| c.starts_with(GOAL_PIN_MARKER)));
+            let result = wire.iter().rposition(|m| m["role"] == "tool").filter(|&i| pinned && wire[i]["content"].is_string() && wire[i + 1..].iter().all(|m| m["role"] == "system"));
+            let goal = resolve_run_goal(&user_text, history_last_user.as_deref(), None);
+            if let (Some(i), Some(goal)) = (result, goal) {
+                let pin = wire.pop().unwrap_or_default();
+                let noted = if pin["content"].as_str().is_some_and(|c| c.ends_with(NOTED)) { NOTED } else { "" };
+                wire[i]["content"] = json!(format!("{}\n\n{}{noted}", wire[i]["content"].as_str().unwrap_or(""), render_work_state(&goal, &tail)));
+            } else if !tail.is_empty() {
+                wire.push(json!({ "role": "system", "content": tail }));
+            }
         }
 
         let thinking_now = thinking && !force_no_thinking && !no_think_next;
@@ -1233,7 +1244,8 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
                 halt = Some(Halt::Premature(Premature::StepBudget));
                 break;
             }
-            log_with("run_stopped", "step budget checkpoint", &format!("Step {}: {} rounds, {} min (checkpoint {}).", due.id, due.rounds, due.minutes, due.level), json!({ "rounds": tool_rounds }));
+            // A checkpoint, not a stop: the run goes on, and the problem report counts stops.
+            log_with("run_checkpoint", "step budget", &format!("Step {}: {} rounds, {} min (checkpoint {}).", due.id, due.rounds, due.minutes, due.level), json!({ "rounds": tool_rounds }));
             harness.push(format!("{}{}", plan::step_budget_nudge(&due), plan::STEP_BACK));
         }
         // Code drafted in thought is paid for again as the file's content: say so, with the count.
@@ -1846,10 +1858,13 @@ mod tests {
         let (_, _, _, sent) = reply_to(ask, vec![write("w1", "v1"), write("w2", "v2"), sse(&[says("Here is what I did: wrote notes.txt.", Some("stop"))])], "none", None).await;
         assert!(sent_systems(&sent[0], GOAL_PIN_MARKER).is_empty());
         for request in &sent[1..] {
-            // One pin however many rounds ran, and it is the last thing read.
-            let pins = sent_systems(request, GOAL_PIN_MARKER);
-            assert!(pins.len() == 1 && pins[0].contains("in the middle of the work on this request") && pins[0].contains(&format!("\n> {ask}\n")), "{pins:?}");
-            assert_eq!(request["messages"].as_array().unwrap().last().unwrap()["content"], pins[0]);
+            // With the work under way the request is told inside the newest tool result, once however many rounds
+            // ran, and no message of the app's own follows the results for the model to answer.
+            let messages = request["messages"].as_array().unwrap();
+            let results: Vec<&str> = messages.iter().filter(|m| m["role"] == "tool").filter_map(|m| m["content"].as_str()).collect();
+            let told: Vec<&&str> = results.iter().filter(|text| text.contains(crate::context::goal_pin::WORK_STATE_MARKER)).collect();
+            assert!(told.len() == 1 && results.last().unwrap().ends_with(&format!("{}\nRequest: {ask}", crate::context::goal_pin::WORK_STATE_MARKER)), "{results:?}");
+            assert!(sent_systems(request, GOAL_PIN_MARKER).is_empty() && messages.last().unwrap()["role"] != "system" || messages.last().unwrap()["content"].as_str().unwrap().starts_with("Workspace changes"));
         }
     }
 

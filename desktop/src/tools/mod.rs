@@ -147,6 +147,9 @@ static SCHEMAS: LazyLock<Vec<Value>> = LazyLock::new(|| {
             "run_command" => " For questions about the computer itself there are the system's own looking tools (ps, uname, df, free, uptime).",
             _ => "",
         };
+        // Said of every system: a reply that did not know this ran its long programs a second time to get a file.
+        let kept = if t["function"]["name"] == "run_command" { " A long output is shown with its middle cut, and ALL of it is kept in a file under outputs/ that the result names: never redirect a program's output to a file yourself, and never run a program again to see more of what it printed." } else { "" };
+        let more = format!("{more}{kept}");
         if !more.is_empty() {
             t["function"]["description"] = Value::String(format!("{}{more}", t["function"]["description"].as_str().unwrap_or("")));
         }

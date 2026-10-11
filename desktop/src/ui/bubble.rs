@@ -61,8 +61,6 @@ pub struct Env<'a, 'm> {
     pub action: &'a mut Option<Action>,
     /// The question whose rewind popover is open.
     pub rewind: Option<&'a super::rewind::Preview>,
-    /// The chat's plan, drawn in the newest reply.
-    pub plan: Option<&'a crate::store::Plan>,
     /// Find in this chat: the query to mark in this message, when it has matches.
     pub marks: Option<markdown::Marks<'m>>,
     /// Heights of the rows inside replies: a row that does not show is not laid out.
@@ -1423,11 +1421,12 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
             thinking_panel(ui, &reasoning, msg.reasoning_ms, thinking_now, env, msg.usage.reasoning);
         }
     }
-    // ponytail: a reply written here does not keep its own copy of the plan, so only the newest one shows the chat's.
-    let plan = msg.other.get("plan").and_then(super::plan_panel::from_value).or_else(|| env.plan.filter(|_| env.newest).map(super::plan_panel::from_plan));
+    // A reply brought over from the web app carries its own plan. The chat's plan is pinned above the composer
+    // (`ui/mod.rs`): drawn in the newest reply, it sat hundreds of rounds up the page of a long one.
+    let plan = msg.other.get("plan").and_then(super::plan_panel::from_value);
     if let Some(view) = plan.filter(|view| !view.steps.is_empty()) {
         gap(ui, 12.0);
-        match super::plan_panel::show(ui, &view, env.newest && !env.busy) {
+        match super::plan_panel::show(ui, &view, env.newest && !env.busy, false) {
             Some(super::plan_panel::Act::Unblock) => *env.action = Some(Action::PlanUnblock),
             Some(super::plan_panel::Act::Clear) => *env.action = Some(Action::PlanClear),
             None => {}

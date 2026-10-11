@@ -1209,8 +1209,8 @@ impl App {
             }
             run.inbox.push_back(event);
         }
-        // A reply to a chat that is not the one on screen has nobody to type for.
-        let watched = self.parked.is_none();
+        // A reply to a chat that is not the one on screen has nobody to type for, and neither has a window that is down.
+        let watched = self.parked.is_none() && ctx.input(|i| i.viewport().visible()) != Some(false);
         let conv = match self.parked.as_mut() {
             Some(parked) => parked,
             None => &mut self.conv,
@@ -1552,6 +1552,20 @@ impl App {
 }
 
 impl eframe::App for App {
+    /// Takes in what the reply sent. This runs before every `ui`, and it is all that runs while the window is
+    /// minimized: eframe draws no pass for a window nobody sees. When the taking-in lived in `ui`, a minimized
+    /// window saved nothing for as long as it stayed down (nineteen minutes of a reply's rounds, once), and a
+    /// command waiting to be approved was never shown and never flashed the taskbar: it timed out unseen.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.pump(ctx);
+        self.pump_summary();
+        self.pump_open();
+        // `minimized` puts the self-portrait's window down once its message is sent, and back up when the reply ends.
+        if self.staged("minimized") && self.shot.as_ref().is_some_and(|shot| shot.acted) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(self.run.is_some()));
+        }
+    }
+
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         // Chats are written by another thread: the last save has to land before the program goes.
         store::flush();
@@ -1602,9 +1616,6 @@ impl eframe::App for App {
         if std::mem::replace(&mut self.trims_seen, trim::generation()) != trim::generation() {
             self.remeasure();
         }
-        self.pump(&ctx);
-        self.pump_summary();
-        self.pump_open();
         self.take_drops(&ctx);
         self.take_paste(&ctx);
         self.shortcuts(&ctx);
@@ -1650,6 +1661,25 @@ impl eframe::App for App {
             let bar = egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 0));
             egui::Panel::top("header").exact_size(56.0).show_separator_line(false).frame(bar).show(ui, |ui| ui.horizontal_centered(|ui| chat::header(self, ui)));
             egui::Panel::bottom("composer").show_separator_line(false).resizable(false).frame(egui::Frame::NONE).show(ui, |ui| composer::show(self, ui));
+            // The chat's plan stays in sight, at the composer's width right above it: one line with the step being
+            // worked on and the count, the steps on a click. Nobody scrolls a long reply to find what was planned.
+            if let Some(view) = self.conv.plan.as_ref().map(plan_panel::from_plan).filter(|view| !view.steps.is_empty()) {
+                let (busy, fullscreen) = (self.running_here(), self.fullscreen);
+                let mut act = None;
+                egui::Panel::bottom("plan").show_separator_line(false).resizable(false).frame(egui::Frame::NONE).show(ui, |ui| {
+                    let gutter = if ui.available_width() >= 640.0 { 24.0 } else { 16.0 };
+                    let width = (ui.available_width() - gutter * 2.0).min(composer::column_width(ui, fullscreen));
+                    let left = ui.max_rect().left() + (ui.available_width() - width) / 2.0;
+                    ui.add_space(8.0);
+                    let rect = Rect::from_min_size(egui::pos2(left, ui.cursor().top()), vec2(width, ui.available_height()));
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| act = plan_panel::show(ui, &view, !busy, true));
+                });
+                match act {
+                    Some(plan_panel::Act::Unblock) => self.edit_plan(false),
+                    Some(plan_panel::Act::Clear) => self.edit_plan(true),
+                    None => {}
+                }
+            }
             egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| chat::messages(self, ui));
         });
 

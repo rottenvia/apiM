@@ -106,7 +106,7 @@ pub fn cause(kind: &str, subject: &str, detail: &str) -> Cause {
         "ui_error" | "ui_freeze" | "text_held" => Cause::App,
         "api_error" => Cause::Provider,
         "run_stopped" if subject == "spending limit" => Cause::Routine,
-        "unverified_claim" | "limit_hit" | "browser_blocked" | "run_stopped" => Cause::Model,
+        "unverified_claim" | "limit_hit" | "browser_blocked" | "run_stopped" | "run_checkpoint" => Cause::Model,
         // A command that ran and failed has given its answer: that is the work, not a fault in it.
         _ if starts(&["failed: ", "exit ", "sandbox exit", "timed out: ", "skipped"]) || has(&["declined", "no answer", "skipped the question"]) => Cause::Routine,
         _ if has(&["background is not available", "not implemented", "not supported yet", "internal error", "panicked", "ebusy", "resource busy"]) => Cause::App,
@@ -285,6 +285,7 @@ pub fn kind_label(kind: &str) -> &str {
         "api_error" => "API error",
         "limit_hit" => "Hit a limit",
         "run_stopped" => "Stopped early",
+        "run_checkpoint" => "Long step",
         "ui_error" => "Crash",
         "ui_freeze" => "Window froze",
         "text_held" => "Text held back",
