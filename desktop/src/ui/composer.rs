@@ -714,14 +714,23 @@ fn context_panel(app: &mut App, ui: &mut egui::Ui) {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     let busy = app.compacting();
-                    let button = if busy { "Compacting…" } else { "Compact" };
+                    // A long chat is read in parts: the button counts them, and a click on it stops the work.
+                    let counted = match app.compact_progress() {
+                        Some((done, of)) if of > 1 => format!("Stop · {done} of {of}"),
+                        _ => "Stop · working".to_string(),
+                    };
+                    let button = if busy { counted.as_str() } else { "Compact" };
                     let button_width = widgets::galley(ui, button, theme::font(12.0, W::Medium), Color32::WHITE).size().x + 20.0;
                     egui::Frame::new().stroke(Stroke::new(1.0, p.border)).corner_radius(8).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
                         ui.add_enabled(!busy, egui::TextEdit::singleline(&mut app.compact_focus).hint_text(widgets::text("Keep in focus (optional)", 12.0, W::Regular, p.muted)).font(theme::font(12.0, W::Regular)).desired_width(ui.available_width() - button_width - 24.0).frame(egui::Frame::NONE));
                     });
-                    if widgets::small_btn(ui, button, Color32::WHITE, if busy { alpha(p.accent, 60.0) } else { p.accent }, Color32::TRANSPARENT).clicked() && !busy {
-                        let focus = app.compact_focus.trim().to_string();
-                        app.compact(ui.ctx(), focus);
+                    if widgets::small_btn(ui, button, Color32::WHITE, if busy { alpha(p.accent, 60.0) } else { p.accent }, Color32::TRANSPARENT).on_hover_text(if busy { "Stop compacting. The chat stays as it is." } else { "" }).clicked() {
+                        if busy {
+                            app.stop_compact();
+                        } else {
+                            let focus = app.compact_focus.trim().to_string();
+                            app.compact(ui.ctx(), focus);
+                        }
                     }
                 });
             }

@@ -161,6 +161,10 @@ struct SummaryJob {
     /// Characters of history the next request would have carried without it (`/compact` says what it saved).
     before: usize,
     rx: mpsc::Receiver<Result<HistorySummary, String>>,
+    /// (calls ended, calls in all) of a `/compact`, for its button.
+    progress: Arc<Mutex<(usize, usize)>>,
+    /// The work itself, so a click can stop it.
+    handle: tokio::task::JoinHandle<()>,
 }
 
 /// `APIM_SHOT=out.png`: draw one state, save a picture of it, quit. Nothing is clicked or typed.
@@ -761,6 +765,19 @@ impl App {
         self.summary_job.as_ref().is_some_and(|j| j.manual && j.conv_id == self.conv.id)
     }
 
+    /// How far a `/compact` of the chat on screen has come: (calls ended, calls in all).
+    fn compact_progress(&self) -> Option<(usize, usize)> {
+        self.summary_job.as_ref().filter(|j| j.manual && j.conv_id == self.conv.id).map(|j| *j.progress.lock().unwrap())
+    }
+
+    /// The button pressed again while it works: the calls are dropped where they stand and the chat is as it was.
+    fn stop_compact(&mut self) {
+        if let Some(job) = self.summary_job.take_if(|j| j.manual) {
+            job.handle.abort();
+            self.compact_note = Some((false, "Compaction stopped. Nothing was changed.".into()));
+        }
+    }
+
     /// `/compact`: one summary replaces the conversation for the model. The transcript stays on screen.
     fn compact(&mut self, ctx: &egui::Context, focus: String) {
         if self.running_here() {
@@ -779,11 +796,17 @@ impl App {
         let wake = ctx.clone();
         let (messages, stored, settings) = (self.conv.messages.clone(), self.conv.summary.clone(), self.settings.clone());
         let before = summary::history_chars(&self.conv.messages, self.conv.summary.as_ref());
-        self.rt.spawn(async move {
-            let _ = tx.send(summary::compact(messages, stored, settings, focus).await);
+        let progress = Arc::new(Mutex::new((0, 0)));
+        let (told, redraw) = (progress.clone(), wake.clone());
+        let handle = self.rt.spawn(async move {
+            let said = move |done, of| {
+                *told.lock().unwrap() = (done, of);
+                redraw.request_repaint();
+            };
+            let _ = tx.send(summary::compact(messages, stored, settings, focus, said).await);
             wake.request_repaint();
         });
-        self.summary_job = Some(SummaryJob { conv_id: self.conv.id.clone(), manual: true, before, rx });
+        self.summary_job = Some(SummaryJob { conv_id: self.conv.id.clone(), manual: true, before, rx, progress, handle });
         self.compact_note = None;
     }
 
@@ -803,11 +826,11 @@ impl App {
         let (tx, rx) = mpsc::channel();
         let wake = ctx.clone();
         let (stored, pending, settings) = (conv.summary.clone(), shape.pending.iter().map(|m| (*m).clone()).collect::<Vec<_>>(), self.settings.clone());
-        self.rt.spawn(async move {
+        let handle = self.rt.spawn(async move {
             let _ = tx.send(summary::refresh(stored, pending, settings).await);
             wake.request_repaint();
         });
-        self.summary_job = Some(SummaryJob { conv_id: conv_id.to_string(), manual: false, before: 0, rx });
+        self.summary_job = Some(SummaryJob { conv_id: conv_id.to_string(), manual: false, before: 0, rx, progress: Default::default(), handle });
     }
 
     fn pump_summary(&mut self) {
@@ -1020,7 +1043,7 @@ impl App {
         let (earlier, question) = (&self.conv.messages[..start], &self.conv.messages[start]);
         let request = agent::Request {
             settings: self.settings.clone(),
-            history: crate::context::transcript::history(earlier, self.conv.summary.as_ref()),
+            history: crate::context::transcript::history_before(&self.conv.messages, start, self.conv.summary.as_ref()),
             summary: self.conv.summary.as_ref().map(summary::render),
             history_last_user: earlier.iter().rev().filter(|m| m.role == Role::User && !m.note).map(|m| m.text().trim().to_string()).find(|t| !t.is_empty()),
             text: crate::slash::wire(&question.text()).into_owned(),

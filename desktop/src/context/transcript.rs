@@ -22,6 +22,14 @@ pub fn history(messages: &[Message], stored: Option<&HistorySummary>) -> Vec<(Ro
     summary::shape(messages, stored).verbatim.iter().map(|m| (m.role, m.text(), m.attachments.clone())).collect()
 }
 
+/// `history` for a reply being resumed: the turns before its question (`messages[question]`). The whole chat is
+/// held against the summary, not only those turns: a /compact made after the reply stopped ends at the reply
+/// itself, which stands after the question.
+pub fn history_before(messages: &[Message], question: usize, stored: Option<&HistorySummary>) -> Vec<(Role, String, Vec<Attachment>)> {
+    let earlier: std::collections::HashSet<&str> = messages[..question].iter().map(|m| m.id.as_str()).collect();
+    summary::shape(messages, stored).verbatim.iter().filter(|m| earlier.contains(m.id.as_str())).map(|m| (m.role, m.text(), m.attachments.clone())).collect()
+}
+
 /// The web's `mediaWindowFor`: on a native model the two newest pictures in the history ride in full, and a clip never
 /// replays from history. Other models get no window: their history carries descriptions, not pixels.
 pub fn media_windows(turns: &[(Role, String, Vec<Attachment>)], native: bool) -> Vec<Option<MediaWindow>> {

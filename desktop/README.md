@@ -198,6 +198,16 @@ On screen, the row of that first script read "Ran python - · Ran: python - "". 
 
 Seen and left: restore points copy every file up to 512 MB (1 GB for that one chat's scratch dumps); the workspace listing is one line a file however many there are (900 lines, 10,000 tokens a request); every round's thinking rides in every later request (the second largest part of one); the time shown as thinking includes the time the model spends writing a tool call.
 
+### A compaction that looked hung, and changed nothing
+
+A chat of 976 messages with a reply stopped at 579,000 tokens: Compact said "Compacting…" for seven minutes. It was working: eight parts of the chat, each read in one call that carried the summary so far, about 55 seconds a call, with nothing on screen to tell that from a hang. And when it ended, the next request carried exactly what it had before.
+
+- **The parts are read at the same time.** Each part is summarised on its own, and one last call folds the parts, oldest first, into the summary. A made-up chat of three parts (2.3 million characters, three facts planted far apart): 23 seconds against 51, the three facts kept both ways. The wait is now the slowest part plus the folding, whatever the number of parts.
+- **The button counts and stops.** "Stop · 3 of 9" while it works; a click drops the calls where they stand and leaves the chat as it was.
+- **A compaction over a stopped reply covers the chat.** The summary names the last message it covers. That was the stopped reply, which is not one of the turns a request replays, so the name was never found there and the summary covered nothing: every older turn went out again beside it. Where a summary ends is now looked for among all the messages (`summary::shape`).
+- **Resume opens with the chat as it is now.** A saved transcript begins with the turns that stood before its question when it was saved. When those have since been compacted (the same question, and at least a fifth smaller), the opening is taken afresh and the reply's own rounds are kept (`agent::refresh_opening`). Stop, compact, resume on a made-up chat: the request went from 96,088 tokens to 11,444, and the reply finished its forty files.
+- **Dead saved transcripts are dropped when a chat is loaded.** Only the last reply can be resumed. That chat's file was 340 MB, 155 MB of it transcripts of earlier replies that had stopped, read into memory and written out again with every save.
+
 ## Checking the tools
 
 `apim --tools calls.json --auto --dir FOLDER` runs a list of tool calls (`[{"name": "edit_file", "args": {...}}, ...]`) as the agent would make them and prints what each hands back: no model in between, so a tool is judged on what it does. `APIM_TOOL_CHARS` sets how much of each result is shown. All 59 were run this way on 2026-10-09; what that changed:
