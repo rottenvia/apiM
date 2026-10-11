@@ -45,6 +45,20 @@ pub fn render_goal_pin(goal: &str, mid_run: bool) -> String {
     format!("{GOAL_PIN_MARKER}\nAnswer THIS request. Older turns and the {HISTORY_SUMMARY_MARKER} block are background — if they describe a different task, that task is over or paused; do not resume it unasked.\n\n{capped}")
 }
 
+/// The first line of the state a round is told once the work is under way.
+pub const WORK_STATE_MARKER: &str = "[Work in progress — kept by the app]";
+
+/// What a round under way is told: the request, then the plan and the app's own nudges (`rest`). It is written
+/// into the newest tool result (`agent.rs`), not sent after it as system messages. Sent as messages, each was
+/// answered: "Reminder handled.", "Plan noted.", "Step-budget check accepted." opened round after round, and the
+/// lines stayed in the transcript for the model to copy. On a made-up run with that habit begun, 24 replies a
+/// way: as two system messages 6 answered the note and 19 wrote words; inside the tool result 1 and 5.
+pub fn render_work_state(goal: &str, rest: &str) -> String {
+    let capped = if js_len(goal) > MAX_GOAL_CHARS { format!("{}\n…[request truncated — the full text is the newest user turn above]…", js_head(goal, MAX_GOAL_CHARS)) } else { goal.to_string() };
+    let request = if capped.contains('\n') { format!("Request:\n{}", capped.lines().map(|line| format!("> {line}")).collect::<Vec<_>>().join("\n")) } else { format!("Request: {capped}") };
+    format!("{WORK_STATE_MARKER}\n{request}{}{rest}", if rest.is_empty() { "" } else { "\n" })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

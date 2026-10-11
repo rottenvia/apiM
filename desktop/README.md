@@ -47,7 +47,7 @@ The assistant runs on your own computer, and it is told so. It works at three de
 
 - **What it is told about the computer** (`src/machine.rs`), read once when the app starts and sent with every request: the system and its build, the home folder and where programs keep their data, which of the usual programs are installed, the workspace's path, today's date, and how approvals are set. No chat starts by finding these out.
 - **Looking at files.** `list_files`, `read_file` and `read_files` take a path written in full (`C:\...`, `~/...`, `%LOCALAPPDATA%\...`). Outside the workspace a folder is listed one level at a time, newest files first. Writing, editing, moving and deleting stay inside the workspace.
-- **Asking the system.** `run_command` runs the system's own looking tools (`tasklist`, `systeminfo`, `wevtutil qe`, `reg query`, `sc query` and others; their changing forms are refused) and, on Windows, PowerShell. PowerShell's text is read first: while every command in it only looks (Get, Select, Where, Sort, Format, Measure, Test and their short names) it runs as any other command; text that could change the computer asks you in every mode, "Run automatically" included. That reading is a word list, there to catch a change made in passing; it does not hold a program the assistant writes and runs, which was always free to do what you can do.
+- **Asking the system.** `run_command` runs the system's own looking tools (`tasklist`, `systeminfo`, `wevtutil qe`, `reg query`, `sc query` and others; their changing forms are refused) and, on Windows, PowerShell. With "Ask me first" you are shown its text whole. With "Run automatically" it runs unasked like any other program, with two refusals that come back at once and wait for nobody: a command that takes the computer itself apart (disks, start-up, accounts, the system's protection, deleting from the registry), and a delete that names a place outside the chat's folder, because a restore point brings back that folder and nothing else. It used to ask about any text that could change the computer, in every mode: a reply left to run alone stood five minutes at each such question and then dropped the command. The reading is a word list, there to catch a wreck made in passing; it does not hold a program the assistant writes and runs, which was always free to do what you can do.
 - **Approval.** With "Ask me first" you allow each folder outside the workspace before it is looked into ("Look in this folder?", once or for the chat) and each command. With "Run automatically" looking does not ask.
 - **Closed places.** Folders and files that keep sign-ins and keys (SSH and cloud keys, browser profiles, the system's credential stores, `.env` files, this app's own settings) are not read by a file tool or named in a PowerShell command, in any mode: what a tool reads goes to the model's provider.
 
@@ -124,10 +124,11 @@ Found in one real reply: 160 rounds of work in a sandbox, 48 minutes, $0.27, sto
 
 The chat list on the left and the files on the right were each a faithful copy of its own web component, and side by side they read as two apps: 14px names in rows of 42 against 12px names in rows of 30, a lettered tile before each file, five buttons 40 apart behind a lone folder, Download twice. They are one design now (`widgets::RAIL_*`):
 
-- the same 12 from the edge, the same row (32, two apart), the same 13px names and 11px figures, the same row lit under the pointer;
-- both lists start at one height, so a row on the left stands level with a row on the right;
-- the files panel says "Files" where the left one has "New chat", with its buttons in one group at the right edge and the way out a little apart. Download is at the foot only, as a link like "Settings" on the other side. The history button stays lit while restore points are shown, and the title reads "History";
-- a file has a small page before its name, in the column where a folder has its picture, so the names of one folder stand in one line.
+- the same 12 from the edge and the same links at the foot (40 tall, 14px), under a rule that runs the panel's width;
+- the files panel says "Files" where the left one has "New chat", with its buttons in one group at the right edge and the way out a little apart. Download is at the foot only, as a link like "Settings" on the other side. The history button stays lit while it is on;
+- a file has a small page before its name, in the column where a folder has its picture, so the names of one folder stand in one line. File rows are 32 tall with 13px names.
+
+For one day the chat rows were 32 tall too, level with the file rows. They are back at 42 with 14px names: the user liked the left side bigger.
 
 The web still draws them its own way.
 
@@ -185,6 +186,18 @@ The reply after that ran 148 rounds and died on "OpenRouter API error (400): Pro
 
 On screen, the row of that first script read "Ran python - · Ran: python - "". A script among a command's words is now named by its size: "python - <<stdin (10 lines)".
 
+### Watching a reply as it is written
+
+`bugs.md` of 11 October 2026 was written while a reply ran: a script polled the chat's file every five seconds and each thing that looked wrong went into the list at once. Seventeen entries in two hours, against six from reading the same chat's record the night before. What was fixed:
+
+- **A minimized window took nothing in.** eframe 0.36 draws no pass for a window nobody sees and calls only `App::logic`. Everything the reply sent was taken in inside `ui`, so for as long as the window was down nothing was saved (nineteen minutes of rounds, once: closing the app then would have lost them), the end of a reply went unnoticed, and a command waiting for approval showed no card and flashed no taskbar. It timed out unseen after five minutes and the reply threw its approach away. The taking-in is in `logic` now. `APIM_SHOT_STATE=send,minimized` puts a self-portrait's window down for the length of its reply: the chat's file grows while it is down.
+- **A command's whole output is kept.** A long output is shown with its middle cut. The middle used to be gone, and three times in one afternoon a reply ran a five-minute program again to get it, through PowerShell's `>` (which writes UTF-16, four more rounds each time to find that out). Once it wrote a script that opened the output file it took for granted the app had kept. Now `run_command` writes every byte to `outputs/<time>-<program>.txt` in the chat's folder when the answer shows less than all of it, names the file in the answer, and says not to run the program again. More than 64 MB is a program that will not stop printing: the file holds the first 64.
+- **What the app tells every round rides inside the newest tool result.** The request, the plan and the nudges went after the results as system messages, and the model answered them: "Reminder handled.", "Plan noted.", "Step-budget check accepted." opened round after round. On a made-up run with that habit begun, 24 replies a way: as two system messages 6 answered a note and 19 wrote words; as one merged message 12 answered; with the plan alone 2; inside the tool result 1 answered and 5 wrote words. The saved transcript keeps the note as its own last message, as before.
+- **The plan is pinned above the composer** (`plan_panel.rs`): one line with the step being worked on, the bar and the count, the steps on a click. It was a card in the newest reply, hundreds of rounds up the page of a long one.
+- A program that starts and exits with an error is "Exited at once (code N)" in its step row and in the problem log, not "Failed to start". A long step's checkpoint is logged as `run_checkpoint`, not as a stop.
+
+Seen and left: restore points copy every file up to 512 MB (1 GB for that one chat's scratch dumps); the workspace listing is one line a file however many there are (900 lines, 10,000 tokens a request); every round's thinking rides in every later request (the second largest part of one); the time shown as thinking includes the time the model spends writing a tool call.
+
 ## Checking the tools
 
 `apim --tools calls.json --auto --dir FOLDER` runs a list of tool calls (`[{"name": "edit_file", "args": {...}}, ...]`) as the agent would make them and prints what each hands back: no model in between, so a tool is judged on what it does. `APIM_TOOL_CHARS` sets how much of each result is shown. All 59 were run this way on 2026-10-09; what that changed:
@@ -194,7 +207,7 @@ On screen, the row of that first script read "Ran python - · Ran: python - "". 
 - The loop breaker stopped the plain fix-and-rerun loop (edit, run the checker, edit, run it again) as "the same failing call three times". A command run again after the workspace changed is a new try.
 - `run_tests` finds tests kept beside the code (`test_x.py`), runs pytest as a module, puts a test's name behind `-k`, and says how to get pytest when it is missing.
 - Taken as meant: a process id without its `p`, a command line in one string, `update_plan` with `step`/`status`/`completed`, `query_data` with a bare condition (answered with the JSONPath that works) or a count with no query.
-- "Run automatically" does not ask about a program built or downloaded into the chat's folder (it did). The one thing it still asks about is a PowerShell command that could change the computer.
+- "Run automatically" does not ask about a program built or downloaded into the chat's folder (it did), nor about PowerShell (it did, see "Asking the system").
 - `update_plan` refused a step called done with no word on how it was checked, every time; a model that sent the same call three times had its finished run stopped by the loop breaker. It is asked once, and the second time the step is taken as done and wears "not said how it was checked". What was refused now comes first in the result, not after the whole plan. `finish` asks once in the same way.
 - `delete_file` takes a folder inside the workspace, with everything in it.
 - The check that marks a reply claiming work no tool did took "drop the dump here and I read it" for such a claim: an offer or a condition is no longer one. Its retry asks for a short correction, not the reply written out a second time.
