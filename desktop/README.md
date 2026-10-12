@@ -227,6 +227,8 @@ Met in the live benchmark (`bench/live`, 2026-10-13), each read out of a reply's
 - **A read hid a byte order mark and called the text EXACT.** A reply parsed a CSV as it had read it and found no column named Email: it was the mark plus "Email". A read ends with one line when the file on disk starts with a UTF-8 mark or is UTF-16.
 - **A PowerShell delete inside the chat's own folder was refused as "outside"**: any drive letter counted as outside. The folder's own full path is inside now; a folder that only starts like it, or `..` out of it, is still refused.
 - **The file listing left out `build/`, `dist/` and `__pycache__/` without a word**, so a reply asked to clean a build had to ask the shell whether the project was clean already, and another could not see the `dist/` it had just made. The listing and `list_files` end with one line naming what they left out.
+- **A tool name with the model's own markup after it** (`read_files</arg_key>paths</arg_key><arg_value>["a.py"]`, from a free coding model) was "Unknown tool" and the round was lost. The name is the part before the markup, the rest its arguments.
+- **A whole command line in `command`** (`python -c "…"` and no `args`) was "not an allowed command", several times in a row on the same model, until the stall guard ended the reply. With no args given it is cut into words as a shell cuts it.
 - **A sentence written "1) … 2) … 3) …"** was drawn as a list of one item, "1." in front and the rest run on inside it. A line that opens with `N)` and carries `N+1)` further on stays a sentence.
 
 ## Checking the tools
