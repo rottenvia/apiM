@@ -67,9 +67,10 @@ python bench/live/live.py table
 ```
 
 A first pass is driven by hand and every reply is read: that is where the app's faults show, not in the score. On
-2026-10-13 GLM 5.3 Flash passed 20 of 21 checked turns by hand and 21 of 21 on the repeat pass, and reading the
-rounds found nine faults of the app (see `desktop/README.md`, "Met in the live benchmark"). `LIVE_MODEL=custom:<slug>`
-runs any OpenRouter model, free ones included.
+2026-10-13 GLM 5.3 Flash passed 20 of 21 checked turns by hand and 21 of 21 on the repeat pass (about $0.08 a pass),
+and a free model (Poolside Laguna S 2.1) 20 of 21, then 21 of 21 once the two faults it met were fixed. Reading the
+rounds found eleven faults of the app (see `desktop/README.md`, "Met in the live benchmark").
+`LIVE_MODEL=custom:<slug>` runs any OpenRouter model; a free one costs nothing and shows what a stronger model hides.
 
 | scenario | what it measures |
 |---|---|
