@@ -1,0 +1,6 @@
+db:
+  _: main
+  pool:
+    size: 5
+  user: app
+note: ~

@@ -1,0 +1,15 @@
+{
+  "title": "The window dies in the middle of a reply, then: resume",
+  "measures": "a reply cut off by a crash is carried on from where it stood, not started over, and nothing done before the crash is lost or redone",
+  "turns": [
+    {
+      "say": "Every module in `kit/` has one bug; `python -m unittest discover tests` shows them. Fix the modules one at a time: fix one, run its own test file, then go on to the next.",
+      "noCheck": true,
+      "killAtTools": 9,
+      "driver": "kill the window once four or five modules are fixed"
+    },
+    {
+      "say": "resume"
+    }
+  ]
+}

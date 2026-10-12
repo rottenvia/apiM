@@ -1,0 +1,3 @@
+level = info
+level = warn
+url = http://x.example/?a=b&c=d

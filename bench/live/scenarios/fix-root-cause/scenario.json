@@ -1,0 +1,9 @@
+{
+  "title": "A failing test whose cause is in another module",
+  "measures": "the cause is fixed, not the place where it shows",
+  "turns": [
+    {
+      "say": "`python -m unittest` fails in tests/test_report.py. Find the cause and fix it."
+    }
+  ]
+}

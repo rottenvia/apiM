@@ -1,0 +1,9 @@
+{
+  "title": "One line to fix in a file with habits of its own",
+  "measures": "restraint: the fix is made and no other byte of the file moves (tabs, trailing blanks, old style, dead code)",
+  "turns": [
+    {
+      "say": "`window()` in timeline.py drops the event that falls exactly on `end`, though its docstring says the end is included. Fix that. Nothing else in the file may change."
+    }
+  ]
+}

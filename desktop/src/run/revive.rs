@@ -68,8 +68,22 @@ static DANGLING_MAKE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(?:l
 static MAKE_IDIOM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^(?: (?:sure|sense|certain)\b| a notes?\b)").unwrap());
 static HEADING_END: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n#{1,6}\s+\S+$").unwrap());
 
+// An offer that waits on the user ("give me the real URL and I'll update it", "paste it here (I'll write it in)") closes
+// an honest report; it is not an action left undone. Read as one, a reply that had said plainly what it could not do
+// (a host that does not exist) was sent back twice with "call the tool in this response": two more requests, and a
+// push to do something about a thing that cannot be done.
+static WAITS_ON_USER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(?:if you|once you|when you|after you|as soon as you|you (?:can|could|may|might|want|would like|prefer|give|send|share|provide|paste|tell)|give me|send me|tell me|show me|point me to|let me know|past(?:e|ed|ing)|provid(?:e|ed|ing)|say the word|from you|your (?:go-ahead|call|answer|confirmation|say))\b").unwrap()
+});
+
 fn dangling(text: &str) -> bool {
-    DANGLING.is_match(text) || DANGLING_MAKE.find_iter(text).any(|m| !MAKE_IDIOM.is_match(&text[m.end()..]))
+    // The sentence a promise stands in, up to the promise.
+    let offered = |at: usize| {
+        let before = &text[..at];
+        let start = [". ", "! ", "? ", "\n"].iter().filter_map(|stop| before.rfind(stop).map(|i| i + stop.len())).max().unwrap_or(0);
+        WAITS_ON_USER.is_match(&before[start..])
+    };
+    DANGLING.find_iter(text).any(|m| !offered(m.start())) || DANGLING_MAKE.find_iter(text).any(|m| !MAKE_IDIOM.is_match(&text[m.end()..]) && !offered(m.start()))
 }
 
 fn tail_of(text: &str) -> &str {
@@ -212,6 +226,16 @@ mod tests {
 
     fn text<'a>(input: &'a Value, key: &str) -> &'a str {
         input[key].as_str().unwrap_or("")
+    }
+
+    #[test]
+    fn an_offer_that_waits_on_the_user_is_not_an_action_left_undone() {
+        let stop = |text: &'static str| detect_premature_stop(&Stop { content: text, round_content: text, reasoning: "", tool_rounds: 6, plan_complete: None, plan_blocked: false, finish_reason: "stop" });
+        assert_eq!(stop("Items 1 and 2 are in and their tests pass. Item 3 cannot be completed from here: the host does not resolve, and I won't invent numbers. Give me the real URL (or paste the JSON it returns) and I'll update `rates.json` immediately."), None);
+        assert_eq!(stop("Nothing on my side can fetch it. I need from you either:\n- the real URL, or\n- today's JSON pasted into the chat (I'll write it into `rates.json` in the same key layout).\n\nItems 1 and 2 stay as they are, with all 6 tests passing."), None);
+        // A promise nobody is waited on for is still one.
+        assert_eq!(stop("The parser handles the new branch. Now I'll update the tests in test_parser.py to cover it."), Some(Premature::DanglingNext));
+        assert_eq!(stop("You can see the failure above. I'll fix the import in rates.json next and run it again."), Some(Premature::DanglingNext));
     }
 
     #[test]

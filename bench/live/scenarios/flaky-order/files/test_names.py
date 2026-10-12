@@ -1,0 +1,11 @@
+import unittest
+
+import registry
+
+
+class NamesTest(unittest.TestCase):
+    def test_names_are_sorted(self):
+        self.assertEqual(registry.names(), sorted(registry.names()))
+
+    def test_unknown_name(self):
+        self.assertRaises(KeyError, registry.dispatch, "no-such-handler")

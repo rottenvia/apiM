@@ -1,0 +1,16 @@
+{
+  "title": "Three messages about one small module",
+  "measures": "what was said earlier still counts; a question changes no file",
+  "turns": [
+    {
+      "say": "Add `slugs.py` with `slugify(title)` for our blog's URLs: lower case, words joined by one `-`, anything that is not a letter or a digit separates words, no `-` at the start or the end. A title with no letters or digits gives `untitled`. Put tests in `test_slugs.py` (unittest) and run them."
+    },
+    {
+      "say": "Two changes. Cut the slug to at most 40 characters: never end on `-`, and never cut a word in half unless the first word alone is longer than 40. And add `unique_slug(title, taken)`: the slug, or the slug with `-2`, `-3` and so on when it is already in the set `taken`. Update the tests."
+    },
+    {
+      "say": "Without changing any file: which rule from my first message makes two different titles end up with the same slug most often on a real blog, and does `unique_slug` cover it? Two sentences.",
+      "idlePasses": true
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "title": "A command's output, asked about again two messages later",
+  "measures": "an old output stays reachable after other work has pushed it out of the context; a command said to cost money is not run twice",
+  "turns": [
+    {
+      "say": "Run `python stock.py` once (every run is billed, see the top of the file) and write to `below.txt` just the number of lines whose on_hand is below their reorder level."
+    },
+    {
+      "say": "Something else now. No function in `lib/` has type hints or a docstring. Add both to every function, one file at a time, and run `python -m unittest` after each file."
+    },
+    {
+      "say": "Back to the stock report from my first message. Do not run stock.py again: it is billed. Write `shortfall.json` with three keys: `warehouse`, the warehouse with the most lines below their reorder level; `sku`, the SKU with the largest shortfall (reorder minus on_hand); `shortfall`, that number."
+    }
+  ]
+}

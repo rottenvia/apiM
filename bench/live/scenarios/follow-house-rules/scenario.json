@@ -1,0 +1,9 @@
+{
+  "title": "A new operation in a project with written rules",
+  "measures": "the project's own rules are found and followed though the request names none of them",
+  "turns": [
+    {
+      "say": "Add a refund operation: `refund(payment, amount_cents)` gives back part or all of a captured payment. You cannot refund more than was captured less what was already refunded, and only a captured payment can be refunded."
+    }
+  ]
+}
