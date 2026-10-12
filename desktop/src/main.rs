@@ -159,6 +159,7 @@ fn headless(args: &[String]) {
         }
     }
     let (tx, rx) = std::sync::mpsc::channel();
+    let (model, customs) = (settings.model.clone(), settings.custom_models.clone());
     let request = agent::Request {
         settings,
         history: Vec::new(),
@@ -207,7 +208,7 @@ fn headless(args: &[String]) {
             }
             Notice(n) => println!("\n[{n}]"),
             Retry { reason, wait, .. } => println!("\n[{reason} Retrying in {}s]", wait.as_secs()),
-            Usage(u) => eprintln!("\n[tokens in {} out {} cached {}]", u.prompt, u.completion, u.cache_hit),
+            Usage(u) => eprintln!("\n[tokens in {} out {} cached {} cost {:.5}]", u.prompt, u.completion, u.cache_hit, u.cost(&model, &customs).unwrap_or(0.0)),
             Done { finish, incomplete, stop_reason } => {
                 println!("\n[done: {finish:?}{}{}]", if incomplete { ", incomplete" } else { "" }, stop_reason.map(|r| format!(", {r}")).unwrap_or_default());
                 break;

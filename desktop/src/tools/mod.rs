@@ -191,6 +191,66 @@ pub fn scratch(name: &str) -> PathBuf {
     dir
 }
 
+/// One tool's definition as the model is sent it.
+pub fn schema(name: &str) -> Option<&'static Value> {
+    SCHEMAS.iter().find(|t| t["function"]["name"] == name)
+}
+
+/// A call's arguments, read. GLM writes a call as `<arg_key>name</arg_key><arg_value>value</arg_value>` pairs, and some
+/// endpoints turn that into JSON badly when a list comes before a text: the rest of the call arrives inside one value
+/// (`"args": "[\"-\"]<arg_key>command</arg_key><arg_value>python"`), or loose in the JSON, which then does not parse.
+/// Both are put back, and only for names that are arguments of the tool: a file's own text may hold the same markup.
+pub fn parse_call(name: &str, raw: &str) -> Result<Value, serde_json::Error> {
+    const KEY: &str = "<arg_key>";
+    const VALUE: &str = "</arg_key><arg_value>";
+    let parsed = serde_json::from_str::<Value>(raw).or_else(|e| {
+        static LOOSE: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r#"<arg_key>(\w+)</arg_key><arg_value>([^,"}<]*)(?:</arg_value>)?"#).unwrap());
+        if !raw.contains(KEY) {
+            return Err(e);
+        }
+        serde_json::from_str(&LOOSE.replace_all(raw, |c: &regex::Captures| format!(", {}: {}", Value::from(&c[1]), Value::from(c[2].trim()))))
+    })?;
+    let kind = |arg: &str| schema(name).and_then(|t| t["function"]["parameters"]["properties"][arg]["type"].as_str());
+    let read = |arg: &str, text: &str| Some(text).filter(|_| kind(arg) != Some("string")).and_then(|t| serde_json::from_str(t).ok()).unwrap_or_else(|| Value::from(text));
+    let Value::Object(map) = parsed else { return Ok(parsed) };
+    let mut out = serde_json::Map::new();
+    for (key, value) in map {
+        let text = match &value {
+            Value::String(s) => Some(s.as_str()),
+            Value::Array(a) if a.len() == 1 => a[0].as_str(),
+            _ => None,
+        };
+        let parts: Vec<&str> = text.filter(|t| t.contains(KEY)).map(|t| t.split(KEY).collect()).unwrap_or_default();
+        let pairs: Vec<(&str, &str)> = parts.iter().skip(1).filter_map(|p| p.split_once(VALUE)).filter(|(arg, _)| kind(arg).is_some()).collect();
+        if pairs.is_empty() || pairs.len() + 1 != parts.len() {
+            out.insert(key, value);
+            continue;
+        }
+        out.insert(key.clone(), read(&key, parts[0]));
+        for (arg, text) in pairs {
+            out.insert(arg.to_string(), read(arg, text.trim_end_matches("</arg_value>")));
+        }
+    }
+    Ok(Value::Object(out))
+}
+
+#[cfg(test)]
+#[test]
+fn a_call_with_the_models_markup_in_it_is_put_back() {
+    let whole = serde_json::json!({ "args": ["-"], "command": "python3", "stdin": "print(1)\nprint(2)" });
+    for broken in [
+        r#"{"args": "[\"-\"]<arg_key>command</arg_key><arg_value>python3", "stdin": "print(1)\nprint(2)"}"#,
+        r#"{"args": ["[\"-\"]<arg_key>command</arg_key><arg_value>python3"], "stdin": "print(1)\nprint(2)"}"#,
+        r#"{"args": ["-"]<arg_key>command</arg_key><arg_value>python3, "stdin": "print(1)\nprint(2)"}"#,
+    ] {
+        assert_eq!(parse_call("run_command", broken).unwrap(), whole, "{broken}");
+    }
+    // A file about the markup keeps it, and a call that is whole is not touched.
+    let file = r#"{"path": "a.md", "content": "x<arg_key>command</arg_key><arg_value>y"}"#;
+    assert_eq!(parse_call("write_file", file).unwrap(), serde_json::from_str::<Value>(file).unwrap());
+    assert!(parse_call("run_command", "{\"args\": [").is_err());
+}
+
 #[cfg(test)]
 pub fn implemented(name: &str) -> bool {
     IMPLEMENTED.contains(&name)

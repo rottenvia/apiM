@@ -1,0 +1,9 @@
+{
+  "title": "Find and fix one bug in each of 24 small modules",
+  "category": "long",
+  "language": "python",
+  "difficulty": "hard",
+  "prompt": "toolkit/ holds 24 small helper modules, one function each. Each function's docstring is its contract, and QA tells us every one of the 24 has exactly one bug: the code does not do what its docstring says for some input. There are no tests. Go through all 24, find each bug and fix it, changing as little as you can; don't rename functions or change their arguments, and don't add dependencies. Check your fixes by running the code. All 24 need to be right, so keep track of which ones you have done.",
+  "timeoutMinutes": 40,
+  "budgetUsd": 1.5
+}

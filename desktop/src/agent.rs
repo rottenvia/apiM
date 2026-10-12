@@ -1058,7 +1058,7 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
             if !reports.as_ref().is_some_and(|r| r.contains_key(&call.id)) {
                 emit.send(Event::ToolStart(ToolEvent { id: call.id.clone(), name: call.name.clone(), args: args_text.to_string(), ..Default::default() }));
             }
-            let parsed = serde_json::from_str::<Value>(args_text);
+            let parsed = tools::parse_call(&call.name, args_text);
             // The instructions name tools whose group may not be loaded yet: such a call runs, and brings its group.
             tools::groups::note_use(&call.name, &mut groups);
             let out = match &parsed {

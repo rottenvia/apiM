@@ -1,0 +1,9 @@
+{
+  "title": "Fix a script and total reports in folders with spaces and Cyrillic names",
+  "category": "windows",
+  "language": "python",
+  "difficulty": "medium",
+  "prompt": "The folder `Отчёты 2025` holds our monthly expense reports for the first quarter. `tools & scripts/sum report.py` is supposed to print the total per category for one report (`python \"tools & scripts/sum report.py\" <report.csv>`), but it has been failing since we moved to this PC. Fix it, keeping it a command-line script that takes the report's path.\n\nThen write `Итоги/2025 Q1.json` with the totals of all three reports, in this shape, totals as numbers rounded to 2 decimals:\n\n{\"Январь\": {\"<категория>\": <total>, ...}, \"Февраль\": {...}, \"Март\": {...}, \"всего\": <grand total of the quarter>}\n\nDon't rename or move the reports.",
+  "timeoutMinutes": 15,
+  "budgetUsd": 0.5
+}

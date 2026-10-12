@@ -1,0 +1,9 @@
+{
+  "title": "Write an unpacker for a documented binary archive format",
+  "category": "binary",
+  "language": "python",
+  "difficulty": "medium",
+  "prompt": "data/archive.pak is in our old in-house archive format, which docs/FORMAT.md describes. I need two things:\n\n1. unpak.py, used as `python unpak.py <archive> <out_dir>`: it extracts every entry of any such archive into out_dir (creating sub-folders as needed), checking each entry against its CRC. A corrupt entry is still written, with whatever bytes could be recovered. Standard library only.\n2. answers.json about data/archive.pak itself: {\"entries\": <how many entries it has>, \"corrupt\": [<names of entries whose CRC does not match>], \"secret\": \"<the text of notes/secret.txt, without surrounding whitespace>\"}.",
+  "timeoutMinutes": 20,
+  "budgetUsd": 0.6
+}

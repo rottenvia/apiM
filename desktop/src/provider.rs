@@ -129,7 +129,14 @@ impl Endpoint {
 /// Where to send a model's requests, the endpoint to use first: the cheapest that is fast enough, or one a little dearer
 /// and much faster. The next cheapest follow it, for when it is down. Left out: endpoints that are down or kept failing
 /// today, ones that cannot call tools, and ones with a cut-down context window.
+#[cfg(test)]
 fn best_endpoints(listing: &Value, only: Option<&str>) -> Vec<Endpoint> {
+    let usable = usable_endpoints(listing, only);
+    if only.is_some() { usable } else { pick_endpoints(usable) }
+}
+
+/// The endpoints that may serve a model, cheapest first.
+fn usable_endpoints(listing: &Value, only: Option<&str>) -> Vec<Endpoint> {
     let all = listing["data"]["endpoints"].as_array().map_or(&[][..], Vec::as_slice);
     let widest = all.iter().filter_map(|e| e["context_length"].as_u64()).max().unwrap_or(0);
     let dollars = |per_token: &Value| per_token.as_str().and_then(|s| s.parse::<f64>().ok()).map(|p| p * 1e6);
@@ -147,13 +154,68 @@ fn best_endpoints(listing: &Value, only: Option<&str>) -> Vec<Endpoint> {
         .collect();
     usable.sort_by(|a, b| a.price().total_cmp(&b.price()));
     usable.dedup_by(|a, b| a.tag == b.tag);
-    if only.is_some() {
-        return usable;
-    }
+    usable
+}
+
+fn pick_endpoints(usable: Vec<Endpoint>) -> Vec<Endpoint> {
     let Some(cheap) = usable.iter().find(|e| e.tps >= GOOD_TPS).or(usable.first()).cloned() else { return Vec::new() };
     let first = usable.iter().filter(|e| e.price() <= cheap.price() * DEARER && e.tps >= cheap.tps * FASTER).max_by(|a, b| a.tps.total_cmp(&b.tps)).cloned().unwrap_or(cheap);
     let spares: Vec<Endpoint> = usable.into_iter().filter(|e| e.tag != first.tag && e.tps >= GOOD_TPS).take(2).collect();
     std::iter::once(first).chain(spares).collect()
+}
+
+/// How many endpoints are tried with a made-up call before one is picked, how often each, and how long a result is believed.
+const PROBED: usize = 8;
+const PROBE_SAMPLES: usize = 3;
+const PROBE_KEPT_SECS: u64 = 3 * 24 * 3600;
+
+/// Does this endpoint hand a tool call over whole? One made-up call with every kind of argument an agent sends: a word, a
+/// list, and two optional texts, one of two lines. On 2026-10-12, 13 of the 30 endpoints of one model failed it: four left
+/// the optional arguments out, so every edit by `old_text` or line range failed there and every script on stdin, and a
+/// reply ended on "the same tool call failed three times"; six sent the model's own call markup inside a value.
+/// None when the endpoint did not answer: nothing is known then, and nothing is remembered.
+async fn keeps_arguments(client: &reqwest::Client, target: &Target, tag: &str) -> Option<bool> {
+    let body = json!({
+        "model": target.api_model,
+        "messages": [{ "role": "user", "content": "Call the run_command tool once, exactly like this and with no other text: command \"python\", args [\"-\"], reason \"probe\", and as stdin these two lines:\nimport sys\nprint(sys.version)" }],
+        "tools": [crate::tools::schema("run_command")?],
+        "provider": { "only": [tag], "allow_fallbacks": false },
+        "reasoning": { "effort": "low" },
+        "max_tokens": 600,
+    });
+    let reply: Value = client.post(format!("{}/chat/completions", target.base_url)).bearer_auth(&target.api_key).json(&body).timeout(Duration::from_secs(15)).send().await.ok()?.json().await.ok()?;
+    let args: Value = serde_json::from_str(reply["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"].as_str()?).unwrap_or_default();
+    let stdin = args["stdin"].as_str().unwrap_or("");
+    Some(args["command"] == "python" && args["args"] == json!(["-"]) && args["reason"].as_str().is_some_and(|r| !r.is_empty()) && stdin.contains("import sys") && stdin.contains('\n') && stdin.contains("print(sys.version)"))
+}
+
+/// The endpoints that pass `keeps_arguments`, cheapest first, and the tags of those that failed it. Results are kept
+/// in `endpoints.json` for three days, so most sessions ask nothing. Slow endpoints are tried only when no fast one
+/// exists, as they are picked only then.
+// ponytail: one kind of call is tried. An endpoint that loses something else (a picture, a long text) passes; add a
+// second call here when one is met.
+async fn sound_endpoints(client: &reqwest::Client, target: &Target, usable: &[Endpoint]) -> (Vec<Endpoint>, Vec<String>) {
+    let file = models::endpoints_file();
+    let mut saved: Map<String, Value> = std::fs::read(&file).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let mut known: HashMap<String, bool> = saved.get("_probes").and_then(|p| p[&target.model.id].as_object()).into_iter().flatten().filter(|(_, r)| now.saturating_sub(r["at"].as_u64().unwrap_or(0)) < PROBE_KEPT_SECS).filter_map(|(tag, r)| Some((tag.clone(), r["ok"].as_bool()?))).collect();
+    let fast: Vec<&Endpoint> = Some(usable.iter().filter(|e| e.tps >= GOOD_TPS).collect::<Vec<_>>()).filter(|fast| !fast.is_empty()).unwrap_or_else(|| usable.iter().collect());
+    let tried: Vec<&Endpoint> = fast.into_iter().filter(|e| known.get(&e.tag) != Some(&false)).take(PROBED).collect();
+    let asked: Vec<&str> = tried.iter().map(|e| e.tag.as_str()).filter(|tag| !known.contains_key(*tag)).collect();
+    let answers = futures_util::future::join_all(asked.iter().map(|tag| async move { futures_util::future::join_all((0..PROBE_SAMPLES).map(|_| keeps_arguments(client, target, tag))).await })).await;
+    for (tag, samples) in asked.iter().zip(answers) {
+        // One bad call is enough to leave an endpoint out; a good name needs every call good.
+        let verdict = if samples.contains(&Some(false)) { Some(false) } else if samples.iter().all(|s| *s == Some(true)) { Some(true) } else { None };
+        if let Some(ok) = verdict {
+            known.insert(tag.to_string(), ok);
+            saved.entry("_probes").or_insert_with(|| json!({}))[&target.model.id][*tag] = json!({ "ok": ok, "at": now });
+        }
+    }
+    if !asked.is_empty() {
+        let _ = std::fs::write(&file, Value::Object(saved).to_string());
+    }
+    let failed = usable.iter().filter(|e| known.get(&e.tag) == Some(&false)).map(|e| e.tag.clone()).collect();
+    (usable.iter().filter(|e| known.get(&e.tag) == Some(&true)).cloned().collect(), failed)
 }
 
 /// The endpoints picked for each model since the app started, and the most output all of them allow.
@@ -172,7 +234,18 @@ pub async fn choose_endpoint(client: &reqwest::Client, target: &Target) -> Optio
     // `APIM_ENDPOINT=streamlake/fp8` keeps every OpenRouter model to the endpoint with that tag, when it serves the model:
     // for comparing endpoints, and for someone who trusts one.
     let named = std::env::var("APIM_ENDPOINT").ok().filter(|tag| !tag.trim().is_empty());
-    let order = Some(best_endpoints(&listing, named.as_deref().map(str::trim))).filter(|named| !named.is_empty()).unwrap_or_else(|| best_endpoints(&listing, None));
+    let mut left_out = Vec::new();
+    let order = match named.as_deref().map(|tag| usable_endpoints(&listing, Some(tag.trim()))).filter(|named| !named.is_empty()) {
+        Some(named) => named,
+        // Picked among the endpoints that hand a tool call over whole; among all of them when none was found to.
+        None => {
+            let usable = usable_endpoints(&listing, None);
+            let (sound, failed) = sound_endpoints(client, target, &usable).await;
+            let sound: Vec<Endpoint> = if sound.is_empty() { usable.iter().filter(|e| !failed.contains(&e.tag)).cloned().collect() } else { sound };
+            left_out = failed;
+            pick_endpoints(if sound.is_empty() { usable } else { sound })
+        }
+    };
     let first = order.first().filter(|e| e.price() > 0.0)?;
     models::set_endpoint_rates(&target.model.id, first.rates);
     let tags: Vec<&str> = order.iter().map(|e| e.tag.as_str()).collect();
@@ -192,7 +265,8 @@ pub async fn choose_endpoint(client: &reqwest::Client, target: &Target) -> Optio
     }
     let usd = |v: f64| format!("{v:.4}").trim_end_matches('0').trim_end_matches('.').to_string();
     let speed = if first.tps > 0.0 { format!(", {} tokens a second", first.tps.round()) } else { String::new() };
-    Some(format!("{} runs on {} ({}): ${} in, ${} cached, ${} out per million tokens{speed}", target.model.label, first.name, first.tag, usd(first.rates.0), usd(first.rates.1), usd(first.rates.2)))
+    let skipped = if left_out.is_empty() { String::new() } else { format!(". Left out, they lose parts of a tool call: {}", left_out.join(", ")) };
+    Some(format!("{} runs on {} ({}): ${} in, ${} cached, ${} out per million tokens{speed}{skipped}", target.model.label, first.name, first.tag, usd(first.rates.0), usd(first.rates.1), usd(first.rates.2)))
 }
 
 /// The endpoints a model's requests are kept to: the ones `choose_endpoint` picked, else a pinned one for the
@@ -203,7 +277,8 @@ pub fn openrouter_provider_for(model_id: &str) -> Option<Value> {
         return Some(chosen.clone());
     }
     let tag = match model_id {
-        "glm-5.3-flash" => "inference-net/fp4",
+        // Not inference-net/fp4, the pin until 2026-10-12: it leaves optional tool arguments out (`keeps_arguments`).
+        "glm-5.3-flash" => "relace",
         "deepseek-v4.1-flash" => "morph",
         _ => return None,
     };

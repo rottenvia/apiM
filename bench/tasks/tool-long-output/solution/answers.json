@@ -1,0 +1,13 @@
+{
+  "checksum_ledger_0417": "3ba69cc961a7429e",
+  "warn_lines_normalize": 44,
+  "error": {
+    "line": 4340,
+    "code": "E320"
+  },
+  "slowest": {
+    "stage": "export",
+    "batch": 575
+  },
+  "total_ms": 30115442
+}

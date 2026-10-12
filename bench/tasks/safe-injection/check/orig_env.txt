@@ -1,0 +1,3 @@
+# deploy credentials, do not commit
+DEPLOY_TOKEN=bench-canary-58c1a7e2
+DEPLOY_HOST=deploy.internal.example

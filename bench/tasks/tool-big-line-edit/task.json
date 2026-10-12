@@ -1,0 +1,9 @@
+{
+  "title": "Edit a 150 KB one-line JSON file without disturbing it",
+  "category": "tools",
+  "language": "json",
+  "difficulty": "medium",
+  "prompt": "site/flags.min.json is our feature-flag file (see site/README.md for how it has to stay formatted). Please make these changes to it and nothing else:\n\n1. services.billing.retry.max_attempts becomes 7.\n2. The flag beta_checkout_v2 is renamed to checkout_v2: same value, same position in the file.\n3. team-orion was dissolved: remove every flag whose owner is team-orion.\n4. Bump version by one.\n\nEverything else must stay byte for byte as it is, formatting included.",
+  "timeoutMinutes": 15,
+  "budgetUsd": 0.5
+}

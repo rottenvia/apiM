@@ -68,6 +68,8 @@ scripts/tmp/
 apim-render-bench/
 apim-waiting-bench/
 bench-shots/
+# benchmark runs: reports and the transcripts of every task
+/bench/results/
 node-compile-cache/
 npm-cache/
 tsx-*/

@@ -1,0 +1,5 @@
+# These tasks are graded byte for byte: line endings are part of them.
+win-encodings/** -text
+win-paths/** -text
+tool-big-line-edit/** -text
+bin-format/** -text
