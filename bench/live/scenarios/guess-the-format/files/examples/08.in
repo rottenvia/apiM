@@ -1,0 +1,4 @@
+db = main
+db.user = app
+db.pool.size = 5
+note =

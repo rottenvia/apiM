@@ -1,0 +1,11 @@
+{
+  "title": "A note handed to the reply while it works",
+  "measures": "a \"btw\" passed mid-reply is read and acted on, without starting over",
+  "turns": [
+    {
+      "say": "Write `report.py`: it reads `sales.csv` and prints the revenue per region (units times unit_price, summed), one line per region as `<region> <revenue with two decimals>`. Run it.",
+      "driver": "before sending, put this in the inbox: note btw sort the regions by revenue, highest first, and also write the same figures to `report.md` as a markdown table with the columns Region and Revenue"
+    }
+  ],
+  "note": "btw sort the regions by revenue, highest first, and also write the same figures to `report.md` as a markdown table with the columns Region and Revenue"
+}

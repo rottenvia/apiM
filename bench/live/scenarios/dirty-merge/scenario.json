@@ -1,0 +1,9 @@
+{
+  "title": "Two exports of the same customers, merged by written rules",
+  "measures": "careful data work: encodings, separators, dates and duplicates, checked against the rules before calling it done",
+  "turns": [
+    {
+      "say": "Merge `crm.csv` and `shop.csv` into `people.csv` by the rules in README.md."
+    }
+  ]
+}

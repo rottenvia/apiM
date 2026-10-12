@@ -235,11 +235,12 @@ struct Tree {
 
 impl Tree {
     /// Every file but LESSONS.md, which is already in the prompt as text.
-    fn list(root: &Path) -> (Vec<(String, u64)>, Vec<TreeEntry>) {
-        let mut files = tokio::task::block_in_place(|| tools::files::walk(root, root));
+    /// With them, the line that names the folders the listing leaves out.
+    fn list(root: &Path) -> (Vec<(String, u64)>, Vec<TreeEntry>, String) {
+        let (mut files, skipped) = tokio::task::block_in_place(|| tools::files::walk_noting(root, root));
         files.retain(|(path, _)| path != "LESSONS.md");
         let entries = files.iter().map(|(path, size)| TreeEntry { path: path.clone(), size: *size }).collect();
-        (files, entries)
+        (files, entries, tools::files::left_out_note(&skipped))
     }
 
     /// Puts a full listing at the end, in place of any older one and the deltas that described changes to it.
@@ -252,22 +253,22 @@ impl Tree {
 
     /// The opening listing. The tracker is seeded with it, so the first delta describes changes from what the model saw.
     fn open(root: &Path, messages: &mut Vec<Value>) -> Tree {
-        let (files, entries) = Tree::list(root);
+        let (files, entries, left_out) = Tree::list(root);
         let mut tree = Tree::default();
-        tree.show(build_workspace_context(Some(&files)), messages);
+        tree.show(build_workspace_context(Some(&files)) + &left_out, messages);
         tree.tracker.update(&entries);
         tree
     }
 
     /// After a round's tools: nothing, a short delta appended, or a fresh listing once the deltas outgrow one.
     fn refresh(&mut self, root: &Path, messages: &mut Vec<Value>) {
-        let (files, entries) = Tree::list(root);
+        let (files, entries, left_out) = Tree::list(root);
         let step = self.tracker.update(&entries);
         match step.kind {
             StepKind::None => {}
             StepKind::Delta => messages.push(json!({ "role": "system", "content": step.text })),
             StepKind::Baseline => {
-                let next = build_workspace_context(Some(&files));
+                let next = build_workspace_context(Some(&files)) + &left_out;
                 if next != self.shown {
                     self.show(next, messages);
                 }
@@ -879,7 +880,15 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
         let (result, without_tools) = call_model(&ctx.client, target, &mut body, &mut lane, dedup, cut_drafts, gap, emit).await.inspect_err(|e| log("api_error", &target.model.id, e))?;
         ran_without_tools = without_tools;
 
-        let provider::Round { content, reasoning, tool_calls: calls, finish, usage: round_usage, fields, draft_cut, served } = result;
+        let provider::Round { content, reasoning, tool_calls: mut calls, finish, usage: round_usage, fields, draft_cut, served } = result;
+        for call in &mut calls {
+            if let Some((name, args)) = tools::marked_name(&call.name) {
+                call.name = name;
+                if matches!(call.args.trim(), "" | "{}") {
+                    call.args = args;
+                }
+            }
+        }
         // A round answered by another endpoint than the round before starts with nothing cached there, and at that
         // endpoint's prices: OpenRouter falls to the spares when the first is busy. Logged, so a low cached share can be traced.
         if let Some(now) = served {
@@ -887,6 +896,9 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
                 log_with("endpoint_moved", &now, &format!("Round {round} was answered by {now}, the round before by {before}."), json!({ "round": round }));
             }
             served_by = Some(now);
+        }
+        if let (Some(name), Some(used)) = (served_by.as_deref(), round_usage.as_ref()) {
+            provider::saw_usage(&target.model.id, name, used.prompt, used.cache_hit);
         }
         // A think stopped by the loop never reached its usage frame: about four characters per token, none of it cached.
         let round_usage = round_usage.or_else(|| {

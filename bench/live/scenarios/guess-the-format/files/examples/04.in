@@ -1,0 +1,4 @@
+debug = Yes
+cache.enabled = OFF
+verbose = true
+name = yesterday

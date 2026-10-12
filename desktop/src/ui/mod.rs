@@ -1516,6 +1516,35 @@ impl App {
         }
     }
 
+    /// `APIM_SHOT_INBOX=file`: whoever drives a `send` self-portrait is its user through this file. One command
+    /// a file, taken when it can be acted on and then deleted: `answer <text>` and `skip` for the question on
+    /// screen, `note <text>` for a "btw" to the running reply, `stop` for the Stop button.
+    fn take_inbox(&mut self) {
+        static LOOKED: Mutex<Option<Instant>> = Mutex::new(None);
+        if self.shot.is_none() || LOOKED.lock().unwrap().is_some_and(|at| at.elapsed() < Duration::from_millis(300)) {
+            return;
+        }
+        *LOOKED.lock().unwrap() = Some(Instant::now());
+        let Some(path) = std::env::var_os("APIM_SHOT_INBOX").map(PathBuf::from) else { return };
+        let Ok(said) = std::fs::read_to_string(&path) else { return };
+        let (verb, text) = said.trim().split_once(char::is_whitespace).unwrap_or((said.trim(), ""));
+        let done = match verb {
+            "answer" | "skip" => self.run.as_mut().and_then(|run| run.question.take()).map(|asked| asked.reply.send(if verb == "skip" { String::new() } else { text.trim().to_string() })).is_some(),
+            "note" if self.running_here() => {
+                self.pass_note(text.trim().to_string());
+                true
+            }
+            "stop" if self.run.is_some() => {
+                self.stop();
+                true
+            }
+            _ => false,
+        };
+        if done {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
     /// The self-portrait: wait for the first frames to settle, ask for the pixels, save them, leave.
     fn take_shot(&mut self, ctx: &egui::Context) {
         if self.shot.is_none() {
@@ -1583,6 +1612,7 @@ impl eframe::App for App {
         self.pump(ctx);
         self.pump_summary();
         self.pump_open();
+        self.take_inbox();
         // `minimized` puts the self-portrait's window down once its message is sent, and back up when the reply ends.
         if self.staged("minimized") && self.shot.as_ref().is_some_and(|shot| shot.acted) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(self.run.is_some()));

@@ -55,6 +55,9 @@ static CARGO_FAIL: LazyLock<Regex> = LazyLock::new(|| re(r"(?mR)^\s{4}(\S+)$"));
 static GO_LINE: LazyLock<Regex> = LazyLock::new(|| re(r"(?mR)^(ok|FAIL|---)\s"));
 static GO_FAIL: LazyLock<Regex> = LazyLock::new(|| re(r"(?mR)^--- FAIL: (\S+)"));
 static GO_PASS: LazyLock<Regex> = LazyLock::new(|| re(r"(?mR)^--- PASS"));
+static UNITTEST_RAN: LazyLock<Regex> = LazyLock::new(|| re(r"(?mR)^Ran (\d+) tests? in [\d.]+s$"));
+static UNITTEST_BAD: LazyLock<Regex> = LazyLock::new(|| re(r"(?mR)^(?:FAIL|ERROR): (\S+) \((\S+?)\)"));
+static UNITTEST_COUNT: LazyLock<Regex> = LazyLock::new(|| re(r"(failures|errors|skipped)=(\d+)"));
 
 fn re(pattern: &str) -> Regex {
     Regex::new(pattern).expect("testing pattern is valid")
@@ -219,6 +222,21 @@ pub fn parse_output(runner: &str, stdout: &str, stderr: &str, exit_code: i32) ->
         return s;
     }
 
+    // unittest: "Ran 5 tests in 0.004s", then "OK" or "FAILED (failures=1, errors=1, skipped=2)".
+    if let Some(ran) = UNITTEST_RAN.captures(&text) {
+        let count = |what: &str| UNITTEST_COUNT.captures_iter(&text).filter(|c| &c[1] == what).filter_map(|c| c[2].parse::<usize>().ok()).sum::<usize>();
+        s.failed = count("failures") + count("errors");
+        s.skipped = count("skipped");
+        s.passed = num(&ran, 1).saturating_sub(s.failed + s.skipped);
+        s.ok = s.failed == 0 && exit_code == 0;
+        for m in UNITTEST_BAD.captures_iter(&text).take(20) {
+            // Python 3.11 and later name the test inside the brackets too; older ones only its class.
+            let name = if m[2].ends_with(&m[1]) { m[2].to_string() } else { format!("{}.{}", &m[2], &m[1]) };
+            s.failures.push(Failure { name, detail: "failed".into() });
+        }
+        return s;
+    }
+
     // Recognised nothing: say so rather than reporting a clean run.
     s.unparsed = true;
     s.ok = exit_code == 0;
@@ -322,6 +340,17 @@ mod tests {
         assert_eq!(pytest.failures.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), vec!["test_old"]);
         let cargo = parse_output("cargo test", "test result: FAILED. 1 passed; 1 failed; 0 ignored\r\n    tests::a\r\n", "", 101);
         assert_eq!(cargo.failures.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), vec!["tests::a"]);
+    }
+
+    #[test]
+    fn unittest_output_is_counted() {
+        let bad = parse_output("unittest", "F.E.\r\n======\r\nFAIL: test_a (test_x.XTest.test_a)\r\n----\r\nERROR: test_c (test_x.XTest.test_c)\r\n\r\nRan 4 tests in 0.002s\r\n\r\nFAILED (failures=1, errors=1)\r\n", "", 1);
+        assert_eq!((bad.passed, bad.failed, bad.ok), (2, 2, false));
+        assert_eq!(bad.failures.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), vec!["test_x.XTest.test_a", "test_x.XTest.test_c"]);
+        let good = parse_output("unittest", "...\n----\nRan 3 tests in 0.001s\n\nOK (skipped=1)\n", "", 0);
+        assert_eq!((good.passed, good.skipped, good.ok, good.unparsed), (2, 1, true, false));
+        // Nothing found is not a pass.
+        assert!(!parse_output("unittest", "\n----\nRan 0 tests in 0.000s\n\nNO TESTS RAN\n", "", 5).ok);
     }
 
     #[test]

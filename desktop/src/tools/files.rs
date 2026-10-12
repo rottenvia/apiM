@@ -165,10 +165,27 @@ fn rel_of(root: &Path, path: &Path) -> String {
 
 /// Every file under `dir` as (workspace-relative path, size), sorted.
 pub fn walk(root: &Path, dir: &Path) -> Vec<(String, u64)> {
+    walk_noting(root, dir).0
+}
+
+/// One line naming the folders a listing left out, so that what is not shown is not taken for not there. A reply
+/// asked to clean out a build saw no build/ in its listing and had to ask the shell whether the folder was clean
+/// already; another made dist/, did not see it listed, and spent a round proving it existed.
+pub fn left_out_note(skipped: &[String]) -> String {
+    if skipped.is_empty() { String::new() } else { format!("\n(On disk but not listed: {}. list_files with one of them as path shows it.)", skipped.join(", ")) }
+}
+
+/// `walk`, and the folders it did not go into that a project makes itself (the app's own hidden ones are not named).
+pub fn walk_noting(root: &Path, dir: &Path) -> (Vec<(String, u64)>, Vec<String>) {
     let mut out = Vec::new();
+    let mut skipped = Vec::new();
     let entries = walkdir::WalkDir::new(dir).follow_links(false).into_iter().filter_entry(|e| {
         let name = e.file_name().to_string_lossy();
-        !(e.depth() > 0 && e.file_type().is_dir() && (IGNORED.contains(&name.as_ref()) || (e.path().parent() == Some(root) && IGNORED_AT_ROOT.contains(&name.as_ref()))))
+        let skip = e.depth() > 0 && e.file_type().is_dir() && (IGNORED.contains(&name.as_ref()) || (e.path().parent() == Some(root) && IGNORED_AT_ROOT.contains(&name.as_ref())));
+        if skip && !name.starts_with('.') && skipped.len() < 8 {
+            skipped.push(rel_of(root, e.path()) + "/");
+        }
+        !skip
     });
     for entry in entries.flatten() {
         if entry.file_type().is_file() {
@@ -179,7 +196,8 @@ pub fn walk(root: &Path, dir: &Path) -> Vec<(String, u64)> {
         }
     }
     out.sort();
-    out
+    skipped.sort();
+    (out, skipped)
 }
 
 fn human(size: u64) -> String {
@@ -198,14 +216,15 @@ pub fn list_files(ctx: &Ctx, args: &Value) -> Output {
     if !dir.starts_with(&ctx.root) {
         return list_outside(&dir);
     }
-    let files = walk(&ctx.root, &dir);
+    let (files, skipped) = walk_noting(&ctx.root, &dir);
     if files.is_empty() {
-        return Output::ok("No files here yet.", "0 files");
+        return Output::ok(format!("No files here yet.{}", left_out_note(&skipped)), "0 files");
     }
     let mut text: String = files.iter().take(MAX_LISTED).map(|(p, s)| format!("{p}  ({})\n", human(*s))).collect();
     if files.len() > MAX_LISTED {
         text.push_str(&format!("… and {} more. Pass path to list one subdirectory.\n", files.len() - MAX_LISTED));
     }
+    text.push_str(left_out_note(&skipped).trim_start());
     Output::ok(text, format!("{} files", files.len()))
 }
 
@@ -222,6 +241,21 @@ pub fn read_text_exact(path: &Path) -> Result<String, String> {
         (text, false) => Ok(text),
     }
 }
+
+/// What a read does not show and a program reading the file will meet. A reply parsed a CSV it had read as "EXACT",
+/// found no column named Email, and spent two rounds learning that the first one was the mark plus "Email".
+fn unseen_mark(path: &Path) -> &'static str {
+    let mut head = [0u8; 3];
+    let n = std::fs::File::open(path).and_then(|mut file| std::io::Read::read(&mut file, &mut head)).unwrap_or(0);
+    match &head[..n] {
+        [0xEF, 0xBB, 0xBF] => "\n[On disk this file starts with a UTF-8 byte order mark, not shown above: a program reads it as part of the first word unless it opens the file as utf-8-sig.]",
+        [0xFF, 0xFE, ..] => "\n[On disk this file is UTF-16 with a byte order mark: a program must open it as utf-16.]",
+        _ => "",
+    }
+}
+
+/// How much of a command's kept output one whole read shows.
+const KEPT_OUTPUT_PEEK: usize = 12_000;
 
 /// The text of a file, and whether bytes that are not UTF-8 had to be replaced to show it.
 fn decode(path: &Path) -> Result<(String, bool), String> {
@@ -353,11 +387,20 @@ pub fn read_file(ctx: &Ctx, args: &Value) -> Output {
             if written.is_some() && !recalled {
                 ctx.memory.invalidate(rel);
             }
-            let mut out = render_read(rel, &text, start, end, bool_arg(args, "line_numbers"), if recalled { usize::MAX } else { ctx.read_chars });
+            // A kept command output is read in parts. Read whole, one of 124,000 characters went into a reply's context and
+            // was sent again with every later round: 326,905 tokens in for a turn that took 46,742 when the reply ran a
+            // script over the file instead.
+            let kept_output = !ranged && rel.replace('\\', "/").trim_start_matches("./").starts_with(".outputs/");
+            let budget = if recalled { usize::MAX } else if kept_output { ctx.read_chars.min(KEPT_OUTPUT_PEEK) } else { ctx.read_chars };
+            let mut out = render_read(rel, &text, start, end, bool_arg(args, "line_numbers"), budget);
+            if kept_output && out.contains("\n[CUT SHORT: ") {
+                out.push_str("\n[This is a command's kept output, and only its start is shown. For something that needs all of it, run a script that reads the file, or search_files with it as path: read whole, its size is sent again with every later round.]");
+            }
             if lossy {
                 // Not the file's exact text, and said so: "EXACT" over a line of "caf\u{fffd}" invited an edit that would have written the \u{fffd} back.
                 out = format!("{}\n[NOT UTF-8: this file is in an older encoding, and its bytes that are not valid UTF-8 show as \u{fffd}. edit_file refuses it: change it with a script that reads and writes it in its own encoding.]", out.replacen(": EXACT, all ", ": all ", 1));
             }
+            out.push_str(unseen_mark(&path));
             let header = out.find('\n').unwrap_or(out.len());
             // ponytail: nothing reads this back yet. The web uses it to hand a small file over whole on its first range read
             // and only then (tools.ts SMALL_FILE_LINES); port that with `already_served_whole` when slice-walking costs rounds.
@@ -404,10 +447,10 @@ pub fn read_files(ctx: &Ctx, args: &Value) -> Output {
     let mut budget = ctx.read_chars;
     let mut read = 0;
     for rel in &paths {
-        let piece = match resolve_look(&ctx.root, rel).and_then(|p| read_text(&p)) {
-            Ok(text) => {
+        let piece = match resolve_look(&ctx.root, rel).and_then(|p| read_text(&p).map(|text| (p, text))) {
+            Ok((path, text)) => {
                 read += 1;
-                render_read(rel, &text, None, None, false, budget.max(2_000))
+                render_read(rel, &text, None, None, false, budget.max(2_000)) + unseen_mark(&path)
             }
             Err(e) => format!("{rel}: ERROR {e}"),
         };
@@ -667,8 +710,12 @@ pub fn apply_edit(content: &str, spec: &EditSpec) -> Result<Applied, String> {
         let at = spec.end_line.map(|n| format!(" (you passed end_line {n})")).unwrap_or_default();
         return Err(format!("The region has an end but no start{at}. To replace lines A to B send start_line A and end_line B and no anchors; to delete them send the same with new_text \"\". For one line, send start_line and end_line with the same number."));
     }
+    // Line numbers next to old_text: the text names the region when it is there once, and always when the numbers are
+    // only an end. A reply sent the four lines to replace and "end_line 5": line 5 alone was replaced by all of
+    // new_text, and the block stood in the file twice.
+    let by_text = spec.old_text.as_ref().is_some_and(|old| spec.start_line.is_none() || content.matches(strip_gutter(old).as_str()).count() == 1);
     // A lone end_line means that one line.
-    if let Some(start) = spec.start_line.or(spec.end_line) {
+    if let Some(start) = spec.start_line.or(spec.end_line).filter(|_| !by_text) {
         let end = spec.end_line.unwrap_or(start);
         if start < 1 || end < start || end > total {
             return Err(format!("Lines {start}-{end} are out of range: the file has {total} lines."));
@@ -1231,6 +1278,27 @@ mod tests {
         let a = apply_edit(src, &spec(|s| { s.start_line = Some(2); s.end_line = Some(3); s.new_text = String::new() })).unwrap();
         assert_eq!(a.content, "start\nend\ntail");
         assert!(apply_edit(src, &spec(|s| { s.start_line = Some(9); })).is_err());
+        // The text to replace and a stray end_line: the text is replaced, not that one line.
+        let both = apply_edit("a
+b
+
+c", &spec(|s| { s.old_text = Some("b
+
+c".into()); s.end_line = Some(4); s.new_text = "b
+x
+
+c2".into() })).unwrap();
+        assert_eq!(both.content, "a
+b
+x
+
+c2");
+        let both = apply_edit("a
+b
+b", &spec(|s| { s.old_text = Some("b".into()); s.start_line = Some(3); s.end_line = Some(3); s.new_text = "z".into() })).unwrap();
+        assert_eq!(both.content, "a
+b
+z", "a text that is there twice: the lines decide");
         // The result names what was replaced, and says so when that was nothing but blank lines.
         let told = describe("f", "a\n\nb", &apply_edit("a\n\nb", &spec(|s| { s.start_line = Some(2); s.new_text = "x".into() })).unwrap(), false);
         assert!(told.starts_with("f: replaced lines 2-2 with 1 line(s). They were blank: if you meant other lines, undo_file puts this back.\nNow:\n1 | a\n2 | x"), "{told}");

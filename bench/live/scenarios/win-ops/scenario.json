@@ -1,0 +1,9 @@
+{
+  "title": "File work on this machine: sizes, a zip, a read-only file",
+  "measures": "the operating system's own tools are used right on names with spaces, brackets and Cyrillic",
+  "turns": [
+    {
+      "say": "Three things in this folder. 1) Write `top3.txt`: the three largest files under `assets/`, largest first, one a line as `<path relative to assets, with forward slashes> <size in bytes>`. 2) Make `dist/assets.zip` holding everything under `assets/` except `*.tmp` files; entry names relative to `assets/`, with forward slashes. 3) Make `assets/licence.txt` read-only."
+    }
+  ]
+}

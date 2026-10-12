@@ -1,0 +1,12 @@
+{
+  "title": "A rename, then the rename taken back",
+  "measures": "a correction undoes the agent's own work cleanly and keeps what was asked to stay",
+  "turns": [
+    {
+      "say": "Rename the module `shop/utils.py` to `shop/textutils.py`, everywhere it is named. And add `shout(text)` to it: upper case with one `!` at the end, no second `!` when the text already ends with one. The tests must still pass."
+    },
+    {
+      "say": "I take the rename back: the module is `shop/utils.py` again, everywhere, exactly as it was before. Keep `shout`."
+    }
+  ]
+}

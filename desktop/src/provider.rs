@@ -109,6 +109,48 @@ struct Endpoint {
     tps: f64,
     /// The most it writes in one answer; 0 when not listed.
     max_output: u64,
+    /// Of the input this app sent there, the share that came from its cache (`saw_usage`), once enough was sent to
+    /// tell; until then `USUAL_READS`.
+    reads: f64,
+}
+
+/// What long agent runs read from a cache that works: seven tokens in ten.
+const USUAL_READS: f64 = 0.7;
+/// Input sent to an endpoint before its own share is believed, and the sum past which old rounds count half.
+const READS_BELIEVED: f64 = 150_000.0;
+const READS_HALVED: f64 = 3_000_000.0;
+static READS_FILE: Mutex<()> = Mutex::new(());
+
+/// Counts a round's input, and how much of it the endpoint read from its cache, in `endpoints.json`. A cached price is
+/// only paid where the cache is read, and endpoints differ: on 2026-10-13 the one with the lowest listed prices read
+/// nothing in the first two or three rounds of every reply and sometimes nothing in five (45% over a night of
+/// replies), while others read every round from the second. The picker prices an endpoint by its own count.
+pub fn saw_usage(model_id: &str, endpoint_name: &str, sent: u64, cached: u64) {
+    if sent == 0 {
+        return;
+    }
+    let _one_writer = READS_FILE.lock().unwrap();
+    let file = models::endpoints_file();
+    let mut saved: Map<String, Value> = std::fs::read(&file).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
+    let seen = &mut saved.entry("_reads").or_insert_with(|| json!({}))[model_id][endpoint_name];
+    let (mut all, mut hit) = (seen[0].as_f64().unwrap_or(0.0) + sent as f64, seen[1].as_f64().unwrap_or(0.0) + cached as f64);
+    if all > READS_HALVED {
+        (all, hit) = (all / 2.0, hit / 2.0);
+    }
+    *seen = json!([all, hit]);
+    let _ = std::fs::write(&file, Value::Object(saved).to_string());
+}
+
+/// The endpoints with the share each was seen to read from its cache, cheapest first by that.
+fn with_reads(mut endpoints: Vec<Endpoint>, seen: &Value) -> Vec<Endpoint> {
+    for e in &mut endpoints {
+        let (all, hit) = (seen[&e.name][0].as_f64().unwrap_or(0.0), seen[&e.name][1].as_f64().unwrap_or(0.0));
+        if all >= READS_BELIEVED {
+            e.reads = (hit / all).clamp(0.0, 1.0);
+        }
+    }
+    endpoints.sort_by(|a, b| a.price().total_cmp(&b.price()));
+    endpoints
 }
 
 /// From this speed up an endpoint is picked on price alone.
@@ -122,7 +164,7 @@ impl Endpoint {
     // ponytail: the mix is the one measured over long agent runs (seven tokens in ten read from the cache, one written per
     // hundred sent), not the chat's own. Weigh by the chat's last reply if short chats turn out to pick badly.
     fn price(&self) -> f64 {
-        0.3 * self.rates.0 + 0.7 * self.rates.1 + 0.01 * self.rates.2
+        (1.0 - self.reads) * self.rates.0 + self.reads * self.rates.1 + 0.01 * self.rates.2
     }
 }
 
@@ -149,7 +191,7 @@ fn usable_endpoints(listing: &Value, only: Option<&str>) -> Vec<Endpoint> {
         .filter_map(|e| {
             let input = dollars(&e["pricing"]["prompt"])?;
             let rates = (input, dollars(&e["pricing"]["input_cache_read"]).unwrap_or(input), dollars(&e["pricing"]["completion"]).unwrap_or(0.0));
-            Some(Endpoint { tag: e["tag"].as_str()?.to_string(), name: e["provider_name"].as_str().unwrap_or("").to_string(), rates, tps: e["throughput_last_30m"]["p50"].as_f64().unwrap_or(0.0), max_output: e["max_completion_tokens"].as_u64().unwrap_or(0) })
+            Some(Endpoint { tag: e["tag"].as_str()?.to_string(), name: e["provider_name"].as_str().unwrap_or("").to_string(), rates, tps: e["throughput_last_30m"]["p50"].as_f64().unwrap_or(0.0), max_output: e["max_completion_tokens"].as_u64().unwrap_or(0), reads: USUAL_READS })
         })
         .collect();
     usable.sort_by(|a, b| a.price().total_cmp(&b.price()));
@@ -235,11 +277,15 @@ pub async fn choose_endpoint(client: &reqwest::Client, target: &Target) -> Optio
     // for comparing endpoints, and for someone who trusts one.
     let named = std::env::var("APIM_ENDPOINT").ok().filter(|tag| !tag.trim().is_empty());
     let mut left_out = Vec::new();
+    // Per tag, what the picker went by where that was this app's own count.
+    let mut counted: HashMap<String, String> = HashMap::new();
     let order = match named.as_deref().map(|tag| usable_endpoints(&listing, Some(tag.trim()))).filter(|named| !named.is_empty()) {
         Some(named) => named,
         // Picked among the endpoints that hand a tool call over whole; among all of them when none was found to.
         None => {
-            let usable = usable_endpoints(&listing, None);
+            let seen: Value = std::fs::read(models::endpoints_file()).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
+            let usable = with_reads(usable_endpoints(&listing, None), &seen["_reads"][&target.model.id]);
+            counted = usable.iter().filter(|e| e.reads != USUAL_READS).map(|e| (e.tag.clone(), format!("{} read {}% of what it was sent from its cache", e.name, (e.reads * 100.0).round()))).collect();
             let (sound, failed) = sound_endpoints(client, target, &usable).await;
             let sound: Vec<Endpoint> = if sound.is_empty() { usable.iter().filter(|e| !failed.contains(&e.tag)).cloned().collect() } else { sound };
             left_out = failed;
@@ -260,13 +306,15 @@ pub async fn choose_endpoint(client: &reqwest::Client, target: &Target) -> Optio
     if before.as_ref() != Some(&now) {
         let _ = std::fs::write(&remembered, Value::Object(last).to_string());
     }
-    if before.is_some_and(|before| before["tag"] == now["tag"]) {
+    let was = before.as_ref().and_then(|before| before["tag"].as_str()).map(str::to_string);
+    if was.as_deref() == now["tag"].as_str() {
         return None;
     }
+    let moved = was.and_then(|tag| counted.remove(&tag)).map(|why| format!(". {why}")).unwrap_or_default();
     let usd = |v: f64| format!("{v:.4}").trim_end_matches('0').trim_end_matches('.').to_string();
     let speed = if first.tps > 0.0 { format!(", {} tokens a second", first.tps.round()) } else { String::new() };
     let skipped = if left_out.is_empty() { String::new() } else { format!(". Left out, they lose parts of a tool call: {}", left_out.join(", ")) };
-    Some(format!("{} runs on {} ({}): ${} in, ${} cached, ${} out per million tokens{speed}{skipped}", target.model.label, first.name, first.tag, usd(first.rates.0), usd(first.rates.1), usd(first.rates.2)))
+    Some(format!("{} runs on {} ({}): ${} in, ${} cached, ${} out per million tokens{speed}{skipped}{moved}", target.model.label, first.name, first.tag, usd(first.rates.0), usd(first.rates.1), usd(first.rates.2)))
 }
 
 /// The endpoints a model's requests are kept to: the ones `choose_endpoint` picked, else a pinned one for the
@@ -626,6 +674,19 @@ pub async fn stream(client: &reqwest::Client, target: &Target, body: &Value, cut
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_endpoint_is_priced_by_what_it_was_seen_to_read() {
+        let e = |tag: &str, rates| Endpoint { tag: tag.into(), name: tag.into(), rates, tps: 50.0, max_output: 0, reads: USUAL_READS };
+        let listed = vec![e("cheap", (0.04, 0.0125, 0.5)), e("steady", (0.06, 0.012, 0.5))];
+        // Nothing seen, or too little to tell: the listing decides.
+        assert_eq!(with_reads(listed.clone(), &json!({}))[0].tag, "cheap");
+        assert_eq!(with_reads(listed.clone(), &json!({ "cheap": [9000.0, 0.0] }))[0].tag, "cheap");
+        // The cheap one read a fifth of 400,000 tokens from its cache: the other costs less in fact.
+        let ranked = with_reads(listed, &json!({ "cheap": [400000.0, 80000.0] }));
+        assert_eq!(ranked[0].tag, "steady");
+        assert!((ranked[1].reads - 0.2).abs() < 1e-9);
+    }
 
     #[test]
     fn a_model_page_link_gives_its_id() {

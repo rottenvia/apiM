@@ -1,0 +1,9 @@
+{
+  "title": "A converter specified only by examples",
+  "measures": "a rule set is worked out from examples, each example is run before the work is called done, and the rules hold on input not seen",
+  "turns": [
+    {
+      "say": "Write `convert.py`: it reads our old settings format on stdin and writes the new one on stdout. `examples/` has pairs of input (`.in`) and the output expected for it (`.out`). There is no other specification."
+    }
+  ]
+}

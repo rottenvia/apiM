@@ -1,0 +1,3 @@
+cache/render.tmp 50000
+audio/menu theme.ogg 20000
+img/фон (1).png 5000

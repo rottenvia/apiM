@@ -157,7 +157,25 @@ type Events<'a> = Peekable<Parser<'a>>;
 
 fn parse(text: &str) -> Vec<Block> {
     let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-    blocks(&mut Parser::new_ext(text, options).peekable())
+    let text = counted_sentences_kept(text);
+    blocks(&mut Parser::new_ext(&text, options).peekable())
+}
+
+/// "1) fixed this. 2) added that. 3) left the third alone." is a sentence that counts, not a list of one item. Read
+/// as a list its first number was drawn as "1." and the rest of the sentence, "2)" and "3)" included, ran on inside
+/// that item. A line that opens with `N)` and carries `N+1)` further on is kept as the sentence it is.
+fn counted_sentences_kept(text: &str) -> String {
+    let mut fenced = false;
+    let line = |line: &str| {
+        let body = line.trim_start();
+        if body.starts_with("```") || body.starts_with("~~~") {
+            fenced = !fenced;
+        }
+        let digits = body.bytes().take_while(u8::is_ascii_digit).count();
+        let counted = !fenced && (1..=2).contains(&digits) && body[digits..].starts_with(") ") && body[..digits].parse::<u32>().is_ok_and(|n| body.contains(&format!(" {}) ", n + 1)));
+        if counted { format!("{}{}\\{}", &line[..line.len() - body.len()], &body[..digits], &body[digits..]) } else { line.to_string() }
+    };
+    text.split('\n').map(line).collect::<Vec<_>>().join("\n")
 }
 
 fn is_inline_end(end: &TagEnd) -> bool {
@@ -889,6 +907,11 @@ mod tests {
         let Block::List { start: None, items } = &parsed[2] else { panic!("{:?}", parsed[2]) };
         assert_eq!(items[0].blocks, vec![Block::Para(vec![plain("one")])]);
         assert!(matches!(items[1].blocks.as_slice(), [Block::Para(_), Block::List { items: inner, .. }] if inner.len() == 1));
+        // A sentence that counts its parts stays a sentence; a real list written with brackets stays a list.
+        let counted = parse("1) Fixed the bug. 2) Added a test. 3) Left rates.json alone.");
+        let [Block::Para(spans)] = counted.as_slice() else { panic!("{counted:?}") };
+        assert_eq!(spans.iter().map(|span| span.text.as_str()).collect::<String>(), "1) Fixed the bug. 2) Added a test. 3) Left rates.json alone.");
+        assert!(matches!(parse("1) one\n2) two\n").as_slice(), [Block::List { start: Some(1), items }] if items.len() == 2));
         // A numbered list keeps where it starts, and a task item its tick, apart from its text.
         let numbered = parse("3. three\n4. four\n\n- [x] done\n- [ ] open\n");
         let [Block::List { start: Some(3), items: two }, Block::List { start: None, items: tasks }] = numbered.as_slice() else { panic!("{numbered:?}") };

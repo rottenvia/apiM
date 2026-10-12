@@ -1,0 +1,4 @@
+hosts[] = a.example
+hosts[] = b.example
+hosts[] = a.example
+retries = 3

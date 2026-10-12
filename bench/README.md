@@ -46,6 +46,54 @@ three times: one run of a task says little, models differ from try to try. `BENC
 
 Which endpoint serves the model changes what is measured: pin one with `APIM_ENDPOINT=<tag>` when comparing two builds.
 
+## The live benchmark: the real window, a user who answers
+
+`bench/live` is a second set, written for the desktop app and driven through its real window (kept off screen, in a
+spare data folder). The tasks above are one message and one check. These are conversations: follow-ups, a request
+taken back, an output asked about two messages later, a window that dies mid-reply and is told "resume", a note
+passed while the reply works, a question the reply asks and the driver answers.
+
+```bash
+cd desktop && cargo build --release && cd ..
+python bench/live/live.py selftest                       # free: every check fails on the start, passes on the solution
+export OPENROUTER_API_KEY=sk-or-… LIVE_ROOT=C:/some/short/folder LIVE_EXE=desktop/target/release/apim.exe
+python bench/live/live.py send talk-refine               # one message; the window stays hidden
+python bench/live/live.py watch                          # running or ended, tools, a question on screen
+python bench/live/live.py rounds talk-refine             # the reply, round by round
+python bench/live/live.py tell straight-report answer "There is no other address."
+python bench/live/live.py check talk-refine              # the hidden check for the turn just sent
+python bench/live/live.py auto 1 small-diff hands-off    # a repeat pass, each scenario's user played from its file
+python bench/live/live.py table
+```
+
+A first pass is driven by hand and every reply is read: that is where the app's faults show, not in the score. On
+2026-10-13 GLM 5.3 Flash passed 20 of 21 checked turns by hand and 21 of 21 on the repeat pass, and reading the
+rounds found nine faults of the app (see `desktop/README.md`, "Met in the live benchmark"). `LIVE_MODEL=custom:<slug>`
+runs any OpenRouter model, free ones included.
+
+| scenario | what it measures |
+|---|---|
+| talk-refine (3 turns) | what was said earlier still counts; a question changes no file |
+| talk-take-it-back (2) | a correction undoes the agent's own work cleanly |
+| talk-old-output (3) | an output from two messages ago is still reachable; a command said to cost money runs once |
+| talk-crash-resume | a reply cut off by a crash is carried on, not started over |
+| talk-note-midway | a "btw" passed mid-reply is acted on |
+| talk-ask-first | care before deleting: the rule is in a README, one folder is on hold |
+| fix-root-cause | the cause is fixed, not the place where it shows |
+| follow-house-rules | a project's written rules are followed though the request names none |
+| small-diff | one line fixed, no other byte of the file moved |
+| hands-off | a stated limit holds when the quick fix lies on the other side of it |
+| straight-report | what could not be done is said plainly and nothing is made up |
+| dirty-merge | data work by written rules: encodings, separators, dates, duplicates |
+| flaky-order | a failure that depends on test order is reproduced and its cause fixed |
+| guess-the-format | rules worked out from examples hold on input not seen |
+| clean-build | deleting with care: look-alike names, a file git ignores that is not a build product |
+| win-ops | sizes, a zip and a read-only file on names with spaces, brackets and Cyrillic |
+
+A scenario is `scenarios/<id>/`: `scenario.json` (the turns, and what its user does: a note, an answer, a kill),
+`files/`, `check.py <folder> <turn>` built on `checklib.py`, and `solution/<turn>/` (files laid over, `DELETE`,
+`APPLY.py`).
+
 ## Without a model: what a round sends again
 
 Every round sends the whole conversation, and the provider reads from its cache only the start that is unchanged since
@@ -57,6 +105,9 @@ OPENROUTER_BASE_URL=http://127.0.0.1:18999 OPENROUTER_API_KEY=x APIM_DATA_DIR=<a
   desktop/target/release/apim --ask --auto --model glm-5.3-flash --dir <a copy of tasks/explore-large-codebase/files> "any question"
 python bench/wire/wirediff.py out
 ```
+
+`cacheprobe.py <model> <endpoint tag>…` asks the other question, with a key and for a fraction of a cent: what each
+endpoint really reads from its cache over six rounds of one conversation.
 
 `stub.py` stands in for OpenRouter: it answers each request with the next step of the script (a list of tool calls,
 or a text that ends the reply) and keeps the request. `wirediff.py` prints, for each request, how much of it is the

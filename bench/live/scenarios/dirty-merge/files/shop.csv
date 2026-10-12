@@ -1,0 +1,11 @@
+email;first;last;phone;created
+ann.lee@example.org;Annie;Lee;030 999;2024-04-01 09:15
+Bo@Example.org;Bo;Berg;+1 555 0100;2023-02-01 18:00
+carla.diaz@example.org;Carla;Diaz;;2022-03-05 07:30
+dmitri@example.org;Dima;Orlov;8 (495) 123-45-67;2020-07-19 23:59
+fay@example.org;;Wong;;2025-05-05 12:00
+kim @example.org;Kim;Spaced;;2021-01-01 00:00
+gus@example.org;Gus;Hall;555 0199;
+gus@example.org;Gustav;Hall;;2018-01-01 10:00
+zoe@example.org;Zoe;Mueller;;2021-11-09 08:00
+hana@example;Hana;Nodot;;2022-02-02 02:02

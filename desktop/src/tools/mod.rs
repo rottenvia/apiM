@@ -150,7 +150,7 @@ static SCHEMAS: LazyLock<Vec<Value>> = LazyLock::new(|| {
             _ => "",
         };
         // Said of every system: a reply that did not know this ran its long programs a second time to get a file.
-        let kept = if t["function"]["name"] == "run_command" { " A long output is shown with its middle cut, and ALL of it is kept in a file that the result names in its first line (.outputs/...), as is any output you may need again after it has left your context: never redirect a program's output to a file yourself, and never run a program again to see what it printed. Read the file." } else { "" };
+        let kept = if t["function"]["name"] == "run_command" { " A long output is shown with its middle cut, and ALL of it is kept in a file that the result names in its first line (.outputs/...), as is any output you may need again after it has left your context: never redirect a program's output to a file yourself, and never run a program again to see what it printed. Take what you need from the file: search_files with it as path, read_file with start_line and end_line, or a script that reads it. A long one read whole only fills your context." } else { "" };
         let more = format!("{more}{kept}");
         if !more.is_empty() {
             t["function"]["description"] = Value::String(format!("{}{more}", t["function"]["description"].as_str().unwrap_or("")));
@@ -202,6 +202,26 @@ pub fn schema(name: &str) -> Option<&'static Value> {
 /// endpoints turn that into JSON badly when a list comes before a text: the rest of the call arrives inside one value
 /// (`"args": "[\"-\"]<arg_key>command</arg_key><arg_value>python"`), or loose in the JSON, which then does not parse.
 /// Both are put back, and only for names that are arguments of the tool: a file's own text may hold the same markup.
+/// A call whose name carries the model's own markup after it (`read_files</arg_key>paths</arg_key><arg_value>["a"]`,
+/// met on a free coding model: "Unknown tool", and the round was lost). The name is the part before the markup and
+/// the rest is its arguments, taken only for names the tool has. None when the name is a tool's as it stands.
+pub fn marked_name(name: &str) -> Option<(String, String)> {
+    let (base, rest) = name.split_once('<')?;
+    let tool = schema(base.trim())?;
+    // The opening `<arg_key>` is what the name swallowed.
+    let rest = format!("<{rest}");
+    let rest = rest.strip_prefix("</arg_key>").map(|r| format!("<arg_key>{r}")).unwrap_or(rest);
+    let mut args = serde_json::Map::new();
+    for part in rest.split("<arg_key>").skip(1) {
+        let Some((key, value)) = part.split_once("</arg_key><arg_value>") else { continue };
+        let value = value.split("</arg_value>").next().unwrap_or(value).trim();
+        if !tool["function"]["parameters"]["properties"][key.trim()].is_null() {
+            args.insert(key.trim().to_string(), serde_json::from_str(value).unwrap_or_else(|_| Value::from(value)));
+        }
+    }
+    Some((base.trim().to_string(), Value::Object(args).to_string()))
+}
+
 pub fn parse_call(name: &str, raw: &str) -> Result<Value, serde_json::Error> {
     const KEY: &str = "<arg_key>";
     const VALUE: &str = "</arg_key><arg_value>";
@@ -243,6 +263,16 @@ pub fn parse_call(name: &str, raw: &str) -> Result<Value, serde_json::Error> {
 }
 
 #[cfg(test)]
+#[test]
+fn a_tool_name_with_markup_after_it_is_the_name_and_its_arguments() {
+    let (name, args) = marked_name(r#"read_files</arg_key>paths</arg_key><arg_value>["shop/utils.py", "tests/test_shop.py"]"#).unwrap();
+    assert_eq!((name.as_str(), serde_json::from_str::<Value>(&args).unwrap()), ("read_files", serde_json::json!({ "paths": ["shop/utils.py", "tests/test_shop.py"] })));
+    let (name, args) = marked_name("read_file<arg_key>path</arg_key><arg_value>a.py</arg_value><arg_key>nonsense</arg_key><arg_value>1</arg_value>").unwrap();
+    assert_eq!((name.as_str(), serde_json::from_str::<Value>(&args).unwrap()), ("read_file", serde_json::json!({ "path": "a.py" })));
+    assert_eq!(marked_name("read_file"), None);
+    assert_eq!(marked_name("no_such_tool<arg_key>x</arg_key><arg_value>1"), None);
+}
+
 #[test]
 fn a_call_with_the_models_markup_in_it_is_put_back() {
     let whole = serde_json::json!({ "args": ["-"], "command": "python3", "stdin": "print(1)\nprint(2)" });

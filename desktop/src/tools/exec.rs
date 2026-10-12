@@ -172,7 +172,7 @@ pub fn on_path(name: &str) -> bool {
 // ponytail: a reading of the text, there to catch a wreck made in passing. It is not a parser, and a script the
 // model writes to a file and runs was never held by it. Use PowerShell's own parser
 // (System.Management.Automation.Language) if this has to hold against a command written to get past it.
-fn shell_wrecks(script: &str) -> Option<&'static str> {
+fn shell_wrecks(script: &str, root: &Path) -> Option<&'static str> {
     use std::sync::LazyLock;
     static SYSTEM: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"(?i)\b(format-volume|clear-disk|remove-partition|initialize-disk|stop-computer|restart-computer|shutdown|bcdedit|diskpart|vssadmin|wbadmin|set-mppreference|remove-localuser|disable-computerrestore|reg(\.exe)?\s+delete|remove-item(property)?\s+\S*\b(hklm|hkcu|registry):)|\bformat\s+[a-z]:|\bcipher\s+/w").unwrap()
@@ -182,7 +182,11 @@ fn shell_wrecks(script: &str) -> Option<&'static str> {
     if SYSTEM.is_match(script) {
         return Some("Not run: this changes the computer itself (its disks, its start-up, its accounts, its protection, or it deletes from the registry) and cannot be undone. Leave it to the user: say what should be run and why.");
     }
-    if DELETES.is_match(script) && OUTSIDE.is_match(script) {
+    // The chat's own folder written out in full is inside. A reply cleaning a project wrote `Remove-Item 'C:\…\chat\build'`,
+    // was told the place was outside, and concluded that a shell cannot delete in the folder at all.
+    let own = regex::escape(&root.to_string_lossy().to_lowercase().replace('/', "\\"));
+    let inside = Regex::new(&format!(r#"{own}(\\|['",;)\s]|$)"#)).map(|own| own.replace_all(&script.to_lowercase().replace('/', "\\"), ".$1").into_owned());
+    if DELETES.is_match(script) && OUTSIDE.is_match(inside.as_deref().unwrap_or(script)) {
         return Some("Not run: this deletes, and it names a place outside the chat's folder, where nothing can be restored. Delete inside the folder by a relative path (delete_file does it too), and keep a command that deletes apart from one that reads elsewhere. What is outside is the user's to remove.");
     }
     None
@@ -211,7 +215,7 @@ fn shell(ctx: &Ctx, command: &str, argv: Vec<String>) -> Result<Launch, String> 
     }
     let Some(program) = find_program(&ctx.root, command) else { return Err(format!("`{command}` was not found on this machine.")) };
     let ask = ctx.settings.approval == Approval::Manual;
-    if let Some(why) = shell_wrecks(&script).filter(|_| !ask) {
+    if let Some(why) = shell_wrecks(&script, &ctx.root).filter(|_| !ask) {
         return Err(why.into());
     }
     let key = serde_json::to_string(&["powershell", script.as_str()]).unwrap_or_default();
@@ -635,12 +639,47 @@ fn report(ran: &Ran) -> Output {
     Output { ok, text: parts.join("\n"), summary, ..Default::default() }
 }
 
+/// A command line cut into words as a shell cuts it: quotes group, and `\"` inside double quotes is a quote.
+fn split_words(line: &str) -> Vec<String> {
+    let (mut words, mut word, mut quote, mut open) = (Vec::new(), String::new(), None::<char>, false);
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some('"'), '\\') if chars.peek() == Some(&'"') => {
+                word.push('"');
+                chars.next();
+            }
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), c) => word.push(c),
+            (None, '"' | '\'') => (quote, open) = (Some(c), true),
+            (None, c) if c.is_whitespace() => {
+                if open || !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                    open = false;
+                }
+            }
+            (None, c) => word.push(c),
+        }
+    }
+    if open || !word.is_empty() {
+        words.push(word);
+    }
+    words
+}
+
 pub async fn run_command(ctx: &Ctx, args: &Value) -> Output {
-    let command = str_arg(args, "command").trim();
     let mut argv = match argv_arg(args, "args") {
         Ok(argv) => argv,
         Err(e) => return Output::fail(e),
     };
+    // The whole command line in `command` and no args (`python -c "print(1)"`): cut as a shell would cut it. A reply on
+    // a smaller model wrote its commands so and was told "is not an allowed command" for each.
+    let line = str_arg(args, "command").trim();
+    let whole_line = argv.is_empty() && line.contains(char::is_whitespace) && find_program(&ctx.root, line).is_none();
+    let mut words = if whole_line { split_words(line) } else { Vec::new() };
+    let command = if words.is_empty() { line.to_string() } else { words.remove(0) };
+    let command = command.as_str();
+    argv.extend(words);
     let mut stdin = str_arg(args, "stdin").to_string();
     // The dash means "the script is on stdin". Written after the dash as one more argument, the script reached
     // nobody: python started its prompt on an empty stdin and "exit 0" came back. The reply read that as stdin being
@@ -680,14 +719,32 @@ pub async fn run_tests(ctx: &Ctx, args: &Value) -> Output {
         argv.push(filter.to_string());
     }
     let limit = timeout_for(&command, &argv, None);
-    let ran = match execute(ctx, &command, argv, "Run the project's tests", Some(limit), None).await {
+    let mut ran = match execute(ctx, &command, argv, "Run the project's tests", Some(limit), None).await {
         Ok(ran) => ran,
         Err(refused) => return refused,
     };
+    let mut name = runner.name.clone();
+    // No pytest here: Python's own runner finds the same test files. The answer used to be "install it (pip install
+    // pytest)", and a reply did, into the user's own Python, for a project whose README said `python -m unittest`.
     if ran.out.contains("No module named pytest") {
-        return Output::fail("pytest is not installed on this machine, so the tests could not run. Install it (run_command: pip install pytest), then call run_tests again.");
+        let mut argv: Vec<String> = vec!["-m".into(), "unittest".into()];
+        match runner.args.last().filter(|dir| ["tests", "test"].contains(&dir.as_str())) {
+            _ if filter.ends_with(".py") => argv.push(filter.trim_end_matches(".py").replace(['/', '\\'], ".")),
+            // A tests folder that is a package is found from the project's root, a plain one from inside itself.
+            Some(dir) if ctx.root.join(dir).join("__init__.py").is_file() => argv.extend(["discover".into(), "-s".into(), dir.clone(), "-t".into(), ".".into()]),
+            Some(dir) => argv.extend(["discover".into(), "-s".into(), dir.clone()]),
+            None => {}
+        }
+        if !filter.is_empty() && !filter.ends_with(".py") {
+            argv.extend(["-k".into(), filter.to_string()]);
+        }
+        name = "unittest".into();
+        ran = match execute(ctx, "python", argv, "Run the project's tests", Some(limit), None).await {
+            Ok(ran) => ran,
+            Err(refused) => return refused,
+        };
     }
-    let summary = testing::parse_output(&runner.name, &ran.out, "", ran.code.unwrap_or(1));
+    let summary = testing::parse_output(&name, &ran.out, "", ran.code.unwrap_or(1));
     // A failing suite is a successful tool call: the agent asked what the state was and got a true answer.
     Output { ok: true, text: testing::format_summary(&summary, &format!("{}\n", ran.out)), summary: testing::headline(&summary), ..Default::default() }
 }
@@ -1022,6 +1079,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_command_line_is_cut_into_words() {
+        assert_eq!(split_words(r#"python -c "from shop.utils import shout; print(shout('hello'))""#), ["python", "-c", "from shop.utils import shout; print(shout('hello'))"]);
+        assert_eq!(split_words(r#"python  -m unittest 'tests/test a.py' "say \"hi\"" """#), ["python", "-m", "unittest", "tests/test a.py", "say \"hi\"", ""]);
+    }
+
+    #[test]
     fn powershell_is_refused_only_what_cannot_be_put_back() {
         for runs in [
             "Get-Process | Sort-Object CPU -Descending | Select-Object -First 10",
@@ -1036,14 +1099,19 @@ mod tests {
             "Remove-Item analysis/tmp -Recurse", "rm x", "Get-Process; del a", "New-Item a", "[IO.File]::WriteAllText('a','b')", "$x = Get-Item a; $x.Delete()",
             "Get-ChildItem -Recurse | Format-Table Name", r"Copy-Item C:\tools\a.dll lib\a.dll",
         ] {
-            assert_eq!(shell_wrecks(runs), None, "{runs}");
+            assert_eq!(shell_wrecks(runs, Path::new(r"C:\chats\one")), None, "{runs}");
         }
         for wrecks in [
             r"Remove-Item C:\temp -Recurse", r"rm ..\..\other -Recurse", "del $env:USERPROFILE\\notes.txt", "Get-ChildItem ~ | Remove-Item", r"[IO.File]::Delete('C:\x\a')",
             "Format-Volume -DriveLetter D", "shutdown /s /t 0", "Restart-Computer -Force", r"reg delete HKCU\Software\x /f", r"Remove-Item HKCU:\Software\x", "Set-MpPreference -DisableRealtimeMonitoring $true", "bcdedit /set x",
         ] {
-            assert!(shell_wrecks(wrecks).is_some(), "{wrecks}");
+            assert!(shell_wrecks(wrecks, Path::new(r"C:\chats\one")).is_some(), "{wrecks}");
         }
+        // The chat's own folder by its full name is inside; a folder that only starts like it, or a way out of it, is not.
+        let own = Path::new(r"C:\chats\one");
+        assert_eq!(shell_wrecks(r"Remove-Item -Recurse -Force 'C:\chats\one\build','c:/chats/one/dist'", own), None);
+        assert!(shell_wrecks(r"Remove-Item -Recurse 'C:\chats\one-more\build'", own).is_some());
+        assert!(shell_wrecks(r"Remove-Item -Recurse C:\chats\one\..\two", own).is_some());
     }
 
     #[test]

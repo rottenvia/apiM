@@ -1,0 +1,5 @@
+hosts:
+  - a.example
+  - b.example
+  - a.example
+retries: 3
