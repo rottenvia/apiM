@@ -129,8 +129,9 @@ def _(env):
     env.ok("add", "a")
     env.ok("add", "b")
     err = user_error(env, "done", "1", "7")
-    if "#7" not in err:
-        raise AssertionError(f"error should name task #7, got {err.strip()!r}")
+    # The task asks only that the error "say which id was missing": "#7" and "id 7" both do.
+    if "7" not in err:
+        raise AssertionError(f"error should name the missing id 7, got {err.strip()!r}")
     eq(env.ok("list"), ["#1 [ ] a", "#2 [ ] b"], "after failed done:")
 
 

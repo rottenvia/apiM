@@ -374,7 +374,7 @@ async function runTaskDesktop(app, task, outDir, run) {
   const wsDir = path.join(app.dataRoot, "w", name);
   const dataDir = path.join(app.dataRoot, "d", name);
   const transcript = path.join(outDir, `${name}.txt`);
-  if (existsSync(transcript)) return scoreDesktop(task, wsDir, readFileSync(transcript, "utf8"));
+  if (existsSync(transcript)) return scoreDesktop(task, wsDir, dataDir, readFileSync(transcript, "utf8"));
   await rm(wsDir, { recursive: true, force: true });
   await mkdir(dataDir, { recursive: true });
   await cp(path.join(task.dir, "files"), wsDir, { recursive: true });
@@ -393,11 +393,14 @@ async function runTaskDesktop(app, task, outDir, run) {
   clearTimeout(timer);
   out = `${out.replace(/sk-or-v1-[a-f0-9]+/g, "[key]")}\n[bench: ${Math.round((Date.now() - started) / 1000)} seconds${timedOut ? ", timed out" : ""}]\n`;
   await writeFile(transcript, out);
-  return scoreDesktop(task, wsDir, out);
+  return scoreDesktop(task, wsDir, dataDir, out);
 }
 
 /** A finished task's numbers, from the workspace it left and what the app printed. */
-async function scoreDesktop(task, wsDir, out) {
+async function scoreDesktop(task, wsDir, dataDir, out) {
+  // Rounds answered by another endpoint than the round before (the app logs each): there the cache starts cold.
+  const log = path.join(dataDir, "diagnostics.jsonl");
+  const endpointMoves = existsSync(log) ? (readFileSync(log, "utf8").match(/"kind":"endpoint_moved"/g) ?? []).length : 0;
   const bench = /^\[bench: (\d+) seconds(, timed out)?\]/m.exec(out);
   const timedOut = Boolean(bench?.[2]);
   const check = await runCheck(task, wsDir);
@@ -428,6 +431,7 @@ async function scoreDesktop(task, wsDir, out) {
     planned: tools.includes("make_plan"),
     questions: (out.match(/^  \(question skipped/gm) ?? []).length,
     endpoint: /^\[.* runs on .* \(([^)]+)\):/m.exec(out)?.[1] ?? null,
+    endpointMoves,
     finish: done?.[1] ?? null,
     stoppedEarly: Boolean(done?.[2]),
     error: error ?? done?.[3] ?? null,
@@ -449,7 +453,7 @@ function summarise(results) {
     if (r.pass) c.passed++;
   }
   const sum = (key) => results.reduce((s, r) => s + (r[key] ?? 0), 0);
-  return { tasks: n, passed, passRate: n ? passed / n : 0, partialScore: n ? partial / n : 0, costUsd: cost, medianSeconds: median, byCategory, tokens: sum("tokens"), rounds: sum("rounds"), toolCalls: sum("toolCalls"), toolFailures: sum("toolFailures") };
+  return { tasks: n, passed, passRate: n ? passed / n : 0, partialScore: n ? partial / n : 0, costUsd: cost, medianSeconds: median, byCategory, tokens: sum("tokens"), promptTokens: sum("promptTokens"), cachedTokens: sum("cachedTokens"), endpointMoves: sum("endpointMoves"), rounds: sum("rounds"), toolCalls: sum("toolCalls"), toolFailures: sum("toolFailures") };
 }
 
 function previousRun(model, currentFile) {
@@ -476,7 +480,7 @@ function markdown(run, prev) {
     `**${s.passed}/${s.tasks} passed (${pct(s.passRate)})** · partial credit ${pct(s.partialScore)} · $${s.costUsd.toFixed(3)} total · median ${s.medianSeconds}s per task`,
   ];
   lines.push("", Object.entries(s.byCategory).map(([name, c]) => `${name} ${c.passed}/${c.tasks}`).join(" · "));
-  if (s.rounds) lines.push("", `${s.rounds} rounds · ${s.toolCalls} tool calls (${s.toolFailures} failed) · ${(s.tokens / 1e6).toFixed(2)}M tokens`);
+  if (s.rounds) lines.push("", `${s.rounds} rounds · ${s.toolCalls} tool calls (${s.toolFailures} failed) · ${(s.tokens / 1e6).toFixed(2)}M tokens, ${s.promptTokens ? Math.round((s.cachedTokens / s.promptTokens) * 100) : 0}% of the input read from the cache · ${s.endpointMoves} rounds answered by another endpoint than the round before`);
   if (prev) {
     const p = prev.summary;
     lines.push("", `Previous run (${prev.startedAt}, ${prev.commit}): ${p.passed}/${p.tasks} (${pct(p.passRate)}), $${p.costUsd.toFixed(3)}, median ${p.medianSeconds}s`);
