@@ -1,0 +1,9 @@
+{
+  "title": "Pull five facts out of a 6,000-line program output",
+  "category": "tools",
+  "language": "python",
+  "difficulty": "medium",
+  "prompt": "pipeline.py simulates our nightly reconciliation run: it prints about 6,000 log lines and takes roughly half a minute. I need a few facts from one run, written to answers.json in the workspace root, in exactly this shape:\n\n{\n  \"checksum_ledger_0417\": \"<the checksum of batch 0417 of the ledger stage>\",\n  \"warn_lines_normalize\": <how many WARN lines the normalize stage printed>,\n  \"error\": {\"line\": <the number at the start of the one ERROR line>, \"code\": \"<its code, like E123>\"},\n  \"slowest\": {\"stage\": \"<stage of the batch with the highest ms of the whole run>\", \"batch\": <its batch number>},\n  \"total_ms\": <the total the last line reports>\n}\n\nDon't change pipeline.py.",
+  "timeoutMinutes": 15,
+  "budgetUsd": 0.5
+}

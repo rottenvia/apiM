@@ -56,6 +56,12 @@ const BUDGET = opt("budget", null);
 const ONLY = opt("tasks", null)?.split(",").map((s) => s.trim()).filter(Boolean) ?? null;
 const EXISTING_URL = opt("url", null);
 const LABEL = opt("label", "");
+// --desktop runs the tasks through the Rust app's terminal mode instead of the web app.
+const DESKTOP = flag("desktop");
+const EXE = opt("exe", null);
+const REPEAT = Math.max(1, Number(opt("repeat", "1")));
+// --resume bench/results/<run folder> carries on a desktop run that was cut short: finished tasks are only checked again.
+const RESUME = opt("resume", null);
 
 const COLOR = process.stdout.isTTY && !process.env.NO_COLOR;
 const c = (code) => (s) => (COLOR ? `\x1b[${code}m${s}\x1b[0m` : s);
@@ -110,7 +116,7 @@ async function runCheck(task, workspaceDir) {
       cwd: tmp,
       encoding: "utf8",
       timeout: (task.checkTimeoutSeconds ?? 120) * 1000,
-      env: { PATH: process.env.PATH, HOME: tmp, SYSTEMROOT: process.env.SYSTEMROOT ?? "", PYTHONDONTWRITEBYTECODE: "1" },
+      env: { PATH: process.env.PATH, HOME: tmp, SYSTEMROOT: process.env.SYSTEMROOT ?? "", PYTHONDONTWRITEBYTECODE: "1", PYTHONUTF8: "1" },
     });
     const output = `${r.stdout ?? ""}${r.stderr ?? ""}`.trim();
     const m = /SCORE\s+(\d+)\s*\/\s*(\d+)/.exec(output);
@@ -349,6 +355,85 @@ async function runTask(app, task, creds, stamp) {
   };
 }
 
+// ---------------------------------------------------------------- desktop app
+function desktopExe() {
+  const names = EXE ? [EXE] : ["target-bench", "target"].map((t) => path.join(ROOT, "desktop", t, "release", process.platform === "win32" ? "apim.exe" : "apim"));
+  const found = names.find((p) => existsSync(p));
+  if (!found) throw new Error(`no desktop build at ${names.join(" or ")} (cargo build --release in desktop/)`);
+  return path.resolve(found);
+}
+
+/**
+ * One task through `apim --ask --auto`: one reply, no window, its own data folder (so nothing it
+ * learns leaks into the next task). The whole terminal output is kept beside the report: a failed
+ * task is read round by round there.
+ */
+async function runTaskDesktop(app, task, outDir, run) {
+  const started = Date.now();
+  const name = `${task.id}${run ? `-${run + 1}` : ""}`;
+  const wsDir = path.join(app.dataRoot, "w", name);
+  const dataDir = path.join(app.dataRoot, "d", name);
+  const transcript = path.join(outDir, `${name}.txt`);
+  if (existsSync(transcript)) return scoreDesktop(task, wsDir, readFileSync(transcript, "utf8"));
+  await rm(wsDir, { recursive: true, force: true });
+  await mkdir(dataDir, { recursive: true });
+  await cp(path.join(task.dir, "files"), wsDir, { recursive: true });
+  await writeFile(path.join(dataDir, "settings.json"), JSON.stringify({ budget_usd: BUDGET ? Number(BUDGET) : task.budgetUsd ?? 1 }));
+  const child = spawn(app.exe, ["--ask", "--auto", "--model", MODEL, ...(EFFORT === "auto" ? [] : ["--effort", EFFORT]), "--dir", wsDir, task.prompt], {
+    env: { ...process.env, APIM_DATA_DIR: dataDir },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  children.push(child);
+  let out = "";
+  child.stdout.on("data", (d) => (out += d));
+  child.stderr.on("data", (d) => (out += d));
+  let timedOut = false;
+  const timer = setTimeout(() => ((timedOut = true), killTree(child)), (task.timeoutMinutes ?? 20) * 60_000);
+  await new Promise((r) => child.on("close", r));
+  clearTimeout(timer);
+  out = `${out.replace(/sk-or-v1-[a-f0-9]+/g, "[key]")}\n[bench: ${Math.round((Date.now() - started) / 1000)} seconds${timedOut ? ", timed out" : ""}]\n`;
+  await writeFile(transcript, out);
+  return scoreDesktop(task, wsDir, out);
+}
+
+/** A finished task's numbers, from the workspace it left and what the app printed. */
+async function scoreDesktop(task, wsDir, out) {
+  const bench = /^\[bench: (\d+) seconds(, timed out)?\]/m.exec(out);
+  const timedOut = Boolean(bench?.[2]);
+  const check = await runCheck(task, wsDir);
+  const usage = [...out.matchAll(/^\[tokens in (\d+) out (\d+) cached (\d+)(?: cost ([\d.]+))?\]/gm)];
+  const last = usage.at(-1);
+  const done = /^\[done: (?:Some\("?)?(\w+)[")]*(, incomplete)?(?:, (.*))?\]/m.exec(out);
+  const tools = [...out.matchAll(/^> (\w+)/gm)].map((m) => m[1]);
+  const error = /^\[error: (.*)\]/m.exec(out)?.[1] ?? (timedOut ? "timed out" : done ? null : "ended without a done line");
+  return {
+    id: task.id,
+    title: task.title,
+    category: task.category,
+    language: task.language,
+    difficulty: task.difficulty,
+    pass: check.pass,
+    score: check.score,
+    checkOutput: check.output.split("\n").slice(-15).join("\n"),
+    seconds: Number(bench?.[1] ?? 0),
+    costUsd: last?.[4] ? Number(last[4]) : null,
+    tokens: last ? Number(last[1]) + Number(last[2]) : null,
+    promptTokens: last ? Number(last[1]) : null,
+    completionTokens: last ? Number(last[2]) : null,
+    cachedTokens: last ? Number(last[3]) : null,
+    rounds: usage.length,
+    toolCalls: tools.length,
+    toolFailures: (out.match(/^  FAILED /gm) ?? []).length,
+    delegated: tools.filter((t) => t === "delegate").length,
+    planned: tools.includes("make_plan"),
+    questions: (out.match(/^  \(question skipped/gm) ?? []).length,
+    endpoint: /^\[.* runs on .* \(([^)]+)\):/m.exec(out)?.[1] ?? null,
+    finish: done?.[1] ?? null,
+    stoppedEarly: Boolean(done?.[2]),
+    error: error ?? done?.[3] ?? null,
+  };
+}
+
 // ---------------------------------------------------------------- report
 function summarise(results) {
   const n = results.length;
@@ -357,7 +442,14 @@ function summarise(results) {
   const secs = results.map((r) => r.seconds).sort((a, b) => a - b);
   const median = secs.length ? secs[Math.floor(secs.length / 2)] : 0;
   const partial = results.reduce((s, r) => s + (r.pass ? 1 : r.score ? r.score.got / r.score.of : 0), 0);
-  return { tasks: n, passed, passRate: n ? passed / n : 0, partialScore: n ? partial / n : 0, costUsd: cost, medianSeconds: median };
+  const byCategory = {};
+  for (const r of results) {
+    const c = (byCategory[r.category] ??= { tasks: 0, passed: 0 });
+    c.tasks++;
+    if (r.pass) c.passed++;
+  }
+  const sum = (key) => results.reduce((s, r) => s + (r[key] ?? 0), 0);
+  return { tasks: n, passed, passRate: n ? passed / n : 0, partialScore: n ? partial / n : 0, costUsd: cost, medianSeconds: median, byCategory, tokens: sum("tokens"), rounds: sum("rounds"), toolCalls: sum("toolCalls"), toolFailures: sum("toolFailures") };
 }
 
 function previousRun(model, currentFile) {
@@ -383,6 +475,8 @@ function markdown(run, prev) {
     "",
     `**${s.passed}/${s.tasks} passed (${pct(s.passRate)})** · partial credit ${pct(s.partialScore)} · $${s.costUsd.toFixed(3)} total · median ${s.medianSeconds}s per task`,
   ];
+  lines.push("", Object.entries(s.byCategory).map(([name, c]) => `${name} ${c.passed}/${c.tasks}`).join(" · "));
+  if (s.rounds) lines.push("", `${s.rounds} rounds · ${s.toolCalls} tool calls (${s.toolFailures} failed) · ${(s.tokens / 1e6).toFixed(2)}M tokens`);
   if (prev) {
     const p = prev.summary;
     lines.push("", `Previous run (${prev.startedAt}, ${prev.commit}): ${p.passed}/${p.tasks} (${pct(p.passRate)}), $${p.costUsd.toFixed(3)}, median ${p.medianSeconds}s`);
@@ -392,7 +486,7 @@ function markdown(run, prev) {
     const before = prev?.results?.find((x) => x.id === r.id);
     const delta = before && before.pass !== r.pass ? (r.pass ? " ⬆ newly passing" : " ⬇ regressed") : "";
     lines.push(
-      `| ${r.id} | ${r.category} | ${r.pass ? "✅ pass" : r.score ? `❌ ${r.score.got}/${r.score.of}` : "❌ fail"}${delta} | ${r.seconds}s | ${r.costUsd != null ? `$${r.costUsd.toFixed(4)}` : "?"} | ${r.toolCalls}${r.delegated ? ` (${r.delegated} delegated)` : ""} | ${[r.error, r.stoppedEarly ? "stopped early" : null].filter(Boolean).join("; ").replace(/\|/g, "/").slice(0, 120)} |`
+      `| ${r.id} | ${r.category} | ${r.pass ? "✅ pass" : r.score ? `❌ ${r.score.got}/${r.score.of}` : "❌ fail"}${delta} | ${r.seconds}s | ${r.costUsd != null ? `$${r.costUsd.toFixed(4)}` : "?"} | ${r.toolCalls}${r.delegated ? ` (${r.delegated} delegated)` : ""}${r.toolFailures ? ` (${r.toolFailures} failed)` : ""}${r.rounds ? ` in ${r.rounds} rounds` : ""} | ${[r.error, r.stoppedEarly ? "stopped early" : null].filter(Boolean).join("; ").replace(/\|/g, "/").slice(0, 120)} |`
     );
   }
   const failed = run.results.filter((r) => !r.pass);
@@ -422,37 +516,46 @@ async function main() {
   }
 
   const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-  const dataRoot = await mkdtemp(path.join(os.tmpdir(), "apim-bench-"));
-  console.log(bold(`\napiM benchmark — ${tasks.length} tasks on ${MODEL} (effort ${EFFORT}, ${CONCURRENCY} at a time)\n`));
-  const app = await startApp(dataRoot);
+  const resumed = RESUME ? path.resolve(RESUME) : null;
+  const dataRoot = resumed ? readFileSync(path.join(resumed, "dataroot.txt"), "utf8").trim() : await mkdtemp(path.join(os.tmpdir(), "apim-bench-"));
+  console.log(bold(`\napiM benchmark — ${tasks.length} tasks on ${MODEL} (effort ${EFFORT}, ${CONCURRENCY} at a time${DESKTOP ? ", desktop app" : ""})\n`));
+  const app = DESKTOP ? { dataRoot, exe: desktopExe() } : await startApp(dataRoot);
   if (!app.dataRoot) app.dataRoot = dataRoot;
+  const base = resumed ?? path.join(RESULTS_DIR, `${stamp}-${MODEL.replace(/[^\w.-]/g, "_")}${LABEL ? `-${LABEL.replace(/[^\w.-]/g, "_")}` : ""}`);
+  if (DESKTOP) await mkdir(base, { recursive: true });
+  if (DESKTOP && !resumed) await writeFile(path.join(base, "dataroot.txt"), dataRoot);
+  const commit = spawnSync("git", ["rev-parse", "--short", "HEAD"], { cwd: ROOT, encoding: "utf8" }).stdout?.trim() || "?";
+  const startedAt = new Date().toISOString();
+  const prev = previousRun(MODEL, `${base}.json`);
+  // Written after every task: a run that is cut short keeps what it finished.
+  const save = async () => {
+    const run = { model: MODEL, effort: EFFORT, label: LABEL, commit, startedAt, summary: summarise(results), results: [...results].sort((a, b) => a.id.localeCompare(b.id)) };
+    await writeFile(`${base}.json`, JSON.stringify(run, null, 2));
+    await writeFile(`${base}.md`, markdown(run, prev));
+    return run;
+  };
 
   const pricing = await import(pathToFileURL(path.join(ROOT, "src/lib/pricing.ts")).href).catch(() => null);
   const results = [];
-  const queue = [...tasks];
+  const queue = tasks.flatMap((task) => Array.from({ length: REPEAT }, (_, run) => ({ task, run })));
+  const lanes = Math.min(CONCURRENCY, queue.length);
   const worker = async () => {
-    for (let task = queue.shift(); task; task = queue.shift()) {
+    for (let job = queue.shift(); job; job = queue.shift()) {
+      const { task, run } = job;
       console.log(dim(`  → ${task.id} started`));
-      const r = await runTask(app, task, creds, stamp);
+      const r = DESKTOP ? await runTaskDesktop(app, task, base, run) : await runTask(app, task, creds, stamp);
       if (r.costUsd == null && pricing && r.tokens) {
         r.costUsd = pricing.estimateCost({ prompt_tokens: r.promptTokens, completion_tokens: r.completionTokens, total_tokens: r.tokens }, MODEL) ?? null;
       }
       results.push(r);
+      await save();
       console.log(
         `  ${r.pass ? green("PASS") : red("FAIL")}  ${task.id.padEnd(28)} ${String(r.seconds).padStart(4)}s  ${r.costUsd != null ? `$${r.costUsd.toFixed(4)}` : "   ?   "}  ${dim(`${r.toolCalls} tools`)}${r.error ? "  " + yellow(r.error.slice(0, 80)) : ""}`
       );
     }
   };
-  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, tasks.length) }, worker));
-  results.sort((a, b) => a.id.localeCompare(b.id));
-
-  const commit = spawnSync("git", ["rev-parse", "--short", "HEAD"], { cwd: ROOT, encoding: "utf8" }).stdout?.trim() || "?";
-  const run = { model: MODEL, effort: EFFORT, label: LABEL, commit, startedAt: new Date().toISOString(), summary: summarise(results), results };
-  await mkdir(RESULTS_DIR, { recursive: true });
-  const base = path.join(RESULTS_DIR, `${stamp}-${MODEL.replace(/[^\w.-]/g, "_")}${LABEL ? `-${LABEL.replace(/[^\w.-]/g, "_")}` : ""}`);
-  const prev = previousRun(MODEL, `${base}.json`);
-  await writeFile(`${base}.json`, JSON.stringify(run, null, 2));
-  await writeFile(`${base}.md`, markdown(run, prev));
+  await Promise.all(Array.from({ length: lanes }, worker));
+  const run = await save();
 
   const s = run.summary;
   console.log(bold(`\n${s.passed}/${s.tasks} passed (${Math.round(s.passRate * 100)}%) · $${s.costUsd.toFixed(3)} · median ${s.medianSeconds}s`));

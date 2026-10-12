@@ -1,0 +1,9 @@
+{
+  "title": "Fix bugs that only show against the running server",
+  "category": "process",
+  "language": "python",
+  "difficulty": "medium",
+  "prompt": "Our tiny inventory service (app/server.py; start it with `python app/server.py`, the PORT environment variable picks the port) has bug reports from the people calling it:\n\n- creating an item whose name has non-English letters gives the client a broken response;\n- deleting an id that doesn't exist kills the request instead of answering 404;\n- /stats disagrees with /items once something has been deleted;\n- someone managed to store a quantity that isn't a whole number, and /stats has failed ever since.\n\nThe docstring at the top of the file is the contract. Reproduce the problems against the running server, fix them, and check your fixes the same way. Standard library only. Don't leave a server running when you're done.",
+  "timeoutMinutes": 20,
+  "budgetUsd": 0.6
+}

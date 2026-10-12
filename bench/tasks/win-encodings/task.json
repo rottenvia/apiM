@@ -1,0 +1,9 @@
+{
+  "title": "Edit files from an old Windows system without changing their encoding",
+  "category": "windows",
+  "language": "text",
+  "difficulty": "medium",
+  "prompt": "The two files in legacy/ come from an old Windows accounting machine and go back to it afterwards, so each must keep exactly the encoding and line endings it has now. Please:\n\n1. In legacy/settings.ini: the archive folder moves from 2023 to 2024 (same path otherwise), and the export delimiter becomes | instead of ;.\n2. In legacy/клиенты.csv: customer 1047 moved to Нижний Новгород; customer 1012 paid in 150,50, so add that to their balance (keep the number format the file uses); and add a new customer at the end: id 1101, Зоя Щукина, Тверь, balance 0,00.\n3. Write legacy/summary.json (plain UTF-8) from the updated customer file: {\"customers\": <how many>, \"total_balance\": <sum of all balances, as a number>, \"cities\": [<each city once, sorted>]}.\n\nChange nothing else in the two files.",
+  "timeoutMinutes": 15,
+  "budgetUsd": 0.5
+}
