@@ -104,7 +104,7 @@ pub fn cause(kind: &str, subject: &str, detail: &str) -> Cause {
     let starts = |words: &[&str]| words.iter().any(|word| text.starts_with(word));
     match kind {
         "ui_error" | "ui_freeze" | "text_held" => Cause::App,
-        "api_error" => Cause::Provider,
+        "api_error" | "endpoint_moved" => Cause::Provider,
         "run_stopped" if subject == "spending limit" => Cause::Routine,
         "unverified_claim" | "limit_hit" | "browser_blocked" | "run_stopped" | "run_checkpoint" => Cause::Model,
         // A command that ran and failed has given its answer: that is the work, not a fault in it.
@@ -283,6 +283,7 @@ pub fn kind_label(kind: &str) -> &str {
         "command_refused" => "Command refused",
         "browser_blocked" => "Browser blocked",
         "api_error" => "API error",
+        "endpoint_moved" => "Endpoint changed",
         "limit_hit" => "Hit a limit",
         "run_stopped" => "Stopped early",
         "run_checkpoint" => "Long step",

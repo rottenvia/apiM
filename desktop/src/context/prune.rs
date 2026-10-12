@@ -262,8 +262,17 @@ pub fn prune_transcript<'a>(messages: &'a [Value], o: &Options) -> (Cow<'a, [Val
     let results: Vec<usize> = (0..messages.len()).filter(|&i| messages[i]["role"] == "tool").collect();
     // Result collapsing needs old results to exist; argument stubbing does not.
     let batch = o.batch.max(1);
-    let mut collapsible: HashSet<usize> = results[..results.len().saturating_sub(o.keep_verbatim) / batch * batch].iter().copied().collect();
-    let retained = retained_file_content(messages, o.file_read_budget);
+    let old = &results[..results.len().saturating_sub(o.keep_verbatim) / batch * batch];
+    let mut collapsible: HashSet<usize> = old.iter().copied().collect();
+    // In batches, what stays verbatim is decided from the transcript as it stood at the last result that may collapse:
+    // nothing before that point changes until the next batch is old, so the provider's cache holds for the rounds
+    // between. Decided from the whole transcript, a spell of reading pushed one older read out of the budget on every
+    // round, and each of those rounds was paid in full (seen: five rounds in a row with only the system prompt cached).
+    let cut = if batch > 1 { old.last().map_or(0, |last| last + 1) } else { messages.len() };
+    let retained = retained_file_content(&messages[..cut], o.file_read_budget);
+    // After that point a write is judged as things stand now: a file written again a moment later loses its older
+    // copy at once, and little follows it to be sent anew.
+    let newer_writes = if cut < messages.len() { retained_file_content(messages, o.file_read_budget).writes } else { HashSet::new() };
     for i in &retained.reads {
         collapsible.remove(i);
     }
@@ -287,11 +296,12 @@ pub fn prune_transcript<'a>(messages: &'a [Value], o: &Options) -> (Cow<'a, [Val
                 return r;
             }
             if m["role"] == "assistant" && !calls(m).is_empty() {
+                let kept_writes = if i < cut { &retained.writes } else { &newer_writes };
                 let mut touched = false;
                 let mut r = m.clone();
                 for (k, call) in calls(m).iter().enumerate() {
                     let args = call_str(call, "arguments");
-                    if js_len(args) <= MAX_VERBATIM_ARGS_CHARS || retained.writes.contains(call["id"].as_str().unwrap_or("")) {
+                    if js_len(args) <= MAX_VERBATIM_ARGS_CHARS || kept_writes.contains(call["id"].as_str().unwrap_or("")) {
                         continue;
                     }
                     let stub = stub_arguments(args);
@@ -360,6 +370,20 @@ mod tests {
     /// `n` rounds of one command each, every answer big enough to collapse.
     fn rounds(n: usize) -> Vec<Value> {
         (0..n).flat_map(|i| [json!({ "role": "assistant", "content": "", "tool_calls": [{ "id": format!("c{i}"), "type": "function", "function": { "name": "run_command", "arguments": "{}" } }] }), json!({ "role": "tool", "tool_call_id": format!("c{i}"), "content": format!("{i}{}", "y".repeat(4_000)) })]).collect()
+    }
+
+    #[test]
+    fn a_spell_of_reading_changes_old_messages_once_a_batch() {
+        // Forty rounds, each reading a new file of 29,000 characters: far over the read budget.
+        let read = |i: usize| [json!({ "role": "assistant", "content": "", "tool_calls": [{ "id": format!("r{i}"), "type": "function", "function": { "name": "read_file", "arguments": format!("{{\"path\":\"f{i}.rs\"}}") } }] }), json!({ "role": "tool", "tool_call_id": format!("r{i}"), "content": format!("{i}{}", "z".repeat(29_000)) })];
+        let o = Options { batch: COLLAPSE_BATCH, ..Options::default() };
+        let at = |n: usize| prune_transcript(&(0..n).flat_map(read).collect::<Vec<_>>(), &o).0.into_owned();
+        // A round "changes old messages" when what it sends does not start with what the round before sent.
+        let changed = (2..=40).filter(|&n| !at(n).starts_with(&at(n - 1))).count();
+        assert_eq!(changed, 4, "once for each batch of eight that grew old");
+        // And the budget still holds for what is old: five reads of 29,000 fit in 150,000.
+        let kept = at(40).iter().filter(|m| m["role"] == "tool" && m["content"].as_str().is_some_and(|c| c.len() > 20_000)).count();
+        assert_eq!(kept, 5 + 8, "five old reads within the budget, and the newest eight results");
     }
 
     #[test]

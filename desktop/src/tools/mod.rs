@@ -143,12 +143,14 @@ static SCHEMAS: LazyLock<Vec<Value>> = LazyLock::new(|| {
         let more = match t["function"]["name"].as_str().unwrap_or("") {
             "list_files" | "read_file" | "read_files" => " A path written in full (C:\\..., ~/..., %LOCALAPPDATA%\\...) reaches anywhere on the user's computer, to look only; list_files then shows that one folder, newest files first.",
             "delete_file" => " A folder inside the workspace is deleted with everything in it.",
+            // It reads what was said, not what tools answered: a reply looked here for a command's output and lost five rounds on it.
+            "search_conversation" => " It searches what you and the user wrote, never the results of tools: a command's output is in the file its result named.",
             "run_command" if cfg!(windows) => " For questions about the computer itself there are the system's own looking tools (tasklist, systeminfo, wevtutil qe, reg query, sc query) and PowerShell, given as one string: {\"command\":\"powershell\",\"args\":[\"Get-WinEvent -LogName Application -MaxEvents 20 | Format-List TimeCreated,ProviderName,Message\"]}.",
             "run_command" => " For questions about the computer itself there are the system's own looking tools (ps, uname, df, free, uptime).",
             _ => "",
         };
         // Said of every system: a reply that did not know this ran its long programs a second time to get a file.
-        let kept = if t["function"]["name"] == "run_command" { " A long output is shown with its middle cut, and ALL of it is kept in a file under outputs/ that the result names: never redirect a program's output to a file yourself, and never run a program again to see more of what it printed." } else { "" };
+        let kept = if t["function"]["name"] == "run_command" { " A long output is shown with its middle cut, and ALL of it is kept in a file that the result names in its first line (.outputs/...), as is any output you may need again after it has left your context: never redirect a program's output to a file yourself, and never run a program again to see what it printed. Read the file." } else { "" };
         let more = format!("{more}{kept}");
         if !more.is_empty() {
             t["function"]["description"] = Value::String(format!("{}{more}", t["function"]["description"].as_str().unwrap_or("")));
@@ -223,7 +225,13 @@ pub fn parse_call(name: &str, raw: &str) -> Result<Value, serde_json::Error> {
         let parts: Vec<&str> = text.filter(|t| t.contains(KEY)).map(|t| t.split(KEY).collect()).unwrap_or_default();
         let pairs: Vec<(&str, &str)> = parts.iter().skip(1).filter_map(|p| p.split_once(VALUE)).filter(|(arg, _)| kind(arg).is_some()).collect();
         if pairs.is_empty() || pairs.len() + 1 != parts.len() {
-            out.insert(key, value);
+            // A list or an object sent as its own JSON text (`"files": "[{...}]"`) is read as what it is.
+            let unwrapped = match (kind(&key), &value) {
+                (Some("array"), Value::String(text)) => serde_json::from_str::<Value>(text).ok().filter(Value::is_array),
+                (Some("object"), Value::String(text)) => serde_json::from_str::<Value>(text).ok().filter(Value::is_object),
+                _ => None,
+            };
+            out.insert(key, unwrapped.unwrap_or(value));
             continue;
         }
         out.insert(key.clone(), read(&key, parts[0]));
@@ -249,6 +257,8 @@ fn a_call_with_the_models_markup_in_it_is_put_back() {
     let file = r#"{"path": "a.md", "content": "x<arg_key>command</arg_key><arg_value>y"}"#;
     assert_eq!(parse_call("write_file", file).unwrap(), serde_json::from_str::<Value>(file).unwrap());
     assert!(parse_call("run_command", "{\"args\": [").is_err());
+    // A list sent as text is a list; a text argument that looks like a list stays text.
+    assert_eq!(parse_call("run_command", r#"{"command": "python", "args": "[\"a.py\", \"-v\"]", "stdin": "[1]"}"#).unwrap(), serde_json::json!({ "command": "python", "args": ["a.py", "-v"], "stdin": "[1]" }));
 }
 
 #[cfg(test)]

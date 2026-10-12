@@ -378,6 +378,8 @@ pub struct Round {
     pub fields: BTreeSet<String>,
     /// Set when the think was stopped for drafting a whole program: the code lines counted in it.
     pub draft_cut: Option<usize>,
+    /// The endpoint that answered, as OpenRouter names it in the stream ("Relace").
+    pub served: Option<String>,
 }
 
 pub enum Delta<'a> {
@@ -566,6 +568,9 @@ pub async fn stream(client: &reqwest::Client, target: &Target, body: &Value, cut
             }
             if frame["usage"].is_object() {
                 round.usage = Some(Usage::from_wire(&frame["usage"]));
+            }
+            if let Some(name) = frame["provider"].as_str() {
+                round.served = Some(name.to_string());
             }
             let choice = &frame["choices"][0];
             if let Some(reason) = choice["finish_reason"].as_str() {

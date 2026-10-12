@@ -731,6 +731,7 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
     // A reply that already burned its output on thinking is not told it may think again when resumed.
     let (mut force_no_thinking, mut no_think_next, mut continuation_pending) = (resumed_think_nudges > 0, false, false);
     let (mut claim_retried, mut asked_early, mut asked_plan, mut nudged_incomplete, mut ran_without_tools) = (false, false, false, false, false);
+    let mut served_by: Option<String> = None;
     // The guards: one call failing identically, calls that add nothing, a read-only streak, whole-file rewrites, a preview taken for an edit.
     let mut breaker = LoopBreaker::default();
     let mut stalls = StallTracker::default();
@@ -878,7 +879,15 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
         let (result, without_tools) = call_model(&ctx.client, target, &mut body, &mut lane, dedup, cut_drafts, gap, emit).await.inspect_err(|e| log("api_error", &target.model.id, e))?;
         ran_without_tools = without_tools;
 
-        let provider::Round { content, reasoning, tool_calls: calls, finish, usage: round_usage, fields, draft_cut } = result;
+        let provider::Round { content, reasoning, tool_calls: calls, finish, usage: round_usage, fields, draft_cut, served } = result;
+        // A round answered by another endpoint than the round before starts with nothing cached there, and at that
+        // endpoint's prices: OpenRouter falls to the spares when the first is busy. Logged, so a low cached share can be traced.
+        if let Some(now) = served {
+            if let Some(before) = served_by.as_ref().filter(|before| **before != now) {
+                log_with("endpoint_moved", &now, &format!("Round {round} was answered by {now}, the round before by {before}."), json!({ "round": round }));
+            }
+            served_by = Some(now);
+        }
         // A think stopped by the loop never reached its usage frame: about four characters per token, none of it cached.
         let round_usage = round_usage.or_else(|| {
             draft_cut.map(|_| {
@@ -1993,6 +2002,35 @@ mod tests {
         let (_, _, _, sent) = reply(vec![note, again, sse(&[says("Here is what I did: noted where the parser lives.", Some("stop"))])], "none", None).await;
         assert!(last_result(&sent[1]).starts_with("Finding recorded ["), "{}", last_result(&sent[1]));
         assert!(last_result(&sent[2]).starts_with("No active finding with id nope was found to revise."), "{}", last_result(&sent[2]));
+    }
+
+    /// How much of each request is the request before it, unchanged from the start: what a provider's cache can serve.
+    /// (index of the first message that differs, messages in the earlier request) for each round after the first.
+    fn kept_prefixes(sent: &[Value]) -> Vec<(usize, usize)> {
+        sent.windows(2)
+            .map(|pair| {
+                let (before, after) = (pair[0]["messages"].as_array().unwrap(), pair[1]["messages"].as_array().unwrap());
+                (before.iter().zip(after).take_while(|(a, b)| a == b).count(), before.len())
+            })
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_round_sends_the_round_before_it_unchanged() {
+        // Sixteen rounds of reading, 24,000 characters a round: past the read budget by the seventh.
+        let reads: Vec<String> = (0..16).map(|i| sse(&[call_as(&format!("r{i}"), "read_file", &json!({ "path": format!("f{i}.txt") }).to_string())])).collect();
+        let replies = reads.into_iter().chain([sse(&[says("Here is what I found: sixteen files of lines.", Some("stop"))])]).collect();
+        let ran = run_with(replies, "none", None, |dir| {
+            for i in 0..16 {
+                std::fs::write(dir.join(format!("f{i}.txt")), format!("file {i}\n").repeat(3_000)).unwrap();
+            }
+            opening(dir, "Read the sixteen files.")
+        })
+        .await;
+        let kept = kept_prefixes(&ran.sent);
+        // All but the newest result (it loses the note that rode on it) is the same, except in the round a batch grows old.
+        let broken = kept.iter().filter(|(same, of)| same + 2 < *of).count();
+        assert!(broken <= 2, "{kept:?}");
     }
 
     /// The arguments of every tool call in a request, oldest first.

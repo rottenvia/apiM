@@ -46,6 +46,23 @@ three times: one run of a task says little, models differ from try to try. `BENC
 
 Which endpoint serves the model changes what is measured: pin one with `APIM_ENDPOINT=<tag>` when comparing two builds.
 
+## Without a model: what a round sends again
+
+Every round sends the whole conversation, and the provider reads from its cache only the start that is unchanged since
+the round before. `bench/wire` measures that start with no key and no cost:
+
+```bash
+python bench/wire/stub.py bench/wire/example-script.json out 18999 &
+OPENROUTER_BASE_URL=http://127.0.0.1:18999 OPENROUTER_API_KEY=x APIM_DATA_DIR=<a spare folder> \
+  desktop/target/release/apim --ask --auto --model glm-5.3-flash --dir <a copy of tasks/explore-large-codebase/files> "any question"
+python bench/wire/wirediff.py out
+```
+
+`stub.py` stands in for OpenRouter: it answers each request with the next step of the script (a list of tool calls,
+or a text that ends the reply) and keeps the request. `wirediff.py` prints, for each request, how much of it is the
+request before it from the start, and the message where the two part. `STUB_PROVIDERS=Relace,Relace,Sail` makes the
+stand-in name a different endpoint per request, as OpenRouter does when it falls to a spare.
+
 ## The tasks
 
 | kind | tasks |

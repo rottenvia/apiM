@@ -7,7 +7,7 @@ use regex::{Regex, RegexBuilder};
 use serde_json::Value;
 use std::path::{Component, Path, PathBuf};
 
-const IGNORED: &[&str] = &[".history", ".snapshots", ".packages", ".analysis", "node_modules", ".git", ".next", "__pycache__", ".venv", "venv", "target"];
+const IGNORED: &[&str] = &[".history", ".snapshots", ".packages", ".analysis", ".outputs", "node_modules", ".git", ".next", "__pycache__", ".venv", "venv", "target"];
 /// Build output, hidden only at the top of the workspace: a `build` folder deeper in is as likely to be source.
 const IGNORED_AT_ROOT: &[&str] = &["dist", "build"];
 const MAX_WALK: usize = 50_000;
@@ -952,7 +952,14 @@ pub fn search_files(ctx: &Ctx, args: &Value) -> Output {
     // "no matches" for text the file held: the argument was not read, and the file was over the size to search.
     let scope = str_arg(args, "path").replace('\\', "/");
     let scope = scope.trim().trim_start_matches("./").trim_matches('/');
-    let inside: Vec<(String, u64)> = walk(&ctx.root, &ctx.root).into_iter().filter(|(p, _)| scope.is_empty() || p == scope || p.strip_prefix(scope).is_some_and(|rest| rest.starts_with('/'))).collect();
+    // Walked from the named place itself: a folder the file list leaves out (`.outputs`, where command outputs are
+    // kept) is searched when it is asked for by name.
+    let named_place = Some(ctx.root.join(scope)).filter(|place| !scope.is_empty() && !scope.split('/').any(|part| part == "..") && place.exists());
+    let inside: Vec<(String, u64)> = match &named_place {
+        Some(place) => walk(&ctx.root, place),
+        None if scope.is_empty() => walk(&ctx.root, &ctx.root),
+        None => Vec::new(),
+    };
     if inside.is_empty() && !scope.is_empty() {
         return Output::fail(format!("Nothing at {scope} to search: path is a file or a folder of the workspace."));
     }

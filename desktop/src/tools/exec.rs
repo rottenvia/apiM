@@ -502,7 +502,8 @@ pub async fn execute(ctx: &Ctx, program: &str, argv: Vec<String>, reason: &str, 
     execute_keeping(ctx, program, argv, reason, limit, stdin, false).await
 }
 
-/// `execute`, and with `keep` the whole output is left in `outputs/` when it is longer than the answer shows.
+/// `execute`, and with `keep` the whole output is left in `.outputs/` when the answer may not hold it for long:
+/// when it is longer than the answer shows, or long enough to be folded out of the reply's context later.
 async fn execute_keeping(ctx: &Ctx, program: &str, argv: Vec<String>, reason: &str, limit: Option<Duration>, stdin: Option<&str>, keep: bool) -> Result<Ran, Output> {
     let mut launch = prepare(ctx, program.trim(), argv).map_err(Output::fail)?;
     let short = match stdin {
@@ -530,27 +531,41 @@ async fn execute_keeping(ctx: &Ctx, program: &str, argv: Vec<String>, reason: &s
         });
     }
     let started = Instant::now();
-    // Named for the moment and the program: `outputs/124857-luau.txt`.
+    // Named for the moment and the program: `.outputs/124857-luau.txt`. The folder is left out of the file list, as `.history` is.
     let stem: String = base_name(&launch.program.to_string_lossy()).chars().filter(|c| c.is_ascii_alphanumeric()).take(24).collect();
     let stamp = chrono::Local::now().format("%H%M%S").to_string();
     // Two runs in one second, or the same second of another day: the next free name.
-    let name = (1..).map(|n| if n == 1 { format!("outputs/{stamp}-{stem}.txt") } else { format!("outputs/{stamp}-{stem}-{n}.txt") }).find(|name| !ctx.root.join(name).exists()).unwrap_or_default();
+    let name = (1..).map(|n| if n == 1 { format!(".outputs/{stamp}-{stem}.txt") } else { format!(".outputs/{stamp}-{stem}-{n}.txt") }).find(|name| !ctx.root.join(name).exists()).unwrap_or_default();
     let keeper = keep.then(|| Arc::new(Mutex::new(Kept { path: ctx.root.join(&name), file: None, bytes: 0 })));
     let (code, out, timed_out) = run_to_end(child, limit, keeper.clone()).await;
     let kept = keeper.and_then(|keeper| {
         let mut kept = keeper.lock().unwrap();
         // Closed before it is named or removed.
         kept.file = None;
-        if out.trim().chars().count() > MAX_OUTPUT {
+        // An answer of this size is folded to one line once it is old (`prune::MIN_COLLAPSE_CHARS`). Without its file it
+        // could not be read again: a reply that needed an earlier run's output undid six files to print it once more.
+        if out.trim().chars().count() >= crate::context::prune::MIN_COLLAPSE_CHARS {
+            forget_old_outputs(kept.path.parent());
             Some((name, kept.bytes))
         } else {
-            // All of it is in the answer: no file is left behind, nor the folder if this was its only one.
+            // All of it is in the answer, and stays there: no file is left behind, nor the folder if this was its only one.
             let _ = std::fs::remove_file(&kept.path);
             let _ = kept.path.parent().map(std::fs::remove_dir);
             None
         }
     });
     Ok(Ran { display: launch.display, code, out, timed_out, took: started.elapsed(), error: None, kept })
+}
+
+/// At most this many kept outputs: the oldest go when one more is kept.
+const KEPT_OUTPUTS: usize = 300;
+
+fn forget_old_outputs(folder: Option<&Path>) {
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = folder.and_then(|f| std::fs::read_dir(f).ok()).into_iter().flatten().flatten().filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path()))).collect();
+    files.sort();
+    for (_, path) in files.iter().take(files.len().saturating_sub(KEPT_OUTPUTS)) {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// Keeps the first HEAD_CHARS and the newest part of a long output, and counts the middle, as the web's OutputBuffer does.
@@ -584,7 +599,9 @@ fn telling_line(out: &str) -> Option<String> {
 
 /// Formats a finished run the way the web's formatRunResult does: the status first, then the output.
 fn report(ran: &Ran) -> Output {
-    let mut parts = vec![format!("$ {}", ran.display)];
+    // First, so the one line an old answer is folded to still names the file.
+    let mut parts: Vec<String> = ran.kept.iter().map(|(path, _)| format!("Output kept in {path}: read it there, do not run this again for it.")).collect();
+    parts.push(format!("$ {}", ran.display));
     let (ok, summary) = if let Some(err) = &ran.error {
         parts.push(format!("\nSTATUS: could not run - {err}"));
         (false, format!("Could not run: {err}"))
@@ -1059,11 +1076,15 @@ mod tests {
         let ctx = crate::tools::test_ctx(&dir, Approval::Auto);
         let long = run_command(&ctx, &json!({ "command": "python", "args": ["-c", "for i in range(9000): print('line', i)"] })).await;
         let named = long.text.split("is in ").nth(1).and_then(|rest| rest.split(',').next()).unwrap_or_default().to_string();
-        assert!(long.ok && named.starts_with("outputs/") && named.ends_with(".txt") && named.contains("-python") && long.text.contains("do not run the program again"), "{}", &long.text[long.text.len().saturating_sub(400)..]);
+        assert!(long.ok && named.starts_with(".outputs/") && long.text.starts_with(&format!("Output kept in {named}:")) && named.ends_with(".txt") && named.contains("-python") && long.text.contains("do not run the program again"), "{}", &long.text[long.text.len().saturating_sub(400)..]);
         let whole = std::fs::read_to_string(dir.join(&named)).unwrap();
         assert!(whole.lines().count() == 9000 && whole.contains("line 4500") && !long.text.contains("line 4500"));
         let short = run_command(&ctx, &json!({ "command": "python", "args": ["-c", "print('one line')"] })).await;
-        assert!(short.ok && !short.text.contains("outputs/") && std::fs::read_dir(dir.join("outputs")).unwrap().count() == 1);
+        assert!(short.ok && !short.text.contains("outputs/") && std::fs::read_dir(dir.join(".outputs")).unwrap().count() == 1);
+        // One that is shown whole but will be folded once it is old keeps its file too, and is not in the file list.
+        let medium = run_command(&ctx, &json!({ "command": "python", "args": ["-c", "for i in range(200): print('row', i)"] })).await;
+        assert!(medium.text.starts_with("Output kept in .outputs/") && medium.text.contains("row 100") && std::fs::read_dir(dir.join(".outputs")).unwrap().count() == 2, "{}", medium.text);
+        assert!(crate::tools::files::walk(&dir, &dir).is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
 

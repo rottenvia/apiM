@@ -39,7 +39,7 @@ pub const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
 pub const MAX_FILES_PER_WORKSPACE: usize = 100_000;
 
 /// Names the web's listing skips at any depth, files and folders alike: its own bookkeeping and installed packages.
-const IGNORED: &[&str] = &[".history", ".snapshots", ".packages", ".analysis", ".workspace-id", "node_modules", ".git", ".next", "__pycache__", ".venv", "venv"];
+const IGNORED: &[&str] = &[".history", ".snapshots", ".packages", ".analysis", ".outputs", ".workspace-id", "node_modules", ".git", ".next", "__pycache__", ".venv", "venv"];
 /// Build output, hidden only at the top of the workspace: a `build` folder deeper in is as likely to be source.
 const IGNORED_AT_ROOT: &[&str] = &["dist", "build"];
 
