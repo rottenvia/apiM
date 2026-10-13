@@ -4,7 +4,7 @@ use crate::models::{CustomModel, DEFAULT_MODEL_ID, Usage};
 use crate::plugins::Plugin;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// `%APPDATA%\apiM`, `~/Library/Application Support/apiM` or `~/.local/share/apiM`.
 /// `APIM_DATA_DIR` overrides it (tests, portable installs).
@@ -421,7 +421,7 @@ pub struct Conversation {
 }
 
 /// What the sidebar needs without holding every chat in memory.
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct ChatMeta {
     pub id: String,
     pub title: String,
@@ -897,9 +897,18 @@ impl Conversation {
     }
 
     pub fn load(id: &str) -> Option<Conversation> {
+        Self::load_showing(id, None)
+    }
+
+    /// `load`, telling `progress` how far the file has come: a long chat takes seconds to read.
+    pub fn load_showing(id: &str, progress: Option<&Progress>) -> Option<Conversation> {
         flush();
         let slug = Self::list().into_iter().find(|c| c.id == id)?.slug;
-        let w: wire::Conv = serde_json::from_slice(&std::fs::read(chats_dir().join(&slug).join("chat.json")).ok()?).ok()?;
+        let path = chats_dir().join(&slug).join("chat.json");
+        if let Some(progress) = progress {
+            progress.total.store(stamp_of(&path).map_or(0, |stamp| stamp.0), Ordering::Relaxed);
+        }
+        let w: wire::Conv = read_chat(&path, progress, true)?;
         Some(Self::from_wire(w, slug))
     }
 
@@ -945,7 +954,7 @@ impl Conversation {
         // ponytail: a program closed in that second leaves what was not yet removed; sweep folders without a chat.json at start if that shows.
         let folders = [chats_dir().join(&meta.slug), data_dir().join("workspaces").join(&meta.slug), data_dir().join("state").join(&meta.slug)];
         let _ = std::fs::remove_file(folders[0].join("chat.json"));
-        std::thread::spawn(move || {
+        crate::background(move || {
             for folder in folders {
                 let _ = std::fs::remove_dir_all(folder);
             }
@@ -982,26 +991,44 @@ impl Conversation {
 
     /// Newest first. A chat file is read again only when its size or time changed, as the web app does it.
     pub fn list() -> Vec<ChatMeta> {
+        Self::list_showing(None)
+    }
+
+    /// `list`, telling `progress` how far the reading has come: the first listing of a start can take seconds.
+    pub fn list_showing(progress: Option<&Progress>) -> Vec<ChatMeta> {
         let dir = chats_dir();
         let mut listed = LISTED.lock().unwrap();
+        // What the last run knew of this folder comes first: the files that have not changed since are not read.
+        if SEEDED.lock().unwrap().replace(dir.clone()).as_ref() != Some(&dir) {
+            for (path, known) in read_index(&dir) {
+                listed.entry(path).or_insert(known);
+            }
+        }
         // A chat saved a moment ago is listed from memory: its file may not be written yet.
         let mut fresh: std::collections::BTreeMap<PathBuf, Listed> = listed.iter().filter(|(path, l)| l.waiting > 0 && path.starts_with(&dir)).map(|(path, l)| (path.clone(), l.clone())).collect();
+        // Found first and read after, so the bar knows how much there is before the first byte of it.
+        let mut unread = Vec::new();
         for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten().filter(|e| e.path().is_dir()) {
             let path = entry.path().join("chat.json");
             if fresh.contains_key(&path) {
                 continue;
             }
             let Some(stamp) = stamp_of(&path) else { continue };
-            let known = listed.get(&path).filter(|l| l.stamp == Some(stamp)).cloned();
-            let read = || {
-                let w: wire::Summary = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
-                let meta = ChatMeta { id: w.id, title: w.title, archived: w.archived, updated_at: from_iso(&w.updated_at), message_count: w.messages.len(), slug: entry.file_name().to_string_lossy().into_owned() };
-                Some(Listed { stamp: Some(stamp), waiting: 0, meta })
-            };
-            if let Some(l) = known.or_else(read) {
-                fresh.insert(path, l);
+            match listed.get(&path).filter(|l| l.stamp == Some(stamp)) {
+                Some(known) => drop(fresh.insert(path, known.clone())),
+                None => unread.push((path, stamp, entry.file_name().to_string_lossy().into_owned())),
             }
         }
+        if let Some(progress) = progress {
+            progress.total.store(unread.iter().map(|(_, stamp, _)| stamp.0).sum(), Ordering::Relaxed);
+        }
+        for (path, stamp, slug) in unread {
+            if let Some(w) = read_chat::<wire::Summary>(&path, progress, false) {
+                let meta = ChatMeta { id: w.id, title: w.title, archived: w.archived, updated_at: from_iso(&w.updated_at), message_count: w.messages.len(), slug };
+                fresh.insert(path, Listed { stamp: Some(stamp), waiting: 0, meta });
+            }
+        }
+        write_index(&dir, &fresh);
         *listed = fresh;
         let mut out: Vec<ChatMeta> = listed.values().map(|l| l.meta.clone()).filter(|c| !c.id.is_empty()).collect();
         out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
@@ -1021,6 +1048,127 @@ struct Listed {
 
 static LISTED: std::sync::Mutex<std::collections::BTreeMap<PathBuf, Listed>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
 
+// ---------------------------------------------------------------- the list, kept between starts
+//
+// Every start used to read every chat file whole to list it: 264 MB of them on one PC, before the window drew
+// anything. The list is kept in `chat-index.json` beside the chats, each entry with the size and time of the
+// file it was read from, and a start reads only the files that have changed since.
+
+/// The chats folder `LISTED` was last seeded for from the kept list.
+static SEEDED: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+/// What the kept list held when it was last written: it is written again only when that changes.
+static INDEXED: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Serialize, Deserialize, Default)]
+#[serde(default)]
+struct Index {
+    /// `PACE`, so the first bar of a start is drawn at this disk's speed.
+    pace: [u64; 2],
+    /// (bytes, time changed in nanoseconds, the chat) of every chat file.
+    chats: Vec<(u64, u64, ChatMeta)>,
+}
+
+fn index_path(dir: &Path) -> PathBuf {
+    dir.with_file_name("chat-index.json")
+}
+
+fn read_index(dir: &Path) -> Vec<(PathBuf, Listed)> {
+    let index: Index = std::fs::read(index_path(dir)).ok().and_then(|raw| serde_json::from_slice(&raw).ok()).unwrap_or_default();
+    for (slot, pace) in PACE.iter().zip(index.pace) {
+        if pace > 0 {
+            slot.store(pace, Ordering::Relaxed);
+        }
+    }
+    let stamp = |bytes, nanos| Some((bytes, std::time::UNIX_EPOCH + std::time::Duration::from_nanos(nanos)));
+    index.chats.into_iter().map(|(bytes, nanos, meta)| (dir.join(&meta.slug).join("chat.json"), Listed { stamp: stamp(bytes, nanos), waiting: 0, meta })).collect()
+}
+
+/// Hands the list to the writing thread when it differs from what is kept. A chat still on its way to disk has
+/// no size and time yet and is left out: the next start reads that one file.
+fn write_index(dir: &Path, listed: &std::collections::BTreeMap<PathBuf, Listed>) {
+    use std::hash::{Hash, Hasher};
+    let nanos = |time: std::time::SystemTime| time.duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_nanos() as u64);
+    let chats: Vec<(u64, u64, ChatMeta)> = listed.values().filter_map(|l| l.stamp.map(|(bytes, time)| (bytes, nanos(time), l.meta.clone()))).collect();
+    let mut print = std::collections::hash_map::DefaultHasher::new();
+    dir.hash(&mut print);
+    for (bytes, time, meta) in &chats {
+        (bytes, time, &meta.id, &meta.title, meta.archived, &meta.slug).hash(&mut print);
+    }
+    if INDEXED.swap(print.finish(), Ordering::Relaxed) != print.finish() {
+        let index = Index { pace: [PACE[0].load(Ordering::Relaxed), PACE[1].load(Ordering::Relaxed)], chats };
+        let _ = WRITER.send(Job::Index(index_path(dir), serde_json::to_vec(&index).unwrap_or_default()));
+    }
+}
+
+// ---------------------------------------------------------------- reading, with a bar
+
+/// How far a read of chat files has come, for whoever draws a bar of it.
+#[derive(Default)]
+pub struct Progress {
+    /// Bytes of every file this read takes in, and of the files it has finished.
+    pub total: AtomicU64,
+    done: AtomicU64,
+    /// The file in hand: its bytes, when it was started, and whether its messages are built (an opening) or skipped (a listing).
+    current: std::sync::Mutex<Option<(u64, std::time::Instant, bool)>>,
+}
+
+impl Progress {
+    /// A read part way through, for a self-portrait of its bar: this much done, and a file of `in_hand` just begun.
+    pub fn staged(total: u64, done: u64, in_hand: u64) -> Progress {
+        Progress { total: total.into(), done: done.into(), current: Some((in_hand, std::time::Instant::now(), false)).into() }
+    }
+
+    /// (the share done, seconds left).
+    pub fn eta(&self) -> (f32, f32) {
+        // Held across both, so a file finishing is never counted as done and in hand at once.
+        let current = self.current.lock().unwrap();
+        let pace = PACE[current.is_some_and(|file| file.2) as usize].load(Ordering::Relaxed) as f32;
+        eta(self.total.load(Ordering::Relaxed), self.done.load(Ordering::Relaxed), current.map(|(bytes, since, _)| (bytes, since.elapsed().as_secs_f32())), pace)
+    }
+
+    pub fn megabytes(&self) -> f32 {
+        self.total.load(Ordering::Relaxed) as f32 / 1_048_576.0
+    }
+}
+
+/// Bytes a second a chat file is taken in at, [listed, opened]: measured on every read of some size, and
+/// remembered between starts. The file in hand is one call to the JSON reader, which says nothing until it is
+/// done; this is what tells how far it has come meanwhile.
+static PACE: [AtomicU64; 2] = [AtomicU64::new(400_000_000), AtomicU64::new(120_000_000)];
+
+/// (the share done, seconds left) of a read: the files finished, and the one in hand for `secs` as far as `pace`
+/// says it has come. It is never called finished before it is.
+pub fn eta(total: u64, done: u64, current: Option<(u64, f32)>, pace: f32) -> (f32, f32) {
+    if total == 0 {
+        return (1.0, 0.0);
+    }
+    let pace = pace.max(1.0);
+    let came = done as f32 + current.map_or(0.0, |(bytes, secs)| (pace * secs).min(bytes as f32 * 0.95));
+    ((came / total as f32).min(1.0), (total as f32 - came).max(0.0) / pace)
+}
+
+/// Reads one chat file, keeping `progress` told and learning the pace from it.
+fn read_chat<T: serde::de::DeserializeOwned>(path: &Path, progress: Option<&Progress>, opening: bool) -> Option<T> {
+    let bytes = stamp_of(path).map_or(0, |stamp| stamp.0);
+    let started = std::time::Instant::now();
+    if let Some(progress) = progress {
+        *progress.current.lock().unwrap() = Some((bytes, started, opening));
+    }
+    let read = std::fs::read(path).ok().and_then(|raw| serde_json::from_slice(&raw).ok());
+    // A small file tells of the time to find it on the disk, not of the pace.
+    if bytes > 4_000_000 {
+        let pace = &PACE[opening as usize];
+        let measured = bytes as f64 / started.elapsed().as_secs_f64().max(1e-6);
+        pace.store(((pace.load(Ordering::Relaxed) as f64 + measured) / 2.0) as u64, Ordering::Relaxed);
+    }
+    if let Some(progress) = progress {
+        let mut current = progress.current.lock().unwrap();
+        progress.done.fetch_add(bytes, Ordering::Relaxed);
+        *current = None;
+    }
+    read
+}
+
 fn stamp_of(path: &Path) -> Option<(u64, std::time::SystemTime)> {
     let meta = std::fs::metadata(path).ok()?;
     Some((meta.len(), meta.modified().ok()?))
@@ -1028,6 +1176,8 @@ fn stamp_of(path: &Path) -> Option<(u64, std::time::SystemTime)> {
 
 enum Job {
     Write(PathBuf, Box<wire::Conv>),
+    /// The kept list of chats, already as bytes.
+    Index(PathBuf, Vec<u8>),
     Flush(std::sync::mpsc::Sender<()>),
 }
 
@@ -1041,6 +1191,9 @@ static WRITER: std::sync::LazyLock<std::sync::mpsc::Sender<Job>> = std::sync::La
                 match job {
                     Job::Flush(done) => {
                         let _ = done.send(());
+                    }
+                    Job::Index(path, json) => {
+                        let _ = write_atomic(path, json);
                     }
                     Job::Write(path, conv) => {
                         // Several saves of one chat in line: only the newest is worth the disk.
@@ -1110,6 +1263,40 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_bar_follows_the_files_done_and_the_pace_of_the_one_in_hand() {
+        // Nothing to read is a full bar; nothing read yet an empty one with the whole wait ahead.
+        assert_eq!((eta(0, 0, None, 100.0), eta(1000, 0, None, 100.0)), ((1.0, 0.0), (0.0, 10.0)));
+        // 400 of 1000 done, and two seconds into a file of 600 at 100 a second: 600 came, four seconds left.
+        assert_eq!(eta(1000, 400, Some((600, 2.0)), 100.0), (0.6, 4.0));
+        // A file slower than the pace said stops short of its end: the bar never claims what is not read.
+        let (share, left) = eta(1000, 400, Some((600, 60.0)), 100.0);
+        assert!((share - 0.97).abs() < 1e-4 && (left - 0.3).abs() < 1e-3, "{share} {left}");
+    }
+
+    #[test]
+    fn the_list_is_kept_between_starts_and_only_changed_chats_are_read() {
+        let dir = std::env::temp_dir().join(format!("apim-index-{}", new_id())).join("chats");
+        let file = |slug: &str| dir.join(slug).join("chat.json");
+        for (slug, title) in [("one", "One"), ("two", "Two")] {
+            write_atomic(&file(slug), format!(r#"{{"id":"{slug}","title":"{title}","updatedAt":"2026-10-01T10:00:00.000Z","messages":[{{}},{{}}]}}"#).as_bytes()).unwrap();
+        }
+        let listed: std::collections::BTreeMap<PathBuf, Listed> = ["one", "two"].iter().map(|slug| (file(slug), Listed { stamp: stamp_of(&file(slug)), waiting: 0, meta: ChatMeta { id: slug.to_string(), title: "kept".into(), slug: slug.to_string(), ..Default::default() } })).collect();
+        write_index(&dir, &listed);
+        flush();
+        // What comes back is what was kept, each with the size and time of its file, so neither is read again.
+        let back = read_index(&dir);
+        assert_eq!(back.len(), 2);
+        assert!(back.iter().all(|(path, known)| known.stamp == stamp_of(path) && known.meta.title == "kept"), "stamps survive the round trip");
+        // A file that grew no longer matches its entry.
+        std::fs::write(file("two"), br#"{"id":"two","title":"Two, longer","messages":[]}"#).unwrap();
+        assert_eq!(back.iter().filter(|(path, known)| known.stamp == stamp_of(path)).count(), 1);
+        // A kept list that is not JSON is no list: everything is read.
+        std::fs::write(index_path(&dir), b"{ half").unwrap();
+        assert!(read_index(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
 
     /// Timings against real chats, read-only: `APIM_DATA_DIR=<data> cargo test --release perf_probe -- --ignored --nocapture`.
     #[test]

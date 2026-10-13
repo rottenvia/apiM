@@ -143,7 +143,7 @@ pub fn refresh(app: &mut App) {
             // every step of a reply: not on the thread that draws. A newer listing replaces one still on its way.
             let (tx, rx) = std::sync::mpsc::channel();
             let ctx = app.ctx.clone();
-            std::thread::spawn(move || {
+            crate::background(move || {
                 let _ = tx.send(list(workspace));
                 ctx.request_repaint();
             });

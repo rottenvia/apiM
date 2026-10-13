@@ -21,6 +21,36 @@ pub fn tick(ui: &Ui) {
     ui.ctx().request_repaint_after(std::time::Duration::from_millis(wait));
 }
 
+/// A number that travels to `target` over `secs`, easing out, from wherever it stood when the target moved.
+/// With `travel` false a new target is simply taken: what it places did not go anywhere, its surroundings did.
+pub fn glide(ctx: &egui::Context, id: egui::Id, target: f32, secs: f32, travel: bool) -> f32 {
+    let now = ctx.input(|i| i.time);
+    let known = ctx.data(|d| d.get_temp::<(f32, f32, f64)>(id));
+    let (from, to, since) = known.unwrap_or((target, target, now - secs as f64));
+    let t = (((now - since) / secs as f64) as f32).clamp(0.0, 1.0);
+    let at = from + (to - from) * egui::emath::easing::cubic_out(t);
+    if to == target && known.is_some() {
+        if t < 1.0 {
+            ctx.request_repaint();
+        }
+        return at;
+    }
+    let travels = travel && known.is_some();
+    ctx.data_mut(|d| d.insert_temp(id, if travels { (at, target, now) } else { (target, target, now - secs as f64) }));
+    ctx.request_repaint();
+    if travels { at } else { target }
+}
+
+/// How far something that came on screen `since` is into its entrance of `secs`, eased out: 0 is not there yet,
+/// 1 is in place. One frame is counted in from the start, so its first frame already shows.
+pub fn entrance(ctx: &egui::Context, since: std::time::Instant, secs: f32) -> f32 {
+    let t = ((since.elapsed().as_secs_f32() + 0.016) / secs).min(1.0);
+    if t < 1.0 {
+        ctx.request_repaint();
+    }
+    egui::emath::easing::cubic_out(t)
+}
+
 pub fn lerp(a: Color32, b: Color32, t: f32) -> Color32 {
     a.lerp_to_gamma(b, t)
 }
@@ -64,7 +94,9 @@ pub fn lines(s: impl Into<String>, size: f32, line_height: f32, weight: W, color
 
 fn clickable(ui: &mut Ui, size: egui::Vec2) -> (Rect, Response) {
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-    (rect, response.on_hover_cursor(CursorIcon::PointingHand))
+    // Every button gives a little under the pointer while it is held down: it is drawn a point smaller all round.
+    let down = ui.ctx().animate_bool_with_time(response.id.with("down"), response.is_pointer_button_down_on(), 0.08);
+    (rect.shrink(down), response.on_hover_cursor(CursorIcon::PointingHand))
 }
 
 fn boxed(ui: &Ui, rect: Rect, radius: f32, fill: Color32, border: Color32) {
@@ -195,6 +227,31 @@ pub fn mini_btn(ui: &mut Ui, icon: Icon, size: f32, icon_size: f32, tip: &str) -
     if tip.is_empty() { response } else { response.on_hover_text(tip) }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_glide_travels_to_a_new_target_and_takes_one_it_is_told_not_to_travel_to() {
+        let ctx = egui::Context::default();
+        let id = egui::Id::new("glide");
+        let mut at = |time: f64, target: f32, travel: bool| {
+            let mut seen = 0.0;
+            let _ = ctx.run_ui(egui::RawInput { time: Some(time), ..Default::default() }, |ui| seen = glide(ui.ctx(), id, target, 0.2, travel));
+            seen
+        };
+        // Where it is first asked for, it simply is.
+        assert_eq!(at(1.0, 10.0, true), 10.0);
+        // A new target: it starts from where it stood, is part of the way a moment later, and arrives.
+        assert_eq!(at(1.1, 50.0, true), 10.0);
+        let midway = at(1.2, 50.0, true);
+        assert!(midway > 30.0 && midway < 50.0, "{midway}");
+        assert_eq!(at(1.4, 50.0, true), 50.0);
+        // Told not to travel, it is at the next target at once.
+        assert_eq!((at(1.5, 90.0, false), at(1.51, 90.0, true)), (90.0, 90.0));
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum SendKind {
     Send { enabled: bool },
@@ -282,16 +339,17 @@ pub fn segmented(ui: &mut Ui, items: &[(&str, usize)], active: usize) -> Option<
     let inner = track.shrink(2.0);
     let width = (inner.width() - 2.0 * (items.len() as f32 - 1.0)) / items.len() as f32;
     let mut clicked = None;
+    // The raised item is one piece that slides to whichever is chosen.
+    let at = glide(ui.ctx(), ui.id().with("segmented-at"), active as f32 * (width + 2.0), 0.2, true);
+    let raised = Rect::from_min_size(pos2(inner.left() + at, inner.top()), vec2(width, 26.0));
+    ui.painter().add(egui::Shadow { offset: [0, 1], blur: 2, spread: 0, color: Color32::from_black_alpha(64) }.as_shape(raised, CornerRadius::same(8)));
+    ui.painter().rect_filled(raised, 8.0, p.elevated);
     for (i, (label, count)) in items.iter().enumerate() {
         let rect = Rect::from_min_size(pos2(inner.left() + i as f32 * (width + 2.0), inner.top()), vec2(width, 26.0));
         let response = ui.interact(rect, ui.id().with(("segmented", i)), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
         let on = i == active;
         let t = fade(ui, response.id, response.hovered());
-        let fg = if on { p.text } else { lerp(p.muted, p.text2, t) };
-        if on {
-            ui.painter().add(egui::Shadow { offset: [0, 1], blur: 2, spread: 0, color: Color32::from_black_alpha(64) }.as_shape(rect, CornerRadius::same(8)));
-            ui.painter().rect_filled(rect, 8.0, p.elevated);
-        }
+        let fg = lerp(lerp(p.muted, p.text2, t), p.text, fade(ui, response.id.with("on"), on));
         let name = galley(ui, label, theme::font(12.0, W::Medium), fg);
         let number = (*count > 0).then(|| galley(ui, &count.to_string(), theme::font(12.0, W::Medium), fg.gamma_multiply(0.55)));
         let total = name.size().x + number.as_ref().map_or(0.0, |n| n.size().x + 5.0);

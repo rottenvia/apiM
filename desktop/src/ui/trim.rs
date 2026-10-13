@@ -50,7 +50,7 @@ pub fn of(ctx: &egui::Context, path: &Path) -> Look {
     }
     known.insert(key.clone(), Look::Pending);
     let ctx = ctx.clone();
-    std::thread::spawn(move || {
+    crate::background(move || {
         let look = image::open(&key.0).map_or(Look::Unreadable, |picture| {
             let picture = picture.to_rgba8();
             let (w, h) = (picture.width(), picture.height());

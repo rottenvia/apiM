@@ -229,7 +229,7 @@ fn search(app: &mut App, ctx: &egui::Context) -> bool {
         if since >= Duration::from_millis(180) {
             let (tx, rx) = mpsc::channel();
             let (asked, wake) = (needle.clone(), ctx.clone());
-            std::thread::spawn(move || {
+            crate::background(move || {
                 let hits = store::search_chats(&asked, 30);
                 let _ = tx.send((asked, hits));
                 wake.request_repaint();

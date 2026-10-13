@@ -280,7 +280,7 @@ fn processes(app: &mut App, ui: &mut egui::Ui) {
     // Stopped off the window's thread: `taskkill` takes a moment, and the row turns to "stopped" when the process is gone.
     for proc in stop {
         let pid = proc.pid;
-        std::thread::spawn(move || exec::kill_tree(pid));
+        crate::background(move || exec::kill_tree(pid));
         st.stopped.insert(proc.id.clone());
         // What it was writing is final now.
         app.files_stale = true;

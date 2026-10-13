@@ -41,7 +41,49 @@ use std::sync::Arc;
 fn runtime() -> tokio::runtime::Runtime {
     // First thing, so a crash anywhere after this is in the problem report.
     diagnostics::watch_for_crashes();
-    tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("async runtime")
+    // The threads tokio starts for blocking work are kept, not let go after ten idle seconds: see `background`.
+    tokio::runtime::Builder::new_multi_thread().worker_threads(2).thread_keep_alive(std::time::Duration::from_secs(24 * 3600)).enable_all().build().expect("async runtime")
+}
+
+/// Runs `job` off the thread that asked, on one of a few threads kept for it.
+///
+/// A thread started for each job held the window still. Starting any thread in this program made the frame
+/// after it come 40 to 60 ms late on the PC this was measured on (ending one cost nothing), whichever thread
+/// started it: a chat that took 1 ms to read showed 50 ms after the click, and the workspace, listed again
+/// after every step of a reply, stopped the window for as long each time. Three are started with the program;
+/// one more joins, and stays, whenever every one of them is busy.
+pub(crate) fn background(job: impl FnOnce() + Send + 'static) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc::{Receiver, Sender, channel};
+    use std::sync::{LazyLock, Mutex};
+    type Job = Box<dyn FnOnce() + Send>;
+    static IDLE: AtomicUsize = AtomicUsize::new(0);
+    static JOBS: LazyLock<(Sender<Job>, Arc<Mutex<Receiver<Job>>>)> = LazyLock::new(|| {
+        let (tx, rx) = channel::<Job>();
+        let rx = Arc::new(Mutex::new(rx));
+        (0..3).for_each(|_| worker(rx.clone()));
+        (tx, rx)
+    });
+    fn worker(jobs: Arc<Mutex<Receiver<Job>>>) {
+        IDLE.fetch_add(1, Ordering::SeqCst);
+        std::thread::spawn(move || {
+            loop {
+                // The lock is held only while one of them waits for the next job.
+                let job = jobs.lock().unwrap().recv();
+                IDLE.fetch_sub(1, Ordering::SeqCst);
+                match job {
+                    Ok(job) => job(),
+                    Err(_) => break,
+                }
+                IDLE.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+    }
+    let (tx, rx) = &*JOBS;
+    if IDLE.load(Ordering::SeqCst) == 0 {
+        worker(rx.clone());
+    }
+    let _ = tx.send(Box::new(job));
 }
 
 fn main() -> eframe::Result {
@@ -61,6 +103,10 @@ fn main() -> eframe::Result {
         tool_calls(&args[1..]);
         return Ok(());
     }
+    // The threads that work behind the window are started before it is, not at the first click that needs one:
+    // the kept ones, and the one that writes chats (`flush` starts it).
+    background(|| {});
+    store::flush();
     ui::run(runtime())
 }
 
