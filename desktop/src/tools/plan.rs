@@ -43,7 +43,8 @@ fn publish(ctx: &Ctx) {
 
 pub fn make_plan(ctx: &Ctx, args: &Value) -> Output {
     let goal = str_arg(args, "goal").trim();
-    let steps = list_arg(args, "steps");
+    // A step may come as an object around its sentence (`{"step": "..."}`, as Qwen 3.8 Flash sends them).
+    let steps: Vec<String> = args["steps"].as_array().map_or(Vec::new(), |list| list.iter().filter_map(|step| step.as_str().or_else(|| ["step", "text", "title", "description", "name"].iter().find_map(|key| step[*key].as_str()))).map(str::to_string).collect());
     if goal.is_empty() || steps.is_empty() {
         return Output::fail("make_plan needs a goal and a list of steps (each its own string).");
     }
@@ -73,6 +74,9 @@ pub fn update_plan(ctx: &Ctx, args: &Value) -> Output {
     let mut chat = ctx.chat.lock().unwrap();
     let Some(plan) = chat.plan.as_mut() else { return Output::fail("There is no plan yet. Call make_plan first.") };
     let mut problems = Vec::new();
+    // What an update did not do, said so: a step sent as `doing` with its proof stayed `doing` without a word, and
+    // GPT-6 Luna sent the same step six times, each with a longer proof, until the stall guard ended the reply.
+    let (mut hints, mut same) = (Vec::new(), 0);
     for u in updates {
         // The names and words other tools use for the same thing are taken too: step for id, status for state.
         let state = match [str_arg(u, "state"), str_arg(u, "status")].into_iter().find(|said| !said.is_empty()).unwrap_or("") {
@@ -99,19 +103,31 @@ pub fn update_plan(ctx: &Ctx, args: &Value) -> Output {
                 problems.push(format!("Step {} needs a blocker: what outside your control is in the way.", step.id));
             }
             "todo" | "doing" | "done" | "blocked" => {
-                step.state = state.to_string();
-                step.note = match state {
+                let note = match state {
                     "done" if checked.is_empty() => UNCHECKED.to_string(),
                     "done" => checked.to_string(),
                     _ => blocker.to_string(),
                 };
+                if matches!(state, "todo" | "doing") && !checked.is_empty() {
+                    hints.push(format!("Step {} stays `{state}`: `verified` counts only with state `done`. If the step is finished, send {{\"id\":{},\"state\":\"done\",\"verified\":\"...\"}}. If it is not, do its work now; the plan needs no call until then.", step.id, step.id));
+                } else if step.state == state && step.note == note {
+                    same += 1;
+                }
+                step.state = state.to_string();
+                step.note = note;
             }
             other => problems.push(format!("Unknown state `{other}` for step {}.", step.id)),
         }
     }
     let done = plan.steps.iter().filter(|s| s.state == "done").count();
     // What was refused comes first: after a whole plan it went unread, and the same call came back.
-    let text = if problems.is_empty() { format_plan(plan) } else { format!("NOT RECORDED:\n{}\nSend only those steps again. Everything else in this call was recorded.\n\n{}", problems.join("\n"), format_plan(plan)) };
+    if same == updates.len() && same > 0 {
+        hints.push("Nothing changed: the plan already stood so. Do the next step's work now; the plan needs no call until a step is finished.".to_string());
+    }
+    let text = if problems.is_empty() && !hints.is_empty() { format!("{}
+
+{}", hints.join("
+"), format_plan(plan)) } else if problems.is_empty() { format_plan(plan) } else { format!("NOT RECORDED:\n{}\nSend only those steps again. Everything else in this call was recorded.\n\n{}", problems.join("\n"), format_plan(plan)) };
     let summary = problems.first().map_or_else(|| format!("Plan: {done}/{} done", plan.steps.len()), |first| first.chars().take(160).collect());
     drop(chat);
     publish(ctx);
@@ -271,6 +287,20 @@ mod tests {
         // finish: the same once-only question, then the run ends as it stands.
         let bye = serde_json::json!({ "result": "shipped" });
         assert!(!finish(&ctx, &bye).ok && finish(&ctx, &bye).finish);
+    }
+
+    #[test]
+    fn an_update_that_changes_nothing_says_so() {
+        let ctx = crate::tools::test_ctx(&std::env::temp_dir(), crate::store::Approval::Auto);
+        // Steps as objects around their sentences are taken too.
+        assert!(make_plan(&ctx, &serde_json::json!({ "goal": "ship", "steps": [{ "step": "write" }, { "text": "test" }] })).ok);
+        let proof = update_plan(&ctx, &serde_json::json!({ "updates": [{ "id": 1, "state": "doing", "blocker": "", "verified": "read all eight files" }] }));
+        assert!(proof.ok && proof.text.starts_with("Step 1 stays `doing`: `verified` counts only with state `done`."), "{}", proof.text);
+        let again = update_plan(&ctx, &serde_json::json!({ "updates": [{ "id": 1, "state": "doing" }] }));
+        assert!(again.ok && again.text.starts_with("Nothing changed: the plan already stood so."), "{}", again.text);
+        let moved = update_plan(&ctx, &serde_json::json!({ "updates": [{ "id": 1, "state": "done", "verified": "ran it" }] }));
+        assert!(moved.text.starts_with("PLAN") || moved.text.contains("[x] 1. write (ran it)"), "{}", moved.text);
+        assert!(!moved.text.contains("Nothing changed") && !moved.text.contains("stays"), "{}", moved.text);
     }
 
     #[test]

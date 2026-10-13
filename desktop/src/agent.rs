@@ -733,6 +733,7 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
     // Thinking is off for the rest of the run, or for the next round only; the next round continues cut-off prose.
     // A reply that already burned its output on thinking is not told it may think again when resumed.
     let (mut force_no_thinking, mut no_think_next, mut continuation_pending) = (resumed_think_nudges > 0, false, false);
+    let mut lone_plan_rounds = 0u8;
     let (mut claim_retried, mut asked_early, mut asked_plan, mut nudged_incomplete, mut ran_without_tools) = (false, false, false, false, false);
     let mut served_by: Option<String> = None;
     // The guards: one call failing identically, calls that add nothing, a read-only streak, whole-file rewrites, a preview taken for an edit.
@@ -1173,6 +1174,14 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
                 Err(_) => json!(args_text),
             };
             let mut text = out.text.clone();
+            // A round spent on the plan alone sends everything again for nothing. The tool's description says so and
+            // GPT-6 Luna and Haiku 5.5 did it all the same (6 of 15 rounds of one reply); said in the result, it is read.
+            if call.name == "update_plan" && out.ok && calls.len() == 1 && lone_plan_rounds < 2 {
+                lone_plan_rounds += 1;
+                text.push_str("
+
+(A message that only updates the plan sends the whole conversation again for nothing. Carry on with the work now, and next time put the plan update in the same message as the step's own tool call.)");
+            }
             let strike = breaker.observe(&call.name, &key, out.ok);
             if out.ok && (out.changed.is_some() || matches!(call.name.as_str(), "run_command" | "build_project" | "write_files" | "edit_files" | "apply_patch" | "extract_archive" | "download_file")) {
                 breaker.workspace_changed(call.name != "run_command" && call.name != "build_project");

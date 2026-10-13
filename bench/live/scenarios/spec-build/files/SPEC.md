@@ -12,7 +12,7 @@
 
 ## Rules
 
-1. A duration is `90m`, `2h`, `1h30m` or `1.5h`, and is kept as whole minutes (`1.5h` is 90). Zero, a negative one, more than 24 hours, or anything else is an error.
+1. A duration is `90m`, `2h`, `1h30m` or `1.5h`, and is kept as whole minutes (`1.5h` is 90). Zero, a negative one, more than 24 hours, one that is not a whole number of minutes (`0.01h`), or anything else is an error.
 2. Every entry gets the next id: 1, 2, 3 and so on. An id is never used twice, also after `rm`.
 3. `add` prints `added <id>`.
 4. `--date` is today when left out. A date that does not exist (2026-02-30) is an error.

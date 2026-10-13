@@ -31,16 +31,16 @@ want("a filter that leaves nothing", t("list", "--from", "2027-01-01"), 0, "noth
 want("sum", t("sum"), 0, "total 6:35")
 want("sum by tag: both tags, (none) last, total once", t("sum", "--by", "tag"), 0, "admin 3:00\ncode 2:00\ndocs 1:30\n(none) 1:35\ntotal 6:35")
 want("sum by date", t("sum", "--by", "date", "--to", "2026-03-02"), 0, "2026-03-01 1:30\n2026-03-02 3:00\ntotal 4:30")
-before = (box / "tally.json").read_bytes()
-for name, args in (("zero", ("add", "0m", "x")), ("more than a day", ("add", "25h", "x")), ("not a duration", ("add", "soon", "x")), ("a negative one", ("add", "-5m", "x")), ("a date that does not exist", ("add", "1h", "x", "--date", "2026-02-30")), ("rm of an id not there", ("rm", "99")), ("half minutes", ("add", "0.01h", "x"))):
-    want(f"an error: {name}", t(*args), 2)
-c.row("an error leaves tally.json as it was", (box / "tally.json").read_bytes() == before)
 want("rm", t("rm", "3"), 0, "removed 3")
 want("an id is not used again", t("add", "24h", "long day", "--date", "2026-02-28"), 0, "added 6")
 want("100 hours are 100:00", (lambda: [t("add", "24h", "x", "--date", "2026-02-27") for _ in range(3)] and t("sum", "--to", "2026-02-28"))(), 0, "total 96:00")
 want("export", t("export", "out.csv"), 0, "exported 8")
 rows = list(csv.reader(io.StringIO((box / "out.csv").read_text("utf-8")))) if (box / "out.csv").exists() else []
 c.row("the CSV: header, order of list, tags by a space", rows[:1] == [["id", "date", "minutes", "text", "tags"]] and [r[0] for r in rows[1:]] == ["7", "8", "9", "6", "2", "1", "4", "5"] and ["1", "2026-03-02", "90", "write report", "admin docs"] in rows, rows[:4])
+before = (box / "tally.json").read_bytes()
+for name, args in (("zero", ("add", "0m", "x")), ("more than a day", ("add", "25h", "x")), ("not a duration", ("add", "soon", "x")), ("a negative one", ("add", "-5m", "x")), ("a date that does not exist", ("add", "1h", "x", "--date", "2026-02-30")), ("rm of an id not there", ("rm", "99")), ("half minutes", ("add", "0.01h", "x"))):
+    want(f"an error: {name}", t(*args), 2)
+c.row("an error leaves tally.json as it was", (box / "tally.json").read_bytes() == before)
 c.row("no half-written file left", not [p.name for p in box.iterdir() if p.name not in ("tally.json", "out.csv")], [p.name for p in box.iterdir()])
 code, out, err = c.python("-m", "unittest", "test_tally", "-q")
 import re

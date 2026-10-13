@@ -377,6 +377,11 @@ pub async fn run(name: &str, args: &Value, ctx: &Ctx) -> Output {
     if name.starts_with("mcp__") {
         return mcp_call(name, args, ctx).await;
     }
+    // The stand-in the app leaves for an old call's long arguments, sent back as a new call's arguments (Qwen 3.8
+    // Flash copied one; the answer then was "No command was given", which said nothing about what was wrong).
+    if args.get("_note").is_some() && args.get("_head").is_some() {
+        return Output::fail("These are not arguments. `_note` and `_head` are what the app leaves in place of an old call's long arguments once it has run. Send this call's own arguments, in full.");
+    }
     // A command may rewrite, reformat or generate anything: after one the disk is the only truth.
     if matches!(name, "run_command" | "run_tests" | "start_process" | "build_project") {
         ctx.memory.invalidate_all();

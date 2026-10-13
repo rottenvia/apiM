@@ -217,7 +217,7 @@ fn processes(app: &mut App, ui: &mut egui::Ui) {
     } else {
         p.muted
     };
-    let (label, tip) = if running > 0 { (format!("{running} running"), format!("{running} running in the background")) } else { ("Stopped".to_string(), "Recently finished processes".to_string()) };
+    let (label, tip) = if running > 0 { (format!("{running} running"), format!("{running} running in the background")) } else { ("Processes".to_string(), "Nothing is running. Recently finished processes".to_string()) };
     let chip = chip(ui, Lead::Dot(dot), &label, running > 0, open, None).on_hover_text(tip);
     if chip.clicked() {
         app.ws.docks.procs_open = !open;

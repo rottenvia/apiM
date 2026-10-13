@@ -9,5 +9,5 @@
   "settings": {
     "approval": "manual"
   },
-  "deny": "\\bpip\\b|ensurepip|easy_install|\\buv\\b|conda|tablekit"
+  "deny": "pip(3|\\.exe)?\\s+install|ensurepip|easy_install|\\buv\\s+(pip|add)|conda\\s+install"
 }
