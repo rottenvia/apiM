@@ -1,0 +1,45 @@
+"""python -m loans [--store FILE] [--today YYYY-MM-DD] COMMAND ..."""
+import argparse
+import sys
+from datetime import date
+
+from loans import core
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="loans")
+    parser.add_argument("--store", default="store.json")
+    parser.add_argument("--today", type=date.fromisoformat, default=None)
+    sub = parser.add_subparsers(dest="command", required=True)
+    p = sub.add_parser("add-book")
+    p.add_argument("id")
+    p.add_argument("title")
+    p.add_argument("price", help="like 12.50")
+    p = sub.add_parser("add-member")
+    p.add_argument("id")
+    p.add_argument("name")
+    p = sub.add_parser("lend")
+    p.add_argument("book")
+    p.add_argument("member")
+    p = sub.add_parser("return")
+    p.add_argument("book")
+    sub.add_parser("report")
+    args = parser.parse_args(argv)
+    today = args.today or date.today()
+    state = core.load(args.store)
+    try:
+        if args.command == "add-book":
+            core.add_book(state, args.id, args.title, int(float(args.price) * 100))
+        elif args.command == "add-member":
+            core.add_member(state, args.id, args.name)
+        elif args.command == "lend":
+            print(f"due {core.lend(state, args.book, args.member, today)['due']}")
+        elif args.command == "return":
+            core.give_back(state, args.book, today)
+        elif args.command == "report":
+            print("\n".join(core.report(state)))
+    except core.LoanError as e:
+        print(f"loans: {e}", file=sys.stderr)
+        return 2
+    core.save(args.store, state)
+    return 0

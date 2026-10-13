@@ -144,6 +144,17 @@ fn find_program(root: &Path, command: &str) -> Option<PathBuf> {
     })
 }
 
+/// A bare name that PATH answers while the workspace holds a program of that name. PATH wins, as in PowerShell, and
+/// like PowerShell the answer says so: a reply told "`python.exe` here runs it" ran the machine's Python for four
+/// rounds before it wrote `.\python.exe`.
+fn shadowed(root: &Path, command: &str) -> Option<String> {
+    if command.contains(['/', '\\']) {
+        return None;
+    }
+    let (found, local) = (find_program(root, command)?, find_program(root, &format!("./{command}"))?);
+    (std::fs::canonicalize(&found).ok() != std::fs::canonicalize(&local).ok()).then(|| format!("\n[This ran {}, found on PATH. The workspace has a program of that name too: `.{}{}` runs that one.]", found.display(), std::path::MAIN_SEPARATOR, local.file_name().unwrap_or_default().to_string_lossy()))
+}
+
 /// Stops a process and everything it started. A plain kill on Windows leaves `npm`'s `node` child running.
 pub fn kill_tree(pid: u32) {
     let mut cmd = if cfg!(windows) {
@@ -691,8 +702,13 @@ pub async fn run_command(ctx: &Ctx, args: &Value) -> Output {
         }
     }
     let limit = timeout_for(command, &argv, num_arg(args, "timeout_ms"));
+    let note = shadowed(&ctx.root, command).unwrap_or_default();
     match execute_keeping(ctx, command, argv, str_arg(args, "reason"), Some(limit), Some(stdin.as_str()).filter(|text| !text.is_empty()), true).await {
-        Ok(ran) => report(&ran),
+        Ok(ran) => {
+            let mut out = report(&ran);
+            out.text.push_str(&note);
+            out
+        }
         Err(refused) => refused,
     }
 }
@@ -1077,6 +1093,17 @@ pub async fn wait_for_output(ctx: &Ctx, args: &Value) -> Output {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn a_workspace_program_hidden_by_one_on_path_is_pointed_out() {
+        let root = crate::tools::scratch("shadowed");
+        std::fs::write(root.join("cmd.exe"), b"MZ").unwrap();
+        let note = shadowed(&root, "cmd.exe").unwrap();
+        assert!(note.contains("found on PATH") && note.ends_with("`.\\cmd.exe` runs that one.]"), "{note}");
+        assert!(shadowed(&root, "cmd").is_some() && shadowed(&root, ".\\cmd.exe").is_none() && shadowed(&root, "whoami").is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn a_command_line_is_cut_into_words() {

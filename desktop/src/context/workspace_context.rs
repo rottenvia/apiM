@@ -60,6 +60,53 @@ pub fn build_workspace_context(listing: Option<&[(String, u64)]>) -> String {
     format!("\n\nFiles already in the workspace:\n\n{tree}\n\nThese exist right now. Edit the relevant one rather than creating a near-duplicate, and read a file before editing it so your replacement matches exactly. Sizes are shown so you can tell a stub from a real file.")
 }
 
+/// Past this many files a listing names folders, not files. A tree of 2,268 files was 60,000 characters in every
+/// round of a reply: 17,000 tokens a round, 842,000 for a one-line fix. `list_files` then added 2,000 lines to it.
+pub const FOLD_FILES: usize = 400;
+/// The most folders a folded listing names; the deepest levels are left out first.
+const FOLD_FOLDERS: usize = 150;
+const FOLD_ROOT_FILES: usize = 60;
+
+/// A large tree as its folders: up to `own` of the files right inside `base` (a folder from the workspace's root,
+/// "" for the workspace itself), then the folders under it, each with the files in it and below it.
+pub fn fold_listing(files: &[(String, u64)], base: &str, own: usize) -> String {
+    let prefix = if base.is_empty() { String::new() } else { format!("{}/", base.trim_end_matches('/')) };
+    let (mut lines, mut direct) = (Vec::new(), 0);
+    let mut folders: std::collections::BTreeMap<&str, (usize, u64)> = Default::default();
+    for (path, size) in files {
+        let Some(rest) = path.strip_prefix(prefix.as_str()) else { continue };
+        if !rest.contains('/') {
+            direct += 1;
+            if direct <= own {
+                lines.push(format!("{path}  ({})", format_size(*size)));
+            }
+        }
+        for (cut, _) in rest.match_indices('/') {
+            let folder = folders.entry(&path[..prefix.len() + cut]).or_default();
+            *folder = (folder.0 + 1, folder.1 + size);
+        }
+    }
+    if direct > own {
+        lines.push(format!("… and {} more files right here", direct - own));
+    }
+    let depth = |folder: &str| folder[prefix.len()..].matches('/').count() + 1;
+    let levels = (2..=12).take_while(|level| folders.keys().filter(|f| depth(f) <= *level).count() <= FOLD_FOLDERS).last().unwrap_or(1);
+    lines.extend(folders.iter().filter(|(folder, _)| depth(folder) <= levels).map(|(folder, (count, bytes))| format!("{folder}/  ({count} file{}, {})", if *count == 1 { "" } else { "s" }, format_size(*bytes))));
+    lines.join("\n")
+}
+
+/// The workspace section of a request: every file, or the folders of a tree too large to name each file of.
+pub fn workspace_listing(files: &[(String, u64)]) -> String {
+    if files.len() <= FOLD_FILES {
+        return build_workspace_context(Some(files));
+    }
+    format!(
+        "\n\nFiles already in the workspace: {}, too many to name each. Here are the files right under it, then every folder with the files in it and below it:\n\n{}\n\nThese exist right now. list_files with a folder as path names the files in it; search_files finds a file by what it holds. Read a file before editing it so your replacement matches exactly.",
+        files.len(),
+        fold_listing(files, "", FOLD_ROOT_FILES)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,5 +128,21 @@ mod tests {
         assert!(out.contains("Files already in the workspace:\n\na.txt  (2KB)\nb/\n  x.rs  (10B)\n\nThese exist"), "{out}");
         assert!(!out.contains("LESSONS"));
         assert_eq!(build_workspace_context(None), "");
+    }
+
+    #[test]
+    fn a_large_tree_is_listed_by_its_folders() {
+        let mut files: Vec<(String, u64)> = (0..500).map(|n| (format!("Lib/test/t{n:03}.py"), 1000)).collect();
+        files.extend([("README.md".to_string(), 408), ("Lib/glob.py".to_string(), 2048), ("Lib/email/utils.py".to_string(), 1024)]);
+        files.sort();
+        let out = workspace_listing(&files);
+        assert!(out.contains("503, too many to name each") && out.contains("\n\nREADME.md  (408B)\nLib/  (502 files, ") && out.contains("\nLib/email/  (1 file, 1KB)\nLib/test/  (500 files, "), "{out}");
+        assert!(!out.contains("t001.py") && out.len() < 900, "{}", out.len());
+        // Asked for by name, a folder shows its own files and the folders under it.
+        let inside = fold_listing(&files, "Lib", 2_000);
+        assert!(inside.starts_with("Lib/glob.py  (2KB)\nLib/email/  (1 file, 1KB)\nLib/test/  (500 files, "), "{inside}");
+        assert_eq!(fold_listing(&files, "Lib/test", 3).lines().last(), Some("… and 497 more files right here"));
+        // A small tree is listed whole, as before.
+        assert!(workspace_listing(&files[..3]).contains("utils.py"));
     }
 }

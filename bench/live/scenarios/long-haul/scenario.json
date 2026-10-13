@@ -1,0 +1,44 @@
+{
+  "title": "Twelve messages on one project",
+  "measures": "rules given once hold to the end; a fact said in passing is there ten messages later; what was taken back stays out; older turns leave the context without taking these with them",
+  "turns": [
+    {
+      "say": "Some ground rules for this whole chat, then a first task. Rules: (1) money is whole cents, an int, everywhere: no float ever touches it; (2) every change you make gets one new line at the top of the `## Unreleased` list in CHANGELOG.md; (3) every new behaviour gets at least one test in `tests/`; (4) never change anything under `legacy/`; (5) when you add a command, add it to the table in README.md. First task: `python -m loans report` on a store with nothing out ends in a traceback. It should print `no loans`."
+    },
+    {
+      "say": "Late books cost money. Add `fine_cents(loan, state, today)` to `loans/core.py`: 25 cents for every day past the due date, but never more than the book's price; nothing when the book is not late. A loan that is back counts up to the day it came back. `return` prints the fine when there is one, like `fine: 1.25`."
+    },
+    {
+      "say": "New command `renew BOOK`: it pushes the due date 14 days on. A loan can be renewed twice; the third time is an error. By the way, our branch code is KX-417. A later task needs it; do not write it into any file yet."
+    },
+    {
+      "say": "`return` for a book that is not out ends in a TypeError. Make it an ordinary error: `loans: book <id> is not out` on stderr, exit code 2."
+    },
+    {
+      "say": "A member holds 3 books at most: `lend` refuses a fourth with an error. And one thing to keep in mind, no code for it: we never lend e-books, the publisher licence forbids it."
+    },
+    {
+      "say": "I changed my mind about fines: no cap. 25 cents a day for as long as the book is late."
+    },
+    {
+      "say": "New command `overdue`: one line for every loan that is late and still out, the one that is the most days late first, ties by book id: `<days late>  <book id>  <member id>  <fine>`, the fine written the way `return` writes it. It prints `nothing overdue` when there is none."
+    },
+    {
+      "say": "`loans/core.py` is getting long. Move everything about fines into a new `loans/fines.py`. `from loans.core import fine_cents` has to keep working: old scripts use it."
+    },
+    {
+      "say": "The first 2 days late are free: 2 days late costs nothing, 3 days late costs 25 cents. Such a loan still shows in `overdue`, with 0.00."
+    },
+    {
+      "say": "Which ground rules did I give you at the start of this chat? Say each in one line. Then check the whole project against them and fix whatever breaks one."
+    },
+    {
+      "say": "Print our branch code as the first line of what `report` and `overdue` print, also when there is nothing to list: `Branch <code>`.",
+      "answer": "KX-417"
+    },
+    {
+      "say": "Last one. Add a section `## Not supported` at the end of README.md, one line: what I told you earlier we never do, and why."
+    }
+  ],
+  "minutes": 10
+}

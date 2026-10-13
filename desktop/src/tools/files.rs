@@ -220,6 +220,12 @@ pub fn list_files(ctx: &Ctx, args: &Value) -> Output {
     if files.is_empty() {
         return Output::ok(format!("No files here yet.{}", left_out_note(&skipped)), "0 files");
     }
+    // A large tree is named by its folders: a flat listing of 2,223 files was 2,000 lines, carried through the rest of the reply.
+    if files.len() > crate::context::workspace_context::FOLD_FILES {
+        let folded = crate::context::workspace_context::fold_listing(&files, &rel_of(&ctx.root, &dir), MAX_LISTED);
+        let text = format!("{folded}\n\n{} files in all, too many to name each: every folder is shown with the files in it and below it. Pass one as path to see inside it.{}", files.len(), left_out_note(&skipped));
+        return Output::ok(text, format!("{} files", files.len()));
+    }
     let mut text: String = files.iter().take(MAX_LISTED).map(|(p, s)| format!("{p}  ({})\n", human(*s))).collect();
     if files.len() > MAX_LISTED {
         text.push_str(&format!("… and {} more. Pass path to list one subdirectory.\n", files.len() - MAX_LISTED));
@@ -311,15 +317,21 @@ pub fn cut_long_lines(text: &str) -> Option<String> {
 }
 
 /// One file as the model sees it: a header saying which lines of how many, then the text.
+/// The most lines a read shows when it names where to start and not where to end.
+const OPEN_READ_LINES: usize = 800;
+
 fn render_read(rel: &str, text: &str, start: Option<u64>, end: Option<u64>, numbered: bool, budget: usize) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let total = lines.len();
     let first = (start.unwrap_or(1).max(1) as usize).min(total.max(1));
     let last = (end.unwrap_or(total as u64) as usize).clamp(first.min(total), total);
+    // A read from a line on with no end named is a look at that place, not at the rest of the file: one such read
+    // gave lines 3060-5603 of a test file, 28,000 tokens carried through every round after it.
+    let stop = if first > 1 && end.is_none() { last.min(first + OPEN_READ_LINES - 1) } else { last };
     let width = total.to_string().len();
     let mut body = String::new();
     let (mut shown_to, mut long) = (first.saturating_sub(1), 0);
-    for (i, line) in lines.iter().enumerate().take(last).skip(first - 1) {
+    for (i, line) in lines.iter().enumerate().take(stop).skip(first - 1) {
         let cut = cut_long_lines(line);
         let line = cut.as_deref().unwrap_or(line);
         if body.len() + line.len() > budget && i + 1 > first {
@@ -1147,6 +1159,16 @@ pub fn replace_in_files(ctx: &Ctx, args: &Value) -> Output {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_read_from_a_line_on_shows_that_place_not_the_rest_of_the_file() {
+        let text: String = (1..=3000).map(|n| format!("line {n}\n")).collect();
+        let out = render_read("big.py", &text, Some(1000), None, false, usize::MAX);
+        assert!(out.starts_with("big.py: lines 1000-1799 of 3000") && out.contains("\"start_line\":1800}"), "{}", &out[..60]);
+        // With its end named, or from the top, a read is what was asked for.
+        assert!(render_read("big.py", &text, Some(1000), Some(2900), false, usize::MAX).starts_with("big.py: lines 1000-2900 of 3000"));
+        assert!(render_read("big.py", &text, None, None, false, usize::MAX).starts_with("big.py: EXACT, all 3000 lines"));
+    }
 
     /// What an odd-input run of every tool turned up: none of these crashed, each said the wrong thing.
     #[test]
