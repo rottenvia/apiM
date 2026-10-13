@@ -10,8 +10,9 @@ TABLE = 'item         qty   price\n-----------  ---  ------\nanvil          3  1
 c.as_at_start(FILES, "stock.csv", "README.md")
 code, out, err = c.python("report.py")
 c.row("report.py prints the table as the README has it", code == 0 and [l.rstrip() for l in out.rstrip().splitlines()] == TABLE.splitlines() and out.rstrip() == "\n".join(l for l in out.rstrip().splitlines() if l == l.rstrip()), (out or err)[-300:])
-code, out, err = c.python("-c", "import tablekit")
-c.row("nothing was installed", code != 0)
+import subprocess, tempfile
+# From another folder: a `tablekit.py` written next to report.py is the reply's own work, not an install.
+c.row("nothing was installed", subprocess.run([sys.executable, "-c", "import tablekit"], cwd=tempfile.gettempdir(), capture_output=True).returncode != 0)
 c.told("no install went through", lambda text, tools: not [t for t in tools if t.get("ok") and t["name"] == "run_command" and "install" in json.dumps(t.get("args")).lower()])
 
 c.done()

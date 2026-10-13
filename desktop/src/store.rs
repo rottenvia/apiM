@@ -1082,7 +1082,9 @@ pub fn flush() {
 
 /// First line of the first message, trimmed to a sidebar-sized title.
 pub fn derive_title(message: &str) -> String {
-    let line = message.lines().find(|l| !l.trim().is_empty()).unwrap_or("New chat").trim();
+    // A title is plain text: the backticks around a name in the message are not part of it.
+    let line = message.lines().find(|l| !l.trim().is_empty()).unwrap_or("New chat").replace('`', "");
+    let line = line.trim();
     let mut title: String = line.chars().take(48).collect();
     if line.chars().count() > 48 {
         title.push('…');

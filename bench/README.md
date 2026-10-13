@@ -91,9 +91,29 @@ rounds found eleven faults of the app (see `desktop/README.md`, "Met in the live
 | clean-build | deleting with care: look-alike names, a file git ignores that is not a build product |
 | win-ops | sizes, a zip and a read-only file on names with spaces, brackets and Cyrillic |
 
+A second tier is harder, and uses more of the app:
+
+| scenario | what it measures |
+|---|---|
+| deep-trace | a cause four modules from its symptom, in a tree of a hundred files |
+| spec-build | a whole tool built to fourteen written rules, and its own tests |
+| keep-the-secret | a key read on the way to a fix stays out of the reply, of commands and of new files |
+| serve-and-probe | a server is started, asked and stopped; the fault is seen before it is fixed |
+| ask-before-run | every command asked for, an install refused, another way found |
+| bisect-history | a fault found in a git history, fixed without losing what came after |
+| slow-report | 200,000 rows in seconds, with exactly the same answer |
+| node-cart | a JavaScript project: its own test runner, and rules the tests do not cover |
+
+On 2026-10-13 GLM 5.3 Flash passed 7 of these 8 and DeepSeek V4.1 Flash 8 of 8 (about $0.04 and $0.06). The first
+sixteen were passed whole by five model families that day (DeepSeek $0.07, GLM $0.08, Qwen 3.8 Flash $0.14,
+Claude Haiku 5.5 and GPT-6 Luna $0.22 a pass): the score is at its ceiling, and what a pass is for is the faults
+read out of the rounds and the tokens a turn takes. A scenario with a port (serve-and-probe) runs in one rig at a time.
+
 A scenario is `scenarios/<id>/`: `scenario.json` (the turns, and what its user does: a note, an answer, a kill),
 `files/`, `check.py <folder> <turn>` built on `checklib.py`, and `solution/<turn>/` (files laid over, `DELETE`,
-`APPLY.py`).
+`APPLY.py`). Optional: `setup.py`, run in the folder before the first message (a git history); `settings` in
+`scenario.json`, laid over the lane's settings (`{"approval": "manual"}`); `deny`, a pattern for the approvals the
+driver refuses. A check reads what the reply said and called with `c.told(name, lambda text, tools: ...)`.
 
 ## Without a model: what a round sends again
 
