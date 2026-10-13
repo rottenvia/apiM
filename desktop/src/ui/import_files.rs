@@ -140,7 +140,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         let (to, done, ctx) = (conv.workspace(), mpsc::channel(), ctx.clone());
         st.busy = Some(done.1);
         st.error = None;
-        std::thread::spawn(move || {
+        crate::background(move || {
             let worked = Conversation::load(&from).map(|chat| copy_workspace(&chat.workspace(), &to)).is_some();
             let _ = done.0.send(worked);
             ctx.request_repaint();

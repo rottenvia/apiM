@@ -7,6 +7,10 @@ use super::lazy::{self, Measured};
 use super::{App, Dialog, bubble, composer, icons, markdown};
 use crate::store::{Bucket, Message, Part, Role};
 use eframe::egui::{self, Color32, Rect, Sense, Stroke, pos2, vec2};
+
+/// How long a chat takes to come in once it is on screen, and how far below its place it starts.
+const ENTER: f32 = 0.2;
+const ENTER_DROP: f32 = 10.0;
 use std::time::{Duration, Instant};
 
 /// `toLocaleString()` for whole numbers: 1,234,567.
@@ -112,8 +116,17 @@ pub fn header(app: &mut App, ui: &mut egui::Ui) {
 pub fn messages(app: &mut App, ui: &mut egui::Ui) {
     let area = ui.max_rect();
     super::find_bar::show(app, ui, area);
+    let leaving = app.opening.as_ref().map_or(0.0, |opening| ((opening.since.elapsed().as_secs_f32() - 0.05) / 0.15).clamp(0.0, 1.0));
     if app.conv.messages.is_empty() {
-        welcome(app, ui);
+        if app.opening.is_none() {
+            app.arriving = None;
+        }
+        let come = widgets::entrance(ui.ctx(), *app.entered.get_or_insert_with(Instant::now), ENTER);
+        ui.scope(|ui| {
+            ui.set_opacity(come * (1.0 - 0.6 * leaving));
+            welcome(app, ui, (1.0 - come) * ENTER_DROP);
+        });
+        opening_pill(app, ui, area);
         return;
     }
     let p = p();
@@ -127,6 +140,20 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
     // sight first (over as many frames as that needs), then one more pass lands on the end they turned out to have.
     let jump = std::mem::take(&mut app.jump_to_latest);
     let landing = jump && std::mem::take(&mut app.tail_measured);
+    // A chat comes in from the moment it has landed: it fades up from a little below its place. The one being
+    // left for a chat still on its way from disk dims meanwhile, so the click is seen to have been taken.
+    if !jump {
+        if app.opening.is_none() {
+            app.arriving = None;
+        }
+        app.entered.get_or_insert_with(Instant::now);
+    }
+    let come = app.entered.map_or(0.0, |at| widgets::entrance(ui.ctx(), at, ENTER));
+    // Messages just sent come in the same way, under the ones that were there.
+    let fresh = app.fresh.as_ref().and_then(|(id, at)| Some((app.conv.messages.iter().position(|m| m.id == *id)?, widgets::entrance(ui.ctx(), *at, 0.25))));
+    if fresh.is_none_or(|(_, come)| come >= 1.0) {
+        app.fresh = None;
+    }
 
     // Find in this chat: how many matches each message holds, and which of them is the focused one.
     // ponytail: counted again every frame the bar is open; cache per (chat, query) if a long chat stutters.
@@ -162,32 +189,43 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
     }
     if app.staged("top") {
         scroll = scroll.vertical_scroll_offset(0.0);
-    } else if jump {
-        // Past the end: clamped to it, and the view then follows the reply as it grows.
-        scroll = scroll.vertical_scroll_offset(1e9);
-    } else if shift != 0.0 {
+    } else if landing {
+        // Past the end: clamped to it, and the view then follows the reply as it grows. Only now, with the end
+        // measured, and only as far past as the heights just taken up could have added. Every frame of a jump
+        // used to be laid out a thousand million points down, where a float steps 64 points at a time: each
+        // message measured there came out some multiple of 64 tall, and the chat landed short of its end by
+        // however much that was wrong, to be put right a frame later.
+        scroll = scroll.vertical_scroll_offset(app.scroll_end + 100_000.0);
+    } else if shift != 0.0 && !jump {
         scroll = scroll.vertical_scroll_offset((app.scroll_y + shift).max(0.0));
     }
     // What this frame may spend measuring messages nobody is looking at. A chat just opened gets more: nothing
     // of it shows until its end is measured.
-    app.rows.begin(Duration::from_millis(if landing { 0 } else if jump { 12 } else { 4 }));
+    // of it shows until its end is measured, so one longer frame there is cheaper than several empty ones.
+    app.rows.begin(Duration::from_millis(if landing { 0 } else if jump { 28 } else { 4 }));
     // (how far the view has to follow next frame, lay this frame out again before showing it, more to measure, the end is measured)
     let (mut anchor, mut redo, mut unmeasured, mut tail_ready) = (0.0_f32, false, false, true);
     let out = scroll.show(ui, |ui| {
         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
-        ui.add_space(24.0);
-        // `unseen` lays it out without drawing it, to learn its height.
-        let column_in = |ui: &mut egui::Ui, unseen: bool, add: &mut dyn FnMut(&mut egui::Ui)| {
-            let top = ui.cursor().top();
-            let rect = Rect::from_min_size(pos2(left, top), vec2(column, 0.0));
+        ui.set_opacity(come * (1.0 - 0.6 * leaving));
+        // The room it gives up above its place comes off the room below it: the whole is as tall as ever.
+        ui.add_space(24.0 + (1.0 - come) * ENTER_DROP);
+        // `unseen` lays it out without drawing it, to learn its height. `come` under 1 draws it that far into its
+        // entrance, fainter and lower than its place; the room it takes is the same.
+        let column_in = |ui: &mut egui::Ui, unseen: bool, come: f32, add: &mut dyn FnMut(&mut egui::Ui)| {
+            let (top, drop) = (ui.cursor().top(), (1.0 - come) * 14.0);
+            let rect = Rect::from_min_size(pos2(left, top + drop), vec2(column, 0.0));
             let builder = egui::UiBuilder::new().max_rect(rect.with_max_y(f32::INFINITY));
             let used = ui.scope_builder(if unseen { builder.invisible() } else { builder }, |ui| {
                 ui.set_width(column);
+                if come < 1.0 {
+                    ui.multiply_opacity(come);
+                }
                 add(ui);
             });
-            ui.advance_cursor_after_rect(Rect::from_min_max(pos2(area.left(), top), pos2(area.right(), used.response.rect.bottom())));
+            ui.advance_cursor_after_rect(Rect::from_min_max(pos2(area.left(), top), pos2(area.right(), used.response.rect.bottom() - drop)));
         };
-        let column_ui = |ui: &mut egui::Ui, add: &mut dyn FnMut(&mut egui::Ui)| column_in(ui, false, add);
+        let column_ui = |ui: &mut egui::Ui, add: &mut dyn FnMut(&mut egui::Ui)| column_in(ui, false, 1.0, add);
 
         if totals.tokens > 0 {
             column_ui(ui, &mut |ui| {
@@ -243,7 +281,25 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
         // What a message's height hangs on besides its width.
         let print_of = |i: usize, msg: &Message| lazy::print((running, i == last, msg.parts.len(), msg.incomplete, msg.error.is_some(), split));
         // Messages still to be measured are measured out of sight, the four nearest the end first: reading starts there.
-        let pending: Vec<usize> = (start..=last).rev().filter(|&i| !heights.get(key_of(i, &conv.messages[i]).as_ref()).is_some_and(|m| m.exact && m.width == column && m.print == print_of(i, &conv.messages[i]))).take(if landing { 0 } else { 4 }).collect();
+        // The end of a chat can be landed on once every message that will be in view there is measured. With
+        // only its last three measured, a fourth in view changed height as it was drawn, and the chat was seen
+        // for a frame some way short of its end before it moved there.
+        let mut view = area.height();
+        let in_view = (start..=last)
+            .rev()
+            .take_while(|&i| {
+                let wanted = view > 0.0;
+                view -= gap + heights.get(key_of(i, &conv.messages[i]).as_ref()).map_or_else(|| guess(&conv.messages[i], cap), |m| m.next.unwrap_or(m.height));
+                wanted
+            })
+            .last()
+            .unwrap_or(last);
+        // Messages still to be measured are measured out of sight, the four nearest the end first: reading starts
+        // there. On the way to the end only those that will show there are, and the rest once it has landed:
+        // measured oldest first with the others, the one message in view of a chat of long replies waited for
+        // twenty-three that were not, and the window stood empty for two seconds.
+        let unmeasured_yet = |i: &usize| !heights.get(key_of(*i, &conv.messages[*i]).as_ref()).is_some_and(|m| m.exact && m.width == column && m.print == print_of(*i, &conv.messages[*i]));
+        let pending: Vec<usize> = (if jump { in_view } else { start }..=last).rev().filter(unmeasured_yet).take(if landing { 0 } else if jump { usize::MAX } else { 4 }).collect();
         for (i, msg) in conv.messages.iter().enumerate().skip(start) {
             let live = running && i == last;
             let hits = counts.get(i).copied().unwrap_or(0);
@@ -264,7 +320,7 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
                 let top = ui.cursor().top();
                 rows.guessed = false;
                 let mut marks = matcher.as_ref().filter(|_| hits > 0).map(|matcher| markdown::Marks { matcher, active: focused, seen: 0, reveal: wanted, shown: false });
-                column_in(ui, !shows, &mut |ui| {
+                column_in(ui, !shows, fresh.filter(|(from, _)| i >= *from).map_or(1.0, |(_, come)| come), &mut |ui| {
                     let mut env = bubble::Env { settings, workspace: &workspace, live, newest: i == last, busy: running, cap, thinking_secs, editing, action: &mut action, rewind, marks: marks.take(), rows };
                     ui.push_id(&msg.id, |ui| bubble::show(ui, msg, &mut env));
                     marks = env.marks.take();
@@ -288,7 +344,7 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
                     unmeasured = true;
                 }
             }
-            if i + 3 > last {
+            if i >= in_view {
                 tail_ready &= heights.get(key_of(i, msg).as_ref()).is_some_and(|m| m.exact);
             }
             match compacted.as_ref().filter(|(id, _)| *id == msg.id && !live) {
@@ -318,11 +374,12 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
         if let Some(run) = app.run.as_ref().filter(|_| running) {
             column_ui(ui, &mut |ui| wait_rows(ui, run, has_output));
         }
-        ui.add_space(24.0);
+        ui.add_space(24.0 - (1.0 - come) * ENTER_DROP);
     });
     if more {
         app.mounted += 60;
     }
+    app.scroll_end = out.content_size.y;
     app.scroll_y = out.state.offset.y;
     app.anchor = anchor;
     if jump && !landing {
@@ -341,15 +398,19 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
 
     // Jump to latest: only when scrolled away from the end.
     let distance = out.content_size.y - out.state.offset.y - out.inner_rect.height();
-    if distance > 40.0 {
-        let centre = pos2(area.center().x, area.bottom() - 12.0 - 17.0);
+    // It comes up into its place when the end is left behind, and sinks away when the end is back in view.
+    let away = ui.ctx().animate_bool_with_time_and_easing(ui.id().with("jump-in"), distance > 40.0 && !jump, 0.18, egui::emath::easing::cubic_out);
+    if away > 0.0 {
+        let centre = pos2(area.center().x, area.bottom() - 12.0 - 17.0 + 10.0 * (1.0 - away));
         let rect = Rect::from_center_size(centre, vec2(34.0, 34.0));
         let response = ui.interact(rect, ui.id().with("jump"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
         let t = widgets::fade(ui, response.id, response.hovered());
-        ui.painter().add(egui::Shadow { offset: [0, 6], blur: 20, spread: 0, color: Color32::from_black_alpha(102) }.as_shape(rect, egui::CornerRadius::same(17)));
-        ui.painter().circle(centre, 17.0, widgets::lerp(p.elevated, p.hover, t), Stroke::new(1.0, p.border_light));
-        icons::paint(ui, icons::ARROW_DOWN, centre, 16.0, widgets::lerp(p.text2, p.text, t));
-        if response.clicked() {
+        let mut seen = ui.new_child(egui::UiBuilder::new().max_rect(area));
+        seen.set_opacity(away);
+        seen.painter().add(egui::Shadow { offset: [0, 6], blur: 20, spread: 0, color: Color32::from_black_alpha(102) }.as_shape(rect, egui::CornerRadius::same(17)));
+        seen.painter().circle(centre, 17.0, widgets::lerp(p.elevated, p.hover, t), Stroke::new(1.0, p.border_light));
+        icons::paint(&seen, icons::ARROW_DOWN, centre, 16.0, widgets::lerp(p.text2, p.text, t));
+        if response.clicked() && distance > 40.0 {
             app.jump_to_latest = true;
         }
     }
@@ -392,22 +453,38 @@ fn guess(msg: &Message, width: f32) -> f32 {
         .sum::<f32>()
 }
 
-/// "Opening…" over the transcript, once the chat that was clicked has taken a moment to read from disk.
+/// "Opening…" over the transcript, once the chat that was clicked has taken a moment: to read from disk, and
+/// then to measure its end. (It used to go when the file was read, and a long chat then showed an empty window
+/// for as long as its last messages took to lay out.)
 fn opening_pill(app: &App, ui: &mut egui::Ui, area: Rect) {
-    let Some(opening) = app.opening.as_ref() else { return };
-    let waited = opening.since.elapsed();
-    if waited < Duration::from_millis(150) {
-        ui.ctx().request_repaint_after(Duration::from_millis(150) - waited);
+    let Some(waited) = app.arriving.map(|since| since.elapsed()) else { return };
+    // Not for a chat that is there in a quarter of a second: a pill that comes and goes at once is a flicker.
+    if waited < Duration::from_millis(250) {
+        ui.ctx().request_repaint_after(Duration::from_millis(250) - waited);
         return;
     }
+    let come = widgets::entrance(ui.ctx(), app.arriving.unwrap_or_else(Instant::now) + Duration::from_millis(250), 0.18);
+    let ui = &mut ui.new_child(egui::UiBuilder::new().max_rect(area.translate(vec2(0.0, -6.0 * (1.0 - come)))));
+    ui.set_opacity(come);
+    let area = ui.max_rect();
     let p = p();
-    let title = app.chats.iter().find(|c| c.id == opening.id).map_or("chat", |c| c.title.as_str());
+    let id = app.current_id();
+    let title = app.chats.iter().find(|c| c.id == id).map_or("chat", |c| c.title.as_str());
     let short: String = if title.chars().count() > 36 { format!("{}…", title.chars().take(35).collect::<String>()) } else { title.to_string() };
     let label = ui.painter().layout_job(shimmer(ui, &format!("Opening {short}…"), 13.0));
-    let rect = Rect::from_center_size(pos2(area.center().x, area.top() + 28.0), vec2(label.size().x + 28.0, 34.0));
+    // A chat of some size says how long it still takes, and shows it: its file is read at a known pace.
+    let (share, secs) = app.opening.as_ref().map_or((1.0, 0.0), |opening| opening.progress.eta());
+    let wait = (secs >= 0.2).then(|| widgets::galley(ui, &super::splash::left(secs), theme::font(11.0, W::Regular), p.muted));
+    let width = label.size().x + wait.as_ref().map_or(0.0, |wait| 10.0 + wait.size().x);
+    let rect = Rect::from_center_size(pos2(area.center().x, area.top() + 28.0), vec2(width + 28.0, 34.0));
     ui.painter().add(egui::Shadow { offset: [0, 6], blur: 20, spread: 0, color: Color32::from_black_alpha(102) }.as_shape(rect, egui::CornerRadius::same(17)));
     ui.painter().rect(rect, 17.0, p.elevated, Stroke::new(1.0, p.border_light), egui::StrokeKind::Inside);
-    widgets::text_at(ui, rect.left() + 14.0, rect.center().y, label);
+    let x = rect.left() + 14.0 + widgets::text_at(ui, rect.left() + 14.0, rect.center().y, label);
+    if let Some(wait) = wait {
+        widgets::text_at(ui, x + 10.0, rect.center().y, wait);
+    }
+    let shown = widgets::glide(ui.ctx(), egui::Id::new(("opening-bar", id)), share, 0.12, true);
+    super::splash::bar(ui, Rect::from_min_max(pos2(rect.left() + 16.0, rect.bottom() - 5.0), pos2(rect.right() - 16.0, rect.bottom() - 3.0)), shown, true, 1.0);
 }
 
 /// "Show 60 earlier of 212": older messages stay out of the layout until asked for. True when clicked.
@@ -584,7 +661,7 @@ fn drafting_label(name: &str, path: Option<&str>) -> String {
     }
 }
 
-fn welcome(app: &mut App, ui: &mut egui::Ui) {
+fn welcome(app: &mut App, ui: &mut egui::Ui, drop: f32) {
     let p = p();
     let area = ui.max_rect();
     let has_keys = crate::provider::resolve_target(&app.settings.model, &app.settings).is_ok();
@@ -604,7 +681,7 @@ fn welcome(app: &mut App, ui: &mut egui::Ui) {
     // Laid out once to learn the height, so the block sits centred (lifted 32, like the web's pb-16).
     let id = ui.id().with("welcome-height");
     let height: f32 = ui.data(|d| d.get_temp(id)).unwrap_or(200.0);
-    let top = area.center().y - 32.0 - height / 2.0;
+    let top = area.center().y - 32.0 - height / 2.0 + drop;
     let rect = Rect::from_min_size(pos2(area.center().x - width / 2.0, top.max(area.top())), vec2(width, area.height()));
     let used = ui.scope_builder(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::top_down(egui::Align::Center)), |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;

@@ -25,6 +25,7 @@ mod settings;
 mod settings_panels;
 mod sidebar;
 mod slash_menu;
+mod splash;
 pub mod theme;
 mod titlebar;
 mod trim;
@@ -151,6 +152,8 @@ struct Run {
 struct Opening {
     id: String,
     since: Instant,
+    /// How far its file has come: a long chat shows a bar.
+    progress: Arc<store::Progress>,
     rx: mpsc::Receiver<Option<Conversation>>,
 }
 
@@ -179,13 +182,17 @@ struct Shot {
     acted: bool,
     /// The `up-N` state has turned the wheel.
     scrolled: bool,
+    /// `APIM_SHOT_FILM=600`: every frame of that many milliseconds is kept instead of one picture, each with the
+    /// millisecond it was drawn at. This is how something that moves is looked at.
+    film: Option<(u64, Vec<(u64, Arc<egui::ColorImage>)>)>,
 }
 
 impl Shot {
     fn from_env() -> Option<Shot> {
         let path = PathBuf::from(std::env::var_os("APIM_SHOT")?);
         let size = std::env::var("APIM_SHOT_SIZE").ok().and_then(|s| s.split_once('x').and_then(|(w, h)| Some([w.parse().ok()?, h.parse().ok()?]))).unwrap_or([1280.0, 800.0]);
-        Some(Shot { path, size, state: std::env::var("APIM_SHOT_STATE").unwrap_or_default(), started: Instant::now(), asked: false, acted: false, scrolled: false })
+        let film = std::env::var("APIM_SHOT_FILM").ok().and_then(|ms| ms.parse().ok()).map(|ms| (ms, Vec::new()));
+        Some(Shot { path, size, state: std::env::var("APIM_SHOT_STATE").unwrap_or_default(), started: Instant::now(), asked: false, acted: false, scrolled: false, film })
     }
 }
 
@@ -193,6 +200,8 @@ pub struct App {
     rt: tokio::runtime::Runtime,
     settings: Settings,
     chats: Vec<ChatMeta>,
+    /// The start: the chats are still being read, or its loading screen is still fading.
+    boot: Option<splash::Boot>,
     /// The chat on screen.
     conv: Conversation,
     /// The chat a reply is still being written to, when the user has switched away from it.
@@ -221,8 +230,16 @@ pub struct App {
     /// Where the transcript is scrolled to, and how far it has to follow messages above it that changed height.
     scroll_y: f32,
     anchor: f32,
+    /// How tall the transcript was when it was last laid out.
+    scroll_end: f32,
     /// The chat being read from disk, so a long one does not hold up the window.
     opening: Option<Opening>,
+    /// When a chat was asked for that is not on screen at its end yet: read, then measured, then landed on.
+    arriving: Option<Instant>,
+    /// When the chat on screen first showed: it comes in over a moment.
+    entered: Option<Instant>,
+    /// The first of the messages just sent, and when: they come in from below.
+    fresh: Option<(String, Instant)>,
     /// How much of the reply being written is shown yet: its text is let out evenly rather than in bursts.
     ctx: egui::Context,
     /// Ctrl+V was down on the last frame, so one press pastes once.
@@ -293,9 +310,13 @@ impl App {
             // The transcript may ask for a frame to be laid out again before it is shown (`chat::messages`).
             o.max_passes = std::num::NonZeroUsize::new(3).unwrap();
         });
+        // The window does not wait for the chats: they are read behind a loading screen. A self-portrait reads
+        // them first, since it is staged from them, unless the start itself is what it is a portrait of (`boot`).
+        let boot = shot.as_ref().is_none_or(|shot| shot.state.split(',').any(|part| part == "boot")).then(|| splash::Boot::start(&cc.egui_ctx));
         let mut app = App {
             rt,
-            chats: Conversation::list(),
+            chats: if boot.is_some() { Vec::new() } else { Conversation::list() },
+            boot,
             conv: Conversation::new(),
             parked: None,
             run: None,
@@ -313,7 +334,11 @@ impl App {
             rows: Default::default(),
             scroll_y: 0.0,
             anchor: 0.0,
+            scroll_end: 0.0,
             opening: None,
+            arriving: None,
+            entered: None,
+            fresh: None,
             ctx: cc.egui_ctx.clone(),
             paste_held: false,
             dialog: Dialog::None,
@@ -358,7 +383,7 @@ impl App {
 
     /// Puts the window in the state a self-portrait was asked for.
     fn stage_shot(&mut self) {
-        let Some(shot) = self.shot.as_ref().map(|s| Shot { path: s.path.clone(), size: s.size, state: s.state.clone(), started: s.started, asked: s.asked, acted: s.acted, scrolled: s.scrolled }) else { return };
+        let Some(shot) = self.shot.as_ref().map(|s| Shot { path: s.path.clone(), size: s.size, state: s.state.clone(), started: s.started, asked: s.asked, acted: s.acted, scrolled: s.scrolled, film: None }) else { return };
         let state = shot.state.clone();
         self.focus_composer = false;
         if let Ok(wanted) = std::env::var("APIM_SHOT_CHAT") {
@@ -370,6 +395,16 @@ impl App {
         for part in state.split(',') {
             match part {
                 "settings" => self.dialog = Dialog::Settings,
+                "boot" => {}
+                "splash" => self.boot = Some(splash::Boot::staged()),
+                // The last question as if just sent: it comes in half a second after the window does.
+                "fresh" => self.fresh = self.conv.messages.iter().rev().find(|m| m.role == Role::User).map(|m| (m.id.clone(), Instant::now() + Duration::from_millis(500))),
+                "opening" => {
+                    // A long chat a second into being read: nothing is read and nothing arrives.
+                    let since = Instant::now().checked_sub(Duration::from_secs(1)).unwrap_or_else(Instant::now);
+                    let id = self.chats.first().map(|c| c.id.clone()).unwrap_or_default();
+                    (self.arriving, self.opening) = (Some(since), Some(Opening { id, since, progress: Arc::new(store::Progress::staged(185 << 20, 0, 185 << 20)), rx: mpsc::channel().1 }));
+                }
                 "plugins" => self.dialog = Dialog::Plugins,
                 "mcp" => self.dialog = Dialog::Mcp,
                 "delete" => self.dialog = Dialog::Delete { ids: self.chats.iter().take(1).map(|c| c.id.clone()).collect(), opened: Instant::now() },
@@ -582,6 +617,7 @@ impl App {
         }
         self.forget_layout();
         self.opening = None;
+        self.entered = None;
         self.files_stale = true;
         self.focus_composer = true;
         self.popover = Popover::None;
@@ -598,13 +634,14 @@ impl App {
         }
         self.leave_current();
         self.conv = Conversation::new();
+        self.arriving = None;
     }
 
     /// Heights belong to the chat on screen: another chat starts with none.
     fn forget_layout(&mut self) {
         self.heights.clear();
         self.rows.clear();
-        (self.scroll_y, self.anchor) = (0.0, 0.0);
+        (self.scroll_y, self.anchor, self.scroll_end) = (0.0, 0.0, 0.0);
     }
 
     /// Something about the messages changed: they keep their room until each is measured again.
@@ -620,17 +657,22 @@ impl App {
     /// Opens a chat. It is read from disk on another thread: the one on screen stays until it is here.
     fn open_chat(&mut self, id: &str) {
         if id == self.conv.id {
-            self.opening = None;
+            (self.opening, self.arriving) = (None, None);
             return;
         }
+        // Asked for twice (the second press of a double click): it is on its way already.
+        if self.opening.as_ref().is_some_and(|opening| opening.id == id) {
+            return;
+        }
+        self.arriving = Some(Instant::now());
         if let Some(parked) = self.parked.take_if(|p| p.id == id) {
             return self.show_chat(parked);
         }
         let (tx, rx) = mpsc::channel();
-        let (id, wake) = (id.to_string(), self.ctx.clone());
-        self.opening = Some(Opening { id: id.clone(), since: Instant::now(), rx });
-        std::thread::spawn(move || {
-            let _ = tx.send(Conversation::load(&id));
+        let (id, wake, progress) = (id.to_string(), self.ctx.clone(), Arc::new(store::Progress::default()));
+        self.opening = Some(Opening { id: id.clone(), since: Instant::now(), progress: progress.clone(), rx });
+        crate::background(move || {
+            let _ = tx.send(Conversation::load_showing(&id, Some(&progress)));
             wake.request_repaint();
         });
     }
@@ -656,6 +698,7 @@ impl App {
             if &self.conv.id == id {
                 self.conv = Conversation::new();
                 self.forget_layout();
+                self.entered = None;
                 self.files_stale = true;
             }
         }
@@ -949,6 +992,7 @@ impl App {
 
         let mut user = Message::new(Role::User, &text);
         user.attachments = attached.clone();
+        self.fresh = Some((user.id.clone(), Instant::now()));
         self.conv.messages.push(user);
         let mut reply = Message::new(Role::Assistant, "");
         reply.model = self.settings.model.clone();
@@ -1589,6 +1633,28 @@ impl App {
             return;
         }
         let Some(shot) = self.shot.as_mut() else { return };
+        if let Some((length, frames)) = shot.film.as_mut() {
+            // Filmed from the click of a `click-X-Y`, or from the window's first frame.
+            let from = if shot.state.contains("click-") { 380 } else { 0 };
+            let at = shot.started.elapsed().as_millis() as u64;
+            frames.extend(ctx.input(|i| {
+                let frame = |event: &egui::Event| match event {
+                    egui::Event::Screenshot { image, user_data, .. } => Some((*user_data.data.as_ref()?.downcast_ref::<u64>()?, image.clone())),
+                    _ => None,
+                };
+                i.events.iter().filter_map(frame).collect::<Vec<_>>()
+            }));
+            if (from..from + *length).contains(&at) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(at - from)));
+            } else if at > from + *length + 150 {
+                for (ms, image) in frames.iter() {
+                    let name = format!("{}-{ms:04}.png", shot.path.file_stem().unwrap_or_default().to_string_lossy());
+                    let _ = image::save_buffer(shot.path.with_file_name(name), image.as_raw(), image.size[0] as u32, image.size[1] as u32, image::ColorType::Rgba8);
+                }
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            return;
+        }
         if !shot.asked && shot.started.elapsed() > Duration::from_millis(std::env::var("APIM_SHOT_WAIT").ok().and_then(|ms| ms.parse().ok()).unwrap_or(1200)) {
             shot.asked = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
@@ -1622,6 +1688,11 @@ impl eframe::App for App {
         self.pump(ctx);
         self.pump_summary();
         self.pump_open();
+        if let Some(chats) = self.boot.as_mut().and_then(|boot| boot.take()) {
+            self.chats = chats;
+            self.side.prune(&self.chats);
+            self.side.arrive();
+        }
         self.take_inbox();
         // `minimized` puts the self-portrait's window down once its message is sent, and back up when the reply ends.
         if self.staged("minimized") && self.shot.as_ref().is_some_and(|shot| shot.acted) {
@@ -1630,7 +1701,11 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        // Chats are written by another thread: the last save has to land before the program goes.
+        // Chats are written by another thread: the last save has to land before the program goes. Listed once
+        // more after it, they leave the kept list with the size and time each file really ended at, so the next
+        // start reads none of them.
+        store::flush();
+        Conversation::list();
         store::flush();
         perf_summary();
     }
@@ -1646,6 +1721,11 @@ impl eframe::App for App {
             if let [x1, y1, x2, y2] = points[..] {
                 ctx.add_plugin(selection::Told);
                 selection::replay(raw_input, shot.started.elapsed(), egui::pos2(x1, y1), egui::pos2(x2, y2));
+            }
+            // `click-150-200`: the mouse comes to that point and clicks it, 400 ms in.
+            let point: Vec<f32> = shot.state.split(',').find_map(|token| token.strip_prefix("click-")).into_iter().flat_map(|at| at.split('-')).filter_map(|n| n.parse().ok()).collect();
+            if let [x, y] = point[..] {
+                selection::click(raw_input, shot.started.elapsed(), egui::pos2(x, y));
             }
         }
         // `up-600`: the wheel is turned once, that many points back through the transcript.
@@ -1669,8 +1749,12 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         // Frames that follow one another are held to the screen's pace here; one drawn after a pause is not held.
+        // Nor is a frame laid out again before it is shown (a chat being landed on takes three passes): held
+        // once a pass, it reached the screen two refreshes late, 33 ms on a 60 Hz screen.
         static STARTED: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
-        if *PACE == Pace::Dwm && STARTED.lock().unwrap().is_some_and(|at| at.elapsed() < Duration::from_millis(50)) {
+        static FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+        let again = FRAME.swap(ctx.cumulative_frame_nr(), std::sync::atomic::Ordering::Relaxed) == ctx.cumulative_frame_nr();
+        if *PACE == Pace::Dwm && !again && STARTED.lock().unwrap().is_some_and(|at| at.elapsed() < Duration::from_millis(50)) {
             wait_for_screen();
         }
         let frame_started = Instant::now();
@@ -1681,7 +1765,10 @@ impl eframe::App for App {
         }
         self.take_drops(&ctx);
         self.take_paste(&ctx);
-        self.shortcuts(&ctx);
+        // Nothing is opened by a key while the loading screen still covers what it would open over.
+        if !self.boot.as_ref().is_some_and(|boot| boot.loading()) {
+            self.shortcuts(&ctx);
+        }
         if self.run.is_some() || self.summary_job.is_some() {
             // Keeps the elapsed time moving between tokens.
             ctx.request_repaint_after(Duration::from_millis(120));
@@ -1708,16 +1795,22 @@ impl eframe::App for App {
                 ui.scope_builder(egui::UiBuilder::new().max_rect(full), |ui| sidebar::show(self, ui));
             });
         }
-        // A fixed rail, and only when the window has room for it (the web hides it under 1024).
-        let rail = self.settings.workspace_open && ctx.content_rect().width() >= 1024.0;
-        if rail {
-            egui::Panel::right("workspace").exact_size(workspace::WIDTH).resizable(false).show_separator_line(false).frame(egui::Frame::new().fill(p.bg2)).show(ui, |ui| workspace::show(self, ui));
+        // A fixed rail, and only when the window has room for it (the web hides it under 1024). It slides as the
+        // chat list does: its content keeps its width and is cut off at the window's edge.
+        let rail = ctx.animate_bool_with_time_and_easing(egui::Id::new("rail-open"), self.settings.workspace_open && ctx.content_rect().width() >= 1024.0, 0.3, egui::emath::easing::cubic_out);
+        if rail > 0.0 {
+            egui::Panel::right("workspace").exact_size((workspace::WIDTH * rail).round()).resizable(false).show_separator_line(false).frame(egui::Frame::new().fill(p.bg2)).show(ui, |ui| {
+                let rect = ui.max_rect();
+                ui.set_clip_rect(rect);
+                let full = Rect::from_min_size(rect.min, vec2(workspace::WIDTH, rect.height()));
+                ui.scope_builder(egui::UiBuilder::new().max_rect(full), |ui| workspace::show(self, ui));
+            });
         }
         // The chat is a rounded card set into the window's chrome (the bar, the sidebar, the rail), with a strip of
         // chrome wherever it would otherwise touch the window's own edge. It used to be the square hole the panels
         // left, ruled off from them by two bright lines.
         let edge = |covered: f32| ((1.0 - covered) * CARD_GAP).round() as i8;
-        let around = egui::Margin { left: edge(open), right: edge(rail as u8 as f32), top: edge(!self.fullscreen as u8 as f32), bottom: CARD_GAP as i8 };
+        let around = egui::Margin { left: edge(open), right: edge(rail), top: edge(!self.fullscreen as u8 as f32), bottom: CARD_GAP as i8 };
         egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg2).inner_margin(around)).show(ui, |ui| {
             let card = ui.max_rect();
             ui.painter().rect(card, CARD_ROUND, p.bg, egui::Stroke::new(1.0, theme::alpha(p.border, 70.0)), egui::StrokeKind::Inside);
@@ -1757,6 +1850,7 @@ impl eframe::App for App {
             }
         }
         self.show_toast(&ctx);
+        splash::show(self, &ctx);
         if !self.fullscreen {
             titlebar::show(&ctx);
         }
@@ -1796,6 +1890,10 @@ impl eframe::App for App {
             // Both are kept for the summary printed when the program leaves: how long the app took to lay a frame
             // out, and how long it was from one frame to the next, which is what the eye gets.
             TIMES.lock().unwrap().push((took as f32, since as f32));
+            // A film says what each of its frames cost, so a picture that came late can be told from one drawn late.
+            if let Some(shot) = self.shot.as_ref().filter(|shot| shot.film.is_some() && (took > 4.0 || since > 20.0)) {
+                eprintln!("at {} ms (frame {}, pass {}): app {took:.1} ms, {since:.0} ms after the pass before", shot.started.elapsed().as_millis(), ctx.cumulative_frame_nr(), ctx.cumulative_pass_nr());
+            }
             if since > 25.0 && self.shot.is_some() && BORN.elapsed() > Duration::from_secs(1) {
                 eprintln!("late {since:.0} ms at {:.1} s (app {took:.1} ms)", BORN.elapsed().as_secs_f32());
             }
@@ -1806,11 +1904,14 @@ impl eframe::App for App {
 impl App {
     /// Something went wrong and nothing on screen says so: a line at the bottom that stays until dismissed.
     fn show_toast(&mut self, ctx: &egui::Context) {
-        let Some((text, _)) = &self.toast else { return };
+        let Some((text, since)) = &self.toast else { return };
         let p = theme::p();
         let bare = self.toast_bare;
         let mut dismiss = false;
-        egui::Area::new(egui::Id::new("toast")).anchor(egui::Align2::CENTER_BOTTOM, [0.0, -20.0]).order(egui::Order::Tooltip).show(ctx, |ui| {
+        // It comes up from below as it appears.
+        let come = widgets::entrance(ctx, *since, 0.25);
+        egui::Area::new(egui::Id::new("toast")).anchor(egui::Align2::CENTER_BOTTOM, [0.0, -20.0 + 14.0 * (1.0 - come)]).order(egui::Order::Tooltip).fade_in(false).show(ctx, |ui| {
+            ui.set_opacity(come);
             let shadow = egui::Shadow { offset: [0, 25], blur: 50, spread: 0, color: egui::Color32::from_black_alpha(64) };
             egui::Frame::new().fill(p.bg2).stroke(egui::Stroke::new(1.0, theme::alpha(p.danger, 30.0))).corner_radius(12).shadow(shadow).inner_margin(egui::Margin::symmetric(16, 10)).show(ui, |ui| {
                 ui.set_max_width(560.0);

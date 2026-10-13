@@ -279,7 +279,7 @@ fn probe_limited(cmd: &str, args: &[&str]) -> Option<String> {
     let child = c.spawn().ok()?;
     let pid = child.id();
     let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
+    crate::background(move || {
         let _ = tx.send(child.wait_with_output());
     });
     match rx.recv_timeout(PROBE_LIMIT) {

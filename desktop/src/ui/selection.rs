@@ -96,6 +96,22 @@ pub fn replay(input: &mut egui::RawInput, at: Duration, from: Pos2, to: Pos2) {
     STEP.store(step + 1, Ordering::Relaxed);
 }
 
+/// A self-portrait's `click-X-Y`: the mouse comes to rest on the point, goes down 400 ms in and comes up 70 ms
+/// later, as a hand does it. Fed to the app as input: no real mouse moves.
+pub fn click(input: &mut egui::RawInput, at: Duration, on: Pos2) {
+    static STEP: AtomicU8 = AtomicU8::new(0);
+    let button = |pressed| egui::Event::PointerButton { pos: on, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+    let (step, ms) = (STEP.load(Ordering::Relaxed), at.as_millis());
+    let event = match step {
+        0 if ms >= 250 => egui::Event::PointerMoved(on),
+        1 if ms >= 400 => button(true),
+        2 if ms >= 470 => button(false),
+        _ => return,
+    };
+    input.events.push(event);
+    STEP.store(step + 1, Ordering::Relaxed);
+}
+
 /// Prints what a self-portrait copied and keeps it from the real clipboard.
 pub struct Told;
 

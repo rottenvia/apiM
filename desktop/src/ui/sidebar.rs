@@ -26,6 +26,12 @@ pub struct State {
     pub show_archived: bool,
     selecting: bool,
     selected: HashSet<String>,
+    /// Where the row of the chat on screen sits this frame, in the list's own coordinates, and whose it is.
+    lit: Option<(f32, String)>,
+    /// The chat the highlight was last on.
+    lit_for: String,
+    /// When the list on screen was put there (the chats came in, or the other tab was picked): its rows come in one after another.
+    arrived: Option<Instant>,
     /// "Imported 3 chats", shown for a few seconds.
     pub note: Option<(String, Instant)>,
 }
@@ -78,9 +84,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             ui.add_space(12.0);
             ui.allocate_ui(vec2(WIDTH - 24.0, 30.0), |ui| {
                 let picked = widgets::segmented(ui, &[("Chats", active.len()), ("Archive", archived.len())], app.side.show_archived as usize);
-                if let Some(i) = picked {
+                if let Some(i) = picked.filter(|i| (*i == 1) != app.side.show_archived) {
                     app.side.show_archived = i == 1;
                     app.side.selected.clear();
+                    app.side.arrive();
                 }
             });
         });
@@ -98,13 +105,37 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     ui.spacing_mut().item_spacing.y = 0.0;
     egui::ScrollArea::vertical().id_salt("chats").auto_shrink(false).max_height(list_height).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
+        // The highlight is one box that travels from the chat that was open to the one that is, drawn under
+        // the rows: its place is known only once they are laid out, so it is kept room for here and drawn after.
+        let (top, under) = (ui.cursor().top(), ui.painter().add(egui::Shape::Noop));
+        app.side.lit = None;
         // Rows are 42 tall with 2 between them; the last 10 of the width is the scrollbar's.
-        for chat in &visible {
+        let since = app.side.arrived.map(|at| at.elapsed().as_secs_f32()).filter(|secs| *secs < 0.6);
+        if since.is_some() {
+            ui.ctx().request_repaint();
+        }
+        for (i, chat) in visible.iter().enumerate() {
+            // A list just put there comes in row after row, each a moment behind the one above and from a little left of its place.
+            let come = since.map_or(1.0, |secs| egui::emath::easing::cubic_out(((secs - i.min(14) as f32 * 0.02) / 0.22).clamp(0.0, 1.0)));
             ui.add_space(2.0);
             ui.horizontal(|ui| {
-                ui.add_space(12.0);
-                ui.allocate_ui(vec2(WIDTH - 24.0 - 10.0, 42.0), |ui| row(app, ui, chat, &mut action));
+                ui.add_space(12.0 - 10.0 * (1.0 - come));
+                ui.allocate_ui(vec2(WIDTH - 24.0 - 10.0, 42.0), |ui| {
+                    ui.set_opacity(come);
+                    row(app, ui, chat, top, &mut action)
+                });
             });
+        }
+        let on = ui.ctx().animate_bool_with_time(egui::Id::new("chat-lit"), app.side.lit.is_some(), 0.15);
+        if let Some((y, id)) = app.side.lit.take() {
+            // It travels when another chat is opened. When its own chat moves (a reply put it first), it is just there.
+            let another = std::mem::replace(&mut app.side.lit_for, id.clone()) != id;
+            app.side.lit = Some((widgets::glide(ui.ctx(), egui::Id::new("chat-lit-y"), y, 0.2, another), id));
+        }
+        if let Some((y, _)) = app.side.lit.as_ref().filter(|_| on > 0.0) {
+            let rect = Rect::from_min_size(pos2(full.left() + 12.0, top + y), vec2(WIDTH - 24.0 - 10.0, 42.0));
+            ui.painter().set(under, egui::Shape::rect_filled(rect, 8.0, p.elevated.gamma_multiply(on)));
+            ui.painter().rect_stroke(rect, 8.0, Stroke::new(1.0, alpha(p.accent, 40.0 * on)), StrokeKind::Inside);
         }
         ui.add_space(2.0);
         if visible.is_empty() {
@@ -199,7 +230,7 @@ fn check(ui: &mut egui::Ui, on: bool, partial: bool) -> egui::Response {
     response.on_hover_cursor(CursorIcon::PointingHand)
 }
 
-fn row(app: &mut App, ui: &mut egui::Ui, chat: &ChatMeta, action: &mut Option<Action>) {
+fn row(app: &mut App, ui: &mut egui::Ui, chat: &ChatMeta, list_top: f32, action: &mut Option<Action>) {
     let p = p();
     let editing = app.side.editing.as_deref() == Some(chat.id.as_str());
     if editing {
@@ -222,11 +253,12 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &ChatMeta, action: &mut Option<Ac
     if hovered {
         fade(ui, response.id.with("hover"), true);
     }
-    let (fill, border, fg) = if current {
-        (p.elevated, alpha(p.accent, 40.0), p.text)
-    } else {
-        (lerp(Color32::TRANSPARENT, p.bg3, t), lerp(Color32::TRANSPARENT, p.border, t), lerp(p.text2, p.text, t))
-    };
+    // The chat on screen is lit by the box that travels (`show`); its name brightens as that arrives.
+    let lit = fade(ui, response.id.with("lit"), current);
+    if current {
+        app.side.lit = Some((rect.top() - list_top, chat.id.clone()));
+    }
+    let (fill, border, fg) = (lerp(Color32::TRANSPARENT, p.bg3, t * (1.0 - lit)), lerp(Color32::TRANSPARENT, p.border, t * (1.0 - lit)), lerp(lerp(p.text2, p.text, t), p.text, lit));
     ui.painter().rect(rect, 8.0, fill, Stroke::new(1.0, border), StrokeKind::Inside);
 
     let mut x = rect.left() + 13.0;
@@ -268,16 +300,17 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &ChatMeta, action: &mut Option<Ac
         }
     }
 
+    // A chat opens as the mouse button goes down on it, not when it comes up: the tenth of a second in between
+    // was a wait for nothing. (A finger on a touch screen may be about to scroll the list, so that waits.)
+    let pressed = response.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_pressed() && !i.any_touches());
     if response.double_clicked() && !selecting {
         start_rename(app, chat);
-    } else if response.clicked() {
-        if selecting {
-            if !app.side.selected.remove(&chat.id) {
-                app.side.selected.insert(chat.id.clone());
-            }
-        } else {
-            *action = Some(Action::Open(chat.id.clone()));
+    } else if selecting {
+        if response.clicked() && !app.side.selected.remove(&chat.id) {
+            app.side.selected.insert(chat.id.clone());
         }
+    } else if pressed || response.clicked() {
+        *action = Some(Action::Open(chat.id.clone()));
     }
     let tip = if running { format!("{} — working in the background", chat.title) } else { chat.title.clone() };
     response.on_hover_text(tip);
@@ -416,6 +449,11 @@ impl State {
         if self.selecting && chats.is_empty() {
             self.selecting = false;
         }
+    }
+
+    /// The list on screen is another one from now: its rows come in.
+    pub fn arrive(&mut self) {
+        self.arrived = Some(Instant::now());
     }
 
     pub fn finish_selecting(&mut self) {
