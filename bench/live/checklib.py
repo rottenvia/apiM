@@ -24,6 +24,13 @@ class Check:
         self.ws, self.turn, self.rows = Path(sys.argv[1]).resolve(), int(sys.argv[2]), []
         before = os.environ.get("LIVE_BEFORE", "")
         self.before = json.loads(Path(before).read_text("utf-8")) if before and Path(before).exists() else {}
+        # What the reply said and the tool calls it made; None when the check runs on the reference solution.
+        reply = os.environ.get("LIVE_REPLY", "")
+        self.reply = json.loads(Path(reply).read_text("utf-8")) if reply and Path(reply).is_file() else None
+
+    def told(self, name, ok):
+        """A row about the reply itself (`ok` takes its text and its tool calls); passes where there is no reply to read."""
+        self.row(name, self.reply is None or ok(self.reply["text"], self.reply["tools"]))
 
     def row(self, name, ok, detail=""):
         self.rows.append((name, bool(ok), "" if ok else " ".join(str(detail).split())[:300]))

@@ -105,6 +105,11 @@ pub fn num_arg(args: &Value, key: &str) -> Option<u64> {
     let v = &args[key];
     v.as_u64().or_else(|| v.as_f64().filter(|f| *f >= 0.0).map(|f| f as u64)).or_else(|| v.as_str()?.trim().parse().ok())
 }
+/// A line number. Lines count from 1, so 0 is a field filled in for the sake of filling it (GPT-6 Luna sends every
+/// optional field, `"start_line":0,"end_line":0` among them, and its edits were "Lines 0-0 are out of range").
+pub fn line_arg(args: &Value, key: &str) -> Option<u64> {
+    num_arg(args, key).filter(|n| *n > 0)
+}
 pub fn list_arg(args: &Value, key: &str) -> Vec<String> {
     args[key].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default()
 }

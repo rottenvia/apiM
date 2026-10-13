@@ -1276,6 +1276,11 @@ impl App {
                 Event::Status(status) => run.status = status,
                 Event::Reasoning(text) => run.typing.push(false, text),
                 Event::Content(text) => run.typing.push(true, text),
+                Event::Unsaid => {
+                    if let Some(Part::Text(text)) = msg.parts.pop_if(|part| matches!(part, Part::Text(_))) {
+                        write_text(msg, &mut run.thinking, false, text);
+                    }
+                }
                 Event::ToolDraft { name, chars, path } => {
                     // The clock runs from the call's first byte; a new call starts it again.
                     let since = run.drafting.as_ref().filter(|d| d.name == name && d.chars <= chars).map_or_else(Instant::now, |d| d.since);
@@ -1312,6 +1317,10 @@ impl App {
                     let _ = reply.send(true);
                 }
                 Event::Approval { command, reason, key, mcp, reply } => {
+                    // Whoever drives a self-portrait reads what is asked here and answers `allow` or `deny` in the inbox.
+                    if let Some(inbox) = std::env::var_os("APIM_SHOT_INBOX").map(PathBuf::from) {
+                        let _ = std::fs::write(inbox.with_extension("ask"), serde_json::json!({ "command": command, "reason": reason }).to_string());
+                    }
                     run.approval = Some(PendingApproval { command, reason, key, mcp, reply });
                     ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
                 }
@@ -1530,6 +1539,7 @@ impl App {
         let (verb, text) = said.trim().split_once(char::is_whitespace).unwrap_or((said.trim(), ""));
         let done = match verb {
             "answer" | "skip" => self.run.as_mut().and_then(|run| run.question.take()).map(|asked| asked.reply.send(if verb == "skip" { String::new() } else { text.trim().to_string() })).is_some(),
+            "allow" | "deny" => self.run.as_mut().and_then(|run| run.approval.take()).map(|asked| (asked.reply.send(verb == "allow"), std::fs::remove_file(path.with_extension("ask")))).is_some(),
             "note" if self.running_here() => {
                 self.pass_note(text.trim().to_string());
                 true

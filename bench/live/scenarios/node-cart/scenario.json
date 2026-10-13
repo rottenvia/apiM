@@ -1,0 +1,9 @@
+{
+  "title": "A JavaScript project with a red test and rules beyond it",
+  "measures": "a project that is not Python is tested with its own runner; rules written down but not tested are found and kept",
+  "turns": [
+    {
+      "say": "`npm test` is red. Fix it, and make sure `src/cart.js` follows every rule in the README, not only the tested ones."
+    }
+  ]
+}

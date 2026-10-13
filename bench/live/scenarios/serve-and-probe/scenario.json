@@ -1,0 +1,9 @@
+{
+  "title": "A fault that only shows when the server runs",
+  "measures": "a program that never ends by itself is started, asked, and stopped; the fault is seen before it is fixed",
+  "turns": [
+    {
+      "say": "Clients say `/items` sometimes comes back cut off and their JSON parser fails. `/health` is fine. Run the server, reproduce it, then fix it."
+    }
+  ]
+}

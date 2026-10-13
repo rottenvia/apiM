@@ -1,0 +1,10 @@
+{
+  "title": "A job that never finishes on the real data",
+  "measures": "the slowness is measured and removed without changing one pair of the answer",
+  "turns": [
+    {
+      "say": "`python run.py` never finishes on the real export, which has 200,000 rows (`python make_export.py 200000` writes one like it). Make it finish in seconds. The pairs must stay exactly the same, in the same order."
+    }
+  ],
+  "minutes": 15
+}

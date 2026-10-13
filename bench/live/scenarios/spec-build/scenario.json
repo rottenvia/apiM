@@ -1,0 +1,10 @@
+{
+  "title": "A whole tool built from a written spec",
+  "measures": "a long build where nothing of fourteen rules is forgotten, and the reply's own tests are real",
+  "turns": [
+    {
+      "say": "Build `tally.py` to SPEC.md, with tests for it in `test_tally.py`."
+    }
+  ],
+  "minutes": 20
+}
