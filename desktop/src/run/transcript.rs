@@ -149,6 +149,94 @@ impl CarriedEcho {
     }
 }
 
+const THINK_OPEN: &str = "<think>";
+const THINK_CLOSE: &str = "</think>";
+
+/// Sorts out thinking a model wrote into its answer between its own tags (met on a free coding model, 3 of 120
+/// texts: the thought stood in the chat as the answer). `<think>` opening a round's text starts a thought and
+/// `</think>` ends it. A `</think>` with nothing opening it (the model's template ate the opening) says all the
+/// text of the round so far was the thought, and the caller takes it back.
+// ponytail: one thought a round, and a lone closing tag counts only outside backticks (an odd number of them before
+// it is code that names the tag). A reply that writes the tag bare in prose loses what stood before it to thinking.
+#[derive(Default)]
+pub struct ThinkTags {
+    held: String,
+    begun: bool,
+    inside: bool,
+    closed: bool,
+    skip_space: bool,
+    ticks: usize,
+}
+
+impl ThinkTags {
+    /// Takes the next piece. Returns (what it says, what it thinks, whether all it said before was thinking too).
+    pub fn push(&mut self, text: &str) -> (String, String, bool) {
+        self.held.push_str(text);
+        let (mut said, mut aside, mut unsaid) = (String::new(), String::new(), false);
+        loop {
+            if self.closed {
+                if self.skip_space {
+                    self.held = self.held.trim_start().to_string();
+                    self.skip_space = self.held.is_empty();
+                }
+                said.push_str(&std::mem::take(&mut self.held));
+                break;
+            }
+            if !self.begun {
+                let lead = self.held.trim_start();
+                if lead.is_empty() || (lead.len() < THINK_OPEN.len() && THINK_OPEN.starts_with(lead)) {
+                    break;
+                }
+                self.begun = true;
+                if lead.starts_with(THINK_OPEN) {
+                    let at = self.held.len() - lead.len() + THINK_OPEN.len();
+                    self.held.drain(..at);
+                    self.inside = true;
+                }
+                continue;
+            }
+            match self.held.find(THINK_CLOSE) {
+                Some(at) => {
+                    let before: String = self.held.drain(..at).collect();
+                    self.held.drain(..THINK_CLOSE.len());
+                    self.closed = true;
+                    if !self.inside && (self.ticks + before.matches('`').count()) % 2 == 1 {
+                        said.push_str(&before);
+                        said.push_str(THINK_CLOSE);
+                    } else {
+                        unsaid = !self.inside;
+                        if unsaid {
+                            aside.push_str(&std::mem::take(&mut said));
+                        }
+                        aside.push_str(&before);
+                        self.skip_space = true;
+                    }
+                    self.inside = false;
+                }
+                None => {
+                    // The tail that may still become the closing tag waits.
+                    let keep = (1..THINK_CLOSE.len()).rev().find(|n| self.held.ends_with(&THINK_CLOSE[..*n])).unwrap_or(0);
+                    let out: String = self.held.drain(..self.held.len() - keep).collect();
+                    if self.inside {
+                        aside.push_str(&out);
+                    } else {
+                        self.ticks += out.matches('`').count();
+                        said.push_str(&out);
+                    }
+                    break;
+                }
+            }
+        }
+        (said, aside, unsaid)
+    }
+
+    /// The round has ended: what was still held is what it is so far.
+    pub fn finish(&mut self) -> (String, String) {
+        let rest = std::mem::take(&mut self.held);
+        if self.inside { (String::new(), rest) } else { (rest, String::new()) }
+    }
+}
+
 fn with_carried(reasoning: &str, content: &Value) -> Value {
     let carried = carried_thought(reasoning);
     json!(match content.as_str().filter(|c| !c.trim().is_empty()) {
@@ -287,6 +375,33 @@ mod tests {
         let mut echo = CarriedEcho::default();
         let (said, aside) = echo.push("[My notes]\nplain");
         assert_eq!((said + &echo.finish().0, aside), ("[My notes]\nplain".to_string(), String::new()));
+    }
+    #[test]
+    fn thinking_between_the_models_own_tags_is_not_the_answer() {
+        for (reply, says, thinks) in [
+            ("<think>plan it\nthen do it</think>\n\nThe answer.", "The answer.", "plan it\nthen do it"),
+            ("\n<think>only a thought", "", "only a thought"),
+            // The opening was eaten by the model's template: all before the closing tag was the thought.
+            ("I should read the file first.\nIt is short.</think>The file has 3 lines.", "The file has 3 lines.", "I should read the file first.\nIt is short."),
+            ("Close a thought with `</think>` and go on.", "Close a thought with `</think>` and go on.", ""),
+            ("Plain text, a < b and </thin air.", "Plain text, a < b and </thin air.", ""),
+        ] {
+            for size in [1, 2, 3, 7, 40, 1_000] {
+                let mut tags = ThinkTags::default();
+                let (mut said, mut aside) = (String::new(), String::new());
+                let chars: Vec<char> = reply.chars().collect();
+                for piece in chars.chunks(size) {
+                    let (s, a, unsaid) = tags.push(&piece.iter().collect::<String>());
+                    if unsaid {
+                        aside.push_str(&std::mem::take(&mut said));
+                    }
+                    said.push_str(&s);
+                    aside.push_str(&a);
+                }
+                let (s, a) = tags.finish();
+                assert_eq!((said + &s, aside + &a), (says.to_string(), thinks.to_string()), "{reply:?} in pieces of {size}");
+            }
+        }
     }
     use crate::run::cases;
 

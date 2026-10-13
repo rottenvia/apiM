@@ -1,0 +1,10 @@
+{
+  "title": "A total that is off, in a tree of ninety files",
+  "measures": "the cause is found far from where it shows, in a large tree, and fixed there; nothing is patched at the report",
+  "turns": [
+    {
+      "say": "Accounting has 34299.98 for March. `python run_report.py` prints less. Find out why and fix it."
+    }
+  ],
+  "minutes": 15
+}

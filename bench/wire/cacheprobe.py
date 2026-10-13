@@ -6,7 +6,7 @@ Plays a six-round conversation with a long start (about 12,000 tokens, and three
 round the one before plus one exchange, as an agent's rounds are, and prints what the endpoint says it read from
 its cache. The start opens with a line no other request has, so only this conversation's own rounds can have put
 it there. A round costs a fraction of a cent. `PROBE_GAP` is the pause between rounds in seconds (default 3);
-`PROBE_TOOLS=0` leaves the tools out.
+`PROBE_TOOLS=0` leaves the tools out; `PROBE_MARK=top|last|system|both` sends a cache marker.
 """
 import json, os, sys, time, urllib.error, urllib.request
 from pathlib import Path
@@ -23,6 +23,15 @@ TOOLS = [
 
 def ask(model, tag, messages):
     body = {"model": model, "messages": messages, "max_tokens": 24, "reasoning": {"effort": "low"}, "provider": {"only": [tag], "allow_fallbacks": False}, "usage": {"include": True}}
+    # PROBE_MARK=top sends one cache_control for the whole request; PROBE_MARK=last marks the newest message, as
+    # Anthropic's endpoints need it (they read nothing without one).
+    mark = os.environ.get("PROBE_MARK")
+    if mark in ("top", "both"):
+        body["cache_control"] = {"type": "ephemeral"}
+    if mark in ("system", "both"):
+        body["messages"] = [{**messages[0], "content": [{"type": "text", "text": messages[0]["content"], "cache_control": {"type": "ephemeral"}}]}] + messages[1:]
+    elif mark == "last":
+        body["messages"] = messages[:-1] + [{**messages[-1], "content": [{"type": "text", "text": messages[-1]["content"], "cache_control": {"type": "ephemeral"}}]}]
     if os.environ.get("PROBE_TOOLS", "1") != "0":
         body.update(tools=TOOLS, tool_choice="none")
     req = urllib.request.Request("https://openrouter.ai/api/v1/chat/completions", json.dumps(body).encode(), {"Authorization": "Bearer " + KEY, "Content-Type": "application/json"})

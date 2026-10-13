@@ -199,6 +199,21 @@ fn usable_endpoints(listing: &Value, only: Option<&str>) -> Vec<Endpoint> {
     usable
 }
 
+/// A move is worth it when the new endpoint costs this share of the old one or less.
+const WORTH_MOVING: f64 = 0.85;
+
+/// The endpoint used last stays first unless the new pick is cheaper by enough. A move is not free: the new endpoint
+/// has nothing of the conversation in its cache. GPT-6 Luna's three endpoints read between 51% and 64% from their
+/// caches, the counts crossed with every reply, and the pick moved 17 times in one benchmark pass.
+fn keep_last(order: Vec<Endpoint>, candidates: &[Endpoint], last: Option<&str>) -> Vec<Endpoint> {
+    let Some(first) = order.first() else { return order };
+    let Some(kept) = last.and_then(|tag| candidates.iter().find(|e| e.tag == tag)) else { return order };
+    if first.tag == kept.tag || first.price() <= kept.price() * WORTH_MOVING || kept.tps < GOOD_TPS.min(first.tps) {
+        return order;
+    }
+    std::iter::once(kept.clone()).chain(order.into_iter().filter(|e| e.tag != kept.tag)).take(3).collect()
+}
+
 fn pick_endpoints(usable: Vec<Endpoint>) -> Vec<Endpoint> {
     let Some(cheap) = usable.iter().find(|e| e.tps >= GOOD_TPS).or(usable.first()).cloned() else { return Vec::new() };
     let first = usable.iter().filter(|e| e.price() <= cheap.price() * DEARER && e.tps >= cheap.tps * FASTER).max_by(|a, b| a.tps.total_cmp(&b.tps)).cloned().unwrap_or(cheap);
@@ -289,7 +304,8 @@ pub async fn choose_endpoint(client: &reqwest::Client, target: &Target) -> Optio
             let (sound, failed) = sound_endpoints(client, target, &usable).await;
             let sound: Vec<Endpoint> = if sound.is_empty() { usable.iter().filter(|e| !failed.contains(&e.tag)).cloned().collect() } else { sound };
             left_out = failed;
-            pick_endpoints(if sound.is_empty() { usable } else { sound })
+            let candidates = if sound.is_empty() { usable } else { sound };
+            keep_last(pick_endpoints(candidates.clone()), &candidates, seen[&target.model.id]["tag"].as_str())
         }
     };
     let first = order.first().filter(|e| e.price() > 0.0)?;
@@ -686,6 +702,18 @@ mod tests {
         let ranked = with_reads(listed, &json!({ "cheap": [400000.0, 80000.0] }));
         assert_eq!(ranked[0].tag, "steady");
         assert!((ranked[1].reads - 0.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_endpoint_used_last_stays_unless_another_is_cheaper_by_enough() {
+        let e = |tag: &str, input: f64| Endpoint { tag: tag.into(), name: tag.into(), rates: (input, input / 10.0, 0.5), tps: 50.0, max_output: 0, reads: USUAL_READS };
+        let tags = |order: Vec<Endpoint>| order.into_iter().map(|e| e.tag).collect::<Vec<_>>();
+        let near = vec![e("a", 0.095), e("b", 0.1), e("c", 0.2)];
+        assert_eq!(tags(keep_last(near.clone(), &near, Some("b"))), ["b", "a", "c"]);
+        assert_eq!(tags(keep_last(near.clone(), &near, None)), ["a", "b", "c"]);
+        assert_eq!(tags(keep_last(near.clone(), &near, Some("gone"))), ["a", "b", "c"]);
+        let far = vec![e("a", 0.05), e("b", 0.1)];
+        assert_eq!(tags(keep_last(far.clone(), &far, Some("b"))), ["a", "b"]);
     }
 
     #[test]

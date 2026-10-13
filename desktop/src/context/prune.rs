@@ -195,7 +195,14 @@ pub fn retained_file_content(messages: &[Value], budget: usize) -> Retained {
         if superseded || paths.is_empty() {
             continue;
         }
-        if paths.iter().any(|p| later_writes.iter().any(|w| covers(p, w))) || used + js_len(content) > budget {
+        // One read of several files is worked from until every file it showed has been rewritten. Counted stale with
+        // the first of them, it was collapsed eight results later: a reply that read `lib/*.py` once and rewrote the
+        // files one by one lost the text of those it had not reached, undid its work, read again, lost it again
+        // (61 tool calls and a million tokens in before it was stopped).
+        let tidy = |p: &str| p.replace('\\', "/").trim_start_matches("./").to_string();
+        let shown: Vec<String> = SHOWN.captures_iter(content).map(|c| tidy(&c[1])).collect();
+        let stale = if shown.len() > 1 { shown.iter().all(|file| later_writes.iter().any(|w| tidy(w) == *file)) } else { paths.iter().any(|p| later_writes.iter().any(|w| covers(p, w))) };
+        if stale || used + js_len(content) > budget {
             continue;
         }
         used += js_len(content);
@@ -220,6 +227,8 @@ fn tool_name_for<'a>(messages: &'a [Value], id: &str) -> &'a str {
     messages.iter().filter(|m| m["role"] == "assistant").flat_map(calls).find(|c| c["id"].as_str() == Some(id)).map_or("tool", |c| call_str(c, "name"))
 }
 
+/// The line a read puts over each file's text (`files.rs`, `render_read`).
+static SHOWN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^(.+?): (?:empty file|all \d+ lines|EXACT, all \d+ lines|lines \d+-\d+ of \d+)").unwrap());
 static FILE_NAMES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i-u)[\w./\\-]+\.(?:c|cpp|h|hpp|cs|ts|tsx|js|jsx|mjs|py|lua|luau|rs|go|java|kt|rb|php|css|html|json|toml|yaml|yml|md|txt|sln|vcxproj|dll|exe)\b").unwrap());
 static VERDICT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"verdict|conclusion|found|proves?|^- \[").unwrap());
 
@@ -384,6 +393,21 @@ mod tests {
         // And the budget still holds for what is old: five reads of 29,000 fit in 150,000.
         let kept = at(40).iter().filter(|m| m["role"] == "tool" && m["content"].as_str().is_some_and(|c| c.len() > 20_000)).count();
         assert_eq!(kept, 5 + 8, "five old reads within the budget, and the newest eight results");
+    }
+
+    #[test]
+    fn a_read_of_several_files_is_kept_until_all_of_them_are_rewritten() {
+        let call = |id: &str, name: &str, args: Value| json!({ "role": "assistant", "content": "", "tool_calls": [{ "id": id, "type": "function", "function": { "name": name, "arguments": args.to_string() } }] });
+        let said = |id: &str, text: String| json!({ "role": "tool", "tool_call_id": id, "content": text });
+        let body = "x = 1\n".repeat(700);
+        let mut m = vec![call("r", "read_files", json!({ "paths": ["lib/*.py"] })), said("r", format!("lib/a.py: EXACT, all 700 lines, 4200 chars\n{body}\nlib/b.py: EXACT, all 700 lines, 4200 chars\n{body}"))];
+        m.extend([call("w1", "write_file", json!({ "path": "lib/a.py", "content": "x = 2\n" })), said("w1", "Wrote lib/a.py".into())]);
+        m.extend(rounds(12));
+        let kept = |m: &[Value]| retained_reads(m, FILE_READ_BUDGET_CHARS).contains(&1) && prune_transcript(m, &Options::default()).0[1]["content"].as_str().unwrap().len() > 8_000;
+        assert!(kept(&m), "lib/b.py is still to be rewritten from this read");
+        m.extend([call("w2", "write_file", json!({ "path": ".\\lib\\b.py", "content": "x = 2\n" })), said("w2", "Wrote lib/b.py".into())]);
+        m.extend(rounds(12));
+        assert!(!kept(&m), "both rewritten: the read is old text");
     }
 
     #[test]

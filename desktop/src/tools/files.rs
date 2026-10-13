@@ -1,7 +1,7 @@
 //! File tools: list, read, write, edit, search. Everything stays inside the
 //! chat's workspace folder; a path that climbs out is refused.
 
-use super::{Ctx, Output, bool_arg, num_arg, str_arg};
+use super::{Ctx, Output, bool_arg, line_arg, num_arg, str_arg};
 use globset::{Glob, GlobMatcher};
 use regex::{Regex, RegexBuilder};
 use serde_json::Value;
@@ -369,7 +369,7 @@ pub fn read_file(ctx: &Ctx, args: &Value) -> Output {
         Ok(p) => p,
         Err(e) => return Output::fail(e),
     };
-    let (start, end) = (num_arg(args, "start_line"), num_arg(args, "end_line"));
+    let (start, end) = (line_arg(args, "start_line"), line_arg(args, "end_line"));
     let ranged = start.is_some() || end.is_some();
     if rel.trim().is_empty() {
         return Output::fail("path is required.");
@@ -650,13 +650,20 @@ pub struct EditSpec {
 impl EditSpec {
     pub fn from_args(a: &Value) -> EditSpec {
         let text = |k: &str| a[k].as_str().filter(|s| !s.is_empty()).map(|s| s.replace("\r\n", "\n"));
+        let (mut old_text, start_anchor, mut end_anchor) = (text("old_text"), text("start_anchor"), text("end_anchor"));
+        let (start_line, end_line) = (line_arg(a, "start_line").map(|n| n as usize), line_arg(a, "end_line").map(|n| n as usize));
+        // An end anchor and nothing else is the text to replace: GPT-6 Luna names its region so, and the new text it
+        // sends with it is that text rewritten.
+        if old_text.is_none() && start_anchor.is_none() && start_line.is_none() && end_line.is_none() {
+            old_text = end_anchor.take();
+        }
         EditSpec {
-            old_text: text("old_text"),
-            start_anchor: text("start_anchor"),
-            end_anchor: text("end_anchor"),
+            old_text,
+            start_anchor,
+            end_anchor,
             include_anchors: a["include_anchors"].as_bool().unwrap_or(true),
-            start_line: num_arg(a, "start_line").map(|n| n as usize),
-            end_line: num_arg(a, "end_line").map(|n| n as usize),
+            start_line,
+            end_line,
             new_text: a["new_text"].as_str().unwrap_or("").replace("\r\n", "\n"),
         }
     }
@@ -1278,6 +1285,14 @@ mod tests {
         let a = apply_edit(src, &spec(|s| { s.start_line = Some(2); s.end_line = Some(3); s.new_text = String::new() })).unwrap();
         assert_eq!(a.content, "start\nend\ntail");
         assert!(apply_edit(src, &spec(|s| { s.start_line = Some(9); })).is_err());
+        // Every optional field filled with nothing: the anchor names the region, and line 0 is no line.
+        let filled = EditSpec::from_args(&serde_json::json!({ "old_text": "", "start_anchor": "", "start_line": 0, "end_line": 0, "end_anchor": "b", "new_text": "z" }));
+        assert_eq!((filled.start_line, filled.end_line, filled.old_text.as_deref(), filled.end_anchor.clone()), (None, None, Some("b"), None));
+        assert_eq!(apply_edit("a
+b
+c", &filled).unwrap().content, "a
+z
+c");
         // The text to replace and a stray end_line: the text is replaced, not that one line.
         let both = apply_edit("a
 b

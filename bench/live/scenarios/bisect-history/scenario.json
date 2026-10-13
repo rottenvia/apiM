@@ -1,0 +1,9 @@
+{
+  "title": "A fault that came in six commits ago",
+  "measures": "the history is used to find where a fault came in; the fix keeps everything that came after",
+  "turns": [
+    {
+      "say": "`slugify('Route 66')` gave `route-66` in v1.2 and gives `route` now. Find the commit that broke it, fix it without losing what came after, and tell me which commit it was."
+    }
+  ]
+}

@@ -121,14 +121,15 @@ def send(name, turn=None, lane=1, say=None):
         data, ws = ROOT / f"lane{lane}" / "data", ROOT / f"lane{lane}" / "ws" / name
         rm(ws)
         shutil.copytree(SCENARIOS / name / "files", ws)
+        set_up(name, ws)
         (data / "chats" / name).mkdir(parents=True, exist_ok=True)
-        if not (data / "settings.json").exists():
-            (data / "settings.json").write_text(json.dumps(SETTINGS), "utf-8")
         now = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
         st = {"chat": str(uuid.uuid4()), "data": str(data), "ws": str(ws), "turn": 0, "pid": None, "turns": {}}
         (data / "chats" / name / "chat.json").write_text(json.dumps({"id": st["chat"], "title": name, "archived": False, "createdAt": now, "updatedAt": now, "messages": [], "desktop": {"folder": str(ws)}}), "utf-8")
     if alive(st):
         sys.exit(f"{name}: a reply is still running (pid {st['pid']})")
+    # A scenario may run under settings of its own (approval asked for, say); a lane runs one window at a time.
+    Path(st["data"], "settings.json").write_text(json.dumps({**SETTINGS, **sc.get("settings", {})}), "utf-8")
     turn = turn or st["turn"] + 1
     text = say or sc["turns"][turn - 1]["say"]
     side = ROOT / "state" / name
@@ -145,6 +146,12 @@ def send(name, turn=None, lane=1, say=None):
     st["turns"][str(turn)] = {"said": text, "started": time.time()}
     save(name, st)
     print(f"{name} turn {turn}: sent, pid {p.pid}")
+
+
+def set_up(name, ws):
+    """`setup.py` of a scenario builds what files cannot hold (a git history), in the folder, before the first message."""
+    if (SCENARIOS / name / "setup.py").exists():
+        subprocess.run([sys.executable, str(SCENARIOS / name / "setup.py")], cwd=ws, check=True, capture_output=True, timeout=120)
 
 
 def replies(chat):
@@ -262,8 +269,8 @@ def reset(name):
     print(f"{name}: forgotten")
 
 
-def run_check(name, folder, turn, before):
-    env = dict(os.environ, LIVE_BEFORE=str(before), PYTHONUTF8="1", PYTHONDONTWRITEBYTECODE="1")
+def run_check(name, folder, turn, before, reply=""):
+    env = dict(os.environ, LIVE_BEFORE=str(before), LIVE_REPLY=str(reply), PYTHONUTF8="1", PYTHONDONTWRITEBYTECODE="1")
     try:
         r = subprocess.run([sys.executable, str(SCENARIOS / name / "check.py"), str(folder), str(turn)], env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
         return r.returncode == 0, (r.stdout + r.stderr).strip()
@@ -277,7 +284,11 @@ def check(name, turn=None):
     copy = ROOT / "chk" / name
     rm(copy)
     shutil.copytree(st["ws"], copy, ignore=shutil.ignore_patterns(".outputs", ".snapshots", ".git", "node_modules"))
-    ok, out = run_check(name, copy, turn, ROOT / "state" / name / f"before-{turn}.json")
+    # What the reply said and did, for checks on that (a secret not repeated, a command run once).
+    told = (replies(chat_of(st) or {}) or [(None, None)])[-1][1] or {}
+    said = ROOT / "state" / name / f"reply-{turn}.json"
+    said.write_text(json.dumps({"text": "\n".join(s.get("text", "") for s in told.get("timeline") or [] if s.get("kind") == "text"), "tools": [{k: t.get(k) for k in ("name", "args", "ok", "summary")} for t in told.get("toolEvents") or []]}), "utf-8")
+    ok, out = run_check(name, copy, turn, ROOT / "state" / name / f"before-{turn}.json", said)
     st["turns"][str(turn)].update(passed=ok, score=next((l for l in out.splitlines() if l.startswith("SCORE")), "SCORE ?"))
     save(name, st)
     print(f"{name} turn {turn}: {'PASS' if ok else 'FAIL'}\n{out[-1500:]}")
@@ -292,6 +303,7 @@ def selftest(only=None):
         sc, tmp = scenario(name), ROOT / "self" / name
         rm(tmp)
         shutil.copytree(folder / "files", tmp)
+        set_up(name, tmp)
         for turn, said in enumerate(sc["turns"], 1):
             before = ROOT / "self" / f"{name}-before-{turn}.json"
             before.write_text(json.dumps(manifest(tmp)), "utf-8")
@@ -355,6 +367,11 @@ def auto(lane, names):
                 asking = tools and tools[-1].get("name") == "ask_user" and tools[-1].get("ok") is None
                 if asking and not (ROOT / "state" / name / "inbox.txt").exists():
                     tell(name, "answer" if said.get("answer") else "skip", said.get("answer", ""))
+                # An approval on screen: denied when the scenario's `deny` pattern is in what is asked, allowed otherwise.
+                ask = ROOT / "state" / name / "inbox.ask"
+                if ask.exists() and not (ROOT / "state" / name / "inbox.txt").exists():
+                    asked = json.loads(ask.read_text("utf-8") or "{}").get("command", "")
+                    tell(name, "deny" if sc.get("deny") and re.search(sc["deny"], asked, re.I) else "allow")
                 if said.get("killAtTools") and len(tools) >= said["killAtTools"] and not killed:
                     kill(name)
                     killed = True

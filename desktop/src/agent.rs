@@ -78,6 +78,8 @@ pub enum Event {
     Status(&'static str),
     Reasoning(String),
     Content(String),
+    /// The answer text of this round so far was thinking: the model closed a thought it never opened.
+    Unsaid,
     /// A tool call still streaming its arguments. `path` is the file it names, once that much has arrived.
     ToolDraft { name: String, chars: usize, path: Option<String> },
     /// A request failed and try `attempt` of `attempts` starts after `wait`.
@@ -824,6 +826,7 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
         };
         // DeepSeek takes each tool turn's reasoning back as `reasoning_content`. OpenRouter's validators reject
         // the field, so its lanes get `reasoning` where a model needs it and the end of the thought as plain text elsewhere.
+        let claude = openrouter && target.api_model.starts_with("anthropic/");
         let reasoning_field = if !openrouter { Some("reasoning_content") } else if lane.replay { Some("reasoning") } else { None };
         // Clips and pictures ride once: on the request after they joined, and every later round gets a reference line.
         let mut wire = transcript::wire(&ridden(&messages), reasoning_field, thought_ends);
@@ -841,12 +844,30 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
             let pinned = wire.last().is_some_and(|m| m["role"] == "system" && m["content"].as_str().is_some_and(|c| c.starts_with(GOAL_PIN_MARKER)));
             let result = wire.iter().rposition(|m| m["role"] == "tool").filter(|&i| pinned && wire[i]["content"].is_string() && wire[i + 1..].iter().all(|m| m["role"] == "system"));
             let goal = resolve_run_goal(&user_text, history_last_user.as_deref(), None);
+            // Claude's endpoints read their cache only up to a mark the request sets, and only where an earlier request
+            // set one over the same text. Replayed on Haiku 5.5 (six rounds of one reply): 0 tokens read as the request
+            // stood, the work state folded into the newest tool result and so gone from it a round later; all but a few
+            // hundred a round with the work state a message of its own after a marked tool result.
+            let mark = |m: &mut Value| {
+                if let Some(text) = m["content"].as_str().map(str::to_string) {
+                    m["content"] = json!([{ "type": "text", "text": text, "cache_control": { "type": "ephemeral" } }]);
+                }
+            };
             if let (Some(i), Some(goal)) = (result, goal) {
                 let pin = wire.pop().unwrap_or_default();
                 let noted = if pin["content"].as_str().is_some_and(|c| c.ends_with(NOTED)) { NOTED } else { "" };
-                wire[i]["content"] = json!(format!("{}\n\n{}{noted}", wire[i]["content"].as_str().unwrap_or(""), render_work_state(&goal, &tail)));
+                let state = format!("{}{noted}", render_work_state(&goal, &tail));
+                if claude {
+                    wire.push(json!({ "role": "user", "content": state }));
+                    mark(&mut wire[i]);
+                } else {
+                    wire[i]["content"] = json!(format!("{}\n\n{state}", wire[i]["content"].as_str().unwrap_or("")));
+                }
             } else if !tail.is_empty() {
                 wire.push(json!({ "role": "system", "content": tail }));
+            }
+            if claude {
+                mark(&mut wire[0]);
             }
         }
 
@@ -855,6 +876,13 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
         let mut body = Map::new();
         body.insert("model".into(), json!(target.api_model));
         body.insert("messages".into(), json!(wire));
+        // Claude's endpoints read nothing from their cache unless the request asks for it: on Haiku 5.5 a six-round
+        // conversation read 0 of 16,900 tokens a round without this field and all but the newest message with it, on
+        // Anthropic, Bedrock and Vertex alike (`bench/wire/cacheprobe.py`, PROBE_MARK=top), at under a third of the cost.
+        // The field covers a reply's first round, where no tool result is there to mark.
+        if claude {
+            body.insert("cache_control".into(), json!({ "type": "ephemeral" }));
+        }
         body.insert("stream".into(), json!(true));
         body.insert("stream_options".into(), json!({ "include_usage": true }));
         // The limit is enforced inside the round too: the model cannot write what it is not allowed to.
@@ -1393,6 +1421,7 @@ async fn call_model(client: &reqwest::Client, target: &Target, body: &mut Map<St
         };
         // A paragraph of the answer the model labelled as its carried thought is thinking, and goes where thinking goes.
         let mut carried = transcript::CarriedEcho::default();
+        let mut tags = transcript::ThinkTags::default();
         let mut thought_aloud = String::new();
         let mut echo = dedup.as_mut();
         let wire = Value::Object(body.clone());
@@ -1406,7 +1435,13 @@ async fn call_model(client: &reqwest::Client, target: &Target, body: &mut Map<St
             }
             Delta::Content(t) => {
                 heard(t);
-                let (said, aside) = carried.push(t);
+                let (t, thought, unsaid) = tags.push(t);
+                if unsaid {
+                    thought_aloud.push_str(&std::mem::take(&mut shown));
+                    emit.send(Event::Unsaid);
+                }
+                let (said, aside) = carried.push(&t);
+                let aside = thought + &aside;
                 if !aside.is_empty() {
                     thought_aloud.push_str(&aside);
                     emit.send(Event::Reasoning(aside));
@@ -1434,7 +1469,10 @@ async fn call_model(client: &reqwest::Client, target: &Target, body: &mut Map<St
                 if let Some((secs, chars)) = pace.map(|(first, last, chars)| (last.duration_since(first).as_secs_f64(), chars)).filter(|(secs, chars)| crawled(*secs, *chars)) {
                     log_with("api_error", "slow stream", &format!("The model sent {chars} characters of text in {secs:.0} s."), json!({ "model": target.api_model, "charsPerSecond": (chars as f64 / secs).round() }));
                 }
-                let (said, aside) = carried.finish();
+                let (tail, thought) = tags.finish();
+                let (early, aside) = carried.push(&tail);
+                let (late, last) = carried.finish();
+                let (said, aside) = (early + &late, thought + &aside + &last);
                 if !aside.is_empty() {
                     thought_aloud.push_str(&aside);
                     emit.send(Event::Reasoning(aside));
