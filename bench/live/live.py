@@ -18,7 +18,8 @@ A first pass is driven by hand: send, watch, read the rounds, answer. `auto` is 
 another build or model, in a rig of its own (another LIVE_ROOT).
 
 Environment: LIVE_ROOT (the rig's folder, short path), LIVE_EXE (the app to drive), LIVE_MODEL, LIVE_EFFORT,
-LIVE_BUDGET (dollars a chat), OPENROUTER_API_KEY.
+LIVE_BUDGET (dollars a chat), LIVE_WINDOW (a custom model's context, in tokens: a small one makes a reply fold its
+older rounds early), OPENROUTER_API_KEY.
 """
 import ctypes, hashlib, json, os, re, shutil, subprocess, sys, time, uuid
 from ctypes import wintypes
@@ -32,9 +33,9 @@ EXE = Path(os.environ.get("LIVE_EXE", ROOT / "apim-live.exe"))
 SETTINGS = {"model": os.environ.get("LIVE_MODEL", "glm-5.3-flash"), "effort": os.environ.get("LIVE_EFFORT", "high"), "approval": "auto", "budget_usd": float(os.environ.get("LIVE_BUDGET", "0.4")), "lessons_enabled": False}
 # LIVE_MODEL=custom:<openrouter slug> runs a model the app's own list does not have.
 if SETTINGS["model"].startswith("custom:"):
-    SETTINGS["custom_models"] = [{"api_model": SETTINGS["model"][7:], "label": SETTINGS["model"][7:], "context_length": 200_000, "max_output_tokens": 32_000}]
+    SETTINGS["custom_models"] = [{"api_model": SETTINGS["model"][7:], "label": SETTINGS["model"][7:], "context_length": int(os.environ.get("LIVE_WINDOW", 200_000)), "max_output_tokens": 32_000}]
 # Not the work itself: what the app and the tools leave behind.
-LEFTOVERS = {".outputs", ".snapshots", "__pycache__", ".pytest_cache", ".git", "node_modules"}
+LEFTOVERS = {".outputs", ".snapshots", ".history", ".analysis", ".packages", "__pycache__", ".pytest_cache", ".git", "node_modules"}
 
 K = ctypes.windll.kernel32
 K.CreateFileW.restype = K.OpenProcess.restype = wintypes.HANDLE
@@ -151,7 +152,7 @@ def send(name, turn=None, lane=1, say=None):
 def set_up(name, ws):
     """`setup.py` of a scenario builds what files cannot hold (a git history), in the folder, before the first message."""
     if (SCENARIOS / name / "setup.py").exists():
-        subprocess.run([sys.executable, str(SCENARIOS / name / "setup.py")], cwd=ws, check=True, capture_output=True, timeout=120)
+        subprocess.run([sys.executable, str(SCENARIOS / name / "setup.py")], cwd=ws, check=True, capture_output=True, timeout=600)
 
 
 def replies(chat):
@@ -283,7 +284,7 @@ def check(name, turn=None):
     turn = turn or st["turn"]
     copy = ROOT / "chk" / name
     rm(copy)
-    shutil.copytree(st["ws"], copy, ignore=shutil.ignore_patterns(".outputs", ".snapshots", ".git", "node_modules"))
+    shutil.copytree(st["ws"], copy, ignore=shutil.ignore_patterns(".outputs", ".snapshots", ".history", ".analysis", ".git", "node_modules"))
     # What the reply said and did, for checks on that (a secret not repeated, a command run once).
     told = (replies(chat_of(st) or {}) or [(None, None)])[-1][1] or {}
     said = ROOT / "state" / name / f"reply-{turn}.json"

@@ -148,6 +148,8 @@ static SCHEMAS: LazyLock<Vec<Value>> = LazyLock::new(|| {
         let more = match t["function"]["name"].as_str().unwrap_or("") {
             "list_files" | "read_file" | "read_files" => " A path written in full (C:\\..., ~/..., %LOCALAPPDATA%\\...) reaches anywhere on the user's computer, to look only; list_files then shows that one folder, newest files first.",
             "delete_file" => " A folder inside the workspace is deleted with everything in it.",
+            // Asked for in the tool's wording to be in both, it was: the closing answer said how it was checked twice.
+            "finish" => " `result` and `verified` are shown to the user one after the other: how the work was checked goes into `verified` only.",
             // It reads what was said, not what tools answered: a reply looked here for a command's output and lost five rounds on it.
             "search_conversation" => " It searches what you and the user wrote, never the results of tools: a command's output is in the file its result named.",
             "run_command" if cfg!(windows) => " For questions about the computer itself there are the system's own looking tools (tasklist, systeminfo, wevtutil qe, reg query, sc query) and PowerShell, given as one string: {\"command\":\"powershell\",\"args\":[\"Get-WinEvent -LogName Application -MaxEvents 20 | Format-List TimeCreated,ProviderName,Message\"]}.",
@@ -156,7 +158,8 @@ static SCHEMAS: LazyLock<Vec<Value>> = LazyLock::new(|| {
         };
         // Said of every system: a reply that did not know this ran its long programs a second time to get a file.
         let kept = if t["function"]["name"] == "run_command" { " A long output is shown with its middle cut, and ALL of it is kept in a file that the result names in its first line (.outputs/...), as is any output you may need again after it has left your context: never redirect a program's output to a file yourself, and never run a program again to see what it printed. Take what you need from the file: search_files with it as path, read_file with start_line and end_line, or a script that reads it. A long one read whole only fills your context." } else { "" };
-        let more = format!("{more}{kept}");
+        let folded = if t["function"]["name"] == "list_files" { " A tree of more than a few hundred files is listed by its folders, each with the files in it and below it: pass a folder as path to see inside it." } else { "" };
+        let more = format!("{more}{kept}{folded}");
         if !more.is_empty() {
             t["function"]["description"] = Value::String(format!("{}{more}", t["function"]["description"].as_str().unwrap_or("")));
         }

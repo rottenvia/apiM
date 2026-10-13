@@ -3,7 +3,7 @@ evaluated in the chat's folder by a process of their own (a loop that never ends
 import hashlib, json, os, subprocess, sys
 from pathlib import Path
 
-LEFTOVERS = {".outputs", ".snapshots", "__pycache__", ".pytest_cache", ".git", "node_modules"}
+LEFTOVERS = {".outputs", ".snapshots", ".history", ".analysis", ".packages", "__pycache__", ".pytest_cache", ".git", "node_modules"}
 
 
 def manifest(folder):

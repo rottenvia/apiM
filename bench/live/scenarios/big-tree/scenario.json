@@ -1,0 +1,16 @@
+{
+  "title": "Three changes in a tree of 2,400 files",
+  "measures": "the way is found in a large real code base; a fault is fixed where it is, not where it shows; the tree's own tests are run with the tree's own interpreter",
+  "turns": [
+    {
+      "say": "This folder is our own build of Python's standard library; `python.exe` here runs it (see README.md). With it, `glob.glob('sample/reports/Q*.csv')` finds nothing, though Q1.csv and Q2.csv are there; `q*.csv` finds both. Find the cause and fix it where it is."
+    },
+    {
+      "say": "`python.exe -m calendar` always starts the week on Monday. Add `-f` / `--first-weekday N` (0 is Monday, 6 is Sunday), for the text and for the HTML output, with a test in `Lib/test/test_calendar.py`."
+    },
+    {
+      "say": "Mail from our Bangalore office shows the wrong time. For `Date: Tue, 13 Oct 2026 09:15:00 +0530`, `msg['date'].datetime.utcoffset()` under `email.policy.default` is 5:00:30, not 5:30. Fix the cause and tell me which file it was in."
+    }
+  ],
+  "minutes": 15
+}

@@ -21,6 +21,19 @@ async fn git(ctx: &Ctx, args: &[&str]) -> (bool, String) {
     }
 }
 
+/// The app's own folders stay out of the repository. A commit of everything took `.snapshots` with it (57 MB in a
+/// large tree), and the reply had to undo the commit and make it again. They are named in .git/info/exclude, which
+/// belongs to this clone alone and is never committed.
+pub fn keep_app_folders_out(root: &std::path::Path) {
+    let path = root.join(".git/info/exclude");
+    let had = std::fs::read_to_string(&path).unwrap_or_default();
+    let missing: String = [".snapshots/", ".history/", ".outputs/", ".analysis/", ".packages/"].iter().filter(|dir| !had.lines().any(|line| line.trim() == **dir)).map(|dir| format!("{dir}\n")).collect();
+    if !missing.is_empty() && root.join(".git").is_dir() {
+        let _ = std::fs::create_dir_all(root.join(".git/info"));
+        let _ = std::fs::write(&path, format!("{had}{}{missing}", if had.is_empty() || had.ends_with('\n') { "" } else { "\n" }));
+    }
+}
+
 /// The branch new work must not be committed to directly.
 async fn base_branch(ctx: &Ctx) -> String {
     // A repository connected through GitHub has the base the user picked.
@@ -130,5 +143,25 @@ pub async fn run(ctx: &Ctx, name: &str, args: &Value) -> Output {
             }
         }
         other => Output::fail(format!("{other} is not available in the desktop app yet.")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_apps_folders_are_excluded_once_and_what_was_there_stays() {
+        let root = crate::tools::scratch("gitkeep");
+        std::fs::create_dir_all(root.join(".git/info")).unwrap();
+        std::fs::write(root.join(".git/info/exclude"), "*.tmp").unwrap();
+        super::keep_app_folders_out(&root);
+        super::keep_app_folders_out(&root);
+        assert_eq!(std::fs::read_to_string(root.join(".git/info/exclude")).unwrap(), "*.tmp
+.snapshots/
+.history/
+.outputs/
+.analysis/
+.packages/
+");
+        let _ = std::fs::remove_dir_all(root);
     }
 }

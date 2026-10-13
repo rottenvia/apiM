@@ -109,6 +109,22 @@ sixteen were passed whole by five model families that day (DeepSeek $0.07, GLM $
 Claude Haiku 5.5 and GPT-6 Luna $0.22 a pass): the score is at its ceiling, and what a pass is for is the faults
 read out of the rounds and the tokens a turn takes. A scenario with a port (serve-and-probe) runs in one rig at a time.
 
+A third tier is about size, of the chat and of the tree:
+
+| scenario | what it measures |
+|---|---|
+| long-haul | twelve messages on one project: rules given once hold to the end, a fact said in passing is there ten messages later, what was taken back stays out, a refactor keeps old callers working |
+| big-tree | three changes in Python's own library, 2,268 files: a fault fixed where it is and not where it shows, a feature with its test, the tree's own tests run with the tree's own interpreter |
+
+`big-tree` keeps nothing of CPython: its `setup.py` copies the machine's Python 3.11 (Windows) with `Lib` and `DLLs`
+into the folder, puts two faults in and makes one commit; the reference solution is three small scripts.
+`LIVE_WINDOW=60000` with a `custom:` model makes a reply fold its older rounds early.
+
+On 2026-10-13 both passed whole on both models: long-haul 12 of 12 turns (GLM $0.059, 2.03 M tokens; DeepSeek
+$0.086, 2.56 M), big-tree 3 of 3 (GLM $0.028, 1.09 M; DeepSeek $0.045, 1.98 M; DeepSeek at a 60,000-token window
+$0.047, 1.51 M). The app's own folders in a workspace (`.snapshots`, `.history`, `.outputs`, `.analysis`) are not
+the work: a check does not look into them.
+
 A scenario is `scenarios/<id>/`: `scenario.json` (the turns, and what its user does: a note, an answer, a kill),
 `files/`, `check.py <folder> <turn>` built on `checklib.py`, and `solution/<turn>/` (files laid over, `DELETE`,
 `APPLY.py`). Optional: `setup.py`, run in the folder before the first message (a git history); `settings` in

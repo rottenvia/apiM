@@ -243,6 +243,19 @@ Met on four more model families (DeepSeek V4.1 Flash, GPT-6 Luna, Qwen 3.8 Flash
 - **Thinking written into the answer** (`…</think>answer`) stood in the chat as the answer. Between the model's own tags it goes to thinking, and a closing tag with nothing opening it takes the text before it back out of the answer.
 - **Looks:** the header chip for background processes read "Stopped" next to the cost, as if the reply had been stopped ("Processes" now), and a chat's title kept the backticks of its first message.
 
+Met in a large tree and in a long chat (`big-tree`: Python's own library with its interpreter, 2,268 files; `long-haul`: twelve messages on one project; GLM 5.3 Flash and DeepSeek V4.1 Flash, 2026-10-13). Both models passed every turn of both, so again none of this showed in a score:
+
+- **The file list was 60,000 characters in every round.** A request names every file of the workspace, up to 2,000 of them: 17,000 tokens a round in this tree, 842,730 tokens for a one-line fix. Past 400 files the list now names the files right under the workspace and every folder with the number of files in it and below it (`context/workspace_context.rs`). The same fix on the same model then took 172,869 tokens; the three turns 1.09 million and $0.028 where they had taken 1.90 million and $0.044 (one run each).
+- **`list_files` answered with 2,000 lines**, carried through the rest of the reply. A tree that large is answered folder by folder too, and a folder given as `path` shows its own files and the folders under it.
+- **A program in the workspace, asked for by its bare name, ran the one on PATH.** Told "`python.exe` here runs it", a reply ran the machine's Python for four rounds and could not see the fault. PATH still wins, as in PowerShell, and like PowerShell the result says that a program of that name is in the workspace and how to run it (`.\python.exe`).
+- **A commit of everything took the app's own folders with it.** `git_commit` with no paths adds all, and `.snapshots` (57 MB here), `.history`, `.outputs` and `.analysis` went in; the reply noticed, undid its commit and made it again by hand. A workspace that is a repository gets these folders named in `.git/info/exclude`, which is this clone's alone and is never committed.
+- **A read from a line on, with no end named, gave the rest of the file**: lines 3060 to 5603 of a test file, 28,000 tokens in every round after it. Such a read shows 800 lines and says where to go on. (Checked by its test only, not yet in a live run.)
+- **The closing answer said how it was checked twice**: the tool's wording asked for it in `result` and again in `verified`, and both are shown.
+
+What held, and is now measured: the five rules of the first message, a code said in passing in the third and a decision of the fifth were all there at messages ten to twelve, on both models. The rules came through the summary of older turns word for word; the two asides were recorded with `note_finding` by the model itself and retired when used. With the model's window set to 60,000 tokens a reply folded its older rounds twice ("Context compacted · 12 steps summarised") and still finished right.
+
+Not changed, and yours to decide: `git commit` typed as a command on the base branch gets past the rule the `git_commit` tool keeps (GLM committed to `main` three times that way).
+
 ## Checking the tools
 
 `apim --tools calls.json --auto --dir FOLDER` runs a list of tool calls (`[{"name": "edit_file", "args": {...}}, ...]`) as the agent would make them and prints what each hands back: no model in between, so a tool is judged on what it does. `APIM_TOOL_CHARS` sets how much of each result is shown. All 59 were run this way on 2026-10-09; what that changed:

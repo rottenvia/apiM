@@ -18,7 +18,7 @@ use crate::context::subagent::{self, ToolRunner, delegate_tool, parse_delegate_a
 use crate::context::tool_limits::tool_limits_for;
 use crate::context::Stop;
 use crate::context::tree_delta::{StepKind, TreeEntry, TreeTracker};
-use crate::context::workspace_context::build_workspace_context;
+use crate::context::workspace_context::workspace_listing;
 use crate::diagnostics;
 use crate::lessons::{self, Lesson};
 use crate::local;
@@ -257,7 +257,7 @@ impl Tree {
     fn open(root: &Path, messages: &mut Vec<Value>) -> Tree {
         let (files, entries, left_out) = Tree::list(root);
         let mut tree = Tree::default();
-        tree.show(build_workspace_context(Some(&files)) + &left_out, messages);
+        tree.show(workspace_listing(&files) + &left_out, messages);
         tree.tracker.update(&entries);
         tree
     }
@@ -270,7 +270,7 @@ impl Tree {
             StepKind::None => {}
             StepKind::Delta => messages.push(json!({ "role": "system", "content": step.text })),
             StepKind::Baseline => {
-                let next = build_workspace_context(Some(&files)) + &left_out;
+                let next = workspace_listing(&files) + &left_out;
                 if next != self.shown {
                     self.show(next, messages);
                 }
@@ -593,6 +593,9 @@ async fn run_inner(mut req: Request, emit: &Emitter, procs: Arc<Procs>) -> Resul
     let native_vision = target.model.vision == Vision::Native;
     let web_search = s.web_mode() != "off" && (!s.tavily().is_empty() || !s.exa().is_empty());
     let git_repo = req.workspace.join(".git").exists();
+    if git_repo {
+        tools::git::keep_app_folders_out(&req.workspace);
+    }
     // About 3.5 characters per token.
     let window_chars = models::context_window(&target.model.id, customs) as usize * 7 / 2;
 
