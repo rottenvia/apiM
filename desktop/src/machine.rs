@@ -43,7 +43,7 @@ static FACTS: LazyLock<String> = LazyLock::new(|| {
 
 /// The section of the system prompt. `auto`: commands run without asking.
 pub fn block(workspace: &Path, auto: bool) -> String {
-    let asks = if auto { "Commands and looks outside the workspace run without asking; a system command that changes or deletes something still asks the user." } else { "The user approves each command, and each folder you look into outside the workspace." };
+    let asks = if auto { "Commands and looks outside the workspace run without asking; a system command that changes or deletes something, and installing a package into the machine (pip into the system Python, npm -g, cargo install), still asks the user. Prefer what is already there: the standard library's unittest needs nothing installed." } else { "The user approves each command, and each folder you look into outside the workspace." };
     format!(
         "\n\nThis computer, as the app found it when it started (take it as given, do not spend a round checking it):\n{}\n- Your workspace: {}\n- Today is {}.\n- {asks}",
         *FACTS,
@@ -63,6 +63,6 @@ mod tests {
         assert_eq!(windows_name("nonsense"), None);
         let told = block(Path::new("/w/chat"), false);
         assert!(told.contains("- Your workspace: /w/chat\n- Today is 20") && told.contains("Programs found: ") && told.ends_with("outside the workspace."), "{told}");
-        assert!(block(Path::new("/w"), true).ends_with("still asks the user."));
+        assert!(block(Path::new("/w"), true).contains("cargo install), still asks the user. Prefer what is already there"));
     }
 }
