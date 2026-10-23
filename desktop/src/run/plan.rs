@@ -139,9 +139,30 @@ pub fn check_answer_claims(answer: &str, tools_used: &[String]) -> Option<String
         }
     }
     // Any tool of a group having run is enough: "I looked it up" is true whether it was fetch_url or browse.
-    let (tools, _) = TOOL_CLAIMS.iter().find(|(tools, patterns)| !tools.iter().any(|t| used(t)) && any(patterns, answer))?;
-    let named = tools[0];
-    Some(format!("This reply describes using {named} and reports what it returned, but {named} did not run in this reply — the result described above was not produced by a tool. Treat it as invented until it is actually run."))
+    if let Some((tools, _)) = TOOL_CLAIMS.iter().find(|(tools, patterns)| !tools.iter().any(|t| used(t)) && any(patterns, answer)) {
+        let named = tools[0];
+        return Some(format!("This reply describes using {named} and reports what it returned, but {named} did not run in this reply — the result described above was not produced by a tool. Treat it as invented until it is actually run."));
+    }
+    // Any tool, named as having run. GLM 5.3 Flash answered "Model added. `add_model` called with ID …" twice in one chat,
+    // the second time after the user said nothing was called, and no tool ran either time.
+    static NAMED_RUN: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)\b(?:called|used|ran|invoked|executed|triggered)\s+(?:the\s+)?`?([a-z]+(?:_[a-z0-9]+)+)`?|`?\b([a-z]+(?:_[a-z0-9]+)+)`?\s+(?:tool\s+)?(?:was\s+|has\s+been\s+)?(?:called|ran|invoked|executed|returned|succeeded|completed)\b").unwrap()
+    });
+    static MODEL_ADDED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\bmodel\s+(?:is\s+|was\s+|has\s+been\s+)?(?:added|registered|installed)\b|\b(?:added|registered)\b[^.\n]{0,60}\bmodel\s+(?:list|menu|picker)\b").unwrap());
+    static DENIED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(?:not|never|without|cannot|failed)\b|n't\b").unwrap());
+    let is_tool = |name: &str| crate::tools::schema(name).is_some() || ["add_model", "delegate", "load_tools"].contains(&name);
+    for sentence in reported.split_inclusive(['.', '!', '?', '\n']).filter(|sentence| !DENIED.is_match(sentence)) {
+        for caught in NAMED_RUN.captures_iter(sentence) {
+            let name = caught.get(1).or(caught.get(2)).map_or("", |m| m.as_str());
+            if is_tool(name) && !used(name) {
+                return Some(format!("This reply says {name} ran, but {name} was not called in this reply — nothing it would have done happened."));
+            }
+        }
+        if !used("add_model") && MODEL_ADDED.is_match(sentence) {
+            return Some("This reply says a model was added, but add_model did not run in this reply — the model list is unchanged.".into());
+        }
+    }
+    None
 }
 
 pub const PLAN_NUDGE_MARKER: &str = "[Harness: plan update overdue]";
@@ -281,6 +302,15 @@ mod tests {
         assert!(!wrote_plan_in_words("Three causes:\n1. A slow disk.\n2. A cold cache.\n3. A big file.") && !wrote_plan_in_words("My plan:\n1. Read it.\n2. Fix it."));
         // A reply that worked in the sandbox ran its commands and wrote its files there.
         assert_eq!(check_answer_claims("Ran the script and it exited 1. I created the file again.", &["sandbox_run".to_string()]), None);
+        // A tool named as called that never ran, in the words a model used; the same line with the call made, a denial, an offer.
+        let added = ["add_model".to_string()];
+        for lie in ["Model added. `add_model` called with ID `deepseek/deepseek-v4.1-flash-1017` to register model in app.", "Model added. Used `add_model` tool. Workspace empty.", "I called git_status and the tree is clean."] {
+            assert!(check_answer_claims(lie, &[]).is_some(), "{lie}");
+        }
+        assert_eq!(check_answer_claims("Model added. `add_model` called with ID `x/y`.", &added), None);
+        assert_eq!(check_answer_claims("I did not call add_model: the id is not on OpenRouter.", &[]), None);
+        assert_eq!(check_answer_claims("Paste the link and I will call add_model.", &[]), None);
+        assert_eq!(check_answer_claims("The model_list was called a menu in older builds.", &[]), None);
         for (i, o) in cases("check_answer_claims") {
             let used: Vec<String> = i[1].as_array().unwrap().iter().map(|t| t.as_str().unwrap().to_string()).collect();
             assert_eq!(check_answer_claims(i[0].as_str().unwrap(), &used).as_deref(), o.as_str(), "{i}");

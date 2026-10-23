@@ -96,6 +96,8 @@ pub struct Settings {
     #[serde(skip_serializing)]
     pub custom_plugins: Vec<Plugin>,
     pub custom_models: Vec<CustomModel>,
+    /// The app's own models taken out of the model menu (right-click there); Settings → Models brings them back.
+    pub hidden_models: Vec<String>,
     pub approval: Approval,
     /// Hard ceiling on what one reply may cost, in USD. None means no cap.
     pub budget_usd: Option<f64>,
@@ -137,6 +139,7 @@ impl Default for Settings {
             enabled_plugins: Vec::new(),
             custom_plugins: Vec::new(),
             custom_models: Vec::new(),
+            hidden_models: Vec::new(),
             approval: Approval::Manual,
             budget_usd: None,
             sidebar_open: true,
@@ -171,6 +174,35 @@ impl Settings {
         if let Ok(json) = serde_json::to_vec_pretty(self) {
             let _ = write_atomic(&Self::path(), &json);
         }
+    }
+
+    /// How many models the model menu lists.
+    pub fn in_menu(&self) -> usize {
+        crate::models::MODELS.iter().filter(|m| !self.hidden_models.contains(&m.id)).count() + self.custom_models.len()
+    }
+
+    /// Takes a model out of the model menu: one of the app's own is hidden (Settings → Models shows it again), one of the
+    /// user's is removed. The model in use moves to the first one left. False, and nothing done, for the last one.
+    pub fn drop_from_menu(&mut self, id: &str) -> bool {
+        if self.in_menu() <= 1 {
+            return false;
+        }
+        match self.custom_models.iter().position(|c| c.id() == id) {
+            Some(i) => drop(self.custom_models.remove(i)),
+            // Hidden already, and back in the menu only as the model in use: it is moved off.
+            None if self.hidden_models.iter().any(|h| h == id) => {
+                if self.model != id {
+                    return false;
+                }
+            }
+            None if crate::models::MODELS.iter().any(|m| m.id == id) => self.hidden_models.push(id.to_string()),
+            None => return false,
+        }
+        if self.model == id {
+            let first = crate::models::MODELS.iter().find(|m| !self.hidden_models.contains(&m.id)).map(|m| m.id.clone());
+            self.model = first.or_else(|| self.custom_models.first().map(CustomModel::id)).unwrap_or_else(|| DEFAULT_MODEL_ID.into());
+        }
+        true
     }
 
     /// A key from Settings, else from the environment (handy for scripts and tests).
@@ -1247,6 +1279,31 @@ pub fn derive_title(message: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_model_leaves_the_menu_and_the_one_in_use_moves() {
+        use crate::models::{CustomModel, MODELS, Vision};
+        let mine = CustomModel { api_model: "a/b".into(), label: "AB".into(), vision: Vision::None, max_output_tokens: 5, context_length: None, input_price: None, output_price: None, open_limits: false };
+        let mut s = super::Settings { model: MODELS[0].id.clone(), custom_models: vec![mine], ..Default::default() };
+        // The one in use, hidden: the next of the app's own takes its place.
+        assert!(s.drop_from_menu(&MODELS[0].id));
+        assert_eq!((s.hidden_models.clone(), s.model.clone()), (vec![MODELS[0].id.clone()], MODELS[1].id.clone()));
+        // Hidden twice, or a model that is not there: nothing. Hidden and then picked in Settings: it is moved off again.
+        assert!(!s.drop_from_menu(&MODELS[0].id) && !s.drop_from_menu("nope"));
+        s.model = MODELS[0].id.clone();
+        assert!(s.drop_from_menu(&MODELS[0].id));
+        assert_eq!((s.hidden_models.len(), s.model.clone()), (1, MODELS[1].id.clone()));
+        // The user's own is removed, not hidden.
+        assert!(s.drop_from_menu("custom:a/b"));
+        assert!(s.custom_models.is_empty() && !s.hidden_models.contains(&"custom:a/b".to_string()));
+        // Down to one, it stays.
+        for m in MODELS.iter().skip(1).take(MODELS.len() - 2) {
+            assert!(s.drop_from_menu(&m.id));
+        }
+        assert_eq!(s.in_menu(), 1);
+        assert!(!s.drop_from_menu(&MODELS[MODELS.len() - 1].id));
+        assert_eq!(s.model, MODELS[MODELS.len() - 1].id);
+    }
+
     /// The web's import cleaning: one chat or many, partial records kept, fresh ids, and nothing without a usable message.
     #[test]
     fn an_export_imports_the_way_the_web_app_reads_it() {

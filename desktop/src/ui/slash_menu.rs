@@ -7,7 +7,7 @@ use super::theme::{self, W, p};
 use super::{App, Dialog, attachments, find_bar, sandbox_panel, widgets};
 use crate::slash::{self, Cmd, Submit};
 use crate::snapshots::{self, RestorePoint};
-use crate::store::{self, Role};
+use crate::store::Role;
 use crate::{models, provider};
 use eframe::egui::{self, Color32, Sense, pos2, vec2};
 use std::time::{Duration, Instant};
@@ -55,7 +55,8 @@ fn set_draft(app: &mut App, text: String) {
 
 /// Runs `f` with what the option commands choose between right now.
 fn with_choices<R>(app: &App, f: impl FnOnce(&slash::Choices) -> R) -> R {
-    let all = models::all(&app.settings.custom_models);
+    let mut all = models::all(&app.settings.custom_models);
+    all.retain(|m| m.id == app.settings.model || !app.settings.hidden_models.contains(&m.id));
     let specs: Vec<String> = all.iter().map(|m| if provider::resolve_target(&m.id, &app.settings).is_ok() { m.specs.clone() } else { format!("{} · no key", m.specs) }).collect();
     let models: Vec<slash::Opt> = all.iter().zip(&specs).map(|(m, specs)| (m.id.as_str(), m.label.as_str(), specs.as_str())).collect();
     let mut themes: Vec<slash::Opt> = theme::THEMES.iter().map(|t| (t.id.as_str(), t.name.as_str(), "")).collect();

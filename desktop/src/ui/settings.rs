@@ -342,12 +342,23 @@ fn model(app: &mut App, ui: &mut Ui) {
         let (rect, response, ink) = form::choice(ui, vec2(width, 62.0), app.settings.model == m.id);
         let name = widgets::clipped(ui, &m.label, theme::font(14.0, W::Semibold), ink, width - 34.0);
         widgets::text_at(ui, rect.left() + 17.0, rect.top() + 23.0, name);
-        let sub = widgets::clipped(ui, &m.settings_subtitle, theme::font(11.0, W::Medium), ink.gamma_multiply(0.7), width - 34.0);
+        let hidden = app.settings.hidden_models.contains(&m.id);
+        let sub = widgets::clipped(ui, if hidden { "Hidden from the model menu" } else { &m.settings_subtitle }, theme::font(11.0, W::Medium), ink.gamma_multiply(0.7), width - 34.0);
         widgets::text_at(ui, rect.left() + 17.0, rect.top() + 41.0, sub);
         if response.clicked() {
             app.settings.model = m.id.clone();
         }
     });
+    if !app.settings.hidden_models.is_empty() {
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            let names: Vec<String> = app.settings.hidden_models.iter().map(|id| models::resolve(id, &[]).label).collect();
+            ui.label(widgets::lines(&format!("Hidden from the model menu: {}.", names.join(", ")), 12.0, 18.0, W::Regular, p.muted));
+            if Btn::ghost("Show them again").text(12.0, 18.0).pad(8.0, 2.0).fill(Color32::TRANSPARENT, p.hover).ink(p.accent_light, p.text).show(ui).clicked() {
+                app.settings.hidden_models.clear();
+            }
+        });
+    }
     if app.settings.model == "qwen-3.8-27b" {
         ui.add_space(8.0);
         super::settings_panels::local_runtime(app, ui);

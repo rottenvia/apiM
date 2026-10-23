@@ -105,27 +105,46 @@ struct Endpoint {
     name: String,
     /// Dollars per million tokens: input, cached input, output.
     rates: (f64, f64, f64),
-    /// Tokens a second, the middle of the last half hour; 0 when not known.
+    /// Tokens a second while it writes: this app's own count where it has one (`saw_usage`), else OpenRouter's middle of
+    /// the last half hour, else the middle of the others listed.
     tps: f64,
+    /// Seconds to the first token, from the same sources as `tps`.
+    wait: f64,
+    /// No one had a figure for its speed: `tps` is the others' middle.
+    guessed: bool,
     /// The most it writes in one answer; 0 when not listed.
     max_output: u64,
     /// Of the input this app sent there, the share that came from its cache (`saw_usage`), once enough was sent to
     /// tell; until then `USUAL_READS`.
     reads: f64,
+    /// Tokens written per token sent, for this model, in this app's own rounds; until enough were sent, `USUAL_WRITES`.
+    writes: f64,
+    /// Tokens a round writes, thinking included, for this model; until enough rounds were timed, `USUAL_ROUND`.
+    round: f64,
 }
 
-/// What long agent runs read from a cache that works: seven tokens in ten.
+/// What long agent runs read from a cache that works: seven tokens in ten. And write: one per hundred sent, in rounds of 800.
 const USUAL_READS: f64 = 0.7;
+const USUAL_WRITES: f64 = 0.01;
+const USUAL_ROUND: f64 = 800.0;
 /// Input sent to an endpoint before its own share is believed, and the sum past which old rounds count half.
 const READS_BELIEVED: f64 = 150_000.0;
 const READS_HALVED: f64 = 3_000_000.0;
+/// Rounds timed at an endpoint before its own speed is believed, and how long that count stays good.
+const TIMED_BELIEVED: f64 = 4.0;
+const TIMED_KEPT_SECS: u64 = 3 * 24 * 3600;
 static READS_FILE: Mutex<()> = Mutex::new(());
 
-/// Counts a round's input, and how much of it the endpoint read from its cache, in `endpoints.json`. A cached price is
-/// only paid where the cache is read, and endpoints differ: on 2026-10-13 the one with the lowest listed prices read
-/// nothing in the first two or three rounds of every reply and sometimes nothing in five (45% over a night of
-/// replies), while others read every round from the second. The picker prices an endpoint by its own count.
-pub fn saw_usage(model_id: &str, endpoint_name: &str, sent: u64, cached: u64) {
+/// Counts a round in `endpoints.json`: what was sent, what of it the endpoint read from its cache, what it wrote, and,
+/// when the round was timed, how long it took to the first token and to write. A cached price is only paid where the
+/// cache is read, and endpoints differ: on 2026-10-13 the one with the lowest listed prices read nothing in the first
+/// two or three rounds of every reply and sometimes nothing in five (45% over a night of replies), while others read
+/// every round from the second. Speed is counted too: OpenRouter's figure is an average over everyone's short
+/// requests, and this app's are long prompts from one place.
+/// One row per model and endpoint: [sent, read, sent since writing was counted, written, written in timed rounds, writing
+/// secs, first-token secs, timed rounds, at]. Rows from before 2026-10-23 hold the first two: their sending is not held
+/// against writing nobody counted.
+pub fn saw_usage(model_id: &str, endpoint_name: &str, sent: u64, cached: u64, written: u64, timing: Option<(f64, f64)>) {
     if sent == 0 {
         return;
     }
@@ -133,51 +152,112 @@ pub fn saw_usage(model_id: &str, endpoint_name: &str, sent: u64, cached: u64) {
     let file = models::endpoints_file();
     let mut saved: Map<String, Value> = std::fs::read(&file).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
     let seen = &mut saved.entry("_reads").or_insert_with(|| json!({}))[model_id][endpoint_name];
-    let (mut all, mut hit) = (seen[0].as_f64().unwrap_or(0.0) + sent as f64, seen[1].as_f64().unwrap_or(0.0) + cached as f64);
-    if all > READS_HALVED {
-        (all, hit) = (all / 2.0, hit / 2.0);
+    let mut row: Vec<f64> = (0..8).map(|i| seen[i].as_f64().unwrap_or(0.0)).collect();
+    row[0] += sent as f64;
+    row[1] += cached as f64;
+    row[2] += sent as f64;
+    row[3] += written as f64;
+    // A round too short to time says more about the clock than about the endpoint.
+    if let Some((wait, writing)) = timing.filter(|(_, writing)| written >= 32 && *writing >= 0.3) {
+        row[4] += written as f64;
+        row[5] += writing;
+        row[6] += wait;
+        row[7] += 1.0;
     }
-    *seen = json!([all, hit]);
+    if row[0] > READS_HALVED {
+        row.iter_mut().for_each(|n| *n /= 2.0);
+    }
+    row.push(now_secs() as f64);
+    *seen = json!(row);
     let _ = std::fs::write(&file, Value::Object(saved).to_string());
 }
 
-/// The endpoints with the share each was seen to read from its cache, cheapest first by that.
-fn with_reads(mut endpoints: Vec<Endpoint>, seen: &Value) -> Vec<Endpoint> {
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// The endpoints with what this app saw of each (`saw_usage`): the share read from the cache, the speed, and the model's
+/// own mix of writing to sending. Best first.
+fn with_own_counts(mut endpoints: Vec<Endpoint>, seen: &Value) -> Vec<Endpoint> {
+    let row = |row: &Value| (0..9).map(|i| row[i].as_f64().unwrap_or(0.0)).collect::<Vec<f64>>();
+    let rows: Vec<Vec<f64>> = seen.as_object().into_iter().flatten().map(|(_, seen)| row(seen)).collect();
+    let sum = |i: usize| rows.iter().map(|row| row[i]).sum::<f64>();
+    let writes = if sum(2) >= READS_BELIEVED { sum(3) / sum(2) } else { USUAL_WRITES };
+    let round = if sum(7) >= TIMED_BELIEVED { sum(4) / sum(7) } else { USUAL_ROUND };
+    let now = now_secs() as f64;
     for e in &mut endpoints {
-        let (all, hit) = (seen[&e.name][0].as_f64().unwrap_or(0.0), seen[&e.name][1].as_f64().unwrap_or(0.0));
-        if all >= READS_BELIEVED {
-            e.reads = (hit / all).clamp(0.0, 1.0);
+        (e.writes, e.round) = (writes, round);
+        let row = row(&seen[&e.name]);
+        if row[0] >= READS_BELIEVED {
+            e.reads = (row[1] / row[0]).clamp(0.0, 1.0);
+        }
+        if row[7] >= TIMED_BELIEVED && now - row[8] < TIMED_KEPT_SECS as f64 && row[5] > 0.0 {
+            (e.tps, e.wait, e.guessed) = (row[4] / row[5], row[6] / row[7], false);
         }
     }
-    endpoints.sort_by(|a, b| a.price().total_cmp(&b.price()));
+    endpoints.sort_by(|a, b| a.score().total_cmp(&b.score()));
     endpoints
 }
 
-/// From this speed up an endpoint is picked on price alone.
-const GOOD_TPS: f64 = 40.0;
-/// One and a half times the speed is worth a quarter more money, and no more than that.
-const FASTER: f64 = 1.5;
-const DEARER: f64 = 1.25;
+/// Halving the time a round takes is worth 41% more money (√2): a much faster endpoint wins at a little more, and one twice as
+/// cheap wins at a little slower.
+const SPEED_WEIGHT: f64 = 0.5;
+/// An endpoint crawls under this speed, or when a round there takes this many times as long as at the quickest one: it
+/// is picked only when every other one crawls too. Without this a price twice as low would win at three times the wait.
+const SLOWEST_TPS: f64 = 12.0;
+const SLOWEST_SHARE: f64 = 3.0;
+
+fn crawls(e: &Endpoint, among: &[Endpoint]) -> bool {
+    let quickest = among.iter().map(Endpoint::secs).fold(f64::INFINITY, f64::min);
+    e.tps < SLOWEST_TPS || e.secs() > quickest * SLOWEST_SHARE
+}
 
 impl Endpoint {
     /// What this app pays there per million tokens it sends.
-    // ponytail: the mix is the one measured over long agent runs (seven tokens in ten read from the cache, one written per
-    // hundred sent), not the chat's own. Weigh by the chat's last reply if short chats turn out to pick badly.
     fn price(&self) -> f64 {
-        (1.0 - self.reads) * self.rates.0 + self.reads * self.rates.1 + 0.01 * self.rates.2
+        (1.0 - self.reads) * self.rates.0 + self.reads * self.rates.1 + self.writes * self.rates.2
+    }
+
+    /// Seconds a usual round takes there.
+    fn secs(&self) -> f64 {
+        self.wait + self.round / self.tps.max(1.0)
+    }
+
+    /// Lower is better: price weighed against time.
+    fn score(&self) -> f64 {
+        self.price() * self.secs().powf(SPEED_WEIGHT)
     }
 }
 
-/// Where to send a model's requests, the endpoint to use first: the cheapest that is fast enough, or one a little dearer
-/// and much faster. The next cheapest follow it, for when it is down. Left out: endpoints that are down or kept failing
-/// today, ones that cannot call tools, and ones with a cut-down context window.
+/// An endpoint OpenRouter has no figures for gets the middle of the others' (a guess that neither hides nor favours it).
+fn fill_unknown(endpoints: &mut [Endpoint]) {
+    let middle = |known: Vec<f64>, none: f64| {
+        let mut known = known;
+        known.sort_by(f64::total_cmp);
+        known.get(known.len() / 2).copied().unwrap_or(none)
+    };
+    let tps = middle(endpoints.iter().map(|e| e.tps).filter(|t| *t > 0.0).collect(), 40.0);
+    let wait = middle(endpoints.iter().map(|e| e.wait).filter(|w| *w > 0.0).collect(), 1.0);
+    for e in endpoints {
+        if e.tps <= 0.0 {
+            (e.tps, e.guessed) = (tps, true);
+        }
+        if e.wait <= 0.0 {
+            e.wait = wait;
+        }
+    }
+}
+
+/// Where to send a model's requests, the endpoint to use first: the best by `Endpoint::score`. The next best follow it,
+/// for when it is down. Left out: endpoints that are down or kept failing today, ones that cannot call tools, and ones
+/// with a cut-down context window.
 #[cfg(test)]
 fn best_endpoints(listing: &Value, only: Option<&str>) -> Vec<Endpoint> {
     let usable = usable_endpoints(listing, only);
     if only.is_some() { usable } else { pick_endpoints(usable) }
 }
 
-/// The endpoints that may serve a model, cheapest first.
+/// The endpoints that may serve a model, best first.
 fn usable_endpoints(listing: &Value, only: Option<&str>) -> Vec<Endpoint> {
     let all = listing["data"]["endpoints"].as_array().map_or(&[][..], Vec::as_slice);
     let widest = all.iter().filter_map(|e| e["context_length"].as_u64()).max().unwrap_or(0);
@@ -191,34 +271,42 @@ fn usable_endpoints(listing: &Value, only: Option<&str>) -> Vec<Endpoint> {
         .filter_map(|e| {
             let input = dollars(&e["pricing"]["prompt"])?;
             let rates = (input, dollars(&e["pricing"]["input_cache_read"]).unwrap_or(input), dollars(&e["pricing"]["completion"]).unwrap_or(0.0));
-            Some(Endpoint { tag: e["tag"].as_str()?.to_string(), name: e["provider_name"].as_str().unwrap_or("").to_string(), rates, tps: e["throughput_last_30m"]["p50"].as_f64().unwrap_or(0.0), max_output: e["max_completion_tokens"].as_u64().unwrap_or(0), reads: USUAL_READS })
+            // Milliseconds by OpenRouter's schema, though its own example gives 0.25: a figure under 30 is taken as seconds.
+            let wait = e["latency_last_30m"]["p50"].as_f64().map_or(0.0, |w| if w >= 30.0 { w / 1000.0 } else { w });
+            let tps = e["throughput_last_30m"]["p50"].as_f64().unwrap_or(0.0);
+            Some(Endpoint { tag: e["tag"].as_str()?.to_string(), name: e["provider_name"].as_str().unwrap_or("").to_string(), rates, tps, wait, guessed: false, max_output: e["max_completion_tokens"].as_u64().unwrap_or(0), reads: USUAL_READS, writes: USUAL_WRITES, round: USUAL_ROUND })
         })
         .collect();
-    usable.sort_by(|a, b| a.price().total_cmp(&b.price()));
+    fill_unknown(&mut usable);
+    usable.sort_by(|a, b| a.score().total_cmp(&b.score()));
     usable.dedup_by(|a, b| a.tag == b.tag);
     usable
 }
 
-/// A move is worth it when the new endpoint costs this share of the old one or less.
+/// A move is worth it when the new endpoint scores this share of the old one or less.
 const WORTH_MOVING: f64 = 0.85;
 
-/// The endpoint used last stays first unless the new pick is cheaper by enough. A move is not free: the new endpoint
+/// The endpoint used last stays first unless the new pick is better by enough. A move is not free: the new endpoint
 /// has nothing of the conversation in its cache. GPT-6 Luna's three endpoints read between 51% and 64% from their
 /// caches, the counts crossed with every reply, and the pick moved 17 times in one benchmark pass.
 fn keep_last(order: Vec<Endpoint>, candidates: &[Endpoint], last: Option<&str>) -> Vec<Endpoint> {
     let Some(first) = order.first() else { return order };
     let Some(kept) = last.and_then(|tag| candidates.iter().find(|e| e.tag == tag)) else { return order };
-    if first.tag == kept.tag || first.price() <= kept.price() * WORTH_MOVING || kept.tps < GOOD_TPS.min(first.tps) {
+    if first.tag == kept.tag || first.score() <= kept.score() * WORTH_MOVING || (crawls(kept, candidates) && !crawls(first, candidates)) {
         return order;
     }
     std::iter::once(kept.clone()).chain(order.into_iter().filter(|e| e.tag != kept.tag)).take(3).collect()
 }
 
-fn pick_endpoints(usable: Vec<Endpoint>) -> Vec<Endpoint> {
-    let Some(cheap) = usable.iter().find(|e| e.tps >= GOOD_TPS).or(usable.first()).cloned() else { return Vec::new() };
-    let first = usable.iter().filter(|e| e.price() <= cheap.price() * DEARER && e.tps >= cheap.tps * FASTER).max_by(|a, b| a.tps.total_cmp(&b.tps)).cloned().unwrap_or(cheap);
-    let spares: Vec<Endpoint> = usable.into_iter().filter(|e| e.tag != first.tag && e.tps >= GOOD_TPS).take(2).collect();
-    std::iter::once(first).chain(spares).collect()
+/// The three best by score, leaving out the crawling ones while any other is there.
+fn pick_endpoints(mut usable: Vec<Endpoint>) -> Vec<Endpoint> {
+    let all = usable.clone();
+    if usable.iter().any(|e| !crawls(e, &all)) {
+        usable.retain(|e| !crawls(e, &all));
+    }
+    usable.sort_by(|a, b| a.score().total_cmp(&b.score()));
+    usable.truncate(3);
+    usable
 }
 
 /// How many endpoints are tried with a made-up call before one is picked, how often each, and how long a result is believed.
@@ -246,18 +334,17 @@ async fn keeps_arguments(client: &reqwest::Client, target: &Target, tag: &str) -
     Some(args["command"] == "python" && args["args"] == json!(["-"]) && args["reason"].as_str().is_some_and(|r| !r.is_empty()) && stdin.contains("import sys") && stdin.contains('\n') && stdin.contains("print(sys.version)"))
 }
 
-/// The endpoints that pass `keeps_arguments`, cheapest first, and the tags of those that failed it. Results are kept
-/// in `endpoints.json` for three days, so most sessions ask nothing. Slow endpoints are tried only when no fast one
-/// exists, as they are picked only then.
+/// The endpoints that pass `keeps_arguments`, best first, and the tags of those that failed it. Results are kept in
+/// `endpoints.json` for three days, so most sessions ask nothing. The best eight by score are tried: an endpoint never
+/// tried is never picked, and when only fast ones were tried, one twice as cheap and a little slower never could be.
 // ponytail: one kind of call is tried. An endpoint that loses something else (a picture, a long text) passes; add a
 // second call here when one is met.
 async fn sound_endpoints(client: &reqwest::Client, target: &Target, usable: &[Endpoint]) -> (Vec<Endpoint>, Vec<String>) {
     let file = models::endpoints_file();
     let mut saved: Map<String, Value> = std::fs::read(&file).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let now = now_secs();
     let mut known: HashMap<String, bool> = saved.get("_probes").and_then(|p| p[&target.model.id].as_object()).into_iter().flatten().filter(|(_, r)| now.saturating_sub(r["at"].as_u64().unwrap_or(0)) < PROBE_KEPT_SECS).filter_map(|(tag, r)| Some((tag.clone(), r["ok"].as_bool()?))).collect();
-    let fast: Vec<&Endpoint> = Some(usable.iter().filter(|e| e.tps >= GOOD_TPS).collect::<Vec<_>>()).filter(|fast| !fast.is_empty()).unwrap_or_else(|| usable.iter().collect());
-    let tried: Vec<&Endpoint> = fast.into_iter().filter(|e| known.get(&e.tag) != Some(&false)).take(PROBED).collect();
+    let tried: Vec<&Endpoint> = usable.iter().filter(|e| known.get(&e.tag) != Some(&false)).take(PROBED).collect();
     let asked: Vec<&str> = tried.iter().map(|e| e.tag.as_str()).filter(|tag| !known.contains_key(*tag)).collect();
     let answers = futures_util::future::join_all(asked.iter().map(|tag| async move { futures_util::future::join_all((0..PROBE_SAMPLES).map(|_| keeps_arguments(client, target, tag))).await })).await;
     for (tag, samples) in asked.iter().zip(answers) {
@@ -299,7 +386,7 @@ pub async fn choose_endpoint(client: &reqwest::Client, target: &Target) -> Optio
         // Picked among the endpoints that hand a tool call over whole; among all of them when none was found to.
         None => {
             let seen: Value = std::fs::read(models::endpoints_file()).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
-            let usable = with_reads(usable_endpoints(&listing, None), &seen["_reads"][&target.model.id]);
+            let usable = with_own_counts(usable_endpoints(&listing, None), &seen["_reads"][&target.model.id]);
             counted = usable.iter().filter(|e| e.reads != USUAL_READS).map(|e| (e.tag.clone(), format!("{} read {}% of what it was sent from its cache", e.name, (e.reads * 100.0).round()))).collect();
             let (sound, failed) = sound_endpoints(client, target, &usable).await;
             let sound: Vec<Endpoint> = if sound.is_empty() { usable.iter().filter(|e| !failed.contains(&e.tag)).cloned().collect() } else { sound };
@@ -328,7 +415,7 @@ pub async fn choose_endpoint(client: &reqwest::Client, target: &Target) -> Optio
     }
     let moved = was.and_then(|tag| counted.remove(&tag)).map(|why| format!(". {why}")).unwrap_or_default();
     let usd = |v: f64| format!("{v:.4}").trim_end_matches('0').trim_end_matches('.').to_string();
-    let speed = if first.tps > 0.0 { format!(", {} tokens a second", first.tps.round()) } else { String::new() };
+    let speed = if !first.guessed { format!(", {} tokens a second", first.tps.round()) } else { String::new() };
     let skipped = if left_out.is_empty() { String::new() } else { format!(". Left out, they lose parts of a tool call: {}", left_out.join(", ")) };
     Some(format!("{} runs on {} ({}): ${} in, ${} cached, ${} out per million tokens{speed}{skipped}{moved}", target.model.label, first.name, first.tag, usd(first.rates.0), usd(first.rates.1), usd(first.rates.2)))
 }
@@ -444,6 +531,8 @@ pub struct Round {
     pub draft_cut: Option<usize>,
     /// The endpoint that answered, as OpenRouter names it in the stream ("Relace").
     pub served: Option<String>,
+    /// Seconds to the first token, and from it to the end.
+    pub timing: Option<(f64, f64)>,
 }
 
 pub enum Delta<'a> {
@@ -691,22 +780,42 @@ pub async fn stream(client: &reqwest::Client, target: &Target, body: &Value, cut
 mod tests {
     use super::*;
 
+    fn endpoint(tag: &str, rates: (f64, f64, f64), tps: f64) -> Endpoint {
+        Endpoint { tag: tag.into(), name: tag.into(), rates, tps, wait: 1.0, guessed: false, max_output: 0, reads: USUAL_READS, writes: USUAL_WRITES, round: USUAL_ROUND }
+    }
+
     #[test]
     fn an_endpoint_is_priced_by_what_it_was_seen_to_read() {
-        let e = |tag: &str, rates| Endpoint { tag: tag.into(), name: tag.into(), rates, tps: 50.0, max_output: 0, reads: USUAL_READS };
-        let listed = vec![e("cheap", (0.04, 0.0125, 0.5)), e("steady", (0.06, 0.012, 0.5))];
+        let listed = vec![endpoint("cheap", (0.04, 0.0125, 0.5), 50.0), endpoint("steady", (0.06, 0.012, 0.5), 50.0)];
         // Nothing seen, or too little to tell: the listing decides.
-        assert_eq!(with_reads(listed.clone(), &json!({}))[0].tag, "cheap");
-        assert_eq!(with_reads(listed.clone(), &json!({ "cheap": [9000.0, 0.0] }))[0].tag, "cheap");
+        assert_eq!(with_own_counts(listed.clone(), &json!({}))[0].tag, "cheap");
+        assert_eq!(with_own_counts(listed.clone(), &json!({ "cheap": [9000.0, 0.0] }))[0].tag, "cheap");
         // The cheap one read a fifth of 400,000 tokens from its cache: the other costs less in fact.
-        let ranked = with_reads(listed, &json!({ "cheap": [400000.0, 80000.0] }));
+        let ranked = with_own_counts(listed, &json!({ "cheap": [400000.0, 80000.0] }));
         assert_eq!(ranked[0].tag, "steady");
         assert!((ranked[1].reads - 0.2).abs() < 1e-9);
     }
 
     #[test]
-    fn the_endpoint_used_last_stays_unless_another_is_cheaper_by_enough() {
-        let e = |tag: &str, input: f64| Endpoint { tag: tag.into(), name: tag.into(), rates: (input, input / 10.0, 0.5), tps: 50.0, max_output: 0, reads: USUAL_READS };
+    fn an_endpoint_is_timed_by_what_this_app_saw_of_it() {
+        let now = now_secs() as f64;
+        let listed = vec![endpoint("quick", (0.05, 0.01, 0.5), 80.0), endpoint("other", (0.06, 0.012, 0.5), 60.0)];
+        assert_eq!(with_own_counts(listed.clone(), &json!({}))[0].tag, "quick");
+        // OpenRouter says 80 a second; here it wrote 6,000 tokens in 600 s over six rounds, each waiting 9 s for the first.
+        // The other's row is from before writing was counted: its 1.6 million tokens sent do not water the share down.
+        let seen = |at: f64| json!({ "quick": [600000.0, 420000.0, 600000.0, 6000.0, 6000.0, 600.0, 54.0, 6.0, at], "other": [1600000.0, 1200000.0] });
+        let ranked = with_own_counts(listed.clone(), &seen(now));
+        assert_eq!(ranked[0].tag, "other");
+        assert!((ranked[1].tps - 10.0).abs() < 1e-9 && (ranked[1].wait - 9.0).abs() < 1e-9);
+        // The model's own rounds: 1,000 tokens each, one written per hundred sent.
+        assert!((ranked[0].round - 1000.0).abs() < 1e-9 && (ranked[0].writes - 0.01).abs() < 1e-9);
+        // A count from last week is not believed: the endpoint may have changed since.
+        assert_eq!(with_own_counts(listed, &seen(now - 8.0 * 24.0 * 3600.0))[0].tag, "quick");
+    }
+
+    #[test]
+    fn the_endpoint_used_last_stays_unless_another_is_better_by_enough() {
+        let e = |tag: &str, input: f64| endpoint(tag, (input, input / 10.0, 0.5), 50.0);
         let tags = |order: Vec<Endpoint>| order.into_iter().map(|e| e.tag).collect::<Vec<_>>();
         let near = vec![e("a", 0.095), e("b", 0.1), e("c", 0.2)];
         assert_eq!(tags(keep_last(near.clone(), &near, Some("b"))), ["b", "a", "c"]);
@@ -733,7 +842,7 @@ mod tests {
     }
 
     #[test]
-    fn the_cheapest_fast_enough_endpoint_is_picked_unless_a_little_more_buys_much_more_speed() {
+    fn the_endpoint_with_the_best_price_for_its_speed_is_picked() {
         let endpoint = |tag: &str, (input, cached, output): (&str, &str, &str), tps: u32| json!({ "tag": tag, "provider_name": tag, "status": 0, "context_length": 1_048_576, "uptime_last_1d": 100, "supported_parameters": ["tools"], "pricing": { "prompt": input, "input_cache_read": cached, "completion": output }, "throughput_last_30m": { "p50": tps } });
         let listing = |endpoints: Vec<Value>| json!({ "data": { "endpoints": endpoints } });
         let picked = |endpoints: Vec<Value>| best_endpoints(&listing(endpoints), None).into_iter().map(|e| e.tag).collect::<Vec<_>>();
@@ -748,17 +857,46 @@ mod tests {
         small["context_length"] = json!(262_144);
         let mut no_tools = endpoint("plain", ("0.00000001", "0.00000001", "0.00000001"), 90);
         no_tools["supported_parameters"] = json!(["max_tokens"]);
-        // The cheapest of all is too slow; the next is fast enough, and nothing within a quarter more is half as fast again.
-        assert_eq!(picked(vec![sail.clone(), streamlake.clone(), slow.clone(), relace.clone(), down, small, no_tools]), ["relace", "streamlake/fp8", "sail-research/us"]);
+        // The cheapest of all is as dear as the next and a third as fast; the fastest is half as dear again for twice the speed.
+        assert_eq!(picked(vec![sail.clone(), streamlake.clone(), slow.clone(), relace.clone(), down, small, no_tools]), ["relace", "sail-research/us", "streamlake/fp8"]);
         // The same list with the fast one's cached price cut: a tenth dearer than the cheapest, twice the speed.
         let mut sail_cut = sail;
         sail_cut["pricing"]["input_cache_read"] = json!("0.0000000125");
         assert_eq!(picked(vec![sail_cut, streamlake.clone(), slow.clone(), relace])[0], "sail-research/us");
         // Named by the user: that one and no other, slow or not.
         assert_eq!(best_endpoints(&listing(vec![slow.clone(), streamlake.clone()]), Some("open-inference/fp4")).len(), 1);
-        // Nothing fast enough: the cheapest. Nothing at all: no pin.
+        // Nothing faster: the slow one. Nothing at all: no pin.
         assert_eq!(picked(vec![slow]), ["open-inference/fp4"]);
         assert!(picked(Vec::new()).is_empty());
+        // Twice as cheap for ten tokens a second less is the better buy; at eight a second it crawls, and is left out.
+        let half = endpoint("half", ("0.00000005", "0.00000001", "0.00000025"), 40);
+        let full = endpoint("full", ("0.0000001", "0.00000002", "0.0000005"), 50);
+        assert_eq!(picked(vec![full.clone(), half.clone()])[0], "half");
+        let mut crawl = half.clone();
+        crawl["throughput_last_30m"]["p50"] = json!(8);
+        assert_eq!(picked(vec![full.clone(), crawl]), ["full"]);
+        // A long wait for the first token (milliseconds, as the schema has it) is weighed with the price; past three times
+        // the quickest round it crawls, however cheap. Seconds, as the schema's own example gives them, read the same.
+        let (mut full, mut queued) = (full, half.clone());
+        full["latency_last_30m"] = json!({ "p50": 500 });
+        queued["latency_last_30m"] = json!({ "p50": 6000 });
+        assert_eq!(picked(vec![full.clone(), queued.clone()])[0], "half");
+        queued["latency_last_30m"] = json!({ "p50": 45000 });
+        assert_eq!(picked(vec![full.clone(), queued.clone()]), ["full"]);
+        queued["latency_last_30m"] = json!({ "p50": 6.0 });
+        assert!((best_endpoints(&listing(vec![queued]), None)[0].wait - 6.0).abs() < 1e-9);
+        // No speed listed anywhere: price decides, and a speed nobody measured is not shown as one.
+        let mut blind = vec![full, half];
+        blind.iter_mut().for_each(|e| e["throughput_last_30m"] = Value::Null);
+        let order = best_endpoints(&listing(blind), None);
+        assert!(order[0].tag == "half" && order.iter().all(|e| e.guessed));
+        // The one used last stays while it is about as good, and not once it crawls.
+        let near = |tag: &str, tps: f64| self::endpoint(tag, (0.1, 0.01, 0.5), tps);
+        let (kept, quick) = (near("kept", 40.0), near("quick", 50.0));
+        let candidates = vec![quick.clone(), kept.clone()];
+        assert_eq!(keep_last(pick_endpoints(candidates.clone()), &candidates, Some("kept"))[0].tag, "kept");
+        let candidates = vec![quick, near("kept", 9.0)];
+        assert_eq!(keep_last(pick_endpoints(candidates.clone()), &candidates, Some("kept"))[0].tag, "quick");
     }
 
     #[test]

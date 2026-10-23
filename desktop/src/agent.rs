@@ -912,7 +912,7 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
         let (result, without_tools) = call_model(&ctx.client, target, &mut body, &mut lane, dedup, cut_drafts, gap, emit).await.inspect_err(|e| log("api_error", &target.model.id, e))?;
         ran_without_tools = without_tools;
 
-        let provider::Round { content, reasoning, tool_calls: mut calls, finish, usage: round_usage, fields, draft_cut, served } = result;
+        let provider::Round { content, reasoning, tool_calls: mut calls, finish, usage: round_usage, fields, draft_cut, served, timing } = result;
         for call in &mut calls {
             if let Some((name, args)) = tools::marked_name(&call.name) {
                 call.name = name;
@@ -930,7 +930,7 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
             served_by = Some(now);
         }
         if let (Some(name), Some(used)) = (served_by.as_deref(), round_usage.as_ref()) {
-            provider::saw_usage(&target.model.id, name, used.prompt, used.cache_hit);
+            provider::saw_usage(&target.model.id, name, used.prompt, used.cache_hit, used.completion, timing);
         }
         // A think stopped by the loop never reached its usage frame: about four characters per token, none of it cached.
         let round_usage = round_usage.or_else(|| {
@@ -1012,9 +1012,9 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
         if calls.is_empty() {
             // The model stopped. Before taking that as the end: is the answer honest, is the plan done, did it mean to stop?
             messages.push(assistant(&content, &reasoning));
-            if !claim_retried && plan::check_answer_claims(&answer, &tools_used).is_some() {
+            if let Some(issue) = plan::check_answer_claims(&answer, &tools_used).filter(|_| !claim_retried) {
                 claim_retried = true;
-                messages.push(user(CLAIM_RETRY));
+                messages.push(user(format!("{CLAIM_RETRY}\n\nWhat was caught: {issue}")));
                 notice("That reply claimed work that did not run — it is redoing it for real");
                 continue;
             }
@@ -1437,7 +1437,11 @@ async fn call_model(client: &reqwest::Client, target: &Target, body: &mut Map<St
         let mut thought_aloud = String::new();
         let mut echo = dedup.as_mut();
         let wire = Value::Object(body.clone());
-        let result = provider::stream(client, target, &wire, cut_drafts, |delta| match delta {
+        let asked = Instant::now();
+        let mut first: Option<Instant> = None;
+        let result = provider::stream(client, target, &wire, cut_drafts, |delta| {
+            first.get_or_insert_with(Instant::now);
+            match delta {
             Delta::Reasoning(t) => {
                 heard(t);
                 if std::mem::take(&mut gap) {
@@ -1472,10 +1476,12 @@ async fn call_model(client: &reqwest::Client, target: &Target, body: &mut Map<St
                 }
             }
             Delta::ToolDraft { name, chars, args } => emit.send(Event::ToolDraft { name: name.to_string(), chars, path: draft_path(args) }),
+            }
         })
         .await;
         let e = match result {
             Ok(mut round) => {
+                round.timing = first.map(|first| (first.duration_since(asked).as_secs_f64(), first.elapsed().as_secs_f64()));
                 // A reply that crawled in (a busy provider) reads as the app being slow: it goes in the problem
                 // report under the provider, so the two can be told apart afterwards.
                 if let Some((secs, chars)) = pace.map(|(first, last, chars)| (last.duration_since(first).as_secs_f64(), chars)).filter(|(secs, chars)| crawled(*secs, *chars)) {
