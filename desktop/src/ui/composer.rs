@@ -389,7 +389,9 @@ fn popover(app: &mut App, ctx: &egui::Context, width: f32, right: bool, body: im
                 body(app, ui);
             });
         });
-    let pressed_outside = ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|at| !area.response.rect.contains(at) && !anchor.contains(at)));
+    // The right-click menu of a model row floats past the popover's edge: a press in it is not outside.
+    let menu = app.model_menu.is_some().then(|| ctx.memory(|m| m.area_rect(egui::Id::new(MODEL_MENU)))).flatten();
+    let pressed_outside = ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|at| !area.response.rect.contains(at) && !anchor.contains(at) && !menu.is_some_and(|r| r.contains(at))));
     if pressed_outside || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         app.popover = Popover::None;
     }
@@ -415,8 +417,8 @@ fn head(app: &mut App, ui: &mut egui::Ui, title: &str, subtitle: &str) {
     widgets::rule(ui);
 }
 
-/// `.option-item`: a title, an optional tick, and up to two more lines. Returns true when clicked.
-fn option(ui: &mut egui::Ui, title: &str, selected: bool, title_colour: Option<Color32>, lines: &[(&str, f32, f32, Color32, bool)]) -> bool {
+/// `.option-item`: a title, an optional tick, and up to two more lines.
+fn option(ui: &mut egui::Ui, title: &str, selected: bool, title_colour: Option<Color32>, lines: &[(&str, f32, f32, Color32, bool)]) -> egui::Response {
     let p = p();
     let width = ui.available_width();
     let inner = width - 24.0;
@@ -450,7 +452,43 @@ fn option(ui: &mut egui::Ui, title: &str, selected: bool, title_colour: Option<C
         ui.painter().galley(pos2(x, y), galley, Color32::PLACEHOLDER);
         y += size.y;
     }
-    response.clicked()
+    response
+}
+
+const MODEL_MENU: &str = "model-row-menu";
+
+/// What a right-click on a row of the model menu offers: the app's own models are hidden (Settings → Models brings them
+/// back), the user's own are removed. The last model left in the menu stays.
+fn model_menu(app: &mut App, ctx: &egui::Context) {
+    let Some((id, at)) = app.model_menu.clone() else { return };
+    let p = p();
+    let s = &app.settings;
+    let custom = s.custom_models.iter().any(|c| c.id() == id);
+    let label = models::resolve(&id, &s.custom_models).label;
+    let left = s.in_menu();
+    let mut act = false;
+    let area = egui::Area::new(egui::Id::new(MODEL_MENU)).order(egui::Order::Tooltip).fixed_pos(at + vec2(2.0, 2.0)).constrain(true).show(ctx, |ui| {
+        widgets::popover_frame(12).inner_margin(egui::Margin::same(4)).show(ui, |ui| {
+            ui.set_width(196.0);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            if left <= 1 {
+                egui::Frame::new().inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
+                    ui.label(widgets::lines("The last model in the menu stays.", 12.0, 16.0, W::Regular, p.muted));
+                });
+            } else {
+                let (icon, text) = if custom { (icons::TRASH, "Remove from the menu") } else { (icons::EYE_OFF, "Hide from the menu") };
+                act = widgets::menu_item(ui, icon, text, custom).clicked();
+            }
+        });
+    });
+    let outside = ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|at| !area.response.rect.contains(at)));
+    if act || outside || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        app.model_menu = None;
+    }
+    if act && app.settings.drop_from_menu(&id) {
+        app.settings.save();
+        app.toast(if custom { format!("Removed {label}. Its openrouter.ai link adds it back.") } else { format!("Hid {label}. Settings → Models shows it again.") });
+    }
 }
 
 fn popovers(app: &mut App, ctx: &egui::Context) {
@@ -466,12 +504,19 @@ fn popovers(app: &mut App, ctx: &egui::Context) {
             let max = (ctx.content_rect().height() - 260.0).clamp(120.0, 352.0);
             egui::ScrollArea::vertical().max_height(max).show(ui, |ui| {
                 egui::Frame::new().inner_margin(egui::Margin::same(6)).show(ui, |ui| {
-                    let mut pick = None;
-                    for m in models::MODELS.iter() {
-                        let selected = app.settings.model == m.id;
-                        if option(ui, &m.label, selected, None, &[(&m.description, 12.0, 20.0, p.text2, false), (&m.specs, 11.0, 16.0, p.muted, false)]) {
-                            pick = Some(m.id.clone());
+                    let (mut pick, mut menu) = (None, None);
+                    // Right-click on a row: hide or remove it (`model_menu`).
+                    let mut row = |row: egui::Response, id: &str| {
+                        if row.clicked() {
+                            pick = Some(id.to_string());
                         }
+                        if row.secondary_clicked() {
+                            menu = row.interact_pointer_pos().map(|at| (id.to_string(), at));
+                        }
+                    };
+                    for m in models::MODELS.iter().filter(|m| app.settings.model == m.id || !app.settings.hidden_models.contains(&m.id)) {
+                        let selected = app.settings.model == m.id;
+                        row(option(ui, &m.label, selected, None, &[(&m.description, 12.0, 20.0, p.text2, false), (&m.specs, 11.0, 16.0, p.muted, false)]), &m.id);
                     }
                     if !app.settings.custom_models.is_empty() {
                         egui::Frame::new().inner_margin(egui::Margin { left: 12, right: 12, top: 8, bottom: 4 }).show(ui, |ui| {
@@ -481,12 +526,13 @@ fn popovers(app: &mut App, ctx: &egui::Context) {
                             let info = def.to_info();
                             let selected = app.settings.model == info.id;
                             let specs = format!("OpenRouter · {}{}", info.specs, if info.vision == models::Vision::Native { " · vision" } else { "" });
-                            if option(ui, &def.label, selected, None, &[(&def.api_model, 11.0, 16.0, p.text2, true), (&specs, 11.0, 16.0, p.muted, false)]) {
-                                pick = Some(info.id);
-                            }
+                            row(option(ui, &def.label, selected, None, &[(&def.api_model, 11.0, 16.0, p.text2, true), (&specs, 11.0, 16.0, p.muted, false)]), &info.id);
                         }
                     }
-                    if option(ui, "＋ Add any OpenRouter model…", false, Some(p.accent_light), &[("Paste its openrouter.ai link in the chat and ask to add it, or an id in Settings → Model.", 12.0, 20.0, p.text2, false)]) {
+                    if menu.is_some() {
+                        app.model_menu = menu;
+                    }
+                    if option(ui, "＋ Add any OpenRouter model…", false, Some(p.accent_light), &[("Paste its openrouter.ai link in the chat and ask to add it, or an id in Settings → Model. Right-click a model to take it out of this menu.", 12.0, 20.0, p.text2, false)]).clicked() {
                         app.popover = Popover::None;
                         app.dialog = Dialog::Settings;
                         app.settings_ui.tab = 1;
@@ -498,6 +544,7 @@ fn popovers(app: &mut App, ctx: &egui::Context) {
                     }
                 });
             });
+            model_menu(app, ui.ctx());
         }),
         Popover::Effort => popover(app, ctx, 336.0, false, |app, ui| {
             let model = app.settings.model.clone();
@@ -509,7 +556,7 @@ fn popovers(app: &mut App, ctx: &egui::Context) {
                     if !warning.is_empty() {
                         lines.push((warning, 11.0, 16.0, p.warning, false));
                     }
-                    if option(ui, label, selected, None, &lines) {
+                    if option(ui, label, selected, None, &lines).clicked() {
                         app.settings.effort = id.into();
                         app.settings.save();
                         app.popover = Popover::None;
@@ -525,7 +572,7 @@ fn popovers(app: &mut App, ctx: &egui::Context) {
                     ("off", "Off", "The web_search tool is hidden; answers from the model's own knowledge only."),
                 ];
                 for (id, label, blurb) in modes {
-                    if option(ui, label, app.settings.web_mode() == id, None, &[(blurb, 11.0, 16.0, p.muted, false)]) {
+                    if option(ui, label, app.settings.web_mode() == id, None, &[(blurb, 11.0, 16.0, p.muted, false)]).clicked() {
                         app.settings.set_web_mode(id);
                         app.settings.save();
                         app.popover = Popover::None;

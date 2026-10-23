@@ -247,6 +247,8 @@ pub struct App {
     dialog: Dialog,
     side: sidebar::State,
     popover: Popover,
+    /// The model menu's right-click menu: the model, and where it was clicked.
+    model_menu: Option<(String, egui::Pos2)>,
     fullscreen: bool,
     /// The window was maximised when it went full screen, and goes back to that.
     was_maximized: bool,
@@ -344,6 +346,7 @@ impl App {
             dialog: Dialog::None,
             side: sidebar::State::default(),
             popover: Popover::None,
+            model_menu: None,
             fullscreen: false,
             was_maximized: false,
             trims_seen: 0,
@@ -409,6 +412,12 @@ impl App {
                 "mcp" => self.dialog = Dialog::Mcp,
                 "delete" => self.dialog = Dialog::Delete { ids: self.chats.iter().take(1).map(|c| c.id.clone()).collect(), opened: Instant::now() },
                 "model" => self.popover = Popover::Model,
+                // The right-click menu of the model menu's first row, as a click there opens it.
+                "model-menu" => {
+                    self.popover = Popover::Model;
+                    self.model_menu = Some((self.settings.model.clone(), egui::pos2(shot.size[0] / 2.0 - 40.0, shot.size[1] - 470.0)));
+                }
+                "hide-pro" => self.settings.hidden_models = vec!["deepseek-v4-pro".into()],
                 "effort" => self.popover = Popover::Effort,
                 "web" => self.popover = Popover::Web,
                 "context" => self.popover = Popover::Context,
@@ -591,6 +600,7 @@ impl App {
 
     fn toggle_popover(&mut self, which: Popover) {
         self.popover = if self.popover == which { Popover::None } else { which };
+        self.model_menu = None;
     }
 
     /// Runs `change` on a chat wherever it lives right now (on screen, parked, or only on disk) and saves it.

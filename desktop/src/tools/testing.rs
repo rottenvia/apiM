@@ -4,7 +4,7 @@
 //! (last 40 lines) rather than summarised, so an unknown format never reads as a clean pass.
 
 use regex::{Captures, Regex};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -290,6 +290,7 @@ pub fn format_summary(s: &Summary, raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn section(name: &str) -> Value {
         let all: Value = serde_json::from_str(include_str!("build_fixtures.json")).expect("fixtures parse");
