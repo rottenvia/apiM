@@ -125,6 +125,14 @@ $0.086, 2.56 M), big-tree 3 of 3 (GLM $0.028, 1.09 M; DeepSeek $0.045, 1.98 M; D
 $0.047, 1.51 M). The app's own folders in a workspace (`.snapshots`, `.history`, `.outputs`, `.analysis`) are not
 the work: a check does not look into them.
 
+On 2026-10-23, all 26 scenarios in one pass on GLM 5.3 Flash: 39 of 44 checked turns ($0.054, 5.0 M tokens, 56% from
+the cache). Two failures were the scenarios' own and are fixed: ask-before-run's README left open where a numbers
+column puts its header, and spec-build's SPEC named no test runner, so the reply wrote pytest tests and installed
+pytest into the machine's Python to run them (now asked first, see `desktop/README.md`). dirty-merge and
+guess-the-format passed when run again. talk-old-output's second turn failed twice the same way:
+`last(items, default=None)` is left without a hint on `default` or a return type, and the reply says every function
+has both.
+
 A scenario is `scenarios/<id>/`: `scenario.json` (the turns, and what its user does: a note, an answer, a kill),
 `files/`, `check.py <folder> <turn>` built on `checklib.py`, and `solution/<turn>/` (files laid over, `DELETE`,
 `APPLY.py`). Optional: `setup.py`, run in the folder before the first message (a git history); `settings` in

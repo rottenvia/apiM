@@ -26,3 +26,5 @@
 12. An error is one line on stderr that starts with `error: `, exit code 2, and `tally.json` stays as it was. Everything else exits 0.
 13. H:MM: the hours are not padded, the minutes are: `0:05`, `12:30`, `100:00`.
 14. `tally.json` is never left half written: write a file next to it and rename.
+
+The tests run with `python -m unittest`: nothing is installed for them.

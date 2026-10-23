@@ -79,6 +79,25 @@ fn base_name(command: &str) -> String {
 }
 
 /// Commands that only look, never change. The caller only asks this of allowed programs.
+/// A package put into the machine's own toolchain rather than the workspace: pip into the system Python, npm or yarn
+/// globally, cargo or go install. It outlives the chat and no restore point takes it back, so it asks even when commands
+/// run automatically. A live benchmark reply, told to write tests, put pytest into the user's Python unasked.
+fn installs_on_machine(name: &str, args: &[String]) -> bool {
+    let words: Vec<String> = args.iter().map(|a| a.to_ascii_lowercase()).collect();
+    let has = |flag: &str| words.iter().any(|a| a == flag);
+    let first = words.iter().find(|a| !a.starts_with('-')).map_or("", String::as_str);
+    let pip = |rest: &[String]| rest.iter().find(|a| !a.starts_with('-')).is_some_and(|verb| matches!(verb.as_str(), "install" | "uninstall")) && !rest.iter().any(|a| a == "--target" || a == "-t");
+    match name {
+        "pip" | "pip3" => pip(&words),
+        "python" | "python3" | "py" => words.iter().position(|a| a == "-m").is_some_and(|at| words.get(at + 1).is_some_and(|m| m == "pip") && pip(&words[at + 2..])),
+        "npm" | "pnpm" | "bun" => has("-g") || has("--global"),
+        "yarn" => first == "global",
+        "cargo" | "go" => first == "install",
+        "uv" => first == "tool" || (first == "pip" && has("--system")),
+        _ => false,
+    }
+}
+
 fn read_only(name: &str, args: &[String]) -> bool {
     let first = args.iter().map(String::as_str).find(|a| !a.starts_with('-')).unwrap_or("");
     if matches!(name, "which" | "where") || (args.len() == 1 && INFO_FLAGS.contains(&args[0].as_str())) {
@@ -345,9 +364,9 @@ fn prepare(ctx: &Ctx, command: &str, argv: Vec<String>) -> Result<Launch, String
     if !own && command.contains(['/', '\\']) && !super::build::is_toolchain(&program) {
         return Err(format!("`{command}` is outside the workspace. Run programs by name, e.g. `node`, or by a path inside the workspace."));
     }
-    // "Run automatically" asks about nothing. Otherwise a program from the workspace (built there, or downloaded) always
-    // asks, and an allowed program asks unless it merely looks.
-    let ask = ctx.settings.approval == Approval::Manual && (own || !read_only(&name, &argv));
+    // "Run automatically" asks about nothing but an install into the machine. Otherwise a program from the workspace
+    // (built there, or downloaded) always asks, and an allowed program asks unless it merely looks.
+    let ask = (ctx.settings.approval == Approval::Manual && (own || !read_only(&name, &argv))) || (!own && installs_on_machine(&name, &argv));
     let display = std::iter::once(command.to_string()).chain(argv.iter().map(|a| if a.contains(' ') { format!("\"{a}\"") } else { a.clone() })).collect::<Vec<_>>().join(" ");
     let key = serde_json::to_string(&std::iter::once(name).chain(argv.iter().cloned()).collect::<Vec<_>>()).unwrap_or_default();
     Ok(Launch { program, args: argv, display, key, ask })
@@ -1147,6 +1166,21 @@ mod tests {
         let prep = |approval, command: &str, args: &[&str]| prepare(&crate::tools::test_ctx(&dir, approval), command, args.iter().map(|a| a.to_string()).collect());
         assert!(prep(Approval::Auto, "reg", &["add", r"HKCU\x"]).err().unwrap().starts_with("Only the forms of reg that look are run here: reg query."));
         assert!(prep(Approval::Auto, "wevtutil", &["cl", "Application"]).is_err() && prep(Approval::Auto, "ipconfig", &["/release"]).is_err());
+        // Running automatically, an install into the machine still asks; one into the workspace, or a look, does not.
+        // A program this machine lacks is the one excuse.
+        let asks = |command: &str, args: &[&str], want: bool| match prep(Approval::Auto, command, args) {
+            Ok(launch) => assert_eq!(launch.ask, want, "{command} {args:?}"),
+            Err(e) => assert!(e.contains("was not found"), "{command} {args:?}: {e}"),
+        };
+        for (command, args) in [("pip", &["install", "pytest"][..]), ("python", &["-m", "pip", "install", "-U", "pytest"]), ("npm", &["i", "-g", "serve"]), ("cargo", &["install", "ripgrep"])] {
+            asks(command, args, true);
+        }
+        for (command, args) in [("pip", &["list"][..]), ("pip", &["install", "--target", "deps", "x"]), ("python", &["-m", "unittest"]), ("npm", &["install", "lodash"]), ("cargo", &["build"])] {
+            asks(command, args, false);
+        }
+        let words = |args: &[&str]| args.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+        assert!(installs_on_machine("python", &words(&["-m", "pip", "install", "pytest"])) && !installs_on_machine("python", &words(&["-m", "pip", "list"])));
+        assert!(installs_on_machine("yarn", &words(&["global", "add", "x"])) && !installs_on_machine("yarn", &words(&["add", "x"])));
         if cfg!(windows) {
             assert!(!prep(Approval::Manual, "tasklist", &[]).ok().unwrap().ask);
             let look = prep(Approval::Auto, "powershell", &["-NoProfile", "-Command", "Get-Process | Select-Object -First 3"]).ok().unwrap();
