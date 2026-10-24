@@ -245,18 +245,34 @@ impl Tree {
         (files, entries, tools::files::left_out_note(&skipped))
     }
 
-    /// Puts a full listing at the end, in place of any older one and the deltas that described changes to it.
-    /// It rides at the end so everything before it stays byte-identical for the provider's cache. The wording is the web's.
+    /// Puts a full listing at the end. Older ones and their deltas stay where they are: taken out, they changed the start
+    /// of the transcript, and every round after them went out at full price again. The fold takes them out (`drop_old`).
+    /// The wording is the web's.
     fn show(&mut self, text: String, messages: &mut Vec<Value>) {
-        messages.retain(|m| !(m["role"] == "system" && m["content"].as_str().is_some_and(|c| c.starts_with("Current workspace contents") || c.starts_with("Workspace changes since"))));
         messages.push(json!({ "role": "system", "content": format!("Current workspace contents (refreshed after every action — this replaces any earlier listing):{text}") }));
         self.shown = text;
     }
 
-    /// The opening listing. The tracker is seeded with it, so the first delta describes changes from what the model saw.
+    fn is_listing(m: &Value) -> bool {
+        m["role"] == "system" && m["content"].as_str().is_some_and(|c| c.starts_with("Current workspace contents") || c.starts_with("Workspace changes since"))
+    }
+
+    /// Takes out every listing and delta before the newest listing: when the fold rewrites the transcript anyway.
+    fn drop_old(messages: &mut Vec<Value>) {
+        let Some(newest) = messages.iter().rposition(|m| Tree::is_listing(m) && m["content"].as_str().is_some_and(|c| c.starts_with("Current"))) else { return };
+        let mut i = 0;
+        messages.retain(|m| {
+            i += 1;
+            i > newest || !Tree::is_listing(m)
+        });
+    }
+
+    /// The opening listing, in place of a resumed reply's saved one and its deltas: the files have moved on since.
+    /// The tracker is seeded with it, so the first delta describes changes from what the model saw.
     fn open(root: &Path, messages: &mut Vec<Value>) -> Tree {
         let (files, entries, left_out) = Tree::list(root);
         let mut tree = Tree::default();
+        messages.retain(|m| !Tree::is_listing(m));
         tree.show(workspace_listing(&files) + &left_out, messages);
         tree.tracker.update(&entries);
         tree
@@ -708,7 +724,9 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
     let mut tool_defs = tools::groups::offered(&all_tools, &groups);
     let mut tools_chars = json!(tool_defs).to_string().len();
     let mut groups_sent = ctx.chat.lock().unwrap().groups.len();
-    let output_rate = models::rates(&target.model.id, customs).map(|rates| rates.2);
+    let rates = models::rates(&target.model.id, customs);
+    let output_rate = rates.map(|rates| rates.2);
+    let batch = if rates.is_some_and(|(input, cached, _)| cached <= input / 4.0) { pruning::CACHED_COLLAPSE_BATCH } else { pruning::COLLAPSE_BATCH };
     let notice = |text: &str| emit.send(Event::Notice(text.to_string()));
     let done_steps = || chat.lock().unwrap().plan.as_ref().map_or(0, |p| plan::progress(p).done);
     let started = Instant::now();
@@ -805,10 +823,10 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
         // Old tool output collapses to a line saying what it was, and fat call arguments to a stub; files still being worked from stay whole.
         // ponytail: the web prunes the copy it sends and keeps its transcript whole; here the result is kept, like the fold below.
         // Its `context_pruned` event is ignored by its page, so nothing is shown here either.
-        // Eight at a time, so the provider's cache of the request holds between collapses; all that is due on the first round, when a
+        // A batch at a time, so the provider's cache of the request holds between collapses; all that is due on the first round, when a
         // resumed reply's cache is cold anyway. And a file read whole stays while it is the newest read of it: one larger than the
         // budget was collapsed after eight results and read again, 400,000 characters each time.
-        let options = pruning::Options { batch: if round == 1 { 1 } else { pruning::COLLAPSE_BATCH }, file_read_budget: pruning::FILE_READ_BUDGET_CHARS.max(ctx.read_chars * 5 / 4), ..Default::default() };
+        let options = pruning::Options { batch: if round == 1 { 1 } else { batch }, file_read_budget: pruning::FILE_READ_BUDGET_CHARS.max(ctx.read_chars * 5 / 4), ..Default::default() };
         let pruned = match prune_transcript(&messages, &if qwen { QWEN_PRUNE } else { options }).0 {
             Cow::Owned(pruned) => Some(pruned),
             Cow::Borrowed(_) => None,
@@ -819,6 +837,7 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
         // The valve: finished rounds fold into one line each once the run passes 65% of the window.
         let folded = compact::fold(&mut messages, window);
         if folded.rounds > 0 {
+            Tree::drop_old(&mut messages);
             notice(&format!("Context compacted · {} steps summarised · about {} tokens saved", folded.rounds, folded.tokens_saved));
         }
         // Still too big after that (huge tool results in the rounds kept): collapse the oldest of them.
@@ -1855,6 +1874,19 @@ mod tests {
         assert!(deltas.len() == 2 && deltas[0].ends_with("  + a.txt  (5B)") && deltas[1].ends_with("  + b.txt  (5B)"), "{deltas:?}");
     }
 
+    #[test]
+    fn a_fresh_listing_goes_after_the_old_one_until_the_fold() {
+        let mut tree = Tree::default();
+        let mut messages = vec![json!({ "role": "system", "content": "rules" }), user("q")];
+        tree.show("\n\nold".into(), &mut messages);
+        messages.extend([json!({ "role": "system", "content": "Workspace changes since the last full listing (+ added, ~ modified, - removed):\n  + a" }), json!({ "role": "assistant", "content": "on it" })]);
+        let before = messages.clone();
+        tree.show("\n\nnew".into(), &mut messages);
+        assert_eq!(messages[..before.len()], before[..], "nothing the provider has cached moves");
+        Tree::drop_old(&mut messages);
+        assert_eq!(messages.iter().map(|m| m["content"].as_str().unwrap().chars().take(7).collect::<String>()).collect::<Vec<_>>(), ["rules", "q", "on it", "Current"]);
+    }
+
     /// A chat compacted after its reply stopped: Resume opens with the summary, and keeps every round of the reply.
     #[test]
     fn a_resumed_reply_opens_with_the_history_as_it_is_now() {
@@ -2179,6 +2211,47 @@ mod tests {
 
     fn local_target(base: String) -> Target {
         Target { model: models::resolve("qwen-3.8-27b", &[]), provider: ProviderId::Local, style: ThinkingStyle::Qwen, api_key: "local".into(), base_url: base, api_model: "stub".into() }
+    }
+
+    /// How much of each request is the request before it, unchanged: what a provider's prefix cache can read at most.
+    /// Sixty rounds of a build on DeepSeek: two files written, one more written, one read back, a wide search. Enough
+    /// changes for a fresh listing, enough results for the pruning batches. Measured before: 84% of what went out could
+    /// be read from the cache, and 13% was lost to the harness changing earlier text (a fresh listing in place of the
+    /// first, write arguments stubbed as each file was read back, pointers folded into pointers, a collapse every 6 rounds).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_harness_keeps_what_the_provider_cached() {
+        let file = |n: &str| format!("// file {n}\n{}", "fn work() { let total = items.iter().sum::<u32>(); }\n".repeat(60));
+        let write = |k: usize, id: String, path: String| json!({ "index": k, "id": id, "function": { "name": "write_file", "arguments": json!({ "path": path, "content": file(&path) }).to_string() } });
+        let calls = |list: Vec<Value>| sse(&[json!({ "choices": [{ "delta": { "tool_calls": list }, "finish_reason": "tool_calls" }] })]);
+        let mut replies: Vec<String> = (0..60)
+            .map(|i| match i % 4 {
+                0 => calls(vec![write(0, format!("a{i}"), format!("src/f{i}a.rs")), write(1, format!("b{i}"), format!("src/f{i}b.rs"))]),
+                1 => calls(vec![write(0, format!("c{i}"), format!("src/f{i}.rs"))]),
+                2 => sse(&[call_as(&format!("c{i}"), "read_file", &json!({ "path": format!("src/f{}a.rs", i - 2) }).to_string())]),
+                _ => sse(&[call_as(&format!("c{i}"), "search_files", &json!({ "query": "let total" }).to_string())]),
+            })
+            .collect();
+        replies.push(sse(&[says("Done.", Some("stop"))]));
+        let ran = run_on(replies, "none", None, |dir| opening(dir, "build it"), deepseek_target).await;
+        let wire = |body: &Value| format!("{}{}", body["tools"], body["messages"]);
+        let (mut same_all, mut sent_all, mut lost_all) = (0, 0, 0);
+        for (k, pair) in ran.sent.windows(2).enumerate() {
+            let (before, now) = (wire(&pair[0]), wire(&pair[1]));
+            let same = before.bytes().zip(now.bytes()).take_while(|(a, b)| a == b).count();
+            // What the request before sent that this one could not reuse: an earlier message changed.
+            let lost = before.len().saturating_sub(same + 64);
+            (same_all, sent_all, lost_all) = (same_all + same, sent_all + now.len(), lost_all + lost);
+            if lost > 0 {
+                let (a, b) = (pair[0]["messages"].as_array().unwrap(), pair[1]["messages"].as_array().unwrap());
+                let at = a.iter().zip(b).position(|(x, y)| x != y).map_or("the tools".into(), |i| format!("message {i}: {}", a[i].to_string().chars().take(80).collect::<String>()));
+                eprintln!("request {}: {lost} characters lost at {at}", k + 2);
+            }
+        }
+        let (cached, lost) = (same_all as f64 / sent_all as f64, lost_all as f64 / sent_all as f64);
+        // At DeepSeek's prices a cached character costs 2% of a fresh one.
+        let cost = (same_all as f64 * 0.02 + (sent_all - same_all) as f64) / 1000.0;
+        eprintln!("{} requests, {}K characters: {:.1}% could be read from the cache, {:.1}% lost to earlier text changing, {cost:.0}K at full price", ran.sent.len(), sent_all / 1000, cached * 100.0, lost * 100.0);
+        assert!(cached > 0.92 && lost < 0.05, "{cached} {lost}");
     }
 
     fn claude_target(base: String) -> Target {
