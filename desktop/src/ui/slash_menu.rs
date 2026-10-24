@@ -350,6 +350,7 @@ fn prompt(app: &mut App, ctx: &egui::Context, shown: String) {
             models::ProviderId::Openrouter => "OpenRouter",
             models::ProviderId::Local => "local server",
             models::ProviderId::Deepseek => "DeepSeek",
+            models::ProviderId::Anthropic => "Anthropic",
         };
         return say(app, format!("Add your {provider} key in Settings first."), true);
     }

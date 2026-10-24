@@ -3,6 +3,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod agent;
+mod anthropic;
 mod binary;
 mod browser;
 mod compact;

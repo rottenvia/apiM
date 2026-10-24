@@ -17,7 +17,7 @@ The program ends up at `desktop/target/release/apim.exe`. You can copy that one 
 
 Settings says at its foot when the program was built ("Built 2026-10-10 17:18"): the way to tell whether a window, a copy or a pinned shortcut is the newest build. A shortcut pinned to `target/release/apim.exe` opens whatever was built last; a copy made elsewhere stays as old as the day it was copied, and a window left open stays the build it was started from.
 
-Open **Settings** and paste an OpenRouter or DeepSeek key. Keys stay on your PC.
+Open **Settings** and paste an OpenRouter, DeepSeek or Anthropic key. Keys stay on your PC.
 
 ## What it does
 
@@ -80,7 +80,13 @@ The picked endpoint is the first of three: when it is busy OpenRouter sends a ro
 
 Paste a model's openrouter.ai link (or its id, `author/model-name`) into the chat and say to add it: the model in the chat calls `add_model`, the app checks the id with OpenRouter, and the model is in the model menu, with its context window, prices and abilities as OpenRouter lists them. The conversation stays on the model it was on. Settings → Models does the same by hand. The tool is only sent when a message names it or holds such a link, so it costs nothing otherwise.
 
-What an added model gets is what every model gets, because none of it is written per model: the endpoint pick above (not for `:free` and other `:variant` ids), its real prices in the cost figures, and everything under "What a request carries". What it does not get: handling written for one model's habits (the two catalog models have some: DeepSeek is handed its thinking back, GLM's thinking cannot be switched off), and a cache on providers that only cache what a request marks for it (Anthropic's models, for one): the app sends no such marks, so there every round is paid at the full input price.
+What an added model gets is what every model gets, because none of it is written per model: the endpoint pick above (not for `:free` and other `:variant` ids), its real prices in the cost figures, and everything under "What a request carries". What it does not get: handling written for one model's habits (the two catalog models have some: DeepSeek is handed its thinking back, GLM's thinking cannot be switched off), Claude is the exception on caching: it reads from its cache only up to where a request marks it, and the loop marks a Claude request (the system prompt, the newest tool result, and the request as a whole).
+
+## Claude on your own Anthropic key
+
+With an Anthropic key in Settings → API keys, any Claude model runs on Anthropic's own API, billed to that key: Settings → Models lists the models the key can use (click one to check and add it), a Claude id (`claude-sonnet-5-5`) typed there or named in a chat is added the same way, and an id the key does not have comes back with the ones it does. Anthropic does not list prices through its API; the app knows them for the Claude models out by October 2026 (`src/anthropic.rs`), and a later one shows "pricing unknown" until the app knows it.
+
+Claude's API speaks Messages, not Chat Completions: `src/anthropic.rs` translates each request on its way out and each reply or stream event on its way back, so the loop is the same loop. What changes on the way: system messages after the first turn ride in the user's turn as `<system-reminder>` text (Claude's own mid-conversation system message is not on every model); thinking is adaptive, its depth the effort setting, and "None" is low effort, as the newest models cannot switch it off; models older than 4.6 run without thinking; Claude's thoughts are not sent back, only the end of each as text, as on OpenRouter (each returned thought is checked against everything before it, and the loop rebuilds its newest turns every round); `temperature` and the like are never sent (API version 2026-10-21 refuses them).
 
 ## What a request carries
 

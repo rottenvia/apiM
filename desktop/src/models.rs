@@ -11,6 +11,7 @@ pub enum ProviderId {
     Deepseek,
     Openrouter,
     Local,
+    Anthropic,
 }
 
 impl ProviderId {
@@ -19,6 +20,7 @@ impl ProviderId {
             ProviderId::Deepseek => "DeepSeek",
             ProviderId::Openrouter => "OpenRouter",
             ProviderId::Local => "On this PC",
+            ProviderId::Anthropic => "Anthropic",
         }
     }
 }
@@ -52,11 +54,13 @@ pub struct ModelInfo {
     pub max_output_tokens: u32,
 }
 
-/// A user-added OpenRouter model (Settings -> Models).
+/// A user-added model (Settings -> Models): an OpenRouter one, or a Claude one on the user's own Anthropic key.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct CustomModel {
-    /// OpenRouter slug for the wire, e.g. `anthropic/claude-opus-4-6`.
+    /// The id on the wire: OpenRouter's slug (`anthropic/claude-opus-4-6`), or Anthropic's own (`claude-opus-4-6`).
     pub api_model: String,
+    #[serde(default = "openrouter")]
+    pub provider: ProviderId,
     pub label: String,
     #[serde(default)]
     pub vision: Vision,
@@ -72,6 +76,10 @@ pub struct CustomModel {
     /// Uncapped tools: whole-file reads, no batch ceilings.
     #[serde(default)]
     pub open_limits: bool,
+}
+
+fn openrouter() -> ProviderId {
+    ProviderId::Openrouter
 }
 
 fn default_max_output() -> u32 {
@@ -134,14 +142,14 @@ impl CustomModel {
         ModelInfo {
             id: self.id(),
             api_model: self.api_model.clone(),
-            provider: ProviderId::Openrouter,
+            provider: self.provider,
             label: self.label.clone(),
             short_label: short,
-            description: format!("Custom OpenRouter model ({}).", self.api_model),
+            description: format!("Custom {} model ({}).", self.provider.name(), self.api_model),
             specs: self.specs(),
             vision: self.vision,
             video: false,
-            settings_subtitle: format!("OpenRouter · {}", self.specs()),
+            settings_subtitle: format!("{} · {}", self.provider.name(), self.specs()),
             max_output_tokens: self.max_output_tokens.clamp(1_000, 1_000_000),
         }
     }
@@ -215,7 +223,9 @@ pub fn rates(id: &str, customs: &[CustomModel]) -> Option<(f64, f64, f64)> {
         _ => {
             let c = customs.iter().find(|c| c.id() == id)?;
             let input = c.input_price?;
-            (input, input, c.output_price?)
+            // OpenRouter lists no cached price, so none is assumed; Claude's is a fraction of its input price.
+            let cached = if c.provider == ProviderId::Anthropic { crate::anthropic::rates(&c.api_model).map_or(input, |rates| rates.1) } else { input };
+            (input, cached, c.output_price?)
         }
     })
 }
@@ -302,6 +312,7 @@ mod tests {
         assert!(!valid_slug("bad slug"));
         let c = CustomModel {
             api_model: "a/b".into(),
+            provider: ProviderId::Openrouter,
             label: "AB".into(),
             vision: Vision::Native,
             max_output_tokens: 5,
@@ -315,6 +326,11 @@ mod tests {
         assert_eq!(context_window("custom:a/b", &customs), 200_000);
         let u = Usage { prompt: 1_000_000, completion: 1_000_000, ..Default::default() };
         assert_eq!(u.cost("custom:a/b", &customs), Some(18.0));
+        // A Claude model reads its cache at Anthropic's price for it: a twentieth of the input on Opus 5.5.
+        let claude = [CustomModel { api_model: "claude-opus-5-5".into(), provider: ProviderId::Anthropic, input_price: Some(4.0), output_price: Some(20.0), ..customs[0].clone() }];
+        let cached = Usage { prompt: 1_000_000, cache_hit: 1_000_000, ..Default::default() };
+        assert!(cached.cost("custom:claude-opus-5-5", &claude).is_some_and(|usd| (usd - 0.2).abs() < 1e-9));
+        assert_eq!((resolve("custom:claude-opus-5-5", &claude).provider, resolve("custom:claude-opus-5-5", &claude).settings_subtitle.starts_with("Anthropic · ")), (ProviderId::Anthropic, true));
         // Off-peak is DeepSeek's own discount: an OpenRouter model costs the same at any hour.
         assert_eq!(u.shown_cost("custom:a/b", &customs, true), Some(18.0));
         assert_eq!(u.shown_cost("deepseek-v4-flash", &[], true).map(|usd| (usd * 100.0).round()), u.cost("deepseek-v4-flash", &[]).map(|usd| (usd * 50.0).round()));

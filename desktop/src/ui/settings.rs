@@ -14,13 +14,22 @@ use std::sync::mpsc;
 
 type Lookup = mpsc::Receiver<Result<Verified, String>>;
 
+/// The Claude models on the user's Anthropic key, read once per key while the dialog is open.
+#[derive(Default)]
+struct ClaudeList {
+    key: String,
+    waiting: Option<mpsc::Receiver<Result<Vec<(String, String)>, String>>>,
+    models: Vec<(String, String)>,
+    error: String,
+}
+
 /// What the dialog remembers while it is open.
 #[derive(Default)]
 pub struct State {
     pub tab: usize,
     /// Counts tab changes: the web app rebuilds a tab from scratch when it is opened.
     epoch: u32,
-    // "Your OpenRouter models"
+    // "Your added models"
     slug: String,
     label: String,
     verifying: Option<Lookup>,
@@ -28,6 +37,7 @@ pub struct State {
     verify_error: String,
     /// The model being re-checked: (its id, the answer on its way).
     refreshing: Option<(String, Lookup)>,
+    claude: ClaudeList,
     /// The delete lock's number box, as typed.
     delay: Option<String>,
     pub panels: super::settings_panels::State,
@@ -230,6 +240,21 @@ fn keys(app: &mut App, ui: &mut Ui) {
     }
     ui.add_space(20.0);
 
+    head(ui, "Anthropic API Key", "(Claude models)", None);
+    help(
+        ui,
+        &[
+            Seg::T("Get a key from "),
+            Seg::Link("platform.claude.com/settings/keys", "https://platform.claude.com/settings/keys"),
+            Seg::T(". Claude models then run on Anthropic's own API, billed to this key: add any of them under the Model tab, or ask in a chat (\u{201c}add Claude Sonnet 5.5\u{201d})."),
+        ],
+    );
+    Input::new("sk-ant-...").password().show(ui, "anthropic", &mut app.settings.anthropic_key);
+    if !app.settings.anthropic_key.is_empty() {
+        form::key_saved(ui);
+    }
+    ui.add_space(20.0);
+
     head(ui, "Local model", "(Qwen 3.8 27B on this PC)", None);
     help(
         ui,
@@ -422,23 +447,95 @@ fn price_line(found: &Verified) -> String {
 
 fn start_verify(app: &App, ctx: &egui::Context, slug: String) -> Lookup {
     let (tx, rx) = mpsc::channel();
-    let key = app.settings.openrouter();
+    let (openrouter, anthropic) = (app.settings.openrouter(), app.settings.anthropic());
     let wake = ctx.clone();
     app.rt.spawn(async move {
-        let _ = tx.send(provider::verify_openrouter(&slug, &key).await);
+        let _ = tx.send(provider::verify_model(&slug, &openrouter, &anthropic).await);
         wake.request_repaint();
     });
     rx
 }
 
-/// CustomModelsManager: the user's own OpenRouter models.
+/// The Claude models the user's Anthropic key can use, as chips: one not added yet is checked and offered to add,
+/// one already added is picked. False when there is nothing to show.
+fn claude_models(app: &mut App, ui: &mut Ui) -> bool {
+    let key = app.settings.anthropic();
+    if key.is_empty() {
+        return false;
+    }
+    let p = p();
+    let list = &mut app.settings_ui.claude;
+    if list.key != key {
+        let (tx, rx) = mpsc::channel();
+        let (wake, asked) = (ui.ctx().clone(), key.clone());
+        app.rt.spawn(async move {
+            let _ = tx.send(crate::anthropic::list(&asked).await);
+            wake.request_repaint();
+        });
+        *list = ClaudeList { key, waiting: Some(rx), ..Default::default() };
+    }
+    if let Some(answer) = list.waiting.as_ref().and_then(|rx| rx.try_recv().ok()) {
+        list.waiting = None;
+        match answer {
+            Ok(models) => list.models = models,
+            Err(why) => list.error = why,
+        }
+    }
+    if list.waiting.is_some() {
+        form::para(ui, "Reading the Claude models on your Anthropic key…", 11.0, 16.0, W::Regular, p.muted);
+        return true;
+    }
+    if !list.error.is_empty() {
+        ui.horizontal(|ui| {
+            ui.label(widgets::lines(&list.error, 11.0, 16.0, W::Regular, p.danger));
+            // A key that was refused stays refused until it changes; a lost connection deserves another go.
+            if Btn::ghost("Try again").text(11.0, 16.0).pad(8.0, 2.0).fill(Color32::TRANSPARENT, p.hover).ink(p.accent_light, p.text).show(ui).clicked() {
+                list.key.clear();
+            }
+        });
+        return true;
+    }
+    if list.models.is_empty() {
+        return false;
+    }
+    mini_label(ui, "On your Anthropic key");
+    let mut picked = None;
+    form::wrap_row(ui, 6.0, |ui| {
+        for (id, name) in &list.models {
+            let added = app.settings.custom_models.iter().any(|c| c.provider == models::ProviderId::Anthropic && c.api_model == *id);
+            let tip = if added { format!("{id} · added: click to use it") } else { format!("{id} · click to check it and add it") };
+            if pick_chip(ui, if name.is_empty() { id } else { name }, added, false).on_hover_text(tip).clicked() {
+                picked = Some((id.clone(), added));
+            }
+        }
+    });
+    match picked {
+        Some((id, true)) => app.settings.model = format!("{}{id}", models::CUSTOM_PREFIX),
+        Some((id, false)) => {
+            let lookup = start_verify(app, ui.ctx(), id.clone());
+            let st = &mut app.settings_ui;
+            (st.slug, st.verified, st.verifying) = (id, None, Some(lookup));
+            st.verify_error.clear();
+        }
+        None => {}
+    }
+    true
+}
+
+/// CustomModelsManager: the models the user added, from OpenRouter or Anthropic.
 fn custom_models(app: &mut App, ui: &mut Ui) {
     let p = p();
-    form::label(ui, "Your OpenRouter models", "");
+    form::label(ui, "Your added models", "");
     ui.add_space(8.0);
     form::helper(
         ui,
-        &[Seg::T("Any model id from "), Seg::Link("openrouter.ai/models", "https://openrouter.ai/models"), Seg::T(" — paste it, Verify, Add. It rides your OpenRouter key and appears in the model picker like a built-in.")],
+        &[
+            Seg::T("Any model id from "),
+            Seg::Link("openrouter.ai/models", "https://openrouter.ai/models"),
+            Seg::T(" rides your OpenRouter key; a Claude model id ("),
+            Seg::Code("claude-sonnet-5-5"),
+            Seg::T(") rides your Anthropic key. Paste it, Verify, Add: it appears in the model picker like a built-in."),
+        ],
     );
     ui.add_space(10.0);
 
@@ -481,7 +578,7 @@ fn custom_models(app: &mut App, ui: &mut Ui) {
                         remove = Some(i);
                     }
                     let checking = busy.as_deref() == Some(id.as_str());
-                    if small(if checking { "…" } else { "↻" }).ink(p.muted, p.text2).enabled(busy.is_none()).show(ui).on_hover_text("Re-check capabilities and pricing with OpenRouter").clicked() {
+                    if small(if checking { "…" } else { "↻" }).ink(p.muted, p.text2).enabled(busy.is_none()).show(ui).on_hover_text(format!("Re-check capabilities and pricing with {}", c.provider.name())).clicked() {
                         recheck = Some(i);
                     }
                     ui.add_space(4.0);
@@ -498,7 +595,8 @@ fn custom_models(app: &mut App, ui: &mut Ui) {
             });
             if unknown {
                 ui.add_space(4.0);
-                form::para(ui, "OpenRouter reported no pricing — usage on this model won't be costed. Re-verify if that looks wrong.", 11.0, 16.0, W::Regular, p.warning);
+                let why = if c.provider == models::ProviderId::Anthropic { "This app does not know this Claude model's price yet" } else { "OpenRouter reported no pricing" };
+                form::para(ui, &format!("{why} — usage on this model won't be costed. Re-verify if that looks wrong."), 11.0, 16.0, W::Regular, p.warning);
             }
             ui.add_space(6.0);
             let row = ui.horizontal(|ui| {
@@ -533,6 +631,9 @@ fn custom_models(app: &mut App, ui: &mut Ui) {
         }
     }
 
+    if claude_models(app, ui) {
+        ui.add_space(8.0);
+    }
     form::boxed(ui, alpha(p.bg3, 50.0), p.border, 12, (12, 10), |ui| {
         let st = &mut app.settings_ui;
         let mut go = false;
@@ -542,7 +643,7 @@ fn custom_models(app: &mut App, ui: &mut Ui) {
                 let waiting = st.verifying.is_some();
                 go |= Btn::outline(if waiting { "…" } else { "Verify" }).fill(p.bg3, p.hover).pad(12.0, 8.0).enabled(!st.slug.trim().is_empty() && !waiting).show(ui).clicked();
                 let before = st.slug.clone();
-                let field = Input::new("author/model-name or author/model:free").mono().text(12.0, 16.0).pad(12, 8).radius(8).show(ui, "slug", &mut st.slug);
+                let field = Input::new("author/model-name, author/model:free or claude-…").mono().text(12.0, 16.0).pad(12, 8).radius(8).show(ui, "slug", &mut st.slug);
                 if st.slug != before {
                     // Typing clears what the last check said.
                     st.verified = None;
@@ -591,7 +692,7 @@ fn custom_models(app: &mut App, ui: &mut Ui) {
         }
         let old = app.settings.custom_models.iter().position(|c| c.api_model == found.id.trim());
         match to_custom(&found, &st.label, old.map(|i| &app.settings.custom_models[i])) {
-            None => st.verify_error = format!("The verified id \"{}\" is not a usable model id. Copy it fresh from openrouter.ai.", found.id),
+            None => st.verify_error = format!("The verified id \"{}\" is not a usable model id. Copy it again from {}.", found.id, found.provider.name()),
             Some(def) => {
                 app.settings.model = def.id();
                 // Same wire id, same entry: this replaces rather than duplicates.
@@ -599,7 +700,7 @@ fn custom_models(app: &mut App, ui: &mut Ui) {
                     Some(i) => app.settings.custom_models[i] = def,
                     None => app.settings.custom_models.push(def),
                 }
-                *st = State { tab: st.tab, epoch: st.epoch, panels: std::mem::take(&mut st.panels), ..State::default() };
+                *st = State { tab: st.tab, epoch: st.epoch, panels: std::mem::take(&mut st.panels), claude: std::mem::take(&mut st.claude), ..State::default() };
             }
         }
     });
@@ -806,13 +907,16 @@ mod tests {
 
     #[test]
     fn verified_models_become_entries() {
-        let found = Verified { id: "z/glm:free".into(), name: "GLM".into(), context_length: Some(1_000_000), input_price: Some(0.0), output_price: Some(0.0), supports_tools: false, supports_vision: true, supports_thinking: true };
+        let found = Verified { provider: models::ProviderId::Openrouter, id: "z/glm:free".into(), name: "GLM".into(), context_length: Some(1_000_000), max_output: None, input_price: Some(0.0), output_price: Some(0.0), supports_tools: false, supports_vision: true, supports_thinking: true };
         assert_eq!(price_line(&found), "Free · no tools · vision · thinking");
         let def = to_custom(&found, "  ", None).unwrap();
         assert_eq!((def.id().as_str(), def.label.as_str(), def.vision), ("custom:z/glm:free", "GLM", Vision::Native));
         let half = Verified { input_price: Some(0.15), output_price: None, supports_vision: false, supports_thinking: false, supports_tools: true, ..found.clone() };
         assert_eq!(price_line(&half), "$0.15 / $? per 1M in/out · tools");
         assert_eq!(price_line(&Verified { input_price: None, ..half.clone() }), "Pricing unknown — usage won't be costed · tools");
-        assert!(to_custom(&Verified { id: "not a slug".into(), ..half }, "x", None).is_none());
+        assert!(to_custom(&Verified { id: "not a slug".into(), ..half.clone() }, "x", None).is_none());
+        // A Claude model keeps its provider and the output limit Anthropic gave.
+        let claude = to_custom(&Verified { provider: models::ProviderId::Anthropic, id: "claude-opus-5-5".into(), max_output: Some(128_000), ..half }, "", None).unwrap();
+        assert_eq!((claude.id().as_str(), claude.provider, claude.max_output_tokens), ("custom:claude-opus-5-5", models::ProviderId::Anthropic, 128_000));
     }
 }

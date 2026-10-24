@@ -310,33 +310,36 @@ pub fn implemented(name: &str) -> bool {
 pub fn add_model_schema() -> Value {
     serde_json::json!({ "type": "function", "function": {
         "name": "add_model",
-        "description": "Adds an OpenRouter model to the user's model list in this app, so they can pick it in the model menu. Call it when the user gives an openrouter.ai model link or a model id (author/model-name, optionally with :free) and asks to add, install or try that model. The app checks the id with OpenRouter and takes the context window, prices and abilities from there. This conversation stays on its current model.",
+        "description": "Adds a model to the user's model list in this app, so they can pick it in the model menu: an OpenRouter model (an openrouter.ai link, or an id author/model-name, optionally with :free), or a Claude model on the user's own Anthropic key (Anthropic's id, such as claude-sonnet-5-5; the user names it in words, you give the id). Call it when the user asks to add, install or try a model. The app checks the id with OpenRouter or Anthropic and takes the context window, prices and abilities from there; an unknown Claude id comes back with the ids the key has. This conversation stays on its current model.",
         "parameters": {
             "type": "object",
             "properties": {
-                "model": { "type": "string", "description": "The model's openrouter.ai link, or its id (author/model-name)." },
-                "name": { "type": "string", "description": "A display name, if the user asked for one. Default: OpenRouter's name for the model." }
+                "model": { "type": "string", "description": "The model's openrouter.ai link or id (author/model-name), or a Claude model id (claude-...)." },
+                "name": { "type": "string", "description": "A display name, if the user asked for one. Default: the provider's name for the model." }
             },
             "required": ["model"]
         }
     } })
 }
 
-/// `add_model`: checks the id with OpenRouter and hands the app the entry for its list (`Event::ModelAdded`).
+/// `add_model`: checks the id with OpenRouter or Anthropic and hands the app the entry for its list (`Event::ModelAdded`).
 async fn add_model(ctx: &Ctx, args: &Value) -> Output {
-    let slug = crate::provider::slug_from_link(args["model"].as_str().unwrap_or(""));
+    let asked = args["model"].as_str().unwrap_or("");
+    let slug = crate::provider::slug_from_link(asked);
     if let Some(have) = crate::models::all(&[]).into_iter().find(|m| m.api_model == slug) {
         return Output::ok(format!("{} is already in the model list, as one of the app's own models. Nothing was added.", have.label), format!("{} is already there", have.label));
     }
-    let found = match crate::provider::verify_openrouter(&slug, &ctx.settings.openrouter()).await {
+    let found = match crate::provider::verify_model(asked, &ctx.settings.openrouter(), &ctx.settings.anthropic()).await {
         Ok(found) => found,
         Err(why) => return Output::fail(why),
     };
     let old = ctx.settings.custom_models.iter().find(|c| c.api_model == found.id.trim());
-    let Some(model) = found.custom(args["name"].as_str().unwrap_or(""), old) else { return Output::fail(format!("OpenRouter's id \"{}\" cannot be used as a model id here.", found.id)) };
+    let Some(model) = found.custom(args["name"].as_str().unwrap_or(""), old) else { return Output::fail(format!("{}'s id \"{}\" cannot be used as a model id here.", found.provider.name(), found.id)) };
     ctx.emit.send(crate::agent::Event::ModelAdded(model.clone()));
+    let claude = found.provider == crate::models::ProviderId::Anthropic;
     let price = match (found.input_price, found.output_price) {
         (Some(i), Some(o)) if i == 0.0 && o == 0.0 => "free".to_string(),
+        (Some(i), Some(o)) if claude => format!("${i} in and ${o} out per million tokens, billed by Anthropic on the user's key"),
         (Some(i), Some(o)) => format!("${i} in and ${o} out per million tokens at list price; the app picks the cheapest fast endpoint when it is first used"),
         _ => "price not listed".to_string(),
     };

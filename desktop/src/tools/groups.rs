@@ -80,9 +80,9 @@ pub const GROUPS: &[Group] = &[
     },
     Group {
         name: "models",
-        what: "the app's model list: add an OpenRouter model from its link or id",
+        what: "the app's model list: add an OpenRouter model from its link or id, or a Claude model on the user's Anthropic key",
         tools: &["add_model"],
-        hints: &["openrouter.ai/", "add model", "add this model", "add the model", "install model", "install this model", "model list"],
+        hints: &["openrouter.ai/", "add model", "add this model", "add the model", "install model", "install this model", "model list", "add claude", "claude-"],
     },
     Group {
         name: "helpers",

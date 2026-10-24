@@ -409,12 +409,17 @@ async fn run_helpers(target: &Target, ctx: &Ctx, tool_defs: &[Value], listing: &
     if let Some(pinned) = provider::openrouter_provider_for(&target.model.id).filter(|_| openrouter && !lane.unpinned) {
         extra_body.insert("provider".into(), pinned);
     }
+    let anthropic = target.provider == ProviderId::Anthropic;
+    if anthropic {
+        // Which thinking fields Claude takes depends on which Claude it is.
+        extra_body.insert("model".into(), json!(target.api_model));
+    }
     provider::apply_thinking(&mut extra_body, target.style, false, "none", lane.mandatory);
-    let mut headers = vec![("Authorization".to_string(), format!("Bearer {}", target.api_key))];
+    let mut headers = if anthropic { crate::anthropic::headers(&target.api_key) } else { vec![("Authorization".to_string(), format!("Bearer {}", target.api_key))] };
     if openrouter {
         headers.extend([("HTTP-Referer".to_string(), "https://github.com/rottenvia/apiM".to_string()), ("X-Title".to_string(), "apiM".to_string())]);
     }
-    let to = subagent::Target { base_url: target.base_url.clone(), api_model: target.api_model.clone(), headers, extra_body };
+    let to = subagent::Target { base_url: target.base_url.clone(), api_model: target.api_model.clone(), headers, extra_body, anthropic };
     // A helper may use the read-only tools the reply itself was offered, nothing more.
     let available: HashSet<String> = tool_defs.iter().filter_map(|t| t["function"]["name"].as_str().map(str::to_string)).collect();
     let customs = &ctx.settings.custom_models;
@@ -830,8 +835,9 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
         };
         // DeepSeek takes each tool turn's reasoning back as `reasoning_content`. OpenRouter's validators reject
         // the field, so its lanes get `reasoning` where a model needs it and the end of the thought as plain text elsewhere.
-        let claude = openrouter && target.api_model.starts_with("anthropic/");
-        let reasoning_field = if !openrouter { Some("reasoning_content") } else if lane.replay { Some("reasoning") } else { None };
+        // Claude, on OpenRouter or its own API, takes back only its own signed thoughts (`anthropic` says why none go): the end as text.
+        let claude = (openrouter && target.api_model.starts_with("anthropic/")) || target.provider == ProviderId::Anthropic;
+        let reasoning_field = if claude { None } else if !openrouter { Some("reasoning_content") } else if lane.replay { Some("reasoning") } else { None };
         // Clips and pictures ride once: on the request after they joined, and every later round gets a reference line.
         let mut wire = transcript::wire(&ridden(&messages), reasoning_field, thought_ends);
         if qwen {
@@ -2173,6 +2179,35 @@ mod tests {
 
     fn local_target(base: String) -> Target {
         Target { model: models::resolve("qwen-3.8-27b", &[]), provider: ProviderId::Local, style: ThinkingStyle::Qwen, api_key: "local".into(), base_url: base, api_model: "stub".into() }
+    }
+
+    fn claude_target(base: String) -> Target {
+        Target { model: models::resolve("deepseek-v4-flash", &[]), provider: ProviderId::Anthropic, style: ThinkingStyle::Anthropic, api_key: "test".into(), base_url: base, api_model: "claude-sonnet-5-5".into() }
+    }
+
+    /// A Messages stream as Claude's own API sends it.
+    fn claude_sse(events: &[Value]) -> String {
+        let body = events.iter().map(|e| format!("event: {}\ndata: {e}\n\n", e["type"].as_str().unwrap_or(""))).collect::<String>();
+        format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reply_runs_on_claudes_own_api() {
+        let start = json!({ "type": "message_start", "message": { "usage": { "input_tokens": 50, "output_tokens": 1 } } });
+        let stop = |reason: &str| [json!({ "type": "message_delta", "delta": { "stop_reason": reason }, "usage": { "output_tokens": 9 } }), json!({ "type": "message_stop" })];
+        let call: Vec<Value> = [start.clone(), json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "tool_use", "id": "toolu_1", "name": "list_files", "input": {} } }), json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "input_json_delta", "partial_json": "{}" } })].into_iter().chain(stop("tool_use")).collect();
+        let answer: Vec<Value> = [start, json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "text_delta", "text": "Done." } })].into_iter().chain(stop("end_turn")).collect();
+        let ran = run_on(vec![claude_sse(&call), claude_sse(&answer)], "high", None, |dir| opening(dir, "q"), claude_target).await;
+        assert_eq!((ran.text.as_str(), ran.sent.len()), ("Done.", 2));
+        let first = &ran.sent[0];
+        assert_eq!((first["thinking"].clone(), first["output_config"].clone(), first["cache_control"].clone()), (json!({ "type": "adaptive", "display": "summarized" }), json!({ "effort": "high" }), json!({ "type": "ephemeral" })));
+        assert_eq!(first["system"][0]["cache_control"]["type"], "ephemeral");
+        // The turns alternate, the call and its result pair up, and the request ends on the user's turn.
+        let turns = ran.sent[1]["messages"].as_array().unwrap();
+        assert!(turns.windows(2).all(|pair| pair[0]["role"] != pair[1]["role"]) && turns.last().unwrap()["role"] == "user", "{turns:?}");
+        let (call, result) = (&turns[turns.len() - 2]["content"][0], &turns[turns.len() - 1]["content"][0]);
+        assert_eq!((call["type"].as_str(), call["id"].as_str(), result["type"].as_str(), result["tool_use_id"].as_str()), (Some("tool_use"), Some("toolu_1"), Some("tool_result"), Some("toolu_1")));
+        assert_eq!((ran.usage.prompt, ran.usage.completion), (100, 18));
     }
 
     /// A system prompt too long for any window. Nothing old is there to drop, so only the fit can shorten it.

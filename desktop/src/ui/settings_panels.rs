@@ -763,8 +763,10 @@ pub fn local_runtime(app: &mut App, ui: &mut Ui) {
     let p = p();
     let ctx = ui.ctx().clone();
     let live = app.shot.is_none();
-    // Shot states only: the settings scroll area is brought to the card (or its end, for `local-end`) so the harness can see it.
+    // Shot states only: the settings scroll area is brought to the card (or its end, for `local-end`) so the harness can see it;
+    // `top` leaves it at the top, where the keys are.
     let shot_end = !live && app.staged("local-end");
+    let shot_top = !live && app.staged("top");
     let st = &mut app.settings_ui.panels.local;
     pump(st, &mut app.settings, &ctx, live);
     let s = st.status.clone().unwrap_or_else(checking);
@@ -776,7 +778,7 @@ pub fn local_runtime(app: &mut App, ui: &mut Ui) {
     let mut click = None;
 
     form::boxed(ui, p.bg3, p.border, 12, (12, 12), |ui| {
-        if !live && !shot_end {
+        if !live && !shot_end && !shot_top {
             ui.scroll_to_cursor(Some(egui::Align::TOP));
         }
         ui.horizontal_top(|ui| {
