@@ -45,11 +45,16 @@ static FACTS: LazyLock<String> = LazyLock::new(|| {
 pub fn block(workspace: &Path, auto: bool) -> String {
     let asks = if auto { "Commands and looks outside the workspace run without asking; a system command that changes or deletes something, and installing a package into the machine (pip into the system Python, npm -g, cargo install), still asks the user. Prefer what is already there: the standard library's unittest needs nothing installed." } else { "The user approves each command, and each folder you look into outside the workspace." };
     format!(
-        "\n\nThis computer, as the app found it when it started (take it as given, do not spend a round checking it):\n{}\n- Your workspace: {}\n- Today is {}.\n- {asks}",
+        "\n\nThis computer, as the app found it when it started (take it as given, do not spend a round checking it):\n{}\n- Your workspace: {}\n- {asks}",
         *FACTS,
-        workspace.display(),
-        chrono::Local::now().format("%Y-%m-%d, %A")
+        workspace.display()
     )
+}
+
+/// The date, for the note before each question. In the system prompt it changed the start of every request at midnight,
+/// and a chat open across it was sent again whole at full price.
+pub fn today() -> String {
+    format!("Today is {}.", chrono::Local::now().format("%Y-%m-%d, %A"))
 }
 
 #[cfg(test)]
@@ -62,7 +67,8 @@ mod tests {
         assert_eq!(windows_name("Microsoft Windows [Version 10.0.19045.3803]").as_deref(), Some("Windows 10, build 19045"));
         assert_eq!(windows_name("nonsense"), None);
         let told = block(Path::new("/w/chat"), false);
-        assert!(told.contains("- Your workspace: /w/chat\n- Today is 20") && told.contains("Programs found: ") && told.ends_with("outside the workspace."), "{told}");
+        assert!(told.contains("- Your workspace: /w/chat\n- The user approves") && told.contains("Programs found: ") && told.ends_with("outside the workspace."), "{told}");
+        assert!(today().starts_with("Today is 20") && !told.contains("Today is"));
         assert!(block(Path::new("/w"), true).contains("cargo install), still asks the user. Prefer what is already there"));
     }
 }

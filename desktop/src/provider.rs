@@ -655,6 +655,11 @@ pub async fn stream(client: &reqwest::Client, target: &Target, body: &Value, cut
     let anthropic = target.provider == ProviderId::Anthropic;
     let payload = if anthropic { crate::anthropic::request(body).to_string() } else { body.to_string() };
     let budget = attempt_timeout(target.provider, payload.len());
+    // `APIM_WIRE_LOG=<folder>` keeps every request body as sent, numbered: what to diff when a provider's cache misses.
+    if let Some(dir) = std::env::var_os("APIM_WIRE_LOG") {
+        static SENT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let _ = std::fs::write(std::path::Path::new(&dir).join(format!("{:04}.json", SENT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))), &payload);
+    }
     let mut req = client.post(format!("{}/{}", target.base_url, if anthropic { "messages" } else { "chat/completions" })).header("Content-Type", "application/json").body(payload);
     req = if anthropic { crate::anthropic::headers(&target.api_key).into_iter().fold(req, |req, (name, value)| req.header(name, value)) } else { req.bearer_auth(&target.api_key) };
     if target.provider == ProviderId::Openrouter {

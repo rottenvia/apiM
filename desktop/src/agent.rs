@@ -360,9 +360,12 @@ fn resume_transcript(mut resume: Resume, mut messages: Vec<Value>, start: &mut S
     if note.to_ascii_lowercase().contains("do not think more") {
         start.think_nudges = start.think_nudges.max(1);
     }
-    // Conclusions recorded during the interrupted run are on disk but not in the saved first system message.
-    if let Some(first) = messages.iter_mut().find(|m| m["role"] == "system" && m["content"].is_string()).filter(|_| !findings.is_empty()) {
-        first["content"] = json!(findings::replace_findings(first["content"].as_str().unwrap_or(""), findings));
+    // Conclusions recorded during the interrupted run are on disk but not in the saved note before the question (or, in a
+    // transcript saved before that note, the first system message).
+    let holds = |m: &Value, test: &dyn Fn(&str) -> bool| m["role"] == "system" && m["content"].as_str().is_some_and(test);
+    let at = messages.iter().position(|m| holds(m, &|c| c.contains(findings::FINDINGS_MARKER_OPEN))).or_else(|| messages.iter().position(|m| holds(m, &|c| c.starts_with("Today is "))));
+    if let Some(holder) = at.filter(|_| !findings.is_empty()) {
+        messages[holder]["content"] = json!(findings::replace_findings(messages[holder]["content"].as_str().unwrap_or(""), findings));
     }
     start.usage = resume.usage;
     start.answer = resume.prior["content"].as_str().unwrap_or("").to_string();
@@ -646,7 +649,11 @@ async fn run_inner(mut req: Request, emit: &Emitter, procs: Arc<Procs>) -> Resul
     let mut system = prompt::system(&plugins::legacy_prompt(&every, &plugins_on), web_search, native_vision, git_repo, github.as_ref());
     // The computer this runs on, so no chat starts by finding it out.
     system.push_str(&crate::machine::block(&req.workspace, s.approval == crate::store::Approval::Auto));
-    // What earlier turns established rides in the system prompt, read fresh from the workspace's store (the web app's file).
+    // What changes from one question to the next (the date, and what earlier work established, read fresh from the
+    // workspace's store) rides in a note just before the question, after the history. In the system prompt, a finding
+    // recorded in one reply changed the start of the next reply's requests, and the whole chat went out at full price
+    // again: a finding was recorded in 28% of replies.
+    let mut context = crate::machine::today();
     let findings_path = findings::store_path(&req.workspace);
     if !findings_path.exists() {
         // Findings this chat recorded before the store was shared lived only in the chat file: they move over once.
@@ -655,15 +662,15 @@ async fn run_inner(mut req: Request, emit: &Emitter, procs: Arc<Procs>) -> Resul
         }
     }
     if findings::shared_findings_enabled() {
-        system.push_str(&findings::format_machine_findings_for_prompt(&findings::read_store(&findings::machine_store_path(&crate::store::data_dir()))));
+        context.push_str(&findings::format_machine_findings_for_prompt(&findings::read_store(&findings::machine_store_path(&crate::store::data_dir()))));
     }
     let findings_block = findings::format_findings_for_prompt(&findings::read_store(&findings_path));
-    system.push_str(&findings_block);
+    context.push_str(&findings_block);
     // Binaries already inspected in this workspace, so the model does not analyse them again.
-    system.push_str(&crate::binary::ledger::format_binary_ledger_for_prompt(&crate::binary::ledger::read_binary_ledger(&req.workspace)));
+    context.push_str(&crate::binary::ledger::format_binary_ledger_for_prompt(&crate::binary::ledger::read_binary_ledger(&req.workspace)));
     // What earlier work in this workspace proved, when lessons are switched on.
     let known_lessons = if s.lessons_enabled { lessons::read_lessons(&req.workspace) } else { Vec::new() };
-    system.push_str(&lessons::format_lessons_for_prompt(&known_lessons));
+    context.push_str(&lessons::format_lessons_for_prompt(&known_lessons));
     // Standing orders go at the start of the first system message: some lanes only honour that one.
     if !directives.is_empty() {
         system = format!("{directives}\n\n{system}");
@@ -674,6 +681,8 @@ async fn run_inner(mut req: Request, emit: &Emitter, procs: Arc<Procs>) -> Resul
         messages.push(json!({ "role": "system", "content": summary }));
     }
     messages.extend(crate::context::transcript::wire_turns(&req.history, &req.text, &req.images, target.model.vision));
+    let question = messages.len() - 1;
+    messages.insert(question, json!({ "role": "system", "content": context }));
     // The enabled plugins' reminders ride at the end of the newest message, where a model that has drifted reads them last.
     remind(&mut messages, &plugins::reminders(&every, &plugins_on));
 
@@ -694,7 +703,7 @@ async fn run_inner(mut req: Request, emit: &Emitter, procs: Arc<Procs>) -> Resul
     // Not all of them are sent (`tools::groups`): the everyday ones, and the groups this chat has loaded, a
     // connected repository calls for, or the message names.
     let mut groups = req.chat.groups.clone();
-    for group in github.iter().map(|_| "git".to_string()).chain(tools::groups::hinted(&req.text)) {
+    for group in tools::groups::STANDING.iter().map(|group| group.to_string()).chain(github.iter().map(|_| "git".to_string())).chain(tools::groups::hinted(&req.text)) {
         tools::groups::add(&mut groups, &group);
     }
     let mut end = drive(&target, &ctx, messages, all_tools, groups, effort, &req.conv_id, &req.notes, start).await?;
@@ -724,9 +733,8 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
     let mut tool_defs = tools::groups::offered(&all_tools, &groups);
     let mut tools_chars = json!(tool_defs).to_string().len();
     let mut groups_sent = ctx.chat.lock().unwrap().groups.len();
-    let rates = models::rates(&target.model.id, customs);
-    let output_rate = rates.map(|rates| rates.2);
-    let batch = if rates.is_some_and(|(input, cached, _)| cached <= input / 4.0) { pruning::CACHED_COLLAPSE_BATCH } else { pruning::COLLAPSE_BATCH };
+    let output_rate = models::rates(&target.model.id, customs).map(|rates| rates.2);
+    let batch = if models::cache_is_cheap(&target.model.id, customs) { pruning::CACHED_COLLAPSE_BATCH } else { pruning::COLLAPSE_BATCH };
     let notice = |text: &str| emit.send(Event::Notice(text.to_string()));
     let done_steps = || chat.lock().unwrap().plan.as_ref().map_or(0, |p| plan::progress(p).done);
     let started = Instant::now();
@@ -877,9 +885,9 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
             // set one over the same text. Replayed on Haiku 5.5 (six rounds of one reply): 0 tokens read as the request
             // stood, the work state folded into the newest tool result and so gone from it a round later; all but a few
             // hundred a round with the work state a message of its own after a marked tool result.
-            let mark = |m: &mut Value| {
+            let mark = |m: &mut Value, mark: Value| {
                 if let Some(text) = m["content"].as_str().map(str::to_string) {
-                    m["content"] = json!([{ "type": "text", "text": text, "cache_control": { "type": "ephemeral" } }]);
+                    m["content"] = json!([{ "type": "text", "text": text, "cache_control": mark }]);
                 }
             };
             if let (Some(i), Some(goal)) = (result, goal) {
@@ -888,7 +896,7 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
                 let state = format!("{}{noted}", render_work_state(&goal, &tail));
                 if claude {
                     wire.push(json!({ "role": "user", "content": state }));
-                    mark(&mut wire[i]);
+                    mark(&mut wire[i], json!({ "type": "ephemeral" }));
                 } else {
                     wire[i]["content"] = json!(format!("{}\n\n{state}", wire[i]["content"].as_str().unwrap_or("")));
                 }
@@ -896,7 +904,16 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
                 wire.push(json!({ "role": "system", "content": tail }));
             }
             if claude {
-                mark(&mut wire[0]);
+                // The rules, and the chat before this question, are kept an hour: the next question often comes more than
+                // five minutes after the last round, and the chat before it was then written again at 1.25 times the price
+                // in place of read at 0.1. Longer marks have to come first, so the rules are kept an hour too.
+                let hour = json!({ "type": "ephemeral", "ttl": "1h" });
+                let rounds = wire.iter().position(|m| m["tool_calls"].as_array().is_some_and(|calls| !calls.is_empty())).unwrap_or(wire.len());
+                // The last of the history: the note before the question changes with every question.
+                if let Some(end) = wire[..rounds].iter().rposition(|m| m["role"] == "user").and_then(|question| wire[..question].iter().rposition(|m| m["role"] != "system")) {
+                    mark(&mut wire[end], hour.clone());
+                }
+                mark(&mut wire[0], hour);
             }
         }
 
@@ -1114,9 +1131,6 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
             break;
         }
         tool_rounds += 1;
-        if tool_rounds >= tools::groups::LONG_WORK_ROUNDS {
-            tools::groups::FOR_LONG_WORK.iter().for_each(|group| drop(tools::groups::add(&mut groups, group)));
-        }
         let mut turn = assistant(&content, &reasoning);
         turn["tool_calls"] = calls.iter().map(|c| json!({ "id": c.id, "type": "function", "function": { "name": c.name, "arguments": if c.args.trim().is_empty() { "{}" } else { &c.args } } })).collect();
         messages.push(turn);
@@ -2270,11 +2284,19 @@ mod tests {
         let stop = |reason: &str| [json!({ "type": "message_delta", "delta": { "stop_reason": reason }, "usage": { "output_tokens": 9 } }), json!({ "type": "message_stop" })];
         let call: Vec<Value> = [start.clone(), json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "tool_use", "id": "toolu_1", "name": "list_files", "input": {} } }), json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "input_json_delta", "partial_json": "{}" } })].into_iter().chain(stop("tool_use")).collect();
         let answer: Vec<Value> = [start, json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "text_delta", "text": "Done." } })].into_iter().chain(stop("end_turn")).collect();
-        let ran = run_on(vec![claude_sse(&call), claude_sse(&answer)], "high", None, |dir| opening(dir, "q"), claude_target).await;
+        // A chat with a turn before this question, and the note that rides before it.
+        let ran = run_on(vec![claude_sse(&call), claude_sse(&answer)], "high", None, |dir| {
+            let mut messages = vec![json!({ "role": "system", "content": "rules" }), user("earlier"), json!({ "role": "assistant", "content": "earlier answer" }), json!({ "role": "system", "content": "Today is 2026-10-25, Sunday." }), user("q")];
+            let tree = Tree::open(dir, &mut messages);
+            (messages, Start { tree, user_text: "q".into(), ..Default::default() })
+        }, claude_target).await;
         assert_eq!((ran.text.as_str(), ran.sent.len()), ("Done.", 2));
         let first = &ran.sent[0];
         assert_eq!((first["thinking"].clone(), first["output_config"].clone(), first["cache_control"].clone()), (json!({ "type": "adaptive", "display": "summarized" }), json!({ "effort": "high" }), json!({ "type": "ephemeral" })));
-        assert_eq!(first["system"][0]["cache_control"]["type"], "ephemeral");
+        // The rules and the chat before the question are kept an hour; the note before the question is not part of either.
+        let hour = json!({ "type": "ephemeral", "ttl": "1h" });
+        assert_eq!((&first["system"][0]["cache_control"], &first["messages"][1]["content"][0]["cache_control"]), (&hour, &hour));
+        assert!(first["messages"][2]["content"][0]["text"].as_str().unwrap().contains("Today is") && first["messages"][2]["content"][0].get("cache_control").is_none());
         // The turns alternate, the call and its result pair up, and the request ends on the user's turn.
         let turns = ran.sent[1]["messages"].as_array().unwrap();
         assert!(turns.windows(2).all(|pair| pair[0]["role"] != pair[1]["role"]) && turns.last().unwrap()["role"] == "user", "{turns:?}");
