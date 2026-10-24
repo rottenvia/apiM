@@ -6,7 +6,8 @@ Plays a six-round conversation with a long start (about 12,000 tokens, and three
 round the one before plus one exchange, as an agent's rounds are, and prints what the endpoint says it read from
 its cache. The start opens with a line no other request has, so only this conversation's own rounds can have put
 it there. A round costs a fraction of a cent. `PROBE_GAP` is the pause between rounds in seconds (default 3);
-`PROBE_TOOLS=0` leaves the tools out; `PROBE_MARK=top|last|system|both` sends a cache marker.
+`PROBE_TOOLS=0` leaves the tools out; `PROBE_MARK=top|last|system|both` sends a cache marker; `PROBE_SESSION=1` sends
+`session_id` and `prompt_cache_key`.
 """
 import json, os, sys, time, urllib.error, urllib.request
 from pathlib import Path
@@ -32,6 +33,9 @@ def ask(model, tag, messages):
         body["messages"] = [{**messages[0], "content": [{"type": "text", "text": messages[0]["content"], "cache_control": {"type": "ephemeral"}}]}] + messages[1:]
     elif mark == "last":
         body["messages"] = messages[:-1] + [{**messages[-1], "content": [{"type": "text", "text": messages[-1]["content"], "cache_control": {"type": "ephemeral"}}]}]
+    # PROBE_SESSION=1 names the conversation, for endpoints that keep one conversation on one machine by it.
+    if os.environ.get("PROBE_SESSION") == "1":
+        body.update(session_id=messages[0]["content"][:64], prompt_cache_key=messages[0]["content"][:64])
     if os.environ.get("PROBE_TOOLS", "1") != "0":
         body.update(tools=TOOLS, tool_choice="none")
     req = urllib.request.Request("https://openrouter.ai/api/v1/chat/completions", json.dumps(body).encode(), {"Authorization": "Bearer " + KEY, "Content-Type": "application/json"})

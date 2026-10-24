@@ -248,11 +248,13 @@ fn finish(stop: Option<&str>) -> Value {
 fn usage(u: &Value) -> Value {
     let n = |key: &str| u[key].as_u64().unwrap_or(0);
     let (fresh, written, read) = (n("input_tokens"), n("cache_creation_input_tokens"), n("cache_read_input_tokens"));
+    // Written for five minutes costs 1.25 times the input price, for an hour twice it.
+    let hour = u["cache_creation"]["ephemeral_1h_input_tokens"].as_u64().unwrap_or(0).min(written);
     json!({
         "prompt_tokens": fresh + written + read,
         "completion_tokens": n("output_tokens"),
         "prompt_tokens_details": { "cached_tokens": read },
-        "prompt_cache_miss_tokens": fresh + written + written / 4,
+        "prompt_cache_miss_tokens": fresh + written + (written - hour) / 4 + hour,
     })
 }
 

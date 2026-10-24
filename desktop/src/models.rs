@@ -209,6 +209,12 @@ pub fn set_endpoint_rates(id: &str, rates: (f64, f64, f64)) {
     ENDPOINT_RATES.lock().unwrap().insert(id.to_string(), rates);
 }
 
+/// A cached input token costs a quarter of a fresh one or less (DeepSeek 2%, Claude 10%): old text is then cheaper
+/// left as it is than rewritten, since a rewrite sends everything after it again at full price.
+pub fn cache_is_cheap(id: &str, customs: &[CustomModel]) -> bool {
+    rates(id, customs).is_some_and(|(input, cached, _)| cached <= input / 4.0)
+}
+
 /// USD per 1M tokens: (input, cached input, output). None when unknown.
 pub fn rates(id: &str, customs: &[CustomModel]) -> Option<(f64, f64, f64)> {
     if let Some(picked) = ENDPOINT_RATES.lock().unwrap().get(id) {

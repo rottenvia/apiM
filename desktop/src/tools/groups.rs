@@ -92,10 +92,11 @@ pub const GROUPS: &[Group] = &[
     },
 ];
 
-/// What a reply that has become real work gets without asking: the system prompt tells it to keep findings and
-/// to hand broad reading to a helper, and a chat of one or two steps needs neither.
-pub const FOR_LONG_WORK: [&str; 2] = ["memory", "helpers"];
-pub const LONG_WORK_ROUNDS: usize = 3;
+/// Offered to every reply from its first request: the system prompt tells it to keep findings and to hand broad
+/// reading to a helper. Added at the third tool round instead, they changed the tool list in the middle of the reply,
+/// and the provider's cache of everything after the tools went with it: the next round read nothing from its cache,
+/// on DeepSeek and on Claude alike (2026-10-25).
+pub const STANDING: [&str; 2] = ["memory", "helpers"];
 
 fn name(tool: &Value) -> &str {
     tool["function"]["name"].as_str().unwrap_or("")

@@ -13,6 +13,11 @@ const VERBATIM_MAX: usize = 20;
 /// Older turns waiting for a summary are folded in once they pass either of these.
 const TRIGGER_CHARS: usize = 4_000;
 const TRIGGER_TURNS: usize = 6;
+/// Where the cache is cheap (`models::cache_is_cheap`) they wait for more. A refresh rewrites the start of the history,
+/// so the next request sent all of it again at full price, and with long replies 4,000 characters went by in about every
+/// other message. As many turns as the verbatim window still holds, so it never slides (which would rewrite it too).
+const CACHED_TRIGGER_CHARS: usize = 40_000;
+const CACHED_TRIGGER_TURNS: usize = VERBATIM_MAX - VERBATIM_TURNS;
 const DIGEST_MAX_CHARS: usize = 60_000;
 const TURN_MAX_CHARS: usize = 20_000;
 const TEXT_MAX_CHARS: usize = 4_000;
@@ -83,8 +88,9 @@ pub fn history_chars(messages: &[Message], stored: Option<&HistorySummary>) -> u
     stored.map_or(0, |s| render(s).len()) + shape(messages, stored).verbatim.iter().map(|m| m.text().len() + 16).sum::<usize>()
 }
 
-pub fn should_refresh(pending: &[&Message]) -> bool {
-    !pending.is_empty() && (pending.len() >= TRIGGER_TURNS || pending.iter().map(|m| m.text().len()).sum::<usize>() >= TRIGGER_CHARS)
+pub fn should_refresh(pending: &[&Message], cheap_cache: bool) -> bool {
+    let (turns, chars) = if cheap_cache { (CACHED_TRIGGER_TURNS, CACHED_TRIGGER_CHARS) } else { (TRIGGER_TURNS, TRIGGER_CHARS) };
+    !pending.is_empty() && (pending.len() >= turns || pending.iter().map(|m| m.text().len()).sum::<usize>() >= chars)
 }
 
 fn cut(text: &str, chars: usize) -> &str {
@@ -311,14 +317,17 @@ mod tests {
         let all = turns(20, 10);
         let s = shape(&all, None);
         assert_eq!((s.verbatim.len(), s.pending.len()), (20, 12));
-        assert!(should_refresh(&s.pending));
+        assert!(should_refresh(&s.pending, false) && should_refresh(&s.pending, true));
         // A stored summary covers up to turn 9: ten turns stay open, eight of them verbatim.
         let stored = HistorySummary { up_to_id: "9".into(), ..Default::default() };
         let s = shape(&all, Some(&stored));
         assert_eq!((s.verbatim.len(), s.pending.len(), s.pending[0].id.as_str()), (10, 2, "10"));
-        assert!(!should_refresh(&s.pending));
-        assert!(should_refresh(&turns(1, 4_000).iter().collect::<Vec<_>>()));
-        assert!(!should_refresh(&[]));
+        assert!(!should_refresh(&s.pending, false));
+        assert!(should_refresh(&turns(1, 4_000).iter().collect::<Vec<_>>(), false));
+        assert!(!should_refresh(&[], false));
+        // With a cheap cache, 4,000 characters wait; eleven pending turns wait; twelve, as the verbatim window fills, do not.
+        assert!(!should_refresh(&turns(1, 4_000).iter().collect::<Vec<_>>(), true) && !should_refresh(&turns(11, 10).iter().collect::<Vec<_>>(), true));
+        assert!(should_refresh(&turns(12, 10).iter().collect::<Vec<_>>(), true) && should_refresh(&turns(1, 40_000).iter().collect::<Vec<_>>(), true));
         // A /compact made over a reply that had stopped names that reply, which does not replay: everything before it is covered all the same.
         let mut stopped = turns(20, 10);
         stopped[19].incomplete = true;

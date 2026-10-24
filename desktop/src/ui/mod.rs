@@ -873,7 +873,7 @@ impl App {
             _ => &self.conv,
         };
         let shape = summary::shape(&conv.messages, conv.summary.as_ref());
-        if conv.id != conv_id || !summary::should_refresh(&shape.pending) {
+        if conv.id != conv_id || !summary::should_refresh(&shape.pending, crate::models::cache_is_cheap(&self.settings.model, &self.settings.custom_models)) {
             return;
         }
         let (tx, rx) = mpsc::channel();
