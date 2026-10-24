@@ -1,6 +1,7 @@
 //! Resolves which LLM endpoint a request hits, and streams one Chat
-//! Completions round from it. Three front doors, one wire shape: DeepSeek's own
-//! API, the OpenRouter gateway, and a local OpenAI-compatible host.
+//! Completions round from it. Four front doors: DeepSeek's own API, the
+//! OpenRouter gateway and a local OpenAI-compatible host speak Chat Completions;
+//! Anthropic's own API speaks Messages, which `anthropic` translates both ways.
 
 use crate::models::{self, ModelInfo, ProviderId, Usage};
 use crate::refusal;
@@ -19,6 +20,7 @@ pub enum ThinkingStyle {
     Deepseek,
     Openai,
     Qwen,
+    Anthropic,
 }
 
 #[derive(Clone, Debug)]
@@ -93,6 +95,13 @@ pub fn resolve_target(model_id: &str, s: &Settings) -> Result<Target, String> {
             let key = if s.local_api_key.trim().is_empty() { "local".to_string() } else { s.local_api_key.trim().to_string() };
             let api_model = if s.local_api_model.trim().is_empty() { model.api_model.clone() } else { s.local_api_model.trim().to_string() };
             (ThinkingStyle::Qwen, key, normalize_openai_base(&base), api_model)
+        }
+        ProviderId::Anthropic => {
+            let key = s.anthropic();
+            if key.is_empty() {
+                return Err(format!("An Anthropic API key is required for {}. Add one in Settings (platform.claude.com/settings/keys).", model.label));
+            }
+            (ThinkingStyle::Anthropic, key, crate::anthropic::BASE_URL.to_string(), model.api_model.clone())
         }
     };
     Ok(Target { provider: model.provider, model, style, api_key, base_url: base_url.trim_end_matches('/').to_string(), api_model })
@@ -469,6 +478,7 @@ pub fn apply_thinking(body: &mut Map<String, Value>, style: ThinkingStyle, enabl
                 body.insert("think".into(), json!(false));
             }
         }
+        ThinkingStyle::Anthropic => crate::anthropic::apply_thinking(body, enabled, level),
         ThinkingStyle::Openai => {
             if enabled {
                 body.insert("reasoning_effort".into(), json!(level));
@@ -498,10 +508,11 @@ pub fn http_error(status: u16, provider: &str, detail: &str) -> String {
         402 => format!("Your {provider} account has insufficient balance. Everything done so far is saved. Add credit and press Try again."),
         429 if provider == "OpenRouter" => "OpenRouter is rate limiting this model right now (429). This is their capacity, not your key. Wait a bit, or pick another model.".into(),
         429 => format!("Rate limited by {provider}. Please wait a moment and try again."),
-        502..=504 => {
+        // 529 is Anthropic's "overloaded".
+        502..=504 | 529 => {
             // The host's own words ride along, unless all they say is "retrying" or the status again.
             let said = detail.split_whitespace().collect::<Vec<_>>().join(" ");
-            let noisy = matches!(said.strip_suffix(['.', '!']).unwrap_or(&said).to_lowercase().as_str(), "" | "retrying" | "inference is temporarily unavailable" | "bad gateway" | "gateway timeout" | "gateway time-out");
+            let noisy = matches!(said.strip_suffix(['.', '!']).unwrap_or(&said).to_lowercase().as_str(), "" | "retrying" | "inference is temporarily unavailable" | "bad gateway" | "gateway timeout" | "gateway time-out" | "overloaded");
             format!("{provider} is temporarily unavailable ({status}). This is their servers, not your API key.{} Wait a minute and try again.", if noisy { String::new() } else { format!(" {said}") })
         }
         _ if detail.is_empty() => format!("{provider} API error ({status})"),
@@ -641,9 +652,11 @@ pub async fn stream(client: &reqwest::Client, target: &Target, body: &Value, cut
     let provider = target.provider.name();
     let fail = |message: String, retryable: bool, kind: Failure| RoundError { message, status: 0, detail: String::new(), retryable, retry_after: None, kind };
 
-    let payload = body.to_string();
+    let anthropic = target.provider == ProviderId::Anthropic;
+    let payload = if anthropic { crate::anthropic::request(body).to_string() } else { body.to_string() };
     let budget = attempt_timeout(target.provider, payload.len());
-    let mut req = client.post(format!("{}/chat/completions", target.base_url)).bearer_auth(&target.api_key).header("Content-Type", "application/json").body(payload);
+    let mut req = client.post(format!("{}/{}", target.base_url, if anthropic { "messages" } else { "chat/completions" })).header("Content-Type", "application/json").body(payload);
+    req = if anthropic { crate::anthropic::headers(&target.api_key).into_iter().fold(req, |req, (name, value)| req.header(name, value)) } else { req.bearer_auth(&target.api_key) };
     if target.provider == ProviderId::Openrouter {
         req = req.header("HTTP-Referer", "https://github.com/rottenvia/apiM").header("X-Title", "apiM");
     }
@@ -672,6 +685,7 @@ pub async fn stream(client: &reqwest::Client, target: &Target, body: &Value, cut
 
     let mut round = Round::default();
     let mut acc = ToolAcc::default();
+    let mut events = crate::anthropic::Events::default();
     let mut stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::new();
     let mut alive = false;
@@ -708,6 +722,17 @@ pub async fn stream(client: &reqwest::Client, target: &Target, body: &Value, cut
             }
             // Malformed frames are ignored rather than aborting the reply.
             let Ok(frame) = serde_json::from_str::<Value>(payload) else { continue };
+            // Claude streams events of its own: each is read as the chunk it amounts to, and its last one ends the reply.
+            let frame = if !anthropic {
+                frame
+            } else if frame["type"] == "message_stop" {
+                break 'stream;
+            } else {
+                match events.chunk(&frame) {
+                    Some(chunk) => chunk,
+                    None => continue,
+                }
+            };
 
             if let Some(err) = frame.get("error").filter(|e| !e.is_null()) {
                 // Once output has arrived this is a cut reply; before that it is the request failing.
@@ -986,10 +1011,14 @@ mod hours_tests {
 /// What OpenRouter says about a model id (src/app/api/openrouter/verify/route.ts).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Verified {
+    /// Who serves it: OpenRouter, or Anthropic for a Claude model on the user's own key.
+    pub provider: ProviderId,
     /// The id as typed: what goes on the wire, `:free` suffix and all.
     pub id: String,
     pub name: String,
     pub context_length: Option<u64>,
+    /// The most a reply may write, where the provider says.
+    pub max_output: Option<u32>,
     /// USD per 1M tokens.
     pub input_price: Option<f64>,
     pub output_price: Option<f64>,
@@ -1009,10 +1038,11 @@ impl Verified {
         let label: String = if label.is_empty() { if self.name.is_empty() { api_model.to_string() } else { self.name.clone() } } else { label.to_string() };
         Some(models::CustomModel {
             api_model: api_model.to_string(),
+            provider: self.provider,
             label: label.chars().take(60).collect(),
             // Natives get the picture itself; anything else gets a description of it.
             vision: if self.supports_vision { models::Vision::Native } else { models::Vision::Helper },
-            max_output_tokens: old.map_or(65_536, |o| o.max_output_tokens),
+            max_output_tokens: old.map_or(self.max_output.unwrap_or(65_536), |o| o.max_output_tokens),
             context_length: self.context_length,
             input_price: self.input_price,
             output_price: self.output_price,
@@ -1039,14 +1069,24 @@ fn shape_verified(entry: &Value, wire: &str) -> Verified {
     // Prices arrive per token, as strings.
     let per_million = |v: &Value| v.as_str().and_then(|s| s.trim().parse::<f64>().ok()).filter(|n| n.is_finite() && *n >= 0.0).map(|n| n * 1_000_000.0);
     Verified {
+        provider: ProviderId::Openrouter,
         id: wire.to_string(),
         name: entry["name"].as_str().filter(|n| !n.is_empty()).unwrap_or(wire).to_string(),
         context_length: entry["context_length"].as_f64().filter(|n| *n > 0.0).map(|n| n as u64),
+        max_output: None,
         input_price: per_million(&entry["pricing"]["prompt"]),
         output_price: per_million(&entry["pricing"]["completion"]),
         supports_tools: params.is_empty() || params.iter().any(|p| p == "tools"),
         supports_vision: inputs.iter().any(|m| m == "image" || m == "video"),
         supports_thinking: params.iter().any(|p| p == "reasoning" || p == "include_reasoning"),
+    }
+}
+
+/// Checks a model the user named: a Claude id (`claude-sonnet-5-5`) with Anthropic on their own key, anything else with OpenRouter.
+pub async fn verify_model(text: &str, openrouter_key: &str, anthropic_key: &str) -> Result<Verified, String> {
+    match crate::anthropic::model_id(text) {
+        Some(id) => crate::anthropic::verify(&id, anthropic_key).await,
+        None => verify_openrouter(&slug_from_link(text), openrouter_key).await,
     }
 }
 

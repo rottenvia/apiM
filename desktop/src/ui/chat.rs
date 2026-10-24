@@ -672,11 +672,12 @@ fn welcome(app: &mut App, ui: &mut egui::Ui, drop: f32) {
         crate::models::ProviderId::Openrouter => "OpenRouter",
         crate::models::ProviderId::Local => "local server",
         crate::models::ProviderId::Deepseek => "DeepSeek",
+        crate::models::ProviderId::Anthropic => "Anthropic",
     };
     let blurb = if has_keys {
         "Type a message below to start a conversation.".to_string()
     } else {
-        format!("Connect a {provider} API key to start chatting. DeepSeek and OpenRouter both work. Your keys stay on this PC — nothing leaves this app except your requests.")
+        format!("Connect a {provider} API key to start chatting. DeepSeek, OpenRouter and Anthropic all work. Your keys stay on this PC — nothing leaves this app except your requests.")
     };
     // Laid out once to learn the height, so the block sits centred (lifted 32, like the web's pb-16).
     let id = ui.id().with("welcome-height");

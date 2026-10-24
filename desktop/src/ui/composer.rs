@@ -487,7 +487,7 @@ fn model_menu(app: &mut App, ctx: &egui::Context) {
     }
     if act && app.settings.drop_from_menu(&id) {
         app.settings.save();
-        app.toast(if custom { format!("Removed {label}. Its openrouter.ai link adds it back.") } else { format!("Hid {label}. Settings → Models shows it again.") });
+        app.toast(if custom { format!("Removed {label}. Its id or openrouter.ai link adds it back.") } else { format!("Hid {label}. Settings → Models shows it again.") });
     }
 }
 
@@ -525,14 +525,14 @@ fn popovers(app: &mut App, ctx: &egui::Context) {
                         for def in &app.settings.custom_models {
                             let info = def.to_info();
                             let selected = app.settings.model == info.id;
-                            let specs = format!("OpenRouter · {}{}", info.specs, if info.vision == models::Vision::Native { " · vision" } else { "" });
+                            let specs = format!("{} · {}{}", info.provider.name(), info.specs, if info.vision == models::Vision::Native { " · vision" } else { "" });
                             row(option(ui, &def.label, selected, None, &[(&def.api_model, 11.0, 16.0, p.text2, true), (&specs, 11.0, 16.0, p.muted, false)]), &info.id);
                         }
                     }
                     if menu.is_some() {
                         app.model_menu = menu;
                     }
-                    if option(ui, "＋ Add any OpenRouter model…", false, Some(p.accent_light), &[("Paste its openrouter.ai link in the chat and ask to add it, or an id in Settings → Model. Right-click a model to take it out of this menu.", 12.0, 20.0, p.text2, false)]).clicked() {
+                    if option(ui, "＋ Add any OpenRouter or Claude model…", false, Some(p.accent_light), &[("Ask in the chat (an openrouter.ai link, or a Claude model by name), or add it in Settings → Model. Right-click a model to take it out of this menu.", 12.0, 20.0, p.text2, false)]).clicked() {
                         app.popover = Popover::None;
                         app.dialog = Dialog::Settings;
                         app.settings_ui.tab = 1;

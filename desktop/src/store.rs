@@ -73,6 +73,8 @@ pub struct Settings {
     // version's localStorage. Move to the OS keyring if this machine is shared.
     pub deepseek_key: String,
     pub openrouter_key: String,
+    /// For Claude models on Anthropic's own API.
+    pub anthropic_key: String,
     pub tavily_key: String,
     pub exa_key: String,
     /// GitHub Personal Access Token typed into the GitHub dialog. `GITHUB_TOKEN` / `GITHUB_PAT` stand in when empty.
@@ -123,6 +125,7 @@ impl Default for Settings {
         Settings {
             deepseek_key: String::new(),
             openrouter_key: String::new(),
+            anthropic_key: String::new(),
             tavily_key: String::new(),
             exa_key: String::new(),
             github_token: String::new(),
@@ -215,6 +218,9 @@ impl Settings {
     }
     pub fn deepseek(&self) -> String {
         self.key(&self.deepseek_key, "DEEPSEEK_API_KEY")
+    }
+    pub fn anthropic(&self) -> String {
+        self.key(&self.anthropic_key, "ANTHROPIC_API_KEY")
     }
     pub fn tavily(&self) -> String {
         if self.tavily_enabled { self.key(&self.tavily_key, "TAVILY_API_KEY") } else { String::new() }
@@ -1282,7 +1288,7 @@ mod tests {
     #[test]
     fn a_model_leaves_the_menu_and_the_one_in_use_moves() {
         use crate::models::{CustomModel, MODELS, Vision};
-        let mine = CustomModel { api_model: "a/b".into(), label: "AB".into(), vision: Vision::None, max_output_tokens: 5, context_length: None, input_price: None, output_price: None, open_limits: false };
+        let mine = CustomModel { api_model: "a/b".into(), provider: crate::models::ProviderId::Openrouter, label: "AB".into(), vision: Vision::None, max_output_tokens: 5, context_length: None, input_price: None, output_price: None, open_limits: false };
         let mut s = super::Settings { model: MODELS[0].id.clone(), custom_models: vec![mine], ..Default::default() };
         // The one in use, hidden: the next of the app's own takes its place.
         assert!(s.drop_from_menu(&MODELS[0].id));

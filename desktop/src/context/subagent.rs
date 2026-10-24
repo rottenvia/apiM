@@ -83,6 +83,8 @@ pub struct Target {
     pub headers: Vec<(String, String)>,
     /// Thinking switches, endpoint pins: merged into every request body.
     pub extra_body: Map<String, Value>,
+    /// Claude's own API: each request and reply goes through `anthropic`'s translation.
+    pub anthropic: bool,
 }
 
 /// Runs one read-only tool for the helper: (name, parsed arguments) to the text the helper reads.
@@ -194,7 +196,9 @@ fn parse_tool_arguments(raw: &str) -> Result<Map<String, Value>, String> {
 /// One request with retries: Ok is the reply message and its usage. Err is "stopped", an `HTTP 4xx...` (never retried),
 /// or the last transient failure after three attempts.
 async fn complete(client: &reqwest::Client, opts: &Options, body: &Value) -> Result<(Value, Option<Value>), String> {
-    let url = format!("{}/chat/completions", opts.target.base_url);
+    let anthropic = opts.target.anthropic;
+    let url = format!("{}/{}", opts.target.base_url, if anthropic { "messages" } else { "chat/completions" });
+    let sent = if anthropic { crate::anthropic::request(body) } else { body.clone() };
     let mut last_error = String::new();
     for attempt in 0..3 {
         if opts.signal.is_stopped() {
@@ -206,7 +210,7 @@ async fn complete(client: &reqwest::Client, opts: &Options, body: &Value) -> Res
         if opts.signal.is_stopped() {
             return Err("stopped".to_string());
         }
-        match post_json(client, &url, &opts.target.headers, body, Some(REQUEST_TIMEOUT), Some(&opts.signal)).await {
+        match post_json(client, &url, &opts.target.headers, &sent, Some(REQUEST_TIMEOUT), Some(&opts.signal)).await {
             Err(e) => {
                 if opts.signal.is_stopped() {
                     return Err("stopped".to_string());
@@ -224,7 +228,7 @@ async fn complete(client: &reqwest::Client, opts: &Options, body: &Value) -> Res
                     }
                     last_error = msg;
                 } else {
-                    match serde_json::from_str::<Value>(&text) {
+                    match serde_json::from_str::<Value>(&text).map(|json| if anthropic { crate::anthropic::reply(&json) } else { json }) {
                         Err(e) => last_error = e.to_string(),
                         Ok(json) if json["choices"][0]["message"].is_null() => last_error = "empty response".to_string(),
                         Ok(json) => return Ok((json["choices"][0]["message"].clone(), Some(json["usage"].clone()).filter(|u| !u.is_null()))),
@@ -393,7 +397,7 @@ mod tests {
         Arc::new(move |_, _| ready(text.to_string()))
     }
     fn target(base: &str, extra: Map<String, Value>) -> Target {
-        Target { base_url: base.to_string(), api_model: "helper-model".into(), headers: vec![("Authorization".into(), "Bearer k".into())], extra_body: extra }
+        Target { base_url: base.to_string(), api_model: "helper-model".into(), headers: vec![("Authorization".into(), "Bearer k".into())], extra_body: extra, anthropic: false }
     }
     fn tool_defs(names: &[&str]) -> Vec<Value> {
         names.iter().map(|n| json!({ "type": "function", "function": { "name": n } })).collect()
@@ -492,6 +496,22 @@ mod tests {
         let (content, summary) = format_sub_agent_result(&r);
         assert_eq!(summary, "Helper finished · 2 rounds, 4 tool calls, 2 files read");
         assert!(content.starts_with("Helper report (2 rounds, 4 tool calls, 2 files read).\n\nFound it"));
+    }
+
+    #[tokio::test]
+    async fn a_helper_runs_on_claudes_own_api() {
+        let first = json!({ "stop_reason": "tool_use", "usage": { "input_tokens": 9, "output_tokens": 3 }, "content": [{ "type": "tool_use", "id": "toolu_1", "name": "read_file", "input": { "path": "src/a.rs" } }] });
+        let last = json!({ "stop_reason": "end_turn", "usage": { "input_tokens": 20, "output_tokens": 4 }, "content": [{ "type": "text", "text": "Found it in src/a.rs:3" }] });
+        let server = stub(vec![(200, first.to_string()), (200, last.to_string())]);
+        let mut to = target(&server.base, Map::new());
+        (to.anthropic, to.headers) = (true, crate::anthropic::headers("sk-ant-test"));
+        let o = Options::new("find a".into(), to, tool_defs(&["read_file"]), HashSet::from(["read_file".to_string()]), Stop::new(), runner("fn a() {}"));
+        let r = run_sub_agent(&client(), o).await;
+        assert_eq!((r.ok, r.report.as_str(), r.tool_calls), (true, "Found it in src/a.rs:3", 1));
+        let seen = server.requests();
+        assert_eq!((seen[1]["url"].as_str(), seen[1]["headers"]["x-api-key"].as_str()), (Some("/v1/messages"), Some("sk-ant-test")));
+        let turns = seen[1]["body"]["messages"].as_array().unwrap();
+        assert_eq!((turns[1]["content"][0]["id"].as_str(), turns[2]["content"][0]["tool_use_id"].as_str(), turns[2]["content"][0]["content"].as_str()), (Some("toolu_1"), Some("toolu_1"), Some("fn a() {}")));
     }
 
     #[tokio::test]
