@@ -58,7 +58,10 @@ fn same_output(longer: &str, whole: &str) -> bool {
 /// One tool, the same output: older copies become a pointer at the newest one. The arguments are not compared:
 /// a file asked for whole twice, with another last line the second time, came back as the same 400,000
 /// characters, counted as two calls, and both copies rode on every round.
-fn dedupe(messages: &mut [Value]) -> usize {
+/// Outside a fold, only where that is cheap: the pointer sends everything after the older copy again at full price, so
+/// it goes in only when the two copies are at least half of that. A few hundred characters seen twice, rounds apart,
+/// cost the whole transcript after the first.
+fn dedupe(messages: &mut [Value], all: bool) -> usize {
     let mut call_by_id: HashMap<String, (String, String)> = HashMap::new();
     for m in messages.iter() {
         for c in calls(m) {
@@ -67,18 +70,24 @@ fn dedupe(messages: &mut [Value]) -> usize {
     }
     // Newest first, so the first copy seen is the one that stays.
     let mut seen: HashMap<String, Vec<String>> = HashMap::new();
-    let mut saved = 0;
+    let (mut saved, mut after) = (0, 0);
     for m in messages.iter_mut().rev() {
+        let behind = after;
+        after += size_of(std::slice::from_ref(m));
         if m["role"] != "tool" || len(&m["content"]) <= DEDUP_MIN_CHARS {
             continue;
         }
         let Some((name, args)) = call_by_id.get(m["tool_call_id"].as_str().unwrap_or("")) else { continue };
         let content = m["content"].as_str().unwrap_or("").to_string();
+        // A line already standing in for output: one pointer for another saves nothing.
+        if ["[earlier", "[Folded", "[Unchanged"].iter().any(|p| content.starts_with(p)) {
+            continue;
+        }
         let before = content.len();
         let kept = seen.entry(name.clone()).or_default();
         if !kept.iter().any(|k| same_output(k, &content) || same_output(&content, k)) {
             kept.push(content);
-        } else {
+        } else if all || 2 * before >= behind {
             let pointer = format!("[Folded: identical {} result — byte-identical output. The latest copy is below; use it instead of re-fetching.]", describe(name, args, None));
             saved += before.saturating_sub(pointer.len());
             m["content"] = json!(pointer);
@@ -120,13 +129,15 @@ pub fn fold(messages: &mut Vec<Value>, window: u64) -> Folded {
 }
 
 fn fold_at(messages: &mut Vec<Value>, threshold: usize) -> Folded {
-    let mut saved = dedupe(messages);
-    let before = size_of(messages);
+    let mut saved = dedupe(messages, false);
     let rounds: Vec<usize> = (0..messages.len()).filter(|&i| messages[i]["role"] == "assistant" && !calls(&messages[i]).is_empty()).collect();
     let boundary = rounds.len().saturating_sub(KEEP_RECENT_ROUNDS) / STEP * STEP;
-    if before < threshold || boundary == 0 {
+    if size_of(messages) < threshold || boundary == 0 {
         return Folded { rounds: 0, tokens_saved: (saved as f64 / CHARS_PER_TOKEN) as u64 };
     }
+    // The fold sends the transcript anew anyway: every older copy goes.
+    saved += dedupe(messages, true);
+    let before = size_of(messages);
     let cutoff: HashSet<usize> = rounds[..boundary].iter().copied().collect();
     let results: HashMap<String, String> = messages.iter().filter(|m| m["role"] == "tool").map(|m| (m["tool_call_id"].as_str().unwrap_or("").to_string(), m["content"].as_str().unwrap_or("").to_string())).collect();
 
@@ -268,15 +279,25 @@ mod tests {
 
 [Harness: you already read this.]"))] {
             let mut messages = vec![call("a"), result("a", older), call("b"), result("b", newer.clone())];
-            assert!(dedupe(&mut messages) > 0);
+            assert!(dedupe(&mut messages, false) > 0);
             assert!(messages[1]["content"].as_str().unwrap().starts_with("[Folded:"), "{}", messages[1]);
             assert_eq!(messages[3]["content"], json!(newer));
         }
         // Another file's text is left alone, and so is a longer output that only starts the same.
         for older in ["y".repeat(DEDUP_MIN_CHARS + 50), format!("{body} and more")] {
             let mut other = vec![call("a"), result("a", older), call("b"), result("b", body.clone())];
-            assert_eq!(dedupe(&mut other), 0);
+            assert_eq!(dedupe(&mut other, true), 0);
         }
+    }
+
+    #[test]
+    fn a_small_repeat_far_from_its_first_copy_waits_for_the_fold() {
+        let call = |id: &str| json!({ "role": "assistant", "content": "", "tool_calls": [{ "id": id, "type": "function", "function": { "name": "list_files", "arguments": "{}" } }] });
+        let reply = |id: &str, text: &str| json!({ "role": "tool", "tool_call_id": id, "content": text });
+        let (small, big) = ("x".repeat(400), "y".repeat(5_000));
+        let mut messages = vec![call("1"), reply("1", &small), call("2"), reply("2", &big), call("3"), reply("3", &small)];
+        assert_eq!(dedupe(&mut messages, false), 0, "400 characters saved, 5,000 sent again");
+        assert!(dedupe(&mut messages, true) > 0 && messages[1]["content"].as_str().unwrap().starts_with("[Folded:"));
     }
 
     #[test]

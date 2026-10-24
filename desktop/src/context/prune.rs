@@ -25,6 +25,10 @@ pub const FILE_READ_BUDGET_CHARS: usize = 150_000;
 /// the middle of the request, and the provider's cache of everything after it is lost: one a round meant the newest
 /// eight results were paid in full on every round (measured: 32% of the input cached over 24 reads, 9% of each round).
 pub const COLLAPSE_BATCH: usize = 8;
+/// The batch where a cached token costs a quarter of a fresh one or less (DeepSeek 2%, Claude 10%): each collapse sends
+/// everything after it again at full price, and the smaller transcript it leaves is read at the cached price. Over a
+/// simulated 150-round run, 32 at a time cost 18% less than 8 on Claude, 37% less on DeepSeek, for a transcript 10% longer.
+pub const CACHED_COLLAPSE_BATCH: usize = 32;
 
 const FILE_READ_TOOLS: [&str; 2] = ["read_file", "read_files"];
 const FILE_WRITE_TOOLS: [&str; 9] = ["write_file", "write_files", "edit_file", "edit_files", "apply_patch", "replace_in_files", "move_file", "delete_file", "undo_file"];
@@ -279,8 +283,7 @@ pub fn prune_transcript<'a>(messages: &'a [Value], o: &Options) -> (Cow<'a, [Val
     // round, and each of those rounds was paid in full (seen: five rounds in a row with only the system prompt cached).
     let cut = if batch > 1 { old.last().map_or(0, |last| last + 1) } else { messages.len() };
     let retained = retained_file_content(&messages[..cut], o.file_read_budget);
-    // After that point a write is judged as things stand now: a file written again a moment later loses its older
-    // copy at once, and little follows it to be sent anew.
+    // After that point a write is judged as things stand now, and loses its text only where that is cheap (`sent_again`).
     let newer_writes = if cut < messages.len() { retained_file_content(messages, o.file_read_budget).writes } else { HashSet::new() };
     for i in &retained.reads {
         collapsible.remove(i);
@@ -314,6 +317,10 @@ pub fn prune_transcript<'a>(messages: &'a [Value], o: &Options) -> (Cow<'a, [Val
                         continue;
                     }
                     let stub = stub_arguments(args);
+                    let name = call_str(call, "name");
+                    if i >= cut && FULL_WRITE_TOOLS.contains(&name) && sent_again(messages, i, &written_paths(name, args)) >= js_len(args) - js_len(&stub) {
+                        continue;
+                    }
                     touched = true;
                     chars_saved += js_len(args) - js_len(&stub);
                     r["tool_calls"][k]["function"]["arguments"] = Value::String(stub);
@@ -324,6 +331,19 @@ pub fn prune_transcript<'a>(messages: &'a [Value], o: &Options) -> (Cow<'a, [Val
         })
         .collect();
     (Cow::Owned(out), PruneStats { collapsed, chars_saved, tokens_saved: js_round(chars_saved as f64 / 3.6) as usize })
+}
+
+/// What stubbing the write in message `i` sends again at full price: the messages after it up to the call that made it
+/// stale. A file written again at once loses its old copy for little; one read back after a run of other work keeps it
+/// until its batch is old. Stubbed whenever it went stale, a quarter of the rounds of a 30-round run lost 7,000
+/// characters of cache each.
+fn sent_again(messages: &[Value], i: usize, paths: &[String]) -> usize {
+    let touches = |c: &Value| {
+        let (name, args) = (call_str(c, "name"), call_str(c, "arguments"));
+        let touched = if FILE_READ_TOOLS.contains(&name) { read_paths(args) } else { written_paths(name, args) };
+        touched.iter().any(|t| paths.iter().any(|p| covers(t, p)))
+    };
+    messages[i + 1..].iter().take_while(|m| !calls(m).iter().any(touches)).map(|m| m.to_string().len()).sum()
 }
 
 /// Every tool call has a reply and vice versa: the property a bad prune would break.
@@ -393,6 +413,19 @@ mod tests {
         // And the budget still holds for what is old: five reads of 29,000 fit in 150,000.
         let kept = at(40).iter().filter(|m| m["role"] == "tool" && m["content"].as_str().is_some_and(|c| c.len() > 20_000)).count();
         assert_eq!(kept, 5 + 8, "five old reads within the budget, and the newest eight results");
+    }
+
+    #[test]
+    fn a_write_read_back_keeps_its_text_until_its_batch_is_old() {
+        let o = Options { threshold_chars: 0, batch: COLLAPSE_BATCH, ..Options::default() };
+        let round = |id: &str, name: &str, args: &str, result: &str| [json!({ "role": "assistant", "content": "", "tool_calls": [{ "id": id, "type": "function", "function": { "name": name, "arguments": args } }] }), json!({ "role": "tool", "tool_call_id": id, "content": result })];
+        let text = json!({ "path": "a.rs", "content": "x".repeat(3_000) }).to_string();
+        let mut m: Vec<Value> = [round("w", "write_file", &text, "Wrote a.rs"), round("t", "run_command", r#"{"command":"cargo test"}"#, &"ok\n".repeat(2_000)), round("r", "read_file", r#"{"path":"a.rs"}"#, "1| x")].concat();
+        assert_eq!(prune_transcript(&m, &o).0[0], m[0], "read back after a test run: the copy stays, or the run goes out anew");
+        for k in 0..16 {
+            m.extend(round(&format!("s{k}"), "search_files", r#"{"query":"x"}"#, "nothing"));
+        }
+        assert_ne!(prune_transcript(&m, &o).0[0], m[0], "its batch is old: the copy read back stands for it");
     }
 
     #[test]
