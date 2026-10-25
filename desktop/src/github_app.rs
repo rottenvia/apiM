@@ -103,7 +103,14 @@ async fn installation_token(as_app: &Api, app_id: u64, installation: u64) -> Res
         return Ok(token.clone());
     }
     let made = as_app.post(&format!("/app/installations/{installation}/access_tokens"), &json!({})).await?;
-    let token = made["token"].as_str().filter(|t| crate::github::looks_like_token(t)).ok_or("GitHub gave no installation token.")?.to_string();
+    let Some(token) = made["token"].as_str().filter(|t| crate::github::looks_like_token(t)).map(str::to_string) else {
+        // What came instead, by its shape only: never the token itself.
+        let held = match made["token"].as_str() {
+            Some(t) => format!("a token of {} characters in a form apiM does not take", t.len()),
+            None => format!("no token, only {}", made.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>().join(", ")).unwrap_or_default()),
+        };
+        return Err(format!("GitHub's answer for the installation held {held}."));
+    };
     let mut all = TOKENS.lock().unwrap();
     all.retain(|t| !(t.0 == app_id && t.1 == installation));
     all.push((app_id, installation, token.clone(), Instant::now() + Duration::from_secs(55 * 60)));
@@ -284,7 +291,7 @@ mod tests {
     async fn a_repository_gets_its_installations_token_and_keeps_it_for_the_hour() {
         let (base, seen) = stub(|line, _| match line {
             "GET /repos/octo/demo/installation" => (200, json!({ "id": 7 })),
-            "POST /app/installations/7/access_tokens" => (201, json!({ "token": "ghs_installationTOKEN0123456789abcdefgh", "expires_at": "2030-01-01T00:00:00Z" })),
+            "POST /app/installations/7/access_tokens" => (201, json!({ "token": "ghs_9001_eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiJnaXRodWIifQ.sig-nature_0123", "expires_at": "2030-01-01T00:00:00Z" })),
             "GET /app/installations" => (200, json!([{ "id": 7 }])),
             "GET /installation/repositories?per_page=100" => (200, json!({ "total_count": 1, "repositories": [{ "full_name": "octo/demo", "private": true, "default_branch": "trunk", "clone_url": "https://github.com/octo/demo.git" }] })),
             _ => (404, json!({ "message": "Not Found" })),
@@ -292,7 +299,7 @@ mod tests {
         .await;
         let (app, via) = (app(9_001), stub_api(&base));
         for _ in 0..2 {
-            assert_eq!(api(&app, &via, Some("octo/demo")).await.unwrap().token, "ghs_installationTOKEN0123456789abcdefgh");
+            assert_eq!(api(&app, &via, Some("octo/demo")).await.unwrap().token, "ghs_9001_eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiJnaXRodWIifQ.sig-nature_0123");
         }
         assert_eq!(repos(&app, &via).await.unwrap(), [Repo { full_name: "octo/demo".into(), private: true, default_branch: "trunk".into() }]);
         let not_there = api(&app, &via, Some("octo/other")).await.err().unwrap();
@@ -301,7 +308,17 @@ mod tests {
         // One token for the installation, asked for with the app's own sign-in; the repositories with the token.
         assert_eq!(seen.iter().filter(|(line, _)| line.starts_with("POST")).count(), 1);
         assert!(seen.iter().filter(|(line, _)| line.contains("installation") && !line.contains("repositories")).all(|(_, auth)| auth.starts_with("authorization: Bearer ey") || auth.starts_with("Authorization: Bearer ey")), "{seen:?}");
-        assert!(seen.iter().any(|(line, auth)| line.contains("/installation/repositories") && auth.ends_with("ghs_installationTOKEN0123456789abcdefgh")));
+        assert!(seen.iter().any(|(line, auth)| line.contains("/installation/repositories") && auth.ends_with("ghs_9001_eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiJnaXRodWIifQ.sig-nature_0123")));
+    }
+
+    /// Against GitHub, with the app set up on this computer, read-only; prints names, never the key or a token:
+    /// `cargo test --release real_app -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore]
+    async fn real_app_lists_its_repositories() {
+        let app = load().expect("no app is set up on this computer");
+        let repos = repos(&app, &Api::new("")).await.unwrap();
+        println!("{} is on {} repositories: {:?}", app.bot(), repos.len(), repos.iter().map(|r| r.full_name.as_str()).collect::<Vec<_>>());
     }
 
     #[tokio::test]
