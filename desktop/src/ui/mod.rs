@@ -42,7 +42,7 @@ use crate::tools::{ChatState, exec::Procs};
 use crate::{export, provider, summary};
 use composer::Popover;
 use eframe::egui::{self, Rect, vec2};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
@@ -1044,6 +1044,7 @@ impl App {
             skills: self.conv.names("skills"),
             skills_all: self.settings.enabled_plugins.clone(),
             groups: self.conv.names("toolGroups"),
+            tools_run: self.conv.messages.iter().flat_map(|m| &m.parts).filter_map(|part| match part { Part::Tool(t) if t.ok == Some(true) => Some(t.name.clone()), _ => None }).collect::<BTreeSet<_>>().into_iter().collect(),
             ..Default::default()
         }
     }

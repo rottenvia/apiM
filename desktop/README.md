@@ -281,6 +281,15 @@ What held, and is now measured: the five rules of the first message, a code said
 
 Not changed, and yours to decide: `git commit` typed as a command on the base branch gets past the rule the `git_commit` tool keeps (GLM committed to `main` three times that way).
 
+Read out of a model's own report (2026-10-25). Asked after a long job what held it back, a reply named seven things. Held against the code, three were real, three half and one wrong:
+
+- **It was told every command waits for the user, and that there is no shell.** `run_command`'s wording is the web's, where both are true. Here, with commands running automatically, nothing asks but an install into the machine, and PowerShell takes a whole script. The model priced every look as an approval it never got, looked less, and ran one program per round. The wording now leaves who is asked to the system prompt, which always said it, and on Windows calls PowerShell the shell: pipes, `;` and loops, the steps that go together in one call. "Ask me first" now says what it does not ask about. The same task before and after (DeepSeek V4.1 Flash, one run each): 6 requests and $0.0070, then 4 and $0.0045, with the tests, a line count and a process query in one round.
+- **Work an earlier reply did was called invented.** The closing text is held against the tools that ran, and only this reply's counted: a summary of what the last reply wrote got "no file tool ran", and the model wrote corrections instead of finishing. The tools every earlier reply in the chat ran count now (`ChatState::tools_run`).
+- **Every finding rode every question**: the 25 newest, up to 17,000 characters, most of them about other work. Past six, a question gets the ones it names by a word of their claim or files (a word a third of them share does not count), the newest besides when it names few, and a line saying how many more are in `.analysis/findings.json` (`format_findings_for_question`).
+- **A wait on a background process stopped at 2 minutes**, so a 10-minute build took five waits. A wait and a command's own `timeout_ms` now go to 10 minutes.
+
+Not as it said: a 420 MB folder is not too big for a restore point (the limits are 512 MB a file and 100,000 files, and a file is stored once however many points name it); the helper agent only reads, by design; and a command's 60 seconds was a default that `timeout_ms` raises.
+
 ## Checking the tools
 
 `apim --tools calls.json --auto --dir FOLDER` runs a list of tool calls (`[{"name": "edit_file", "args": {...}}, ...]`) as the agent would make them and prints what each hands back: no model in between, so a tool is judged on what it does. `APIM_TOOL_CHARS` sets how much of each result is shown. All 59 were run this way on 2026-10-09; what that changed:
@@ -358,7 +367,7 @@ Set `APIM_DATA_DIR` to keep the data somewhere else.
 
 ## Staying in step with the web app
 
-Tool descriptions, prompts, plugins and the model list come from the web app's source, so both versions tell the models the same thing. Kept apart, because the web has no such thing: the theme wall (`assets/themes.json`), the skill catalog (`assets/skills.json`), and which tools are sent when (the web sends them all). After changing the others in the web app, run this from the repo root:
+Tool descriptions, prompts, plugins and the model list come from the web app's source, so both versions tell the models the same thing. Kept apart, because the web has no such thing: the theme wall (`assets/themes.json`), the skill catalog (`assets/skills.json`), and which tools are sent when (the web sends them all). The commands' wording in `assets/tools.json` is this build's own too (who is asked, PowerShell, the 10-minute limits): the sync writes the web's back over it, and `the_desktop_wording_of_commands_survives_a_sync` then fails until it is put back. After changing the others in the web app, run this from the repo root:
 
 ```bash
 npx tsx desktop/sync-from-web.mts

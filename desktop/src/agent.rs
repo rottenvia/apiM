@@ -369,7 +369,7 @@ fn resume_transcript(mut resume: Resume, mut messages: Vec<Value>, start: &mut S
     }
     start.usage = resume.usage;
     start.answer = resume.prior["content"].as_str().unwrap_or("").to_string();
-    start.tools_used = resume.prior["toolEvents"].as_array().into_iter().flatten().filter_map(|step| step["name"].as_str().map(str::to_string)).collect();
+    start.tools_used.extend(resume.prior["toolEvents"].as_array().into_iter().flatten().filter_map(|step| step["name"].as_str().map(str::to_string)));
     messages
 }
 
@@ -664,7 +664,7 @@ async fn run_inner(mut req: Request, emit: &Emitter, procs: Arc<Procs>) -> Resul
     if findings::shared_findings_enabled() {
         context.push_str(&findings::format_machine_findings_for_prompt(&findings::read_store(&findings::machine_store_path(&crate::store::data_dir()))));
     }
-    let findings_block = findings::format_findings_for_prompt(&findings::read_store(&findings_path));
+    let findings_block = findings::format_findings_for_question(&findings::read_store(&findings_path), &format!("{} {}", req.text, req.history_last_user.as_deref().unwrap_or("")));
     context.push_str(&findings_block);
     // Binaries already inspected in this workspace, so the model does not analyse them again.
     context.push_str(&crate::binary::ledger::format_binary_ledger_for_prompt(&crate::binary::ledger::read_binary_ledger(&req.workspace)));
@@ -686,7 +686,7 @@ async fn run_inner(mut req: Request, emit: &Emitter, procs: Arc<Procs>) -> Resul
     // The enabled plugins' reminders ride at the end of the newest message, where a model that has drifted reads them last.
     remind(&mut messages, &plugins::reminders(&every, &plugins_on));
 
-    let mut start = Start { user_text: req.text.clone(), history_last_user: req.history_last_user.clone(), ..Default::default() };
+    let mut start = Start { user_text: req.text.clone(), history_last_user: req.history_last_user.clone(), tools_used: req.chat.tools_run.clone(), ..Default::default() };
     if let Some(resume) = resume {
         messages = resume_transcript(resume, messages, &mut start, &findings_block);
     }
@@ -2303,6 +2303,18 @@ mod tests {
         let (call, result) = (&turns[turns.len() - 2]["content"][0], &turns[turns.len() - 1]["content"][0]);
         assert_eq!((call["type"].as_str(), call["id"].as_str(), result["type"].as_str(), result["tool_use_id"].as_str()), (Some("tool_use"), Some("toolu_1"), Some("tool_result"), Some("toolu_1")));
         assert_eq!((ran.usage.prompt, ran.usage.completion), (100, 18));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn work_an_earlier_reply_did_is_not_called_invented() {
+        let said = "I wrote app.py in the last reply and it printed 42.";
+        assert!(plan::check_answer_claims(said, &[]).is_some());
+        let ran = run_on(vec![sse(&[says(said, Some("stop"))])], "none", None, |dir| {
+            let mut messages = vec![json!({ "role": "system", "content": "rules" }), user("what did you do?")];
+            let tree = Tree::open(dir, &mut messages);
+            (messages, Start { tree, user_text: "what did you do?".into(), tools_used: vec!["write_file".into(), "run_command".into()], ..Default::default() })
+        }, deepseek_target).await;
+        assert_eq!((ran.text.as_str(), ran.sent.len()), (said, 1));
     }
 
     /// A system prompt too long for any window. Nothing old is there to drop, so only the fit can shorten it.
