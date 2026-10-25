@@ -48,8 +48,9 @@ const CHILD_ENV: &[&str] = &[
     "PATH", "PATHEXT", "SYSTEMROOT", "SystemRoot", "windir", "WINDIR", "COMSPEC", "SYSTEMDRIVE", "PROCESSOR_ARCHITECTURE", "NUMBER_OF_PROCESSORS", "TEMP", "TMP", "USERPROFILE", "USERNAME", "HOME", "APPDATA", "LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)", "ProgramData", "CARGO_HOME", "RUSTUP_HOME", "LANG", "LC_ALL",
 ];
 
-/// A command with no timeout asked for runs for this long, or the web's default for everything else.
-const RUN_LIMIT: Duration = Duration::from_secs(60);
+/// A command with no timeout asked for runs for this long (the web used 60s; raised here because the agent runs real
+/// local work — a quick test or script often needs more than a minute). A caller can still ask up to MAX_ASKED.
+const RUN_LIMIT: Duration = Duration::from_secs(120);
 /// Installs and other slow subcommands of the package managers.
 const INSTALL_LIMIT: Duration = Duration::from_secs(300);
 /// The longest a model may ask for with timeout_ms, here and for a wait on a background process. At 2 minutes a
@@ -255,6 +256,59 @@ fn shell(ctx: &Ctx, command: &str, argv: Vec<String>) -> Result<Launch, String> 
     Ok(Launch { program, args, display: format!("powershell {script}"), key, ask })
 }
 
+/// Catastrophic bash the shell is not run for while commands run automatically (the bash counterpart of `shell_wrecks`):
+/// what takes the computer apart, and a delete naming a place outside the chat's folder, where nothing can be restored.
+// ponytail: a reading of the text, not a parser — a script written to a file and run was never held by it. Harden with
+// `bash -n` / an AST if this must stand against a command written to get past it.
+fn bash_wrecks(script: &str, root: &Path) -> Option<&'static str> {
+    use std::sync::LazyLock;
+    static SYSTEM: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)\b(mkfs\S*|shutdown|reboot|poweroff|halt|init\s+[06]|wipefs|fdisk|parted)\b|\bdd\b[^\n]*\bof=/dev/|>\s*/dev/sd|:\s*\(\s*\)\s*\{\s*:\s*\|\s*:|\brm\s+-[a-z]*[rf][a-z]*\s+(-[a-z]*\s+)*(/|~|\$\{?home)").unwrap()
+    });
+    static DELETES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)(^|[\s;|&(])(rm|unlink|shred|srm)\b").unwrap());
+    static OUTSIDE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b[a-z]:[\\/]|\\\\|(^|\s)/[a-z]|\.\.[\\/]|~|\$\{?home\b").unwrap());
+    if SYSTEM.is_match(script) {
+        return Some("Not run: this changes the computer itself (its disks, its start-up) or deletes from the root, your home or everything, and cannot be undone. Leave it to the user: say what should be run and why.");
+    }
+    // The chat's own folder written out in full is inside; everything else a delete names is outside.
+    let own = regex::escape(&root.to_string_lossy().to_lowercase().replace('\\', "/"));
+    let inside = Regex::new(&format!(r#"{own}(/|['",;)\s]|$)"#)).map(|re| re.replace_all(&script.to_lowercase().replace('\\', "/"), ".$1").into_owned());
+    if DELETES.is_match(script) && OUTSIDE.is_match(inside.as_deref().unwrap_or(script)) {
+        return Some("Not run: this deletes, and it names a place outside the chat's folder, where nothing can be restored. Delete inside the folder by a relative path (delete_file does it too). What is outside is the user's to remove.");
+    }
+    None
+}
+
+/// bash/sh as a real shell, the counterpart of `shell`: the script is run with `bash -c`, so its pipes, redirects, `&&`
+/// and loops work. On Windows this needs git-bash's bash.exe on PATH. Asked for in "Ask me first"; while commands run
+/// automatically it runs unasked like any program, except for what `bash_wrecks` refuses.
+fn bash_shell(ctx: &Ctx, command: &str, argv: Vec<String>) -> Result<Launch, String> {
+    let mut words = argv.into_iter().peekable();
+    // Drop the usual invocation flags; whatever remains is the script.
+    while let Some(flag) = words.peek().map(|word| word.to_ascii_lowercase()) {
+        match flag.as_str() {
+            "-c" | "-lc" | "-ic" | "-xc" | "-l" | "-i" | "-x" | "-e" | "--norc" | "--noprofile" | "--login" => drop(words.next()),
+            _ => break,
+        }
+    }
+    let script = words.collect::<Vec<_>>().join(" ");
+    if script.trim().is_empty() {
+        return Err("No bash command was given. Pass it as one string, e.g. {\"command\":\"bash\",\"args\":[\"-c\",\"ls | wc -l\"]}.".into());
+    }
+    if super::files::closed_text(&script) {
+        return Err(format!("The command names a place that is not read: {}", super::files::CLOSED_WHY));
+    }
+    let Some(program) = find_program(&ctx.root, command) else {
+        return Err(format!("`{command}` was not found on this machine.{}", if cfg!(windows) { " Install Git for Windows and make sure bash.exe is on PATH, or use powershell instead." } else { "" }));
+    };
+    let ask = ctx.settings.approval.asks_routine();
+    if let Some(why) = bash_wrecks(&script, &ctx.root).filter(|_| !ask) {
+        return Err(why.into());
+    }
+    let key = serde_json::to_string(&["bash", script.as_str()]).unwrap_or_default();
+    Ok(Launch { program, args: vec!["-c".to_string(), script.clone()], display: format!("bash {script}"), key, ask })
+}
+
 #[cfg(windows)]
 pub(crate) fn hide_window_std(cmd: &mut std::process::Command) {
     use std::os::windows::process::CommandExt;
@@ -307,8 +361,8 @@ fn prepare(ctx: &Ctx, command: &str, argv: Vec<String>) -> Result<Launch, String
     }
     // A whole command line in one string, from a model that forgot the list: taken apart when it is plain
     // words and no program of that very name exists (a path may hold a space).
-    // PowerShell written as one line keeps its text whole: its quotes are its own.
-    let shell_line = command.split_once(char::is_whitespace).filter(|(first, _)| argv.is_empty() && matches!(base_name(first).as_str(), "powershell" | "pwsh"));
+    // PowerShell or bash written as one line keeps its text whole: its quotes are its own.
+    let shell_line = command.split_once(char::is_whitespace).filter(|(first, _)| argv.is_empty() && matches!(base_name(first).as_str(), "powershell" | "pwsh" | "bash" | "sh"));
     let one_line = argv.is_empty() && command.contains(' ') && !command.contains(['"', '\'']) && find_program(&ctx.root, command).is_none();
     let (command, argv) = if let Some((first, rest)) = shell_line {
         (first, vec![rest.to_string()])
@@ -321,6 +375,9 @@ fn prepare(ctx: &Ctx, command: &str, argv: Vec<String>) -> Result<Launch, String
     let name = base_name(command);
     if cfg!(windows) && matches!(name.as_str(), "powershell" | "pwsh") {
         return shell(ctx, command, argv);
+    }
+    if matches!(name.as_str(), "bash" | "sh") {
+        return bash_shell(ctx, command, argv);
     }
     if SHELLS.contains(&name.as_str()) {
         return Err(format!("`{name}` is not available. Run the interpreter directly, e.g. `python app.py` rather than `sh -c \"python app.py\"`.{}", if cfg!(windows) { " PowerShell is the shell here: pass the whole script as one string in args, and its pipes, `;` and loops run several steps in one call." } else { "" }));
@@ -1163,6 +1220,37 @@ mod tests {
     }
 
     #[test]
+    fn bash_wrecks_catches_the_catastrophic_and_outside_deletes() {
+        let own = Path::new(r"C:\chats\one");
+        for runs in ["ls | wc -l", "grep -r foo src/ > out.txt", "rm -rf build", "rm -f ./tmp/x", r"rm -rf C:\chats\one\build", "find . -name '*.tmp' -delete", "git log --oneline | head"] {
+            assert_eq!(bash_wrecks(runs, own), None, "{runs}");
+        }
+        for wrecks in [
+            "rm -rf /", "rm -rf /*", "sudo rm -rf /usr", "rm -rf ~", "rm -rf ~/Documents", "rm -rf $HOME/x",
+            "sudo mkfs.ext4 /dev/sda1", "dd if=/dev/zero of=/dev/sda bs=1M", ":(){ :|:& };:", "shutdown -h now", "reboot", "wipefs -a /dev/sda",
+            r"rm -rf C:\Windows", "rm -rf ../../other", "unlink /etc/hosts",
+        ] {
+            assert!(bash_wrecks(wrecks, own).is_some(), "{wrecks}");
+        }
+    }
+
+    /// With git-bash on PATH, bash runs as a real shell: pipes and redirects work, and the flags are stripped.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bash_runs_a_real_shell_when_present() {
+        let dir = crate::tools::scratch("bashrun");
+        if find_program(&dir, "bash").is_none() {
+            return; // no bash on this machine; the refusal path is covered by prepare's "was not found" branch
+        }
+        let ctx = crate::tools::test_ctx(&dir, Approval::Auto);
+        let out = run_command(&ctx, &json!({ "command": "bash", "args": ["-c", "echo hi | tr a-z A-Z"] })).await;
+        assert!(out.ok && out.text.contains("HI"), "{}", out.text);
+        // A redirect writes a real file the shell handles.
+        let wrote = run_command(&ctx, &json!({ "command": "bash", "args": ["-c", "printf one > bash_out.txt; wc -l < bash_out.txt"] })).await;
+        assert!(wrote.ok && dir.join("bash_out.txt").exists(), "{}", wrote.text);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_system_is_asked_only_in_forms_that_look() {
         let dir = crate::tools::scratch("system");
         let prep = |approval, command: &str, args: &[&str]| prepare(&crate::tools::test_ctx(&dir, approval), command, args.iter().map(|a| a.to_string()).collect());
@@ -1280,8 +1368,8 @@ mod tests {
     #[test]
     fn timeouts_follow_the_web_table() {
         assert_eq!(timeout_for("npm", &s(&["install"]), None), Duration::from_secs(300));
-        assert_eq!(timeout_for("npm", &s(&["test"]), None), Duration::from_secs(60));
-        assert_eq!(timeout_for("msbuild", &s(&["x"]), None), Duration::from_secs(60));
+        assert_eq!(timeout_for("npm", &s(&["test"]), None), Duration::from_secs(120));
+        assert_eq!(timeout_for("msbuild", &s(&["x"]), None), Duration::from_secs(120));
         assert_eq!(timeout_for("npm", &s(&["test"]), Some(1)), Duration::from_secs(5));
         assert_eq!(timeout_for("npm", &s(&["test"]), Some(900_000)), Duration::from_secs(600));
     }
