@@ -42,8 +42,13 @@ static FACTS: LazyLock<String> = LazyLock::new(|| {
 });
 
 /// The section of the system prompt. `auto`: commands run without asking.
-pub fn block(workspace: &Path, auto: bool) -> String {
-    let asks = if auto { "Commands and looks outside the workspace run without asking; a system command that changes or deletes something, and installing a package into the machine (pip into the system Python, npm -g, cargo install), still asks the user. Prefer what is already there: the standard library's unittest needs nothing installed." } else { "The user approves each command before it runs, except a program that only looks (git status or log, tasklist, systeminfo, which, a --version), and each folder you look into outside the workspace. Every PowerShell call is shown to them whole: put the steps that go together in one." };
+pub fn block(workspace: &Path, approval: crate::store::Approval) -> String {
+    use crate::store::Approval;
+    let asks = match approval {
+        Approval::Manual => "The user approves each command before it runs, except a program that only looks (git status or log, tasklist, systeminfo, which, a --version), and each folder you look into outside the workspace. Every PowerShell call is shown to them whole: put the steps that go together in one.",
+        Approval::Critical => "Commands and looks outside the workspace run without asking; the critical actions still ask the user — installing a package into the machine (pip into the system Python, npm -g, cargo install), adding a skill, pushing to a remote or opening a pull request, calling an outside tool, and changing a process the app did not start. Prefer what is already there: the standard library's unittest needs nothing installed.",
+        Approval::Auto => "Commands and looks outside the workspace run without asking, installing a package into the machine (pip into the system Python, npm -g, cargo install) included; nothing asks. A system command that takes the computer itself apart is refused outright, not asked. Prefer what is already there: the standard library's unittest needs nothing installed.",
+    };
     format!(
         "\n\nThis computer, as the app found it when it started (take it as given, do not spend a round checking it):\n{}\n- Your workspace: {}\n- {asks}",
         *FACTS,
@@ -66,9 +71,11 @@ mod tests {
         assert_eq!(windows_name("Microsoft Windows [Version 10.0.26200.6584]").as_deref(), Some("Windows 11, build 26200"));
         assert_eq!(windows_name("Microsoft Windows [Version 10.0.19045.3803]").as_deref(), Some("Windows 10, build 19045"));
         assert_eq!(windows_name("nonsense"), None);
-        let told = block(Path::new("/w/chat"), false);
+        use crate::store::Approval;
+        let told = block(Path::new("/w/chat"), Approval::Manual);
         assert!(told.contains("- Your workspace: /w/chat\n- The user approves") && told.contains("Programs found: ") && told.ends_with("put the steps that go together in one."), "{told}");
         assert!(today().starts_with("Today is 20") && !told.contains("Today is"));
-        assert!(block(Path::new("/w"), true).contains("cargo install), still asks the user. Prefer what is already there"));
+        assert!(block(Path::new("/w"), Approval::Critical).contains("cargo install), adding a skill"));
+        assert!(block(Path::new("/w"), Approval::Auto).contains("cargo install) included; nothing asks"));
     }
 }
