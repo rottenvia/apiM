@@ -18,6 +18,7 @@ pub mod sandbox;
 pub mod skills;
 pub mod testing;
 pub mod web;
+pub mod winproc;
 
 use crate::agent::Emitter;
 use crate::store::{Finding, Plan, Settings};
@@ -141,7 +142,8 @@ const IMPLEMENTED: &[&str] = &[
 
 static SCHEMAS: LazyLock<Vec<Value>> = LazyLock::new(|| {
     let mut all: Vec<Value> = serde_json::from_str(include_str!("../../assets/tools.json")).expect("assets/tools.json is valid");
-    all.retain(|t| IMPLEMENTED.contains(&t["function"]["name"].as_str().unwrap_or("")));
+    all.extend(winproc::schemas());
+    all.retain(|t| IMPLEMENTED.contains(&t["function"]["name"].as_str().unwrap_or("")) || winproc::NAMES.contains(&t["function"]["name"].as_str().unwrap_or("")));
     // Without a browser on this computer `browse` is withheld, as the web app does.
     if !crate::browser::available() {
         all.retain(|t| t["function"]["name"] != "browse");
@@ -305,7 +307,7 @@ fn a_call_with_the_models_markup_in_it_is_put_back() {
 
 #[cfg(test)]
 pub fn implemented(name: &str) -> bool {
-    IMPLEMENTED.contains(&name)
+    IMPLEMENTED.contains(&name) || winproc::NAMES.contains(&name)
 }
 
 /// The tool list for one request. A tool that cannot work is withheld rather than
@@ -362,6 +364,7 @@ pub fn definitions(web_search: bool, native_vision: bool, git_repo: bool, github
             "git_pull_base" => github.is_some(),
             // Push and pull requests need the token as well as the connection.
             n if n.starts_with("github_") => github == Some(true),
+            n if winproc::NAMES.contains(&n) => cfg!(windows),
             n if n.starts_with("git_") => git_repo,
             _ => true,
         })
@@ -456,6 +459,7 @@ pub async fn run(name: &str, args: &Value, ctx: &Ctx) -> Output {
         "add_model" => add_model(ctx, args).await,
         "git_pull_base" | "github_push" | "github_create_pr" | "github_pr_status" => github::run(ctx, name, args).await,
         n if n.starts_with("git_") => git::run(ctx, n, args).await,
+        n if winproc::NAMES.contains(&n) => winproc::run(n, args),
         _ => Output::fail(format!("Unknown tool: {name}. Use one of the tools you were given.")),
     }
 }

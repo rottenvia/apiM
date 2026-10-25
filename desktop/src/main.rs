@@ -37,6 +37,8 @@ mod store;
 mod summary;
 mod tools;
 mod ui;
+#[cfg(windows)]
+mod winproc;
 
 use std::sync::Arc;
 

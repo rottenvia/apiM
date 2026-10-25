@@ -4,7 +4,7 @@
 //! (`load_tools`). A group, once loaded, stays for the chat, and is added after everything already sent,
 //! so the start of the request does not change from round to round.
 
-use super::Output;
+use super::{Output, winproc};
 use serde_json::{Value, json};
 
 pub struct Group {
@@ -77,6 +77,12 @@ pub const GROUPS: &[Group] = &[
         what: "compiled programs: inspect an EXE, DLL or other binary and keep notes on it",
         tools: &["inspect_binary", "note_binary"],
         hints: &[".exe", ".dll", "a binary", "decompile", "disassembl", "reverse engineer", "malware", "deobfuscat"],
+    },
+    Group {
+        name: "winproc",
+        what: "Windows processes you did not start: list them with thread wait reasons, open and probe rights, suspend and resume threads, read and set registers, read, write, query, protect, allocate and free memory, list modules",
+        tools: winproc::NAMES,
+        hints: &["attach", "suspend", "thread context", "process memory", "debugger", "inject", "virtualalloc", "ntreadvirtualmemory", " pid "],
     },
     Group {
         name: "models",
