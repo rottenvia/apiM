@@ -354,8 +354,8 @@ fn prompt(app: &mut App, ctx: &egui::Context, shown: String) {
         };
         return say(app, format!("Add your {provider} key in Settings first."), true);
     }
-    if app.run.is_some() {
-        return say(app, "Another chat is still being answered. Stop it or wait for it to finish.", true);
+    if app.running_here() {
+        return say(app, "Wait for the reply to finish, or start with \"btw\" to tell it something.", true);
     }
     if let Some(why) = attachments::waiting(&app.attachments) {
         return say(app, why, false);
@@ -414,7 +414,7 @@ fn perform(app: &mut App, ctx: &egui::Context, cmd: Cmd, arg: &str) -> Result<Op
         Cmd::Rename => {
             saved(app)?;
             let title: String = arg.chars().take(200).collect();
-            app.rename_chat(&id, &title);
+            app.rename_chat(&id, &title)?;
             return Ok(Some(format!("Renamed to \"{title}\".")));
         }
         Cmd::Archive => {

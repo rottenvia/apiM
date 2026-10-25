@@ -9,6 +9,7 @@ use crate::media::{ocr, vision::{self, VisionResult}};
 use crate::models::Vision;
 use crate::provider;
 use crate::store::{Attachment, Settings};
+use serde::{Deserialize, Serialize};
 use crate::tools::files;
 use eframe::egui::{self, Color32, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use std::path::{Path, PathBuf};
@@ -45,9 +46,37 @@ pub struct Pending {
     pub body: Body,
 }
 
+/// What is kept of a chip in a draft on disk (`drafts`): enough to make it again without copying a file twice
+/// or paying for a picture's description twice.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Kept {
+    pub path: PathBuf,
+    pub name: String,
+    /// Where a file or folder was copied to in the workspace: it is read from there again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved: Option<String>,
+    /// A picture's finished description, and what made it ("vision" or "ocr").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+pub fn kept(a: &Pending) -> Kept {
+    let done = match &a.body {
+        Body::Picture { described: Some(slot), .. } => slot.lock().ok().and_then(|s| s.clone()),
+        _ => None,
+    };
+    let saved = match &a.body {
+        Body::Saved(d) => Some(d.path.clone()),
+        _ => None,
+    };
+    Kept { path: a.path.clone(), name: a.name.clone(), saved, description: done.as_ref().and_then(|d| d.description.clone()), source: done.and_then(|d| d.source).map(str::to_string) }
+}
+
 impl Pending {
     /// True while a picture is still being described.
-    fn describing(&self) -> bool {
+    pub fn describing(&self) -> bool {
         matches!(&self.body, Body::Picture { described: Some(slot), .. } if slot.lock().is_ok_and(|s| s.is_none()))
     }
 
@@ -102,13 +131,46 @@ pub fn add(app: &mut App, path: PathBuf) {
         return slash_menu::say(app, problem, true);
     }
     let name = path.file_name().map_or_else(|| "file".to_string(), |n| n.to_string_lossy().into_owned());
+    attach(app, |root, vision, describer| read_attachment(root, path, name, vision, describer));
+}
+
+/// A chip from a draft kept on disk, back in the message box of the chat it was made in.
+pub fn bring_back(app: &mut App, kept: Kept) {
+    let name = kept.name.clone();
+    attach(app, |root, vision, describer| restore(root, kept, vision, describer).map_err(|problem| format!("{name} could not be attached again: {problem}")));
+}
+
+fn attach(app: &mut App, read: impl FnOnce(&Path, Vision, &dyn Fn(&str) -> Described) -> Result<Pending, String>) {
     let (root, vision) = (app.conv.workspace(), model_vision(&app.settings));
     let (rt, key, model) = (app.rt.handle().clone(), app.settings.vision_key.clone(), app.settings.vision_model.clone());
     let describer = |url: &str| describe(&rt, &key, &model, url);
-    match read_attachment(&root, path, name, vision, &describer) {
+    match read(&root, vision, &describer) {
         Ok(pending) => app.attachments.push(pending),
         Err(problem) => slash_menu::say(app, problem, true),
     }
+}
+
+/// `read_attachment` for a chip made before: a file or folder is read from its copy in the workspace, and a
+/// picture keeps the description it had.
+fn restore(root: &Path, kept: Kept, vision: Vision, describe: &dyn Fn(&str) -> Described) -> Result<Pending, String> {
+    let Kept { path, name, saved, description, source } = kept;
+    if let Some(rel) = saved {
+        let folder = root.join(&rel).is_dir();
+        let body = if folder { ingest::describe_folder(root, &rel)? } else { ingest::ingest_upload(root, &rel, true)? };
+        let (kind, files) = if folder { (Kind::Folder, body.file_count) } else { (Kind::File, None) };
+        return Ok(Pending { path, name, size: body.bytes, kind, files, body: Body::Saved(body) });
+    }
+    if is_image(&path) {
+        let picture = media::read_image_file(&path)?;
+        let source = ["vision", "ocr"].into_iter().find(|s| source.as_deref() == Some(*s));
+        let described = (vision != Vision::Native).then(|| match description {
+            Some(text) => Arc::new(Mutex::new(Some(VisionResult { description: Some(text), error: None, source }))),
+            None => describe(picture.data_url.as_str()),
+        });
+        return Ok(Pending { path, name, size: picture.size, kind: Kind::Image, files: None, body: Body::Picture { picture, described } });
+    }
+    let clip = media::read_video_file(&path)?;
+    Ok(Pending { path, name, size: clip.size, kind: Kind::Video, files: None, body: Body::Clip(clip) })
 }
 
 /// Reads one attached thing the way the web's composer does. Pictures are shrunk and capped, clips read whole, and files
@@ -285,6 +347,33 @@ mod tests {
         assert_eq!(clip_detail(&clip(0)), "2 KB");
         assert_eq!(clip_detail(&clip(1)), "2 KB · 1 frame");
         assert_eq!(clip_detail(&clip(3)), "2 KB · 3 frames");
+    }
+
+    #[test]
+    fn a_kept_draft_comes_back_without_copying_or_describing_again() {
+        let dir = std::env::temp_dir().join(format!("apim-kept-{}", crate::store::new_id()));
+        let (src, root) = (dir.join("src"), dir.join("ws"));
+        std::fs::create_dir_all(src.join("proj")).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(src.join("notes.txt"), "hello").unwrap();
+        std::fs::write(src.join("proj").join("main.rs"), "fn main() {}").unwrap();
+        // A real PNG, 1 by 1: a picture is read again from where it was.
+        image::save_buffer(src.join("shot.png"), &[9, 9, 9, 255], 1, 1, image::ColorType::Rgba8).unwrap();
+        let described = |_: &str| -> Described { Arc::new(Mutex::new(Some(VisionResult { description: Some("a grey dot".into()), error: None, source: Some("ocr") }))) };
+        let never = |_: &str| -> Described { panic!("described twice") };
+        let first: Vec<Pending> = ["notes.txt", "proj", "shot.png"].iter().map(|name| read_attachment(&root, src.join(name), name.to_string(), Vision::None, &described).unwrap()).collect();
+        // Through the file on disk and back.
+        let json = serde_json::to_string(&first.iter().map(kept).collect::<Vec<_>>()).unwrap();
+        let again: Vec<Pending> = serde_json::from_str::<Vec<Kept>>(&json).unwrap().into_iter().map(|k| restore(&root, k, Vision::None, &never).unwrap()).collect();
+        assert!(!root.join("uploads/notes-2.txt").exists() && !root.join("uploads/proj-2").exists(), "copied again");
+        let (text, stored) = message("look", again, Vision::None);
+        assert_eq!(stored.iter().map(|a| (a.name.as_str(), a.kind.as_str())).collect::<Vec<_>>(), [("notes.txt", "text"), ("proj/", "text"), ("shot.png", "image")]);
+        assert_eq!((stored[2].description.as_deref(), stored[2].description_source.as_deref()), (Some("a grey dot"), Some("ocr")));
+        assert!(text.contains("hello") && text.contains("uploads/proj/ — 1 files"), "{text}");
+        // A picture deleted since cannot come back.
+        std::fs::remove_file(src.join("shot.png")).unwrap();
+        assert!(restore(&root, Kept { path: src.join("shot.png"), name: "shot.png".into(), saved: None, description: None, source: None }, Vision::None, &never).is_err());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -32,6 +32,8 @@ The same things as the web app, with the same look:
 - Slash commands, find in chat (Ctrl+F), notes to a running task (`/btw`)
 - The workspace panel with file tree, editor, diffs and restore points; the process list; import from a folder
 - Attach files, folders, pictures and clips, or paste a picture or copied files with Ctrl+V; models that cannot see get a description of each picture
+- A message box for each chat: what is typed and attached in one chat stays with it, comes back when that chat is opened again, and survives a restart, pasted screenshots included
+- Several chats answered at once: a reply goes on in its chat while another chat is open, or is sent to, and the chat list marks each one working (a pulsing dot) or waiting for your answer (a steady amber dot)
 - GitHub: connect a repository through apiM's own GitHub App or a token, push, open and follow pull requests
 - MCP servers, the same 8 plugins plus your own, search budget
 - Tools on demand and a catalog of skills, both described below: a request carries about a third of what it did, and plugins can be added, by you or by the assistant, to one chat or to all
@@ -173,6 +175,27 @@ The chat list on the left and the files on the right were each a faithful copy o
 For one day the chat rows were 32 tall too, level with the file rows. They are back at 42 with 14px names: the user liked the left side bigger.
 
 The web still draws them its own way.
+
+## Several chats at once, and a message box for each
+
+One message box was shared by every chat (`App.draft`, `App.attachments`): text typed in one went along to whichever chat was opened next, and was gone after a restart. Now:
+
+- **The box belongs to its chat.** Leaving a chat puts its text and chips away under its id (`ui/drafts.rs`) and opening it brings them back. The box's undo history is cleared on the way, or Ctrl+Z in the next chat brought the last one's words back. A notice above the box goes too: "Undo file changes" from a rewind would have undone them in the next chat's folder.
+- **It outlives the app.** `drafts.json` in the data folder is written 0.6 s after the box last changed and when the app closes. A chip is kept as where it came from: a file or folder by its copy in the workspace (read from there again, never copied twice), a picture by its file with its description if it had one (never paid for twice). Chips are made live only when their chat is opened.
+- **Pasted pictures are kept.** They went to `%TEMP%\apim-paste`, which Windows empties. They go to `pasted/` in the data folder now, and a start removes the ones no draft holds.
+- **"New chat" goes back to the new chat you left.** `Conversation::new()` made a new id, so a fresh chat with text and files in it was lost behind the next one, its files in a workspace nothing pointed at. The blank chat's id is kept (`Drafts::blank`) and the app opens on it after a restart.
+
+Replies run in as many chats as you send to. `App.run` was one reply and `parked` the one chat that could be written to off screen; now `App.runs` holds one per chat, each carrying its chat while another is on screen (`Run::parked`), and `pump` takes in every one each frame. Stop, approvals, questions and "btw" notes act on the chat on screen. Measured with `APIM_SHOT_INBOX` driving the window: two chats sent 4 s apart, switched between three times mid-reply, both finished with their files in their own workspaces.
+
+What two replies at once had to have fixed first (found by reading everything an `agent::run` reaches for state shared across chats):
+
+- A chat is not renamed while its reply runs. Its workspace and state folders are named after the title and move with it, from under a reply holding the old paths.
+- The async runtime has 4 workers, not 2. Some steps still block the worker they run on (the sandbox's WSL probe takes up to 10 s), and with two of them every other chat's stream stopped.
+- `screenshot_window` aims only at this chat's processes: process ids count up across all chats.
+- One sandbox start and one local-model start at a time: two chats' first sandbox steps each started an Xvfb, and two local-model replies each killed the server the other had just started.
+- `write_atomic` takes a temporary name of its own for each write, not one `.tmp` per file. A Ghidra project folder is per analysis, not per file.
+
+Left as is: the sandbox has one display for all chats, so two chats running GUI programs in it at once draw on the same screen; `endpoints.json` can lose a usage count when two chats probe a new OpenRouter model at the same moment.
 
 ## Carrying a big task through
 
@@ -369,6 +392,7 @@ The desktop app and the web app share chats, workspaces, plugins, MCP servers an
 | --- | --- |
 | Settings and keys | `%APPDATA%\apiM\settings.json` |
 | Chats, workspaces and the rest | the repo's `data` folder when the program runs from inside the repo, otherwise `%APPDATA%\apiM` |
+| Unsent messages, pasted pictures | `drafts.json` and `pasted/` beside the chats |
 
 Set `APIM_DATA_DIR` to keep the data somewhere else.
 
@@ -411,7 +435,7 @@ A chat opens as the mouse button goes down on it, not when it comes up, comes in
 
 The start read every chat file whole before the window drew anything, to list them: 264 MB on one PC. The window is up first now, behind a loading screen with a bar of the bytes read and the time left, and the list is kept in `chat-index.json` beside the chats with the size and time of each file, so a start reads only the files that changed. A chat that takes more than a quarter of a second to open shows the same bar on its "Opening…" pill, which stays until the chat has landed and not only until its file is read. The time left is the bytes still to read over the pace of the files read so far (remembered between starts); the file in hand counts as far as that pace says it has come and is never called done before it is.
 
-How it was seen: `APIM_SHOT_FILM=600` keeps every frame of that many milliseconds instead of one picture, named by the millisecond it was drawn at (`f-0040.png`), and `APIM_SHOT_STATE=click-140-415` clicks that point 400 ms in, as a hand does, 70 ms between down and up. `boot` films a real start, `splash` and `opening` stage the two bars part way, `fresh` a message just sent. With `APIM_PERF` a film says what each frame cost and how long after the one before it came.
+How it was seen: `APIM_SHOT_FILM=600` keeps every frame of that many milliseconds instead of one picture, named by the millisecond it was drawn at (`f-0040.jpg`), and `APIM_SHOT_STATE=click-140-415` clicks that point 400 ms in, as a hand does, 70 ms between down and up. `boot` films a real start, `splash` and `opening` stage the two bars part way, `fresh` a message just sent. With `APIM_PERF` a film says what each frame cost and how long after the one before it came.
 
 ### Odd input, every tool
 
@@ -436,10 +460,33 @@ The buffer is only worth its delay while text comes quickly, so here it parts fr
 
 Three things are written to the problem report so that slowness nobody was measuring can be found afterwards, and told apart: a frame that took over a quarter of a second, and text that waited over two seconds to be shown (both the app's doing), and a reply whose text came at under 15 characters a second (the provider's).
 
+### A thought that shut as a step appeared
+
+Filmed with `APIM_SHOT_STATE=send` and `APIM_SHOT_FILM=45000` (the film now runs alongside the reply, from the moment the message goes), the first step of a reply did everything in one frame, 7.88 s into a 30-second film: the open thought (some 300 points of text) vanished, the step row appeared, the route notice moved from under the thought to over it, and the chat's totals strip came in at the top and pushed the whole chat down by about 60 points. A second review of a 45-second film found the same jolt on every step after that, and one more: as a thought shut the chat followed its end down by up to 170 points, then jumped back up 37 when the next row came.
+
+- **One layout from the first thought.** A reply that thinks is drawn as a timeline from its first thought on. It started as a box on top and turned into a timeline when a step came, which is what moved everything at once. A reply without steps now shows its thought as the same one-line row.
+- **A thought takes the place of "Thinking…"**: its label is there in the frame the line goes, at the same height, and its box fades in around it. Unfolding from nothing, it left a beat with neither.
+- **A thought folds** over a quarter of a second (`widgets::unfold`: the body is cut off at a share of its height and takes only that much room, its words fading faster than the room so none stand half seen; a row coming in fades at the pace of its room instead, or it stayed unseen for its first frames), and its box fades from the thinking colour. It shuts when the model starts writing a tool call or its own words, and the step, notice or words wait for the fold (`FOLD_WAIT`, 200 ms, so they come in under its last stretch rather than after a beat of nothing). The typing pacer gives out one kind of text a frame (the end of a thought and the first words after it came in together, under the open box), and while the words are held neither its quarter-second for typing out what a row waits behind runs, nor its clock: a reply's last line came in whole, and the first line after a fold in one frame.
+- **One curve** for every fold and entrance, the web's standard `cubic-bezier(0.4, 0, 0.2, 1)` (`widgets::ease`). Filmed, a cubic in-out read as a fade that then snapped shut (its first fifth hardly moves), a sine in-out the same more mildly, and a cubic out as a pop that then drifted.
+- **New rows unfold into their room**: a step (finished or not, a quick one arrives done), a notice (the route line pushed "Thinking…" down two lines in a frame), the buttons under a reply that ends, a step's detail when clicked. The counts in the row over a reply fade in where they land.
+- **The totals strip has its room from the moment a reply runs** and its words fade in with the first count; unfolding then, it pushed a new chat down by 60 points mid-reply.
+- **Gaps stay put.** Every gap in the chat was 4 points while a reply waited for its first words and 24 after, so the chat drew together on each send and the reply dropped 20 points at its first word.
+- **Status lines** on an empty row go up once their words have stood 300 ms, counted from when they could first be said ("Writing a.txt…" came up under a folding thought for a tenth of a second before its step took its place); in place of a line that is up, new words go up at once. They fade in when their words change, not when a request goes out or its first byte comes ("Thinking…" dimmed and came back twice in its first second). A request counts as answered once something of the answer shows, so "Waiting for the model…" does not leave before anything takes its place.
+- **Room a fold gives up stays as blank space** under the live reply (`App::floor`) instead of the chat sliding down into it; new rows fill it, and what is left glides away when the reply ends.
+- **A scrolled thought fades out under its label** rather than cutting a line in half there.
+- **The end is glided onto.** egui's own sticking stepped the chat up by each line a reply wrapped onto (15 to 40 points in a frame), showing the line cut off under the edge first. The chat now follows its end itself, as a spring that closes the distance in about a fifth of a second (`widgets::Follow`), and stops following when a wheel or the scroll bar takes it up. Closing a share of the distance each frame instead kicked the pace up in a frame with every line. A live thought's own text follows its end the same way inside its box, where it hopped a line at a time.
+- **What grows while open takes its room gradually**: a thought's box grew by a line (20 or 40 points) in a frame as it streamed, and a step's row by its result line. `unfold` gives growth its room over about a tenth of a second, cut at the edge meanwhile.
+- A thought's clock goes on from the line before it ("Thinking… · 4s" turned into "Thinking · 0s").
+- A failed step's line, cut at 160 characters, ends in "…" (it read "…pass the whole scr").
+
+Measured after, on four more films of the same task, each checked frame by frame and two by a second pair of eyes: a fold runs its quarter-second with height and words falling together (81% height at 65% opacity, 61% at 43%, 37% at 36%); a thought's box grows about 8 points a frame; the chat glides 1 to 5 points a frame onto its end; no status line comes up for less than a quarter of a second; the last words of a reply type out over 0.3 s; the window drew a frame every 6.9 ms (95th percentile 7.0 ms) while filming. Left as is: a step can still come a tenth of a second after its thought has folded when the model is still writing the call (there is nothing to show yet), and the "Files" button in the top bar turns into a count in one frame.
+
+The film itself had to change: half a minute of 2400x1720 frames held in memory ran out of it (16.5 MB a frame, 9.6 GB of PNGs). Frames are written by another thread as they come, at the window's size in points as JPEG, one every 14 ms at most, and dropped (and counted) rather than slowing the window when the writer falls behind. `APIM_SHOT_INBOX` also takes `type <text>`, `attach <path>`, `open <part of a title>`, `new` and `send`, which is how the drafts and the parallel chats above were filmed.
+
 ## Checking the look without touching the window
 
 `APIM_SHOT=out.png` makes the program draw one state off screen, save a picture of it and quit. `APIM_SHOT_STATE` names the state as a comma-separated list (`settings`, `tab4`, `wait-row`, `stalled`, `plugins`, `plugin-search` with `APIM_SHOT_QUERY`, `plugin-add`, `ask-skill`, `ask-look`, `btw`, `theme-midnight`, `no-sidebar`, `up-330` to turn the wheel back that many points, `select-300-200-600-260` to drag between two points and press Ctrl+C (what it copies is printed, and kept from the real clipboard), `maximized,f11` for full screen, and more in `ui/mod.rs`), `APIM_SHOT_CHAT` picks the chat by a part of its title, and `APIM_SHOT_SIZE=1400x900` sets the window.
 
-`APIM_SHOT_INBOX=<file>` makes whoever started a `send` self-portrait its user while the reply runs. One command a file, taken when it can be acted on and then deleted: `answer <text>` or `skip` for the question on screen, `allow` or `deny` for an approval (what is asked stands in the file of the same name ending `.ask`), `note <text>` for a "btw", `stop` for the Stop button. `bench/live/live.py` drives the live benchmark with it.
+`APIM_SHOT_INBOX=<file>` makes whoever started a `send` self-portrait its user while the reply runs. One command a file, taken when it can be acted on and then deleted: `answer <text>` or `skip` for the question on screen, `allow` or `deny` for an approval (what is asked stands in the file of the same name ending `.ask`), `note <text>` for a "btw", `stop` for the Stop button, and `type <text>`, `attach <path>`, `open <part of a title>`, `new` and `send` to move between chats as a hand would. `bench/live/live.py` drives the live benchmark with it.
 
 `APIM_SHOT_STATE=send` with `APIM_SHOT_DRAFT="..."` really sends that message and takes the picture when the reply (or the compaction, for `/compact`) has ended. From Git Bash a draft that starts with `/` is rewritten into a path (`/compact` arrives as `C:/Program Files/Git/compact` and is sent as a message): set `MSYS2_ENV_CONV_EXCL=APIM_SHOT_DRAFT` first. Point `APIM_DATA_DIR` at a spare folder first, so the chat it makes is not one of yours.

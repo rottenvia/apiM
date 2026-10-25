@@ -170,7 +170,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
     match action {
         Some(Action::Open(id)) => app.open_chat(&id),
-        Some(Action::Rename(id, title)) => app.rename_chat(&id, &title),
+        Some(Action::Rename(id, title)) => {
+            if let Err(why) = app.rename_chat(&id, &title) {
+                app.toast(why);
+            }
+        }
         Some(Action::Archive(id, archived)) => app.archive_chat(&id, archived),
         Some(Action::Delete(ids)) => app.dialog = Dialog::Delete { ids, opened: Instant::now() },
         Some(Action::Export(id, format)) => app.export_chat(&id, format),
@@ -240,7 +244,10 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &ChatMeta, list_top: f32, action:
     let selecting = app.side.selecting;
     let menu_open = app.side.menu.as_ref().is_some_and(|(id, _)| *id == chat.id);
     let current = app.current_id() == chat.id;
-    let running = app.run.as_ref().is_some_and(|r| r.conv_id == chat.id);
+    let run = app.runs.iter().find(|r| r.conv_id == chat.id);
+    let running = run.is_some();
+    // Stopped on a question or a command to approve: it waits for the user, not the model.
+    let asking = run.is_some_and(|r| r.approval.is_some() || r.question.is_some());
 
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 42.0), Sense::click());
     let response = response.on_hover_cursor(CursorIcon::PointingHand);
@@ -277,7 +284,13 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &ChatMeta, list_top: f32, action:
     let right = rect.right() - 13.0 - if !selecting { 24.0 + 4.0 } else { 0.0 } - if running { 8.0 + 8.0 } else { 0.0 };
     widgets::text_at(ui, x, rect.center().y, widgets::clipped(ui, &chat.title, theme::font(14.0, W::Regular), fg, right - x));
 
-    if running {
+    if asking {
+        // A steady dot in the warning colour: nothing moves until the user answers.
+        let centre = pos2(right + 8.0 + 4.0, rect.center().y);
+        ui.painter().circle_filled(centre, 5.5, alpha(p.warning, 22.0));
+        ui.painter().circle_filled(centre, 3.0, p.warning);
+        ui.interact(Rect::from_center_size(centre, vec2(16.0, 16.0)), response.id.with("asking"), Sense::hover()).on_hover_text("Waiting for your answer");
+    } else if running {
         // Still working in the background: a dot with a slow ping around it.
         let centre = pos2(right + 8.0 + 4.0, rect.center().y);
         let phase = (ui.input(|i| i.time) % 1.0) as f32;

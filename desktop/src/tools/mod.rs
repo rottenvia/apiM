@@ -90,7 +90,13 @@ impl Output {
     }
     pub fn fail(text: impl Into<String>) -> Output {
         let text = text.into();
-        Output { ok: false, summary: text.lines().next().unwrap_or("").chars().take(160).collect(), text, ..Default::default() }
+        // Cut short, it says so: the step showed "…pass the whole scr" as if that were all.
+        let first = text.lines().next().unwrap_or("");
+        let summary = match first.char_indices().nth(160) {
+            Some((at, _)) => format!("{}…", first[..at].trim_end()),
+            None => first.to_string(),
+        };
+        Output { ok: false, summary, text, ..Default::default() }
     }
     pub fn changed(mut self, rel: &str) -> Output {
         self.changed = Some(rel.to_string());

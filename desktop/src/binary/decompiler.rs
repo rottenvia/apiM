@@ -534,7 +534,8 @@ async fn run_ghidra(tools: &Tools, root: &Path, target: &str, inspection: &PeIns
         return DeepDecompilationResult::new(false, "failed", "ghidra", e.to_string());
     }
     // Ghidra rejects project paths with a dot-prefixed element, so the disposable project lives in the OS temp folder.
-    let project_dir = std::env::temp_dir().join("apim-ghidra-projects").join(&sha[..16.min(sha.len())]);
+    // One folder per analysis, not per file: two chats looking at the same binary deleted each other's project.
+    let project_dir = std::env::temp_dir().join("apim-ghidra-projects").join(format!("{}-{}", &sha[..16.min(sha.len())], crate::store::new_id()));
     let _ = std::fs::remove_dir_all(&project_dir);
     if let Err(e) = std::fs::create_dir_all(&project_dir) {
         return DeepDecompilationResult::new(false, "failed", "ghidra", e.to_string());

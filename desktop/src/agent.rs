@@ -1688,10 +1688,6 @@ impl Stopwatch {
     pub fn start(&mut self) {
         self.0.get_or_insert_with(Instant::now);
     }
-    /// Whole seconds since `start`, while it runs.
-    pub fn secs(&self) -> Option<u64> {
-        self.0.map(|t| t.elapsed().as_secs())
-    }
     /// Milliseconds since `start`, and resets.
     pub fn stop(&mut self) -> u64 {
         self.0.take().map_or(0, |t| t.elapsed().as_millis() as u64)
