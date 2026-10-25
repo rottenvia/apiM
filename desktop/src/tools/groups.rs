@@ -92,7 +92,7 @@ pub const GROUPS: &[Group] = &[
     },
     Group {
         name: "helpers",
-        what: "a read-only helper with a context of its own, for broad surveys and research",
+        what: "a helper with a context of its own, for broad surveys, research, and running something to see what happens; it reads, searches, browses and runs commands and tests, but does not edit files",
         tools: &["delegate"],
         hints: &["research", "survey", "audit", "whole codebase", "across the codebase"],
     },

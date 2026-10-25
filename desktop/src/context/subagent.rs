@@ -1,12 +1,14 @@
-//! Sub-agents: read-only helpers with their own context. Port of src/lib/subagent.ts.
-//! The main agent's context is its most expensive resource: "find where auth is handled" costs dozens of reads that stay
-//! in the transcript for the rest of the run. `delegate` hands such a job to a helper that explores in a SEPARATE context
-//! (its brief, the workspace tree, the read-only tools, a round budget) and returns only a report, which the main agent
-//! reads as one tool result. Several delegate calls in one round run at the same time (the round loop starts them together).
-//! Read-only by construction: the helper is only offered read tools, its calls are refused by name if a model invents one
-//! anyway, and it cannot delegate further.
-//! The tools themselves are the caller's: pass a `ToolRunner` that runs a read-only tool and returns its text (the git
-//! read tools included), turning a failure into "Error: <message>". No dependency on tools/ or agent.rs.
+//! Sub-agents: helpers with their own context. Port of src/lib/subagent.ts, extended so a helper can also run commands.
+//! The main agent's context is its most expensive resource: "find where auth is handled" costs dozens of reads, and
+//! "run it and tell me what happened" costs the command's whole output — all of it staying in the transcript for the rest
+//! of the run. `delegate` hands such a job to a helper that works in a SEPARATE context (its brief, the workspace tree,
+//! the read and exec tools, a round budget) and returns only a report, which the main agent reads as one tool result.
+//! Several delegate calls in one round run at the same time (the round loop starts them together).
+//! A helper may read, search, browse and run commands and tests, but never edit files, and it cannot delegate further:
+//! a tool outside its set is refused by name if a model invents one anyway. A command it runs goes through the same
+//! approval gate as the main agent's — the helper's tool context carries the real settings and approval channel.
+//! The tools themselves are the caller's: pass a `ToolRunner` that runs a tool and returns its text (the git read tools
+//! and run_command included), turning a failure into "Error: <message>". No dependency on tools/ or agent.rs.
 
 use super::{js_head, js_len, js_round, js_trim, js_truthy, post_json, Stop};
 use futures_util::future::join_all;
@@ -18,8 +20,18 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Tools a helper may use. Everything here only reads.
+/// Tools a helper may use to read. Everything here only reads.
 pub const SUBAGENT_TOOLS: [&str; 16] = ["list_files", "read_file", "read_files", "search_files", "read_symbol", "find_references", "query_data", "read_document", "analyze_log", "git_status", "git_diff", "git_log", "fetch_url", "inspect_page", "web_search", "search_conversation"];
+
+/// Tools a helper may use to run things — for "run it and tell me what happened". Each goes through the app's approval
+/// gate (the helper's tool context carries the real settings), so Auto runs it, Critical asks only for the critical ones,
+/// and Ask-me-first asks. Editing files and starting background processes are left to the main agent.
+pub const SUBAGENT_EXEC_TOOLS: [&str; 2] = ["run_command", "run_tests"];
+
+/// Whether a helper may be offered this tool at all — a read tool or an exec tool.
+pub fn helper_tool(name: &str) -> bool {
+    SUBAGENT_TOOLS.contains(&name) || SUBAGENT_EXEC_TOOLS.contains(&name)
+}
 
 /// The `delegate` tool as the main agent sees it.
 pub fn delegate_tool() -> Value {
@@ -28,11 +40,13 @@ pub fn delegate_tool() -> Value {
         "function": {
             "name": "delegate",
             "description": concat!(
-                "Hand a self-contained research job to a helper agent that works in its OWN context and returns only its conclusions. ",
+                "Hand a self-contained job to a helper agent that works in its OWN context and returns only its conclusions. ",
                 "Use it for broad exploration (\"find everything involved in X\", \"how is Y wired end to end\"), reviewing many files, ",
-                "or looking something up on the web — work whose reads you would otherwise carry in your context for the rest of the task. ",
-                "The helper can read, search and browse but cannot change files or run commands. It cannot see this conversation, ",
-                "so the brief must say everything it needs: the goal, what to look at, and what the report must contain. ",
+                "looking something up on the web, or running something to see what happens (\"run it and tell me what it prints\") ",
+                "— work whose reads and output you would otherwise carry in your context for the rest of the task. ",
+                "The helper can read, search, browse and run commands and tests, but it cannot edit files; a command it runs follows ",
+                "this app's approval setting, the same as yours. It cannot see this conversation, ",
+                "so the brief must say everything it needs: the goal, what to look at or run, and what the report must contain. ",
                 "Several delegate calls in the same round run in parallel — split independent questions across them. ",
                 "Do not delegate a single known file read or an edit; do those yourself."
             ),
@@ -65,6 +79,19 @@ Do the task you are given by reading and searching the workspace (and the web, i
 - what you could not find or could not verify, said plainly — never guess and present it as fact.
 
 Work efficiently: read several files at once with read_files, locate things with search_files / find_references / read_symbol rather than opening files one by one, and stop as soon as you can answer. Make reasonable assumptions instead of asking, and state them. Keep the report under about 800 words unless the task needs more. Your final message is the report — no tool call in it.";
+
+/// The helper's system prompt when it also has exec tools (run_command / run_tests). Used instead of SYSTEM only when
+/// those are offered; without them the prompt above is kept, byte-for-byte, so a read-only helper is unchanged.
+const SYSTEM_EXEC: &str = "You are a helper working for a coding agent. You can READ the workspace and (if a tool is offered) the web, and you can RUN commands and tests — but you cannot edit files, delegate further, or ask anyone anything.
+
+Do the task you are given: read and search the workspace, browse the web if a tool for it is offered, and run commands or tests with run_command / run_tests when the task is to see what happens. Then reply with your report. The agent that sent you sees NOTHING you did — only your final report — so the report must stand on its own:
+- concrete findings with file paths and line numbers (path:line), and for anything you ran, what it printed and how it exited,
+- short quoted snippets only where the exact text matters,
+- what you could not find, run or verify, said plainly — never guess and present it as fact.
+
+A command may wait on the user's approval depending on their setting; if one is declined or times out, say so and work around it. There is no shell unless you invoke one: pass the program and its arguments as a list, or run \"powershell\"/\"bash\" with the script as one argument.
+
+Work efficiently: read several files at once with read_files, locate things with search_files / find_references / read_symbol rather than opening files one by one, run a check rather than guessing its result, and stop as soon as you can answer. Make reasonable assumptions instead of asking, and state them. Keep the report under about 800 words unless the task needs more. Your final message is the report — no tool call in it.";
 
 /// Per tool result, inside the helper's own context.
 const RESULT_MAX_CHARS: usize = 24_000;
@@ -251,9 +278,11 @@ fn ready(text: String) -> ToolFuture {
 /// Runs one helper to completion and returns its report. Never panics or errors: a failure is a result with `ok: false`.
 pub async fn run_sub_agent(client: &reqwest::Client, opts: Options) -> SubAgentResult {
     let rounds = js_round(opts.max_rounds.unwrap_or(DEFAULT_ROUNDS)).clamp(1.0, MAX_ROUNDS) as u32;
-    let tools: Vec<Value> = opts.tools.iter().filter(|t| t["function"]["name"].as_str().is_some_and(|n| SUBAGENT_TOOLS.contains(&n) && opts.available.contains(n))).cloned().collect();
+    let tools: Vec<Value> = opts.tools.iter().filter(|t| t["function"]["name"].as_str().is_some_and(|n| helper_tool(n) && opts.available.contains(n))).cloned().collect();
     let allowed: HashSet<&str> = tools.iter().filter_map(|t| t["function"]["name"].as_str()).collect();
-    let mut messages: Vec<Value> = vec![json!({ "role": "system", "content": format!("{SYSTEM}{}", opts.tree) }), json!({ "role": "user", "content": opts.task })];
+    // The exec prompt is used only when the helper actually has run tools; without them SYSTEM is kept byte-for-byte, so a read-only helper is unchanged.
+    let system = if allowed.iter().any(|n| SUBAGENT_EXEC_TOOLS.contains(n)) { SYSTEM_EXEC } else { SYSTEM };
+    let mut messages: Vec<Value> = vec![json!({ "role": "system", "content": format!("{system}{}", opts.tree) }), json!({ "role": "user", "content": opts.task })];
     let mut files_read: Vec<String> = Vec::new();
     let mut tool_calls = 0usize;
     let mut context_chars = context_len(&messages);
@@ -331,7 +360,7 @@ pub async fn run_sub_agent(client: &reqwest::Client, opts: Options) -> SubAgentR
         for call in &calls {
             let name = call["function"]["name"].as_str().unwrap_or("").to_string();
             if !allowed.contains(name.as_str()) {
-                futs.push(ready(format!("Error: {name} is not available to a read-only helper. Use the read and search tools, and put anything that needs a change in your report.")));
+                futs.push(ready(format!("Error: {name} is not available to a helper. Use the read, search and run tools, and put anything that needs a file edit in your report.")));
                 continue;
             }
             let args = match parse_tool_arguments(call["function"]["arguments"].as_str().unwrap_or("{}")) {
@@ -492,7 +521,7 @@ mod tests {
         let replies: Vec<&str> = second["messages"].as_array().unwrap().iter().filter(|m| m["role"] == "tool").map(|m| m["content"].as_str().unwrap()).collect();
         assert_eq!(replies[0], "RESULT read_file");
         assert!(replies[2].starts_with("Error: the arguments were not valid JSON ("), "{replies:?}");
-        assert_eq!(replies[3], "Error: write_file is not available to a read-only helper. Use the read and search tools, and put anything that needs a change in your report.");
+        assert_eq!(replies[3], "Error: write_file is not available to a helper. Use the read, search and run tools, and put anything that needs a file edit in your report.");
         let (content, summary) = format_sub_agent_result(&r);
         assert_eq!(summary, "Helper finished · 2 rounds, 4 tool calls, 2 files read");
         assert!(content.starts_with("Helper report (2 rounds, 4 tool calls, 2 files read).\n\nFound it"));
