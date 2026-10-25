@@ -2,7 +2,6 @@
 //! They drive the `git` on PATH; nothing is ever pushed from here.
 
 use super::{Ctx, Output, bool_arg, clip, list_arg, num_arg, str_arg};
-use crate::store::Approval;
 use serde_json::Value;
 use std::process::Stdio;
 
@@ -54,7 +53,7 @@ async fn current_branch(ctx: &Ctx) -> String {
 
 /// Changing the repository asks first in Manual mode.
 async fn allowed(ctx: &Ctx, what: &str) -> bool {
-    ctx.settings.approval == Approval::Auto || ctx.emit.approve(what, "Changes the git repository in this folder").await
+    !ctx.settings.approval.asks_routine() || ctx.emit.approve(what, "Changes the git repository in this folder").await
 }
 
 pub async fn run(ctx: &Ctx, name: &str, args: &Value) -> Output {

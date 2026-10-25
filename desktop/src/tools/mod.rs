@@ -459,7 +459,16 @@ pub async fn run(name: &str, args: &Value, ctx: &Ctx) -> Output {
         "add_model" => add_model(ctx, args).await,
         "git_pull_base" | "github_push" | "github_create_pr" | "github_pr_status" => github::run(ctx, name, args).await,
         n if n.starts_with("git_") => git::run(ctx, n, args).await,
-        n if winproc::NAMES.contains(&n) => winproc::run(n, args),
+        n if winproc::NAMES.contains(&n) => {
+            // Changing a process the app did not start is a critical action: it asks first in every mode but "Run automatically".
+            if let Some(what) = winproc::changes_a_process(n).filter(|_| ctx.settings.approval.asks_critical()) {
+                let target = args["pid"].as_u64().map(|p| format!(" (pid {p})")).or_else(|| args.get("tids").or_else(|| args.get("tid")).map(|t| format!(" ({t})"))).unwrap_or_default();
+                if !ctx.emit.approve_keyed(&format!("{n}: {what}{target}"), "This changes a running process the app did not start.", "winproc_change").await {
+                    return Output::fail(format!("The user did not allow {n}."));
+                }
+            }
+            winproc::run(n, args)
+        }
         _ => Output::fail(format!("Unknown tool: {name}. Use one of the tools you were given.")),
     }
 }

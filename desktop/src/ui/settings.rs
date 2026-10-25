@@ -834,15 +834,19 @@ fn safety(app: &mut App, ui: &mut Ui) {
     ui.add_space(8.0);
     form::helper(ui, &[Seg::T("When the assistant writes code, it can run it to check whether it works — and fix its own mistakes from the error.")]);
     ui.add_space(10.0);
-    let auto = s.approval == Approval::Auto;
-    if form::option_item(ui, !auto, "Ask me first", if auto { "" } else { "Recommended" }, "You see each command, and each folder it looks into outside the chat's own, and click Run or Skip before anything happens.").clicked() {
+    let approval = s.approval;
+    if form::option_item(ui, approval == Approval::Manual, "Ask me first", if approval == Approval::Manual { "Recommended" } else { "" }, "You see each command, and each folder it looks into outside the chat's own, and click Run or Skip before anything happens.").clicked() {
         s.approval = Approval::Manual;
     }
     ui.add_space(6.0);
-    if form::option_item(ui, auto, "Run automatically", "", "Faster, and closer to how Arena feels. Only a system command that would change this computer still asks.").clicked() {
+    if form::option_item(ui, approval == Approval::Critical, "Ask only for the risky", "", "Runs on its own, but still asks before it installs something into this computer, adds a skill, pushes to a remote, calls an outside tool, or changes another running program.").clicked() {
+        s.approval = Approval::Critical;
+    }
+    ui.add_space(6.0);
+    if form::option_item(ui, approval == Approval::Auto, "Run automatically", "", "Fastest, and closest to how Arena feels. Nothing asks — installing into this computer included.").clicked() {
         s.approval = Approval::Auto;
     }
-    if auto {
+    if approval == Approval::Auto {
         ui.add_space(10.0);
         form::boxed(ui, alpha(p.warning, 7.0), alpha(p.warning, 30.0), 12, (12, 10), |ui| {
             ui.horizontal_top(|ui| {
@@ -853,7 +857,7 @@ fn safety(app: &mut App, ui: &mut Ui) {
                 });
                 form::para(
                     ui,
-                    "Code the assistant writes will run on this computer without asking, and so will a program it builds or downloads into the chat's folder. It can read files anywhere on this computer, except the places that keep sign-ins and keys, and run system commands that only look; one that would change or delete something still asks. Each command is stopped after a time limit — but a program it runs has the same access to your files that you do. Keep a restore point.",
+                    "Code the assistant writes will run on this computer without asking, and so will a program it builds or downloads into the chat's folder and a package it installs into this computer. It can read files anywhere on this computer, except the places that keep sign-ins and keys, and run system commands; only the few that take the computer itself apart are refused outright. Each command is stopped after a time limit — but a program it runs has the same access to your files that you do. Keep a restore point.",
                     12.0,
                     16.0,
                     W::Regular,
