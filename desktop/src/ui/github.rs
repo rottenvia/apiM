@@ -695,7 +695,8 @@ fn choose(ui: &mut Ui, st: &mut State) -> Option<Do> {
     let chosen = st.selected.as_ref().map(|repo| repo.full_name.as_str());
     egui::ScrollArea::vertical().id_salt("github-repos").max_height(288.0).auto_shrink([false, true]).show(ui, |ui| {
         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
-        if visible.is_empty() && st.app.is_some() && st.repos.is_empty() {
+        // Said only when GitHub answered: a listing that failed says why, below, and claims nothing about the app.
+        if visible.is_empty() && st.app.is_some() && st.repos.is_empty() && st.error.is_empty() {
             ui.add_space(12.0);
             let none = row(ui, 36.0);
             let words = widgets::galley(ui, "apiM's app is not on any repository yet.", theme::font(12.0, W::Regular), p.muted);

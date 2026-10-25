@@ -38,11 +38,12 @@ pub fn env_token() -> Option<String> {
     ["GITHUB_TOKEN", "GITHUB_PAT"].iter().filter_map(|k| std::env::var(k).ok()).map(|v| v.trim().to_string()).find(|v| !v.is_empty())
 }
 
-/// Does this look like a GitHub access token? The prefixed kinds (`ghp_…`, `github_pat_…`) and bare legacy tokens
-/// are all 20 or more letters, digits and underscores; a pasted sentence is not, and must never be sent as a header.
+/// Does this look like a GitHub access token? 20 or more letters, digits, `_`, `.` and `-`; a pasted sentence is not,
+/// and must never be sent as a header. The dot and dash are GitHub's since April 2026: an installation token is now
+/// `ghs_<app id>_<JWT>`, some 520 characters, and the old letters-only shape threw every one of them away.
 pub fn looks_like_token(value: &str) -> bool {
     let t = value.trim();
-    t.len() >= 20 && t.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    t.len() >= 20 && t.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
 }
 
 /// The token to use: the saved one, else the environment's. A saved value that is not token-shaped is an error.
@@ -312,7 +313,7 @@ pub async fn connect(ws: &Ws, api: &Api, opt: &Connect) -> Result<Connection, St
     if !clone_url.starts_with("https://github.com/") {
         return Err("GitHub did not return a valid clone URL".into());
     }
-    clone_to_workspace(ws, Some(&api.token), clone_url, opt).await
+    clone_to_workspace(ws, Some(&api.token), clone_url, opt, crate::github_app::identity()).await
 }
 
 /// Copies a tree without overwriting anything already there: the user's files win, the rest of the project is
@@ -335,8 +336,8 @@ fn merge_tree(from: &Path, to: &Path) -> std::io::Result<()> {
 }
 
 /// Clones `clone_url` and lays it over the workspace on a dedicated working branch. Public on its own so tests can
-/// use a local bare repository as the remote.
-pub async fn clone_to_workspace(ws: &Ws, token: Option<&str>, clone_url: &str, opt: &Connect) -> Result<Connection, String> {
+/// use a local bare repository as the remote. Its commits are made as `(name, email)`.
+pub async fn clone_to_workspace(ws: &Ws, token: Option<&str>, clone_url: &str, opt: &Connect, (name, email): (String, String)) -> Result<Connection, String> {
     let repo = assert_repo(&opt.repo)?;
     let base = assert_branch(&opt.base_branch)?;
     let cont = if opt.continue_branch.trim().is_empty() { String::new() } else { assert_branch(&opt.continue_branch)? };
@@ -354,7 +355,6 @@ pub async fn clone_to_workspace(ws: &Ws, token: Option<&str>, clone_url: &str, o
     std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
 
     let io = |e: std::io::Error| e.to_string();
-    let (name, email) = crate::github_app::identity();
     let identity = |dir: PathBuf| {
         let (name, email) = (name.clone(), email.clone());
         async move {
@@ -509,6 +509,11 @@ pub(crate) mod tests {
     /// Invented for the tests. Never a real token.
     pub(crate) const FAKE: &str = "ghp_testFAKEtoken0123456789abcdefghijkl";
 
+    /// The agent's own name for commits: a test never reads the app this computer may have set up.
+    pub(crate) fn agent() -> (String, String) {
+        ("apiM Agent".into(), "apim-agent@users.noreply.github.com".into())
+    }
+
     /// Does this text carry the fake token, raw or in the form git is handed?
     pub(crate) fn leaks(text: &str) -> bool {
         text.contains(FAKE) || text.contains(&basic_auth(FAKE))
@@ -588,7 +593,7 @@ pub(crate) mod tests {
     /// Connects the fixture's workspace to its remote as `octo/demo`, and keeps commit signing out of the tests.
     pub(crate) async fn connected(name: &str) -> (Ws, String, Connection) {
         let (ws, remote) = fixture(name).await;
-        let c = clone_to_workspace(&ws, Some(FAKE), &remote, &Connect { repo: "octo/demo".into(), base_branch: "main".into(), task: "Fix the Login!".into(), ..Default::default() }).await.unwrap();
+        let c = clone_to_workspace(&ws, Some(FAKE), &remote, &Connect { repo: "octo/demo".into(), base_branch: "main".into(), task: "Fix the Login!".into(), ..Default::default() }, agent()).await.unwrap();
         sh(&ws.root, &["config", "commit.gpgsign", "false"]).await;
         (ws, remote, c)
     }
@@ -597,6 +602,7 @@ pub(crate) mod tests {
     fn names_and_tokens_are_checked() {
         assert!(looks_like_token(FAKE) && looks_like_token(&format!("github_pat_{}", "a".repeat(40))));
         assert!(!looks_like_token("short") && !looks_like_token("this is a sentence, not a token at all"));
+        assert!(looks_like_token(&format!("ghs_123456_eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiJnaXRodWIifQ.{}-_x", "a".repeat(300))));
         assert_eq!(resolve_token(" not a token ").unwrap_err(), "That does not look like a GitHub access token.");
         assert_eq!(resolve_token(FAKE).unwrap().as_deref(), Some(FAKE));
         assert_eq!(assert_repo(" octo/demo.js ").unwrap(), "octo/demo.js");
@@ -668,8 +674,8 @@ pub(crate) mod tests {
         std::fs::write(ws.root.join("notes.txt"), "mine\n").unwrap();
         std::fs::write(ws.root.join("README.md"), "my own readme\n").unwrap();
         let opt = Connect { repo: "octo/demo".into(), base_branch: "main".into(), task: "Fix the Login!".into(), ..Default::default() };
-        assert_eq!(clone_to_workspace(&ws, Some(FAKE), &remote, &Connect { continue_branch: "main".into(), ..opt.clone() }).await.unwrap_err(), "Pick a branch other than the base to continue — the base branch is never committed to");
-        let c = clone_to_workspace(&ws, Some(FAKE), &remote, &opt).await.unwrap();
+        assert_eq!(clone_to_workspace(&ws, Some(FAKE), &remote, &Connect { continue_branch: "main".into(), ..opt.clone() }, agent()).await.unwrap_err(), "Pick a branch other than the base to continue — the base branch is never committed to");
+        let c = clone_to_workspace(&ws, Some(FAKE), &remote, &opt, agent()).await.unwrap();
         sh(&ws.root, &["config", "commit.gpgsign", "false"]).await;
         assert!(c.working_branch.starts_with("apim/fix-the-login-") && c.base_branch == "main" && c.repo == "octo/demo");
         assert_eq!(std::fs::read_to_string(ws.root.join("README.md")).unwrap(), "my own readme\n", "the user's copy wins");
