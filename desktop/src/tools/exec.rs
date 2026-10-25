@@ -245,7 +245,7 @@ fn shell(ctx: &Ctx, command: &str, argv: Vec<String>) -> Result<Launch, String> 
         return Err(format!("The command names a place that is not read: {}", super::files::CLOSED_WHY));
     }
     let Some(program) = find_program(&ctx.root, command) else { return Err(format!("`{command}` was not found on this machine.")) };
-    let ask = ctx.settings.approval == Approval::Manual;
+    let ask = ctx.settings.approval.asks_routine();
     if let Some(why) = shell_wrecks(&script, &ctx.root).filter(|_| !ask) {
         return Err(why.into());
     }
@@ -365,9 +365,10 @@ fn prepare(ctx: &Ctx, command: &str, argv: Vec<String>) -> Result<Launch, String
     if !own && command.contains(['/', '\\']) && !super::build::is_toolchain(&program) {
         return Err(format!("`{command}` is outside the workspace. Run programs by name, e.g. `node`, or by a path inside the workspace."));
     }
-    // "Run automatically" asks about nothing but an install into the machine. Otherwise a program from the workspace
-    // (built there, or downloaded) always asks, and an allowed program asks unless it merely looks.
-    let ask = (ctx.settings.approval == Approval::Manual && (own || !read_only(&name, &argv))) || (!own && installs_on_machine(&name, &argv));
+    // "Ask me first" asks for a workspace program or any command that is not a mere look. "Critical only" asks for
+    // an install into the machine but nothing else. "Run automatically" asks for nothing, installs included.
+    let ask = (ctx.settings.approval.asks_routine() && (own || !read_only(&name, &argv)))
+        || (ctx.settings.approval.asks_critical() && !own && installs_on_machine(&name, &argv));
     let display = std::iter::once(command.to_string()).chain(argv.iter().map(|a| if a.contains(' ') { format!("\"{a}\"") } else { a.clone() })).collect::<Vec<_>>().join(" ");
     let key = serde_json::to_string(&std::iter::once(name).chain(argv.iter().cloned()).collect::<Vec<_>>()).unwrap_or_default();
     Ok(Launch { program, args: argv, display, key, ask })
@@ -1167,17 +1168,19 @@ mod tests {
         let prep = |approval, command: &str, args: &[&str]| prepare(&crate::tools::test_ctx(&dir, approval), command, args.iter().map(|a| a.to_string()).collect());
         assert!(prep(Approval::Auto, "reg", &["add", r"HKCU\x"]).err().unwrap().starts_with("Only the forms of reg that look are run here: reg query."));
         assert!(prep(Approval::Auto, "wevtutil", &["cl", "Application"]).is_err() && prep(Approval::Auto, "ipconfig", &["/release"]).is_err());
-        // Running automatically, an install into the machine still asks; one into the workspace, or a look, does not.
-        // A program this machine lacks is the one excuse.
-        let asks = |command: &str, args: &[&str], want: bool| match prep(Approval::Auto, command, args) {
-            Ok(launch) => assert_eq!(launch.ask, want, "{command} {args:?}"),
+        // "Critical only" asks for an install into the machine; "Run automatically" asks for nothing, installs included.
+        // One into the workspace, or a look, asks in neither. A program this machine lacks is the one excuse.
+        let asks = |approval, command: &str, args: &[&str], want: bool| match prep(approval, command, args) {
+            Ok(launch) => assert_eq!(launch.ask, want, "{approval:?} {command} {args:?}"),
             Err(e) => assert!(e.contains("was not found"), "{command} {args:?}: {e}"),
         };
         for (command, args) in [("pip", &["install", "pytest"][..]), ("python", &["-m", "pip", "install", "-U", "pytest"]), ("npm", &["i", "-g", "serve"]), ("cargo", &["install", "ripgrep"])] {
-            asks(command, args, true);
+            asks(Approval::Critical, command, args, true);
+            asks(Approval::Auto, command, args, false);
         }
         for (command, args) in [("pip", &["list"][..]), ("pip", &["install", "--target", "deps", "x"]), ("python", &["-m", "unittest"]), ("npm", &["install", "lodash"]), ("cargo", &["build"])] {
-            asks(command, args, false);
+            asks(Approval::Critical, command, args, false);
+            asks(Approval::Auto, command, args, false);
         }
         let words = |args: &[&str]| args.iter().map(|a| a.to_string()).collect::<Vec<_>>();
         assert!(installs_on_machine("python", &words(&["-m", "pip", "install", "pytest"])) && !installs_on_machine("python", &words(&["-m", "pip", "list"])));

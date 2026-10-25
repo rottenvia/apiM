@@ -62,8 +62,23 @@ pub enum Approval {
     /// Reading is free; commands and other risky actions ask first.
     #[default]
     Manual,
-    /// The agent runs commands without asking.
+    /// The agent runs on its own, but still asks before the critical actions: an install into the
+    /// machine, adding a skill, and changing a process the app did not start.
+    Critical,
+    /// The agent runs everything without asking, installs included.
     Auto,
+}
+
+impl Approval {
+    /// Manual only: the user approves each command and change that is not plain reading.
+    pub fn asks_routine(self) -> bool {
+        matches!(self, Approval::Manual)
+    }
+    /// Manual and Critical: the user approves the critical actions — an install into the machine,
+    /// adding a skill, changing a process the app did not start. Auto approves nothing.
+    pub fn asks_critical(self) -> bool {
+        !matches!(self, Approval::Auto)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

@@ -2,7 +2,6 @@
 //! (src/app/api/chat/route.ts: the sandbox_screenshot and sandbox_run branches).
 
 use crate::sandbox::run;
-use crate::store::Approval;
 use crate::tools::{Ctx, Output, str_arg};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -50,8 +49,8 @@ pub async fn sandbox_run_with(wsl: &Path, ctx: &Ctx, args: &Value) -> Output {
     }
     let background = args["background"].as_bool() == Some(true);
     let display = display_line(&script, background);
-    // Same gate as run_command: Auto mode runs it, otherwise the card asks. "Always allow" is remembered by the key.
-    if ctx.settings.approval != Approval::Auto {
+    // The sandbox is isolated, so only "Ask me first" shows the card; the two running modes run it unasked. "Always allow" is remembered by the key.
+    if ctx.settings.approval.asks_routine() {
         let reason = str_arg(args, "reason").trim();
         let key = serde_json::to_string(&["sandbox", script.as_str()]).unwrap_or_default();
         // Stricter than the web: the card shows the whole command. The web cuts it at 80 characters, which lets a long tail be approved unseen.
