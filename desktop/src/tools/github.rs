@@ -23,8 +23,15 @@ pub fn ws(ctx: &Ctx) -> Ws {
 }
 
 pub async fn run(ctx: &Ctx, name: &str, args: &Value) -> Output {
-    let token = github::resolve_token(&ctx.settings.github_token).ok().flatten();
-    run_at(ctx, &ws(ctx), github::API, token.as_deref(), name, args).await
+    let ws = ws(ctx);
+    let repo = github::read_connection(&ws).map(|c| c.repo);
+    let token = match github::token_for(&ctx.settings.github_token, repo.as_deref()).await {
+        Ok(token) => token,
+        // apiM's app is set up but not installed on this repository, and no token stands in: said as it is, with where to add it.
+        Err(e) if name != "git_pull_base" => return failed(name, &e),
+        Err(_) => None,
+    };
+    run_at(ctx, &ws, github::API, token.as_deref(), name, args).await
 }
 
 /// Pushing and opening a pull request ask first, unless commands run automatically. A remembered answer is the

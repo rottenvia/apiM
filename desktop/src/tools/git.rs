@@ -110,7 +110,17 @@ pub async fn run(ctx: &Ctx, name: &str, args: &Value) -> Output {
             if !ok {
                 return Output::fail(format!("git add failed: {out}"));
             }
-            let (ok, out) = git(ctx, &["commit", "-m", message]).await;
+            // A repository connected through the GitHub dialog commits as apiM's app when there is one, a clone made
+            // before the app included: its commits then show on GitHub as the app, beside the pull request it opens.
+            let who = match (crate::github::read_connection(&super::github::ws(ctx)), crate::github_app::load()) {
+                (Some(_), Some(app)) => {
+                    let (name, email) = app.identity();
+                    vec!["-c".to_string(), format!("user.name={name}"), "-c".to_string(), format!("user.email={email}")]
+                }
+                _ => Vec::new(),
+            };
+            let argv: Vec<&str> = who.iter().map(String::as_str).chain(["commit", "-m", message]).collect();
+            let (ok, out) = git(ctx, &argv).await;
             Output { ok, ..Output::ok(out, format!("Committed: {}", message.lines().next().unwrap_or(""))) }
         }
         "git_branch" => {

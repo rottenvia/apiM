@@ -72,7 +72,9 @@ pub fn expand(path: &str) -> String {
 /// Places that keep sign-ins and keys. They are not read for a model in any approval mode: what a tool reads goes
 /// to the model's provider, and a page the model was shown can ask it to go and fetch one.
 // ponytail: the common places, matched on the path alone. A program the model writes and runs is not held by it.
-const CLOSED: &[&str] = &["/.ssh", "/.gnupg", "/.aws", "/user data", "/firefox/profiles", "/microsoft/credentials", "/microsoft/protect", "/system32/config"];
+/// The app's own keys are in the list too: a PowerShell command is held to this list alone, and `settings.json`
+/// was only kept from the file tools.
+const CLOSED: &[&str] = &["/.ssh", "/.gnupg", "/.aws", "/user data", "/firefox/profiles", "/microsoft/credentials", "/microsoft/protect", "/system32/config", "/apim/settings.json", "/apim/github-app.json"];
 const CLOSED_FILES: &[&str] = &[".env", ".netrc", "_netrc", ".git-credentials", ".npmrc", ".pypirc"];
 pub const CLOSED_WHY: &str = "that place keeps sign-ins or keys, and apiM does not read it for a model. If the task needs one file from it, ask the user to copy that file into the workspace.";
 
@@ -84,7 +86,7 @@ pub fn closed_text(text: &str) -> bool {
 
 fn closed(path: &Path) -> bool {
     let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
-    let own = [crate::store::config_dir(), crate::store::data_dir()].iter().any(|dir| path == dir.join("settings.json"));
+    let own = [crate::store::config_dir(), crate::store::data_dir()].iter().any(|dir| path == dir.join("settings.json") || path == dir.join("github-app.json"));
     own || closed_text(&format!("{}/", path.display())) || CLOSED_FILES.iter().any(|file| name == *file || name.starts_with(&format!("{file}."))) || name.ends_with(".kdbx")
 }
 
@@ -1236,6 +1238,7 @@ mod tests {
         assert!(resolve_look(&root, &full(".env")).unwrap_err().contains("keeps sign-ins or keys"));
         assert!(closed(Path::new("C:/Users/x/.ssh/id_ed25519")) && closed(Path::new("C:/Users/x/AppData/Local/Vendor/Browser/User Data/Default/Cookies")) && !closed(Path::new("C:/Users/x/AppData/Local/Game/logs/a.log")));
         assert!(closed_text(r"Get-Content C:\Users\x\.ssh\id_rsa") && !closed_text("Get-Process | Sort-Object CPU"));
+        assert!(closed_text(r"Get-Content $env:APPDATA\apiM\settings.json") && closed_text(r"gc C:\Users\x\AppData\Roaming\apiM\github-app.json"));
         unsafe { std::env::set_var("APIM_TEST_PLACE", &out) };
         assert_eq!(Path::new(&expand("%APIM_TEST_PLACE%/crash.log")), out.join("crash.log"));
         assert_eq!(Path::new(&expand("$env:APIM_TEST_PLACE/crash.log")), out.join("crash.log"));

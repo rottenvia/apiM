@@ -1,10 +1,11 @@
-//! The GitHub connector (src/components/GitHubConnector.tsx): sign in with a token, pick a repository and a branch,
-//! then watch what the workspace changes and open its pull request. Opened from the rail's GitHub button.
+//! The GitHub connector (src/components/GitHubConnector.tsx): set up apiM's own GitHub App or sign in with a token,
+//! pick a repository and a branch, then watch what the workspace changes and open its pull request. Opened from the
+//! rail's GitHub button.
 //!
 //! GitHub and git are never called on the window's thread: each job runs on the app's runtime and posts its
 //! result to the dialog's inbox.
-// ponytail: the "Continue with GitHub" OAuth button is not here (no registered app on the desktop), the repository
-// grid is always two columns, the description box has no resize handle, and the chevrons turn without easing.
+// ponytail: the repository grid is always two columns, the description box has no resize handle, and the chevrons
+// turn without easing.
 
 use super::form::{self, Btn, Input};
 use super::overlay::{self, Card};
@@ -13,6 +14,7 @@ use super::theme::{self, W, alpha, p};
 use super::{App, icons, widgets};
 use crate::git_agent::{self, PrStatus};
 use crate::github::{self, Api, Changes, Connect, Connection, Repo, Ws};
+use crate::github_app;
 use crate::store::{Conversation, Settings};
 use eframe::egui::{self, Color32, CursorIcon, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use std::sync::mpsc;
@@ -40,6 +42,8 @@ enum Msg {
     Changes(Option<Changes>),
     Pr(Option<PrStatus>, Option<(String, String, usize)>),
     PrOpened(Result<(), String>),
+    /// GitHub sent the browser back and the app is saved, or why not.
+    AppMade(Result<github_app::App, String>),
 }
 
 struct Inbox(mpsc::Sender<Msg>, mpsc::Receiver<Msg>);
@@ -89,6 +93,13 @@ pub struct State {
     pr_body: String,
     pr_draft: bool,
     polled: Option<Instant>,
+    /// apiM's own GitHub App, when it is set up: the work is done as it, ahead of any token.
+    app: Option<github_app::App>,
+    /// The page that starts making the app, while GitHub's answer is waited for.
+    making_app: Option<String>,
+    /// Repositories may have been added to the app in the browser: read them again when the window is back in front.
+    awaiting_install: bool,
+    focused: bool,
     inbox: Inbox,
 }
 
@@ -96,6 +107,8 @@ pub struct State {
 enum Do {
     Verify,
     SignOut,
+    MakeApp,
+    AddRepos,
     Choose(Repo),
     Connect,
     TurnOff,
@@ -134,6 +147,9 @@ pub fn stage(app: &mut App, token: &str) {
         "-verifying" => State { show_pat: true, busy: true, pat: "ghp_sampleSampleSampleSample0000".into(), ..Default::default() },
         "-error" => State { show_pat: true, pat: "ghp_sampleSampleSampleSample0000".into(), error: "That token did not authenticate with GitHub. Check it has the repo scope.".into(), ..Default::default() },
         "-loading" => State { loading: true, ..Default::default() },
+        "-app-waiting" => State { making_app: Some("http://127.0.0.1:50000/".into()), ..Default::default() },
+        "-app-repos" => State { app: Some(github_app::App { id: 1, slug: "apim-mona".into(), ..Default::default() }), login: "apim-mona[bot]".into(), ..signed_in },
+        "-app-empty" => State { app: Some(github_app::App { id: 1, slug: "apim-mona".into(), ..Default::default() }), connected: true, login: "apim-mona[bot]".into(), ..Default::default() },
         "-repos" => State { query: "octo".into(), ..signed_in },
         "-repo" => State { task: "Fix the login redirect".into(), ..picked(signed_in) },
         "-cloning" => State { continuing: true, continue_branch: "apim/fix-login-redirect-k3x9qa".into(), busy: true, ..picked(signed_in) },
@@ -154,9 +170,23 @@ fn spawn(rt: &Runtime, ctx: &egui::Context, st: &State, work: impl std::future::
     });
 }
 
-/// The token for a request: what is typed in the box, else the saved one, else the environment's.
-fn token(st: &State, settings: &Settings) -> Result<Option<String>, String> {
-    github::resolve_token(if st.pat.trim().is_empty() { &settings.github_token } else { &st.pat })
+/// The token typed in the box, else the saved one. The environment's stands in for both (`github::resolve_token`).
+fn pat(st: &State, settings: &Settings) -> String {
+    if st.pat.trim().is_empty() { settings.github_token.clone() } else { st.pat.clone() }
+}
+
+/// GitHub for work on `repo`: as apiM's app where it is installed, else with the token (`github::token_for`).
+async fn signed_in(pat: &str, repo: &str) -> Result<Api, String> {
+    match github::token_for(pat, Some(repo)).await? {
+        Some(token) => Ok(Api::new(&token)),
+        None => Err(NOT_CONNECTED.into()),
+    }
+}
+
+/// The repositories apiM's app is installed on, read again.
+fn load_app_repos(st: &State, rt: &Runtime, ctx: &egui::Context) {
+    let Some(app) = st.app.clone() else { return };
+    spawn(rt, ctx, st, async move { Msg::Account(Some(app.bot()), github_app::repos(&app, &Api::new("")).await) });
 }
 
 /// Reads the clone only: no token, no network.
@@ -168,12 +198,12 @@ fn load_changes(st: &mut State, rt: &Runtime, ctx: &egui::Context) {
 
 /// The pull request's state comes from GitHub, so it is read on open and after actions, not on the poll.
 fn load_pr(st: &State, settings: &Settings, rt: &Runtime, ctx: &egui::Context) {
-    let (ws, token) = (st.ws.clone(), token(st, settings).ok().flatten());
+    let (ws, pat, repo) = (st.ws.clone(), pat(st, settings), st.connection.as_ref().map(|c| c.repo.clone()).unwrap_or_default());
     spawn(rt, ctx, st, async move {
         let suggestion = git_agent::suggest_pr(&ws).await.ok();
-        let pr = match token {
-            Some(token) => git_agent::pr_status(&ws, &Api::new(&token)).await.ok().flatten(),
-            None => None,
+        let pr = match signed_in(&pat, &repo).await {
+            Ok(api) => git_agent::pr_status(&ws, &api).await.ok().flatten(),
+            Err(_) => None,
         };
         Msg::Pr(pr, suggestion)
     });
@@ -181,13 +211,18 @@ fn load_pr(st: &State, settings: &Settings, rt: &Runtime, ctx: &egui::Context) {
 
 fn load(st: &mut State, settings: &Settings, rt: &Runtime, ctx: &egui::Context) {
     st.pat = settings.github_token.trim().to_string();
-    st.configured = !st.pat.is_empty() || github::env_token().is_some();
+    st.app = github_app::load();
+    st.configured = st.app.is_some() || !st.pat.is_empty() || github::env_token().is_some();
     st.connection = github::read_connection(&st.ws);
     if st.connection.is_some() {
         load_changes(st, rt, ctx);
         load_pr(st, settings, rt, ctx);
     }
-    let token = token(st, settings).ok().flatten();
+    // apiM's own app comes first: it is who the work is done as.
+    if st.app.is_some() {
+        return load_app_repos(st, rt, ctx);
+    }
+    let token = github::resolve_token(&pat(st, settings)).ok().flatten();
     spawn(rt, ctx, st, async move {
         let Some(token) = token else { return Msg::Account(None, Ok(Vec::new())) };
         let api = Api::new(&token);
@@ -259,6 +294,16 @@ fn receive(st: &mut State, msg: Msg, settings: &mut Settings, files_stale: &mut 
                 Err(error) => st.error = error,
             }
         }
+        // The browser goes on to GitHub's page for picking the app's repositories; they are read when the window is back.
+        Msg::AppMade(Ok(app)) => {
+            st.making_app = None;
+            (st.login, st.connected, st.configured, st.awaiting_install) = (app.bot(), true, true, true);
+            st.repos.clear();
+            st.app = Some(app);
+        }
+        // A wait left behind by a second try runs out later: it says nothing once the app is there.
+        Msg::AppMade(Err(error)) if st.app.is_none() => (st.making_app, st.error) = (None, error),
+        Msg::AppMade(Err(_)) => {}
     }
 }
 
@@ -282,24 +327,49 @@ fn perform(st: &mut State, act: Do, settings: &mut Settings, files_stale: &mut b
             });
         }
         Do::SignOut => {
-            settings.github_token.clear();
-            settings.save();
-            st.pat.clear();
             st.repos.clear();
             (st.connected, st.selected) = (false, None);
+            if st.app.take().is_some() {
+                // This computer forgets the app's key; the app stays on GitHub, where its page has Delete. A token, if there is one, is used again.
+                github_app::forget();
+                load(st, settings, rt, ctx);
+            } else {
+                settings.github_token.clear();
+                settings.save();
+                st.pat.clear();
+            }
+        }
+        Do::MakeApp => {
+            st.error.clear();
+            match github_app::begin(&st.login) {
+                Ok(setup) => {
+                    ctx.open_url(egui::OpenUrl::new_tab(setup.url.clone()));
+                    st.making_app = Some(setup.url.clone());
+                    spawn(rt, ctx, st, async move { Msg::AppMade(github_app::finish(setup).await) });
+                }
+                Err(error) => st.error = error,
+            }
+        }
+        Do::AddRepos => {
+            if let Some(app) = &st.app {
+                ctx.open_url(egui::OpenUrl::new_tab(app.install_url()));
+                st.awaiting_install = true;
+            }
         }
         Do::Choose(repo) => {
             st.branch = repo.default_branch.clone();
             st.branches.clear();
             st.continue_branch.clear();
             st.error.clear();
-            let name = repo.full_name.clone();
+            let (name, pat) = (repo.full_name.clone(), pat(st, settings));
             st.selected = Some(repo);
-            match token(st, settings) {
-                Ok(Some(token)) => spawn(rt, ctx, st, async move { Msg::Branches(name.clone(), github::list_branches(&Api::new(&token), &name).await) }),
-                Ok(None) => st.error = NOT_CONNECTED.into(),
-                Err(error) => st.error = error,
-            }
+            spawn(rt, ctx, st, async move {
+                let branches = match signed_in(&pat, &name).await {
+                    Ok(api) => github::list_branches(&api, &name).await,
+                    Err(error) => Err(error),
+                };
+                Msg::Branches(name, branches)
+            });
         }
         Do::Connect => {
             let Some(repo) = st.selected.clone().filter(|_| !st.branch.is_empty() && !st.busy) else { return };
@@ -309,15 +379,14 @@ fn perform(st: &mut State, act: Do, settings: &mut Settings, files_stale: &mut b
             }
             st.error.clear();
             let opt = Connect { repo: repo.full_name, base_branch: st.branch.clone(), task: if st.continuing { String::new() } else { st.task.trim().chars().take(200).collect() }, continue_branch: if st.continuing { st.continue_branch.clone() } else { String::new() } };
-            match token(st, settings) {
-                Ok(Some(token)) => {
-                    st.busy = true;
-                    let ws = st.ws.clone();
-                    spawn(rt, ctx, st, async move { Msg::Connected(github::connect(&ws, &Api::new(&token), &opt).await) });
-                }
-                Ok(None) => st.error = "GitHub is not connected — add a Personal Access Token or sign in with GitHub OAuth.".into(),
-                Err(error) => st.error = error,
-            }
+            st.busy = true;
+            let (ws, pat) = (st.ws.clone(), pat(st, settings));
+            spawn(rt, ctx, st, async move {
+                Msg::Connected(match signed_in(&pat, &opt.repo).await {
+                    Ok(api) => github::connect(&ws, &api, &opt).await,
+                    Err(error) => Err(error),
+                })
+            });
         }
         // Off: the files stay put and nothing more is pushed.
         Do::TurnOff => {
@@ -342,15 +411,15 @@ fn perform(st: &mut State, act: Do, settings: &mut Settings, files_stale: &mut b
                 return;
             }
             st.error.clear();
-            match token(st, settings) {
-                Ok(Some(token)) => {
-                    st.busy = true;
-                    let (ws, title, body, draft) = (st.ws.clone(), st.pr_title.trim().to_string(), st.pr_body.clone(), st.pr_draft);
-                    spawn(rt, ctx, st, async move { Msg::PrOpened(git_agent::create_pr(&ws, &Api::new(&token), &title, &body, draft).await.map(|_| ())) });
-                }
-                Ok(None) => st.error = NOT_CONNECTED.into(),
-                Err(error) => st.error = error,
-            }
+            st.busy = true;
+            let (ws, pat, title, body, draft) = (st.ws.clone(), pat(st, settings), st.pr_title.trim().to_string(), st.pr_body.clone(), st.pr_draft);
+            let repo = st.connection.as_ref().map(|c| c.repo.clone()).unwrap_or_default();
+            spawn(rt, ctx, st, async move {
+                Msg::PrOpened(match signed_in(&pat, &repo).await {
+                    Ok(api) => git_agent::create_pr(&ws, &api, &title, &body, draft).await.map(|_| ()),
+                    Err(error) => Err(error),
+                })
+            });
         }
         Do::Link(url) => ctx.open_url(egui::OpenUrl::new_tab(url)),
     }
@@ -366,6 +435,11 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         }
         while let Ok(msg) = st.inbox.1.try_recv() {
             receive(st, msg, settings, files_stale, rt, ctx);
+        }
+        // Back from GitHub's page for the app's repositories: what was added there shows without reopening the dialog.
+        let focused = ctx.input(|i| i.viewport().focused).unwrap_or(true);
+        if focused && !std::mem::replace(&mut st.focused, focused) && st.awaiting_install {
+            load_app_repos(st, rt, ctx);
         }
         // The agent may be editing while this is open: the change summary is read again every five seconds.
         if st.connection.is_some() {
@@ -534,12 +608,30 @@ fn signed_out(ui: &mut Ui, st: &mut State) -> Option<Do> {
     let words = widgets::galley(ui, "Connect GitHub", theme::font(15.0, W::Semibold), p.text);
     widgets::text_at(ui, title.center().x - words.size().x / 2.0, title.center().y, words);
     ui.add_space(4.0);
-    mixed(ui, 12.0, 20.0, p.muted, Some(384.0), &[("Click below, authorize apiM on GitHub, and pick a repository and branch. The repo is cloned into this workspace and the agent pushes only a dedicated ", Face::Sans), ("apim/…", Face::Mono), (" branch.", Face::Sans)]);
-    ui.add_space(48.0);
+    mixed(ui, 12.0, 20.0, p.muted, Some(384.0), &[("apiM works on GitHub as its own app, on the repositories you add it to and nowhere else. Each repo is cloned into the workspace; the agent pushes only a dedicated ", Face::Sans), ("apim/…", Face::Mono), (" branch and opens its pull request.", Face::Sans)]);
+    ui.add_space(32.0);
 
-    let host = if st.configured { ", or ask the host to set GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET" } else { "" };
-    form::boxed(ui, alpha(p.warning, 8.0), alpha(p.warning, 30.0), 12, (12, 12), |ui| form::para(ui, &format!("This apiM instance has no GitHub OAuth app registered. Use a Personal Access Token below{host}."), 12.0, 20.0, W::Regular, p.text2));
-    ui.add_space(16.0);
+    // The way in: one click on GitHub makes the app, a second picks its repositories.
+    let line = row(ui, 40.0);
+    let button = Rect::from_center_size(line.center(), vec2(280.0, 40.0));
+    let waiting = st.making_app.is_some();
+    if part(ui, button, |ui| accent(if waiting { "Waiting for GitHub…" } else { "Set up apiM's GitHub App" }, 13.0, (16.0, 10.0)).width(280.0).enabled(!waiting).show(ui)).clicked() {
+        act = Some(Do::MakeApp);
+    }
+    ui.add_space(10.0);
+    if let Some(url) = st.making_app.clone() {
+        let hint = row(ui, 18.0);
+        let words = widgets::galley(ui, "Finish on GitHub, in your browser. Tab closed?", theme::font(11.0, W::Regular), p.muted);
+        let again = widgets::galley(ui, "Open it again", theme::font(11.0, W::Medium), Color32::WHITE);
+        let left = hint.center().x - (words.size().x + 4.0 + again.size().x) / 2.0;
+        let x = left + widgets::text_at(ui, left, hint.center().y, words) + 4.0;
+        if link(ui, "github-app-again", (x, hint.center().y), false, "Open it again", theme::font(11.0, W::Medium), p.accent, p.accent).clicked() {
+            act = Some(Do::Link(url));
+        }
+    } else {
+        mixed(ui, 11.0, 18.0, p.muted, Some(560.0), &[("GitHub's form opens in your browser, filled in. Press ", Face::Sans), ("Create GitHub App", Face::Bold), (", then pick the repositories.", Face::Sans)]);
+    }
+    ui.add_space(32.0);
 
     section(ui, |ui| {
         let (head, hit) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::click());
@@ -586,8 +678,13 @@ fn choose(ui: &mut Ui, st: &mut State) -> Option<Do> {
     let top = row(ui, 18.0);
     let x = top.left() + widgets::text_at(ui, top.left(), top.center().y, widgets::galley(ui, "Connected as ", theme::font(12.0, W::Regular), p.muted));
     widgets::text_at(ui, x, top.center().y, widgets::galley(ui, &st.login, theme::font(12.0, W::Regular), p.text2));
-    if link(ui, "github-sign-out", (top.right(), top.center().y), true, "Sign out", theme::font(11.0, W::Regular), p.muted, p.danger).clicked() {
+    let out = link(ui, "github-sign-out", (top.right(), top.center().y), true, if st.app.is_some() { "Disconnect" } else { "Sign out" }, theme::font(11.0, W::Regular), p.muted, p.danger);
+    let out = if st.app.is_some() { out.on_hover_text("apiM forgets the app's key on this computer. The app stays on GitHub until you delete it there.") } else { out };
+    if out.clicked() {
         act = Some(Do::SignOut);
+    }
+    if st.app.is_some() && link(ui, "github-add-repos", (out.rect.left() - 16.0, top.center().y), true, "Add repositories", theme::font(11.0, W::Regular), p.muted, p.text).clicked() {
+        act = Some(Do::AddRepos);
     }
     ui.add_space(12.0);
     field("Find a repository…", p.bg).show(ui, "github-find", &mut st.query);
@@ -598,7 +695,17 @@ fn choose(ui: &mut Ui, st: &mut State) -> Option<Do> {
     let chosen = st.selected.as_ref().map(|repo| repo.full_name.as_str());
     egui::ScrollArea::vertical().id_salt("github-repos").max_height(288.0).auto_shrink([false, true]).show(ui, |ui| {
         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
-        if visible.is_empty() {
+        if visible.is_empty() && st.app.is_some() && st.repos.is_empty() {
+            ui.add_space(12.0);
+            let none = row(ui, 36.0);
+            let words = widgets::galley(ui, "apiM's app is not on any repository yet.", theme::font(12.0, W::Regular), p.muted);
+            widgets::text_at(ui, none.center().x - words.size().x / 2.0, none.center().y, words);
+            let line = row(ui, 34.0);
+            if part(ui, Rect::from_center_size(line.center(), vec2(160.0, 34.0)), |ui| outline("Add repositories", (12.0, 8.0)).width(160.0).show(ui)).clicked() {
+                act = Some(Do::AddRepos);
+            }
+            ui.add_space(12.0);
+        } else if visible.is_empty() {
             let none = row(ui, 66.0);
             let words = widgets::galley(ui, "No repositories match.", theme::font(12.0, W::Regular), p.muted);
             widgets::text_at(ui, none.center().x - words.size().x / 2.0, none.center().y, words);

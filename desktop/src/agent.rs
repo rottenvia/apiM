@@ -645,7 +645,7 @@ async fn run_inner(mut req: Request, emit: &Emitter, procs: Arc<Procs>) -> Resul
     let directives = plugins::directives(&every, &plugins_on);
     // A repository connected through the GitHub dialog, and whether there is a token to push with.
     let github = crate::github::read_connection(&tools::github::ws(&ctx));
-    let github_token = github.as_ref().map(|_| matches!(crate::github::resolve_token(&s.github_token), Ok(Some(_))));
+    let github_token = github.as_ref().map(|_| crate::github::configured(&s.github_token));
     let mut system = prompt::system(&plugins::legacy_prompt(&every, &plugins_on), web_search, native_vision, git_repo, github.as_ref());
     // The computer this runs on, so no chat starts by finding it out.
     system.push_str(&crate::machine::block(&req.workspace, s.approval == crate::store::Approval::Auto));

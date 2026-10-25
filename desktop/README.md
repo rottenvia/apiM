@@ -32,7 +32,7 @@ The same things as the web app, with the same look:
 - Slash commands, find in chat (Ctrl+F), notes to a running task (`/btw`)
 - The workspace panel with file tree, editor, diffs and restore points; the process list; import from a folder
 - Attach files, folders, pictures and clips, or paste a picture or copied files with Ctrl+V; models that cannot see get a description of each picture
-- GitHub: connect a repository with a token, push, open and follow pull requests
+- GitHub: connect a repository through apiM's own GitHub App or a token, push, open and follow pull requests
 - MCP servers, the same 8 plugins plus your own, search budget
 - Tools on demand and a catalog of skills, both described below: a request carries about a third of what it did, and plugins can be added, by you or by the assistant, to one chat or to all
 - A problem report (Settings, Reports) that sorts what went wrong by likely cause: the app first (crashes, frozen frames), then this PC, the provider, and a model's slips only when the same one repeats
@@ -87,6 +87,14 @@ What an added model gets is what every model gets, because none of it is written
 With an Anthropic key in Settings → API keys, any Claude model runs on Anthropic's own API, billed to that key: Settings → Models lists the models the key can use (click one to check and add it), a Claude id (`claude-sonnet-5-5`) typed there or named in a chat is added the same way, and an id the key does not have comes back with the ones it does. Anthropic does not list prices through its API; the app knows them for the Claude models out by October 2026 (`src/anthropic.rs`), and a later one shows "pricing unknown" until the app knows it.
 
 Claude's API speaks Messages, not Chat Completions: `src/anthropic.rs` translates each request on its way out and each reply or stream event on its way back, so the loop is the same loop. What changes on the way: system messages after the first turn ride in the user's turn as `<system-reminder>` text (Claude's own mid-conversation system message is not on every model); thinking is adaptive, its depth the effort setting, and "None" is low effort, as the newest models cannot switch it off; models older than 4.6 run without thinking; Claude's thoughts are not sent back, only the end of each as text, as on OpenRouter (each returned thought is checked against everything before it, and the loop rebuilds its newest turns every round); `temperature` and the like are never sent (API version 2026-10-21 refuses them). Requests carry three cache marks: the rules and the chat before the question for an hour, the newest tool result for five minutes, and the request's own mark for the rest.
+
+## GitHub as apiM's own app
+
+A Personal Access Token acts as you, on everything it reaches, until it is revoked. apiM can instead be a GitHub App of its own (`src/github_app.rs`): it then pushes and opens pull requests as `apim-…[bot]`, its commits show as the app, and it reaches only the repositories you install it on, with tokens that last an hour.
+
+Setting it up is two clicks on GitHub. "Set up apiM's GitHub App" in the GitHub dialog opens GitHub's "new app" form in your browser, filled in from a manifest (name, the permissions below, no webhook). Pressing Create GitHub App sends the browser back to a one-time listener on 127.0.0.1, checked by a random state, and apiM trades GitHub's code for the app's id and private key. The browser then goes on to the app's install page, where you pick the repositories; the dialog reads them when its window is back in front. The app asks for write access to contents, pull requests, issues and workflows, and read access to checks, statuses and actions.
+
+The key is kept in `github-app.json` beside `settings.json`, and neither file is read by a file tool or named in a PowerShell command. Each request signs a nine-minute sign-in with the key (RS256 through `ring`, already built for TLS), trades it for the repository's installation token and keeps that token for 55 minutes. The app comes first wherever a token is needed: listing repositories, cloning, pushing, the pull request and its checks. A repository it is not installed on falls back to the token when there is one, and otherwise says where to add it. "Disconnect" forgets the key on this computer; the app stays on GitHub until it is deleted on its page there. The rules for pushing are the same either way: only the `apim/…` working branch, never the base, never forced.
 
 ## What a request carries
 
@@ -348,7 +356,6 @@ Text in a reply, your own messages, the notices between steps, the "Context comp
 
 ## Not here yet
 
-- GitHub sign-in through the browser (the token field works)
 - Screenshots of a hidden desktop for apps the agent starts
 - Stills from a video clip for models that cannot watch it
 - Pointing a chat at a folder of your own from the window (terminal mode has `--dir`; the window copies files in, as the web app does)
