@@ -648,7 +648,7 @@ async fn run_inner(mut req: Request, emit: &Emitter, procs: Arc<Procs>) -> Resul
     let github_token = github.as_ref().map(|_| crate::github::configured(&s.github_token));
     let mut system = prompt::system(&plugins::legacy_prompt(&every, &plugins_on), web_search, native_vision, git_repo, github.as_ref());
     // The computer this runs on, so no chat starts by finding it out.
-    system.push_str(&crate::machine::block(&req.workspace, s.approval == crate::store::Approval::Auto));
+    system.push_str(&crate::machine::block(&req.workspace, s.approval));
     // What changes from one question to the next (the date, and what earlier work established, read fresh from the
     // workspace's store) rides in a note just before the question, after the history. In the system prompt, a finding
     // recorded in one reply changed the start of the next reply's requests, and the whole chat went out at full price

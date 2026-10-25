@@ -10,6 +10,21 @@ pub const NAMES: &[&str] = &[
     "read_mem", "write_mem", "query_mem", "protect_mem", "alloc_mem", "free_mem", "modules",
 ];
 
+/// The tools that change a running process the app did not start — its threads, registers or memory.
+/// Each asks the user to allow it before it runs, like an install into the machine, whatever the approval setting.
+/// Returns the line shown on that card, or None for the read-only tools (listing, probing, reading).
+pub fn changes_a_process(name: &str) -> Option<&'static str> {
+    match name {
+        "suspend" | "resume" => Some("suspend or resume threads of a process the app did not start"),
+        "set_context" => Some("change the registers of a thread in a process the app did not start"),
+        "write_mem" => Some("write into the memory of a process the app did not start"),
+        "protect_mem" => Some("change memory protection in a process the app did not start"),
+        "alloc_mem" => Some("allocate memory in a process the app did not start"),
+        "free_mem" => Some("free memory in a process the app did not start"),
+        _ => None,
+    }
+}
+
 fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
     json!({ "type": "function", "function": { "name": name, "description": description,
         "parameters": { "type": "object", "properties": properties, "required": required } } })
