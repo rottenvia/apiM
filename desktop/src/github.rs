@@ -1,11 +1,11 @@
 //! GitHub for a chat's workspace: the token, the REST calls, the clone that becomes the workspace, and the push.
 //! A port of the web app's `src/lib/github.ts`.
 //!
-//! Connecting is by Personal Access Token only. The token is kept in the desktop settings file (the web app keeps
+//! Connecting is by apiM's own GitHub App (`github_app`), which acts as `<slug>[bot]` on the repositories it is
+//! installed on, or by a Personal Access Token. The token is kept in the desktop settings file (the web app keeps
 //! its copy in the browser), or comes from `GITHUB_TOKEN` / `GITHUB_PAT`, which both apps honour. The repository
 //! connection itself is the same file the web app writes, `<data>/github/workspaces/<id>.json`, so a repository
 //! connected in one app is connected in the other.
-// ponytail: no OAuth sign-in. It needs the web server's registered app, client secret and callback; the dialog offers the token path only.
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -54,6 +54,24 @@ pub fn resolve_token(saved: &str) -> Result<Option<String>, String> {
     if looks_like_token(saved) { Ok(Some(saved.to_string())) } else { Err("That does not look like a GitHub access token.".into()) }
 }
 
+/// The token for work on `repo` (owner/name; None: any). apiM's own GitHub App comes first when it is set up and
+/// installed there; else the Personal Access Token, `saved` or the environment's.
+pub async fn token_for(saved: &str, repo: Option<&str>) -> Result<Option<String>, String> {
+    let Some(app) = crate::github_app::load() else { return resolve_token(saved) };
+    match crate::github_app::api(&app, &Api::new(""), repo).await {
+        Ok(api) => Ok(Some(api.token)),
+        Err(e) => match resolve_token(saved) {
+            Ok(Some(pat)) => Ok(Some(pat)),
+            _ => Err(e),
+        },
+    }
+}
+
+/// Is there anything to reach GitHub with: the app, a saved token or the environment's.
+pub fn configured(saved: &str) -> bool {
+    crate::github_app::load().is_some() || matches!(resolve_token(saved), Ok(Some(_)))
+}
+
 pub fn assert_repo(repo: &str) -> Result<String, String> {
     let clean = repo.trim();
     let parts: Vec<&str> = clean.split('/').collect();
@@ -80,7 +98,11 @@ impl Api {
     }
     /// The token travels in the Authorization header only, never in the URL.
     async fn send(&self, method: reqwest::Method, path: &str, body: Option<&Value>) -> Result<Value, String> {
-        let mut req = self.client.request(method, format!("{}{path}", self.base)).header("Accept", "application/vnd.github+json").bearer_auth(&self.token).header("X-GitHub-Api-Version", "2022-11-28").header("User-Agent", "apiM-github-connector").timeout(Duration::from_secs(30));
+        let mut req = self.client.request(method, format!("{}{path}", self.base)).header("Accept", "application/vnd.github+json").header("X-GitHub-Api-Version", "2022-11-28").header("User-Agent", "apiM-github-connector").timeout(Duration::from_secs(30));
+        // No token is no header: making the app from its manifest is asked for signed out, and an empty one is refused.
+        if !self.token.is_empty() {
+            req = req.bearer_auth(&self.token);
+        }
         if let Some(body) = body {
             req = req.json(body);
         }
@@ -109,16 +131,19 @@ pub struct Repo {
 
 /// The 100 most recently updated repositories the token can reach.
 pub async fn list_repos(api: &Api) -> Result<Vec<Repo>, String> {
-    let rows = api.get("/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member").await?;
+    Ok(repo_rows(&api.get("/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member").await?))
+}
+
+/// GitHub's repository rows as the connector lists them: only those cloned from github.com.
+pub fn repo_rows(rows: &Value) -> Vec<Repo> {
     let text = |v: &Value| v.as_str().unwrap_or("").to_string();
-    Ok(rows
-        .as_array()
+    rows.as_array()
         .into_iter()
         .flatten()
         .filter(|row| row["clone_url"].as_str().is_some_and(|u| u.starts_with("https://github.com/")))
         .map(|row| Repo { full_name: text(&row["full_name"]), private: row["private"] == true, default_branch: row["default_branch"].as_str().unwrap_or("main").to_string() })
         .filter(|repo| !repo.full_name.is_empty())
-        .collect())
+        .collect()
 }
 
 pub async fn list_branches(api: &Api, repo: &str) -> Result<Vec<String>, String> {
@@ -329,9 +354,13 @@ pub async fn clone_to_workspace(ws: &Ws, token: Option<&str>, clone_url: &str, o
     std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
 
     let io = |e: std::io::Error| e.to_string();
-    let identity = |dir: PathBuf| async move {
-        let _ = git(&dir, &["config", "user.name", "apiM Agent"]).await;
-        let _ = git(&dir, &["config", "user.email", "apim-agent@users.noreply.github.com"]).await;
+    let (name, email) = crate::github_app::identity();
+    let identity = |dir: PathBuf| {
+        let (name, email) = (name.clone(), email.clone());
+        async move {
+            let _ = git(&dir, &["config", "user.name", &name]).await;
+            let _ = git(&dir, &["config", "user.email", &email]).await;
+        }
     };
     let track = format!("origin/{working}");
     let attach = async {

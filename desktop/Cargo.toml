@@ -29,6 +29,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 rfd = "0.17"
 sha2 = "0.10"
 base64 = "0.22"
+# Already built for rustls: signs the GitHub App's sign-in (RS256).
+ring = "0.17"
 pdf-extract = "0.12.1"
 
 [profile.dev.package."*"]
