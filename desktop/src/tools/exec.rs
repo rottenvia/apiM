@@ -52,8 +52,9 @@ const CHILD_ENV: &[&str] = &[
 const RUN_LIMIT: Duration = Duration::from_secs(60);
 /// Installs and other slow subcommands of the package managers.
 const INSTALL_LIMIT: Duration = Duration::from_secs(300);
-/// The longest a model may ask for with timeout_ms.
-const MAX_ASKED: u64 = 300_000;
+/// The longest a model may ask for with timeout_ms, here and for a wait on a background process. At 2 minutes a
+/// 10-minute build took five waits, each a round.
+const MAX_ASKED: u64 = 600_000;
 /// Results keep the first HEAD_CHARS and the newest part, up to MAX_OUTPUT in all.
 const HEAD_CHARS: usize = 2_000;
 const MAX_OUTPUT: usize = 20_000;
@@ -279,7 +280,7 @@ fn argv_arg(args: &Value, key: &str) -> Result<Vec<String>, String> {
         .collect()
 }
 
-/// The time a command may run, as the web's timeoutFor works it out: a caller's timeout_ms is honoured within 5 to 300 seconds.
+/// The time a command may run, as the web's timeoutFor works it out: a caller's timeout_ms is honoured within 5 seconds and `MAX_ASKED`.
 fn timeout_for(command: &str, args: &[String], asked_ms: Option<u64>) -> Duration {
     if let Some(ms) = asked_ms.filter(|m| *m > 0) {
         return Duration::from_millis(ms.clamp(5_000, MAX_ASKED));
@@ -322,17 +323,17 @@ fn prepare(ctx: &Ctx, command: &str, argv: Vec<String>) -> Result<Launch, String
         return shell(ctx, command, argv);
     }
     if SHELLS.contains(&name.as_str()) {
-        return Err(format!("Shells are not available. Run the interpreter directly, e.g. `python app.py` rather than `sh -c \"python app.py\"`.{}", if cfg!(windows) { " For a question to the system itself use powershell, with the command as one string in args." } else { "" }));
+        return Err(format!("`{name}` is not available. Run the interpreter directly, e.g. `python app.py` rather than `sh -c \"python app.py\"`.{}", if cfg!(windows) { " PowerShell is the shell here: pass the whole script as one string in args, and its pipes, `;` and loops run several steps in one call." } else { "" }));
     }
     // No shell reads `>out.txt` or `|` either: the program gets them as words ("Error opening ./>_NBUF_OUT.txt").
     if let Some(word) = argv.iter().map(|a| a.trim()).find(|a| matches!(*a, "|" | "&&" | "<") || a.starts_with('>') || a.starts_with("2>") || a.starts_with("1>") || a.starts_with("&>")) {
-        return Err(format!("There is no shell here, so `{word}` would reach the program as a plain argument and redirect nothing. The output comes back to you as the result. To keep it in a file, have the program write the file itself."));
+        return Err(format!("There is no shell here, so `{word}` would reach the program as a plain argument and redirect nothing. The output comes back to you as the result. To keep it in a file, have the program write the file itself.{}", if cfg!(windows) { " Or give the whole line to powershell as one string: it reads pipes and redirects." } else { "" }));
     }
     if let Some((_, forms)) = LOOKING_FORMS.iter().find(|(tool, _)| *tool == name) {
         let first = argv.first().map(|word| word.to_ascii_lowercase()).unwrap_or_default();
         if !forms.contains(&first.as_str()) {
             let looking: Vec<String> = forms.iter().map(|form| format!("{name} {form}").trim().to_string()).collect();
-            return Err(format!("Only the forms of {name} that look are run here: {}.{}", looking.join(", "), if cfg!(windows) { " To change something on this computer use powershell: the user is asked first." } else { "" }));
+            return Err(format!("Only the forms of {name} that look are run here: {}.{}", looking.join(", "), if cfg!(windows) { " To change something on this computer use powershell." } else { "" }));
         }
     }
     // The web's browser rules: the user's own browser is never driven, closed or pointed at their profile.
@@ -1078,7 +1079,7 @@ pub async fn wait_for_output(ctx: &Ctx, args: &Value) -> Output {
     } else {
         Some(Regex::new(&format!("(?i){pattern}")).unwrap_or_else(|_| Regex::new(&format!("(?i){}", regex::escape(pattern))).expect("escaped pattern is valid")))
     };
-    let limit = Duration::from_millis(num_arg(args, "timeout_ms").unwrap_or(30_000).clamp(1_000, 120_000));
+    let limit = Duration::from_millis(num_arg(args, "timeout_ms").unwrap_or(30_000).clamp(1_000, MAX_ASKED));
     let started = Instant::now();
     loop {
         let log = p.log.lock().unwrap().clone();
@@ -1191,7 +1192,7 @@ mod tests {
             assert!(!change.ask && change.display == "powershell Remove-Item 'a b'");
             assert!(prep(Approval::Auto, "powershell", &[r"Remove-Item C:\Users\x -Recurse"]).err().unwrap().starts_with("Not run: this deletes"));
             assert!(prep(Approval::Auto, "powershell", &["-EncodedCommand", "AAAA"]).is_err() && prep(Approval::Auto, "powershell", &["Get-Content ~/.ssh/id_rsa"]).is_err());
-            assert!(prep(Approval::Auto, "cmd", &["/c", "dir"]).err().unwrap().contains("use powershell"));
+            assert!(prep(Approval::Auto, "cmd", &["/c", "dir"]).err().unwrap().contains("PowerShell is the shell here"));
         }
         // A redirect is a shell's doing: said before the program takes `>out.txt` for a file to open.
         assert!(prep(Approval::Auto, "python", &["a.py", ">out.txt"]).err().unwrap().starts_with("There is no shell here, so `>out.txt`"));
@@ -1279,7 +1280,7 @@ mod tests {
         assert_eq!(timeout_for("npm", &s(&["test"]), None), Duration::from_secs(60));
         assert_eq!(timeout_for("msbuild", &s(&["x"]), None), Duration::from_secs(60));
         assert_eq!(timeout_for("npm", &s(&["test"]), Some(1)), Duration::from_secs(5));
-        assert_eq!(timeout_for("npm", &s(&["test"]), Some(900_000)), Duration::from_secs(300));
+        assert_eq!(timeout_for("npm", &s(&["test"]), Some(900_000)), Duration::from_secs(600));
     }
 
     #[test]

@@ -37,6 +37,9 @@ pub struct ChatState {
     pub skills_all: Vec<String>,
     /// The tool groups this chat has loaded (`groups`).
     pub groups: Vec<String>,
+    /// The tools earlier replies in this chat ran. A closing summary of work an earlier reply did was marked as
+    /// invented: only this reply's tools were counted, and the model wrote correction notes instead of finishing.
+    pub tools_run: Vec<String>,
 }
 
 /// Everything a tool may touch.
@@ -152,7 +155,8 @@ static SCHEMAS: LazyLock<Vec<Value>> = LazyLock::new(|| {
             "finish" => " `result` and `verified` are shown to the user one after the other: how the work was checked goes into `verified` only.",
             // It reads what was said, not what tools answered: a reply looked here for a command's output and lost five rounds on it.
             "search_conversation" => " It searches what you and the user wrote, never the results of tools: a command's output is in the file its result named.",
-            "run_command" if cfg!(windows) => " For questions about the computer itself there are the system's own looking tools (tasklist, systeminfo, wevtutil qe, reg query, sc query) and PowerShell, given as one string: {\"command\":\"powershell\",\"args\":[\"Get-WinEvent -LogName Application -MaxEvents 20 | Format-List TimeCreated,ProviderName,Message\"]}.",
+            // Told only that PowerShell answers questions about the computer, a reply ran forty commands one per call that one script does in five.
+            "run_command" if cfg!(windows) => " PowerShell is the shell here, given the whole script as one string: {\"command\":\"powershell\",\"args\":[\"python gen.py; python check.py | Select-Object -Last 20\"]}. Pipes, `;`, redirects, loops and variables work in it, so steps that go together (build, run, read what came out) take one call, not one each. It also asks the computer itself, as do the system's own looking tools (tasklist, systeminfo, wevtutil qe, reg query, sc query): Get-WinEvent -LogName Application -MaxEvents 20 | Format-List TimeCreated,ProviderName,Message.",
             "run_command" => " For questions about the computer itself there are the system's own looking tools (ps, uname, df, free, uptime).",
             _ => "",
         };
@@ -474,6 +478,17 @@ fn search_conversation(ctx: &Ctx, args: &Value) -> Output {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The wording in assets/tools.json that is this build's own: `sync-from-web.mts` writes the web's back over it. The web
+    /// asks before every command and has no PowerShell; told the same here, a model priced every look as an approval it never got.
+    #[test]
+    fn the_desktop_wording_of_commands_survives_a_sync() {
+        let said = |name: &str| SCHEMAS.iter().find(|t| t["function"]["name"] == name).unwrap()["function"].to_string();
+        let run = said("run_command");
+        assert!(run.contains("Whether the user is asked first is said in the system prompt") && !run.contains("has to approve") && run.contains("Capped at 10 minutes"), "{run}");
+        assert!(cfg!(not(windows)) || run.contains("PowerShell is the shell here"), "{run}");
+        assert!(said("wait_for_output").contains("max 600000"));
+    }
 
     #[test]
     fn every_implemented_tool_has_a_schema() {

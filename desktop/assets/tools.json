@@ -234,13 +234,13 @@
   "type": "function",
   "function": {
    "name": "run_command",
-   "description": "Run a program in the workspace and get its output back, so you can check whether your code actually works. Use this after writing code: run it, read any error, fix the file, run it again. The user has to approve each command before it runs. Only real interpreters are available (python, node, npm, pip and similar) — there is no shell, so pass arguments as a list rather than one string. Commands are stopped after 60 seconds by default (5 minutes for installs and builds); pass timeout_ms if you know a job is slower. Never start a server or anything that waits for input — use start_process for those, then wait_for_output. For tests, prefer run_tests. A few lines to run once go in stdin, with \"-\" as the argument (python, node): one call instead of write_file and then run_command, and no file left in the workspace.",
+   "description": "Run a program in the workspace and get its output back, so you can check whether your code actually works. Use this after writing code: run it, read any error, fix the file, run it again. Whether the user is asked first is said in the system prompt. A program starts directly, not through a shell, so pass its arguments as a list rather than one string. Commands are stopped after 60 seconds by default (5 minutes for installs and builds); pass timeout_ms (up to 10 minutes) if you know a job is slower. Never start a server or anything that waits for input — use start_process for those, then wait_for_output. For tests, prefer run_tests. A few lines to run once go in stdin, with \"-\" as the argument (python, node): one call instead of write_file and then run_command, and no file left in the workspace.",
    "parameters": {
     "type": "object",
     "properties": {
      "command": {
       "type": "string",
-      "description": "Program to run, e.g. \"python3\", \"node\", \"npm\". Not a shell."
+      "description": "Program to run, e.g. \"python3\", \"node\", \"npm\". It starts directly, not through a shell."
      },
      "args": {
       "type": "array",
@@ -255,7 +255,7 @@
      },
      "timeout_ms": {
       "type": "number",
-      "description": "How long to allow, in ms, when you know the job is slow. Capped at 5 minutes."
+      "description": "How long to allow, in ms, when you know the job is slow. Capped at 10 minutes."
      },
      "reason": {
       "type": "string",
@@ -781,7 +781,7 @@
      },
      "timeout_ms": {
       "type": "number",
-      "description": "How long to wait before giving up. Default 30000, max 120000."
+      "description": "How long to wait before giving up. Default 30000, max 600000."
      }
     },
     "required": [

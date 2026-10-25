@@ -286,6 +286,39 @@ pub fn format_findings_for_prompt(store: &Store) -> String {
     format!("\n\n{FINDINGS_MARKER_OPEN}\nFindings already established in this workspace (your own prior conclusions — use the ones RELEVANT to the current request, do not re-derive them; a finding this request does not need is background: never mention, cite, or act on it, leave it out of your reply entirely; if one is wrong, correct it with note_finding; when the work a finding describes is DONE and shipped, retire it — note_finding with that id, status 'disproved', and claim 'done — shipped in <commit/fix>' — so finished items stop riding every prompt):\n\n{}\n{FINDINGS_MARKER_CLOSE}\n", lines.join("\n"))
 }
 
+/// Findings a question is shown whole when there are no more than this; past it, the ones it is about.
+const ALL_SHOWN_UP_TO: usize = 6;
+/// Most findings shown for what a question names.
+const MATCHED_SHOWN: usize = 12;
+
+/// The findings block for one question: the active findings it names (a word of their claim or refs), the newest besides
+/// when it names few, and a count of the rest. Every active finding rode every question, 25 of them and up to 17,000
+/// characters, and a model reported most of it was about other work.
+// ponytail: shared words, not meaning. A question that names its subject in other words gets the newest ones and the count.
+pub fn format_findings_for_question(store: &Store, question: &str) -> String {
+    let active = active_newest_first(store);
+    if active.len() <= ALL_SHOWN_UP_TO {
+        return format_findings_for_prompt(store);
+    }
+    let words = |text: &str| text.to_lowercase().split(|c: char| !c.is_alphanumeric() && c != '_').filter(|word| word.chars().count() >= 3).map(str::to_string).collect::<std::collections::HashSet<_>>();
+    let asked = words(question);
+    let said: Vec<_> = active.iter().map(|f| words(&format!("{} {}", f.claim, f.refs.join(" ")))).collect();
+    // A word a third of them share (the project's name, "the") does not tell which one is meant.
+    let telling = |word: &String| asked.contains(word) && said.iter().filter(|s| s.contains(word)).count() * 3 <= said.len();
+    let score: Vec<usize> = said.iter().map(|s| s.iter().filter(|word| telling(word)).count()).collect();
+    let mut shown: Vec<usize> = (0..active.len()).filter(|&i| score[i] > 0).collect();
+    shown.sort_by_key(|&i| std::cmp::Reverse(score[i]));
+    shown.truncate(MATCHED_SHOWN);
+    let newest: Vec<usize> = (0..active.len()).filter(|i| !shown.contains(i)).take(ALL_SHOWN_UP_TO.saturating_sub(shown.len())).collect();
+    shown.extend(newest);
+    let block = format_findings_for_prompt(&Store { version: store.version, findings: shown.iter().map(|&i| active[i].clone()).collect() });
+    let left = active.len() - shown.len();
+    if left == 0 {
+        return block;
+    }
+    block.replacen(&format!("\n{FINDINGS_MARKER_CLOSE}"), &format!("\n  … {left} more about other work, in {FINDINGS_DIR}/{FINDINGS_FILE}: search_files there for a subject.\n{FINDINGS_MARKER_CLOSE}"), 1)
+}
+
 /// Machine-wide findings block for the system prompt ("" when none).
 pub fn format_machine_findings_for_prompt(store: &Store) -> String {
     let active = active_newest_first(store);
@@ -326,6 +359,20 @@ mod tests {
         });
         check("findings.isRetirementClaim", |c| json!(is_retirement_claim(c.as_str().unwrap())));
         check("findings.replaceFindings", |a| json!(replace_findings(a[0].as_str().unwrap(), a[1].as_str().unwrap())));
+    }
+
+    #[test]
+    fn a_question_gets_the_findings_it_names() {
+        let finding = |id: &str, day: usize, claim: &str| Finding { id: id.into(), claim: claim.into(), refs: vec![], evidence: String::new(), status: Status::Active, superseded_by: None, created_at: format!("2026-10-{day:02}T00:00:00.000Z"), updated_at: format!("2026-10-{day:02}T00:00:00.000Z") };
+        let mut findings: Vec<Finding> = (1..=20).map(|n| finding(&format!("f{n}"), n, &format!("The build of module m{n} needs the flag"))).collect();
+        findings.push(finding("fr", 1, "The renderer drops frames when vsync is off"));
+        let store = Store { version: 1, findings };
+        let block = format_findings_for_question(&store, "why does the renderer stutter?");
+        assert!(block.contains("[fr] The renderer") && block.contains("[f20]") && block.contains("[f16]") && !block.contains("[f15]"), "{block}");
+        assert!(block.contains("… 15 more about other work, in .analysis/findings.json") && block.ends_with(&format!("{FINDINGS_MARKER_CLOSE}\n")), "{block}");
+        // A few are shown whole, whatever is asked.
+        let few = Store { version: 1, findings: store.findings[..5].to_vec() };
+        assert_eq!(format_findings_for_question(&few, "anything"), format_findings_for_prompt(&few));
     }
 
     #[test]
