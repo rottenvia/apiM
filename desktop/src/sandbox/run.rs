@@ -58,6 +58,9 @@ fn not_ready(error: &str, needs_setup: bool) -> RunResult {
 
 /// Starts (once) the off-screen display inside the sandbox distro and returns the sandbox. Err is (reason, needs setup).
 pub fn ensure(wsl: &Path) -> Result<Sandbox, (String, bool)> {
+    // One start at a time: two chats' first sandbox steps both started an Xvfb, and the first one's handle was lost.
+    static STARTING: Mutex<()> = Mutex::new(());
+    let _one = STARTING.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(s) = active() {
         return Ok(s);
     }

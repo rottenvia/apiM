@@ -1193,6 +1193,9 @@ pub async fn ensure() -> ActionResult {
 /// The chat route's gate for a request aimed at the in-app sidecar (chat/route.ts:822-841): start it, then check the window.
 /// Err is the text the route answers with a 503.
 pub async fn chat_ready() -> Result<(), String> {
+    // One start at a time: two chats starting a reply together each stopped the server the other had just launched.
+    static STARTING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _one = STARTING.lock().await;
     ensure_at(ENGINE_PORT).await?;
     match read_ctx(ENGINE_PORT).await {
         Some(ctx) if ctx < SIDECAR_CTX => Err(format!(

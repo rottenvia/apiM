@@ -175,7 +175,7 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
     let mut more = false;
 
     // Each chat keeps its own place, and a chat opened for the first time starts at its end.
-    let mut scroll = egui::ScrollArea::vertical().id_salt(("transcript", &app.conv.id)).auto_shrink(false).stick_to_bottom(true);
+    let mut scroll = egui::ScrollArea::vertical().id_salt(("transcript", &app.conv.id)).auto_shrink(false);
     // Heights measured out of sight last frame are taken up now. Where a message sat above the window the view
     // moves by as much as it changed, so what is on screen stays where it is.
     let mut shift = std::mem::take(&mut app.anchor);
@@ -199,13 +199,22 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
     } else if shift != 0.0 && !jump {
         scroll = scroll.vertical_scroll_offset((app.scroll_y + shift).max(0.0));
     }
+    // Following the end, the view glides onto it rather than stepping a line at a time (`widgets::Follow`). egui's
+    // own sticking jumped by each line a reply wrapped onto, and showed it cut off under the edge first.
+    let glide = app.at_end && !jump && !landing && shift == 0.0 && !app.staged("top");
+    let forced = glide.then(|| app.follow.step(app.scroll_y, ui.input(|i| i.stable_dt)));
+    if let Some(offset) = forced {
+        scroll = scroll.vertical_scroll_offset(offset);
+    }
     // What this frame may spend measuring messages nobody is looking at. A chat just opened gets more: nothing
     // of it shows until its end is measured.
     // of it shows until its end is measured, so one longer frame there is cheaper than several empty ones.
     app.rows.begin(Duration::from_millis(if landing { 0 } else if jump { 28 } else { 4 }));
     // (how far the view has to follow next frame, lay this frame out again before showing it, more to measure, the end is measured)
     let (mut anchor, mut redo, mut unmeasured, mut tail_ready) = (0.0_f32, false, false, true);
+    let mut tall = 0.0;
     let out = scroll.show(ui, |ui| {
+        let content_top = ui.cursor().top();
         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
         ui.set_opacity(come * (1.0 - 0.6 * leaving));
         // The room it gives up above its place comes off the room below it: the whole is as tall as ever.
@@ -227,9 +236,16 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
         };
         let column_ui = |ui: &mut egui::Ui, add: &mut dyn FnMut(&mut egui::Ui)| column_in(ui, false, 1.0, add);
 
-        if totals.tokens > 0 {
-            column_ui(ui, &mut |ui| {
+        // The chat's totals come with its first reply's first count of tokens. Their room is there from the moment a
+        // reply runs, and the words fade in when the count comes: arriving then, they pushed the whole of a new chat
+        // down mid-reply. Keyed by the chat's first message, so the room is simply there in the frame it is sent.
+        let first = app.conv.messages.first().map_or("", |m| m.id.as_str());
+        let totals_shown = widgets::opened(ui, egui::Id::new(("totals", first)), totals.tokens > 0 || running);
+        let counted = widgets::opened(ui, egui::Id::new(("totals-count", first)), totals.tokens > 0);
+        if totals_shown > 0.0 {
+            column_ui(ui, &mut |ui| widgets::unfold(ui, egui::Id::new(("totals-strip", &app.conv.id)), totals_shown, |ui| {
                 ui.horizontal(|ui| {
+                    ui.multiply_opacity(counted);
                     ui.spacing_mut().item_spacing.x = 12.0;
                     let small = |text: String, colour| widgets::lines(text, 11.0, 16.0, W::Regular, colour);
                     ui.label(widgets::lines("This conversation", 11.0, 16.0, W::Medium, p.text2));
@@ -247,7 +263,7 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
                 ui.add_space(12.0);
                 widgets::rule(ui);
                 ui.add_space(20.0);
-            });
+            }));
         }
 
         let last = app.conv.messages.len() - 1;
@@ -255,23 +271,26 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
         // The line under the last message a manual /compact covered.
         let compacted = app.conv.summary.as_ref().filter(|s| s.manual).map(|s| (s.up_to_id.clone(), s.covered_turns));
         let has_output = app.conv.messages.last().is_some_and(|m| m.role == Role::Assistant && (!m.loose_reasoning.trim().is_empty() || m.parts.iter().any(|part| matches!(part, Part::Text(text) | Part::Thinking { text, .. } if !text.trim().is_empty()))));
-        // Until something comes back the rows sit close together (`space-y-1`), then at the usual 24.
-        let gap = if running && !has_output { 4.0 } else { 24.0 };
+        // The same 24 while a reply waits for its first words. It was 4 then (`space-y-1`), every gap in the chat at
+        // once: the chat drew together on each send and apart at the first word, the reply 20 points down in a frame.
+        let gap = 24.0;
         if start > 0 {
             column_ui(ui, &mut |ui| more = earlier_pill(ui, start));
             ui.add_space(8.0 + gap);
         }
 
-        let App { conv, heights, rows, run, settings, editing, rewind, .. } = app;
+        let App { conv, heights, rows, runs, settings, editing, rewind, .. } = app;
+        let run = runs.iter().find(|r| r.conv_id == conv.id);
         // What a live reply is doing is said under it, as far from it as a step is from the text before it: a
         // reply that ends in text keeps room of its own under its last line, one that is only its label has none.
         // A question to the user keeps its distance.
-        let asking = run.as_ref().is_some_and(|r| r.approval.is_some() || r.question.is_some());
+        let asking = run.is_some_and(|r| r.approval.is_some() || r.question.is_some());
         let tail_gap = if !running || asking { gap } else if has_output { 6.0 } else { 18.0 };
         let rewind = rewind.as_ref();
         // Bubbles stop at three quarters of the column; a narrow window gives them a little more.
         let cap = column * if ui.ctx().content_rect().width() < 768.0 { 0.85 } else { 0.75 };
-        let thinking_secs = run.as_ref().and_then(|r| r.thinking.secs());
+        // A thought's clock goes on from the line before it ("Thinking… · 4s" became "Thinking · 0s"): the round's.
+        let thinking_secs = run.map(|r| r.request.as_ref().filter(|q| q.number > 1).map_or(r.started, |q| q.fired).elapsed().as_secs());
         let split = settings.reply_layout == "split";
         // A message with matches is laid out differently, so it is measured apart.
         fn key_for(hits: usize, msg: &Message) -> std::borrow::Cow<'_, str> {
@@ -371,13 +390,35 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
                 ui.add_space(24.0);
             }
         }
-        if let Some(run) = app.run.as_ref().filter(|_| running) {
+        if let Some(run) = app.runs.iter().find(|r| r.conv_id == app.conv.id) {
             column_ui(ui, &mut |ui| wait_rows(ui, run, has_output));
         }
         ui.add_space(24.0 - (1.0 - come) * ENTER_DROP);
+        // Room a live reply gave up (a thought folded shut) stays, blank, under it. Given back, the chat followed its
+        // end down as the thought shut and up again as the next step came: a bounce on every step.
+        tall = ui.cursor().top() - content_top;
+        ui.add_space((app.floor - tall).max(0.0));
     });
+    if running {
+        app.floor = app.floor.max(tall);
+    } else if app.floor > tall {
+        // Once the reply is done, the room it kept goes, gliding: kept, a chat ended in blank space until the next
+        // message was sent.
+        let k = (ui.input(|i| i.stable_dt) * 12.0).min(1.0);
+        app.floor = if app.floor - tall < 0.5 { 0.0 } else { app.floor - (app.floor - tall) * k };
+        ui.ctx().request_repaint();
+    }
     if more {
         app.mounted += 60;
+    }
+    let distance = out.content_size.y - out.state.offset.y - out.inner_rect.height();
+    // A wheel or the bar took the view up from where it was put: it stops following. Otherwise it goes on, also
+    // through a frame that moved it for heights changed above, and catches up from wherever that left it.
+    let taken = forced.is_some_and(|offset| out.state.offset.y < offset.min(out.content_size.y - out.inner_rect.height()) - 1.0);
+    app.at_end = if app.at_end && !jump && !landing && !taken { true } else { distance <= 1.0 };
+    app.follow.left(if app.at_end { distance } else { 0.0 });
+    if app.follow.lag > 0.0 {
+        ui.ctx().request_repaint();
     }
     app.scroll_end = out.content_size.y;
     app.scroll_y = out.state.offset.y;
@@ -397,9 +438,8 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
     opening_pill(app, ui, area);
 
     // Jump to latest: only when scrolled away from the end.
-    let distance = out.content_size.y - out.state.offset.y - out.inner_rect.height();
     // It comes up into its place when the end is left behind, and sinks away when the end is back in view.
-    let away = ui.ctx().animate_bool_with_time_and_easing(ui.id().with("jump-in"), distance > 40.0 && !jump, 0.18, egui::emath::easing::cubic_out);
+    let away = ui.ctx().animate_bool_with_time_and_easing(ui.id().with("jump-in"), distance > 40.0 && !jump && !app.at_end, 0.18, egui::emath::easing::cubic_out);
     if away > 0.0 {
         let centre = pos2(area.center().x, area.bottom() - 12.0 - 17.0 + 10.0 * (1.0 - away));
         let rect = Rect::from_center_size(centre, vec2(34.0, 34.0));
@@ -546,10 +586,66 @@ fn describe_request(buckets: &[Bucket]) -> (u64, String) {
 /// How long a reply may say nothing, mid-text, before the row under it says it is waiting.
 const QUIET: Duration = Duration::from_secs(2);
 
+/// How long what a line under a reply would say has to last before it is said.
+const GLANCE: Duration = Duration::from_millis(300);
+
 /// The lines under a reply that is still on its way (StatusRow, RetryBanner, RequestSizeLine, WaitRow
 /// and DraftRow in ChatArea.tsx): "✻ Thinking… · 12s" and its kin.
 fn wait_rows(ui: &mut egui::Ui, run: &super::Run, has_output: bool) {
     let p = p();
+    // A failed request counts down to its next try.
+    let retry = run.retry.as_ref().map(|(text, until)| format!("{text} in {}s", until.saturating_duration_since(Instant::now()).as_secs_f32().ceil()));
+    let sent = run.request.as_ref().map(|r| (r, describe_request(&r.buckets)));
+    let stage = match run.status {
+        "Writing" => "Writing",
+        "Working" => "Working on your files",
+        "Searching" => "Searching the web",
+        _ => "Thinking",
+    };
+    // Not while the text before the call is still being typed out: the line spoke of a step the text had not reached.
+    let drafting = run.drafting.as_ref().filter(|d| d.chars > 0 && !run.typing.waiting());
+    let waiting = sent.as_ref().filter(|(r, _)| !r.answered);
+    // Mid-reply and nothing has come for a while: the provider is slow, and saying so tells it from a window that
+    // has stopped.
+    let quiet = matches!(run.status, "Writing" | "Thinking") && run.retry.is_none() && run.approval.is_none() && run.question.is_none() && run.heard.elapsed() >= QUIET;
+    let says = match drafting {
+        _ if !has_output => stage.to_string(),
+        Some(draft) => drafting_label(&draft.name, draft.path.as_deref()),
+        None if waiting.is_some() || quiet => "Waiting for the model".into(),
+        None => String::new(),
+    };
+    // A line fades in when its words change, not its counters, nor what stands behind it: "Thinking…" dimmed and
+    // came back twice in its first second, as the request went out and as its first byte came.
+    let said = {
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        (&says, run.retry.is_some()).hash(&mut hash);
+        hash.finish()
+    };
+    let speaks = !says.is_empty() || run.retry.is_some();
+    // (what it says, since when, when that went up). On an empty row, mid-reply, a line goes up once its words have
+    // stood a glance: filmed, "Writing a.txt…" came up under a folding thought for a tenth of a second before the
+    // step it spoke of took its place. In place of a line that is up, new words go up at once.
+    let (now, id) = (ui.input(|i| i.time), ui.id().with(("wait-said", &run.conv_id)));
+    let (before, since, up) = ui.data(|d| d.get_temp::<(u64, f64, f64)>(id)).unwrap_or((0, now, f64::NAN));
+    let (since, mut up) = if before == said { (since, up) } else { (now, if up.is_nan() { f64::NAN } else { now }) };
+    if !speaks {
+        up = f64::NAN;
+    } else if up.is_nan() && (!has_output || now - since >= GLANCE.as_secs_f64()) {
+        up = now;
+    }
+    ui.data_mut(|d| d.insert_temp(id, (said, since, up)));
+    if up.is_nan() {
+        if speaks {
+            ui.ctx().request_repaint_after(GLANCE);
+        }
+        return;
+    }
+    let come = egui::emath::easing::cubic_out((((now - up) / 0.16) as f32).clamp(0.0, 1.0));
+    if come < 1.0 {
+        ui.multiply_opacity(come);
+        ui.ctx().request_repaint();
+    }
     let row = |ui: &mut egui::Ui, top: f32, add: &mut dyn FnMut(&mut egui::Ui)| {
         ui.add_space(top);
         // As tall as its text: a row of the usual height would stand off from the reply it speaks for.
@@ -582,19 +678,10 @@ fn wait_rows(ui: &mut egui::Ui, run: &super::Run, has_output: bool) {
         let job = shimmer(ui, &text, 13.0);
         ui.add(egui::Label::new(job).truncate());
     };
-    // A failed request counts down to its next try.
-    let retry = run.retry.as_ref().map(|(text, until)| format!("{text} in {}s", until.saturating_duration_since(Instant::now()).as_secs_f32().ceil()));
-    let sent = run.request.as_ref().map(|r| (r, describe_request(&r.buckets)));
     let body = |r: &super::Round| r.buckets.iter().map(|b| format!("{} {}", b.label, k(b.chars))).collect::<Vec<_>>().join(" · ");
     let heavy = |chars: u64| if chars >= 400_000 { " — big context, first token may take a while" } else { "" };
 
     if !has_output {
-        let stage = match run.status {
-            "Writing" => "Writing",
-            "Working" => "Working on your files",
-            "Searching" => "Searching the web",
-            _ => "Thinking",
-        };
         row(ui, 0.0, &mut |ui| {
             mark(ui);
             // A retry takes the word's place rather than adding a line.
@@ -605,7 +692,7 @@ fn wait_rows(ui: &mut egui::Ui, run: &super::Run, has_output: bool) {
                         said.on_hover_text(format!("Request body: {}", body(r)));
                     }
                 }
-                None => glow(ui, format!("{stage}…")),
+                None => glow(ui, format!("{says}…")),
             }
             facts(ui, &[format!("{}s", run.started.elapsed().as_secs())], "");
         });
@@ -622,23 +709,21 @@ fn wait_rows(ui: &mut egui::Ui, run: &super::Run, has_output: bool) {
             ui.add(egui::Label::new(small(text.clone(), p.warning)).truncate());
         });
     }
-    if let Some(draft) = run.drafting.as_ref().filter(|d| d.chars > 0) {
+    if let Some(draft) = drafting {
         let size = if draft.chars >= 1000 { format!("{:.1}k chars", draft.chars as f64 / 1000.0) } else { format!("{} chars", draft.chars) };
         row(ui, 0.0, &mut |ui| {
             mark(ui);
-            glow(ui, format!("{}…", drafting_label(&draft.name, draft.path.as_deref())));
+            glow(ui, format!("{says}…"));
             facts(ui, &[size.clone(), format!("{}s", draft.since.elapsed().as_secs())], "");
         });
-    } else if let Some((r, (chars, described))) = sent.as_ref().filter(|(r, _)| !r.answered) {
+    } else if let Some((r, (chars, described))) = waiting {
         row(ui, 0.0, &mut |ui| {
             mark(ui);
             glow(ui, "Waiting for the model…".into());
             let tip = "The next round was sent. The provider is reading it (a big request can take a while) before the first token comes back.";
             facts(ui, &[format!("{}s", r.fired.elapsed().as_secs()), format!("{described}{}", heavy(*chars))], tip);
         });
-    } else if matches!(run.status, "Writing" | "Thinking") && run.retry.is_none() && run.approval.is_none() && run.question.is_none() && run.heard.elapsed() >= QUIET {
-        // Mid-reply and nothing has come for a while: the provider is slow, and saying so tells it from a window
-        // that has stopped.
+    } else if quiet {
         row(ui, 0.0, &mut |ui| {
             mark(ui);
             glow(ui, "Waiting for the model…".into());

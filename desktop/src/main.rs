@@ -46,7 +46,9 @@ fn runtime() -> tokio::runtime::Runtime {
     // First thing, so a crash anywhere after this is in the problem report.
     diagnostics::watch_for_crashes();
     // The threads tokio starts for blocking work are kept, not let go after ten idle seconds: see `background`.
-    tokio::runtime::Builder::new_multi_thread().worker_threads(2).thread_keep_alive(std::time::Duration::from_secs(24 * 3600)).enable_all().build().expect("async runtime")
+    // Four workers, as several chats can each have a reply running, and some steps still block the worker they run
+    // on (the sandbox's WSL probe takes up to 10 s): with two, two such steps stopped every other chat's stream.
+    tokio::runtime::Builder::new_multi_thread().worker_threads(4).thread_keep_alive(std::time::Duration::from_secs(24 * 3600)).enable_all().build().expect("async runtime")
 }
 
 /// Runs `job` off the thread that asked, on one of a few threads kept for it.

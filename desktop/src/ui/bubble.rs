@@ -646,14 +646,20 @@ fn hung(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
     ui.allocate_rect(Rect::from_min_max(top, pos2(top.x + width, child.min_rect().bottom())), Sense::hover());
 }
 
-/// The rows of steps under a stretch of text. `open` holds the id of the one whose detail is showing.
-fn steps(ui: &mut Ui, tools: &[&ToolEvent], env: &mut Env, open: &mut Option<String>) {
+/// The rows of steps under a stretch of text. `open` holds the id of the one whose detail is showing. `writing`: they
+/// are the ones a live reply is adding to, where a new step fades in.
+fn steps(ui: &mut Ui, tools: &[&ToolEvent], env: &mut Env, open: &mut Option<String>, writing: bool) {
     hung(ui, |ui| {
         for (i, tool) in tools.iter().enumerate() {
             if i > 0 {
                 ui.add_space(2.0);
             }
-            ui.push_id(&tool.id, |ui| step(ui, tool, env, open));
+            // A step new to the reply being written unfolds into its room, finished or not (a quick one arrives done):
+            // with its room taken at once, the line under it jumped down while the step only faded in.
+            ui.push_id(&tool.id, |ui| {
+                let come = widgets::arrival(ui, ui.id().with("born"), writing, STEP_IN);
+                widgets::unfold(ui, ui.id().with("in"), come, |ui| step(ui, tool, env, open));
+            });
         }
     });
     ui.add_space(4.0);
@@ -800,7 +806,10 @@ fn step(ui: &mut Ui, tool: &ToolEvent, env: &mut Env, open: &mut Option<String>)
         ui.add_space(4.0);
     }
 
-    if let Some(body) = body.filter(|_| is_open) {
+    let shown = widgets::opened(ui, ui.id().with("detail"), is_open);
+    if let Some(body) = body.filter(|_| shown > 0.0) {
+        let detail = ui.id().with("detail-body");
+        widgets::unfold(ui, detail, shown, |ui| {
         ui.add_space(4.0);
         // The self-portrait brings the step it unfolded into view.
         if SHOT_OPEN_STEP.load(std::sync::atomic::Ordering::Relaxed) {
@@ -826,6 +835,7 @@ fn step(ui: &mut Ui, tool: &ToolEvent, env: &mut Env, open: &mut Option<String>)
             });
         });
         ui.add_space(4.0);
+        });
     }
 
     // A picture the step showed the user. A capture or a look is for the model: only `show_image` puts one in the chat.
@@ -864,6 +874,9 @@ fn step(ui: &mut Ui, tool: &ToolEvent, env: &mut Env, open: &mut Option<String>)
     }
 }
 
+/// How long a step or a thought that has just started takes to unfold into its place.
+const STEP_IN: f32 = 0.2;
+
 // ------------------------------------------------------------------ thinking
 
 fn tokens_of_chars(chars: usize, floor: u64) -> String {
@@ -878,17 +891,49 @@ fn thought_time(ms: u64) -> String {
 }
 
 /// The body of a thinking box: the text, scrolling once it is taller than `max_height`.
-fn thought_body(ui: &mut Ui, text: &str, live: bool, max_height: f32, margin: egui::Margin) {
+/// `fill`: the box's own colour, laid over the chat's.
+fn thought_body(ui: &mut Ui, text: &str, live: bool, max_height: f32, margin: egui::Margin, fill: Color32) {
     let p = p();
     egui::Frame::new().inner_margin(margin).show(ui, |ui| {
         ui.set_width(ui.available_width());
-        egui::ScrollArea::vertical().id_salt("thought").max_height(max_height).stick_to_bottom(live).show(ui, |ui| {
+        // A live thought follows its end as the chat does, gliding (`widgets::Follow`): stuck to it by egui, its text
+        // hopped a line at a time. Until a wheel takes it up, for the rest of that thought.
+        let follow_id = ui.id().with("follow");
+        let (mut follow, at, mut kept): (widgets::Follow, f32, bool) = ui.data(|d| d.get_temp(follow_id)).unwrap_or((widgets::Follow::default(), 0.0, true));
+        let forced = (live && kept).then(|| follow.step(at, ui.input(|i| i.stable_dt)));
+        let mut area = egui::ScrollArea::vertical().id_salt("thought").max_height(max_height);
+        if let Some(offset) = forced {
+            area = area.vertical_scroll_offset(offset);
+        }
+        let out = area.show(ui, |ui| {
             ui.set_width(ui.available_width());
             let shown = text.trim_start();
             // A long live stream only draws its tail: laying out megabytes every frame would stall the window.
             let tail = if live && shown.chars().count() > 12_000 { shown.char_indices().rev().nth(11_999).map_or(shown, |(i, _)| &shown[i..]) } else { shown };
             ui.add(egui::Label::new(widgets::lines(tail, 13.0, 20.0, W::Regular, p.muted)).wrap().selectable(true));
         });
+        let end = out.content_size.y - out.inner_rect.height();
+        kept &= !forced.is_some_and(|offset| out.state.offset.y < offset.min(end) - 1.0);
+        follow.left(if live && kept { end - out.state.offset.y } else { 0.0 });
+        if follow.lag > 0.0 {
+            ui.ctx().request_repaint();
+        }
+        ui.data_mut(|d| d.insert_temp(follow_id, (follow, out.state.offset.y, kept)));
+        // Scrolled, the text fades out under the box's top edge (the web's mask): cut there, half a line stood
+        // under the label, and as the box folded it read as text showing through it.
+        if out.state.offset.y > 0.5 {
+            let k = 1.0 - fill.a() as f32 / 255.0;
+            let under = |a: u8, b: u8| (a as f32 + b as f32 * k).round().min(255.0) as u8;
+            let solid = Color32::from_rgb(under(fill.r(), p.bg.r()), under(fill.g(), p.bg.g()), under(fill.b(), p.bg.b()));
+            let edge = Rect::from_min_size(out.inner_rect.min, vec2(out.inner_rect.width(), 18.0));
+            let mut mesh = egui::Mesh::default();
+            for (at, colour) in [(edge.left_top(), solid), (edge.right_top(), solid), (edge.left_bottom(), Color32::TRANSPARENT), (edge.right_bottom(), Color32::TRANSPARENT)] {
+                mesh.colored_vertex(at, colour);
+            }
+            mesh.add_triangle(0, 1, 2);
+            mesh.add_triangle(1, 3, 2);
+            ui.painter().add(mesh);
+        }
     });
 }
 
@@ -901,12 +946,11 @@ fn thinking_panel(ui: &mut Ui, text: &str, ms: u64, live: bool, env: &mut Env, u
     if live && text.trim().is_empty() {
         return;
     }
+    let shown = widgets::opened(ui, id.with("open"), open);
     let (border, fill) = if live {
         (alpha(p.thinking, 32.0), alpha(p.thinking, 8.0))
-    } else if open {
-        (p.border_light, alpha(p.bg3, 72.0))
     } else {
-        (p.border, alpha(p.bg2, 55.0))
+        (widgets::lerp(p.border, p.border_light, shown), widgets::lerp(alpha(p.bg2, 55.0), alpha(p.bg3, 72.0), shown))
     };
     egui::Frame::new().fill(fill).stroke(Stroke::new(1.0, border)).corner_radius(8).show(ui, |ui| {
         ui.set_width(ui.available_width());
@@ -937,15 +981,15 @@ fn thinking_panel(ui: &mut Ui, text: &str, ms: u64, live: bool, env: &mut Env, u
             open = !open;
             ui.data_mut(|d| d.insert_temp(id, open));
         }
-        if open {
+        widgets::unfold(ui, id.with("body"), shown, |ui| {
             if text.trim().is_empty() {
                 egui::Frame::new().inner_margin(egui::Margin { left: 12, right: 12, top: 0, bottom: 10 }).show(ui, |ui| {
                     plain(ui, widgets::lines("Thinking was enabled, but no reasoning text was received for this reply.", 13.0, 20.0, W::Regular, p.muted.gamma_multiply(0.6)));
                 });
             } else {
-                thought_body(ui, text, live, 320.0, egui::Margin { left: 12, right: 12, top: 0, bottom: 10 });
+                thought_body(ui, text, live, 320.0, egui::Margin { left: 12, right: 12, top: 0, bottom: 10 }, fill);
             }
-        }
+        });
     });
 }
 
@@ -958,13 +1002,16 @@ fn think_row(ui: &mut Ui, text: &str, live: bool, env: &mut Env) {
     let id = ui.id().with("think");
     let toggled: Option<bool> = ui.data(|d| d.get_temp(id));
     let open = toggled.unwrap_or(live);
-    let (border, fill) = if live {
-        (alpha(p.thinking, 32.0), alpha(p.thinking, 8.0))
-    } else if open {
-        (p.border, alpha(p.bg2, 55.0))
-    } else {
-        (Color32::TRANSPARENT, Color32::TRANSPARENT)
-    };
+    // A thought that ends folds shut and its box fades from the thinking colour, rather than both at once in a
+    // frame. Filmed, the box vanished in the frame the next step appeared and everything under it jumped.
+    let shown = widgets::opened(ui, id.with("open"), open);
+    let warm = ui.ctx().animate_bool_with_time(id.with("live"), live, widgets::FOLD);
+    let boxed = shown.max(warm);
+    // A thought that has just begun takes the place of the line that said "Thinking…": its words are there at once,
+    // where that line's stood, and its box fades in around them. Unfolding from nothing, it left a beat with neither.
+    let come = widgets::arrival(ui, id.with("born"), live, STEP_IN);
+    let border = widgets::lerp(p.border, alpha(p.thinking, 32.0), warm).gamma_multiply(boxed * come);
+    let fill = widgets::lerp(alpha(p.bg2, 55.0), alpha(p.thinking, 8.0), warm).gamma_multiply(boxed * come);
     egui::Frame::new().fill(fill).stroke(Stroke::new(1.0, border)).corner_radius(8).show(ui, |ui| {
         ui.set_width(ui.available_width());
         let (row, response) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
@@ -973,9 +1020,9 @@ fn think_row(ui: &mut Ui, text: &str, live: bool, env: &mut Env) {
         if !live {
             ui.painter().rect_filled(row, 8.0, alpha(p.hover, 60.0 * t));
         }
-        let colour = if live { p.thinking } else { widgets::lerp(p.muted, p.text2, t) };
+        let colour = widgets::lerp(widgets::lerp(p.muted, p.text2, t), p.thinking, warm);
         let glyph = Rect::from_min_size(pos2(row.left() + 6.0, row.center().y - 10.0), vec2(20.0, 20.0));
-        ui.painter().rect_filled(glyph, 8.0, if live { alpha(p.thinking, 12.0) } else { alpha(p.hover, 70.0) });
+        ui.painter().rect_filled(glyph, 8.0, widgets::lerp(alpha(p.hover, 70.0), alpha(p.thinking, 12.0), warm));
         icons::paint(ui, icons::THINK, glyph.center(), 13.0, colour);
         let mut x = glyph.right() + 8.0;
         let amount = tokens_of_chars(text.chars().count(), 1);
@@ -992,9 +1039,7 @@ fn think_row(ui: &mut Ui, text: &str, live: bool, env: &mut Env) {
         if response.clicked() {
             ui.data_mut(|d| d.insert_temp(id, !open));
         }
-        if open {
-            thought_body(ui, text, live, 288.0, egui::Margin { left: 36, right: 12, top: 0, bottom: 10 });
-        }
+        widgets::unfold(ui, id.with("body"), shown, |ui| thought_body(ui, text, live, 288.0, egui::Margin { left: 36, right: 12, top: 0, bottom: 10 }, fill));
     });
 }
 
@@ -1034,6 +1079,14 @@ fn meta_row(ui: &mut Ui, msg: &Message, env: &Env, sources_open: &mut bool) -> b
             widgets::text_at(ui, rect.left(), rect.center().y, label);
             response
         };
+        // A count that arrives while the reply is live fades in where it lands, as the lines under the reply do.
+        let fade = |ui: &mut Ui, key: &str, add: &mut dyn FnMut(&mut Ui)| {
+            let come = widgets::arrival(ui, ui.id().with(("meta", key)), env.live, STEP_IN);
+            ui.scope(|ui| {
+                ui.multiply_opacity(come);
+                add(ui);
+            });
+        };
         if let Some(effort) = effort {
             pill(ui, icons::SPARKLE, effort, p.thinking, None);
         }
@@ -1051,7 +1104,9 @@ fn meta_row(ui: &mut Ui, msg: &Message, env: &Env, sources_open: &mut bool) -> b
             if cached > 0 {
                 tip += &format!("\n{} of the input was cached, billed at 1/120th the rate", chat::thousands(cached));
             }
-            word(ui, &format!("{} tokens", chat::thousands(used)), W::Regular).on_hover_text(tip);
+            fade(ui, "tokens", &mut |ui| {
+                word(ui, &format!("{} tokens", chat::thousands(used)), W::Regular).on_hover_text(&tip);
+            });
         }
         // The reply's cost is the model's plus what its web searches cost (the web's `searchUsd`), the search on its own tooltip line.
         let model = msg.usage.shown_cost(&msg.model, &env.settings.custom_models, crate::provider::deepseek_off_peak()).filter(|_| used > 0);
@@ -1062,7 +1117,9 @@ fn meta_row(ui: &mut Ui, msg: &Message, env: &Env, sources_open: &mut bool) -> b
             } else {
                 format!("Model: {}\nEstimated from published rates", chat::format_cost(cost))
             };
-            word(ui, &chat::format_cost(cost), W::Medium).on_hover_text(tip);
+            fade(ui, "cost", &mut |ui| {
+                word(ui, &chat::format_cost(cost), W::Medium).on_hover_text(&tip);
+            });
         }
         let with_icon = |ui: &mut Ui, icon: Icon, text: String, tip: String| {
             // One piece as tall as its text. A row of its own stands taller than the line, and sat low on it.
@@ -1073,7 +1130,7 @@ fn meta_row(ui: &mut Ui, msg: &Message, env: &Env, sources_open: &mut bool) -> b
             response.on_hover_text(tip);
         };
         if msg.duration_ms > 0 {
-            with_icon(ui, icons::CLOCK, chat::format_duration(msg.duration_ms), "Time from sending to the last token".into());
+            fade(ui, "time", &mut |ui| with_icon(ui, icons::CLOCK, chat::format_duration(msg.duration_ms), "Time from sending to the last token".into()));
         }
         let context: u64 = msg.other.get("contextChars").and_then(|v| v.as_u64()).unwrap_or_else(|| msg.context_breakdown.iter().map(|b| b.chars).sum());
         if context > 0 {
@@ -1086,7 +1143,7 @@ fn meta_row(ui: &mut Ui, msg: &Message, env: &Env, sources_open: &mut bool) -> b
                 tip += if tokens > 0 { ". By part, in characters:" } else { ":" };
                 msg.context_breakdown.iter().for_each(|b| tip += &format!("\n{} {}", b.label, k(b.chars)));
             }
-            with_icon(ui, icons::LINES, if tokens > 0 { format!("~{} ctx", k(tokens)) } else { format!("~{} chars", k(context)) }, tip);
+            fade(ui, "context", &mut |ui| with_icon(ui, icons::LINES, if tokens > 0 { format!("~{} ctx", k(tokens)) } else { format!("~{} chars", k(context)) }, tip.clone()));
         }
         let ending = msg.raw_ending.as_ref();
         let count = |key: &str| ending.and_then(|e| e[key].as_u64()).unwrap_or(0);
@@ -1382,8 +1439,12 @@ pub fn timeline_rows(parts: &[Part], live: bool) -> Vec<TimelineRow<'_>> {
 fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
     let p = p();
     let has_tools = msg.parts.iter().any(|part| matches!(part, Part::Tool(_)));
-    // A reply with find matches is drawn flat, as the web draws it while a query is on.
-    let timeline = msg.parts.len() > 1 && has_tools && env.marks.is_none();
+    // A reply that thinks is laid out as a timeline from its first thought, steps or not. It used to start as a box
+    // on top and turn into a timeline when the first step came: the open thought vanished, the step appeared and the
+    // notices moved from under it to over it, all in one frame. A reply with find matches is drawn flat, as the web
+    // draws it while a query is on.
+    let thinks = msg.parts.iter().any(|part| matches!(part, Part::Thinking { .. }));
+    let timeline = (msg.parts.len() > 1 && has_tools || thinks) && env.marks.is_none();
     let text = msg.text();
     let failed = msg.error.is_some();
     let colour = if msg.incomplete && !env.live { p.text2 } else { p.text };
@@ -1409,7 +1470,7 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
     }
 
     // Thinking that has its place among the steps is shown there; otherwise in one box up here.
-    let inline_thinking = timeline && msg.parts.iter().any(|part| matches!(part, Part::Thinking { .. }));
+    let inline_thinking = timeline && thinks;
     if !inline_thinking {
         let reasoning = msg.reasoning();
         let thinking_now = env.live && matches!(msg.parts.last(), Some(Part::Thinking { ms: 0, .. }));
@@ -1509,7 +1570,10 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
                 if let Some((thought, live)) = think {
                     hung(ui, |ui| think_row(ui, thought, *live, env));
                 } else if let Some(notice) = notice {
-                    notice_line(ui, notice);
+                    // A notice new to the reply unfolds as a step does: the route line came in whole and pushed
+                    // "Thinking…" down by two lines in a frame.
+                    let come = widgets::arrival(ui, ui.id().with("born"), writing, STEP_IN);
+                    widgets::unfold(ui, ui.id().with("in"), come, |ui| notice_line(ui, notice));
                 } else {
                     let said = texts.concat();
                     let has_text = !said.trim().is_empty();
@@ -1520,7 +1584,7 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
                         let mut left = ui.new_child(egui::UiBuilder::new().max_rect(full.with_max_x(full.right() - 321.0 - 24.0)).layout(egui::Layout::top_down(egui::Align::Min)));
                         prose(&mut left, &said, colour, env, stretch);
                         let mut right = ui.new_child(egui::UiBuilder::new().max_rect(full.with_min_x(full.right() - 320.0 + 24.0)).layout(egui::Layout::top_down(egui::Align::Min)));
-                        steps(&mut right, tools, env, &mut open);
+                        steps(&mut right, tools, env, &mut open, writing);
                         let bottom = left.min_rect().bottom().max(right.min_rect().bottom());
                         ui.painter().rect_filled(Rect::from_min_max(pos2(full.right() - 321.0, full.top()), pos2(full.right() - 320.0, bottom)), 0.0, p.border);
                         ui.allocate_rect(full.with_max_y(bottom), Sense::hover());
@@ -1532,7 +1596,7 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
                             }
                         }
                         if !tools.is_empty() {
-                            steps(ui, tools, env, &mut open);
+                            steps(ui, tools, env, &mut open, writing);
                         }
                     }
                 }
@@ -1543,16 +1607,22 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
         let tools: Vec<&ToolEvent> = msg.parts.iter().filter_map(|part| if let Part::Tool(t) = part { Some(t) } else { None }).collect();
         if !tools.is_empty() {
             gap(ui, 12.0);
-            steps(ui, &tools, env, &mut open);
+            let live = env.live;
+            steps(ui, &tools, env, &mut open, live);
         }
         if !text.is_empty() {
             gap(ui, 12.0);
             prose(ui, &text, colour, env, lazy::print((&msg.id, usize::MAX)));
         }
-        for part in &msg.parts {
+        for (i, part) in msg.parts.iter().enumerate() {
             if let Part::Notice(notice) = part {
-                gap(ui, 12.0);
-                notice_line(ui, notice);
+                ui.push_id(("notice", i), |ui| {
+                    let come = widgets::arrival(ui, ui.id().with("born"), env.live && i + 1 == msg.parts.len(), STEP_IN);
+                    widgets::unfold(ui, ui.id().with("in"), come, |ui| {
+                        gap(ui, 12.0);
+                        notice_line(ui, notice);
+                    });
+                });
             }
         }
     }
@@ -1569,58 +1639,62 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
         gap(ui, 12.0);
         error_card(ui, error);
     }
+    // What goes under a reply comes in as it ends, unfolding, rather than pushing the chat up by a row in one frame.
+    let ending = widgets::opened(ui, ui.id().with("ending"), !env.live);
     if env.live {
         return;
     }
-    // Under the reply, where its reader is: above two hundred steps nobody found Resume.
-    if msg.incomplete {
-        gap(ui, 12.0);
-        interrupted(ui, msg, env);
-    }
+    widgets::unfold(ui, ui.id().with("ending-rows"), ending, |ui| {
+        // Under the reply, where its reader is: above two hundred steps nobody found Resume.
+        if msg.incomplete {
+            gap(ui, 12.0);
+            interrupted(ui, msg, env);
+        }
 
-    let delete_tip = "Delete this reply and your question — both forget it";
-    if env.newest && !failed && !text.is_empty() {
-        gap(ui, 12.0);
-        ui.add_space(2.0);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            let copied_id = ui.id().with("copied");
-            let done = ui.data(|d| d.get_temp::<f64>(copied_id)).is_some_and(|at| ui.input(|i| i.time) - at < 2.0);
-            let copy = if done { action_btn(ui, icons::CHECK_THIN.stroke(2.2), "Copied", "Copy reply", 28.0, false, Some(p.success)) } else { action_btn(ui, icons::COPY_SMALL, "Copy", "Copy reply", 28.0, false, None) };
-            if copy.clicked() {
-                let now = ui.input(|i| i.time);
-                ui.data_mut(|d| d.insert_temp(copied_id, now));
-                *env.action = Some(Action::Copy(text.clone()));
-            }
-            let earlier = msg.other.get("previousVersions").and_then(|v| v.as_array()).map_or(0, Vec::len);
-            if earlier > 0 && compare_btn(ui, earlier + 1).clicked() {
-                *env.action = Some(Action::Compare(msg.id.clone()));
-            }
-            if !env.busy && action_btn(ui, icons::REGENERATE, "Regenerate", "Generate a different reply", 28.0, false, None).clicked() {
-                *env.action = Some(Action::Retry);
-            }
-            if !env.busy && action_btn(ui, icons::TRASH_SMALL, "Delete", delete_tip, 28.0, true, None).clicked() {
+        let delete_tip = "Delete this reply and your question — both forget it";
+        if env.newest && !failed && !text.is_empty() {
+            gap(ui, 12.0);
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                let copied_id = ui.id().with("copied");
+                let done = ui.data(|d| d.get_temp::<f64>(copied_id)).is_some_and(|at| ui.input(|i| i.time) - at < 2.0);
+                let copy = if done { action_btn(ui, icons::CHECK_THIN.stroke(2.2), "Copied", "Copy reply", 28.0, false, Some(p.success)) } else { action_btn(ui, icons::COPY_SMALL, "Copy", "Copy reply", 28.0, false, None) };
+                if copy.clicked() {
+                    let now = ui.input(|i| i.time);
+                    ui.data_mut(|d| d.insert_temp(copied_id, now));
+                    *env.action = Some(Action::Copy(text.clone()));
+                }
+                let earlier = msg.other.get("previousVersions").and_then(|v| v.as_array()).map_or(0, Vec::len);
+                if earlier > 0 && compare_btn(ui, earlier + 1).clicked() {
+                    *env.action = Some(Action::Compare(msg.id.clone()));
+                }
+                if !env.busy && action_btn(ui, icons::REGENERATE, "Regenerate", "Generate a different reply", 28.0, false, None).clicked() {
+                    *env.action = Some(Action::Retry);
+                }
+                if !env.busy && action_btn(ui, icons::TRASH_SMALL, "Delete", delete_tip, 28.0, true, None).clicked() {
+                    *env.action = Some(Action::Delete(msg.id.clone()));
+                }
+            });
+        } else if env.newest && !env.busy {
+            gap(ui, 12.0);
+            if action_btn(ui, icons::TRASH_SMALL, "Delete", delete_tip, 28.0, true, None).clicked() {
                 *env.action = Some(Action::Delete(msg.id.clone()));
             }
-        });
-    } else if env.newest && !env.busy {
-        gap(ui, 12.0);
-        if action_btn(ui, icons::TRASH_SMALL, "Delete", delete_tip, 28.0, true, None).clicked() {
-            *env.action = Some(Action::Delete(msg.id.clone()));
-        }
-    } else if !env.busy {
-        // Older replies: a Delete that only shows while its strip is hovered. The strip is always there.
-        gap(ui, 12.0);
-        let (strip, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
-        let shown = widgets::fade(ui, ui.id().with("delete-strip"), ui.rect_contains_pointer(strip));
-        if shown > 0.0 {
-            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(strip.with_min_y(strip.top() + 2.0)).layout(egui::Layout::left_to_right(egui::Align::Center)));
-            child.set_opacity(shown);
-            if action_btn(&mut child, icons::TRASH_SMALL, "Delete", delete_tip, 28.0, true, None).clicked() {
-                *env.action = Some(Action::Delete(msg.id.clone()));
+        } else if !env.busy {
+            // Older replies: a Delete that only shows while its strip is hovered. The strip is always there.
+            gap(ui, 12.0);
+            let (strip, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
+            let shown = widgets::fade(ui, ui.id().with("delete-strip"), ui.rect_contains_pointer(strip));
+            if shown > 0.0 {
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(strip.with_min_y(strip.top() + 2.0)).layout(egui::Layout::left_to_right(egui::Align::Center)));
+                child.set_opacity(shown);
+                if action_btn(&mut child, icons::TRASH_SMALL, "Delete", delete_tip, 28.0, true, None).clicked() {
+                    *env.action = Some(Action::Delete(msg.id.clone()));
+                }
             }
         }
-    }
+    });
     let _ = CornerRadius::ZERO;
 }
 

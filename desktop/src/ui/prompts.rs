@@ -59,7 +59,7 @@ fn card(ui: &mut egui::Ui, icon: icons::Icon, title: &str, detail: &str, body: i
 pub fn show(app: &mut App, ui: &mut egui::Ui) -> bool {
     let p = p();
     let conv_id = app.conv.id.clone();
-    let Some(run) = app.run.as_mut().filter(|r| r.conv_id == conv_id) else { return false };
+    let Some(run) = app.runs.iter_mut().find(|r| r.conv_id == conv_id) else { return false };
     let mut drew = false;
 
     if let Some(pending) = &run.approval {
@@ -136,7 +136,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> bool {
         }
     }
 
-    let Some(run) = app.run.as_mut().filter(|r| r.conv_id == conv_id) else { return drew };
+    let Some(run) = app.runs.iter_mut().find(|r| r.conv_id == conv_id) else { return drew };
     if let Some(pending) = run.question.as_mut() {
         if drew {
             ui.add_space(10.0);

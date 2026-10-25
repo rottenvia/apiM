@@ -196,7 +196,8 @@ pub async fn screenshot_window(ctx: &Ctx, args: &Value) -> Output {
     let process_id = str_arg(args, "process_id").trim().to_string();
     let mut pid = num_arg(args, "pid").map(|p| p as u32);
     if !process_id.is_empty() {
-        let Some(tracked) = ctx.procs.list().into_iter().find(|p| p.id == process_id) else {
+        // Only this chat's: process ids count up across every chat, and another chat's window is not this one's to capture.
+        let Some(tracked) = ctx.procs.list_for(&ctx.state_dir).into_iter().find(|p| p.id == process_id) else {
             return fail(format!("Error: no process with id \"{process_id}\". Use list_processes to see what is running."), "No such process");
         };
         if let Some(code) = tracked.exit {

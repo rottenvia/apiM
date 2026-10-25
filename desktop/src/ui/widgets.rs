@@ -51,6 +51,104 @@ pub fn entrance(ctx: &egui::Context, since: std::time::Instant, secs: f32) -> f3
     egui::emath::easing::cubic_out(t)
 }
 
+/// How long a block takes to fold shut or open (a thought, a step's detail, the chat's totals).
+pub const FOLD: f32 = 0.25;
+
+/// The curve every fold and entrance follows, the web's "standard" one (CSS `cubic-bezier(0.4, 0, 0.2, 1)`): under
+/// way within a frame or two, settling gently. Filmed, a cubic in-out read as a fade that then snapped shut (its
+/// first fifth hardly moves), a sine in-out as the same more mildly, and a cubic out as a pop that then drifted.
+pub fn ease(t: f32) -> f32 {
+    let curve = |s: f32, a: f32, b: f32| 3.0 * (1.0 - s) * (1.0 - s) * s * a + 3.0 * (1.0 - s) * s * s * b + s * s * s;
+    // The point of the curve that is `t` across, found by halving.
+    let (mut lo, mut hi) = (0.0_f32, 1.0_f32);
+    for _ in 0..16 {
+        let mid = (lo + hi) / 2.0;
+        if curve(mid, 0.4, 0.2) < t { lo = mid } else { hi = mid }
+    }
+    curve((lo + hi) / 2.0, 0.0, 1.0)
+}
+
+/// How far open a block that folds is, 0..1, easing both ways. The first time it is asked it is where it should be:
+/// a chat opened from history does not unfold everything in it.
+pub fn opened(ui: &Ui, id: egui::Id, open: bool) -> f32 {
+    ui.ctx().animate_bool_with_time_and_easing(id, open, FOLD, ease)
+}
+
+/// How far into its entrance something is, 0 to 1 over `secs`, eased, counted from the first frame it was drawn
+/// in while `fresh`. Something first drawn otherwise (from history, in a chat just opened) is simply there.
+pub fn arrival(ui: &Ui, id: egui::Id, fresh: bool, secs: f32) -> f32 {
+    let now = ui.input(|i| i.time);
+    let born = ui.data_mut(|d| *d.get_temp_mut_or_insert_with(id, || if fresh { now } else { f64::NEG_INFINITY }));
+    let t = (((now - born) as f32) / secs).clamp(0.0, 1.0);
+    if t < 1.0 {
+        ui.ctx().request_repaint();
+    }
+    ease(t)
+}
+
+/// Draws `add` as far open as `shown` says: cut off at that share of its height, and taking only that much room,
+/// so what is under it moves up as it folds instead of jumping. A cut has to be known before anything is painted,
+/// so it goes by the height measured last time. What grows while open (a thought streaming in, a step getting
+/// its result) takes its new room a little at a time too: the box's edge stepped down a line in a frame.
+pub fn unfold(ui: &mut Ui, id: egui::Id, shown: f32, add: impl FnOnce(&mut Ui)) {
+    if shown <= 0.0 {
+        return;
+    }
+    let (top, width) = (ui.cursor().min, ui.available_width());
+    // (height measured last time, height given, how far open it was): none of it the first time.
+    let (known, given, was): (f32, f32, f32) = ui.data(|d| d.get_temp(id.with("height"))).unwrap_or((f32::NAN, f32::NAN, shown));
+    let k = 1.0 - (-ui.input(|i| i.stable_dt).min(0.05) * 20.0).exp();
+    let given = if known > given { given + (known - given) * k } else { known };
+    let builder = egui::UiBuilder::new().id_salt(id).max_rect(Rect::from_min_size(top, vec2(width, f32::INFINITY))).layout(egui::Layout::top_down(egui::Align::Min));
+    let mut child = ui.new_child(builder);
+    if shown < 1.0 || !given.is_nan() {
+        // Open, a point under its room is left for an edge drawn on it.
+        let cut = if given.is_nan() { 0.0 } else { given * shown + if shown < 1.0 { 0.0 } else { 1.0 } };
+        child.set_clip_rect(ui.clip_rect().intersect(Rect::everything_above(top.y + cut)));
+    }
+    if shown < 1.0 {
+        // Folding, the words go before the room does: faded at the pace of the cut, half a thought stood half seen
+        // over the step under it. Coming in they keep pace with it, or a new row stayed unseen for its first frames.
+        child.multiply_opacity(if shown < was { shown * shown } else { shown });
+    }
+    add(&mut child);
+    let height = child.min_rect().height();
+    let given = if given.is_nan() { height } else { given.min(height) };
+    if given < height {
+        ui.ctx().request_repaint();
+    }
+    ui.data_mut(|d| d.insert_temp(id.with("height"), (height, given, shown)));
+    ui.advance_cursor_after_rect(Rect::from_min_size(top, vec2(width, given * shown)));
+}
+
+/// A view that follows the end of what it shows, as a spring that closes the distance in about a fifth of a second.
+/// Closing a share of it each frame instead, every line that landed kicked the pace up in a frame.
+#[derive(Clone, Copy, Default)]
+pub struct Follow {
+    /// How far short of the end the view was left.
+    pub lag: f32,
+    pace: f32,
+}
+
+impl Follow {
+    /// Where the view goes this frame, from `at`.
+    pub fn step(&mut self, at: f32, dt: f32) -> f32 {
+        const W: f32 = 26.0;
+        let dt = dt.min(0.02);
+        self.pace = (self.pace + (W * W * self.lag - 2.0 * W * self.pace) * dt).max(0.0);
+        at + (self.pace * dt).min(self.lag)
+    }
+
+    /// How far from the end this frame left the view.
+    pub fn left(&mut self, distance: f32) {
+        if distance > 0.5 {
+            self.lag = distance;
+        } else {
+            *self = Follow::default();
+        }
+    }
+}
+
 pub fn lerp(a: Color32, b: Color32, t: f32) -> Color32 {
     a.lerp_to_gamma(b, t)
 }
@@ -230,6 +328,34 @@ pub fn mini_btn(ui: &mut Ui, icon: Icon, size: f32, icon_size: f32, tip: &str) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn following_the_end_eases_into_each_new_line_and_never_passes_it() {
+        // A line of 20 lands every 100 ms for half a second, at 144 frames a second.
+        let (mut follow, mut at, mut end, mut paces) = (Follow::default(), 0.0_f32, 0.0_f32, Vec::new());
+        for frame in 0..288 {
+            if frame % 14 == 0 && frame < 72 {
+                end += 20.0;
+            }
+            at = follow.step(at, 1.0 / 144.0);
+            assert!(at <= end + 0.01, "passed the end at frame {frame}");
+            follow.left(end - at);
+            paces.push(follow.pace);
+        }
+        assert!(end - at < 0.5, "{} short after two seconds", end - at);
+        // A line landing changes the step it takes by under a point a frame (closing a share of the distance each
+        // frame, by three and a half).
+        assert!(paces.windows(2).all(|w| (w[1] - w[0]).abs() / 144.0 < 1.0), "{paces:?}");
+    }
+
+    #[test]
+    fn the_curve_starts_at_once_and_settles_gently() {
+        let at = |t: f32| (ease(t) * 100.0).round();
+        assert_eq!((at(0.0), at(1.0)), (0.0, 100.0));
+        // A tenth in, it is moving; at three tenths, a third of the way; past half, most of it; the last fifth settles.
+        assert!(at(0.1) >= 2.0 && at(0.3) >= 30.0 && at(0.5) >= 75.0 && at(0.8) >= 95.0, "{} {} {} {}", at(0.1), at(0.3), at(0.5), at(0.8));
+        assert!((1..=100).all(|i| ease(i as f32 / 100.0) >= ease((i - 1) as f32 / 100.0)));
+    }
 
     #[test]
     fn a_glide_travels_to_a_new_target_and_takes_one_it_is_told_not_to_travel_to() {

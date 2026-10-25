@@ -160,6 +160,10 @@ impl Typing {
 
     /// Its turn has come: it joins what is being typed out.
     pub fn push(&mut self, prose: bool, text: String) {
+        // Nothing to type: an empty piece at the front would be given out as nothing, frame after frame.
+        if text.is_empty() {
+            return;
+        }
         self.chars += text.chars().count();
         match self.queue.back_mut() {
             Some((kind, so_far)) if *kind == prose => so_far.push_str(&text),
@@ -169,6 +173,19 @@ impl Typing {
 
     pub fn waiting(&self) -> bool {
         self.chars > 0
+    }
+
+    /// Nothing is given out for now (a thought is folding). The time it takes is not the text's: a reply's last
+    /// words, held back, came in whole when the fold ended, their quarter-second to be typed in spent waiting.
+    pub fn hold(&mut self) {
+        self.draining = None;
+        // Nor does it count as time owed: the first frame after it gave out a line and a half at once.
+        self.last = Instant::now();
+    }
+
+    /// The next text in line is the reply's own, not its thinking.
+    pub fn prose_next(&self) -> bool {
+        self.queue.front().is_some_and(|(prose, _)| *prose)
     }
 
     /// What to write into the reply this frame. `held`: something waits behind the text, which is then typed
@@ -194,6 +211,9 @@ impl Typing {
                 if left <= 16.0 { self.chars } else { ((self.chars as f64 * dt / left).ceil() as usize).max(1) }
             }
         };
+        // One kind a frame. The end of a thought and the reply's first words together let the words in under the
+        // open box before it had begun to fold (`App::pump_run` holds them back until it has).
+        let n = if self.queue.len() > 1 { n.min(self.queue.front().map_or(0, |(_, text)| text.chars().count())) } else { n };
         self.take(n)
     }
 
@@ -351,6 +371,14 @@ mod tests {
         assert!(typing.waiting());
         assert_eq!(typing.release_all(), [(true, "ose".to_string())]);
         assert!(!typing.waiting() && typing.release(true).is_empty());
+
+        // Typed out, a frame never gives the end of a thought and the first words after it together.
+        typing.push(false, "a thought".into());
+        typing.push(true, "words".into());
+        while typing.waiting() {
+            let out = typing.release(true);
+            assert!(out.len() == 1, "{out:?}");
+        }
 
         let mut typing = Typing::default();
         typing.arrived("late");
