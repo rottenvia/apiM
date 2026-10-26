@@ -311,7 +311,8 @@ pub struct App {
     anchor: f32,
     /// How tall the transcript was when it was last laid out.
     scroll_end: f32,
-    /// The least the transcript is tall: the most it has been while a reply in it ran (`chat::messages`).
+    /// The least the last message is tall, from its top to the transcript's end: the most it has been while it was
+    /// being written (`chat::messages`).
     floor: f32,
     /// The transcript follows its end: it was there, or is gliding to it (`chat::messages`).
     at_end: bool,
@@ -1197,6 +1198,8 @@ impl App {
             folded: None,
             arrived: None,
         });
+        // The room kept was the last reply's, and this one starts with none.
+        self.floor = 0.0;
         self.focus_composer = true;
         self.jump_to_latest = true;
         self.slash.notice = None;
