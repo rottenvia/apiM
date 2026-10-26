@@ -220,6 +220,8 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
     let mut tall = 0.0;
     let out = scroll.show(ui, |ui| {
         let content_top = ui.cursor().top();
+        // Where the last message starts: the room kept under a live reply is its own (below).
+        let mut last_top = content_top;
         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
         ui.set_opacity(come * (1.0 - 0.6 * leaving));
         // The room it gives up above its place comes off the room below it: the whole is as tall as ever.
@@ -326,6 +328,9 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
         let unmeasured_yet = |i: &usize| !heights.get(key_of(*i, &conv.messages[*i]).as_ref()).is_some_and(|m| m.exact && m.width == column && m.print == print_of(*i, &conv.messages[*i]));
         let pending: Vec<usize> = (if jump { in_view } else { start }..=last).rev().filter(unmeasured_yet).take(if landing { 0 } else if jump { usize::MAX } else { 4 }).collect();
         for (i, msg) in conv.messages.iter().enumerate().skip(start) {
+            if i == last {
+                last_top = ui.cursor().top();
+            }
             let live = running && i == last;
             let hits = counts.get(i).copied().unwrap_or(0);
             let focused = located.filter(|at| at.0 == i).map(|at| at.1);
@@ -401,8 +406,10 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
         }
         ui.add_space(24.0 - (1.0 - come) * ENTER_DROP);
         // Room a live reply gave up (a thought folded shut) stays, blank, under it. Given back, the chat followed its
-        // end down as the thought shut and up again as the next step came: a bounce on every step.
-        tall = ui.cursor().top() - content_top;
+        // end down as the thought shut and up again as the next step came: a bounce on every step. Only the reply's
+        // own room: kept for the whole transcript, the guessed heights of a long chat's older messages, measured
+        // smaller as the reply ran, left a screen of blank under it, the view at its end and the question above.
+        tall = ui.cursor().top() - last_top;
         ui.add_space((app.floor - tall).max(0.0));
     });
     if running {
