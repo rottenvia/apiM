@@ -2067,7 +2067,7 @@ mod tests {
             let messages = request["messages"].as_array().unwrap();
             let results: Vec<&str> = messages.iter().filter(|m| m["role"] == "tool").filter_map(|m| m["content"].as_str()).collect();
             let told: Vec<&&str> = results.iter().filter(|text| text.contains(crate::context::goal_pin::WORK_STATE_MARKER)).collect();
-            assert!(told.len() == 1 && results.last().unwrap().ends_with(&format!("{}\nRequest: {ask}", crate::context::goal_pin::WORK_STATE_MARKER)), "{results:?}");
+            assert!(told.len() == 1 && results.last().unwrap().ends_with(&format!("{}\n{}\nRequest: {ask}", crate::context::goal_pin::WORK_STATE_MARKER, crate::context::goal_pin::WORK_STATE_NOTE)), "{results:?}");
             assert!(sent_systems(request, GOAL_PIN_MARKER).is_empty() && messages.last().unwrap()["role"] != "system" || messages.last().unwrap()["content"].as_str().unwrap().starts_with("Workspace changes"));
         }
     }
