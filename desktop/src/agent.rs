@@ -86,7 +86,7 @@ pub enum Event {
     /// A request failed and try `attempt` of `attempts` starts after `wait`.
     Retry { reason: String, attempt: usize, attempts: usize, wait: Duration },
     ToolStart(ToolEvent),
-    ToolDone { id: String, ok: bool, summary: String, image: Option<PathBuf>, changed: Option<String> },
+    ToolDone { id: String, ok: bool, summary: String, image: Option<PathBuf>, changed: Option<String>, started_at: u64, duration_ms: u64 },
     /// A web search a tool call ran: its sources, queries and cost, for the reply it belongs to.
     WebSearch(crate::search::SearchOutcome),
     /// A helper's rounds so far, for its still-running `delegate` row.
@@ -1157,6 +1157,8 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
             let parsed = tools::parse_call(&call.name, args_text);
             // The instructions name tools whose group may not be loaded yet: such a call runs, and brings its group.
             tools::groups::note_use(&call.name, &mut groups);
+            // Timed from here to the result, so the Trace view can show how long the call took (an external wait reads as a long call, not an error).
+            let began = (crate::store::now_ms(), Instant::now());
             let out = match &parsed {
                 Ok(args) if call.name == "load_tools" => {
                     tools_used.push(call.name.clone());
@@ -1206,7 +1208,7 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
                 let passed = serde_json::from_str::<Value>(args_text).ok().and_then(|v| v.as_object().map(|map| map.keys().cloned().collect::<Vec<_>>().join(","))).unwrap_or_default();
                 log_with("tool_failed", &call.name, if out.summary.is_empty() { &out.text } else { &out.summary }, json!({ "model": target.model.id, "args": passed, "round": tool_rounds }));
             }
-            emit.send(Event::ToolDone { id: call.id.clone(), ok: out.ok, summary: out.summary.clone(), image: out.image.clone(), changed: out.changed.clone() });
+            emit.send(Event::ToolDone { id: call.id.clone(), ok: out.ok, summary: out.summary.clone(), image: out.image.clone(), changed: out.changed.clone(), started_at: began.0, duration_ms: began.1.elapsed().as_millis() as u64 });
             if let Some(found) = out.search.as_ref().filter(|_| out.ok) {
                 emit.send(Event::WebSearch(found.clone()));
             }

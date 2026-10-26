@@ -142,13 +142,28 @@ const IMPLEMENTED: &[&str] = &[
     "write_process", "stop_process", "list_processes", "wait_for_output", "fetch_url", "http_request", "download_file",
     "web_search", "make_plan", "update_plan", "ask_user", "finish", "note_finding", "view_image", "show_image", "browse", "inspect_page", "screenshot_window",
     "git_status", "git_diff", "git_log", "git_commit", "git_branch", "apply_patch", "verify_file", "read_symbol", "find_references",
-    "analyze_log", "extract_archive", "query_data", "list_snapshots", "restore_snapshot", "search_conversation",
+    "analyze_log", "extract_archive", "query_data", "list_snapshots", "restore_snapshot", "search_conversation", "read_chat",
     "git_pull_base", "github_push", "github_create_pr", "github_pr_status", "read_document", "build_project", "inspect_binary", "note_binary", "sandbox_run", "sandbox_screenshot",
 ];
+
+/// `read_chat` is this app's own, not in the web's tools.json, so its schema is built here (like the winproc tools).
+/// It lets a reading model pull a whole past chat in one of two methods; the description is the one place the model is
+/// told that a long duration in the Trace view is an external wait, not a stall — the misread this tool exists to end.
+fn read_chat_schema() -> Value {
+    serde_json::json!({ "type": "function", "function": {
+        "name": "read_chat",
+        "description": "Read a past chat from this app so you understand exactly what happened in it, in one of two methods you pick with `mode`. `read`: the chat as prose — every message, the model's thinking, and each tool step shown inline in the order it ran. `trace`: the tool timeline only, with the wall-clock time each call took, one after another. Use `trace` when timing matters: in it a LONG duration is time the app spent WAITING on something outside the model — a command finishing, a process that had already closed and answered late, a slow network read, a window being captured — NOT the model stalling, looping, or an error. A tool row is a failure only when it is marked FAIL. Read the same chat again in the other method whenever you want the other view. By default this reads the current chat; pass `chat` to read a different one.",
+        "parameters": { "type": "object", "properties": {
+            "mode": { "type": "string", "enum": ["read", "trace"], "description": "`read` for the chat as prose with its steps inline (the default), `trace` for the tool timeline with each call's duration." },
+            "chat": { "type": "string", "description": "A chat title (full or part) or its id. Omit to read the current chat." }
+        }, "required": [] }
+    }})
+}
 
 static SCHEMAS: LazyLock<Vec<Value>> = LazyLock::new(|| {
     let mut all: Vec<Value> = serde_json::from_str(include_str!("../../assets/tools.json")).expect("assets/tools.json is valid");
     all.extend(winproc::schemas());
+    all.push(read_chat_schema());
     all.retain(|t| IMPLEMENTED.contains(&t["function"]["name"].as_str().unwrap_or("")) || winproc::NAMES.contains(&t["function"]["name"].as_str().unwrap_or("")));
     // Without a browser on this computer `browse` is withheld, as the web app does.
     if !crate::browser::available() {
@@ -434,6 +449,7 @@ pub async fn run(name: &str, args: &Value, ctx: &Ctx) -> Output {
         "list_snapshots" => at_root(recall::list_snapshots),
         "restore_snapshot" => at_root(recall::restore_snapshot),
         "search_conversation" => sync(search_conversation),
+        "read_chat" => sync(read_chat),
         "make_plan" => sync(plan::make_plan),
         "update_plan" => sync(plan::update_plan),
         "note_finding" => sync(plan::note_finding),
@@ -492,6 +508,29 @@ fn search_conversation(ctx: &Ctx, args: &Value) -> Output {
     let turns: Vec<crate::find::Turn> = said.iter().map(|m| crate::find::Turn { content: m["content"].as_str().unwrap_or(""), attachments: m["attachments"].as_array().into_iter().flatten().map(name_and_note).collect() }).collect();
     let roles: Vec<&str> = said.iter().map(|m| m["role"].as_str().unwrap_or("")).collect();
     recall::search_conversation(&ctx.root, args, &turns, &roles)
+}
+
+/// `read_chat` loads a whole chat and renders it in the chosen method. Default target is the current chat, found by the
+/// folder its state lives in; otherwise a title (full or part) or an id. The two methods are `read` and `trace` (see `export`).
+fn read_chat(ctx: &Ctx, args: &Value) -> Output {
+    let mode = if str_arg(args, "mode") == "trace" { "trace" } else { "read" };
+    let target = str_arg(args, "chat").trim();
+    let metas = crate::store::Conversation::list();
+    let found = if target.is_empty() {
+        let slug = ctx.state_dir.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        metas.iter().find(|m| m.slug == slug)
+    } else {
+        let lower = target.to_lowercase();
+        metas.iter().find(|m| m.id == target).or_else(|| metas.iter().find(|m| m.title.eq_ignore_ascii_case(target))).or_else(|| metas.iter().find(|m| m.title.to_lowercase().contains(&lower)))
+    };
+    let Some(meta) = found else {
+        return Output::fail(if target.is_empty() { "No current chat to read.".to_string() } else { format!("No chat matches \"{target}\". Pass a chat title or id, or omit it for the current chat.") });
+    };
+    let Some(conv) = crate::store::Conversation::load(&meta.id) else {
+        return Output::fail(format!("Could not read the chat \"{}\".", meta.title));
+    };
+    let text = crate::export::render(&conv, mode);
+    Output::ok(text, format!("Read \"{}\" in {mode} ({} messages)", conv.title, conv.messages.len()))
 }
 
 #[cfg(test)]

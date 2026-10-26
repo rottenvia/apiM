@@ -1536,7 +1536,7 @@ impl App {
                     run.arrived = run.arrived.max(Some(came));
                     msg.parts.push(Part::Tool(tool));
                 }
-                Event::ToolDone { id, ok, summary, image, changed } => {
+                Event::ToolDone { id, ok, summary, image, changed, started_at, duration_ms } => {
                     if let Some(tool) = msg.parts.iter_mut().rev().find_map(|p| match p {
                         Part::Tool(t) if t.id == id => Some(t),
                         _ => None,
@@ -1545,6 +1545,8 @@ impl App {
                         tool.summary = summary;
                         tool.image = image;
                         tool.changed_path = changed;
+                        tool.started_at = started_at;
+                        tool.duration_ms = duration_ms;
                     }
                     self.files_stale = true;
                 }
