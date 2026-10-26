@@ -545,7 +545,7 @@ fn save(ctx: &Ctx, img: &RgbaImage, tag: &str) -> Result<PathBuf, String> {
 fn windows_text(frame: &Frame) -> String {
     let mut lines = Vec::new();
     for w in os::windows().iter().filter(|w| w.title != "Program Manager").take(20) {
-        let who = if w.process.eq_ignore_ascii_case("apim") { format!("{}: this app, where the user talks to you", w.process) } else { w.process.clone() };
+        let who = if is_apim(w) { format!("{}: this app, where the user talks to you", w.process) } else { w.process.clone() };
         let place = if w.minimized || w.rect.0 <= -30000 {
             "minimized".to_string()
         } else {
@@ -658,27 +658,30 @@ pub async fn look(ctx: &Ctx, args: &Value) -> Output {
 
 // ---------------------------------------------------------------- computer_act
 
-/// The user has taken the mouse: it is not where the last step left it. A game that holds the pointer in the middle
-/// of its window (first person) moves it too, so a pointer at the window's centre is not taken for the user's.
-// ponytail: the centre test is the only tell of a captured pointer; a game that parks it elsewhere would stop every run.
-fn user_moved(last: (i32, i32)) -> bool {
-    let now = os::cursor();
-    if (now.0 - last.0).abs() <= 2 && (now.1 - last.1).abs() <= 2 {
-        return false;
-    }
-    !os::windows().iter().find(|w| w.foreground).is_some_and(|w| {
-        let (cx, cy) = ((w.rect.0 + w.rect.2) / 2, (w.rect.1 + w.rect.3) / 2);
-        (now.0 - cx).abs() <= 3 && (now.1 - cy).abs() <= 3
-    })
+/// This app's own windows: by pid in the app, by name from the terminal, where the running exe may be renamed aside.
+fn is_apim(w: &os::Win) -> bool {
+    w.pid == std::process::id() || w.process.to_ascii_lowercase().starts_with("apim")
 }
 
-const TAKEN: &str = "the user moved the mouse, so they are using the computer. Nothing more was done: tell them what you were doing, and do not take the mouse back until they say so";
+/// Input came `ms` after our own last input; negative when it came before. Ticks wrap every 49.7 days.
+fn input_after(input: u32, ours: u32) -> i32 {
+    input.wrapping_sub(ours) as i32
+}
+
+/// The user has taken the mouse or keyboard: Windows saw input after ours. A game that holds the pointer in its
+/// window moves it without input, so its pointer is not taken for the user's hand.
+fn user_moved(ours: u32) -> bool {
+    // SendInput reaches Windows a moment after it returns, so our own last input can land a little late.
+    input_after(os::last_input(), ours) > 150
+}
+
+const TAKEN: &str = "the user moved the mouse or pressed a key, so they are using the computer. Nothing more was done: tell them what you were doing, and do not take the mouse back until they say so";
 
 /// Sleeps `ms`, a slice at a time, and Err as soon as the user takes the mouse.
-async fn rest(ms: u64, last: (i32, i32)) -> Result<(), String> {
+async fn rest(ms: u64, ours: u32) -> Result<(), String> {
     let until = Instant::now() + Duration::from_millis(ms);
     while Instant::now() < until {
-        if user_moved(last) {
+        if user_moved(ours) {
             return Err(TAKEN.into());
         }
         tokio::time::sleep((until - Instant::now()).min(Duration::from_millis(100))).await;
@@ -688,8 +691,8 @@ async fn rest(ms: u64, last: (i32, i32)) -> Result<(), String> {
 
 struct Run {
     frame: Frame,
-    /// Where the pointer was left, to tell the user's hand from ours.
-    last: (i32, i32),
+    /// The tick of our last input, to tell the user's hand from ours.
+    ours: u32,
     /// Clicks to ring on the picture: screen point and step number.
     marks: Vec<((i32, i32), usize)>,
 }
@@ -701,7 +704,7 @@ impl Run {
             Target::Point(x, y) => Ok((self.frame.point((*x, *y))?, String::new())),
             Target::Text(text, nth) => {
                 // This app's own windows, where its chat shows what is being looked for.
-                let own: Vec<(i32, i32, i32, i32)> = os::windows().iter().filter(|w| w.process.eq_ignore_ascii_case("apim") && !w.minimized).map(|w| w.rect).collect();
+                let own: Vec<(i32, i32, i32, i32)> = os::windows().iter().filter(|w| is_apim(w) && !w.minimized).map(|w| w.rect).collect();
                 // Read again for a moment when it is not there yet: the window a click just opened is still drawing.
                 let mut tries = 0;
                 let (seen, hits) = loop {
@@ -711,7 +714,7 @@ impl Run {
                     if hits.len() >= *nth || tries == 3 {
                         break (seen, hits);
                     }
-                    rest(300, self.last).await?;
+                    rest(300, self.ours).await?;
                 };
                 let Some(hit) = hits.get(nth - 1) else {
                     let near = near(&seen, text);
@@ -729,16 +732,8 @@ impl Run {
         }
     }
 
-    fn go(&mut self, to: (i32, i32)) -> Result<(), String> {
-        os::move_to(to.0, to.1)?;
-        // Where it really is: a game that holds the pointer inside its window keeps it from where it was sent, and
-        // that is not the user's hand.
-        self.last = os::cursor();
-        Ok(())
-    }
-
     async fn run(&mut self, n: usize, step: &Step) -> Result<String, String> {
-        if user_moved(self.last) {
+        if user_moved(self.ours) {
             return Err(TAKEN.into());
         }
         let pause = || std::thread::sleep(Duration::from_millis(35));
@@ -746,7 +741,7 @@ impl Run {
             Step::Click { at, button, double, with } => {
                 let (to, found) = self.locate(at).await?;
                 tokio::task::block_in_place(|| -> Result<(), String> {
-                    self.go(to)?;
+                    os::move_to(to.0, to.1)?;
                     // Hovered first: some buttons take a click only once they have seen the pointer arrive.
                     pause();
                     for k in with {
@@ -775,7 +770,7 @@ impl Run {
             }
             Step::Move(at) => {
                 let (to, found) = self.locate(at).await?;
-                tokio::task::block_in_place(|| self.go(to))?;
+                tokio::task::block_in_place(|| os::move_to(to.0, to.1))?;
                 let (x, y) = self.frame.from_screen(to);
                 Ok(if found.is_empty() { format!("moved to ({x}, {y})") } else { format!("moved to{found}") })
             }
@@ -783,12 +778,12 @@ impl Run {
                 let (a, _) = self.locate(from).await?;
                 let (b, _) = self.locate(to).await?;
                 tokio::task::block_in_place(|| -> Result<(), String> {
-                    self.go(a)?;
+                    os::move_to(a.0, a.1)?;
                     pause();
                     os::press(Button::Left, true)?;
                     // In steps: a drag that jumps straight to its end is a click to many programs.
                     for i in 1..=12 {
-                        self.go((a.0 + (b.0 - a.0) * i / 12, a.1 + (b.1 - a.1) * i / 12))?;
+                        os::move_to(a.0 + (b.0 - a.0) * i / 12, a.1 + (b.1 - a.1) * i / 12)?;
                         std::thread::sleep(Duration::from_millis(15));
                     }
                     pause();
@@ -802,7 +797,7 @@ impl Run {
             Step::Scroll { at, notches, horizontal } => {
                 if let Some(at) = at {
                     let (to, _) = self.locate(at).await?;
-                    tokio::task::block_in_place(|| self.go(to))?;
+                    tokio::task::block_in_place(|| os::move_to(to.0, to.1))?;
                 }
                 tokio::task::block_in_place(|| os::wheel(*notches, *horizontal))?;
                 let way = match (horizontal, *notches > 0) {
@@ -835,14 +830,15 @@ impl Run {
             }
             Step::Hold { keys, name, ms } => {
                 tokio::task::block_in_place(|| keys.iter().try_for_each(|k| os::key(*k, true)))?;
-                let held = rest(*ms, self.last).await;
+                self.ours = os::ticks();
+                let held = rest(*ms, self.ours).await;
                 // Let go whatever happened: a key left down keeps a game's character walking.
                 tokio::task::block_in_place(|| keys.iter().rev().try_for_each(|k| os::key(*k, false)))?;
                 held?;
                 Ok(format!("held {name} for {:.1}s", *ms as f64 / 1000.0))
             }
             Step::Wait(ms) => {
-                rest(*ms, self.last).await?;
+                rest(*ms, self.ours).await?;
                 Ok(format!("waited {:.1}s", *ms as f64 / 1000.0))
             }
             Step::WaitFor { text, ms } => {
@@ -861,7 +857,7 @@ impl Run {
                     if started.elapsed() >= limit {
                         return Err(format!("\"{text}\" did not show on the screen within {:.0}s", limit.as_secs_f64()));
                     }
-                    rest(400, self.last).await?;
+                    rest(400, self.ours).await?;
                 }
             }
             Step::Open { target, args } => {
@@ -892,7 +888,7 @@ pub async fn act(ctx: &Ctx, args: &Value) -> Output {
     // One pair of hands: two chats driving the mouse at once would each click into the other's work.
     static HANDS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _hands = HANDS.lock().await;
-    let mut run = Run { frame: Frame::now(), last: os::cursor(), marks: Vec::new() };
+    let mut run = Run { frame: Frame::now(), ours: os::ticks(), marks: Vec::new() };
     let started = Instant::now();
     let (mut done, mut stopped) = (Vec::new(), None);
     for (i, step) in steps.iter().enumerate() {
@@ -900,7 +896,9 @@ pub async fn act(ctx: &Ctx, args: &Value) -> Output {
             stopped = Some((i, format!("the call ran past {} seconds; send the rest in another call", MAX_CALL.as_secs())));
             break;
         }
-        match run.run(i + 1, step).await {
+        let ran = run.run(i + 1, step).await;
+        run.ours = os::ticks();
+        match ran {
             Ok(what) => done.push(format!("{}. {what}", i + 1)),
             Err(why) => {
                 stopped = Some((i, why));
@@ -1068,6 +1066,13 @@ mod tests {
         let done = [Step::Open { target: "C:\\Roblox\\RobloxStudioBeta.exe".into(), args: String::new() }, Step::WaitFor { text: "Studio".into(), ms: 1 }, Step::Click { at: Target::Text("Play".into(), 1), button: Button::Left, double: false, with: vec![] }, Step::Key { keys: vec![], name: "tab".into(), repeat: 1 }, Step::Key { keys: vec![], name: "tab".into(), repeat: 1 }];
         assert_eq!(summary(&done, None), "Opened RobloxStudioBeta.exe, waited for \"Studio\", clicked \"Play\", pressed tab ×2");
         assert_eq!(summary(&[], Some("the user moved the mouse, so they are using it")), "Stopped: the user moved the mouse, so they are using it");
+    }
+
+    #[test]
+    fn input_is_timed_from_ours_across_the_wrap() {
+        assert_eq!(input_after(1200, 1000), 200);
+        assert_eq!(input_after(900, 1000), -100);
+        assert_eq!(input_after(5, u32::MAX - 10), 16);
     }
 
     #[test]

@@ -181,8 +181,15 @@ mod imp {
         process: Handle,
     }
 
+    #[repr(C)]
+    struct LastInput {
+        size: u32,
+        time: u32,
+    }
+
     #[link(name = "user32")]
     unsafe extern "system" {
+        fn GetLastInputInfo(info: *mut LastInput) -> i32;
         fn GetSystemMetrics(index: i32) -> i32;
         fn GetDC(h: Hwnd) -> Hdc;
         fn ReleaseDC(h: Hwnd, hdc: Hdc) -> i32;
@@ -222,6 +229,7 @@ mod imp {
         fn GetProcessId(h: Handle) -> u32;
         fn QueryFullProcessImageNameW(process: Handle, flags: u32, name: *mut u16, size: *mut u32) -> i32;
         fn GetCurrentThreadId() -> u32;
+        fn GetTickCount() -> u32;
     }
 
     #[link(name = "shell32")]
@@ -386,6 +394,17 @@ mod imp {
         (p.x, p.y)
     }
 
+    /// The tick of the last mouse or keyboard input, ours included. A program moving the pointer itself does not count.
+    pub fn last_input() -> u32 {
+        let mut info = LastInput { size: std::mem::size_of::<LastInput>() as u32, time: 0 };
+        unsafe { GetLastInputInfo(&mut info) };
+        info.time
+    }
+
+    pub fn ticks() -> u32 {
+        unsafe { GetTickCount() }
+    }
+
     fn send(inputs: &[Input]) -> Result<(), String> {
         let sent = unsafe { SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<Input>() as i32) };
         if sent as usize == inputs.len() {
@@ -538,6 +557,12 @@ mod imp {
     }
     pub fn cursor() -> (i32, i32) {
         (0, 0)
+    }
+    pub fn last_input() -> u32 {
+        0
+    }
+    pub fn ticks() -> u32 {
+        0
     }
     pub fn move_to(_: i32, _: i32) -> Result<(), String> {
         Err(NOT_BUILT.into())
