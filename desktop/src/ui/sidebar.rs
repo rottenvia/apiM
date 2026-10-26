@@ -12,7 +12,7 @@ pub const WIDTH: f32 = 288.0;
 const FOOTER: f32 = 12.0 + 40.0 * 3.0 + 12.0 + 1.0;
 const MENU_WIDTH: f32 = 192.0;
 
-pub const EXPORT_FORMATS: [(&str, &str, &str); 4] = [("md", "Markdown", ".md"), ("json", "JSON", ".json"), ("txt", "Plain text", ".txt"), ("html", "Web page", ".html")];
+pub const EXPORT_FORMATS: [(&str, &str, &str); 6] = [("md", "Markdown", ".md"), ("json", "JSON", ".json"), ("txt", "Plain text", ".txt"), ("html", "Web page", ".html"), ("read", "Read view", ".txt"), ("trace", "Trace view", ".txt")];
 
 #[derive(Default)]
 pub struct State {

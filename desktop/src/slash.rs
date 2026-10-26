@@ -55,7 +55,7 @@ pub static COMMANDS: [Command; 36] = [
     Command { cmd: Cmd::Btw, name: "btw", args: "<note>", arg_required: true, description: "Tell the running task something without stopping it", group: "Chat", while_running: true, ..BASE },
     Command { cmd: Cmd::Copy, name: "copy", description: "Copy the last reply to the clipboard", group: "Chat", while_running: true, ..BASE },
     Command { cmd: Cmd::Rename, name: "rename", args: "<title>", arg_required: true, description: "Rename this chat", group: "Chat", while_running: true, ..BASE },
-    Command { cmd: Cmd::Export, name: "export", args: "[md|json|txt|html]", description: "Download this chat (Markdown by default)", group: "Chat", while_running: true, kind: Kind::Options, ..BASE },
+    Command { cmd: Cmd::Export, name: "export", args: "[md|json|txt|html|read|trace]", description: "Download this chat (Markdown by default; read/trace are the two chat-reading methods)", group: "Chat", while_running: true, kind: Kind::Options, ..BASE },
     Command { cmd: Cmd::Archive, name: "archive", description: "Archive this chat", group: "Chat", ..BASE },
     Command { cmd: Cmd::Delete, name: "delete", description: "Delete this chat", group: "Chat", ..BASE },
     Command { cmd: Cmd::Find, name: "find", args: "[text]", description: "Find text in this chat", group: "Chat", while_running: true, ..BASE },
@@ -136,7 +136,7 @@ pub type Opt<'a> = (&'a str, &'a str, &'a str);
 // The lists the web builds in src/app/page.tsx. Models and themes come from the caller.
 pub const EFFORT: [Opt<'static>; 5] = [("auto", "Auto", ""), ("none", "None", ""), ("low", "Low", ""), ("high", "High", ""), ("max", "Max", "")];
 pub const WEB: [Opt<'static>; 3] = [("auto", "On", "Searches when it needs to"), ("always", "Every message", "Leans towards looking things up"), ("off", "Off", "No web search")];
-pub const EXPORT: [Opt<'static>; 4] = [("md", "Markdown", ".md"), ("json", "JSON", ".json"), ("txt", "Plain text", ".txt"), ("html", "Web page", ".html")];
+pub const EXPORT: [Opt<'static>; 6] = [("md", "Markdown", ".md"), ("json", "JSON", ".json"), ("txt", "Plain text", ".txt"), ("html", "Web page", ".html"), ("read", "Read view", ".txt"), ("trace", "Trace view", ".txt")];
 
 /// What the option commands choose between, and the value in force now (marked "current" in the menu).
 /// On the web a model is `(id, label, specs)`, with " · no key" added to the specs when its
@@ -339,7 +339,7 @@ pub fn submit(text: &str, running: bool, compacting: bool, choices: &Choices) ->
     let Some((value, label, _)) = picked else {
         return refused(match c.cmd {
             Cmd::Theme => format!("No theme called \"{arg}\"."),
-            Cmd::Export => "Export as md, json, txt, html.".into(),
+            Cmd::Export => "Export as md, json, txt, html, read, trace.".into(),
             _ => format!("Nothing matches \"{arg}\". Type /{name} to see the choices."),
         });
     };
@@ -484,7 +484,8 @@ mod tests {
         assert_eq!(notice(run("/model zzz")), "Nothing matches \"zzz\". Type /model to see the choices.");
         assert_eq!(run("/export"), Submit::Pick { cmd: Cmd::Export, value: "md".into(), notice: "Downloading this chat as Markdown.".into() });
         assert_eq!(notice(run("/export web")), "Downloading this chat as Web page.");
-        assert_eq!(notice(run("/export pdf")), "Export as md, json, txt, html.");
+        assert_eq!(notice(run("/export pdf")), "Export as md, json, txt, html, read, trace.");
+        assert_eq!(notice(run("/export trace")), "Downloading this chat as Trace view.");
     }
 
     #[test]

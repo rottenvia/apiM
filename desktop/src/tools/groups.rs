@@ -68,9 +68,9 @@ pub const GROUPS: &[Group] = &[
     },
     Group {
         name: "memory",
-        what: "memory: record a finding for later turns, search what was said earlier in this chat, list and restore snapshots of the workspace",
-        tools: &["note_finding", "search_conversation", "list_snapshots", "restore_snapshot"],
-        hints: &["remember", "earlier you", "snapshot", "restore", "previous version", "last time"],
+        what: "memory: record a finding for later turns, search what was said earlier in this chat, read a whole chat as prose or as a timed tool trace, list and restore snapshots of the workspace",
+        tools: &["note_finding", "search_conversation", "read_chat", "list_snapshots", "restore_snapshot"],
+        hints: &["remember", "earlier you", "snapshot", "restore", "previous version", "last time", "read the chat", "read my chat", "trace the chat", "tool timing", "how long each", "read this chat"],
     },
     Group {
         name: "binary",

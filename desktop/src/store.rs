@@ -293,6 +293,11 @@ pub struct ToolEvent {
     pub caption: String,
     /// The file this step wrote, for the workspace panel's "just changed" mark.
     pub changed_path: Option<String>,
+    /// When the call started running, unix ms. 0 on a step saved before timing was recorded.
+    pub started_at: u64,
+    /// How long the call took, in ms (call to result). This is the number the Trace view reads: a long one is usually
+    /// an external wait — a command, a process that closed, a slow read — not a failure. 0 when it was never recorded.
+    pub duration_ms: u64,
 }
 
 /// A reply reads top to bottom: each stretch of text is followed by the steps it led to.
@@ -529,6 +534,15 @@ mod wire {
         pub changed_path: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub shown_image: Option<Shown>,
+        /// Desktop only: when the call started (unix ms) and how long it ran. Absent on chats saved before timing existed.
+        #[serde(skip_serializing_if = "is_zero")]
+        pub started_at: u64,
+        #[serde(skip_serializing_if = "is_zero")]
+        pub duration_ms: u64,
+    }
+
+    fn is_zero(n: &u64) -> bool {
+        *n == 0
     }
 
     #[derive(Serialize, Deserialize, Default)]
@@ -682,7 +696,7 @@ impl From<wire::Msg> for Message {
                 };
                 order.push(t.id.clone());
                 // A saved step is over: one with no verdict was cut short.
-                (t.id.clone(), ToolEvent { id: t.id, name: t.name, args: t.args, ok: t.ok.or(Some(!incomplete)), summary: t.summary, image, image_url, caption, changed_path: t.changed_path })
+                (t.id.clone(), ToolEvent { id: t.id, name: t.name, args: t.args, ok: t.ok.or(Some(!incomplete)), summary: t.summary, image, image_url, caption, changed_path: t.changed_path, started_at: t.started_at, duration_ms: t.duration_ms })
             })
             .collect();
         // The reply's thinking time, shared out over its thinks. Each used to get all of it, and ending a resumed reply adds
@@ -789,6 +803,8 @@ impl From<&Message> for wire::Msg {
                         summary: t.summary.clone(),
                         changed_path: t.changed_path.clone(),
                         shown_image: t.image.as_ref().map(|p| wire::Shown { url: t.image_url.clone(), path: p.to_string_lossy().replace('\\', "/"), caption: (!t.caption.is_empty()).then(|| t.caption.clone()) }),
+                        started_at: t.started_at,
+                        duration_ms: t.duration_ms,
                     });
                 }
             }
