@@ -220,6 +220,13 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
     // (how far the view has to follow next frame, lay this frame out again before showing it, more to measure, the end is measured)
     let (mut anchor, mut redo, mut unmeasured, mut tail_ready) = (0.0_f32, false, false, true);
     let mut tall = 0.0;
+    // A click in the transcript (a thought or a step opened or shut by hand) gives its room back as it folds: the
+    // room under a live reply is held for the reply's own folds. Held for a fold by hand, a thought shut under the
+    // reply's end left its height of blank there for 0.6 s and then glided back, a second after the click.
+    if ui.input(|i| i.pointer.any_click() && i.pointer.interact_pos().is_some_and(|at| area.contains(at))) {
+        app.floor_free = Some(Instant::now());
+    }
+    let free = app.floor_free.is_some_and(|at| at.elapsed().as_secs_f32() < widgets::FOLD + 0.1);
     let out = scroll.show(ui, |ui| {
         let content_top = ui.cursor().top();
         // Where the last message starts: the room kept under a live reply is its own (below).
@@ -414,9 +421,14 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
         // own room: kept for the whole transcript, the guessed heights of a long chat's older messages, measured
         // smaller as the reply ran, left a screen of blank under it, the view at its end and the question above.
         tall = ui.cursor().top() - last_top;
-        ui.add_space((app.floor - tall).max(0.0));
+        if !free {
+            ui.add_space((app.floor - tall).max(0.0));
+        }
     });
-    if app.floor <= tall {
+    if free {
+        app.floor = if running { tall } else { 0.0 };
+        app.floor_since = None;
+    } else if app.floor <= tall {
         if running {
             app.floor = tall;
         }

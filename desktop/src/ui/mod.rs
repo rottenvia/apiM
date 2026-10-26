@@ -215,6 +215,8 @@ struct Shot {
     /// `APIM_SHOT_FILM=600`: every frame of that many milliseconds is kept instead of one picture, each with the
     /// millisecond it was drawn at. This is how something that moves is looked at.
     film: Option<Film>,
+    /// What an inbox `click` asked the mouse to do, one event a frame.
+    pointer: std::collections::VecDeque<egui::Event>,
 }
 
 /// A film's frames, written to disk by another thread as they come: with `send` a film runs as long as a reply.
@@ -270,7 +272,7 @@ impl Shot {
         let path = PathBuf::from(std::env::var_os("APIM_SHOT")?);
         let size = std::env::var("APIM_SHOT_SIZE").ok().and_then(|s| s.split_once('x').and_then(|(w, h)| Some([w.parse().ok()?, h.parse().ok()?]))).unwrap_or([1280.0, 800.0]);
         let film = std::env::var("APIM_SHOT_FILM").ok().and_then(|ms| ms.parse().ok()).map(|ms| Film::start(ms, &path, size));
-        Some(Shot { path, size, state: std::env::var("APIM_SHOT_STATE").unwrap_or_default(), started: Instant::now(), asked: false, acted: false, scrolled: false, film })
+        Some(Shot { path, size, state: std::env::var("APIM_SHOT_STATE").unwrap_or_default(), started: Instant::now(), asked: false, acted: false, scrolled: false, film, pointer: Default::default() })
     }
 }
 
@@ -316,6 +318,8 @@ pub struct App {
     floor: f32,
     /// Since when some of that room has stood blank under the reply: it is let go a moment later.
     floor_since: Option<Instant>,
+    /// When the transcript was last clicked: what folds then gives its room back at once (`chat::messages`).
+    floor_free: Option<Instant>,
     /// The transcript follows its end: it was there, or is gliding to it (`chat::messages`).
     at_end: bool,
     /// How the transcript, following its end, glides there.
@@ -427,6 +431,7 @@ impl App {
             scroll_end: 0.0,
             floor: 0.0,
             floor_since: None,
+            floor_free: None,
             at_end: true,
             follow: widgets::Follow::default(),
             opening: None,
@@ -479,7 +484,7 @@ impl App {
 
     /// Puts the window in the state a self-portrait was asked for.
     fn stage_shot(&mut self) {
-        let Some(shot) = self.shot.as_ref().map(|s| Shot { path: s.path.clone(), size: s.size, state: s.state.clone(), started: s.started, asked: s.asked, acted: s.acted, scrolled: s.scrolled, film: None }) else { return };
+        let Some(shot) = self.shot.as_ref().map(|s| Shot { path: s.path.clone(), size: s.size, state: s.state.clone(), started: s.started, asked: s.asked, acted: s.acted, scrolled: s.scrolled, film: None, pointer: Default::default() }) else { return };
         let state = shot.state.clone();
         self.focus_composer = false;
         if let Ok(wanted) = std::env::var("APIM_SHOT_CHAT") {
@@ -1785,7 +1790,7 @@ impl App {
     /// `APIM_SHOT_INBOX=file`: whoever drives a `send` self-portrait is its user through this file. One command
     /// a file, taken when it can be acted on and then deleted: `answer <text>` and `skip` for the question on
     /// screen, `note <text>` for a "btw" to the running reply, `stop` for the Stop button, and `type <text>`,
-    /// `attach <path>`, `open <part of a title>`, `new` and `send` for moving between chats.
+    /// `attach <path>`, `open <part of a title>`, `new` and `send` for moving between chats, and `click <x> <y>`.
     fn take_inbox(&mut self) {
         static LOOKED: Mutex<Option<Instant>> = Mutex::new(None);
         if self.shot.is_none() || LOOKED.lock().unwrap().is_some_and(|at| at.elapsed() < Duration::from_millis(300)) {
@@ -1829,6 +1834,16 @@ impl App {
                 self.submit(&ctx);
                 true
             }
+            // The mouse comes to the point, presses and lets go, a frame for each (`raw_input_hook`).
+            "click" => match text.split_whitespace().filter_map(|n| n.parse().ok()).collect::<Vec<f32>>()[..] {
+                [x, y] => {
+                    let on = egui::pos2(x, y);
+                    let button = |pressed| egui::Event::PointerButton { pos: on, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+                    self.shot.as_mut().unwrap().pointer.extend([egui::Event::PointerMoved(on), button(true), button(false)]);
+                    true
+                }
+                _ => false,
+            },
             _ => false,
         };
         if done {
@@ -1967,6 +1982,10 @@ impl eframe::App for App {
         // The self-portrait of a file held over the window: nothing is really dragged.
         if self.staged("drop") {
             raw_input.hovered_files = vec![egui::HoveredFile { path: Some("project.zip".into()), ..Default::default() }];
+        }
+        if let Some(event) = self.shot.as_mut().and_then(|shot| shot.pointer.pop_front()) {
+            raw_input.events.push(event);
+            ctx.request_repaint();
         }
         // `select-300-200-600-260`: a drag between two points, then Ctrl+C. What it copies is printed.
         if let Some(shot) = self.shot.as_ref() {
