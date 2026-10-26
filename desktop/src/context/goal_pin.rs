@@ -52,7 +52,9 @@ pub const WORK_STATE_MARKER: &str = "[Work in progress — kept by the app]";
 /// model re-acknowledges it and re-checks setup it already finished ("the client is still joined, nothing to launch")
 /// every round. This is the one place the model actually reads the restated request on the wire — `render_goal_pin`'s
 /// own "do not acknowledge" wording is popped off the wire for an under-way round (`agent.rs`), so the guard must live here too.
-pub const WORK_STATE_NOTE: &str = "The app repeats this each round so the thread holds; it is not a new message and nothing fresh is asked. Do not acknowledge or restate it, and do not re-verify setup your notes above already show done (a process you started is still running, a file already written) — take the next step.";
+/// The examples name kinds of setup, not facts: "a process you started is still running" told the model a process
+/// was up that may have died.
+pub const WORK_STATE_NOTE: &str = "The app repeats this each round to keep you on the request; it is not a new message and nothing new is asked. Do not acknowledge or restate it, and do not re-check setup your notes above show done (a process you started, a file you wrote) unless a result says it failed — take the next step.";
 
 /// What a round under way is told: the request, then the plan and the app's own nudges (`rest`). It is written
 /// into the newest tool result (`agent.rs`), not sent after it as system messages. Sent as messages, each was
