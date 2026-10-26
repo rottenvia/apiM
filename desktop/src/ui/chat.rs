@@ -11,6 +11,8 @@ use eframe::egui::{self, Color32, Rect, Sense, Stroke, pos2, vec2};
 /// How long a chat takes to come in once it is on screen, and how far below its place it starts.
 const ENTER: f32 = 0.2;
 const ENTER_DROP: f32 = 10.0;
+/// How long room a live reply gave up stays blank under it: a thought folds and its step comes in within this.
+const FLOOR_HOLD: Duration = Duration::from_millis(600);
 use std::time::{Duration, Instant};
 
 /// `toLocaleString()` for whole numbers: 1,234,567.
@@ -405,21 +407,32 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
             column_ui(ui, &mut |ui| wait_rows(ui, run, has_output));
         }
         ui.add_space(24.0 - (1.0 - come) * ENTER_DROP);
-        // Room a live reply gave up (a thought folded shut) stays, blank, under it. Given back, the chat followed its
-        // end down as the thought shut and up again as the next step came: a bounce on every step. Only the reply's
+        // Room a live reply gave up (a thought folded shut) stays, blank, under it for a moment. Given back at once, the
+        // chat followed its end down as the thought shut and up again as the next step came: a bounce on every step.
+        // Kept until the reply grew into it, the wait on the model that follows a step showed the reply's last line a
+        // thought's height above the box, the box under blank for as long as the model took. Only the reply's
         // own room: kept for the whole transcript, the guessed heights of a long chat's older messages, measured
         // smaller as the reply ran, left a screen of blank under it, the view at its end and the question above.
         tall = ui.cursor().top() - last_top;
         ui.add_space((app.floor - tall).max(0.0));
     });
-    if running {
-        app.floor = app.floor.max(tall);
-    } else if app.floor > tall {
-        // Once the reply is done, the room it kept goes, gliding: kept, a chat ended in blank space until the next
-        // message was sent.
-        let k = (ui.input(|i| i.stable_dt) * 12.0).min(1.0);
-        app.floor = if app.floor - tall < 0.5 { 0.0 } else { app.floor - (app.floor - tall) * k };
-        ui.ctx().request_repaint();
+    if app.floor <= tall {
+        if running {
+            app.floor = tall;
+        }
+        app.floor_since = None;
+    } else {
+        let since = *app.floor_since.get_or_insert_with(Instant::now);
+        match FLOOR_HOLD.checked_sub(since.elapsed()).filter(|_| running) {
+            Some(left) => ui.ctx().request_repaint_after(left),
+            None => {
+                // Then the room goes, gliding, as it does once the reply is done: kept, a chat ended in blank space
+                // until the next message was sent.
+                let k = (ui.input(|i| i.stable_dt) * 12.0).min(1.0);
+                app.floor = if app.floor - tall < 0.5 { 0.0 } else { app.floor - (app.floor - tall) * k };
+                ui.ctx().request_repaint();
+            }
+        }
     }
     if more {
         app.mounted += 60;

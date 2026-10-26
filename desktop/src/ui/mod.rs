@@ -314,6 +314,8 @@ pub struct App {
     /// The least the last message is tall, from its top to the transcript's end: the most it has been while it was
     /// being written (`chat::messages`).
     floor: f32,
+    /// Since when some of that room has stood blank under the reply: it is let go a moment later.
+    floor_since: Option<Instant>,
     /// The transcript follows its end: it was there, or is gliding to it (`chat::messages`).
     at_end: bool,
     /// How the transcript, following its end, glides there.
@@ -424,6 +426,7 @@ impl App {
             anchor: 0.0,
             scroll_end: 0.0,
             floor: 0.0,
+            floor_since: None,
             at_end: true,
             follow: widgets::Follow::default(),
             opening: None,
