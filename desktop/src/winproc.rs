@@ -558,8 +558,11 @@ fn modules_once(pid: u32) -> Result<Vec<Module>, String> {
             break Obj(h);
         }
         let e = unsafe { GetLastError() };
+        // A process still loading answers so until its loader is done. Asked again at once, twenty tries passed in
+        // well under a millisecond, and a program just started failed now and then.
         if (e == ERROR_BAD_LENGTH || e == ERROR_PARTIAL_COPY) && tries < 20 {
             tries += 1;
+            std::thread::sleep(std::time::Duration::from_millis(10));
             continue;
         }
         return Err(win_error(e));

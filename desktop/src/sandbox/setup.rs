@@ -682,7 +682,7 @@ mod tests {
     use crate::sandbox::fake_wsl;
 
     fn paths(name: &str) -> Paths {
-        let base = std::env::temp_dir().join(format!("asb-setup-{name}"));
+        let base = std::env::temp_dir().join(format!("asb-setup-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         Paths { wsl: fake_wsl(), dir: base.clone(), data: base.join("data") }

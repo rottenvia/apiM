@@ -1236,8 +1236,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     const FILE: &[u8] = b"0123456789ABCDEF";
-    /// Tests that set APIM_DATA_ROOT take this, so the environment is never changed under another one.
-    static DATA_ROOT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use crate::store::TEST_DATA_DIR as DATA_ROOT_LOCK;
 
     fn http(status: &str, extra: &str, body: &[u8]) -> Vec<u8> {
         let mut v = format!("HTTP/1.1 {status}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n", body.len()).into_bytes();
@@ -1370,7 +1369,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         // SAFETY: the tests that read the data root hold DATA_ROOT_LOCK while the variable points at their own folder.
-        unsafe { std::env::set_var("APIM_DATA_ROOT", &dir) };
+        // APIM_DATA_DIR, as it goes before APIM_DATA_ROOT: set for a test run, it kept the engine's files of the run before.
+        unsafe { std::env::set_var("APIM_DATA_DIR", &dir) };
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
 
         let st = status_at(port).await;
@@ -1381,8 +1381,13 @@ mod tests {
         let gguf = gguf_path();
         std::fs::create_dir_all(root()).unwrap();
         std::fs::write(&gguf, b"not a model").unwrap();
+        // The stand-in server comes up once the program is launched, as a real one does. On a clock (three seconds)
+        // it came up before the launch when the machine was busy (stopping an old engine runs netstat), and the
+        // launch found the port taken.
         let stub = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(3_000)).await;
+            while !pid_path().exists() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
             serve(tokio::net::TcpListener::bind(("127.0.0.1", port)).await.unwrap()).await;
         });
 
@@ -1412,7 +1417,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         // SAFETY: see the sidecar test; DATA_ROOT_LOCK is held.
-        unsafe { std::env::set_var("APIM_DATA_ROOT", &dir) };
+        unsafe { std::env::set_var("APIM_DATA_DIR", &dir) };
         std::fs::create_dir_all(root()).unwrap();
 
         let mut other = quiet(Command::new("ping")).args(["-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn().unwrap();

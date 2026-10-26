@@ -4,7 +4,6 @@
 
 use super::build::group;
 use super::{Ctx, Output, num_arg, str_arg, testing};
-use crate::store::Approval;
 use regex::Regex;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -1171,6 +1170,7 @@ pub async fn wait_for_output(ctx: &Ctx, args: &Value) -> Output {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::Approval;
 
     #[cfg(windows)]
     #[test]

@@ -577,7 +577,8 @@ pub(crate) mod tests {
 
     /// A temp folder holding a bare "remote" with one commit on main, and an empty workspace to connect to it.
     pub(crate) async fn fixture(name: &str) -> (Ws, String) {
-        let dir = std::env::temp_dir().join(format!("apim-gh-{name}"));
+        // The process in the name too: two test runs at once removed each other's folders as they worked in them.
+        let dir = std::env::temp_dir().join(format!("apim-gh-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("seed")).unwrap();
         let remote = dir.join("remote.git").to_string_lossy().replace('\\', "/");

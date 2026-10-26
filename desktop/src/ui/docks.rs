@@ -64,11 +64,36 @@ enum Lead {
 }
 
 /// `.chip` as these two wear it: an icon or a 6px dot in front, and sometimes a dot behind.
+/// When its words change ("Files" to "1", "2 running" to "Processes") it takes its new width over a fifth of a
+/// second, the old words fading out before the new ones fade in: at once, the chip shrank by 22 points and what
+/// stands left of it jumped; faded across each other, "Files" and "3" read as "3iles".
 fn chip(ui: &mut egui::Ui, lead: Lead, text: &str, active: bool, open: bool, trail: Option<Color32>) -> egui::Response {
+    const CHANGE: f32 = 0.2;
     let p = p();
+    let key = ui.next_auto_id();
+    let now = ui.input(|i| i.time);
+    // (the words, the ones before them, when they changed), and the colour of the dot behind as it goes.
+    let (said, before, at) = ui.data(|d| d.get_temp::<(String, String, f64)>(key.with("said"))).unwrap_or_else(|| (text.to_string(), String::new(), f64::NEG_INFINITY));
+    let (before, at) = if said != text { (said, now) } else { (before, at) };
+    let changed = (((now - at) as f32) / CHANGE).clamp(0.0, 1.0);
+    let (gone, come) = ((changed / 0.4).min(1.0), ((changed - 0.4) / 0.6).max(0.0));
+    let dot_on = trail.is_some();
+    let behind = widgets::fade(ui, key.with("behind"), dot_on);
+    let trail = trail.or_else(|| ui.data(|d| d.get_temp::<Color32>(key.with("trail"))));
+    ui.data_mut(|d| {
+        d.insert_temp(key.with("said"), (text.to_string(), before.clone(), at));
+        if let Some(colour) = trail {
+            d.insert_temp(key.with("trail"), colour);
+        }
+    });
+    if changed < 1.0 {
+        ui.ctx().request_repaint();
+    }
     let label = widgets::galley(ui, text, theme::font(13.0, W::Medium), Color32::WHITE);
     let lead_width = if matches!(lead, Lead::Icon(_)) { 14.0 } else { 6.0 };
-    let width = 11.0 + lead_width + 6.0 + label.size().x + if trail.is_some() { 12.0 } else { 0.0 } + 11.0;
+    // The dot's room is taken with the words' (it only fades): grown with the fade, the chip shrank and grew again.
+    let width = 11.0 + lead_width + 6.0 + label.size().x + if dot_on { 12.0 } else { 0.0 } + 11.0;
+    let width = widgets::glide(ui.ctx(), key.with("width"), width, CHANGE, true);
     let (rect, response) = ui.allocate_exact_size(vec2(width, 32.0), Sense::click());
     let response = response.on_hover_cursor(CursorIcon::PointingHand);
     let t = widgets::fade(ui, response.id, response.hovered() || open);
@@ -85,9 +110,15 @@ fn chip(ui: &mut egui::Ui, lead: Lead, text: &str, active: bool, open: bool, tra
     }
     x += lead_width + 6.0;
     let end = x + label.size().x;
-    ui.painter().galley_with_override_text_color(pos2(x, (y - label.size().y / 2.0).round()), label, ink);
-    if let Some(colour) = trail {
-        ui.painter().circle_filled(pos2(end + 6.0 + 3.0, y), 3.0, colour);
+    let words = ui.painter_at(rect.shrink(1.0));
+    if changed < 1.0 {
+        let old = widgets::galley(ui, &before, theme::font(13.0, W::Medium), Color32::WHITE);
+        words.galley_with_override_text_color(pos2(x, (y - old.size().y / 2.0).round()), old, ink.gamma_multiply(1.0 - gone));
+    }
+    words.galley_with_override_text_color(pos2(x, (y - label.size().y / 2.0).round()), label, ink.gamma_multiply(come));
+    // The dot comes in with the new words: standing at their end, it sat on the old ones while they faded.
+    if let Some(colour) = trail.filter(|_| behind > 0.0) {
+        words.circle_filled(pos2(end + 6.0 + 3.0, y), 3.0, colour.gamma_multiply(behind * if dot_on { come } else { 1.0 }));
     }
     response
 }

@@ -80,8 +80,9 @@ pub enum Event {
     Content(String),
     /// The answer text of this round so far was thinking: the model closed a thought it never opened.
     Unsaid,
-    /// A tool call still streaming its arguments. `path` is the file it names, once that much has arrived.
-    ToolDraft { name: String, chars: usize, path: Option<String> },
+    /// A tool call still streaming its arguments: its id (the one its step will have), how much has come, and the
+    /// head of what has, where the file or command it is about stands.
+    ToolDraft { id: String, name: String, chars: usize, head: String },
     /// A request failed and try `attempt` of `attempts` starts after `wait`.
     Retry { reason: String, attempt: usize, attempts: usize, wait: Duration },
     ToolStart(ToolEvent),
@@ -768,7 +769,7 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
     // A reply that already burned its output on thinking is not told it may think again when resumed.
     let (mut force_no_thinking, mut no_think_next, mut continuation_pending) = (resumed_think_nudges > 0, false, false);
     let mut lone_plan_rounds = 0u8;
-    let (mut claim_retried, mut asked_early, mut asked_plan, mut nudged_incomplete, mut ran_without_tools) = (false, false, false, false, false);
+    let (mut claim_retried, mut asked_early, mut asked_plan, mut nudged_incomplete) = (false, false, false, false);
     let mut served_by: Option<String> = None;
     // The guards: one call failing identically, calls that add nothing, a read-only streak, whole-file rewrites, a preview taken for an edit.
     let mut breaker = LoopBreaker::default();
@@ -780,6 +781,8 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
     let mut rounds_since_plan_update = 0;
     // Everything this reply has written and thought so far, across rounds, and the tools it really ran.
     let mut answer = resumed_answer;
+    // What it has written since its last round of real work: the closing words a finish receipt may repeat.
+    let mut since_work = String::new();
     let mut thought = String::new();
     let mut fields_seen: BTreeSet<String> = BTreeSet::new();
     let mut tools_used = resumed_tools;
@@ -952,7 +955,7 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
         let gap = !thought.is_empty() && !thought.trim_end_matches([' ', '\t', '\r']).ends_with('\n');
         let cut_drafts = thinking_now && draft_cutovers < stall::MAX_DRAFT_CUTOVERS;
         let (result, without_tools) = call_model(&ctx.client, target, &mut body, &mut lane, dedup, cut_drafts, gap, emit).await.inspect_err(|e| log("api_error", &target.model.id, e))?;
-        ran_without_tools = without_tools;
+        let ran_without_tools = without_tools;
 
         let provider::Round { content, reasoning, tool_calls: mut calls, finish, usage: round_usage, fields, draft_cut, served, timing } = result;
         for call in &mut calls {
@@ -993,6 +996,7 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
             thought.push_str(&reasoning);
         }
         answer.push_str(&content);
+        since_work.push_str(&content);
         last_finish = finish.clone();
         let finish = finish.unwrap_or_default().to_ascii_lowercase();
 
@@ -1287,13 +1291,19 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
             plan_touched |= out.ok && matches!(call.name.as_str(), "make_plan" | "update_plan");
             looks.extend(out.look);
             if out.finish {
-                // The receipt becomes the closing text, so a reply never ends on a bare tool step.
+                // The receipt becomes the closing text, so a reply never ends on a bare tool step. What the reply has
+                // said already is left out: a model that wrote its summary and then handed it to finish showed it twice.
                 let args: Value = serde_json::from_str(args_text).unwrap_or_default();
-                let field = |key: &str| args[key].as_str().unwrap_or("").trim().to_string();
-                let checked = field("verified");
-                emit.send(Event::Content(if checked.is_empty() { field("result") } else { format!("{}\n\nVerified: {checked}", field("result")) }));
+                let field = |key: &str| Some(args[key].as_str().unwrap_or("").trim().to_string()).filter(|text| !text.is_empty() && !said_already(&since_work, text));
+                let receipt = [field("result"), field("verified").map(|checked| format!("Verified: {checked}"))].into_iter().flatten().collect::<Vec<_>>().join("\n\n");
+                if !receipt.is_empty() {
+                    emit.send(Event::Content(receipt));
+                }
             }
             finished |= out.finish;
+        }
+        if calls.iter().any(|call| call.name != "finish") {
+            since_work.clear();
         }
         if let Some((reason, note)) = stopped {
             // Every call left unrun still gets an answer, so the transcript a Resume replays stays legal.
@@ -1514,7 +1524,21 @@ async fn call_model(client: &reqwest::Client, target: &Target, body: &mut Map<St
                     emit.send(Event::Content(text));
                 }
             }
-            Delta::ToolDraft { name, chars, args } => emit.send(Event::ToolDraft { name: name.to_string(), chars, path: draft_path(args) }),
+            Delta::ToolDraft { id, index, name, chars, args } => {
+                // The line under the reply says what its steps will say once they run: it read "Thinking…" under a
+                // step being written.
+                if announced != "Working" {
+                    announced = "Working";
+                    emit.send(Event::Status("Working"));
+                }
+                emit.send(Event::ToolDraft {
+                    id: if id.is_empty() { format!("call_{index}") } else { id.to_string() },
+                    name: name.to_string(),
+                    chars,
+                    // The file content after the path is not wanted, and not copied again on every chunk.
+                    head: args[..args.floor_char_boundary(600)].to_string(),
+                });
+            }
             }
         })
         .await;
@@ -1671,11 +1695,19 @@ async fn call_model(client: &reqwest::Client, target: &Target, body: &mut Map<St
     }
 }
 
-/// The file a tool call still streaming in is about, once its whole "path" has arrived.
-fn draft_path(args: &str) -> Option<String> {
-    static PATH: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r#""path"\s*:\s*"([^"]+)""#).unwrap());
-    // The path leads the arguments: the file content after it is not searched again on every chunk.
-    PATH.captures(&args[..args.floor_char_boundary(400)]).map(|c| c[1].replace("\\\\", "/"))
+/// Whether `said` (what the reply wrote since its last real work) already says `text`, in other words or not: three
+/// in four of its words that carry meaning are among those said, markdown and case aside. Measured on a reply that
+/// said it twice, its repeat scored 0.79 and the "Verified" line after it, which was new, 0.69.
+// ponytail: a word count, not a meaning. A receipt that says something new in the same words is left out.
+fn said_already(said: &str, text: &str) -> bool {
+    const SMALL: [&str; 32] = [
+        "the", "and", "with", "its", "own", "each", "for", "all", "that", "this", "was", "were", "are", "has", "have", "had", "from", "then", "there", "their", "which", "who",
+        "what", "when", "not", "but", "you", "your", "into", "onto", "per", "out",
+    ];
+    let words = |s: &str| s.split(|c: char| !c.is_alphanumeric()).filter(|w| w.chars().count() > 2).map(str::to_lowercase).filter(|w| !SMALL.contains(&w.as_str())).collect::<Vec<_>>();
+    let said: std::collections::HashSet<String> = words(said).into_iter().collect();
+    let text = words(text);
+    !text.is_empty() && text.iter().filter(|w| said.contains(*w)).count() * 4 >= text.len() * 3
 }
 
 /// Measures how long a stretch of thinking took, for "Thought for 12s".
@@ -1698,6 +1730,16 @@ impl Stopwatch {
 mod tests {
     use super::*;
     use std::io::{Read, Write};
+
+    #[test]
+    fn a_receipt_the_reply_already_said_is_not_said_again() {
+        // Filmed 2026-10-26: the closing words, then finish with the same in other words, then how it was checked.
+        let said = "Created folder `demo` with a.txt, b.txt, c.txt (each containing its own name); the listing shows all three files, and b.txt says **b.txt**.";
+        assert!(said_already(said, "Created folder demo containing a.txt, b.txt and c.txt, each file holding its own name. The folder listing shows all three files (6 B each), and b.txt contains the text \"b.txt\"."));
+        assert!(!said_already(said, "list_files on demo returned demo/a.txt, demo/b.txt, demo/c.txt, and reading demo/b.txt returned the line \"b.txt\"."));
+        assert!(!said_already(said, "Ran the tests: 12 passed, none failed."));
+        assert!(!said_already("", "anything") && !said_already(said, " ** "));
+    }
 
     #[test]
     fn prune_collapses_old_results_only() {
