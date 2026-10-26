@@ -145,6 +145,8 @@ pub struct Settings {
     pub search_profile: String,
     /// Keep a LESSONS.md of proven facts in the workspace and read it back.
     pub lessons_enabled: bool,
+    /// The Computer toggle: the agent may see the screen and use the mouse and keyboard.
+    pub computer_use: bool,
 }
 
 impl Default for Settings {
@@ -181,6 +183,7 @@ impl Default for Settings {
             reply_layout: "claude".into(),
             search_profile: "balanced".into(),
             lessons_enabled: false,
+            computer_use: false,
         }
     }
 }

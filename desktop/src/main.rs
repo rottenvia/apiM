@@ -7,6 +7,7 @@ mod anthropic;
 mod binary;
 mod browser;
 mod compact;
+mod computer;
 mod context;
 mod diagnostics;
 mod diff;
@@ -116,7 +117,7 @@ fn main() -> eframe::Result {
     ui::run(runtime())
 }
 
-/// `apim --tools FILE [--auto] [--dir FOLDER]`: runs the tool calls listed in FILE, a JSON list of
+/// `apim --tools FILE [--auto] [--computer] [--dir FOLDER]`: runs the tool calls listed in FILE, a JSON list of
 /// {"name", "args"}, one after another as the agent would make them, and prints what each handed back.
 /// No model is involved: this is how a tool is checked for what it does rather than for how a model uses it.
 /// Nobody answers an approval card here, so without --auto whatever would ask is declined.
@@ -135,6 +136,7 @@ fn tool_calls(args: &[String]) {
     while let Some(a) = it.next() {
         match a.as_str() {
             "--auto" => settings.approval = store::Approval::Auto,
+            "--computer" => settings.computer_use = true,
             "--dir" => dir = it.next().map(Into::into).unwrap_or(dir),
             _ => file = Some(a.clone()),
         }
@@ -180,7 +182,7 @@ fn tool_calls(args: &[String]) {
     }
 }
 
-/// `apim --ask [--auto] [--dir FOLDER] [--note TEXT] [--think] question`: one reply in the terminal, no window.
+/// `apim --ask [--auto] [--computer] [--dir FOLDER] [--note TEXT] [--think] question`: one reply in the terminal, no window.
 /// `--note` is handed to the reply after its first step, as a "btw" typed while it works; `--think` prints its thinking.
 /// The smoke test for the whole agent path, and handy in scripts.
 fn headless(args: &[String]) {
@@ -202,6 +204,7 @@ fn headless(args: &[String]) {
     while let Some(a) = it.next() {
         match a.as_str() {
             "--auto" => settings.approval = store::Approval::Auto,
+            "--computer" => settings.computer_use = true,
             "--dir" => dir = it.next().map(Into::into).unwrap_or(dir),
             "--model" => settings.model = it.next().cloned().unwrap_or_default(),
             "--effort" => settings.effort = it.next().cloned().unwrap_or_default(),

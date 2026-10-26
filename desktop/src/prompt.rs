@@ -6,7 +6,7 @@ use crate::plugins::PROMPTS;
 
 /// Standing instructions for working in the chat's folder. Only tools that exist are named:
 /// a model told about a tool it does not have will call it and waste the round.
-pub fn workspace_rules(web_search: bool, native_vision: bool, git_repo: bool, github: Option<&crate::github::Connection>) -> String {
+pub fn workspace_rules(web_search: bool, native_vision: bool, git_repo: bool, github: Option<&crate::github::Connection>, computer: bool) -> String {
     let mut p = String::from(
         "\n\nWhere you are. You run on the user's own computer, not on a server, and you work at three depths. Innermost is your workspace, the folder of this chat: everything you create or change belongs there, and a relative path means there. Around it is the computer itself, which you can look at: list_files, read_file and read_files take a path written in full, anywhere on it, and run_command runs the system's own tools to read its logs, what is running, what is installed and how it is set up. Beside both is a Linux sandbox (sandbox_run), when the user has set one up, for programs that should not touch the real system.\n\n\
 So when the user asks about something on their computer (a crash, a program that misbehaves, a slow start, a setting, a file somewhere) investigate it yourself, now: find the logs and the crash dumps and read them, ask the system's event log, check the versions and what is running, and report what you found with the evidence. Never answer with a list of steps for the user to carry out when you can carry them out from here, and never say you cannot see their machine: you can. Turn to the user only for what only they can do (reproduce the problem while you watch, click something in a window, sign in, choose between options): then say exactly what you need from them, and what you will look at once they have done it.\n\n\
@@ -35,6 +35,15 @@ Batch the changes that belong together. move_file renames in one step instead of
     if native_vision {
         p.push_str(" You can also view_image to look at a screenshot or mockup saved in the workspace.");
     }
+    if computer {
+        // Without it, "turn to the user only for what only they can do (... click something in a window ...)" above
+        // left a reply waiting for the user to open a game and press Play while they were away.
+        p.push_str(
+            "
+
+Computer use is on: you see the user's screen and work its mouse and keyboard with computer_look and computer_act, so a step in a window is yours to take, not the user's: open a program, click Play, test a game, press its keys, read what a window shows. Start a program with a command or an open step where you can, use a program's keyboard shortcut where it has one (F5 plays in Roblox Studio), and click only where nothing else reaches. Put the steps you can foresee into one computer_act, click buttons and labels by their text rather than by a point, and read the screenshot that comes back before the next batch. To wait for a program to close, use wait_for_output with process, not a script that polls. Never type a password or another secret: sign-ins are the user's. Close what you opened when you are done, unless the user wants it left open. If a run stops because the user moved the mouse, they are at the computer: leave it to them and say where you were.",
+        );
+    }
     // Tools on demand (`tools::groups`): the paragraphs above name tools that are not sent until their group is loaded.
     p.push_str("\n\nOnly your everyday tools are listed for you in full. The other tools these instructions name come in groups, listed under load_tools: load a group the moment a task calls for one of its tools, and it stays for the rest of the chat. Never tell the user something cannot be done before checking those groups.");
     if let Some(c) = github {
@@ -62,8 +71,8 @@ Browser use:
 
 /// The first system message: persona, optional search nudge, workspace rules.
 /// `legacy` is the classic plugins' text, which rides right after the persona as it always did.
-pub fn system(legacy: &str, web_search: bool, native_vision: bool, git_repo: bool, github: Option<&crate::github::Connection>) -> String {
-    format!("{}{legacy}{}", PROMPTS.base, workspace_rules(web_search, native_vision, git_repo, github))
+pub fn system(legacy: &str, web_search: bool, native_vision: bool, git_repo: bool, github: Option<&crate::github::Connection>, computer: bool) -> String {
+    format!("{}{legacy}{}", PROMPTS.base, workspace_rules(web_search, native_vision, git_repo, github, computer))
 }
 
 /// "Auto" effort: a greeting needs no reasoning, a debugging session needs a lot.
@@ -106,18 +115,19 @@ mod tests {
 
     #[test]
     fn prompt_only_names_tools_that_exist() {
-        let p = system("", false, false, false, None);
+        let p = system("", false, false, false, None, false);
+        assert!(!p.contains("computer_act") && system("", false, true, false, None, true).contains("Computer use is on"));
         assert!(p.starts_with(&PROMPTS.base));
         assert!(p.contains("There is no web_search tool") && !p.contains("{SHELL}"));
         assert!(p.contains("never say you cannot see their machine") && p.contains("put them in order before you start"));
         // A connected repository gets the web app's paragraph in place of the plain git one.
         let c = crate::github::Connection { repo: "octo/demo".into(), base_branch: "main".into(), working_branch: "apim/fix-1".into(), ..Default::default() };
-        let connected = workspace_rules(true, true, true, Some(&c));
+        let connected = workspace_rules(true, true, true, Some(&c), true);
         assert!(connected.contains("\n\nThis workspace is connected to GitHub repository octo/demo. The selected base is main; your working branch is apim/fix-1 — a real clone, so work like a developer on it."));
         assert!(connected.contains("Never commit to or push the base branch, and never force-push.\n\nBrowser use:") && !connected.contains("Nothing is pushed from here"));
         // Every `snake_case` tool the rules mention must have a handler.
         let re = regex::Regex::new(r"\b[a-z]+(?:_[a-z]+)+\b").unwrap();
-        for name in re.find_iter(&format!("{connected}{}", workspace_rules(true, true, true, None))).map(|m| m.as_str()) {
+        for name in re.find_iter(&format!("{connected}{}", workspace_rules(true, true, true, None, true))).map(|m| m.as_str()) {
             let is_tool_shaped = crate::tools::implemented(name) || !include_str!("../assets/tools.json").contains(&format!("\"name\": \"{name}\""));
             assert!(is_tool_shaped, "the prompt mentions {name}, which this build does not have");
         }

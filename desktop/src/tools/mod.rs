@@ -5,6 +5,7 @@ pub mod binary;
 pub mod browser;
 pub mod build;
 pub mod code;
+pub mod computer;
 pub mod data;
 pub mod documents;
 pub mod exec;
@@ -164,7 +165,8 @@ static SCHEMAS: LazyLock<Vec<Value>> = LazyLock::new(|| {
     let mut all: Vec<Value> = serde_json::from_str(include_str!("../../assets/tools.json")).expect("assets/tools.json is valid");
     all.extend(winproc::schemas());
     all.push(read_chat_schema());
-    all.retain(|t| IMPLEMENTED.contains(&t["function"]["name"].as_str().unwrap_or("")) || winproc::NAMES.contains(&t["function"]["name"].as_str().unwrap_or("")));
+    all.extend(computer::schemas());
+    all.retain(|t| implemented(t["function"]["name"].as_str().unwrap_or("")));
     // Without a browser on this computer `browse` is withheld, as the web app does.
     if !crate::browser::available() {
         all.retain(|t| t["function"]["name"] != "browse");
@@ -189,6 +191,13 @@ static SCHEMAS: LazyLock<Vec<Value>> = LazyLock::new(|| {
         let more = format!("{more}{kept}{folded}");
         if !more.is_empty() {
             t["function"]["description"] = Value::String(format!("{}{more}", t["function"]["description"].as_str().unwrap_or("")));
+        }
+        // Waiting on a program the agent did not start: a game opened by its launcher, which `id` cannot name.
+        if t["function"]["name"] == "wait_for_output" {
+            let f = &mut t["function"];
+            f["parameters"]["properties"]["process"] = serde_json::json!({ "type": "string", "description": "A program's name (RobloxStudioBeta, notepad) or pid: the wait also ends the moment it closes, its window or its process, whichever goes first. Without `id`, that is all it waits for. Use it for a program a launcher, Start-Process or computer_act opened, rather than Start-Process -Wait (which also waits for every helper the program left behind) or a script that polls." });
+            f["parameters"]["required"] = serde_json::json!([]);
+            f["description"] = Value::String(format!("{} With `process` it also watches a program you did not start here, and returns as soon as it closes.", f["description"].as_str().unwrap_or("")));
         }
         // Options this build cannot honour are removed, so the model never asks for them.
         if t["function"]["name"] == "start_process" {
@@ -326,9 +335,8 @@ fn a_call_with_the_models_markup_in_it_is_put_back() {
     assert_eq!(parse_call("run_command", r#"{"command": "python", "args": "[\"a.py\", \"-v\"]", "stdin": "[1]"}"#).unwrap(), serde_json::json!({ "command": "python", "args": ["a.py", "-v"], "stdin": "[1]" }));
 }
 
-#[cfg(test)]
 pub fn implemented(name: &str) -> bool {
-    IMPLEMENTED.contains(&name) || winproc::NAMES.contains(&name)
+    IMPLEMENTED.contains(&name) || winproc::NAMES.contains(&name) || computer::NAMES.contains(&name)
 }
 
 /// The tool list for one request. A tool that cannot work is withheld rather than
@@ -376,7 +384,8 @@ async fn add_model(ctx: &Ctx, args: &Value) -> Output {
     Output::ok(format!("{verb} {} ({}) in the model list: {window}, {price}.{tools} The user picks it in the model menu or with /model. This conversation stays on its current model.", model.label, model.api_model), format!("{verb} {}", model.label))
 }
 
-pub fn definitions(web_search: bool, native_vision: bool, git_repo: bool, github: Option<bool>) -> Vec<Value> {
+/// `computer`: the Computer toggle is on. Its tools need a model that sees the screenshots they send back.
+pub fn definitions(web_search: bool, native_vision: bool, git_repo: bool, github: Option<bool>, computer: bool) -> Vec<Value> {
     SCHEMAS
         .iter()
         .filter(|t| match t["function"]["name"].as_str().unwrap_or("") {
@@ -386,6 +395,7 @@ pub fn definitions(web_search: bool, native_vision: bool, git_repo: bool, github
             // Push and pull requests need the token as well as the connection.
             n if n.starts_with("github_") => github == Some(true),
             n if winproc::NAMES.contains(&n) => cfg!(windows),
+            n if computer::NAMES.contains(&n) => computer && native_vision && cfg!(windows),
             n if n.starts_with("git_") => git_repo,
             _ => true,
         })
@@ -474,6 +484,8 @@ pub async fn run(name: &str, args: &Value, ctx: &Ctx) -> Output {
         "inspect_page" => browser::inspect_page(ctx, args).await,
         "browse" => browser::browse(ctx, args).await,
         "screenshot_window" => browser::screenshot_window(ctx, args).await,
+        "computer_look" => computer::look(ctx, args).await,
+        "computer_act" => computer::act(ctx, args).await,
         "http_request" => web::http_request(ctx, args).await,
         "download_file" => web::download_file(ctx, args).await,
         "web_search" => web::web_search(ctx, args).await,
@@ -553,9 +565,12 @@ mod tests {
         for name in IMPLEMENTED {
             assert!(SCHEMAS.iter().any(|t| t["function"]["name"] == *name), "{name} is missing from assets/tools.json");
         }
-        assert!(definitions(false, false, false, None).iter().all(|t| t["function"]["name"] != "web_search"));
+        assert!(definitions(false, false, false, None, false).iter().all(|t| t["function"]["name"] != "web_search"));
+        // The Computer toggle: off, or a model that cannot see the screenshots, and the tools are not offered.
+        let computer = |on, vision| definitions(false, vision, false, None, on).iter().filter(|t| t["function"]["name"].as_str().is_some_and(|n| n.starts_with("computer_"))).count();
+        assert_eq!((computer(false, true), computer(true, false), computer(true, true)), (0, 0, if cfg!(windows) { 2 } else { 0 }));
         // GitHub tools: none without a connected repository, the remote ones only with a token as well.
-        let offered = |github| definitions(false, false, true, github).iter().filter_map(|t| t["function"]["name"].as_str().map(str::to_string)).filter(|n| n == "git_pull_base" || n.starts_with("github_")).collect::<Vec<_>>();
+        let offered = |github| definitions(false, false, true, github, false).iter().filter_map(|t| t["function"]["name"].as_str().map(str::to_string)).filter(|n| n == "git_pull_base" || n.starts_with("github_")).collect::<Vec<_>>();
         assert!(offered(None).is_empty());
         assert_eq!(offered(Some(false)), ["git_pull_base"]);
         assert_eq!(offered(Some(true)).len(), 4);

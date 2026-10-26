@@ -66,6 +66,8 @@ const SHOWN_LOG: usize = 30_000;
 const MAX_RUNNING: usize = 4;
 /// A process that exits inside this window did not start.
 const START_GRACE: Duration = Duration::from_millis(4_000);
+/// How long the last of a finished program's output may take to come out of its pipes, all of them together.
+const AFTER_EXIT: Duration = Duration::from_millis(500);
 /// An approval nobody answers in this time is a decline.
 const APPROVAL_LIMIT: Duration = Duration::from_secs(5 * 60);
 
@@ -562,9 +564,10 @@ async fn run_to_end(mut child: Child, limit: Option<Duration>, keep: Option<Arc<
             (None, true)
         }
     };
-    for r in readers.into_iter().flatten() {
-        let _ = tokio::time::timeout(Duration::from_secs(2), r).await;
-    }
+    // What it printed last is in the pipes already and comes out at once. A pipe still open after that is held by a
+    // program it started and left running (a game, its crash handler), which may never close it: waited out for 2 s
+    // a pipe, one after the other, that put 4 s on every command that started one.
+    let _ = tokio::time::timeout(AFTER_EXIT, futures_util::future::join_all(readers.into_iter().flatten())).await;
     let out = log.lock().unwrap().clone();
     (code, out, timed_out)
 }
@@ -1023,6 +1026,14 @@ pub async fn start_process(ctx: &Ctx, args: &Value) -> Output {
     // A process that exits inside the first seconds did not start: that is a failure, not a background job.
     let (id, died, shown) = ctx.procs.adopt(owner, launch.display.clone(), child, ctx.emit.clone(), START_GRACE).await;
     let shown = shown.trim();
+    // Unless it says all went well: a launcher starts the real program and leaves (Roblox's, a game's, `start`), and
+    // called a failure, the reply started the program again, and again.
+    if died == Some(0) {
+        return Output::ok(
+            format!("{} finished at once, with exit code 0: it was a launcher, or a command that starts something and returns. What it started runs on its own and is not tracked here. To wait until that program closes, use wait_for_output with its process name.\n\n{}", launch.display, or_text(shown, "(no output)")),
+            format!("Launched and returned: {}", launch.display),
+        );
+    }
     if let Some(code) = died {
         return Output { ok: false, text: format!("{} exited immediately (code {code}).\n\n{}\n\nFix the cause before trying again.", launch.display, or_text(shown, "(no output)")), summary: format!("Exited at once (code {code}): {}", launch.display), ..Default::default() };
     }
@@ -1124,10 +1135,74 @@ pub fn stop_process(ctx: &Ctx, args: &Value) -> Output {
     Output::ok(format!("Stopped {}.", p.display), format!("Stopped {}", p.display))
 }
 
+/// A program on the computer the agent did not start, watched until it closes: no process of that name (or pid) is
+/// left, or the windows it had are all gone (Roblox takes some seconds more to end after its window closes).
+struct Watch {
+    name: String,
+    pids: Vec<u32>,
+    /// It has shown a window while watched.
+    windowed: bool,
+    since: Instant,
+}
+
+/// How long a watched program that is not running yet may take to start: it was just launched, say.
+const WATCH_START: Duration = Duration::from_secs(10);
+
+impl Watch {
+    fn new(asked: &str) -> Watch {
+        let name = asked.trim().trim_end_matches(".exe").trim_end_matches(".EXE").to_string();
+        Watch { name, pids: Vec::new(), windowed: false, since: Instant::now() }
+    }
+
+    fn matching(&self) -> Vec<u32> {
+        let pid = self.name.parse::<u32>().ok();
+        crate::computer::processes().into_iter().filter(|(p, n)| Some(*p) == pid || n.eq_ignore_ascii_case(&self.name)).map(|(p, _)| p).collect()
+    }
+
+    /// Some(why) once it has closed, or never started.
+    fn closed(&mut self) -> Option<String> {
+        let now = self.matching();
+        if now.is_empty() {
+            return if self.pids.is_empty() {
+                (self.since.elapsed() >= WATCH_START).then(|| format!("{} is not running, and did not start within {}s", self.name, WATCH_START.as_secs()))
+            } else {
+                Some(format!("{} closed", self.name))
+            };
+        }
+        self.pids = now;
+        let windows = crate::computer::windows().into_iter().any(|w| self.pids.contains(&w.pid));
+        if self.windowed && !windows {
+            return Some(format!("{}'s window closed (the process is still finishing)", self.name));
+        }
+        self.windowed |= windows;
+        None
+    }
+}
+
 pub async fn wait_for_output(ctx: &Ctx, args: &Value) -> Output {
     let id = str_arg(args, "id");
+    let watched = str_arg(args, "process").trim();
+    if (watched.is_empty() || !id.trim().is_empty()) && ctx.procs.get(id, &ctx.state_dir).is_none() {
+        return Output::fail(format!("Error: no process with id \"{id}\". Use list_processes, or pass `process` (a program's name) to wait for a program you did not start here."));
+    }
+    let mut watch = (!watched.is_empty()).then(|| Watch::new(watched));
+    let limit = Duration::from_millis(num_arg(args, "timeout_ms").unwrap_or(30_000).clamp(1_000, MAX_ASKED));
     let Some(p) = ctx.procs.get(id, &ctx.state_dir) else {
-        return Output::fail(format!("Error: no process with id \"{id}\". Use list_processes."));
+        // Only a program to watch.
+        let watch = watch.as_mut().expect("checked above");
+        let started = Instant::now();
+        loop {
+            if let Some(why) = tokio::task::block_in_place(|| watch.closed()) {
+                let ok = !watch.pids.is_empty();
+                let took = started.elapsed().as_secs_f64();
+                return Output { ok, ..Output::ok(format!("{why} after {took:.1}s."), if ok { format!("{} closed after {took:.1}s", watch.name) } else { format!("{} is not running", watch.name) }) };
+            }
+            if started.elapsed() >= limit {
+                let state = if watch.pids.is_empty() { "has not started" } else { "is still open" };
+                return Output::fail(format!("Timed out after {:.0}s: {} {state}.", limit.as_secs_f64(), watch.name));
+            }
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
     };
     let pattern = str_arg(args, "pattern");
     // Case-insensitive; a pattern that is not a valid regex is matched as plain text.
@@ -1142,10 +1217,13 @@ pub async fn wait_for_output(ctx: &Ctx, args: &Value) -> Output {
         let log = p.log.lock().unwrap().clone();
         let exited = *p.exit.lock().unwrap();
         let matched_line = re.as_ref().and_then(|r| log.lines().find(|l| r.is_match(l)).map(|l| l.trim().to_string()));
+        let closed = watch.as_mut().and_then(|w| tokio::task::block_in_place(|| w.closed()));
         let outcome = if matched_line.is_some() {
             "matched"
         } else if exited.is_some() {
             "exited"
+        } else if closed.is_some() {
+            "closed"
         } else if started.elapsed() >= limit {
             "timeout"
         } else {
@@ -1159,6 +1237,7 @@ pub async fn wait_for_output(ctx: &Ctx, args: &Value) -> Output {
             let (ok, text, summary) = match outcome {
                 "matched" => (true, format!("Matched after {ms}ms: {}{tail}", matched_line.unwrap_or_default()), format!("Ready after {:.1}s", started.elapsed().as_secs_f32())),
                 "exited" => (true, format!("The process exited after {ms}ms without printing that.{tail}"), "Process exited while waiting".to_string()),
+                "closed" => (true, format!("Stopped waiting after {ms}ms: {}. The process {id} is still running.{tail}", closed.clone().unwrap_or_default()), "Watched program closed".to_string()),
                 _ => (false, format!("Timed out after {ms}ms. The process is still running but has not printed that yet.{tail}"), "Timed out waiting".to_string()),
             };
             return Output { ok, ..Output::ok(text, summary) };

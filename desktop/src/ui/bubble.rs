@@ -423,6 +423,7 @@ enum Kind {
     Note,
     Ask,
     Image,
+    Computer,
     Done,
     Other,
 }
@@ -483,6 +484,8 @@ fn describe(name: &str, args: &str) -> Display {
         "ask_user" => (Ask, "Asking", "Asked"),
         "view_image" => (Image, "Viewing", "Viewed"),
         "screenshot_window" => (Image, "Capturing", "Captured"),
+        "computer_look" => (Computer, "Looking at the screen", "Looked at the screen"),
+        "computer_act" => (Computer, "Using the computer", "Used the computer"),
         "show_image" => (Image, "Showing", "Showed"),
         "sandbox_run" => (Run, "Running in sandbox", "Ran in sandbox"),
         "sandbox_screenshot" => (Image, "Capturing sandbox", "Captured sandbox"),
@@ -540,6 +543,9 @@ fn target_of(name: &str, args: &str) -> (Option<String>, bool) {
     if let Some(edits) = a["edits"].as_array() {
         return (Some(plural(edits.len(), "edit")), false);
     }
+    if let Some(steps) = a["steps"].as_array().filter(|_| name == "computer_act") {
+        return (Some(screen_steps(steps)), false);
+    }
     if let Some(steps) = a["steps"].as_array().filter(|_| name == "make_plan").or_else(|| a["updates"].as_array().filter(|_| name == "update_plan")) {
         return (Some(plural(steps.len(), "step")), false);
     }
@@ -579,6 +585,38 @@ fn target_of(name: &str, args: &str) -> (Option<String>, bool) {
         return (Some(url.trim_start_matches("https://").trim_start_matches("http://").to_string()), true);
     }
     (s("message").or_else(|| s("title")).or_else(|| s("claim")).or_else(|| s("reason")), false)
+}
+
+/// A computer_act's steps in a few words each: `"Play" · type · enter · wait 2s`.
+fn screen_steps(steps: &[serde_json::Value]) -> String {
+    let word = |v: &serde_json::Value| -> String {
+        let text = |key: &str| v[key].as_str().map(|t| if t.chars().count() > 24 { format!("\"{}…\"", t.chars().take(23).collect::<String>()) } else { format!("\"{t}\"") });
+        if let Some(click) = v.get("click") {
+            return click.as_str().map_or_else(|| if v["double"].as_bool() == Some(true) { "double-click".into() } else { "click".into() }, |_| text("click").unwrap_or_default());
+        }
+        if v.get("type").is_some() {
+            return "type".into();
+        }
+        for key in ["key", "hold"] {
+            if let Some(name) = v[key].as_str() {
+                return name.to_string();
+            }
+        }
+        if let Some(ms) = v["wait"].as_f64() {
+            return format!("wait {}s", (ms / 100.0).round() / 10.0);
+        }
+        if let Some(t) = text("wait_for") {
+            return format!("wait for {t}");
+        }
+        if let Some(target) = v["open"].as_str() {
+            return format!("open {}", target.rsplit(['\\', '/']).next().unwrap_or(target));
+        }
+        if let Some(t) = text("focus") {
+            return format!("focus {t}");
+        }
+        ["scroll", "drag", "move"].into_iter().find(|key| v.get(*key).is_some()).unwrap_or("step").to_string()
+    };
+    steps.iter().map(word).collect::<Vec<_>>().join(" · ")
 }
 
 /// Set by the self-portrait state `open-step`.
@@ -729,6 +767,7 @@ fn step(ui: &mut Ui, tool: &ToolEvent, env: &mut Env, open: &mut Option<String>)
             Kind::Note => icons::TOOL_NOTE,
             Kind::Ask => icons::TOOL_ASK,
             Kind::Image => icons::TOOL_IMAGE,
+            Kind::Computer => icons::TOOL_COMPUTER,
             Kind::Done => icons::TOOL_DONE,
             Kind::Other => icons::TOOL_OTHER,
         }
@@ -842,8 +881,10 @@ fn step(ui: &mut Ui, tool: &ToolEvent, env: &mut Env, open: &mut Option<String>)
         });
     }
 
-    // A picture the step showed the user. A capture or a look is for the model: only `show_image` puts one in the chat.
-    if let Some(path) = tool.image.as_ref().filter(|_| tool.ok == Some(true) && tool.name == "show_image") {
+    // A picture the step showed the user. A capture or a look is for the model: only `show_image` puts one in the chat,
+    // and the computer's steps, so the user sees what was done on their screen and where it clicked.
+    let on_screen = tool.name.starts_with("computer_");
+    if let Some(path) = tool.image.as_ref().filter(|_| on_screen || (tool.ok == Some(true) && tool.name == "show_image")) {
         let full = if path.is_absolute() { path.clone() } else { env.workspace.join(path) };
         let name = path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
         ui.add_space(6.0);
@@ -870,9 +911,12 @@ fn step(ui: &mut Ui, tool: &ToolEvent, env: &mut Env, open: &mut Option<String>)
             if shown.clicked() {
                 *env.action = Some(Action::Image(name.clone(), uri));
             }
-            ui.add_space(4.0);
-            let caption = if tool.caption.is_empty() { name.clone() } else { format!("{} · {name}", tool.caption) };
-            ui.add(egui::Label::new(widgets::lines(caption, 12.0, 18.0, W::Regular, p.muted)).truncate().selectable(false));
+            // A screen step's row says what it did already: no caption to say it again.
+            if !on_screen {
+                ui.add_space(4.0);
+                let caption = if tool.caption.is_empty() { name.clone() } else { format!("{} · {name}", tool.caption) };
+                ui.add(egui::Label::new(widgets::lines(caption, 12.0, 18.0, W::Regular, p.muted)).truncate().selectable(false));
+            }
         });
         ui.add_space(8.0);
     }

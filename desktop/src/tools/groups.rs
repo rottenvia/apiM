@@ -208,9 +208,15 @@ mod tests {
     /// this fails until someone decides whether it belongs there.
     #[test]
     fn the_everyday_tools_are_few_and_every_other_has_one_group() {
-        let all = crate::tools::definitions(true, true, true, Some(true));
+        let all = crate::tools::definitions(true, true, true, Some(true), true);
         let everyday: Vec<&str> = names(&all).into_iter().filter(|tool| group_of(tool).is_none()).collect();
-        assert_eq!(everyday, ["list_files", "read_file", "write_file", "edit_file", "search_files", "read_files", "run_command", "make_plan", "update_plan", "ask_user", "finish", "web_search"]);
+        // web_search and the computer's tools come only with their toggle on, and then with every request: the user
+        // switched them on to have them used.
+        let mut expected = vec!["list_files", "read_file", "write_file", "edit_file", "search_files", "read_files", "run_command", "make_plan", "update_plan", "ask_user", "finish", "web_search"];
+        if cfg!(windows) {
+            expected.extend(["computer_look", "computer_act"]);
+        }
+        assert_eq!(everyday, expected);
         for group in GROUPS {
             for tool in group.tools {
                 assert_eq!(GROUPS.iter().filter(|other| other.tools.contains(tool)).count(), 1, "{tool} is in two groups");

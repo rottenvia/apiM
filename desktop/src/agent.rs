@@ -617,6 +617,8 @@ async fn run_inner(mut req: Request, emit: &Emitter, procs: Arc<Procs>) -> Resul
     std::fs::create_dir_all(&req.workspace).map_err(|e| format!("Cannot open the workspace folder {}: {e}", req.workspace.display()))?;
     let native_vision = target.model.vision == Vision::Native;
     let web_search = s.web_mode() != "off" && (!s.tavily().is_empty() || !s.exa().is_empty());
+    // Its tools send screenshots back: a model that cannot see them is not given them.
+    let computer = s.computer_use && native_vision && cfg!(windows);
     let git_repo = req.workspace.join(".git").exists();
     if git_repo {
         tools::git::keep_app_folders_out(&req.workspace);
@@ -647,7 +649,7 @@ async fn run_inner(mut req: Request, emit: &Emitter, procs: Arc<Procs>) -> Resul
     // A repository connected through the GitHub dialog, and whether there is a token to push with.
     let github = crate::github::read_connection(&tools::github::ws(&ctx));
     let github_token = github.as_ref().map(|_| crate::github::configured(&s.github_token));
-    let mut system = prompt::system(&plugins::legacy_prompt(&every, &plugins_on), web_search, native_vision, git_repo, github.as_ref());
+    let mut system = prompt::system(&plugins::legacy_prompt(&every, &plugins_on), web_search, native_vision, git_repo, github.as_ref(), computer);
     // The computer this runs on, so no chat starts by finding it out.
     system.push_str(&crate::machine::block(&req.workspace, s.approval));
     // What changes from one question to the next (the date, and what earlier work established, read fresh from the
@@ -694,7 +696,7 @@ async fn run_inner(mut req: Request, emit: &Emitter, procs: Arc<Procs>) -> Resul
     // A current listing, last: the files have moved on since a resumed reply stopped, and its saved listing goes.
     start.tree = Tree::open(&req.workspace, &mut messages);
 
-    let mut all_tools = tools::definitions(web_search, native_vision, git_repo, github_token);
+    let mut all_tools = tools::definitions(web_search, native_vision, git_repo, github_token, computer);
     // Read-only helpers with their own context.
     all_tools.push(delegate_tool());
     all_tools.push(tools::skills::schema());
@@ -704,7 +706,10 @@ async fn run_inner(mut req: Request, emit: &Emitter, procs: Arc<Procs>) -> Resul
     // Not all of them are sent (`tools::groups`): the everyday ones, and the groups this chat has loaded, a
     // connected repository calls for, or the message names.
     let mut groups = req.chat.groups.clone();
-    for group in tools::groups::STANDING.iter().map(|group| group.to_string()).chain(github.iter().map(|_| "git".to_string())).chain(tools::groups::hinted(&req.text)) {
+    // With the computer on, the processes too: waiting for a game to close is wait_for_output, and a reply that would
+    // have had to load it first wrote a PowerShell monitor of its own instead, and ran the whole test twice over it.
+    let computer_groups = computer.then(|| "processes".to_string());
+    for group in tools::groups::STANDING.iter().map(|group| group.to_string()).chain(github.iter().map(|_| "git".to_string())).chain(computer_groups).chain(tools::groups::hinted(&req.text)) {
         tools::groups::add(&mut groups, &group);
     }
     let mut end = drive(&target, &ctx, messages, all_tools, groups, effort, &req.conv_id, &req.notes, start).await?;
@@ -1324,6 +1329,9 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
             let mut content = vec![json!({ "type": "text", "text": "[tool image] The image(s) you asked to view:" })];
             content.extend(parts);
             messages.push(json!({ "role": "user", "content": content }));
+            // A run on the screen sends a picture every round, and every picture went out again with every later
+            // request: three are enough to work from.
+            tools::computer::forget_old_screens(&mut messages, 3, 5);
         }
         if finished {
             return Ok(Ending { finish: Some("stop".into()), incomplete: false, stop_reason: None, outcomes });

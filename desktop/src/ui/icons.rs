@@ -114,6 +114,8 @@ pub const FOLDER: Icon = line(path!("M3 7a2 2 0 012-2h3.9a2 2 0 011.6.8l1 1.4a2 
 pub const FOLDER_PLAIN: Icon = line(path!("M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"), 1.6);
 pub const CHIP: Icon = line(r#"<rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path stroke-linecap="round" d="M15 2v2M15 20v2M9 2v2M9 20v2M2 15h2M2 9h2M20 15h2M20 9h2"/>"#, 1.6);
 pub const SPARKLES: Icon = line(concat!(path!("M12 3l1.85 5.15L19 10l-5.15 1.85L12 17l-1.85-5.15L5 10l5.15-1.85L12 3z"), path!("M18.5 15.5l.75 2 2 .75-2 .75-.75 2-.75-2-2-.75 2-.75.75-2z")), 1.6);
+/// The Computer toggle: a screen on its stand.
+pub const MONITOR: Icon = line(concat!(r#"<rect x="3" y="4" width="18" height="12" rx="2"/>"#, path!("M8 20h8M12 16v4")), 1.6);
 pub const GLOBE: Icon = line(r#"<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a15.3 15.3 0 014 9 15.3 15.3 0 01-4 9 15.3 15.3 0 01-4-9 15.3 15.3 0 014-9z"/>"#, 1.6);
 pub const PLUGINS: Icon = line(
     path!("M13.5 16.875h3.375m0 0h3.375m-3.375 0V13.5m0 3.375v3.375M6 10.5h2.25a2.25 2.25 0 002.25-2.25V6a2.25 2.25 0 00-2.25-2.25H6A2.25 2.25 0 003.75 6v2.25A2.25 2.25 0 006 10.5zm0 9.75h2.25A2.25 2.25 0 0010.5 18v-2.25a2.25 2.25 0 00-2.25-2.25H6a2.25 2.25 0 00-2.25 2.25V18A2.25 2.25 0 006 20.25zm9.75-9.75H18a2.25 2.25 0 002.25-2.25V6A2.25 2.25 0 0018 3.75h-2.25A2.25 2.25 0 0013.5 6v2.25a2.25 2.25 0 002.25 2.25z"),
@@ -164,6 +166,8 @@ pub const TOOL_NOTE: Icon = line(path!("M5 4h14v16l-7-4-7 4z"), 1.9);
 pub const TOOL_ASK: Icon = line(path!("M21 12a8 8 0 01-11.6 7.1L4 20l1-4.4A8 8 0 1121 12z"), 1.9);
 pub const TOOL_IMAGE: Icon = line(concat!(path!("M4 5h16v14H4z"), path!("M4 16l5-5 4 4 3-3 4 4"), path!("M15 9h.01")), 1.9);
 pub const TOOL_DONE: Icon = line(path!("M5 12l5 5 9-10"), 1.9);
+/// A step on the user's screen: the pointer.
+pub const TOOL_COMPUTER: Icon = line(path!("M5 3l6.2 16.5 2.3-7 7-2.3z"), 1.9);
 pub const TOOL_OTHER: Icon = line(path!("M13 2L4 14h7l-1 8 9-12h-7z"), 1.9);
 pub const TERMINAL: Icon = line(path!("M8 9l3 3-3 3m5 0h3M4 5h16a1 1 0 011 1v12a1 1 0 01-1 1H4a1 1 0 01-1-1V6a1 1 0 011-1z"), 1.7);
 pub const HELP: Icon = line(concat!(r#"<circle cx="12" cy="12" r="9"/>"#, path!("M9.5 9a2.5 2.5 0 115 .5c0 1.5-2.5 2-2.5 3.5M12 17h.01")), 1.7);

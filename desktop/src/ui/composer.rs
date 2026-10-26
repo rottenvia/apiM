@@ -349,6 +349,21 @@ fn row(app: &mut App, ui: &mut egui::Ui, running: bool, is_note: bool, has_keys:
         app.settings.save();
     }
 
+    // The screen, mouse and keyboard. Its tools send screenshots back, so a model that cannot see is not given them:
+    // the chip says so rather than look on while doing nothing.
+    let computer = app.settings.computer_use;
+    let blind = computer && crate::ui::attachments::model_vision(&app.settings) != crate::models::Vision::Native;
+    let tip = match (computer, blind) {
+        (false, _) => "Computer use off — click to let the agent see your screen and use your mouse and keyboard",
+        (true, false) => "Computer use on — the agent can see your screen and use your mouse and keyboard. Click to turn off",
+        (true, true) => "Computer use is on, but this model cannot see pictures, so it cannot use the computer. Pick a model that can",
+    };
+    let chip = Chip { icon: Some(icons::MONITOR), text: if wide { "Computer" } else { "" }, active: computer, dot: blind.then_some(p.warning), pad, ..Default::default() };
+    if chip.show(ui).on_hover_text(tip).clicked() {
+        app.settings.computer_use = !computer;
+        app.settings.save();
+    }
+
     // On for every chat, or for this one alone.
     let on = crate::plugins::enabled_for(&app.settings.enabled_plugins, &app.conv.names("skills")).len();
     let label = match (wide, on) {
