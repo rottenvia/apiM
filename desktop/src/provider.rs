@@ -157,28 +157,42 @@ pub fn saw_usage(model_id: &str, endpoint_name: &str, sent: u64, cached: u64, wr
     if sent == 0 {
         return;
     }
-    let _one_writer = READS_FILE.lock().unwrap();
-    let file = models::endpoints_file();
-    let mut saved: Map<String, Value> = std::fs::read(&file).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
-    let seen = &mut saved.entry("_reads").or_insert_with(|| json!({}))[model_id][endpoint_name];
-    let mut row: Vec<f64> = (0..8).map(|i| seen[i].as_f64().unwrap_or(0.0)).collect();
-    row[0] += sent as f64;
-    row[1] += cached as f64;
-    row[2] += sent as f64;
-    row[3] += written as f64;
-    // A round too short to time says more about the clock than about the endpoint.
-    if let Some((wait, writing)) = timing.filter(|(_, writing)| written >= 32 && *writing >= 0.3) {
-        row[4] += written as f64;
-        row[5] += writing;
-        row[6] += wait;
-        row[7] += 1.0;
+    update_endpoints(|saved| {
+        let seen = &mut saved.entry("_reads").or_insert_with(|| json!({}))[model_id][endpoint_name];
+        let mut row: Vec<f64> = (0..8).map(|i| seen[i].as_f64().unwrap_or(0.0)).collect();
+        row[0] += sent as f64;
+        row[1] += cached as f64;
+        row[2] += sent as f64;
+        row[3] += written as f64;
+        // A round too short to time says more about the clock than about the endpoint.
+        if let Some((wait, writing)) = timing.filter(|(_, writing)| written >= 32 && *writing >= 0.3) {
+            row[4] += written as f64;
+            row[5] += writing;
+            row[6] += wait;
+            row[7] += 1.0;
+        }
+        if row[0] > READS_HALVED {
+            row.iter_mut().for_each(|n| *n /= 2.0);
+        }
+        row.push(now_secs() as f64);
+        *seen = json!(row);
+        true
+    });
+}
+
+/// Changes `endpoints.json` under one lock, read and written whole; `change` says whether it changed anything. A chat
+/// probing endpoints for seconds wrote back the file as it had read it, and lost the counts other chats added
+/// meanwhile; a write caught half done read as nothing, and the next one started the file again from it.
+fn update_endpoints(change: impl FnOnce(&mut Map<String, Value>) -> bool) {
+    update_json(&models::endpoints_file(), change);
+}
+
+fn update_json(file: &std::path::Path, change: impl FnOnce(&mut Map<String, Value>) -> bool) {
+    let _one_writer = READS_FILE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut saved: Map<String, Value> = std::fs::read(file).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
+    if change(&mut saved) {
+        let _ = crate::store::write_atomic(file, Value::Object(saved).to_string().as_bytes());
     }
-    if row[0] > READS_HALVED {
-        row.iter_mut().for_each(|n| *n /= 2.0);
-    }
-    row.push(now_secs() as f64);
-    *seen = json!(row);
-    let _ = std::fs::write(&file, Value::Object(saved).to_string());
 }
 
 fn now_secs() -> u64 {
@@ -349,24 +363,27 @@ async fn keeps_arguments(client: &reqwest::Client, target: &Target, tag: &str) -
 // ponytail: one kind of call is tried. An endpoint that loses something else (a picture, a long text) passes; add a
 // second call here when one is met.
 async fn sound_endpoints(client: &reqwest::Client, target: &Target, usable: &[Endpoint]) -> (Vec<Endpoint>, Vec<String>) {
-    let file = models::endpoints_file();
-    let mut saved: Map<String, Value> = std::fs::read(&file).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
+    let saved: Map<String, Value> = std::fs::read(models::endpoints_file()).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
     let now = now_secs();
     let mut known: HashMap<String, bool> = saved.get("_probes").and_then(|p| p[&target.model.id].as_object()).into_iter().flatten().filter(|(_, r)| now.saturating_sub(r["at"].as_u64().unwrap_or(0)) < PROBE_KEPT_SECS).filter_map(|(tag, r)| Some((tag.clone(), r["ok"].as_bool()?))).collect();
     let tried: Vec<&Endpoint> = usable.iter().filter(|e| known.get(&e.tag) != Some(&false)).take(PROBED).collect();
     let asked: Vec<&str> = tried.iter().map(|e| e.tag.as_str()).filter(|tag| !known.contains_key(*tag)).collect();
     let answers = futures_util::future::join_all(asked.iter().map(|tag| async move { futures_util::future::join_all((0..PROBE_SAMPLES).map(|_| keeps_arguments(client, target, tag))).await })).await;
+    let mut found = Vec::new();
     for (tag, samples) in asked.iter().zip(answers) {
         // One bad call is enough to leave an endpoint out; a good name needs every call good.
         let verdict = if samples.contains(&Some(false)) { Some(false) } else if samples.iter().all(|s| *s == Some(true)) { Some(true) } else { None };
         if let Some(ok) = verdict {
             known.insert(tag.to_string(), ok);
-            saved.entry("_probes").or_insert_with(|| json!({}))[&target.model.id][*tag] = json!({ "ok": ok, "at": now });
+            found.push((*tag, ok));
         }
     }
-    if !asked.is_empty() {
-        let _ = std::fs::write(&file, Value::Object(saved).to_string());
-    }
+    update_endpoints(|saved| {
+        for (tag, ok) in &found {
+            saved.entry("_probes").or_insert_with(|| json!({}))[&target.model.id][*tag] = json!({ "ok": ok, "at": now });
+        }
+        !found.is_empty()
+    });
     let failed = usable.iter().filter(|e| known.get(&e.tag) == Some(&false)).map(|e| e.tag.clone()).collect();
     (usable.iter().filter(|e| known.get(&e.tag) == Some(&true)).cloned().collect(), failed)
 }
@@ -411,13 +428,12 @@ pub async fn choose_endpoint(client: &reqwest::Client, target: &Target) -> Optio
     // found"): one of them allows 128,000 tokens where the model's page says 131,072. The request asks for what all of them allow.
     let cap = order.iter().map(|e| e.max_output).filter(|max| *max > 0).min().map(|max| max.min(u32::MAX as u64) as u32);
     CHOSEN.lock().unwrap().insert(target.model.id.clone(), (json!({ "order": tags, "allow_fallbacks": false }), cap));
-    let remembered = models::endpoints_file();
-    let mut last: Map<String, Value> = std::fs::read(&remembered).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
     let now = json!({ "tag": first.tag, "rates": [first.rates.0, first.rates.1, first.rates.2] });
-    let before = last.insert(target.model.id.clone(), now.clone());
-    if before.as_ref() != Some(&now) {
-        let _ = std::fs::write(&remembered, Value::Object(last).to_string());
-    }
+    let mut before = None;
+    update_endpoints(|last| {
+        before = last.insert(target.model.id.clone(), now.clone());
+        before.as_ref() != Some(&now)
+    });
     let was = before.as_ref().and_then(|before| before["tag"].as_str()).map(str::to_string);
     if was.as_deref() == now["tag"].as_str() {
         return None;
@@ -549,8 +565,9 @@ pub struct Round {
 pub enum Delta<'a> {
     Content(&'a str),
     Reasoning(&'a str),
-    /// A tool call still streaming its arguments (a file being written).
-    ToolDraft { name: &'a str, chars: usize, args: &'a str },
+    /// A tool call still streaming its arguments (a file being written). `index` is its place in the round, for the
+    /// id it gets when the provider sends none.
+    ToolDraft { id: &'a str, index: usize, name: &'a str, chars: usize, args: &'a str },
 }
 
 #[derive(Debug)]
@@ -782,8 +799,8 @@ pub async fn stream(client: &reqwest::Client, target: &Target, body: &Value, cut
                 for tc in calls {
                     acc.add(tc);
                 }
-                if let Some(last) = acc.calls.last() {
-                    on(Delta::ToolDraft { name: &last.name, chars: last.args.len(), args: &last.args });
+                if let Some((index, last)) = acc.calls.iter().enumerate().last() {
+                    on(Delta::ToolDraft { id: &last.id, index, name: &last.name, chars: last.args.len(), args: &last.args });
                 }
             }
             if let Some(text) = delta["content"].as_str().filter(|t| !t.is_empty()) {
@@ -809,6 +826,29 @@ pub async fn stream(client: &reqwest::Client, target: &Target, body: &Value, cut
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chats_counting_at_once_lose_no_count() {
+        let file = std::env::temp_dir().join(format!("apim-endpoints-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        std::thread::scope(|threads| {
+            for chat in 0..6 {
+                let file = &file;
+                threads.spawn(move || {
+                    for _ in 0..40 {
+                        update_json(file, |saved| {
+                            let n = saved.entry(format!("chat{chat}")).or_insert(json!(0));
+                            *n = json!(n.as_u64().unwrap() + 1);
+                            true
+                        });
+                    }
+                });
+            }
+        });
+        let saved: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert!((0..6).all(|chat| saved[format!("chat{chat}")] == 40), "{saved}");
+        let _ = std::fs::remove_file(&file);
+    }
 
     fn endpoint(tag: &str, rates: (f64, f64, f64), tps: f64) -> Endpoint {
         Endpoint { tag: tag.into(), name: tag.into(), rates, tps, wait: 1.0, guessed: false, max_output: 0, reads: USUAL_READS, writes: USUAL_WRITES, round: USUAL_ROUND }

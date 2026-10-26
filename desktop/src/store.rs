@@ -8,6 +8,11 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// `%APPDATA%\apiM`, `~/Library/Application Support/apiM` or `~/.local/share/apiM`.
 /// `APIM_DATA_DIR` overrides it (tests, portable installs).
+/// Held by the tests that point the data folder at one of their own: it is one variable for the whole process, and
+/// the engine's tests and this module's changed it under each other.
+#[cfg(test)]
+pub static TEST_DATA_DIR: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn data_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("APIM_DATA_DIR").or_else(|| std::env::var_os("APIM_DATA_ROOT")) {
         return PathBuf::from(dir);
@@ -1434,8 +1439,9 @@ mod tests {
 
     #[test]
     fn round_trip() {
+        let _turn = TEST_DATA_DIR.lock().unwrap_or_else(|p| p.into_inner());
         let dir = std::env::temp_dir().join(format!("apim-test-{}", new_id()));
-        // SAFETY: tests in this module are the only ones touching this variable.
+        // SAFETY: the tests that point the data folder at their own hold TEST_DATA_DIR.
         unsafe { std::env::set_var("APIM_DATA_DIR", &dir) };
 
         let mut s = Settings::default();

@@ -106,13 +106,15 @@ struct PendingQuestion {
 
 /// A tool call still streaming its arguments.
 struct Drafting {
+    /// The id its step will have.
+    id: String,
     name: String,
     /// Characters of arguments so far.
     chars: usize,
-    /// The file it is about, once that much has arrived.
-    path: Option<String>,
-    /// When its first byte came in.
-    since: Instant,
+    /// The start of them, where the file or command it is about stands.
+    head: String,
+    /// When its step was first drawn (`Run::drafted`), so the step that starts knows how far in it is.
+    shown: std::cell::Cell<Option<Instant>>,
 }
 
 /// One request to the model: which it is, what it carried, when it left, and whether anything has come back.
@@ -133,7 +135,8 @@ struct Run {
     handle: tokio::task::JoinHandle<()>,
     conv_id: String,
     status: &'static str,
-    drafting: Option<Drafting>,
+    /// The tool calls of this round still being written, or written and not started yet.
+    drafts: Vec<Drafting>,
     /// The request now with the model.
     request: Option<Round>,
     /// A failed request waiting to be tried again: what to say, and when the next try starts.
@@ -151,6 +154,28 @@ struct Run {
     parked: Option<Conversation>,
     /// When the thought before a new step was shut: the step waits for it to fold (`widgets::FOLD`).
     folded: Option<Instant>,
+    /// When a step or notice last came in unfolding: words after it wait until it has its room, or their first line
+    /// rode down under it (the closing words under "Finished", 25 points).
+    arrived: Option<Instant>,
+}
+
+/// Whether the calls being written show: not while the thought before them folds or the text before them is typed.
+fn drafts_show(folded: Option<Instant>, typing: &pacer::Typing) -> bool {
+    !folded.is_some_and(|at| at.elapsed() < FOLD_WAIT) && !typing.waiting()
+}
+
+impl Run {
+    /// The steps the tool calls being written will be, shown from when the thought before them has folded and the
+    /// text before them is on screen. The step that starts has the same id and goes on in the same row: it used to
+    /// come only once its call was whole, a beat after the fold, with a status line between that hardly stood.
+    // ponytail: a call the agent never starts (a guard ends the run between calls) shows until the reply ends.
+    fn drafted(&self) -> Vec<Part> {
+        if !drafts_show(self.folded, &self.typing) {
+            return Vec::new();
+        }
+        let size = |chars: usize| if chars >= 1000 { format!("{:.1}k chars", chars as f64 / 1000.0) } else { String::new() };
+        self.drafts.iter().filter(|d| !d.name.is_empty()).inspect(|d| d.shown.set(d.shown.get().or_else(|| Some(Instant::now())))).map(|d| Part::Tool(store::ToolEvent { id: d.id.clone(), name: d.name.clone(), args: d.head.clone(), summary: size(d.chars), ..Default::default() })).collect()
+    }
 }
 
 /// A chat on its way in from disk.
@@ -537,7 +562,8 @@ impl App {
                 }
                 "draft-row" => {
                     self.fake_run(true);
-                    self.runs.last_mut().unwrap().drafting = Some(Drafting { name: "write_file".into(), chars: 4210, path: Some("desktop/src/ui/chat.rs".into()), since: Instant::now() });
+                    let head = r#"{"path":"desktop/src/ui/chat.rs","content":"use super::"#.into();
+                    self.runs.last_mut().unwrap().drafts = vec![Drafting { id: "draft".into(), name: "write_file".into(), chars: 4210, head, shown: Default::default() }];
                 }
                 "stalled" => {
                     // Text came, then nothing for five seconds.
@@ -639,7 +665,7 @@ impl App {
             handle: self.rt.spawn(std::future::pending::<()>()),
             conv_id: self.conv.id.clone(),
             status: "Thinking",
-            drafting: None,
+            drafts: Vec::new(),
             request: None,
             retry: None,
             approval: None,
@@ -652,6 +678,7 @@ impl App {
             saved: Instant::now() + Duration::from_secs(3600),
             parked: None,
             folded: None,
+            arrived: None,
         });
     }
 
@@ -1156,7 +1183,7 @@ impl App {
             handle,
             conv_id: self.conv.id.clone(),
             status: "Thinking",
-            drafting: None,
+            drafts: Vec::new(),
             request: None,
             retry: None,
             approval: None,
@@ -1168,6 +1195,7 @@ impl App {
             saved: Instant::now(),
             parked: None,
             folded: None,
+            arrived: None,
         });
         self.focus_composer = true;
         self.jump_to_latest = true;
@@ -1470,7 +1498,11 @@ impl App {
             };
             let Some(msg) = conv.messages.last_mut() else { break };
             match event {
-                Event::Retry { reason, attempt, attempts, wait } => run.retry = Some((format!("{reason} — retrying, try {} of {attempts}", attempt.min(attempts)), Instant::now() + wait)),
+                Event::Retry { reason, attempt, attempts, wait } => {
+                    // The round's calls went with it.
+                    run.drafts.clear();
+                    run.retry = Some((format!("{reason} — retrying, try {} of {attempts}", attempt.min(attempts)), Instant::now() + wait));
+                }
                 Event::Status(status) => run.status = status,
                 Event::Reasoning(text) => run.typing.push(false, text),
                 Event::Content(text) => run.typing.push(true, text),
@@ -1479,14 +1511,18 @@ impl App {
                         write_text(msg, &mut run.thinking, false, text);
                     }
                 }
-                Event::ToolDraft { name, chars, path } => {
-                    // The clock runs from the call's first byte; a new call starts it again.
-                    let since = run.drafting.as_ref().filter(|d| d.name == name && d.chars <= chars).map_or_else(Instant::now, |d| d.since);
-                    run.drafting = Some(Drafting { name, chars, path, since });
-                }
+                Event::ToolDraft { id, name, chars, head } => match run.drafts.iter_mut().find(|d| d.id == id) {
+                    Some(draft) => (draft.name, draft.chars, draft.head) = (name, chars, head),
+                    None => run.drafts.push(Drafting { id, name, chars, head, shown: Default::default() }),
+                },
                 Event::ToolStart(tool) => {
                     close_thinking(msg, &mut run.thinking);
-                    run.drafting = None;
+                    // Calls start in the order they were written: one whose id did not come through is the first left.
+                    let at = run.drafts.iter().position(|d| d.id == tool.id).or((!run.drafts.is_empty()).then_some(0));
+                    // A step whose call showed while it was written came in then; any other comes in now. A step's
+                    // call that streamed and started between two frames came in with its words under it.
+                    let came = at.and_then(|at| run.drafts.remove(at).shown.get()).unwrap_or_else(Instant::now);
+                    run.arrived = run.arrived.max(Some(came));
                     msg.parts.push(Part::Tool(tool));
                 }
                 Event::ToolDone { id, ok, summary, image, changed } => {
@@ -1568,6 +1604,7 @@ impl App {
                 }
                 Event::Notice(note) => {
                     close_thinking(msg, &mut run.thinking);
+                    run.arrived = Some(Instant::now());
                     msg.parts.push(Part::Notice(note));
                 }
                 Event::Checkpoint(state) => {
@@ -1603,7 +1640,7 @@ impl App {
                 close_thinking(msg, &mut run.thinking);
                 run.folded = Some(Instant::now());
             }
-            let folding = run.folded.and_then(|at| FOLD_WAIT.checked_sub(at.elapsed())).filter(|_| watched && run.typing.prose_next());
+            let folding = [run.folded, run.arrived].into_iter().flatten().filter_map(|at| FOLD_WAIT.checked_sub(at.elapsed())).max().filter(|_| watched && run.typing.prose_next());
             let pieces = match folding {
                 Some(left) => {
                     run.typing.hold();
@@ -1621,7 +1658,7 @@ impl App {
             }
             // A tool call being written means the thinking before it is over: it folds now, while the call streams
             // in, not when the step starts. Not before all of it is on screen, or the rest would open a second one.
-            if run.drafting.is_some() && !run.typing.waiting() && thinking_now(msg) {
+            if !run.drafts.is_empty() && !run.typing.waiting() && thinking_now(msg) {
                 close_thinking(msg, &mut run.thinking);
                 run.folded = Some(Instant::now());
             }
@@ -1887,9 +1924,15 @@ impl eframe::App for App {
     /// window saved nothing for as long as it stayed down (nineteen minutes of a reply's rounds, once), and a
     /// command waiting to be approved was never shown and never flashed the taskbar: it timed out unseen.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let started = Instant::now();
         self.pump(ctx);
         self.pump_summary();
         self.pump_open();
+        // What the frame's own count (in `ui`) does not see: taking in replies, and a reply that ends being saved.
+        let took = started.elapsed().as_secs_f64() * 1000.0;
+        if PERF.is_some_and(|limit| took > limit.min(4.0)) {
+            eprintln!("logic {took:.1} ms ({} replies running)", self.runs.len());
+        }
         if let Some(chats) = self.boot.as_mut().and_then(|boot| boot.take()) {
             self.chats = chats;
             self.side.prune(&self.chats);

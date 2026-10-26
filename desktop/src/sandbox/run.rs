@@ -2,6 +2,7 @@
 //! background one, and screenshotting the sandbox display. Takes the wsl program path so tests can use a fake.
 
 use super::wsl::{self, capture_invocation, pick_display, wrap_for_sandbox, LINUX_CWD};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -34,11 +35,14 @@ pub struct Sandbox {
     pub display: String,
 }
 
-/// Current sandbox and the Xvfb wsl.exe launcher this process started (kept so it can be killed).
-static STATE: Mutex<Option<(Sandbox, Option<std::process::Child>)>> = Mutex::new(None);
+/// Each chat's sandbox, by chat, and the Xvfb wsl.exe launcher this process started for its display (kept so it can be
+/// killed). Every chat has a display of its own: with one for all, two chats' programs drew on one screen and each
+/// one's screenshots showed the other's windows.
+// ponytail: a chat's display lives until the app closes (an Xvfb is some 20 MB); free it with its chat if that matters.
+static STATE: Mutex<BTreeMap<String, (Sandbox, Option<std::process::Child>)>> = Mutex::new(BTreeMap::new());
 
-pub fn active() -> Option<Sandbox> {
-    STATE.lock().unwrap().as_ref().map(|(s, _)| s.clone())
+pub fn active(chat: &str) -> Option<Sandbox> {
+    STATE.lock().unwrap().get(chat).map(|(s, _)| s.clone())
 }
 
 /// WSL failing to start an instance at all, as opposed to the command inside it failing.
@@ -56,21 +60,29 @@ fn not_ready(error: &str, needs_setup: bool) -> RunResult {
     RunResult { ok: false, content, summary: "Sandbox not available".into() }
 }
 
-/// Starts (once) the off-screen display inside the sandbox distro and returns the sandbox. Err is (reason, needs setup).
-pub fn ensure(wsl: &Path) -> Result<Sandbox, (String, bool)> {
-    // One start at a time: two chats' first sandbox steps both started an Xvfb, and the first one's handle was lost.
+/// Starts (once per chat) the chat's off-screen display inside the sandbox distro and returns its sandbox. Err is
+/// (reason, needs setup).
+pub fn ensure(wsl: &Path, chat: &str) -> Result<Sandbox, (String, bool)> {
+    // One start at a time: two chats' first sandbox steps picked the same display, and the first one's handle was lost.
     static STARTING: Mutex<()> = Mutex::new(());
     let _one = STARTING.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(s) = active() {
+    if let Some(s) = active(chat) {
         return Ok(s);
     }
-    let distro = wsl::choose_distro(&wsl::probe(wsl))?;
-    let display = pick_display(&[]);
+    let (known, used): (Option<String>, Vec<u32>) = {
+        let state = STATE.lock().unwrap();
+        (state.values().next().map(|(s, _)| s.distro.clone()), state.values().filter_map(|(s, _)| s.display.trim_start_matches(':').parse().ok()).collect())
+    };
+    let distro = match known {
+        Some(distro) => distro,
+        None => wsl::choose_distro(&wsl::probe(wsl))?,
+    };
+    let display = pick_display(&used);
     let inv = wsl::build_invocation(Some(&distro), Some("root"), Some(LINUX_CWD), &[], "Xvfb", &wsl::xvfb_launch_args(&display));
     // Detached and silent: Xvfb keeps running in the distro after this wsl.exe returns.
     let xvfb = detached(wsl, &inv.args).ok();
     let sb = Sandbox { distro, display };
-    *STATE.lock().unwrap() = Some((sb.clone(), xvfb));
+    STATE.lock().unwrap().insert(chat.to_string(), (sb.clone(), xvfb));
     Ok(sb)
 }
 
@@ -86,13 +98,15 @@ fn detached(program: &Path, args: &[String]) -> std::io::Result<std::process::Ch
     cmd.spawn()
 }
 
-/// Kills the display's Xvfb and forgets the sandbox. The next use starts a fresh one.
+/// Kills every chat's Xvfb and forgets the sandboxes. The next use starts a fresh one.
 pub fn close(wsl: &Path) {
-    let Some((sb, xvfb)) = STATE.lock().unwrap().take() else { return };
-    let inv = wsl::build_invocation(Some(&sb.distro), Some("root"), Some(LINUX_CWD), &[], "pkill", &["-f".into(), format!("Xvfb {}", sb.display)]);
-    wsl::run_timed(wsl, &inv.args, Duration::from_secs(5), None);
-    if let Some(mut c) = xvfb {
-        let _ = c.kill();
+    let all = std::mem::take(&mut *STATE.lock().unwrap());
+    for (sb, xvfb) in all.into_values() {
+        let inv = wsl::build_invocation(Some(&sb.distro), Some("root"), Some(LINUX_CWD), &[], "pkill", &["-f".into(), format!("Xvfb {}", sb.display)]);
+        wsl::run_timed(wsl, &inv.args, Duration::from_secs(5), None);
+        if let Some(mut c) = xvfb {
+            let _ = c.kill();
+        }
     }
 }
 
@@ -135,7 +149,7 @@ fn cut(text: String) -> String {
 
 /// Runs a shell command in the sandbox and waits. The caller has already had it approved.
 pub async fn run_command(wsl: &Path, workspace_id: &str, workspace_win_dir: &Path, script: &str, timeout_ms: Option<u64>) -> RunResult {
-    let sb = match ensure(wsl) {
+    let sb = match ensure(wsl, workspace_id) {
         Ok(s) => s,
         Err((e, needs)) => return not_ready(&e, needs),
     };
@@ -216,7 +230,7 @@ pub fn took(elapsed: Duration) -> String {
 /// its output pipes untaken: the process list keeps it (`exec::Procs::adopt`), so read_process and stop_process
 /// work on it. The child is not killed on drop.
 pub async fn start_background(wsl: &Path, workspace_id: &str, workspace_win_dir: &Path, script: &str) -> Result<Child, (String, bool)> {
-    let sb = ensure(wsl)?;
+    let sb = ensure(wsl, workspace_id)?;
     let (inv, stdin) = wrap_for_sandbox(&sb.distro, &sb.display, workspace_id, &workspace_win_dir.to_string_lossy(), script, &[]);
     let mut cmd = Command::new(wsl);
     cmd.args(&inv.args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -264,7 +278,7 @@ pub struct Shot {
 
 /// Captures the sandbox display into <workspace>/screenshots. Err is (message, needs setup).
 pub async fn screenshot(wsl: &Path, workspace_id: &str, workspace_win_dir: &Path, requested: Option<&str>, now_ms: u128, full_screen: bool, wait_seconds: Option<f64>) -> Result<Shot, (String, bool)> {
-    let sb = ensure(wsl).map_err(|(e, n)| (format!("{e}\n{WINDOWS_FALLBACK}"), n))?;
+    let sb = ensure(wsl, workspace_id).map_err(|(e, n)| (format!("{e}\n{WINDOWS_FALLBACK}"), n))?;
     let safe = screenshot_file_name(requested, now_ms);
     let (inv, _) = capture_invocation(&sb.distro, &sb.display, workspace_id, &workspace_win_dir.to_string_lossy(), full_screen, wait_seconds);
     let mut cmd = Command::new(wsl);
@@ -334,7 +348,7 @@ mod tests {
     async fn runs_through_the_fake_distro() {
         let _turn = crate::sandbox::test_lock();
         let wsl = crate::sandbox::fake_wsl();
-        let dir = std::env::temp_dir().join("asb-run-test");
+        let dir = std::env::temp_dir().join(format!("asb-run-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let ok = run_command(&wsl, "chat-1", &dir, "echo hi", None).await;
         assert!(ok.ok, "{}", ok.content);
@@ -356,9 +370,13 @@ mod tests {
         assert_eq!(shot.file_name, "screenshots/gui.png");
         assert_eq!(shot.note, "[sandbox] cropped to the visible window(s), 300x200+0+0 of the screen. full_screen:true captures everything.");
         assert!(dir.join("screenshots").join("gui.png").is_file());
-        assert_eq!(active().map(|s| s.distro), Some("apim-sandbox".to_string()));
+        assert_eq!(active("chat-1").map(|s| s.distro), Some("apim-sandbox".to_string()));
+        // Another chat draws on a display of its own.
+        let other = ensure(&wsl, "chat-2").unwrap();
+        assert_ne!(other.display, active("chat-1").unwrap().display);
+        assert_eq!(ensure(&wsl, "chat-2").unwrap(), other);
         close(&wsl);
-        assert!(active().is_none());
+        assert!(active("chat-1").is_none() && active("chat-2").is_none());
     }
 
     #[test]

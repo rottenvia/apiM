@@ -56,6 +56,8 @@ pub struct Env<'a, 'm> {
     pub cap: f32,
     /// Seconds the model has been thinking in this stretch, while it does.
     pub thinking_secs: Option<u64>,
+    /// The tool calls the live reply is still writing, as the steps they will be (`Run::drafted`).
+    pub drafted: &'a [Part],
     /// The user message being edited in place: (id, draft).
     pub editing: &'a mut Option<(String, String)>,
     pub action: &'a mut Option<Action>,
@@ -520,9 +522,11 @@ fn plural(n: usize, word: &str) -> String {
 
 fn target_of(name: &str, args: &str) -> (Option<String>, bool) {
     let Ok(a) = serde_json::from_str::<serde_json::Value>(args) else {
-        // Still streaming: take whatever the first recognisable field holds so far.
-        static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r#""(path|command|query|url)"\s*:\s*"([^"]*)"#).unwrap());
-        return RE.captures(args).map_or((None, false), |c| (Some(c[2].to_string()), matches!(&c[1], "path" | "command")));
+        // Still streaming: the first recognisable field, once it is whole. Taken as far as it had come, the path of
+        // a step being written grew a letter at a time.
+        static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r#""(path|command|query|url)"\s*:\s*"((?:[^"\\]|\\.)*)""#).unwrap());
+        let whole = |c: regex::Captures| Some((serde_json::from_str::<String>(&format!("\"{}\"", &c[2])).ok()?, matches!(&c[1], "path" | "command")));
+        return RE.captures(args).and_then(whole).map_or((None, false), |(target, mono)| (Some(target), mono));
     };
     let s = |key: &str| a[key].as_str().map(str::trim).filter(|v| !v.is_empty()).map(str::to_string);
     let path = s("path").or_else(|| s("file"));
@@ -1143,7 +1147,9 @@ fn meta_row(ui: &mut Ui, msg: &Message, env: &Env, sources_open: &mut bool) -> b
                 tip += if tokens > 0 { ". By part, in characters:" } else { ":" };
                 msg.context_breakdown.iter().for_each(|b| tip += &format!("\n{} {}", b.label, k(b.chars)));
             }
-            fade(ui, "context", &mut |ui| with_icon(ui, icons::LINES, if tokens > 0 { format!("~{} ctx", k(tokens)) } else { format!("~{} chars", k(context)) }, tip.clone()));
+            // Counted in tokens once the provider says, it comes in again where it then stands: it read "~40k chars"
+            // and jumped to "~9k ctx" a hundred points on as the counts before it came in.
+            fade(ui, if tokens > 0 { "context" } else { "context-chars" }, &mut |ui| with_icon(ui, icons::LINES, if tokens > 0 { format!("~{} ctx", k(tokens)) } else { format!("~{} chars", k(context)) }, tip.clone()));
         }
         let ending = msg.raw_ending.as_ref();
         let count = |key: &str| ending.and_then(|e| e[key].as_u64()).unwrap_or(0);
@@ -1408,10 +1414,10 @@ type TimelineRow<'a> = (Vec<&'a str>, Vec<&'a ToolEvent>, Option<(Cow<'a, str>, 
 /// Groups a reply's parts into timeline rows, as the web's `buildTimelineRows` does: prose keeps adding to its row until a
 /// tool or reasoning comes, a tool joins the row above it unless reasoning came last, and reasoning split across parts reads
 /// as one thought in one row.
-pub fn timeline_rows(parts: &[Part], live: bool) -> Vec<TimelineRow<'_>> {
+pub fn timeline_rows<'a>(parts: &[&'a Part], live: bool) -> Vec<TimelineRow<'a>> {
     let mut rows: Vec<TimelineRow> = Vec::new();
     for (i, part) in parts.iter().enumerate() {
-        match part {
+        match *part {
             Part::Thinking { text, ms } => {
                 let streaming = live && *ms == 0 && i + 1 == parts.len();
                 match rows.last_mut() {
@@ -1438,13 +1444,16 @@ pub fn timeline_rows(parts: &[Part], live: bool) -> Vec<TimelineRow<'_>> {
 
 fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
     let p = p();
-    let has_tools = msg.parts.iter().any(|part| matches!(part, Part::Tool(_)));
+    // Its parts, and the steps of the calls it is still writing after them.
+    let drafted: &[Part] = if env.live { env.drafted } else { &[] };
+    let parts: Vec<&Part> = msg.parts.iter().chain(drafted).collect();
+    let has_tools = parts.iter().any(|part| matches!(part, Part::Tool(_)));
     // A reply that thinks is laid out as a timeline from its first thought, steps or not. It used to start as a box
     // on top and turn into a timeline when the first step came: the open thought vanished, the step appeared and the
     // notices moved from under it to over it, all in one frame. A reply with find matches is drawn flat, as the web
     // draws it while a query is on.
-    let thinks = msg.parts.iter().any(|part| matches!(part, Part::Thinking { .. }));
-    let timeline = (msg.parts.len() > 1 && has_tools || thinks) && env.marks.is_none();
+    let thinks = parts.iter().any(|part| matches!(part, Part::Thinking { .. }));
+    let timeline = (parts.len() > 1 && has_tools || thinks) && env.marks.is_none();
     let text = msg.text();
     let failed = msg.error.is_some();
     let colour = if msg.incomplete && !env.live { p.text2 } else { p.text };
@@ -1474,12 +1483,17 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
     if !inline_thinking {
         let reasoning = msg.reasoning();
         let thinking_now = env.live && matches!(msg.parts.last(), Some(Part::Thinking { ms: 0, .. }));
-        // A reply that was asked to think shows the box even when no thinking came back: from its first words on,
-        // so nothing moves when it ends (the box used to arrive with the last word and push the text down).
-        let asked = msg.effort.as_deref().is_some_and(|e| !e.is_empty() && e != "none") && (!env.live || !text.trim().is_empty());
+        // A reply that was asked to think shows the box even when no thinking came back: from its first words or
+        // steps on, so nothing moves when it ends (the box used to arrive with the last word and push the text
+        // down, and a reply of steps whose only words were its receipt had every step pushed down as it ended).
+        // It unfolds into its room as a new row does.
+        let asked = msg.effort.as_deref().is_some_and(|e| !e.is_empty() && e != "none") && (!env.live || !text.trim().is_empty() || has_tools);
         if !reasoning.trim().is_empty() || asked {
-            gap(ui, 12.0);
-            thinking_panel(ui, &reasoning, msg.reasoning_ms, thinking_now, env, msg.usage.reasoning);
+            let come = widgets::arrival(ui, ui.id().with("panel-born"), env.live, STEP_IN);
+            widgets::unfold(ui, ui.id().with("panel-in"), come, |ui| {
+                gap(ui, 12.0);
+                thinking_panel(ui, &reasoning, msg.reasoning_ms, thinking_now, env, msg.usage.reasoning);
+            });
         }
     }
     // A reply brought over from the web app carries its own plan. The chat's plan is pinned above the composer
@@ -1530,7 +1544,7 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
     if timeline {
         gap(ui, 12.0);
         // A row is a stretch of prose and the steps it led to; thinking sits between rows where it happened.
-        let rows = timeline_rows(&msg.parts, env.live);
+        let rows = timeline_rows(&parts, env.live);
         // The classic layout (Settings → Theme): prose on the left, its steps on the right, a rule between rows.
         let split = env.settings.reply_layout == "split";
         let mut after_think = false;
@@ -1604,7 +1618,7 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
             env.rows.store(key, print, ui.cursor().top() - top);
         }
     } else {
-        let tools: Vec<&ToolEvent> = msg.parts.iter().filter_map(|part| if let Part::Tool(t) = part { Some(t) } else { None }).collect();
+        let tools: Vec<&ToolEvent> = parts.iter().filter_map(|part| if let Part::Tool(t) = part { Some(t) } else { None }).collect();
         if !tools.is_empty() {
             gap(ui, 12.0);
             let live = env.live;
@@ -1711,7 +1725,7 @@ mod tests {
         assert_eq!(cases.len(), 5);
         for (input, expected) in cases {
             let msg = Message::from_web(&input["message"]);
-            let rows: Vec<serde_json::Value> = timeline_rows(&msg.parts, false)
+            let rows: Vec<serde_json::Value> = timeline_rows(&msg.parts.iter().collect::<Vec<_>>(), false)
                 .iter()
                 .map(|(texts, tools, think, _)| serde_json::json!({ "text": texts.concat(), "tools": tools.iter().map(|t| t.id.clone()).collect::<Vec<_>>(), "think": think.as_ref().map(|(t, _)| t.clone()) }))
                 .collect();
@@ -1735,8 +1749,9 @@ mod tests {
         assert_eq!(describe("fetch_url", r#"{"url":"https://example.com/a"}"#).target.as_deref(), Some("example.com/a"));
         let search = describe("web_search", r#"{"query":"rust egui"}"#);
         assert_eq!((search.target.as_deref(), search.mono), (Some("rust egui"), false));
-        // Arguments still streaming in: the path so far.
-        assert_eq!(describe("write_file", r#"{"path":"notes/pl"#).target.as_deref(), Some("notes/pl"));
+        // Arguments still streaming in: the path once it is whole, not a letter at a time.
+        assert_eq!(describe("write_file", r#"{"path":"notes/pl"#).target, None);
+        assert_eq!(describe("write_file", r##"{"path":"notes\\plan.md","content":"# Pl"##).target.as_deref(), Some(r"notes\plan.md"));
         assert_eq!(describe("my_new-tool", "{}").done, "My new tool");
         assert_eq!(describe("mcp__files__read_text", "{}").done, "MCP read_text");
         assert_eq!(step_body(r#"{"command":"git","args":["commit","-m","two words"]}"#).as_deref(), Some(r#"git commit -m "two words""#));

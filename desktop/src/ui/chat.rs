@@ -106,9 +106,14 @@ pub fn header(app: &mut App, ui: &mut egui::Ui) {
         }
         super::docks::header(app, ui);
         let totals = app.totals();
-        if totals.priced > 0 {
+        // The first cost of a chat fades in beside the files chip, which is changing its words just then.
+        let priced = widgets::fade(ui, ui.id().with("cost-in"), totals.priced > 0);
+        if priced > 0.0 {
             ui.add_space(4.0);
-            ui.label(widgets::text(format_cost(totals.cost), 11.0, W::Regular, p.muted)).on_hover_text("What this chat has cost so far, estimated from published rates — the full breakdown is at the top of the conversation");
+            ui.scope(|ui| {
+                ui.multiply_opacity(priced);
+                ui.label(widgets::text(format_cost(totals.cost), 11.0, W::Regular, p.muted)).on_hover_text("What this chat has cost so far, estimated from published rates — the full breakdown is at the top of the conversation");
+            });
         }
     });
 }
@@ -291,6 +296,7 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
         let cap = column * if ui.ctx().content_rect().width() < 768.0 { 0.85 } else { 0.75 };
         // A thought's clock goes on from the line before it ("Thinking… · 4s" became "Thinking · 0s"): the round's.
         let thinking_secs = run.map(|r| r.request.as_ref().filter(|q| q.number > 1).map_or(r.started, |q| q.fired).elapsed().as_secs());
+        let drafted = run.map(super::Run::drafted).unwrap_or_default();
         let split = settings.reply_layout == "split";
         // A message with matches is laid out differently, so it is measured apart.
         fn key_for(hits: usize, msg: &Message) -> std::borrow::Cow<'_, str> {
@@ -340,7 +346,7 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
                 rows.guessed = false;
                 let mut marks = matcher.as_ref().filter(|_| hits > 0).map(|matcher| markdown::Marks { matcher, active: focused, seen: 0, reveal: wanted, shown: false });
                 column_in(ui, !shows, fresh.filter(|(from, _)| i >= *from).map_or(1.0, |(_, come)| come), &mut |ui| {
-                    let mut env = bubble::Env { settings, workspace: &workspace, live, newest: i == last, busy: running, cap, thinking_secs, editing, action: &mut action, rewind, marks: marks.take(), rows };
+                    let mut env = bubble::Env { settings, workspace: &workspace, live, newest: i == last, busy: running, cap, thinking_secs, drafted: &drafted, editing, action: &mut action, rewind, marks: marks.take(), rows };
                     ui.push_id(&msg.id, |ui| bubble::show(ui, msg, &mut env));
                     marks = env.marks.take();
                 });
@@ -602,17 +608,17 @@ fn wait_rows(ui: &mut egui::Ui, run: &super::Run, has_output: bool) {
         "Searching" => "Searching the web",
         _ => "Thinking",
     };
-    // Not while the text before the call is still being typed out: the line spoke of a step the text had not reached.
-    let drafting = run.drafting.as_ref().filter(|d| d.chars > 0 && !run.typing.waiting());
     let waiting = sent.as_ref().filter(|(r, _)| !r.answered);
     // Mid-reply and nothing has come for a while: the provider is slow, and saying so tells it from a window that
     // has stopped.
     let quiet = matches!(run.status, "Writing" | "Thinking") && run.retry.is_none() && run.approval.is_none() && run.question.is_none() && run.heard.elapsed() >= QUIET;
-    let says = match drafting {
-        _ if !has_output => stage.to_string(),
-        Some(draft) => drafting_label(&draft.name, draft.path.as_deref()),
-        None if waiting.is_some() || quiet => "Waiting for the model".into(),
-        None => String::new(),
+    // A tool call being written is not said here: it shows as the step it will be (`Run::drafted`).
+    let says = if !has_output {
+        stage.to_string()
+    } else if waiting.is_some() || quiet {
+        "Waiting for the model".into()
+    } else {
+        String::new()
     };
     // A line fades in when its words change, not its counters, nor what stands behind it: "Thinking…" dimmed and
     // came back twice in its first second, as the request went out and as its first byte came.
@@ -709,14 +715,7 @@ fn wait_rows(ui: &mut egui::Ui, run: &super::Run, has_output: bool) {
             ui.add(egui::Label::new(small(text.clone(), p.warning)).truncate());
         });
     }
-    if let Some(draft) = drafting {
-        let size = if draft.chars >= 1000 { format!("{:.1}k chars", draft.chars as f64 / 1000.0) } else { format!("{} chars", draft.chars) };
-        row(ui, 0.0, &mut |ui| {
-            mark(ui);
-            glow(ui, format!("{says}…"));
-            facts(ui, &[size.clone(), format!("{}s", draft.since.elapsed().as_secs())], "");
-        });
-    } else if let Some((r, (chars, described))) = waiting {
+    if let Some((r, (chars, described))) = waiting {
         row(ui, 0.0, &mut |ui| {
             mark(ui);
             glow(ui, "Waiting for the model…".into());
@@ -729,20 +728,6 @@ fn wait_rows(ui: &mut egui::Ui, run: &super::Run, has_output: bool) {
             glow(ui, "Waiting for the model…".into());
             facts(ui, &[format!("{}s", run.heard.elapsed().as_secs())], "Nothing has come from the model for this long. The reply goes on when it sends more.");
         });
-    }
-}
-
-/// "Writing ui/chat.rs", "Preparing edits", "Planning": what a tool call still streaming in is doing.
-fn drafting_label(name: &str, path: Option<&str>) -> String {
-    // The last two parts of the path say which file without the whole way to it.
-    let file = path.map(|p| p.split('/').filter(|part| !part.is_empty()).collect::<Vec<_>>()).filter(|parts| !parts.is_empty()).map(|parts| parts[parts.len().saturating_sub(2)..].join("/"));
-    match (name, file) {
-        ("write_file" | "write_files" | "create_file", Some(file)) => format!("Writing {file}"),
-        ("write_file" | "write_files" | "create_file", None) => "Writing files".into(),
-        ("edit_file" | "edit_files" | "replace_in_files", Some(file)) => format!("Editing {file}"),
-        ("edit_file" | "edit_files" | "replace_in_files", None) => "Preparing edits".into(),
-        (n, _) if n.contains("plan") => "Planning".into(),
-        (n, _) => format!("Preparing {}", n.replace('_', " ")),
     }
 }
 
@@ -804,10 +789,5 @@ mod tests {
         assert_eq!(describe_request(&[bucket("your message", 812)]), (812, "812 in (your message 812)".into()));
         assert_eq!(describe_request(&[]), (0, "0 in".into()));
         assert_eq!((k(999), k(1000), k(2500)), ("999".into(), "1k".into(), "3k".into()));
-
-        assert_eq!(drafting_label("write_file", Some("desktop/src/ui/chat.rs")), "Writing ui/chat.rs");
-        assert_eq!(drafting_label("edit_file", Some("main.rs")), "Editing main.rs");
-        assert_eq!((drafting_label("write_files", None), drafting_label("replace_in_files", None)), ("Writing files".into(), "Preparing edits".into()));
-        assert_eq!((drafting_label("make_plan", Some("x")), drafting_label("run_command", None)), ("Planning".into(), "Preparing run command".into()));
     }
 }
