@@ -32,7 +32,9 @@ OPENROUTER_API_KEY=sk-or-… npm run bench -- --desktop --model glm-5.3-flash --
 ```
 
 `--desktop` runs each task through the Rust app's terminal mode (`apim --ask --auto`, one reply, no window) instead
-of the web app: same tasks, same hidden checks. Each task gets its own workspace and its own data folder, so nothing
+of the web app: same tasks, same hidden checks. `--model` takes any id, not only the catalog's: a Claude id
+(`--model claude-opus-5-5`, with `ANTHROPIC_API_KEY` set) or any OpenRouter slug (`--model openai/gpt-6.1-terra`) is
+checked and added the way the model menu adds it. Each task gets its own workspace and its own data folder, so nothing
 one task learns reaches the next, and your own chats and settings are never touched. The build in
 `desktop/target-bench` is used when there is one, else `desktop/target`; `--exe path` names another (keep a copy of
 an old build to compare against).

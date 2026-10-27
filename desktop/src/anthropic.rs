@@ -318,8 +318,10 @@ impl Events {
         }
     }
 
+    /// Objects are kept too: what was written for an hour, billed at twice the five-minute price, is told only in
+    /// message_start's `cache_creation`, and every hour-long write was costed as a five-minute one without it.
     fn count(&mut self, counts: &Value) -> Value {
-        self.counts.extend(counts.as_object().into_iter().flatten().filter(|(_, v)| v.is_u64()).map(|(k, v)| (k.clone(), v.clone())));
+        self.counts.extend(counts.as_object().into_iter().flatten().filter(|(_, v)| v.is_u64() || v.is_object()).map(|(k, v)| (k.clone(), v.clone())));
         usage(&Value::Object(self.counts.clone()))
     }
 }
@@ -474,7 +476,7 @@ mod tests {
         let mut events = Events::default();
         let mut chunks = Vec::new();
         for event in [
-            json!({ "type": "message_start", "message": { "usage": { "input_tokens": 100, "cache_creation_input_tokens": 40, "cache_read_input_tokens": 1000, "output_tokens": 1 } } }),
+            json!({ "type": "message_start", "message": { "usage": { "input_tokens": 100, "cache_creation_input_tokens": 40, "cache_read_input_tokens": 1000, "cache_creation": { "ephemeral_5m_input_tokens": 20, "ephemeral_1h_input_tokens": 20 }, "output_tokens": 1 } } }),
             json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "thinking", "thinking": "" } }),
             json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "thinking_delta", "thinking": "Let me look." } }),
             json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "signature_delta", "signature": "x" } }),
@@ -495,7 +497,7 @@ mod tests {
         let last = &chunks[6];
         assert_eq!(last["choices"][0]["finish_reason"], "tool_calls");
         let used = crate::models::Usage::from_wire(&last["usage"]);
-        assert_eq!((used.prompt, used.cache_hit, used.cache_miss, used.completion), (1140, 1000, 150, 30));
+        assert_eq!((used.prompt, used.cache_hit, used.cache_miss, used.completion), (1140, 1000, 165, 30));
         assert!(events.chunk(&json!({ "type": "error", "error": { "type": "overloaded_error", "message": "Overloaded" } })).unwrap()["error"]["message"] == "Overloaded");
     }
 

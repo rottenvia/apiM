@@ -152,6 +152,8 @@ Then the real app on real models, the 24-bug task (`bench/tasks/long-many-fixes`
 - **What changes between questions left the system prompt.** The date and what earlier work established (findings, the binary ledger, lessons) ride in a note just before the question. In the system prompt, a finding recorded in one reply changed the start of every request of the next, and the chat went out at full price again: a finding was recorded in 28% of the replies in this PC's chats. The date did the same at midnight.
 - **The summary waits for more.** Older turns were folded into the chat's summary once 4,000 characters of them waited behind the newest eight, about every other message with long replies, and each refresh rewrote the start of the history. Where the cached price is a quarter of the input price or less it now waits for 40,000 characters, or twelve turns (the most the window sent word for word holds).
 
+- **The workspace folder in the rules.** The system prompt named the chat's own folder, so every folder had a prompt of its own, and Claude, which reads its cache only as far as a mark, wrote all 13,800 tokens of rules and tools again for each new chat somewhere else. The folder rides in the note before the question now, with the date, which is already the line that changes. Measured on Haiku 5.5, a second chat in another folder: 0 tokens read from the cache before, 13,463 of 13,773 after.
+
 Before and after on that task: DeepSeek 75.5% of the input read from the cache, then 89.8%; Claude 70 to 80%, then 82.9%. What is left is new text: each round reads all of the round before it, and these replies write long scripts.
 
 A read that did not fit says where to read on. A model that asks again from the first line gets the same first part again, however often it asks: five rounds in a row in that chat. The lines the first answer left out are now read for it and sent with the pointer, once, when they are all that is left of the file.
@@ -175,6 +177,39 @@ Three more, found by running the same long task before and after:
 A reply the app was closed under (or that died with it) came back with its steps and no word that it had stopped: no Resume. A reply still holding the transcript it was being written from is now read as unfinished, and Resume carries on from its last saved step.
 
 A plan with every step done is cleared when the next message is sent: it stood over the new reply as if it were its plan, and was sent to the model with it.
+
+## The benchmark on Claude's own models
+
+The 34 tasks were run on Claude Haiku 5.5 and 14 of them on Claude Opus 5.5, through Anthropic's own API, and every
+round of every failed task was read. Five faults were the app's, not the models':
+
+- **A refused request, and the round lost.** Where a provider has no field for it, the app carries the end of each
+  step's thinking back as the turn's own words, under a label, or the model re-derives the task every round. Claude
+  refuses such a request outright (`stop_reason` "refusal", category `reasoning_extraction`): no content, no tool
+  call, the round gone. It struck 8 of the 14 Opus tasks, and 4 of them failed for it. Claude is given no thinking
+  back now, in a field or in the words (`transcript::Thoughts::Gone`); its own signed thoughts are a separate
+  question, and the comment in `anthropic.rs` says why none go. Opus 5.5 went from 10 of 14 to 13 of 14, in fewer
+  rounds (76 to 67). The one that changed the other way, html-table-extract, failed the task's unseen-snapshot check
+  on its own merits, at the same 41 of 54 Haiku scored on it.
+- **An hour in the cache, costed as five minutes.** Claude says what it wrote for an hour, at twice the price, in
+  `cache_creation` inside the first event of the stream. The reader kept only the plain numbers beside it, so every
+  hour-long write was costed as a five-minute one.
+- **A list sent as its own text, with the file's line breaks in it.** A model that wraps an argument in a string
+  often leaves real line breaks inside, which JSON does not allow there, and the call was refused with "files must be
+  a list of {path, content}" — twice in one task. Such text is read again with its line breaks escaped.
+- **An edit with no path.** `edit_file` without `path` was answered "<the workspace> is a folder, not a file", four
+  times in the 34 tasks. The edit now goes to the one file in the workspace its text fits, and says which; text that
+  fits two files, or none, still asks for the path.
+- **A variable mistaken for a place.** `$env:TZ = $z` in a loop, with `Remove-Item Env:TZ` after it, was refused as a
+  delete outside the chat's folder. A delete from the process's own drives (`env:`, `variable:`, `function:`) touches
+  no file, and `$env:` counts as a place only where a path goes on from it or it names one of the user's folders.
+- **Tests beside the code, in JavaScript.** `run_tests` found no suite in a workspace holding `timing.test.js`, where
+  Python's `test_x.py` beside the code has been found for a while. Node's own runner is used for a `.test.js` or
+  `.spec.js` file with no Python beside it; its output was already read.
+
+Terminal mode takes any model id now (`--model claude-opus-5-5`, `--model openai/gpt-6.1-terra`): one that is not in
+the list is checked and added exactly as the model menu adds it, so the benchmark runs on a Claude key with
+`ANTHROPIC_API_KEY` set and nothing to configure first.
 
 ## A long reply that stopped
 

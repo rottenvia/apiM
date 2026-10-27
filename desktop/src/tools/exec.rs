@@ -211,10 +211,17 @@ fn shell_wrecks(script: &str, root: &Path) -> Option<&'static str> {
         Regex::new(r"(?i)\b(format-volume|clear-disk|remove-partition|initialize-disk|stop-computer|restart-computer|shutdown|bcdedit|diskpart|vssadmin|wbadmin|set-mppreference|remove-localuser|disable-computerrestore|reg(\.exe)?\s+delete|remove-item(property)?\s+\S*\b(hklm|hkcu|registry):)|\bformat\s+[a-z]:|\bcipher\s+/w").unwrap()
     });
     static DELETES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)(^|[\s;|{(&])(remove-item|rm|rmdir|rd|del|erase|ri)\b|(\.|::)delete\(").unwrap());
-    static OUTSIDE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b[a-z]:[\\/]|\\\\|\.\.[\\/]|~|\$env:|\$home\b").unwrap());
+    // An environment variable is a place when a path goes on from it or it names one of the user's folders; `$env:TZ = 'UTC'` is not.
+    static OUTSIDE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)\b[a-z]:[\\/]|\\\\|\.\.[\\/]|~|\$env:\w+\s*[\\/]|\$env:(temp|tmp|userprofile|appdata|localappdata|programdata|programfiles\w*|windir|systemroot|systemdrive|public|onedrive\w*|homepath|homedrive)\b|\$home\b").unwrap()
+    });
+    // Deleting from the process's own drives (an environment variable, a variable, a function) touches no file: a reply that
+    // set TZ in a loop and cleared it after was refused as deleting outside the folder.
+    static PROCESS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?i)(remove-item|rm|ri|del|erase)\s+(-(literal)?path\s+)?['"]?(env|variable|function|alias):[^\s;|}'"]*['"]?"#).unwrap());
     if SYSTEM.is_match(script) {
         return Some("Not run: this changes the computer itself (its disks, its start-up, its accounts, its protection, or it deletes from the registry) and cannot be undone. Leave it to the user: say what should be run and why.");
     }
+    let script = &PROCESS.replace_all(script, "").into_owned();
     // The chat's own folder written out in full is inside. A reply cleaning a project wrote `Remove-Item 'C:\…\chat\build'`,
     // was told the place was outside, and concluded that a shell cannot delete in the folder at all.
     let own = regex::escape(&root.to_string_lossy().to_lowercase().replace('/', "\\"));
@@ -1282,11 +1289,15 @@ mod tests {
             r"tools\luau-win\luau.exe analysis\run.luau > analysis\out.txt 2> analysis\err.txt; (Get-Item analysis\out.txt).Length",
             "Remove-Item analysis/tmp -Recurse", "rm x", "Get-Process; del a", "New-Item a", "[IO.File]::WriteAllText('a','b')", "$x = Get-Item a; $x.Delete()",
             "Get-ChildItem -Recurse | Format-Table Name", r"Copy-Item C:\tools\a.dll lib\a.dll",
+            // A variable set and cleared is not a place, and clearing it deletes no file.
+            "$zones = 'UTC','Asia/Tokyo'; foreach ($z in $zones) { $env:TZ = $z; npm test 2>&1 | Select-String -Pattern '^# (pass|fail)' }; Remove-Item Env:TZ",
+            "Remove-Item build -Recurse; $env:NODE_ENV = 'test'; npm test", "Remove-Item -Path 'env:NODE_ENV'; rm variable:x",
         ] {
             assert_eq!(shell_wrecks(runs, Path::new(r"C:\chats\one")), None, "{runs}");
         }
         for wrecks in [
             r"Remove-Item C:\temp -Recurse", r"rm ..\..\other -Recurse", "del $env:USERPROFILE\\notes.txt", "Get-ChildItem ~ | Remove-Item", r"[IO.File]::Delete('C:\x\a')",
+            "Remove-Item -Recurse (Join-Path $env:TEMP 'x')", r"Remove-Item -Recurse $env:MYDIR\x", r"Remove-Item Env:TZ; Remove-Item C:\x",
             "Format-Volume -DriveLetter D", "shutdown /s /t 0", "Restart-Computer -Force", r"reg delete HKCU\Software\x /f", r"Remove-Item HKCU:\Software\x", "Set-MpPreference -DisableRealtimeMonitoring $true", "bcdedit /set x",
         ] {
             assert!(shell_wrecks(wrecks, Path::new(r"C:\chats\one")).is_some(), "{wrecks}");

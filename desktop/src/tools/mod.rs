@@ -291,8 +291,8 @@ pub fn parse_call(name: &str, raw: &str) -> Result<Value, serde_json::Error> {
         if pairs.is_empty() || pairs.len() + 1 != parts.len() {
             // A list or an object sent as its own JSON text (`"files": "[{...}]"`) is read as what it is.
             let unwrapped = match (kind(&key), &value) {
-                (Some("array"), Value::String(text)) => serde_json::from_str::<Value>(text).ok().filter(Value::is_array),
-                (Some("object"), Value::String(text)) => serde_json::from_str::<Value>(text).ok().filter(Value::is_object),
+                (Some("array"), Value::String(text)) => inner_json(text).filter(Value::is_array),
+                (Some("object"), Value::String(text)) => inner_json(text).filter(Value::is_object),
                 _ => None,
             };
             out.insert(key, unwrapped.unwrap_or(value));
@@ -304,6 +304,42 @@ pub fn parse_call(name: &str, raw: &str) -> Result<Value, serde_json::Error> {
         }
     }
     Ok(Value::Object(out))
+}
+
+/// JSON sent as the text of an argument. A model that wraps a list in a string often leaves the line breaks of a file's
+/// text in it raw, which JSON does not allow inside a string (Claude Haiku 5.5, `write_files`: the round was lost, twice
+/// in one task): inside strings, they are escaped and the text read again.
+fn inner_json(text: &str) -> Option<Value> {
+    serde_json::from_str(text).ok().or_else(|| {
+        let (mut fixed, mut in_string, mut escaped) = (String::with_capacity(text.len() + 64), false, false);
+        for c in text.chars() {
+            match c {
+                '\n' if in_string => fixed.push_str("\\n"),
+                '\r' if in_string => fixed.push_str("\\r"),
+                '\t' if in_string => fixed.push_str("\\t"),
+                _ => {
+                    fixed.push(c);
+                    if c == '"' && !escaped {
+                        in_string = !in_string;
+                    }
+                    escaped = in_string && !escaped && c == '\\';
+                    continue;
+                }
+            }
+            escaped = false;
+        }
+        serde_json::from_str(&fixed).ok()
+    })
+}
+
+#[cfg(test)]
+#[test]
+fn a_list_sent_as_text_with_raw_line_breaks_is_read() {
+    let raw = "{\"files\": \"[{\\\"path\\\": \\\"a.md\\\", \\\"content\\\": \\\"# A\\n\\n\\tsay \\\\\\\"hi\\\\\\\"\\n\\\"}]\"}";
+    assert_eq!(parse_call("write_files", raw).unwrap(), serde_json::json!({ "files": [{ "path": "a.md", "content": "# A\n\n\tsay \"hi\"\n" }] }));
+    // Line breaks between the items are JSON's own, and stay.
+    assert_eq!(inner_json("[\n  1,\n  2\n]"), Some(serde_json::json!([1, 2])));
+    assert_eq!(inner_json("[\"a\\\\\", \"b\nc\"]"), Some(serde_json::json!(["a\\", "b\nc"])));
 }
 
 #[cfg(test)]

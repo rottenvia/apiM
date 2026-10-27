@@ -213,6 +213,21 @@ fn headless(args: &[String]) {
             _ => words.push(a.clone()),
         }
     }
+    let rt = runtime();
+    // A model the list does not have (`claude-opus-5-5`, `qwen/qwen3.8-max`) is checked and added as the model menu adds it.
+    let wanted = settings.model.strip_prefix("custom:").unwrap_or(&settings.model).to_string();
+    if !wanted.is_empty() && !models::MODELS.iter().any(|m| m.id == wanted) && !settings.custom_models.iter().any(|c| c.api_model == wanted) {
+        match rt.block_on(provider::verify_model(&wanted, &settings.openrouter(), &settings.anthropic())).map(|v| v.custom("", None)) {
+            Ok(Some(c)) => {
+                settings.model = c.id();
+                settings.custom_models.push(c);
+            }
+            Ok(None) => return println!("[error: \"{wanted}\" is not a model id]"),
+            Err(e) => return println!("[error: {e}]"),
+        }
+    } else if let Some(c) = settings.custom_models.iter().find(|c| c.api_model == wanted) {
+        settings.model = c.id();
+    }
     let (tx, rx) = std::sync::mpsc::channel();
     let (model, customs) = (settings.model.clone(), settings.custom_models.clone());
     let request = agent::Request {
@@ -228,7 +243,6 @@ fn headless(args: &[String]) {
         ..Default::default()
     };
     let notes = request.notes.clone();
-    let rt = runtime();
     rt.spawn(agent::run(request, agent::Emitter::new(tx, || {}), Arc::new(tools::exec::Procs::default())));
     // Every line of a thought is marked, its first too: unmarked, it read as the reply's own words.
     let mut thinking = false;

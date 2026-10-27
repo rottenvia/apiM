@@ -751,7 +751,7 @@ pub fn apply_edit(content: &str, spec: &EditSpec) -> Result<Applied, String> {
             let hits = if exact.is_empty() { (from..total).filter(|&i| squash(lines[i]).contains(&want)).collect() } else { exact };
             match hits.as_slice() {
                 [one] => Ok(*one),
-                [] => Err(format!("Anchor not found: `{}`", needle.trim())),
+                [] => Err(format!("Anchor not found: `{}`. An anchor is a line of the file's own text, whole or part of one, not a pattern: `^}}` and the like match nothing.", needle.trim())),
                 many => Err(format!(
                     "Anchor `{}` matches {} lines ({}). Use a line that appears once.",
                     needle.trim(),
@@ -765,7 +765,12 @@ pub fn apply_edit(content: &str, spec: &EditSpec) -> Result<Applied, String> {
             // The end anchor may repeat (a closing brace): the first one after the start is meant.
             Some(end) => {
                 let want = squash(end);
-                (s + 1..total).find(|&i| squash(lines[i]) == want).or_else(|| (s + 1..total).find(|&i| squash(lines[i]).contains(&want))).ok_or_else(|| format!("end_anchor not found after line {}: `{}`", s + 1, end.trim()))?
+                // What follows the start anchor comes with the error: the next anchor is picked from it, not guessed again.
+                // Two models spent a round on an end_anchor that was a pattern (`^}`) or a line remembered not quite right.
+                let after: String = (s + 1..total.min(s + 7)).map(|i| format!("\n{:>5} | {}", i + 1, lines[i].chars().take(120).collect::<String>())).collect();
+                (s + 1..total).find(|&i| squash(lines[i]) == want).or_else(|| (s + 1..total).find(|&i| squash(lines[i]).contains(&want))).ok_or_else(|| {
+                    format!("end_anchor not found after line {}: `{}`. An anchor is a line of the file's own text, not a pattern. The lines after the start anchor:{after}", s + 1, end.trim())
+                })?
             }
             None => s,
         };
@@ -925,14 +930,42 @@ fn edit_one(ctx: &Ctx, rel: &str, specs: &[&EditSpec], preview: bool) -> Vec<Res
     results
 }
 
+/// The file an edit that names none is for: the one file its old_text or anchors fit. Claude Haiku 5.5 left the path
+/// out of three edits in fourteen tasks, and each was told "<the workspace> is a folder, not a file".
+fn file_for(ctx: &Ctx, spec: &EditSpec) -> Result<String, String> {
+    if spec.old_text.is_none() && spec.start_anchor.is_none() {
+        return Err("path is required: name the file this edit is for.".into());
+    }
+    let fits: Vec<String> = walk(&ctx.root, &ctx.root)
+        .into_iter()
+        .filter(|(_, size)| *size < 4 << 20)
+        .filter_map(|(rel, _)| apply_edit(&std::fs::read_to_string(ctx.root.join(&rel)).ok()?.replace("\r\n", "\n"), spec).ok().map(|_| rel))
+        .take(3)
+        .collect();
+    match fits.as_slice() {
+        [one] => Ok(one.clone()),
+        [] => Err("path is required: name the file this edit is for (its text fits no file in the workspace).".into()),
+        many => Err(format!("path is required: the edit's text fits {}.", many.join(", "))),
+    }
+}
+
 pub fn edit_file(ctx: &Ctx, args: &Value) -> Output {
-    let rel = str_arg(args, "path");
     let spec = EditSpec::from_args(args);
+    let given = str_arg(args, "path").trim();
+    let rel = if given.is_empty() {
+        match file_for(ctx, &spec) {
+            Ok(rel) => rel,
+            Err(e) => return Output::fail(e),
+        }
+    } else {
+        given.to_string()
+    };
+    let found = if given.is_empty() { format!("(No path was given: {rel} is the one file the edit fits.) ") } else { String::new() };
     let preview = bool_arg(args, "preview");
-    match edit_one(ctx, rel, &[&spec], preview).remove(0) {
+    match edit_one(ctx, &rel, &[&spec], preview).remove(0) {
         Ok(text) => {
-            let out = Output::ok(text, if preview { format!("Previewed edit to {rel}") } else { format!("Edited {rel}") });
-            if preview { out } else { out.changed(rel) }
+            let out = Output::ok(format!("{found}{text}"), if preview { format!("Previewed edit to {rel}") } else { format!("Edited {rel}") });
+            if preview { out } else { out.changed(&rel) }
         }
         Err(e) => Output::fail(format!("{rel}: {e}")),
     }
@@ -1196,6 +1229,12 @@ mod tests {
         // A search stopped at its cap inside a file still counts that file.
         let capped = search_files(&ctx, &serde_json::json!({ "query": "ab", "path": "line.txt" })).text;
         assert!(capped.starts_with("60 matches in 1 file\n"), "{}", &capped[..60]);
+        // An edit with no path goes to the one file its text fits, and says so; text that fits two, or none, asks for it.
+        let pathless = edit_file(&ctx, &serde_json::json!({ "old_text": "x\n", "new_text": "y\n" }));
+        assert!(pathless.ok && pathless.text.starts_with("(No path was given: sub/deep/a b.txt is the one file") && std::fs::read_to_string(root.join("sub/deep/a b.txt")).unwrap() == "y\n", "{}", pathless.text);
+        std::fs::write(root.join("twin.txt"), "y\n").unwrap();
+        assert_eq!(edit_file(&ctx, &serde_json::json!({ "old_text": "y", "new_text": "z" })).text, "path is required: the edit's text fits sub/deep/a b.txt, twin.txt.");
+        assert_eq!(edit_file(&ctx, &serde_json::json!({ "start_line": 1, "end_line": 1, "new_text": "z" })).text, "path is required: name the file this edit is for.");
         let _ = std::fs::remove_dir_all(root);
     }
 

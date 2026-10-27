@@ -245,11 +245,23 @@ fn with_carried(reasoning: &str, content: &Value) -> Value {
     })
 }
 
-/// The transcript as one provider takes it. Reasoning rides back only on turns that called a tool, in
-/// `reasoning_field` (DeepSeek's `reasoning_content`, OpenRouter's `reasoning`). With no field, the end of the
-/// reasoning rides as the turn's own words instead, or the model re-derives the whole task every round.
-/// `ends` sends only the end of each thought in the field: what the words would have carried, kept out of them.
-pub fn wire(messages: &[Value], reasoning_field: Option<&str>, ends: bool) -> Vec<Value> {
+/// How a tool-calling turn's thinking rides back to the model.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Thoughts<'a> {
+    /// Whole, in a field of its own: DeepSeek's `reasoning_content`, OpenRouter's `reasoning`.
+    Field(&'a str),
+    /// Only its end, in that field, for an endpoint that counts a replayed thought against the next prompt.
+    FieldEnd(&'a str),
+    /// Its end as the turn's own words, under a label, where the provider has no field for it.
+    Text,
+    /// Not at all. Anthropic refuses a whole request whose assistant turns carry thinking back as text
+    /// (`stop_reason` "refusal", category `reasoning_extraction`): every such round was lost, mid-task.
+    Gone,
+}
+
+/// The transcript as one provider takes it. Reasoning rides back only on turns that called a tool, the way
+/// `thoughts` says; without it the model re-derives the whole task every round.
+pub fn wire(messages: &[Value], thoughts: Thoughts) -> Vec<Value> {
     messages
         .iter()
         .map(|m| match m["role"].as_str() {
@@ -261,14 +273,10 @@ pub fn wire(messages: &[Value], reasoning_field: Option<&str>, ends: bool) -> Ve
                 let calls: Vec<Value> = calls.iter().map(|c| json!({ "id": c["id"], "type": "function", "function": { "name": c["function"]["name"], "arguments": harden_args(c["function"]["arguments"].as_str().unwrap_or("")) } })).collect();
                 let mut out = json!({ "role": "assistant", "content": m["content"], "tool_calls": calls });
                 let reasoning = m["reasoning_content"].as_str().unwrap_or("");
-                match reasoning_field {
-                    Some(field) if ends => {
-                        if !reasoning.trim().is_empty() {
-                            out[field] = json!(thought_end(reasoning));
-                        }
-                    }
-                    Some(field) if !reasoning.is_empty() => out[field] = json!(reasoning),
-                    None if !reasoning.trim().is_empty() => out["content"] = with_carried(reasoning, &m["content"]),
+                match thoughts {
+                    Thoughts::FieldEnd(field) if !reasoning.trim().is_empty() => out[field] = json!(thought_end(reasoning)),
+                    Thoughts::Field(field) if !reasoning.is_empty() => out[field] = json!(reasoning),
+                    Thoughts::Text if !reasoning.trim().is_empty() => out["content"] = with_carried(reasoning, &m["content"]),
                     _ => {}
                 }
                 out
@@ -429,18 +437,24 @@ mod tests {
             { "role": "user", "content": [{ "type": "text", "text": "see" }] },
         ]);
         for (i, o) in cases("serialize_for_api") {
-            assert_eq!(json!(wire(turns.as_array().unwrap(), i.as_str(), false)), o, "{i}");
+            let thoughts = i.as_str().map_or(Thoughts::Text, Thoughts::Field);
+            assert_eq!(json!(wire(turns.as_array().unwrap(), thoughts)), o, "{i}");
         }
         // An endpoint that rejects the replayed field gets the same condensed form the web re-serialises to.
         // The end of a thought in the field: the words stay the words, and a long thought is cut to its end.
         let long = json!([{ "role": "assistant", "content": "Narration.", "reasoning_content": format!("{} So I read it.", "First I look. ".repeat(200)), "tool_calls": [{ "id": "c", "function": { "name": "read_file", "arguments": "{}" } }] }]);
-        let ended = &wire(long.as_array().unwrap(), Some("reasoning"), true)[0];
+        let ended = &wire(long.as_array().unwrap(), Thoughts::FieldEnd("reasoning"))[0];
         let end = ended["reasoning"].as_str().unwrap();
         assert!(ended["content"] == "Narration." && end.starts_with('…') && end.ends_with("So I read it.") && end.chars().count() <= CARRIED_THOUGHT_CHARS + 1 && !end.contains(CARRIED_MARK), "{ended}");
-        let mut replayed = wire(turns.as_array().unwrap(), Some("reasoning"), false);
+        let mut replayed = wire(turns.as_array().unwrap(), Thoughts::Field("reasoning"));
         assert!(condense_reasoning(&mut replayed));
-        assert_eq!(json!(replayed), json!(wire(turns.as_array().unwrap(), None, false)));
+        assert_eq!(json!(replayed), json!(wire(turns.as_array().unwrap(), Thoughts::Text)));
         assert!(!condense_reasoning(&mut replayed));
+        // Claude: no thought goes back, in a field or in the words, and nothing else of the turn moves.
+        let gone = wire(turns.as_array().unwrap(), Thoughts::Gone);
+        assert!(gone.iter().all(|m| !m.to_string().contains(CARRIED_MARK) && m.get("reasoning").is_none() && m.get("reasoning_content").is_none()), "{gone:?}");
+        assert_eq!(gone[2]["tool_calls"][0]["id"], "c1");
+        assert_eq!((gone[2]["content"].clone(), gone[4]["content"].clone()), (Value::Null, json!("Narration.")));
     }
 
     #[test]

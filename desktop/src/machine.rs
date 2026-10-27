@@ -41,8 +41,8 @@ static FACTS: LazyLock<String> = LazyLock::new(|| {
     out
 });
 
-/// The section of the system prompt. `auto`: commands run without asking.
-pub fn block(workspace: &Path, approval: crate::store::Approval) -> String {
+/// The section of the system prompt. `auto`: commands run without asking. The workspace is not in it: see `today`.
+pub fn block(approval: crate::store::Approval) -> String {
     use crate::store::Approval;
     let asks = match approval {
         Approval::Manual => "The user approves each command before it runs, except a program that only looks (git status or log, tasklist, systeminfo, which, a --version), and each folder you look into outside the workspace. Every PowerShell call is shown to them whole: put the steps that go together in one.",
@@ -50,16 +50,17 @@ pub fn block(workspace: &Path, approval: crate::store::Approval) -> String {
         Approval::Auto => "Commands and looks outside the workspace run without asking, installing a package into the machine (pip into the system Python, npm -g, cargo install) included; nothing asks. A system command that takes the computer itself apart is refused outright, not asked. Prefer what is already there: the standard library's unittest needs nothing installed.",
     };
     format!(
-        "\n\nThis computer, as the app found it when it started (take it as given, do not spend a round checking it):\n{}\n- Your workspace: {}\n- {asks}",
-        *FACTS,
-        workspace.display()
+        "\n\nThis computer, as the app found it when it started (take it as given, do not spend a round checking it):\n{}\n- {asks}",
+        *FACTS
     )
 }
 
-/// The date, for the note before each question. In the system prompt it changed the start of every request at midnight,
-/// and a chat open across it was sent again whole at full price.
-pub fn today() -> String {
-    format!("Today is {}.", chrono::Local::now().format("%Y-%m-%d, %A"))
+/// The date and the workspace, for the note before each question. In the system prompt the date changed the start of
+/// every request at midnight, and a chat open across it was sent again whole at full price. The workspace made each
+/// folder's chats a prompt of their own: Claude, which reads its cache only up to a mark, wrote all 13,800 tokens of
+/// rules and tools again for every new chat in another folder.
+pub fn today(workspace: &Path) -> String {
+    format!("Today is {}. Your workspace: {}", chrono::Local::now().format("%Y-%m-%d, %A"), workspace.display())
 }
 
 #[cfg(test)]
@@ -72,10 +73,11 @@ mod tests {
         assert_eq!(windows_name("Microsoft Windows [Version 10.0.19045.3803]").as_deref(), Some("Windows 10, build 19045"));
         assert_eq!(windows_name("nonsense"), None);
         use crate::store::Approval;
-        let told = block(Path::new("/w/chat"), Approval::Manual);
-        assert!(told.contains("- Your workspace: /w/chat\n- The user approves") && told.contains("Programs found: ") && told.ends_with("put the steps that go together in one."), "{told}");
-        assert!(today().starts_with("Today is 20") && !told.contains("Today is"));
-        assert!(block(Path::new("/w"), Approval::Critical).contains("cargo install), adding a skill"));
-        assert!(block(Path::new("/w"), Approval::Auto).contains("cargo install) included; nothing asks"));
+        let told = block(Approval::Manual);
+        assert!(told.contains(".\n- The user approves") && told.contains("Programs found: ") && told.ends_with("put the steps that go together in one.") && !told.contains("workspace:"), "{told}");
+        let today = today(Path::new("/w/chat"));
+        assert!(today.starts_with("Today is 20") && today.ends_with(". Your workspace: /w/chat") && !told.contains("Today is"));
+        assert!(block(Approval::Critical).contains("cargo install), adding a skill"));
+        assert!(block(Approval::Auto).contains("cargo install) included; nothing asks"));
     }
 }

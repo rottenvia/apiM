@@ -651,12 +651,12 @@ async fn run_inner(mut req: Request, emit: &Emitter, procs: Arc<Procs>) -> Resul
     let github_token = github.as_ref().map(|_| crate::github::configured(&s.github_token));
     let mut system = prompt::system(&plugins::legacy_prompt(&every, &plugins_on), web_search, native_vision, git_repo, github.as_ref(), computer);
     // The computer this runs on, so no chat starts by finding it out.
-    system.push_str(&crate::machine::block(&req.workspace, s.approval));
+    system.push_str(&crate::machine::block(s.approval));
     // What changes from one question to the next (the date, and what earlier work established, read fresh from the
     // workspace's store) rides in a note just before the question, after the history. In the system prompt, a finding
     // recorded in one reply changed the start of the next reply's requests, and the whole chat went out at full price
     // again: a finding was recorded in 28% of replies.
-    let mut context = crate::machine::today();
+    let mut context = crate::machine::today(&req.workspace);
     let findings_path = findings::store_path(&req.workspace);
     if !findings_path.exists() {
         // Findings this chat recorded before the store was shared lived only in the chat file: they move over once.
@@ -870,11 +870,20 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
         };
         // DeepSeek takes each tool turn's reasoning back as `reasoning_content`. OpenRouter's validators reject
         // the field, so its lanes get `reasoning` where a model needs it and the end of the thought as plain text elsewhere.
-        // Claude, on OpenRouter or its own API, takes back only its own signed thoughts (`anthropic` says why none go): the end as text.
+        // Claude takes back only its own signed thoughts (`anthropic` says why none go) and refuses a request that
+        // carries thinking back as text, so nothing of a thought rides with it.
         let claude = (openrouter && target.api_model.starts_with("anthropic/")) || target.provider == ProviderId::Anthropic;
-        let reasoning_field = if claude { None } else if !openrouter { Some("reasoning_content") } else if lane.replay { Some("reasoning") } else { None };
+        let thoughts = if claude {
+            transcript::Thoughts::Gone
+        } else if !openrouter {
+            transcript::Thoughts::Field("reasoning_content")
+        } else if lane.replay {
+            if thought_ends { transcript::Thoughts::FieldEnd("reasoning") } else { transcript::Thoughts::Field("reasoning") }
+        } else {
+            transcript::Thoughts::Text
+        };
         // Clips and pictures ride once: on the request after they joined, and every later round gets a reference line.
-        let mut wire = transcript::wire(&ridden(&messages), reasoning_field, thought_ends);
+        let mut wire = transcript::wire(&ridden(&messages), thoughts);
         if qwen {
             // Qwen's template only accepts a system message at index 0: the listing, its deltas and the tail all join the first one.
             let (systems, rest): (Vec<Value>, Vec<Value>) = wire.into_iter().partition(|m| m["role"] == "system");

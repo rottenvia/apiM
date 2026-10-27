@@ -98,6 +98,17 @@ pub fn detect_runner(dir: &Path) -> Option<TestRunner> {
             return Some(runner("pytest", "pytest", &["-q", "--no-header", "-rN"], format!("{marker} is present")));
         }
     }
+    // Node's own runner, for a project whose tests are files beside the code with no package.json script: run_tests
+    // said there was no suite at all for a workspace holding `timing.test.js`, and the reply ran node itself.
+    let named = |d: &Path, test: &dyn Fn(&str) -> bool| std::fs::read_dir(d).ok().and_then(|es| es.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).find(|n| test(n)));
+    let js_test = |n: &str| ([".test.", ".spec."].iter().any(|m| n.contains(m))) && [".js", ".mjs", ".cjs"].iter().any(|e| n.ends_with(e));
+    for d in [".", "test", "tests"] {
+        let at = dir.join(d);
+        // A Python file beside it means a Python suite, which the rules below run.
+        if let Some(file) = named(&at, &js_test).filter(|_| named(&at, &|n: &str| n.ends_with(".py")).is_none()) {
+            return Some(runner("node --test", "node", &["--test"], format!("{file} is a test file")));
+        }
+    }
     for d in ["tests", "test"] {
         if exists(d) {
             return Some(runner("pytest", "pytest", &["-q", "--no-header", "-rN", d], format!("a {d}/ directory exists")));
@@ -332,6 +343,23 @@ mod tests {
             assert_eq!(got.unwrap_or(Value::Null), case["expect"], "{name}");
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    #[test]
+    fn node_runs_a_test_file_beside_the_code() {
+        // Not in the web's recorded cases: this rule is the desktop's own.
+        let dir = std::env::temp_dir().join(format!("apim-node-tests-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("timing.js"), "export const a = 1;\n").unwrap();
+        assert!(detect_runner(&dir).is_none());
+        std::fs::write(dir.join("timing.test.js"), "import test from 'node:test';\n").unwrap();
+        let found = detect_runner(&dir).unwrap();
+        assert_eq!((found.name.as_str(), found.command.as_str(), found.args.clone(), found.because.as_str()), ("node --test", "node", vec!["--test".to_string()], "timing.test.js is a test file"));
+        // Python beside it is a Python suite, and the rules after this one run it.
+        std::fs::write(dir.join("test_timing.py"), "def test_a(): pass\n").unwrap();
+        assert_eq!(detect_runner(&dir).unwrap().name, "pytest");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

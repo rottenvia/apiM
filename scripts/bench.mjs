@@ -391,7 +391,7 @@ async function runTaskDesktop(app, task, outDir, run) {
   const timer = setTimeout(() => ((timedOut = true), killTree(child)), (task.timeoutMinutes ?? 20) * 60_000);
   await new Promise((r) => child.on("close", r));
   clearTimeout(timer);
-  out = `${out.replace(/sk-or-v1-[a-f0-9]+/g, "[key]")}\n[bench: ${Math.round((Date.now() - started) / 1000)} seconds${timedOut ? ", timed out" : ""}]\n`;
+  out = `${out.replace(/sk-(?:or-v1|ant-[a-z]+\d*)-[\w-]+/g, "[key]")}\n[bench: ${Math.round((Date.now() - started) / 1000)} seconds${timedOut ? ", timed out" : ""}]\n`;
   await writeFile(transcript, out);
   return scoreDesktop(task, wsDir, dataDir, out);
 }
@@ -514,8 +514,8 @@ async function main() {
     openrouterApiKey: process.env.OPENROUTER_API_KEY ?? "",
     deepseekApiKey: process.env.DEEPSEEK_API_KEY ?? "",
   };
-  if (!creds.openrouterApiKey && !creds.deepseekApiKey) {
-    console.log(red("Set OPENROUTER_API_KEY (or DEEPSEEK_API_KEY) to run the benchmark. --self-test needs no key."));
+  if (!creds.openrouterApiKey && !creds.deepseekApiKey && !process.env.ANTHROPIC_API_KEY) {
+    console.log(red("Set OPENROUTER_API_KEY (or DEEPSEEK_API_KEY, or ANTHROPIC_API_KEY for a Claude id with --desktop) to run the benchmark. --self-test needs no key."));
     process.exit(1);
   }
 
