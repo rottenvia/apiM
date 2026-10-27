@@ -61,7 +61,14 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     static WRITES: AtomicU64 = AtomicU64::new(0);
     let tmp = path.with_extension(format!("{}.{}.tmp", std::process::id(), WRITES.fetch_add(1, Ordering::Relaxed)));
     // A write that failed takes its copy with it: each one has a name of its own, so none is written over later.
-    let wrote = std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, path));
+    // sync_all() before rename: without it a crash after rename leaves the file as zeros (data still in page cache).
+    let wrote = (|| {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, path)
+    })();
     if wrote.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }

@@ -132,7 +132,10 @@ fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
     }
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(format!(".{}.{}.tmp", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
-    std::fs::write(&tmp, text)?;
+    use std::io::Write;
+    let mut f = std::fs::File::create(&tmp)?;
+    f.write_all(text.as_bytes())?;
+    f.sync_all()?;
     std::fs::rename(&tmp, path).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })

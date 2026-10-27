@@ -137,12 +137,16 @@ fn write_atomic(target: &Path, data: &[u8]) -> std::io::Result<()> {
     let mut tmp = target.as_os_str().to_owned();
     tmp.push(format!(".{}.{}.tmp", std::process::id(), random36()));
     let tmp = PathBuf::from(tmp);
-    let done = std::fs::write(&tmp, data).and_then(|()| {
+    let done = (|| {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(data)?;
+        f.sync_all()?;
         if let Ok(old) = std::fs::symlink_metadata(target) && old.is_file() {
             let _ = std::fs::set_permissions(&tmp, old.permissions());
         }
         std::fs::rename(&tmp, target)
-    });
+    })();
     if done.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }

@@ -213,11 +213,10 @@ pub fn on_path(name: &str) -> bool {
     find_program(Path::new(""), name).is_some()
 }
 
-/// What PowerShell is not run for while commands run automatically. Nobody reads a command then, so nothing is
-/// asked: a command that could change the computer used to wait five minutes for an approval, with the user away
-/// and the window down, and was then dropped. What cannot be put back is refused instead, at once and with the
-/// reason, and the reply finds another way. A restore point brings back the chat's folder and nothing else, so
-/// deleting is held to that folder; and the commands that take the computer itself apart are not run.
+/// What `shell` treats as taking the computer apart: a disk format, a boot/registry/account/protection change
+/// (bcdedit, diskpart, reg delete, …), or a delete naming a place outside the chat's folder, where a restore point
+/// (which brings back the chat's folder and nothing else) could not undo it. The caller decides what to do with a
+/// match by the approval mode: Auto runs it unasked, Manual and Critical show it for approval first.
 // ponytail: a reading of the text, there to catch a wreck made in passing. It is not a parser, and a script the
 // model writes to a file and runs was never held by it. Use PowerShell's own parser
 // (System.Management.Automation.Language) if this has to hold against a command written to get past it.
@@ -250,8 +249,8 @@ fn shell_wrecks(script: &str, root: &Path) -> Option<&'static str> {
 
 /// PowerShell on Windows: the one shell let through, for what only it can ask the system (event logs, services,
 /// installed programs, hardware). With "Ask me first" the user is shown its text whole. With commands running
-/// automatically it runs unasked, like any program, except for what `shell_wrecks` refuses. The web has no such
-/// thing, because it runs on a server and not on the user's own computer.
+/// automatically it runs unasked, like any program; a `shell_wrecks` match still runs in Auto but is shown for
+/// approval first in Critical. The web has no such thing, because it runs on a server and not on the user's own computer.
 fn shell(ctx: &Ctx, command: &str, argv: Vec<String>) -> Result<Launch, String> {
     let mut words = argv.into_iter().peekable();
     while let Some(flag) = words.peek().map(|word| word.to_ascii_lowercase()) {
@@ -270,9 +269,11 @@ fn shell(ctx: &Ctx, command: &str, argv: Vec<String>) -> Result<Launch, String> 
         return Err(format!("The command names a place that is not read: {}", super::files::CLOSED_WHY));
     }
     let Some(program) = find_program(&ctx.root, command) else { return Err(format!("`{command}` was not found on this machine.")) };
-    let ask = ctx.settings.approval.asks_routine();
-    if let Some(why) = shell_wrecks(&script, &ctx.root).filter(|_| !ask) {
-        return Err(why.into());
+    let mut ask = ctx.settings.approval.asks_routine();
+    // A command that takes the computer apart (bcdedit, diskpart, a disk format, a delete outside the folder):
+    // Auto runs it unasked; Manual and Critical show it for approval first rather than refusing it outright.
+    if shell_wrecks(&script, &ctx.root).is_some() && ctx.settings.approval != crate::store::Approval::Auto {
+        ask = true;
     }
     let key = serde_json::to_string(&["powershell", script.as_str()]).unwrap_or_default();
     // Its output is asked for in UTF-8: the console's own code page turns every non-English letter into noise.
@@ -280,8 +281,8 @@ fn shell(ctx: &Ctx, command: &str, argv: Vec<String>) -> Result<Launch, String> 
     Ok(Launch { program, args, display: format!("powershell {script}"), key, ask })
 }
 
-/// Catastrophic bash the shell is not run for while commands run automatically (the bash counterpart of `shell_wrecks`):
-/// what takes the computer apart, and a delete naming a place outside the chat's folder, where nothing can be restored.
+/// Catastrophic bash (the counterpart of `shell_wrecks`): what takes the computer apart, and a delete naming a place
+/// outside the chat's folder, where nothing can be restored. The caller runs a match in Auto, prompts for it in Critical.
 // ponytail: a reading of the text, not a parser — a script written to a file and run was never held by it. Harden with
 // `bash -n` / an AST if this must stand against a command written to get past it.
 fn bash_wrecks(script: &str, root: &Path) -> Option<&'static str> {
@@ -305,7 +306,7 @@ fn bash_wrecks(script: &str, root: &Path) -> Option<&'static str> {
 
 /// bash/sh as a real shell, the counterpart of `shell`: the script is run with `bash -c`, so its pipes, redirects, `&&`
 /// and loops work. On Windows this needs git-bash's bash.exe on PATH. Asked for in "Ask me first"; while commands run
-/// automatically it runs unasked like any program, except for what `bash_wrecks` refuses.
+/// automatically it runs unasked like any program; a `bash_wrecks` match still runs in Auto but is shown for approval first in Critical.
 fn bash_shell(ctx: &Ctx, command: &str, argv: Vec<String>) -> Result<Launch, String> {
     let mut words = argv.into_iter().peekable();
     // Drop the usual invocation flags; whatever remains is the script.
@@ -325,9 +326,9 @@ fn bash_shell(ctx: &Ctx, command: &str, argv: Vec<String>) -> Result<Launch, Str
     let Some(program) = find_program(&ctx.root, command) else {
         return Err(format!("`{command}` was not found on this machine.{}", if cfg!(windows) { " Install Git for Windows and make sure bash.exe is on PATH, or use powershell instead." } else { "" }));
     };
-    let ask = ctx.settings.approval.asks_routine();
-    if let Some(why) = bash_wrecks(&script, &ctx.root).filter(|_| !ask) {
-        return Err(why.into());
+    let mut ask = ctx.settings.approval.asks_routine();
+    if bash_wrecks(&script, &ctx.root).is_some() && ctx.settings.approval != crate::store::Approval::Auto {
+        ask = true;
     }
     let key = serde_json::to_string(&["bash", script.as_str()]).unwrap_or_default();
     Ok(Launch { program, args: vec!["-c".to_string(), script.clone()], display: format!("bash {script}"), key, ask })
@@ -1406,7 +1407,11 @@ mod tests {
             assert!(prep(Approval::Manual, "powershell", &["Get-Process"]).ok().unwrap().ask && prep(Approval::Manual, "powershell", &[r"Remove-Item C:\x"]).ok().unwrap().ask);
             let change = prep(Approval::Auto, "powershell Remove-Item 'a b'", &[]).ok().unwrap();
             assert!(!change.ask && change.display == "powershell Remove-Item 'a b'");
-            assert!(prep(Approval::Auto, "powershell", &[r"Remove-Item C:\Users\x -Recurse"]).err().unwrap().starts_with("Not run: this deletes"));
+            // Auto runs even what cannot be undone, unasked; Critical shows it for approval instead of refusing.
+            assert!(!prep(Approval::Auto, "powershell", &[r"Remove-Item C:\Users\x -Recurse"]).ok().unwrap().ask);
+            assert!(!prep(Approval::Auto, "powershell", &["bcdedit /set {current} nx AlwaysOff"]).ok().unwrap().ask);
+            assert!(prep(Approval::Critical, "powershell", &["bcdedit /set {current} nx AlwaysOff"]).ok().unwrap().ask);
+            assert!(prep(Approval::Critical, "powershell", &[r"Remove-Item C:\Users\x -Recurse"]).ok().unwrap().ask);
             assert!(prep(Approval::Auto, "powershell", &["-EncodedCommand", "AAAA"]).is_err() && prep(Approval::Auto, "powershell", &["Get-Content ~/.ssh/id_rsa"]).is_err());
             assert!(prep(Approval::Auto, "cmd", &["/c", "dir"]).err().unwrap().contains("PowerShell is the shell here"));
         }
