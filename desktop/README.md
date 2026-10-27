@@ -207,6 +207,20 @@ round of every failed task was read. Five faults were the app's, not the models'
   Python's `test_x.py` beside the code has been found for a while. Node's own runner is used for a `.test.js` or
   `.spec.js` file with no Python beside it; its output was already read.
 
+Two answers that cost a round were made to carry what to do next:
+
+- **An anchor that was a pattern.** `end_anchor: "^}"` matched nothing, and the answer only said so. It now says an
+  anchor is a line of the file's own text and prints the lines after the start anchor, so the next one is picked from
+  the file rather than guessed again. Two models spent a round on this.
+- **A command wrapped in a shell.** `cmd /c npm test` was refused with advice about running interpreters directly,
+  which fits no launcher. The refusal now writes out the call it was carrying — `{"command": "npm", "args": ["test"]}`
+  — unless the wrapper held a whole script with pipes or `&&`, which belongs in a PowerShell call.
+
+Over the 34 tasks on Haiku 5.5, before and after: 32 passed either way (the two that did not are the models' own
+work, a test suite that missed one of four hidden buggy variants and a generalisation to an unseen page), but the
+run cost $0.93 then $0.76, took 261 rounds then 233, a median 108 seconds a task then 78, and failed 26 tool calls
+then 22 — with every one of the app's own among them gone.
+
 Terminal mode takes any model id now (`--model claude-opus-5-5`, `--model openai/gpt-6.1-terra`): one that is not in
 the list is checked and added exactly as the model menu adds it, so the benchmark runs on a Claude key with
 `ANTHROPIC_API_KEY` set and nothing to configure first.

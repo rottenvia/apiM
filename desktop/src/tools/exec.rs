@@ -177,6 +177,22 @@ fn shadowed(root: &Path, command: &str) -> Option<String> {
     (std::fs::canonicalize(&found).ok() != std::fs::canonicalize(&local).ok()).then(|| format!("\n[This ran {}, found on PATH. The workspace has a program of that name too: `.{}{}` runs that one.]", found.display(), std::path::MAIN_SEPARATOR, local.file_name().unwrap_or_default().to_string_lossy()))
 }
 
+/// The call a shell wrapper was carrying, as `run_command` takes it: `["/c", "npm", "test"]` becomes
+/// `{"command": "npm", "args": ["test"]}`. None where the wrapper held a whole script (pipes, `&&`, redirects),
+/// which belongs in a PowerShell call instead.
+fn unwrapped(argv: &[String]) -> Option<String> {
+    let mut words = argv.iter().map(String::as_str).skip_while(|w| matches!(w.to_ascii_lowercase().as_str(), "/c" | "/k" | "-c" | "-lc" | "-ic" | "--"));
+    let command = words.next()?;
+    // One string holding a script was passed to `-c`: the words are not a command line.
+    let rest: Vec<&str> = if command.split_whitespace().count() > 1 { command.split_whitespace().skip(1).chain(words).collect() } else { words.collect() };
+    let command = command.split_whitespace().next()?;
+    if [command].iter().chain(rest.iter()).any(|w| w.contains(['|', '>', '<', ';', '&', '$', '`'])) {
+        return None;
+    }
+    let args: Vec<String> = rest.iter().map(|w| format!("{:?}", w)).collect();
+    Some(format!("{{\"command\": {command:?}, \"args\": [{}]}}", args.join(", ")))
+}
+
 /// Stops a process and everything it started. A plain kill on Windows leaves `npm`'s `node` child running.
 pub fn kill_tree(pid: u32) {
     let mut cmd = if cfg!(windows) {
@@ -388,7 +404,14 @@ fn prepare(ctx: &Ctx, command: &str, argv: Vec<String>) -> Result<Launch, String
         return bash_shell(ctx, command, argv);
     }
     if SHELLS.contains(&name.as_str()) {
-        return Err(format!("`{name}` is not available. Run the interpreter directly, e.g. `python app.py` rather than `sh -c \"python app.py\"`.{}", if cfg!(windows) { " PowerShell is the shell here: pass the whole script as one string in args, and its pipes, `;` and loops run several steps in one call." } else { "" }));
+        // The wrapped command, written out as this tool takes it: `cmd /c npm test` was refused with advice about
+        // interpreters, which fits no launcher, and the round went on guessing the shape.
+        let inner = unwrapped(&argv);
+        return Err(format!(
+            "`{name}` is not available.{}{}",
+            inner.map(|c| format!(" Call it directly: {c}.")).unwrap_or_else(|| " Run the program itself, e.g. `python app.py` rather than `sh -c \"python app.py\"`.".into()),
+            if cfg!(windows) { " PowerShell is the shell here: pass the whole script as one string in args, and its pipes, `;` and loops run several steps in one call." } else { "" }
+        ));
     }
     // No shell reads `>out.txt` or `|` either: the program gets them as words ("Error opening ./>_NBUF_OUT.txt").
     if let Some(word) = argv.iter().map(|a| a.trim()).find(|a| matches!(*a, "|" | "&&" | "<") || a.starts_with('>') || a.starts_with("2>") || a.starts_with("1>") || a.starts_with("&>")) {
@@ -1273,6 +1296,18 @@ mod tests {
     fn a_command_line_is_cut_into_words() {
         assert_eq!(split_words(r#"python -c "from shop.utils import shout; print(shout('hello'))""#), ["python", "-c", "from shop.utils import shout; print(shout('hello'))"]);
         assert_eq!(split_words(r#"python  -m unittest 'tests/test a.py' "say \"hi\"" """#), ["python", "-m", "unittest", "tests/test a.py", "say \"hi\"", ""]);
+    }
+
+    #[test]
+    fn a_shell_wrapper_is_answered_with_the_call_it_held() {
+        let argv = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        assert_eq!(unwrapped(&argv(&["/c", "npm", "test"])).unwrap(), r#"{"command": "npm", "args": ["test"]}"#);
+        assert_eq!(unwrapped(&argv(&["-c", "python app.py"])).unwrap(), r#"{"command": "python", "args": ["app.py"]}"#);
+        assert_eq!(unwrapped(&argv(&["/c", "npm run build"])).unwrap(), r#"{"command": "npm", "args": ["run", "build"]}"#);
+        // A whole script belongs in a PowerShell call, so no single command is offered for it.
+        assert_eq!(unwrapped(&argv(&["-c", "npm test | tee out.txt"])), None);
+        assert_eq!(unwrapped(&argv(&["/c", "a && b"])), None);
+        assert_eq!(unwrapped(&argv(&[])), None);
     }
 
     #[test]
