@@ -1075,6 +1075,16 @@ impl Conversation {
         }
     }
 
+    /// The model picked in this chat. A chat saved before the pick was kept goes by its last reply's model.
+    /// One model shared by every chat sent a chat's next question to whatever was picked last in another.
+    pub fn model(&self) -> Option<&str> {
+        self.other.get("model").and_then(|v| v.as_str()).or_else(|| self.messages.iter().rev().find(|m| m.role == Role::Assistant && !m.model.is_empty()).map(|m| m.model.as_str()))
+    }
+
+    pub fn set_model(&mut self, id: &str) {
+        self.other.insert("model".into(), serde_json::json!(id));
+    }
+
     /// Undo history and other per-chat files that must not sit in the workspace.
     pub fn state_dir(&self) -> PathBuf {
         data_dir().join("state").join(self.own_folder())
@@ -1437,6 +1447,20 @@ mod tests {
             let files = crate::snapshots::list_files(&conv.workspace()).len();
             eprintln!("    workspace: {files} files listed in {:?}", t.elapsed());
         }
+    }
+
+    /// The model picked in a chat is saved with it; a chat from before goes by its last reply's model.
+    #[test]
+    fn a_chat_keeps_its_own_model() {
+        let mut chat = Conversation::new();
+        assert_eq!(chat.model(), None);
+        let mut reply = Message::new(Role::Assistant, "hi");
+        reply.model = "glm-5.3-flash".into();
+        chat.messages.push(reply);
+        assert_eq!(chat.model(), Some("glm-5.3-flash"));
+        chat.set_model("deepseek-v4-pro");
+        let back = Conversation::from_wire(serde_json::from_str(&chat.to_json()).unwrap(), String::new());
+        assert_eq!(back.model(), Some("deepseek-v4-pro"));
     }
 
     /// Only the newest reply keeps the transcript it can be resumed from; an earlier one still reads as unfinished.

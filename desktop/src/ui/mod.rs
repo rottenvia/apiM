@@ -822,6 +822,23 @@ impl App {
         self.editing = None;
         self.jump_to_latest = true;
         drafts::unstash(self);
+        // The chat's own model comes back with it, unless it has since left the model list.
+        let model = self.conv.model().filter(|id| *id != self.settings.model && crate::models::all(&self.settings.custom_models).iter().any(|m| m.id == *id)).map(str::to_string);
+        if let Some(model) = model {
+            self.settings.model = model;
+            self.settings.save();
+        }
+    }
+
+    /// A model picked anywhere (the model menu, `/model`, Settings) belongs to the chat on screen. A new chat starts
+    /// on the model in use and is written with its first message.
+    fn keep_chat_model(&mut self) {
+        if self.conv.model() != Some(self.settings.model.as_str()) {
+            self.conv.set_model(&self.settings.model);
+            if !self.conv.messages.is_empty() {
+                self.conv.save();
+            }
+        }
     }
 
     fn delete_chats(&mut self, ids: &[String]) {
@@ -1003,13 +1020,18 @@ impl App {
             return;
         }
         let conv = parked.unwrap_or(&self.conv);
+        // A chat a reply ended in while another was on screen is summarised by its own model, not the one on screen.
+        let mut settings = self.settings.clone();
+        if let Some(model) = conv.model().filter(|id| crate::models::all(&settings.custom_models).iter().any(|m| m.id == *id)) {
+            settings.model = model.to_string();
+        }
         let shape = summary::shape(&conv.messages, conv.summary.as_ref());
-        if conv.id != conv_id || !summary::should_refresh(&shape.pending, crate::models::cache_is_cheap(&self.settings.model, &self.settings.custom_models)) {
+        if conv.id != conv_id || !summary::should_refresh(&shape.pending, crate::models::cache_is_cheap(&settings.model, &settings.custom_models)) {
             return;
         }
         let (tx, rx) = mpsc::channel();
         let wake = ctx.clone();
-        let (stored, pending, settings) = (conv.summary.clone(), shape.pending.iter().map(|m| (*m).clone()).collect::<Vec<_>>(), self.settings.clone());
+        let (stored, pending) = (conv.summary.clone(), shape.pending.iter().map(|m| (*m).clone()).collect::<Vec<_>>());
         let handle = self.rt.spawn(async move {
             let _ = tx.send(summary::refresh(stored, pending, settings).await);
             wake.request_repaint();
@@ -1962,6 +1984,7 @@ impl eframe::App for App {
             self.side.arrive();
         }
         self.take_inbox();
+        self.keep_chat_model();
         drafts::keep(self, false);
         // `minimized` puts the self-portrait's window down once its message is sent, and back up when the reply ends.
         if self.staged("minimized") && self.shot.as_ref().is_some_and(|shot| shot.acted) {
