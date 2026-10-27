@@ -24,9 +24,19 @@ You can also look at the live web. When a task depends on what is actually on a 
     );
     p = p.replace("{SHELL}", if cfg!(windows) { "The one exception is PowerShell, for questions to Windows itself: give its command as a single string in args. " } else { "" });
     p.push_str(if web_search {
-        "When you hit something you do not know (an unfamiliar error, a library's current API) call web_search rather than guessing, because a wrong assumption compounds over every round after it. Make the query specific and read what comes back before searching again."
+        // Told only to search "when you hit something you do not know", models without a sense of what they do not know
+        // (the free ones above all) built on memory: a version from their training, a selector never seen, a tool written
+        // from scratch that a package already does. The habit is spelled out, and placed before the work starts.
+        "
+
+Know before you build. Before the first edit of any task bigger than a quick answer, ask what you do not know for certain, and settle it first, in the round you start. What you know stops before today's date (the note before the question gives it): versions, APIs, flags, error messages, games, sites and services, anything \"latest\" or \"current\", have moved on since.
+- Something unfamiliar, or that may have changed (a library's API, a version, a tool's options, how a game or site works now): web_search it with a specific query (for anything recent, this year from the date note, not the years you remember), then fetch_url the best source (the official docs, the README, the release notes) and read it before you rely on it.
+- An error you do not recognise after one read: search its exact text, in quotes.
+- Before writing a tool, parser, converter, scraper or integration of your own: search for one that exists (a package, a CLI, a published script or write-up for this very problem) and use it if it fits.
+- A site, page, repository, document or product the user names: open it and read it, never answer from memory. Data that lives on a page is fetched, not guessed.
+One search costs one round; a wrong assumption costs every round after it. Do not search for what the workspace already shows you, and do not run the same search twice."
     } else {
-        "There is no web_search tool available in this reply: the Web toggle is off or no Tavily/Exa key is set in Settings. fetch_url still works if you already know the URL. When you genuinely do not know something and cannot look it up, say so instead of guessing, and name what you would have searched for."
+        "There is no web_search tool available in this reply: the user switched the Web toggle off. fetch_url still works if you already know the URL. When you genuinely do not know something and cannot look it up, say so instead of guessing, and name what you would have searched for."
     });
     p.push_str(
         "\n\nIf an edit turns out to be wrong, undo_file puts that file back exactly as it was; reverting is safer than patching your own mistake. write_files creates several files in one call, which is worth using whenever you are scaffolding.\n\n\
@@ -57,14 +67,22 @@ Computer use is on: you see the user's screen and work its mouse and keyboard wi
             "\n\nThis workspace is a git repository, so work like a developer on it. Check git_status and git_diff, create a working branch with git_branch before your first commit, then commit each logical change with git_commit and a clear message. Never commit to the base branch. Nothing is pushed from here: say when the work is ready so the user can push it.",
         );
     }
-    p.push_str(
+    // `browse` is withheld where no browser is installed (`tools::SCHEMAS`): the paragraph follows the tool. It used to say
+    // there was no browser at all, beside a `browse` tool, and the model believed the paragraph.
+    p.push_str(if crate::browser::available() {
         "
 
 Browser use:
-- There is no real browser in this app, so you cannot run JavaScript on a page or click anything. fetch_url reads the HTML the server sends.
+- browse opens a page in a real headless browser on this computer and runs its JavaScript: use it for a site that is an app (fetch_url sees only the empty shell a server sends before scripts run), to read what a page really shows, and to check a page you built. fetch_url stays the quick way to read plain HTML.
+- It has a profile of its own. Never close, restart or drive the user's own browser, and never borrow their signed-in sessions: if a page needs an account, ask the user."
+    } else {
+        "
+
+Browser use:
+- No browser is installed on this computer, so you cannot run JavaScript on a page or click anything. fetch_url reads the HTML the server sends.
 - That is enough for most sites. It is NOT enough for a page whose content is built by JavaScript after load: you will see an empty shell.
-- If a task actually needs a rendered page, say so plainly. Do not pretend fetch_url saw something it could not.",
-    );
+- If a task actually needs a rendered page, say so plainly. Do not pretend fetch_url saw something it could not."
+    });
     p.push_str(&PROMPTS.work_loop);
     p
 }
@@ -118,7 +136,9 @@ mod tests {
         let p = system("", false, false, false, None, false);
         assert!(!p.contains("computer_act") && system("", false, true, false, None, true).contains("Computer use is on"));
         assert!(p.starts_with(&PROMPTS.base));
-        assert!(p.contains("There is no web_search tool") && !p.contains("{SHELL}"));
+        assert!(p.contains("There is no web_search tool") && !p.contains("{SHELL}") && !p.contains("Know before you build"));
+        assert!(system("", true, false, false, None, false).contains("Know before you build. Before the first edit"));
+        assert_eq!(p.contains("browse opens a page"), crate::browser::available());
         assert!(p.contains("never say you cannot see their machine") && p.contains("put them in order before you start"));
         // A connected repository gets the web app's paragraph in place of the plain git one.
         let c = crate::github::Connection { repo: "octo/demo".into(), base_branch: "main".into(), working_branch: "apim/fix-1".into(), ..Default::default() };

@@ -270,6 +270,23 @@ What two replies at once had to have fixed first (found by reading everything an
 - **Each chat has its own sandbox display** (`sandbox::run::ensure` keeps one per chat, each on a display the others do not use). With one for all, two chats running GUI programs drew on the same screen and each one's screenshots showed the other's windows. A chat's display lives until the app closes, some 20 MB of Xvfb each.
 - **`endpoints.json` is changed under one lock, read and written whole** (`provider::update_endpoints`). A chat probing endpoints for a few seconds wrote back the file as it had read it, losing the counts other chats added meanwhile, and a write caught half done read as an empty file that the next count started again from. Checked by six threads counting forty times each into one file: no count lost.
 
+## A model for each chat
+
+The model was one setting for the whole app: a chat's next question went to whatever was picked last in another chat. Now the model belongs to the chat (`Conversation::model`, a `model` key in its `chat.json`, which the web app keeps untouched). A pick made anywhere (the model menu, `/model`, Settings) is written to the chat on screen; opening a chat brings its model back, unless that model has left the list since. A chat from before goes by its last reply's model. A new chat starts on the model in use. A chat a reply ended in while another was on screen is summarised by its own model, not the one on screen.
+
+Checked in the window with two chats from the real data copied to a spare folder: the game chat opened on GLM 5.3 Flash and the other on Claude Haiku 5.5; DeepSeek V4.1 Flash clicked in the game chat's menu was saved to that chat alone, and came back when it was opened again in a new process.
+
+## Free models, free search, and research first
+
+Measured on OpenRouter's free lanes (2026-10-27): Nemotron 3 Ultra, Nemotron 3.5 Lightning, Laguna S 2.1, Gemma 4 31B. Fresh small tasks finish; what went wrong was around them.
+
+- **A full upstream pool was waited on for 217 s, then failed anyway.** Gemma's free pool (Google AI Studio, shared by every OpenRouter user) answered 429 to all five retries and all six waits. A free model's upstream 429 now gets two waits, then an error that says what it is and what to do. OpenRouter's own limits are read from its 429: the day's allowance (50 requests, 1,000 once $10 was bought) ends the reply at once with the time it comes back; the minute's (20) is waited out to the moment it resets. Requests to free models are spaced 3.1 s apart, so a run of quick rounds waits here rather than on a 429.
+- **The first token was given 45 s.** A free pool queues the request and reads a long prompt slowly; cut and asked again, it started at the back of the queue. Free lanes get 150 s.
+- **Shell lines were refused round after round.** Small models write `python --version && pytest --version`, `del sample.txt 2>nul || rm -f sample.txt`, `echo x > f.txt`, `del f.txt`; each was answered "There is no shell here" or "not an allowed command", and Laguna and Lightning spent six rounds of one task on it. A line with `&&`, `||`, a pipe, `;` or a redirect, and cmd's own commands (`del`, `dir`, `type`, `copy`, …), now run in PowerShell, with `&&`, `||` and `nul` put in the words Windows PowerShell 5.1 reads (`powershell_line`). The approval rules are PowerShell's, as before.
+- **Web search needed a paid key.** Without Tavily or Exa the tool was withheld. Now `web_search` asks the free engines first: DuckDuckGo's HTML results page, then Brave's, with the model's own query, once. Tried and dropped: Bing without cookies answered with pages about something else; Mojeek and Startpage answer with a JavaScript challenge. Both engines refuse a burst (Brave six queries in five seconds, DuckDuckGo three in one) and then keep refusing for half an hour, which is why the free path sends one query per search (the planner made three to six), each engine 3 s apart, and leaves an engine alone for ten minutes after it refused. Tavily and Exa are the fallback when the free engines find nothing or refuse; the Quality search profile asks them alongside. Searches answered by the free engines are not counted in the search cost.
+- **Models did not look things up.** The rules said to search "when you hit something you do not know", which a model that does not know what it does not know never hits. They now spell out the habit before the work starts ("Know before you build": what is unfamiliar or may have changed is searched and its source read; an unknown error is searched by its exact text; an existing tool is looked for before one is written; a named site or product is opened, not recalled), the first request of a reply ends on a one-line reminder of it, and `fetch_url` is an everyday tool rather than one in the web group. Nemotron 3 Ultra on "a script that prints the Bitcoin price from a free public API": before, it wrote the script from memory; now it searched first (8 results, CoinGecko's own keyless-API page among them), then wrote and ran it.
+- **The prompt said there was no browser** next to a `browse` tool that drives the installed Edge or Chrome. The browser paragraph now follows the tool.
+
 ## Carrying a big task through
 
 The same reply, read round by round (201 rounds, 82 minutes, $0.39, two of six plan steps done), lost most of its rounds in four ways. None of them is about the task; each is about how the work was prepared:
@@ -413,7 +430,7 @@ Not run: `sandbox_run` and `sandbox_screenshot` (they need the WSL sandbox), `sc
 
 ## Tools on demand
 
-The agent has 59 tools, and their descriptions used to ride in every request: 57,000 characters, about 14,000 tokens, on every round. A plain "hi" cost 15,760 tokens to answer in 52. Now a request carries the twelve everyday tools (list, read, write, edit, search, run a command, the plan, ask, finish, web search), and the rest wait in eleven groups: files, code, processes, web, pictures, git, sandbox, data, memory, binary, helpers.
+The agent has 59 tools, and their descriptions used to ride in every request: 57,000 characters, about 14,000 tokens, on every round. A plain "hi" cost 15,760 tokens to answer in 52. Now a request carries the thirteen everyday tools (list, read, write, edit, search, run a command, the plan, ask, finish, web search, read a page), and the rest wait in eleven groups: files, code, processes, web, pictures, git, sandbox, data, memory, binary, helpers.
 
 A group arrives in one of four ways, and then stays for the chat:
 

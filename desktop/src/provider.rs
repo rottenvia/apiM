@@ -632,8 +632,16 @@ impl ToolAcc {
 
 /// OpenRouter's budget from the start of the stream to its first sign of life: a silent pool fails fast and is asked again.
 const OPENROUTER_FIRST_TOKEN: Duration = Duration::from_secs(45);
+/// A free lane's pool queues the request and reads a long prompt slowly before the first token: cut at 45 seconds
+/// and asked again, it started over at the back of the queue each time.
+const FREE_FIRST_TOKEN: Duration = Duration::from_secs(150);
 /// Between chunks once the stream is alive. Five minutes of nothing is a dead connection, not a deep think.
 const STREAM_IDLE: Duration = Duration::from_secs(300);
+
+/// OpenRouter's free lanes (`:free`): shared pools, slow to start, and limited to 20 requests a minute per account.
+pub fn is_free(api_model: &str) -> bool {
+    api_model.ends_with(":free")
+}
 
 pub fn client() -> reqwest::Client {
     reqwest::Client::builder().connect_timeout(Duration::from_secs(20)).build().expect("HTTP client")
@@ -671,7 +679,17 @@ pub async fn stream(client: &reqwest::Client, target: &Target, body: &Value, cut
 
     let anthropic = target.provider == ProviderId::Anthropic;
     let payload = if anthropic { crate::anthropic::request(body).to_string() } else { body.to_string() };
-    let budget = attempt_timeout(target.provider, payload.len());
+    let free = target.provider == ProviderId::Openrouter && is_free(&target.api_model);
+    let budget = if free { FREE_FIRST_TOKEN } else { attempt_timeout(target.provider, payload.len()) };
+    if free {
+        // Spaced to OpenRouter's 20 a minute, so a run of quick rounds (or helpers in parallel) waits here rather than on a 429.
+        static LAST: tokio::sync::Mutex<Option<Instant>> = tokio::sync::Mutex::const_new(None);
+        let mut last = LAST.lock().await;
+        if let Some(wait) = last.map(|at| Duration::from_millis(3_100).saturating_sub(at.elapsed())) {
+            tokio::time::sleep(wait).await;
+        }
+        *last = Some(Instant::now());
+    }
     // `APIM_WIRE_LOG=<folder>` keeps every request body as sent, numbered: what to diff when a provider's cache misses.
     if let Some(dir) = std::env::var_os("APIM_WIRE_LOG") {
         static SENT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -716,8 +734,8 @@ pub async fn stream(client: &reqwest::Client, target: &Target, body: &Value, cut
     let silent_pool = target.provider == ProviderId::Openrouter;
 
     'stream: loop {
-        // OpenRouter gets 45 seconds from the start of the stream to its first sign of life. After that, and elsewhere, only five minutes of silence end it.
-        let wait = if silent_pool && !alive { OPENROUTER_FIRST_TOKEN.saturating_sub(started.elapsed()) } else { STREAM_IDLE };
+        // OpenRouter gets 45 seconds from the start of the stream to its first sign of life, a free lane 150. After that, and elsewhere, only five minutes of silence end it.
+        let wait = if silent_pool && !alive { (if free { FREE_FIRST_TOKEN } else { OPENROUTER_FIRST_TOKEN }).saturating_sub(started.elapsed()) } else { STREAM_IDLE };
         let chunk = match tokio::time::timeout(wait, stream.next()).await {
             Err(_) if !alive && silent_pool => return Err(fail(format!("{provider} opened the reply and then sent nothing."), true, Failure::NoFirstToken)),
             Err(_) if !alive => return Err(fail(format!("The {provider} API took too long to respond."), true, Failure::TimedOut)),

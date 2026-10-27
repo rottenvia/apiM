@@ -1,5 +1,7 @@
-//! Web search for the agent: Tavily and Exa asked together, merged, ranked and
-//! handed to the model as text. A cheap model plans the queries and judges
+//! Web search for the agent: the free engines first (Brave's and DuckDuckGo's
+//! results pages, no key), Tavily and Exa when those find nothing or the
+//! "quality" profile asks for every source; merged, ranked and handed to the
+//! model as text. A cheap model plans the queries and judges
 //! whether the results answer the question; the profile decides what each
 //! round may spend. Port of src/lib/smart-search.ts, src/lib/search-types.ts
 //! and the `web_search` case of src/lib/tools.ts, plus the address guard from
@@ -80,7 +82,7 @@ pub struct SearchResult {
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score: Option<f64>,
-    /// "tavily" or "exa".
+    /// "tavily", "exa", "brave" or "duckduckgo".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -103,11 +105,13 @@ pub struct ProfileSettings {
     /// price, so asking for fewer pays the same for half the sources.
     pub results_per_query: u32,
     pub use_cache: bool,
+    /// Ask the keyed providers alongside the free engines, not only when the free ones find nothing.
+    pub every_source: bool,
 }
 
 /// `quality` | `balanced` | `cheap`; anything else is the default, balanced.
 pub fn profile_settings(name: &str) -> ProfileSettings {
-    let profile = |first_round_depth, follow_up_depth, first_round_queries, follow_up_queries| ProfileSettings { first_round_depth, follow_up_depth, first_round_queries, follow_up_queries, results_per_query: 10, use_cache: true };
+    let profile = |first_round_depth, follow_up_depth, first_round_queries, follow_up_queries| ProfileSettings { first_round_depth, follow_up_depth, first_round_queries, follow_up_queries, results_per_query: 10, use_cache: true, every_source: name == "quality" };
     match name {
         // Every request at advanced depth, four queries to open: the original behaviour, kept as a known-good escape hatch.
         "quality" => profile("advanced", "advanced", 4, 3),
@@ -259,7 +263,7 @@ async fn ask(client: &reqwest::Client, planner: &Planner, system: &str, user: St
     }
     let mut request = client.post(format!("{}/chat/completions", planner.base_url)).bearer_auth(&planner.api_key).json(&body).timeout(Duration::from_secs(timeout_secs));
     if planner.base_url.to_ascii_lowercase().contains("openrouter.ai") {
-        request = request.header("HTTP-Referer", "https://github.com/eggyeg/apiM").header("X-Title", "apiM");
+        request = request.header("HTTP-Referer", "https://github.com/rottenvia/apiM").header("X-Title", "apiM");
     }
     let response = request.send().await.ok().filter(|r| r.status().is_success())?;
     let data: Value = response.json().await.ok()?;
@@ -322,6 +326,7 @@ struct Asked<'a> {
     time_range: Option<&'a str>,
     include_domains: &'a [String],
     use_cache: bool,
+    every_source: bool,
 }
 
 /// One provider's results for one query, and whether they came from the cache.
@@ -449,6 +454,115 @@ async fn exa_search(client: &reqwest::Client, query: &str, key: &str, asked: Ask
     call(request, CacheKey { query, provider: "exa", depth: asked.depth, max_results: asked.max_results }, asked.use_cache, exa_results, exa_refusal).await
 }
 
+/// The free engines' results pages, read as HTML: no key and no bill. Measured 2026-10-27 on "serde crate latest
+/// version" and four more: Brave answered with docs.rs, PyPI and GitHub on top, DuckDuckGo likewise, and Bing without
+/// cookies with pages about something else. Both refuse a burst (Brave six queries in five seconds, DuckDuckGo three in
+/// one) and then keep refusing for over a quarter of an hour. DuckDuckGo goes first: it took three queries 3 s apart
+/// where Brave, back from its rest, refused the first. Each is kept 3 s apart, and one that refused is left alone for
+/// ten minutes.
+const FREE_ENGINES: [&str; 2] = ["duckduckgo", "brave"];
+const FREE_GAP: Duration = Duration::from_secs(3);
+const FREE_REST: Duration = Duration::from_secs(600);
+const BROWSER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
+
+#[derive(Default)]
+struct Engines {
+    asked: [Option<std::time::Instant>; 2],
+    resting_until: [Option<std::time::Instant>; 2],
+}
+
+async fn free_search(client: &reqwest::Client, query: &str, asked: Asked<'_>) -> Answer {
+    // Held across the request: free queries go one at a time, which is what keeps them under the engines' limits.
+    static GATE: tokio::sync::Mutex<Engines> = tokio::sync::Mutex::const_new(Engines { asked: [None, None], resting_until: [None, None] });
+    let key = CacheKey { query, provider: "web", depth: "basic", max_results: asked.max_results };
+    if asked.use_cache && let Some(hit) = usage::read_cache(&key) {
+        return Ok((hit, true));
+    }
+    let mut gate = GATE.lock().await;
+    let mut refused = ProviderError { status: 429, detail: "both free search engines refused a query in the last ten minutes and are being left alone".into() };
+    let mut nothing = false;
+    for i in 0..FREE_ENGINES.len() {
+        let engine = FREE_ENGINES[i];
+        if gate.resting_until[i].is_some_and(|until| std::time::Instant::now() < until) {
+            continue;
+        }
+        if let Some(wait) = gate.asked[i].map(|at| FREE_GAP.saturating_sub(at.elapsed())) {
+            tokio::time::sleep(wait).await;
+        }
+        gate.asked[i] = Some(std::time::Instant::now());
+        let url = match engine {
+            "brave" => reqwest::Url::parse_with_params("https://search.brave.com/search", [("q", query), ("source", "web")]),
+            _ => reqwest::Url::parse_with_params("https://html.duckduckgo.com/html/", [("q", query)]),
+        };
+        let Ok(url) = url else { continue };
+        let page = client.get(url).header("User-Agent", BROWSER_AGENT).header("Accept-Language", "en-US,en;q=0.9").timeout(Duration::from_secs(15)).send().await;
+        let (status, html) = match page {
+            Ok(r) => (r.status().as_u16(), r.text().await.unwrap_or_default()),
+            Err(e) => (0, e.to_string()),
+        };
+        let found: Vec<SearchResult> = match (status, engine) {
+            (200, "brave") => brave_results(&html),
+            (200, _) => duckduckgo_results(&html),
+            // 429 is Brave's limit, 202 DuckDuckGo's bot page: asked again soon, they only refuse for longer.
+            _ => {
+                gate.resting_until[i] = Some(std::time::Instant::now() + FREE_REST);
+                refused = ProviderError { status, detail: format!("{engine} answered HTTP {status}") };
+                continue;
+            }
+        };
+        // A page with nothing on it may be a query nothing matches: the other engine is asked, and this one is not rested.
+        if found.is_empty() {
+            nothing = true;
+            continue;
+        }
+        let found: Vec<SearchResult> = found.into_iter().filter(|r| !BLOCKED_DOMAINS.iter().any(|d| domain_of(&r.url).ends_with(d))).take(asked.max_results as usize).collect();
+        if asked.use_cache {
+            usage::write_cache(&key, &found);
+        }
+        return Ok((found, false));
+    }
+    if nothing { Ok((Vec::new(), false)) } else { Err(refused) }
+}
+
+/// Markup to one line of text: tags out, entities read, spaces folded.
+fn inline_text(html: &str) -> String {
+    crate::tools::web::html_to_text(html).split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn free_hit(engine: &str, url: String, title: &str, snippet: &str) -> SearchResult {
+    SearchResult { title: inline_text(title), url, content: inline_text(snippet), provider: Some(engine.to_string()), ..Default::default() }
+}
+
+/// Brave's page: each web result is a block marked `data-type="web"`, with the link first, the title in a
+/// `search-snippet-title` div, and the text in a `content` div.
+fn brave_results(html: &str) -> Vec<SearchResult> {
+    static PARTS: std::sync::LazyLock<[regex::Regex; 3]> = std::sync::LazyLock::new(|| {
+        [r#"<a[^>]*\bhref="(https?://[^"]+)""#, r#"(?s)class="title[^"]*search-snippet-title[^"]*"[^>]*>(.*?)</div>"#, r#"(?s)<div class="content[^"]*"[^>]*>(.*?)</div>"#].map(|p| regex::Regex::new(p).expect("valid pattern"))
+    });
+    let [link, title, text] = &*PARTS;
+    html.split(r#"data-type="web""#).skip(1).filter_map(|block| {
+        let url = link.captures(block)?[1].replace("&amp;", "&");
+        let title = title.captures(block).map_or(String::new(), |c| c[1].to_string());
+        let snippet = text.captures(block).map_or(String::new(), |c| c[1].to_string());
+        Some(free_hit("brave", url, &title, &snippet))
+    }).collect()
+}
+
+/// DuckDuckGo's HTML page: `result__a` links through its own redirect, which carries the address in `uddg`.
+fn duckduckgo_results(html: &str) -> Vec<SearchResult> {
+    static PARTS: std::sync::LazyLock<[regex::Regex; 2]> = std::sync::LazyLock::new(|| {
+        [r#"(?s)class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>"#, r#"(?s)class="result__snippet"[^>]*>(.*?)</a>"#].map(|p| regex::Regex::new(p).expect("valid pattern"))
+    });
+    let [link, text] = &*PARTS;
+    html.split(r#"class="result results_links"#).skip(1).filter_map(|block| {
+        let found = link.captures(block)?;
+        let href = format!("https:{}", found[1].replace("&amp;", "&").trim_start_matches("https:"));
+        let url = reqwest::Url::parse(&href).ok()?.query_pairs().find(|(k, _)| k == "uddg").map(|(_, v)| v.into_owned()).filter(|u| u.starts_with("http"))?;
+        let snippet = text.captures(block).map_or(String::new(), |c| c[1].to_string());
+        Some(free_hit("duckduckgo", url, &found[2], &snippet))
+    }).collect()
+}
+
 /// What one query brought back from every configured provider.
 #[derive(Default)]
 struct Once {
@@ -462,7 +576,7 @@ struct Once {
 /// One provider failing does not fail the search: if Tavily is out of quota
 /// and Exa answered, that is a successful search. Only every provider failing
 /// is a failure, and then the first error is returned so the message stays specific.
-fn merge_answers(answers: [(&'static str, Option<Answer>); 2]) -> Result<Once, ProviderError> {
+fn merge_answers(answers: [(&'static str, Option<Answer>); 3]) -> Result<Once, ProviderError> {
     let mut once = Once::default();
     let mut seen = HashSet::new();
     let mut first_error = None;
@@ -488,21 +602,30 @@ fn merge_answers(answers: [(&'static str, Option<Answer>); 2]) -> Result<Once, P
     }
 }
 
-/// One query across every configured provider, in parallel: peers, not a
-/// primary and a spare. Tavily returns cleaned full pages, Exa is a neural
-/// index that finds what keyword matching misses, and two providers cost the
-/// same wall-clock time as one.
+/// One query across the keyed providers, in parallel: peers, not a primary and a spare. Tavily returns cleaned
+/// full pages, Exa is a neural index that finds what keyword matching misses. The "quality" profile asks the free
+/// engines alongside them; otherwise the free engines were asked first, in `web_search`, and found nothing.
 async fn search_once(client: &reqwest::Client, query: &str, keys: &Keys, asked: Asked<'_>) -> Result<Once, ProviderError> {
     let (tavily, exa) = (keys.tavily(), keys.exa());
-    if tavily.is_empty() && exa.is_empty() {
+    if tavily.is_empty() && exa.is_empty() && !asked.every_source {
         return Err(ProviderError { status: 0, detail: "no search provider is configured".to_string() });
     }
-    let (from_tavily, from_exa) = tokio::join!(
+    let (free, from_tavily, from_exa) = tokio::join!(
+        async { if asked.every_source { Some(free_search(client, query, asked).await) } else { None } },
         async { if tavily.is_empty() { None } else { Some(tavily_search(client, query, tavily, asked).await) } },
         // Exa has no time range, so a recency-limited query loses that filter on this side.
         async { if exa.is_empty() { None } else { Some(exa_search(client, query, exa, asked).await) } },
     );
-    merge_answers([("tavily", from_tavily), ("exa", from_exa)])
+    merge_answers([(free_engine(free.as_ref()), free), ("tavily", from_tavily), ("exa", from_exa)])
+}
+
+/// Which free engine answered, by its results.
+fn free_engine(free: Option<&Answer>) -> &'static str {
+    match free.and_then(|answer| answer.as_ref().ok()).and_then(|(results, _)| results.first()).and_then(|r| r.provider.as_deref()) {
+        Some("brave") => "brave",
+        Some(_) => "duckduckgo",
+        None => "free web",
+    }
 }
 
 /// Everything one question has gathered so far.
@@ -534,6 +657,8 @@ impl Run {
         self.searches += 1;
         if once.cache_hit {
             self.cache_hits += 1;
+        } else if !once.answered.iter().any(|id| matches!(*id, "tavily" | "exa")) {
+            // Only the free engines answered: nothing was billed.
         } else if depth == "advanced" {
             self.billed_advanced += 1;
         } else {
@@ -612,7 +737,7 @@ pub async fn smart_search(client: &reqwest::Client, message: &str, context: &str
     // the questions that would have settled either way.
     let mut run = Run::default();
     let mut rounds = 1;
-    let first = Asked { depth: profile.first_round_depth, max_results: profile.results_per_query, time_range: plan.time_range.as_deref(), include_domains: &plan.include_domains, use_cache: profile.use_cache };
+    let first = Asked { depth: profile.first_round_depth, max_results: profile.results_per_query, time_range: plan.time_range.as_deref(), include_domains: &plan.include_domains, use_cache: profile.use_cache, every_source: profile.every_source };
     run.round(client, keys, &plan.queries[..plan.queries.len().min(profile.first_round_queries)], first).await?;
 
     // Escalate only while something concrete is still missing. Most questions stop here.
@@ -645,9 +770,9 @@ fn reply(ok: bool, content: String, summary: String) -> Reply {
 /// Says WHY, so the model stops instead of rephrasing: no rewording fixes a rejected key.
 fn failed_reply(error: &ProviderError) -> Reply {
     let why = match error.status {
-        401 | 403 => "the Tavily key was rejected. Check it in Settings.".to_string(),
-        429 | 432 => "the Tavily quota or rate limit is spent.".to_string(),
-        0 => "the search service could not be reached.".to_string(),
+        401 | 403 => "the search key was rejected. Check it in Settings.".to_string(),
+        202 | 429 | 432 => "the search services are rate limiting this computer right now.".to_string(),
+        0 => "the search service could not be reached or read.".to_string(),
         status => format!("the search service returned HTTP {status}."),
     };
     let detail = if error.detail.is_empty() { String::new() } else { format!(" ({})", error.detail) };
@@ -686,11 +811,31 @@ pub async fn web_search(client: &reqwest::Client, query: &str, profile: &str, ke
     if query.is_empty() {
         return reply(false, "Error: a query is required.".to_string(), "Empty query".to_string());
     }
-    if keys.tavily().is_empty() && keys.exa().is_empty() {
-        return reply(false, "Web search is not configured — no Tavily or Exa key is set in Settings. Say plainly that you could not look this up rather than guessing, or use fetch_url if you already know the URL.".to_string(), "Search unavailable".to_string());
+    // Free first, and the model's own query alone: the planner turned one search into three to six engine queries,
+    // and the free engines refuse a run of them (both did, for half an hour, after one session's searches). The keyed
+    // providers, and the planner with them, are the fallback.
+    let free = if profile == "quality" { None } else { Some(free_search(client, query, Asked { depth: "basic", max_results: profile_settings(profile).results_per_query, time_range: None, include_domains: &[], use_cache: true, every_source: false }).await) };
+    if let Some(Ok((results, cache_hit))) = &free
+        && !results.is_empty()
+    {
+        let mut run = Run::default();
+        run.fresh(&[query.to_string()]);
+        let engine = free_engine(free.as_ref());
+        run.take(Once { results: results.clone(), cache_hit: *cache_hit, answered: vec![engine], errors: Vec::new() }, "basic");
+        return found_reply(query, run.finish(1, "found what was needed"));
     }
     match smart_search(client, query, "", profile, keys, planner).await {
         Ok(found) => found_reply(query, found),
+        // Nothing keyed to fall back on: what the free engines said is the answer.
+        Err(error) if error.detail == "no search provider is configured" => match free {
+            Some(Ok(_)) => {
+                let mut run = Run::default();
+                run.take(Once { answered: vec![free_engine(free.as_ref())], ..Default::default() }, "basic");
+                found_reply(query, run.finish(1, "no results"))
+            }
+            Some(Err(refused)) => failed_reply(&refused),
+            None => failed_reply(&error),
+        },
         Err(error) => failed_reply(&error),
     }
 }
@@ -840,6 +985,7 @@ mod tests {
     fn providers_merge_and_only_total_failure_fails() {
         let quota = ProviderError { status: 432, detail: "This request exceeds your plan's set usage limit".into() };
         let both = merge_answers([
+            ("brave", None),
             ("tavily", Some(Ok((vec![hit("https://a.test/", "tavily", Some(0.8)), hit("https://b.test/", "tavily", Some(0.6))], false)))),
             ("exa", Some(Ok((vec![hit("https://b.test/", "exa", None), hit("https://c.test/", "exa", None), hit("", "exa", None)], true)))),
         ])
@@ -849,14 +995,17 @@ mod tests {
         assert!(both.cache_hit && both.answered == ["tavily", "exa"] && both.errors.is_empty());
 
         // Tavily out of quota, Exa answered: a successful search that says what failed.
-        let covered = merge_answers([("tavily", Some(Err(quota.clone()))), ("exa", Some(Ok((vec![hit("https://c.test/", "exa", None)], false))))]).unwrap();
+        let covered = merge_answers([("brave", None), ("tavily", Some(Err(quota.clone()))), ("exa", Some(Ok((vec![hit("https://c.test/", "exa", None)], false))))]).unwrap();
         assert_eq!((covered.results.len(), covered.answered.as_slice(), covered.errors.as_slice()), (1, &["exa"][..], &["tavily: This request exceeds your plan's set usage limit".to_string()][..]));
         // A provider that answered with nothing is not a failure either.
-        assert!(merge_answers([("tavily", Some(Err(quota.clone()))), ("exa", Some(Ok((Vec::new(), false))))]).is_ok());
+        assert!(merge_answers([("brave", None), ("tavily", Some(Err(quota.clone()))), ("exa", Some(Ok((Vec::new(), false))))]).is_ok());
         // Every provider failed: the first error comes back, whether one was asked or two.
         let rejected = ProviderError { status: 401, detail: String::new() };
-        assert_eq!(merge_answers([("tavily", Some(Err(quota.clone()))), ("exa", Some(Err(rejected.clone())))]).err(), Some(quota));
-        assert_eq!(merge_answers([("tavily", None), ("exa", Some(Err(rejected.clone())))]).err(), Some(rejected.clone()));
+        assert_eq!(merge_answers([("brave", None), ("tavily", Some(Err(quota.clone()))), ("exa", Some(Err(rejected.clone())))]).err(), Some(quota));
+        assert_eq!(merge_answers([("brave", None), ("tavily", None), ("exa", Some(Err(rejected.clone())))]).err(), Some(rejected.clone()));
+        // The free engines refused and Exa answered: still a search.
+        let refused = ProviderError { status: 429, detail: "brave answered HTTP 429 with no results it could read".into() };
+        assert!(merge_answers([("free web", Some(Err(refused))), ("tavily", None), ("exa", Some(Ok((vec![hit("https://c.test/", "exa", None)], false))))]).is_ok());
         assert_eq!(rejected.to_string(), "search provider returned 401");
     }
 
@@ -886,13 +1035,15 @@ mod tests {
         // A later query returns a page already held, and one that was rejected before but is good now.
         let second = Once { results: vec![hit("https://blog.test/post", "exa", Some(0.3)), hit("https://weak.test/", "exa", Some(0.2))], cache_hit: true, answered: vec!["exa"], errors: vec!["exa: slow".into()] };
         run.take(second, "basic");
-        run.take(Once::default(), "basic");
+        run.take(Once { answered: vec!["tavily"], ..Default::default() }, "basic");
+        // Answered by the free engines alone: searched, and nothing billed.
+        run.take(Once { answered: vec!["brave"], ..Default::default() }, "advanced");
 
         let out = run.finish(2, "found what was needed after follow-up");
         // The official docs (0.6 + 0.25 trusted) outrank the blog (0.8); the ungraded page sits at Exa's floor, last.
         assert_eq!(out.results.iter().map(|r| r.domain.as_str()).collect::<Vec<_>>(), ["docs.python.org", "blog.test", "weak.test", "exa-hit.test", "ungraded.test"]);
-        assert_eq!((out.searches_performed, out.cache_hits, out.sources_used, out.rounds), (3, 1, 5, 2));
-        assert_eq!((out.providers_used.as_slice(), out.provider_errors.as_slice()), (&["tavily".to_string(), "exa".to_string()][..], &["exa: slow".to_string()][..]));
+        assert_eq!((out.searches_performed, out.cache_hits, out.sources_used, out.rounds), (4, 1, 5, 2));
+        assert_eq!((out.providers_used.as_slice(), out.provider_errors.as_slice()), (&["tavily".to_string(), "exa".to_string(), "brave".to_string()][..], &["exa: slow".to_string()][..]));
         // One advanced query at double Tavily's rate, one basic, one served from cache.
         assert_eq!(out.estimated_usd, 1.0 * 0.008 + 1.0 * 0.008 * 2.0);
         assert!(out.summary.starts_with("[1] T https://www.docs.python.org/3/library/asyncio.html\nURL: https://www.docs.python.org/3/library/asyncio.html\nxxx") && out.summary.ends_with("\n\n---\n"));
@@ -934,25 +1085,34 @@ mod tests {
         assert_eq!(found_reply("cat", found).content, "No results for \"cat\".\nProviders that answered: none.\n\nEvery configured provider ran and genuinely found nothing. Try different wording, or say you could not find it.");
 
         let failed = failed_reply(&ProviderError { status: 432, detail: "usage limit".into() });
-        assert_eq!(failed.content, "Search FAILED — the Tavily quota or rate limit is spent. (usage limit)\n\nThis is not \"no results\": the query never ran. Do not retry it or rephrase — nothing about the wording is the problem. Tell the user plainly, and use fetch_url if you already know a URL that would answer this.");
+        assert_eq!(failed.content, "Search FAILED — the search services are rate limiting this computer right now. (usage limit)\n\nThis is not \"no results\": the query never ran. Do not retry it or rephrase — nothing about the wording is the problem. Tell the user plainly, and use fetch_url if you already know a URL that would answer this.");
         assert_eq!((failed.ok, failed.summary.as_str()), (false, "Search failed (432)"));
-        assert!(failed_reply(&ProviderError { status: 401, detail: String::new() }).content.starts_with("Search FAILED — the Tavily key was rejected. Check it in Settings.\n\nThis"));
+        assert!(failed_reply(&ProviderError { status: 401, detail: String::new() }).content.starts_with("Search FAILED — the search key was rejected. Check it in Settings.\n\nThis"));
         assert!(failed_reply(&ProviderError { status: 500, detail: String::new() }).content.starts_with("Search FAILED — the search service returned HTTP 500.\n\n"));
-        let down = failed_reply(&ProviderError { status: 0, detail: "no search provider is configured".into() });
-        assert!(down.content.starts_with("Search FAILED — the search service could not be reached. (no search provider is configured)\n\n") && down.summary == "Search failed (unreachable)");
+        let down = failed_reply(&ProviderError { status: 0, detail: "every free search engine is resting".into() });
+        assert!(down.content.starts_with("Search FAILED — the search service could not be reached or read. (every free search engine is resting)\n\n") && down.summary == "Search failed (unreachable)");
     }
 
     #[tokio::test]
-    async fn no_key_and_no_query_never_reach_the_network() {
+    async fn no_query_never_reaches_the_network() {
         let client = reqwest::Client::new();
-        let off = Keys { tavily: "tvly-x".into(), exa: String::new(), tavily_enabled: false, exa_enabled: true };
-        let unset = web_search(&client, "anything", "balanced", &off, None).await;
-        assert_eq!((unset.ok, unset.summary.as_str()), (false, "Search unavailable"));
-        assert!(unset.content.starts_with("Web search is not configured — no Tavily or Exa key is set in Settings."));
-        let on = Keys { tavily_enabled: true, ..off.clone() };
-        assert_eq!(web_search(&client, "   ", "balanced", &on, None).await.content, "Error: a query is required.");
-        let asked = Asked { depth: "basic", max_results: 10, time_range: None, include_domains: &[], use_cache: false };
-        assert_eq!(search_once(&client, "q", &off, asked).await.err(), Some(ProviderError { status: 0, detail: "no search provider is configured".into() }));
+        let keys = Keys { tavily: "tvly-x".into(), exa: String::new(), tavily_enabled: false, exa_enabled: true };
+        assert_eq!(web_search(&client, "   ", "balanced", &keys, None).await.content, "Error: a query is required.");
+    }
+
+    /// Pages saved from Brave and DuckDuckGo (2026-10-27), cut to their first results: what the free search reads.
+    #[test]
+    fn free_engines_pages_are_read() {
+        let brave = brave_results(include_str!("fixtures/brave.html"));
+        assert!(brave.len() >= 3, "{brave:?}");
+        assert_eq!((brave[0].url.as_str(), brave[0].provider.as_deref()), ("https://pypi.org/project/httpx/", Some("brave")));
+        assert!(brave[0].title.starts_with("httpx") && brave[0].content.contains("Latest release") && !brave[0].content.contains('<'), "{:?}", brave[0]);
+        let ddg = duckduckgo_results(include_str!("fixtures/duckduckgo.html"));
+        assert!(ddg.len() >= 3, "{ddg:?}");
+        assert_eq!((ddg[0].url.as_str(), ddg[0].title.as_str()), ("https://docs.rs/serde/latest/serde/", "serde - Rust - Docs.rs"));
+        assert!(ddg.iter().all(|r| r.url.starts_with("http") && !r.content.is_empty()));
+        // A bot page reads as nothing found, which rests the engine.
+        assert!(brave_results("<html>Too many requests</html>").is_empty() && duckduckgo_results("<html>anomaly</html>").is_empty());
     }
 
     #[tokio::test]

@@ -291,8 +291,8 @@ fn keys(app: &mut App, ui: &mut Ui) {
     Input::new("Leave empty for the in-app sidecar").password().show(ui, "local-key", &mut s.local_api_key);
     ui.add_space(20.0);
 
-    head(ui, "Tavily API Key", if s.tavily_enabled { "(for Web Search)" } else { "(switched off)" }, Some(&mut s.tavily_enabled));
-    help(ui, &[Seg::T("Get your key from "), Seg::Link("app.tavily.com", "https://app.tavily.com"), Seg::T(" — 1,000 free credits/month")]);
+    head(ui, "Tavily API Key", if s.tavily_enabled { "(optional — the free engines search without a key)" } else { "(switched off)" }, Some(&mut s.tavily_enabled));
+    help(ui, &[Seg::T("Web search runs on Brave and DuckDuckGo for free. A key is a paid fallback, asked when they find nothing (or always, with the Quality search profile). Get one from "), Seg::Link("app.tavily.com", "https://app.tavily.com"), Seg::T(" — 1,000 free credits/month")]);
     Input::new("tvly-...").password().search().show(ui, "tavily", &mut s.tavily_key);
     if !s.tavily_key.is_empty() {
         form::key_saved(ui);
@@ -301,7 +301,7 @@ fn keys(app: &mut App, ui: &mut Ui) {
     widgets::rule(ui);
     ui.add_space(20.0);
 
-    head(ui, "Exa API Key", if s.exa_enabled { "(optional — searched alongside Tavily)" } else { "(switched off)" }, Some(&mut s.exa_enabled));
+    head(ui, "Exa API Key", if s.exa_enabled { "(optional — a paid fallback, beside Tavily)" } else { "(switched off)" }, Some(&mut s.exa_enabled));
     help(
         ui,
         &[

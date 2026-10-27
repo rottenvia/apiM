@@ -61,6 +61,7 @@ const FOLD_RETRY_TARGET_CHARS: usize = 350_000;
 const KEEP_RECENT_RESULTS: usize = 6;
 
 // What the model is told on the paths below. The wording is the web app's.
+const RESEARCH_FIRST: &str = "Before you act: if this task depends on anything you are not certain of (a current version or API, an unfamiliar error, how a site, game or service works today, a tool or package that may already do the job), look it up first: web_search, then fetch_url the best source. What you know for certain, start on now.";
 const CARRY_ON: &str = "Continue from exactly where you stopped — do not repeat anything you already wrote, do not restate the plan, and do not apologise. Carry straight on from the last character.";
 const CLAIM_RETRY: &str = "Your reply above describes tools running and reporting results — edits applied, a build coming back green, checks passing — but those tools were not called in this reply. The user reads that as work that happened. Finish this reply one of two ways: either actually call the tools now and report exactly what comes back, or add a short correction saying plainly what was and was not done. The user still sees the reply above, so do not write it out again. Do not describe output you do not have.";
 const NOTE_LEAD: &str = "[Note from the user, added while you work. If it asks something, answer it once, in a sentence or two, in your next message. If it changes what to do, follow it from here on. Then go on with the task from where you were: do not start over, and do not come back to this note in later steps.]";
@@ -616,7 +617,8 @@ async fn run_inner(mut req: Request, emit: &Emitter, procs: Arc<Procs>) -> Resul
 
     std::fs::create_dir_all(&req.workspace).map_err(|e| format!("Cannot open the workspace folder {}: {e}", req.workspace.display()))?;
     let native_vision = target.model.vision == Vision::Native;
-    let web_search = s.web_mode() != "off" && (!s.tavily().is_empty() || !s.exa().is_empty());
+    // The free engines need no key (`search::free_search`): only the Web toggle takes the tool away.
+    let web_search = s.web_mode() != "off";
     // Its tools send screenshots back: a model that cannot see them is not given them.
     let computer = s.computer_use && native_vision && cfg!(windows);
     let git_repo = req.workspace.join(".git").exists();
@@ -796,6 +798,11 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
     // Notes from the loop to the model that ride in the next request only: a stale plan, a step over its budget, code drafted in thought.
     // ponytail: the web pushes these as system messages and removes them by marker a round later; here they join the tail the same request already ends with.
     let mut harness: Vec<String> = Vec::new();
+    // The first request ends on the research habit the rules spell out: read last, it is the one a model acts on. Not
+    // for a resumed reply, nor for a message of a few words.
+    if resumed_rounds == 0 && user_text.split_whitespace().count() > 6 && all_tools.iter().any(|t| t["function"]["name"] == "web_search") {
+        harness.push(RESEARCH_FIRST.to_string());
+    }
     let mut halt = None;
     let mut round = 0;
 
@@ -1604,6 +1611,24 @@ async fn call_model(client: &reqwest::Client, target: &Target, body: &mut Map<St
         let detail = retry::extract_rejection_detail(&e.detail, 300);
         let said = detail.to_lowercase();
 
+        let free = openrouter && provider::is_free(&target.api_model);
+        // OpenRouter's own limit on free models. The day's allowance does not come back in minutes: said at once, not after
+        // six minutes of waits. The minute's is waited out to the moment it resets.
+        if status == 429 && let Some((per_day, reset)) = retry::free_limit(&e.detail) {
+            let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
+            if per_day {
+                let at = reset.and_then(|ms| chrono::DateTime::from_timestamp_millis(ms as i64)).map(|at| format!(" It comes back at {}.", at.with_timezone(&chrono::Local).format("%H:%M")));
+                return Err(format!("OpenRouter's daily allowance of free-model requests is used up for this account (50 a day, or 1,000 once $10 of credit has been bought).{} Everything done so far is saved: pick a paid model and press Try again to carry on now.", at.unwrap_or_default()));
+            }
+            if waits < MAX_RATE_LIMIT_WAITS {
+                waits += 1;
+                let wait = Duration::from_millis(reset.map_or(20_000, |ms| ms.saturating_sub(now) + 500).min(65_000));
+                emit.send(Event::Retry { reason: "free-model limit (20 a minute)".into(), attempt: waits as usize, attempts: MAX_RATE_LIMIT_WAITS as usize, wait });
+                tokio::time::sleep(wait).await;
+                continue;
+            }
+        }
+
         // The cheap pinned endpoint is rate limited, or none of the pinned ones can take this request (OpenRouter drops an
         // endpoint for a picture it cannot read, a window too small, more output than it allows): any other one beats
         // no answer, for the rest of the run.
@@ -1693,12 +1718,13 @@ async fn call_model(client: &reqwest::Client, target: &Target, body: &mut Map<St
             }
         }
 
-        // Still rate limited after the retries: the pool is busy, not broken. Wait it out, up to six times.
-        if status == 429 && waits < MAX_RATE_LIMIT_WAITS {
+        // Still rate limited after the retries: the pool is busy, not broken. Wait it out, up to six times; twice for a
+        // free model, whose full upstream pool is shared by every OpenRouter user and stayed full through all six (217 s).
+        if status == 429 && waits < if free { 2 } else { MAX_RATE_LIMIT_WAITS } {
             waits += 1;
             // The web reads a missing Retry-After header as zero and does not wait at all; the doubling wait its own comment describes runs here.
             let wait = Duration::from_millis(e.retry_after.unwrap_or(5_000 << (waits - 1)).min(60_000));
-            emit.send(Event::Retry { reason: "service busy".into(), attempt: waits as usize, attempts: MAX_RATE_LIMIT_WAITS as usize, wait });
+            emit.send(Event::Retry { reason: "service busy".into(), attempt: waits as usize, attempts: if free { 2 } else { MAX_RATE_LIMIT_WAITS as usize }, wait });
             tokio::time::sleep(wait).await;
             continue;
         }
@@ -1706,6 +1732,7 @@ async fn call_model(client: &reqwest::Client, target: &Target, body: &mut Map<St
         // A body turned away with no reason given is most often one too large: its size is said, so the cause can be seen.
         let sent = if matches!(status, 400 | 413 | 422) { Value::Object(original).to_string().len() } else { 0 };
         return Err(match e.kind {
+            _ if free && status == 429 => format!("{} is rate limited upstream: its free pool is shared by every OpenRouter user and is full right now. Everything done so far is saved. Try again in a few minutes, or pick another model (the paid version of the same model is not limited this way).", target.model.label),
             Failure::Unreachable if e.retryable => provider::unreachable_message(name, attempt),
             Failure::TimedOut => provider::timed_out_message(name, attempt),
             _ if sent > 400_000 => format!("{} (the request was {:.1} MB)", e.message, sent as f64 / 1e6),

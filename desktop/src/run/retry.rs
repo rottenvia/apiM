@@ -40,6 +40,20 @@ pub fn wait_ms(policy: &Policy, attempt: u32, retry_after_ms: Option<u64>) -> u6
     policy.max_ms.min(retry_after_ms.unwrap_or(backoff + jitter))
 }
 
+/// OpenRouter's own limit on an account's free-model requests, read from its 429: whether it is the day's allowance
+/// (waiting minutes does not help) rather than the minute's, and when it resets (ms since the epoch). None for any
+/// other 429, such as a free model's upstream pool being full.
+pub fn free_limit(body: &str) -> Option<(bool, Option<u64>)> {
+    let root: Value = serde_json::from_str(body).ok()?;
+    let message = root["error"]["message"].as_str()?;
+    let per_day = message.contains("free-models-per-day");
+    if !per_day && !message.contains("free-models-per-min") {
+        return None;
+    }
+    let reset = &root["error"]["metadata"]["headers"]["X-RateLimit-Reset"];
+    Some((per_day, reset.as_u64().or_else(|| reset.as_str()?.trim().parse().ok())))
+}
+
 /// The Retry-After header as milliseconds: a number of seconds, or an HTTP date.
 pub fn retry_after_ms(header: &str) -> Option<u64> {
     let header = header.trim();
@@ -140,6 +154,16 @@ mod tests {
         for (i, o) in cases("extract_rejection_detail") {
             assert_eq!(extract_rejection_detail(i[0].as_str().unwrap(), i[1].as_u64().unwrap() as usize), o.as_str().unwrap(), "{i}");
         }
+    }
+
+    #[test]
+    fn free_limits_are_told_apart() {
+        let day = r#"{"error":{"message":"Rate limit exceeded: free-models-per-day. Add 10 credits to unlock 1000 free model requests per day","code":429,"metadata":{"headers":{"X-RateLimit-Limit":"50","X-RateLimit-Remaining":"0","X-RateLimit-Reset":"1741305600000"}}}}"#;
+        assert_eq!(free_limit(day), Some((true, Some(1_741_305_600_000))));
+        assert_eq!(free_limit(r#"{"error":{"message":"Rate limit exceeded: free-models-per-min. ","code":429}}"#), Some((false, None)));
+        // A free model's upstream pool being full is not the account's limit.
+        let upstream = r#"{"error":{"message":"Provider returned error","code":429,"metadata":{"raw":"google/gemma-4-31b-it:free is temporarily rate-limited upstream.","limit_source":"upstream_provider_shared_pool"}}}"#;
+        assert_eq!((free_limit(upstream), free_limit("not json")), (None, None));
     }
 
     #[test]

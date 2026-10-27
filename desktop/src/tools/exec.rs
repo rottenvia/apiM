@@ -414,8 +414,20 @@ fn prepare(ctx: &Ctx, command: &str, argv: Vec<String>) -> Result<Launch, String
             if cfg!(windows) { " PowerShell is the shell here: pass the whole script as one string in args, and its pipes, `;` and loops run several steps in one call." } else { "" }
         ));
     }
-    // No shell reads `>out.txt` or `|` either: the program gets them as words ("Error opening ./>_NBUF_OUT.txt").
-    if let Some(word) = argv.iter().map(|a| a.trim()).find(|a| matches!(*a, "|" | "&&" | "<") || a.starts_with('>') || a.starts_with("2>") || a.starts_with("1>") || a.starts_with("&>")) {
+    // `>out.txt`, `|` and `&&` are a shell's to read, not the program's ("Error opening ./>_NBUF_OUT.txt"): the line goes to
+    // the system's shell whole. Refused instead, small models sent the same line again, round after round (2026-10-27).
+    // cmd's own commands (`del`, `dir`, `type`) are no programs, and were refused as not allowed: PowerShell knows each by that name.
+    let cmd_word = cfg!(windows) && CMD_WORDS.contains(&name.as_str()) && find_program(&ctx.root, command).is_none();
+    if argv.iter().any(|a| shell_word(a)) || cmd_word {
+        let line = std::iter::once(command.to_string()).chain(argv.iter().map(|a| quoted_word(a))).collect::<Vec<_>>().join(" ");
+        if cfg!(windows) {
+            return shell(ctx, "powershell", vec![powershell_line(&line)]);
+        }
+        if on_path("bash") {
+            return bash_shell(ctx, "bash", vec![line]);
+        }
+    }
+    if let Some(word) = argv.iter().map(|a| a.trim()).find(|a| shell_word(a)) {
         return Err(format!("There is no shell here, so `{word}` would reach the program as a plain argument and redirect nothing. The output comes back to you as the result. To keep it in a file, have the program write the file itself.{}", if cfg!(windows) { " Or give the whole line to powershell as one string: it reads pipes and redirects." } else { "" }));
     }
     if let Some((_, forms)) = LOOKING_FORMS.iter().find(|(tool, _)| *tool == name) {
@@ -789,6 +801,61 @@ fn split_words(line: &str) -> Vec<String> {
     words
 }
 
+/// cmd's built-in commands that PowerShell also takes by name.
+const CMD_WORDS: &[&str] = &["del", "erase", "dir", "type", "copy", "move", "ren", "md", "mkdir", "rd", "rmdir", "echo", "cls", "cd"];
+
+/// A word only a shell reads: `&&`, `||`, a pipe, `;`, a redirect.
+fn shell_word(word: &str) -> bool {
+    let word = word.trim();
+    matches!(word, "|" | "||" | "&&" | "&" | ";" | "<") || ["<", ">", "1>", "2>", "&>"].iter().any(|p| word.starts_with(p))
+}
+
+/// A word as a shell line writes it back: bare when it can be, else in quotes PowerShell and bash both read.
+fn quoted_word(word: &str) -> String {
+    if !word.is_empty() && !word.contains(|c: char| c.is_whitespace() || "\"'`$;&|(){}".contains(c)) || shell_word(word) {
+        word.to_string()
+    } else {
+        format!("'{}'", word.replace('\'', "''"))
+    }
+}
+
+/// A cmd/bash line in the words Windows PowerShell 5.1 reads: `a && b` stops after a failing `a`, `a || b` runs `b`
+/// only after a failing `a`, and `nul` is `$null`. Quoted text is left as written.
+// ponytail: `a || b` ends the line once `a` succeeds, so a step after `b` is skipped then. Fine for the `x || y` lines models write.
+fn powershell_line(line: &str) -> String {
+    let (mut out, mut quote) = (String::new(), None::<char>);
+    let mut rest = line;
+    while let Some(c) = rest.chars().next() {
+        let after = &rest[c.len_utf8()..];
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (None, '"' | '\'') => quote = Some(c),
+            (None, '&') if after.starts_with('&') => {
+                out.push_str("; if (-not $?) { exit 1 };");
+                rest = &after[1..];
+                continue;
+            }
+            (None, '|') if after.starts_with('|') => {
+                out.push_str("; if ($?) { exit 0 };");
+                rest = &after[1..];
+                continue;
+            }
+            (None, '>') => {
+                let target = after.trim_start();
+                if target.get(..3).is_some_and(|w| w.eq_ignore_ascii_case("nul")) && !target[3..].starts_with(|c: char| c.is_alphanumeric() || c == '.') {
+                    out.push_str(">$null");
+                    rest = &target[3..];
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        out.push(c);
+        rest = after;
+    }
+    out
+}
+
 pub async fn run_command(ctx: &Ctx, args: &Value) -> Output {
     let mut argv = match argv_arg(args, "args") {
         Ok(argv) => argv,
@@ -799,6 +866,10 @@ pub async fn run_command(ctx: &Ctx, args: &Value) -> Output {
     let line = str_arg(args, "command").trim();
     let whole_line = argv.is_empty() && line.contains(char::is_whitespace) && find_program(&ctx.root, line).is_none();
     let mut words = if whole_line { split_words(line) } else { Vec::new() };
+    // A shell line written whole goes to the shell as it was written, not cut into words and put back together.
+    if cfg!(windows) && words.iter().any(|w| shell_word(w)) {
+        words = vec!["powershell".into(), powershell_line(line)];
+    }
     let command = if words.is_empty() { line.to_string() } else { words.remove(0) };
     let command = command.as_str();
     argv.extend(words);
@@ -1416,8 +1487,15 @@ mod tests {
             assert!(prep(Approval::Auto, "cmd", &["/c", "dir"]).err().unwrap().contains("PowerShell is the shell here"));
         }
         // A redirect is a shell's doing: said before the program takes `>out.txt` for a file to open.
-        assert!(prep(Approval::Auto, "python", &["a.py", ">out.txt"]).err().unwrap().starts_with("There is no shell here, so `>out.txt`"));
-        assert!(prep(Approval::Auto, "python a.py 2>&1", &[]).is_err() && prep(Approval::Auto, "python", &["-c", "print(1 > 0)"]).is_ok());
+        // A shell's own words send the line to the shell whole: PowerShell here, with `&&`, `||` and `nul` put in its words.
+        if cfg!(windows) {
+            assert_eq!(prep(Approval::Auto, "python", &["a.py", ">out.txt"]).ok().unwrap().display, "powershell python a.py >out.txt");
+            assert_eq!(prep(Approval::Auto, "python a.py 2>&1", &[]).ok().unwrap().display, "powershell python a.py 2>&1");
+            assert_eq!(prep(Approval::Auto, "del", &["sample.txt"]).ok().unwrap().display, "powershell del sample.txt");
+        }
+        assert!(prep(Approval::Auto, "python", &["-c", "print(1 > 0)"]).is_ok());
+        assert_eq!(powershell_line("python --version && pytest -q 2>nul || echo 'a && b'"), "python --version ; if (-not $?) { exit 1 }; pytest -q 2>$null ; if ($?) { exit 0 }; echo 'a && b'");
+        assert_eq!((quoted_word("print('hi'); x"), quoted_word("a.py"), quoted_word("2>nul")), ("'print(''hi''); x'".into(), "a.py".into(), "2>nul".into()));
     }
 
     /// A long output is all in a file the answer names; a short one leaves no file behind.

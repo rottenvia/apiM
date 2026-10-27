@@ -38,8 +38,10 @@ pub const GROUPS: &[Group] = &[
     },
     Group {
         name: "web",
-        what: "the live web: read a page, call an API, download a file, look at a page's structure, drive a browser",
-        tools: &["fetch_url", "http_request", "download_file", "inspect_page", "browse"],
+        what: "more of the live web: call an API, download a file, look at a page's structure, drive a browser",
+        // fetch_url is an everyday tool: reading the source a search found is the step after every search, and a model
+        // that had to load a group for it first answered from the search's extracts or from memory instead.
+        tools: &["http_request", "download_file", "inspect_page", "browse"],
         hints: &["http://", "https://", "www.", " url", "website", "web page", "webpage", "scrape", "download", " api", "endpoint", "browser"],
     },
     Group {
@@ -212,7 +214,7 @@ mod tests {
         let everyday: Vec<&str> = names(&all).into_iter().filter(|tool| group_of(tool).is_none()).collect();
         // web_search and the computer's tools come only with their toggle on, and then with every request: the user
         // switched them on to have them used.
-        let mut expected = vec!["list_files", "read_file", "write_file", "edit_file", "search_files", "read_files", "run_command", "make_plan", "update_plan", "ask_user", "finish", "web_search"];
+        let mut expected = vec!["list_files", "read_file", "write_file", "edit_file", "search_files", "read_files", "run_command", "make_plan", "update_plan", "ask_user", "finish", "fetch_url", "web_search"];
         if cfg!(windows) {
             expected.extend(["computer_look", "computer_act"]);
         }
@@ -231,18 +233,18 @@ mod tests {
 
     #[test]
     fn groups_load_once_stay_in_order_and_follow_what_was_sent() {
-        let all: Vec<Value> = ["read_file", "fetch_url", "browse", "git_status", "mcp__notes__add", "delegate"].map(tool).to_vec();
+        let all: Vec<Value> = ["read_file", "http_request", "browse", "git_status", "mcp__notes__add", "delegate"].map(tool).to_vec();
         let mut loaded = Vec::new();
         assert_eq!(names(&offered(&all, &loaded)), ["read_file", "mcp__notes__add", "load_tools"]);
         let lists = |tools: &[Value]| tools.iter().find(|t| name(t) == "load_tools").unwrap()["function"]["description"].as_str().unwrap().to_string();
         let before = lists(&offered(&all, &loaded));
         // Only groups with something to give are listed: no sandbox here.
-        assert!(before.contains("- web: ") && before.contains("(fetch_url, browse)") && !before.contains("- sandbox"));
+        assert!(before.contains("- web: ") && before.contains("(http_request, browse)") && !before.contains("- sandbox"));
 
         let out = load(&json!({ "groups": ["git", "web"] }), &all, &mut loaded);
-        assert!(out.ok && out.text.starts_with("Loaded git: git_status.\nLoaded web: fetch_url, browse.") && out.summary == "git, web");
+        assert!(out.ok && out.text.starts_with("Loaded git: git_status.\nLoaded web: http_request, browse.") && out.summary == "git, web");
         // What was already sent keeps its place; a group comes after it, in the order it was loaded.
-        assert_eq!(names(&offered(&all, &loaded)), ["read_file", "mcp__notes__add", "load_tools", "git_status", "fetch_url", "browse"]);
+        assert_eq!(names(&offered(&all, &loaded)), ["read_file", "mcp__notes__add", "load_tools", "git_status", "http_request", "browse"]);
         assert_eq!(lists(&offered(&all, &loaded)), before);
         assert!(load(&json!({ "group": "web" }), &all, &mut loaded).text.starts_with("Already loaded web"));
         assert_eq!(loaded, ["git", "web"]);
