@@ -101,10 +101,14 @@ pub fn header(app: &mut App, ui: &mut egui::Ui) {
         if widgets::icon_btn(ui, icons::FIND, "Find in this chat (Ctrl+F)").clicked() {
             app.find_open = !app.find_open;
         }
-        if crate::browser::available() && widgets::icon_btn(ui, icons::GLOBE, if app.browser.open { "Hide the browser" } else { "Show the browser: watch the agent browse, or open a page yourself" }).clicked() {
+        if crate::browser::available() && widgets::icon_btn(ui, icons::GLOBE, if super::browser_pane::open_here(app) { "Hide the browser" } else { "Show the browser: watch the agent browse, or open a page yourself" }).clicked() {
             super::browser_pane::toggle(app);
         }
-        if !app.settings.workspace_open && widgets::icon_btn(ui, icons::PANEL_RIGHT, "Show the workspace panel").clicked() {
+        // Shown while the rail is away, by choice or for the Browser pane, which then makes way for it.
+        if !app.rail_shown() && widgets::icon_btn(ui, icons::PANEL_RIGHT, "Show the workspace panel").clicked() {
+            if super::browser_pane::open_here(app) {
+                super::browser_pane::close(app);
+            }
             app.settings.workspace_open = true;
             app.files_stale = true;
             app.settings.save();

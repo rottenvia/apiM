@@ -120,7 +120,7 @@ pub async fn browse(ctx: &Ctx, args: &Value) -> Output {
     };
     // The shared page the Browser pane shows: the user watches the steps, and the next call starts where this one ends.
     let _driving = crate::browser::live::Driving::start(&ctx.root);
-    let session_page = match crate::browser::live::page().await {
+    let session_page = match crate::browser::live::page(&ctx.root).await {
         Ok(p) => p,
         Err(e) => return fail(format!("Error: {e}"), "Browser not available"),
     };
@@ -139,7 +139,7 @@ pub async fn browse(ctx: &Ctx, args: &Value) -> Output {
     };
     let result = page::run_session(&session_page, &steps, &mut save).await;
     if result.stuck {
-        crate::browser::live::discard().await;
+        crate::browser::live::discard(&ctx.root).await;
         let steps = result.results.iter().map(|r| format!("{} {}", r.action, if r.ok { "ok" } else { r.detail.as_str() })).collect::<Vec<_>>().join(" → ");
         crate::diagnostics::record_with("tool_hung", "browse", &format!("the page stopped answering; the browser was restarted: {steps}"), serde_json::json!({ "url": result.final_url }));
     }

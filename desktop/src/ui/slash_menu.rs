@@ -443,13 +443,19 @@ fn perform(app: &mut App, ctx: &egui::Context, cmd: Cmd, arg: &str) -> Result<Op
             return Ok(Some(line));
         }
         // ponytail: the full file browser is being built on another branch; until it lands /files opens the side rail.
+        // The rail makes way for the Browser pane, so showing it closes the pane.
         Cmd::Files => {
+            super::browser_pane::close(app);
             app.settings.workspace_open = true;
             app.files_stale = true;
             app.settings.save();
         }
         Cmd::Panel => {
-            app.settings.workspace_open = !app.settings.workspace_open;
+            let show = !app.rail_shown();
+            if show {
+                super::browser_pane::close(app);
+            }
+            app.settings.workspace_open = show;
             app.files_stale = true;
             app.settings.save();
         }

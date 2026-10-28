@@ -656,6 +656,11 @@ impl App {
     }
 
     /// A self-portrait state was asked for by name.
+    /// The workspace rail is wanted and the Browser pane is not in its place.
+    pub fn rail_shown(&self) -> bool {
+        self.settings.workspace_open && !browser_pane::open_here(self)
+    }
+
     fn staged(&self, token: &str) -> bool {
         self.shot.as_ref().is_some_and(|shot| shot.state.split(',').any(|part| part == token))
     }
@@ -1579,7 +1584,7 @@ impl App {
                         tool.summary = summary;
                         tool.image = image;
                         if let Some(path) = changed.as_ref().filter(|_| ok) {
-                            crate::browser::live::written(&workspace.join(path));
+                            crate::browser::live::written(&workspace, &workspace.join(path));
                         }
                         tool.changed_path = changed;
                         tool.started_at = started_at;
@@ -1921,13 +1926,16 @@ impl App {
         }
         // `browser` waits for the page's first frame (a headless browser takes a second or two to start).
         if self.staged("browser") && self.shot.as_ref().is_some_and(|shot| shot.started.elapsed() < Duration::from_secs(15)) {
-            let v = crate::browser::live::view();
-            let landed = v.seq > 0 && !v.loading && v.url.starts_with("file:");
-            drop(v);
+            // A frame has a size; `seq` also moves when a page is reset, with nothing to show.
+            let landed = crate::browser::live::with(&self.conv.workspace(), |v| v.size[0] > 0 && !v.loading && !v.url.is_empty() && v.url != "about:blank");
             let since = ctx.data_mut(|d| *d.get_temp_mut_or_insert_with(egui::Id::new("browser-landed"), || landed.then(Instant::now)));
             if !landed || since.is_none_or(|at| at.elapsed() < Duration::from_millis(1800)) {
                 if landed && since.is_none() {
                     ctx.data_mut(|d| d.insert_temp(egui::Id::new("browser-landed"), Some(Instant::now())));
+                    // `stretch`: the page over the whole window once it is there, its player filling it.
+                    if self.staged("stretch") {
+                        browser_pane::stretch(self);
+                    }
                 }
                 return;
             }
@@ -2021,6 +2029,8 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Closed rather than killed, so the browser writes its cookies (sign-ins) out; killed if it does not answer.
+        let _ = self.rt.block_on(async { tokio::time::timeout(Duration::from_secs(3), crate::browser::live::shutdown()).await });
         crate::browser::live::shutdown_now();
         drafts::keep(self, true);
         // Chats are written by another thread: the last save has to land before the program goes. Listed once
@@ -2123,9 +2133,16 @@ impl eframe::App for App {
                 ui.scope_builder(egui::UiBuilder::new().max_rect(full), |ui| sidebar::show(self, ui));
             });
         }
+        // Each chat's page: streamed when its pane is open, heard only then and while the window is up, and elsewhere
+        // muted, and paused unless the chat's agent is still at work.
+        let here = self.conv.workspace();
+        let pane_open = browser_pane::open_here(self);
+        let working: Vec<PathBuf> = self.runs.iter().map(|run| run.parked.as_ref().map_or_else(|| here.clone(), |chat| chat.workspace())).collect();
+        crate::browser::live::sync(&here, pane_open, ctx.input(|i| i.viewport().minimized) != Some(true), &working);
         // A fixed rail, and only when the window has room for it (the web hides it under 1024). It slides as the
-        // chat list does: its content keeps its width and is cut off at the window's edge.
-        let rail = ctx.animate_bool_with_time_and_easing(egui::Id::new("rail-open"), self.settings.workspace_open && ctx.content_rect().width() >= 1024.0, 0.3, egui::emath::easing::cubic_out);
+        // chat list does: its content keeps its width and is cut off at the window's edge. It makes way for the Browser
+        // pane and comes back when the pane closes: the two side by side left the chat a strip.
+        let rail = ctx.animate_bool_with_time_and_easing(egui::Id::new("rail-open"), self.rail_shown() && ctx.content_rect().width() >= 1024.0, 0.3, egui::emath::easing::cubic_out);
         if rail > 0.0 {
             egui::Panel::right("workspace").exact_size((workspace::WIDTH * rail).round()).resizable(false).show_separator_line(false).frame(egui::Frame::new().fill(p.bg2)).show(ui, |ui| {
                 let rect = ui.max_rect();

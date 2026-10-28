@@ -104,6 +104,9 @@ pub const PANEL_RIGHT: Icon = line(r#"<rect x="3" y="4" width="18" height="16" r
 pub const FIND: Icon = line(r#"<circle cx="10" cy="10" r="6"/><path stroke-linecap="round" d="M14.5 14.5L20 20"/><path stroke-linecap="round" d="M7.5 10h5"/>"#, 1.7);
 pub const FULLSCREEN: Icon = line(path!("M8 3H5a2 2 0 00-2 2v3m18 0V5a2 2 0 00-2-2h-3m0 18h3a2 2 0 002-2v-3M3 16v3a2 2 0 002 2h3"), 1.6);
 pub const FULLSCREEN_EXIT: Icon = line(path!("M8 3v3a2 2 0 01-2 2H3m18 0h-3a2 2 0 01-2-2V3m0 18v-3a2 2 0 012-2h3M3 16h3a2 2 0 012 2v3"), 1.6);
+/// The Browser pane's player-only view, in and out (Lucide's maximize-2 and minimize-2).
+pub const STRETCH: Icon = line(path!("M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"), 1.7);
+pub const STRETCH_EXIT: Icon = line(path!("M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"), 1.7);
 pub const ARROW_DOWN: Icon = line(path!("M12 5v14M5 12l7 7 7-7"), 2.0);
 pub const WARNING: Icon = line(path!("M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"), 1.8);
 

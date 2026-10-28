@@ -137,9 +137,10 @@ pub fn check_browser_policy(command: &str, args: &[String], workspace_dir: &str)
 
 /// The rule the live page keeps: data:, blob: and about: pass; http and https pass for the public web and for this
 /// machine (`localhost`), so the agent can look at the site it is building; a file passes only from inside the
-/// chat's workspace (`live::root`). Private networks, the cloud metadata address and every other file are refused.
-pub async fn check(raw: &str) -> Result<(), String> {
-    allowed_in(raw, crate::browser::live::root().as_deref()).await
+/// chat's workspace (`root`, the page's own). Private networks, the cloud metadata address and every other file are
+/// refused.
+pub async fn check(raw: &str, root: Option<&std::path::Path>) -> Result<(), String> {
+    allowed_in(raw, root).await
 }
 
 async fn allowed_in(raw: &str, root: Option<&std::path::Path>) -> Result<(), String> {

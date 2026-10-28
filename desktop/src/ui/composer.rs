@@ -660,15 +660,18 @@ fn model_is_claude(app: &App) -> bool {
     models::resolve(&app.settings.model, &app.settings.custom_models).provider == models::ProviderId::Anthropic
 }
 
-/// The track with a stop for each depth and a knob that is dragged or clicked to one. Dimmed while Auto picks; touching
-/// it hands the choice back. Returns the depth let go on.
+/// The track with a stop for each depth and a knob that is dragged or clicked to one. Drawn after the effort card the
+/// user held up (2026-10-28): a thick track lit in the theme's accent up to a big accent knob, the knob ringed in the
+/// theme's lightest colour over a soft shadow, two sparks off it while it is held, the names in small capitals. Dimmed
+/// while Auto picks; touching it hands the choice back. Returns the depth let go on.
 fn slider(ui: &mut egui::Ui, levels: &[&'static str], current: &str, auto: bool) -> Option<&'static str> {
     let p = p();
     let width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(vec2(width, 46.0), Sense::click_and_drag());
-    let response = response.on_hover_cursor(CursorIcon::PointingHand);
+    let (rect, response) = ui.allocate_exact_size(vec2(width, 52.0), Sense::click_and_drag());
+    let cursor = if response.dragged() { CursorIcon::Grabbing } else { CursorIcon::PointingHand };
+    let response = response.on_hover_cursor(cursor);
     let n = levels.len().max(2) as f32 - 1.0;
-    let (left, right) = (rect.left() + 9.0, rect.right() - 9.0);
+    let (left, right) = (rect.left() + 10.0, rect.right() - 10.0);
     let x_of = |i: f32| left + (right - left) * i / n;
     let index = levels.iter().position(|l| *l == current).unwrap_or(0) as f32;
     // Dragged, the knob follows the pointer; let go, it glides to the nearest stop.
@@ -677,30 +680,51 @@ fn slider(ui: &mut egui::Ui, levels: &[&'static str], current: &str, auto: bool)
     let at = ui.ctx().animate_value_with_time(response.id.with("knob"), target, if response.dragged() { 0.0 } else { 0.14 });
     let picked = if response.drag_stopped() || response.clicked() { pointer.map(|f| levels[f.round() as usize]) } else { None };
 
+    // Auto greys the accent rather than fading it: a see-through knob shows the track through it.
     let fade = ui.ctx().animate_bool_with_time(response.id.with("auto"), auto, 0.15);
-    let dim = |c: Color32| c.gamma_multiply(1.0 - 0.55 * fade);
-    let y = rect.top() + 9.0;
-    let track = Rect::from_min_max(pos2(left, y - 2.5), pos2(right, y + 2.5));
-    ui.painter().rect_filled(track, 2.5, alpha(p.text, 9.0));
-    ui.painter().rect_filled(Rect::from_min_max(track.min, pos2(x_of(at), track.max.y)), 2.5, dim(p.accent));
+    let accent = mix(p.muted, 55.0 * fade, p.accent);
+    let ring = if p.is_dark() { mix(p.text, 90.0, p.elevated) } else { Color32::WHITE };
+    let hot = widgets::fade(ui, response.id, response.hovered() || response.dragged());
+    let held = widgets::fade(ui, response.id.with("held"), response.dragged() || response.is_pointer_button_down_on());
+    let y = rect.top() + 15.0;
+    let knob = pos2(x_of(at), y);
+    let painter = ui.painter();
+    let track = Rect::from_min_max(pos2(left - 6.0, y - 5.0), pos2(right + 6.0, y + 5.0));
+    painter.rect_filled(track, 5.0, alpha(p.text, if p.is_dark() { 8.0 } else { 7.0 }));
+    painter.rect_filled(Rect::from_min_max(track.min, pos2(knob.x, track.max.y)), 5.0, alpha(accent, 30.0));
     for i in 0..levels.len() {
         let x = x_of(i as f32);
-        let filled = i as f32 <= at + 0.01;
-        ui.painter().circle_filled(pos2(x, y), 2.0, if filled { dim(Color32::from_white_alpha(170)) } else { alpha(p.text, 28.0) });
+        let lit = (i as f32) <= at + 0.01;
+        painter.circle_filled(pos2(x, y), 2.0, if lit { alpha(accent, 70.0) } else { alpha(p.text, 26.0) });
     }
-    let hot = widgets::fade(ui, response.id, response.hovered() || response.dragged());
-    let knob = pos2(x_of(at), y);
-    ui.painter().circle_filled(knob + vec2(0.0, 1.0), 9.5 + hot, Color32::from_black_alpha(70));
-    ui.painter().circle(knob, 8.5 + hot, dim(Color32::WHITE), Stroke::new(1.0, Color32::from_black_alpha(40)));
-    ui.painter().circle_filled(knob, 3.0, dim(p.accent));
+    // A shadow egui cannot blur, laid down as three widening rings.
+    let r = 11.0 + hot;
+    for (grow, a) in [(3.5, 14u8), (2.0, 24), (0.8, 36)] {
+        painter.circle_filled(knob + vec2(0.0, 2.0), r + grow, Color32::from_black_alpha(if p.is_dark() { a * 2 } else { a }));
+    }
+    painter.circle_filled(knob, r, ring);
+    painter.circle_filled(knob, r - 3.0, accent);
+    // The sparks: two short strokes thrown up off the knob, out further while it is held.
+    let sparks = hot.max(held) * (1.0 - fade);
+    if sparks > 0.01 {
+        let stroke = Stroke::new(1.6, alpha(accent, 100.0 * sparks));
+        for angle in [-2.25f32, -0.89] {
+            let dir = vec2(angle.cos(), angle.sin());
+            let from = r + 3.0 + 1.5 * held;
+            painter.line_segment([knob + dir * from, knob + dir * (from + 3.5 + 1.5 * held)], stroke);
+        }
+    }
 
-    // Each name under its stop; the end ones kept inside the track's ends.
+    // Each name under its stop in small capitals; the end ones kept inside the track's ends.
     for (i, level) in levels.iter().enumerate() {
         let on = !auto && *level == current;
-        let label = EFFORTS.iter().find(|e| e.0 == *level).map_or(*level, |e| e.1);
-        let g = widgets::galley(ui, label, theme::font(11.5, if on { W::Semibold } else { W::Regular }), if on { p.text } else { p.muted });
+        let label = EFFORTS.iter().find(|e| e.0 == *level).map_or(*level, |e| e.1).to_uppercase();
+        let mut job = egui::text::LayoutJob::default();
+        let format = egui::TextFormat { font_id: theme::font(10.0, if on { W::Bold } else { W::Medium }), color: if on { p.text } else { p.muted }, extra_letter_spacing: 0.8, ..Default::default() };
+        job.append(&label, 0.0, format);
+        let g = ui.painter().layout_job(job);
         let x = (x_of(i as f32) - g.size().x / 2.0).clamp(rect.left(), rect.right() - g.size().x);
-        widgets::text_at(ui, x, rect.top() + 34.0, g);
+        widgets::text_at(ui, x, rect.top() + 42.0, g);
     }
     if response.dragged() || ui.ctx().animate_value_with_time(response.id.with("settle"), index, 0.14) != index {
         ui.ctx().request_repaint();

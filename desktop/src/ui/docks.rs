@@ -50,7 +50,7 @@ pub fn stage(app: &mut App, token: &str) {
 pub fn header(app: &mut App, ui: &mut egui::Ui) {
     workspace::refresh(app);
     // The files chip stands in for the panel and goes when the panel is there.
-    if app.settings.workspace_open {
+    if app.rail_shown() {
         app.ws.docks.files_open = false;
     } else {
         files(app, ui);

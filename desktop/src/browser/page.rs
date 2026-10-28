@@ -12,6 +12,7 @@ use base64::Engine;
 use regex::Regex;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
@@ -419,50 +420,112 @@ struct Log {
 pub struct Page {
     cdp: Cdp,
     sid: String,
+    target: String,
+    /// The chat's workspace: the only folder a `file:` page may come from. It follows the chat when a rename moves it.
+    root: Arc<StdMutex<Option<PathBuf>>>,
     log: Arc<StdMutex<Log>>,
     /// Counts DOMContentLoaded events, so a navigation can wait for the next one.
     dom: watch::Receiver<u64>,
     /// Cleared when the browser's connection is gone.
     alive: Arc<std::sync::atomic::AtomicBool>,
+    /// The page is streaming its frames to the pane.
+    casting: std::sync::atomic::AtomicBool,
 }
 
 impl Page {
-    /// Open a blank page on the browser and turn on the events and the request check.
-    pub async fn open(cdp: Cdp, events: mpsc::UnboundedReceiver<Value>) -> Result<Page, String> {
-        let target = cdp.call("Target.createTarget", json!({ "url": "about:blank" }), None).await?;
-        let attached = cdp.call("Target.attachToTarget", json!({ "targetId": target["targetId"], "flatten": true }), None).await?;
-        let sid = attached["sessionId"].as_str().ok_or_else(|| "the browser did not attach a page".to_string())?.to_string();
-        for method in ["Page.enable", "Runtime.enable", "Network.enable"] {
-            cdp.call(method, json!({}), Some(&sid)).await?;
-        }
-        let (width, height) = crate::browser::live::VIEWPORT;
-        cdp.call("Emulation.setDeviceMetricsOverride", json!({ "width": width, "height": height, "deviceScaleFactor": 1, "mobile": false }), Some(&sid)).await?;
-        // Every request pauses here, so a non-public address is refused before the browser opens it.
-        cdp.call("Fetch.enable", json!({ "patterns": [{ "urlPattern": "*" }] }), Some(&sid)).await?;
+    /// Open a blank page on the browser and turn on the events and the request check. `subscribe` gives the page its
+    /// share of the browser's events once its session is known.
+    pub async fn open(cdp: Cdp, subscribe: impl FnOnce(&str) -> mpsc::UnboundedReceiver<Value>, root: Option<PathBuf>) -> Result<Page, String> {
+        // A window of its own: a second tab in one window is a hidden tab, whose timers and video the browser slows down,
+        // and whose screenshots can come back stale.
+        let target = cdp.call("Target.createTarget", json!({ "url": "about:blank", "newWindow": true }), None).await?;
+        let target = target["targetId"].as_str().unwrap_or("").to_string();
+        let ready = async {
+            let attached = cdp.call("Target.attachToTarget", json!({ "targetId": target, "flatten": true }), None).await?;
+            let sid = attached["sessionId"].as_str().ok_or_else(|| "the browser did not attach a page".to_string())?.to_string();
+            let events = subscribe(&sid);
+            for method in ["Page.enable", "Runtime.enable", "Network.enable"] {
+                cdp.call(method, json!({}), Some(&sid)).await?;
+            }
+            let (width, height) = crate::browser::live::VIEWPORT;
+            cdp.call("Emulation.setDeviceMetricsOverride", json!({ "width": width, "height": height, "deviceScaleFactor": 1, "mobile": false }), Some(&sid)).await?;
+            // Every window believes it has the focus, so a site that pauses when it loses it plays on for the agent.
+            let _ = cdp.call("Emulation.setFocusEmulationEnabled", json!({ "enabled": true }), Some(&sid)).await;
+            cdp.call("Page.addScriptToEvaluateOnNewDocument", json!({ "source": crate::browser::live::MEDIA_JS }), Some(&sid)).await?;
+            // Every request pauses here, so a non-public address is refused before the browser opens it.
+            cdp.call("Fetch.enable", json!({ "patterns": [{ "urlPattern": "*" }] }), Some(&sid)).await?;
+            Ok::<_, String>((sid, events))
+        };
+        // A window that failed half way is closed: the browser is shared, and each failed try would leave one open.
+        let (sid, events) = match ready.await {
+            Ok(ready) => ready,
+            Err(e) => {
+                let _ = cdp.call("Target.closeTarget", json!({ "targetId": target }), None).await;
+                return Err(e);
+            }
+        };
 
+        let root = Arc::new(StdMutex::new(root));
         let log = Arc::new(StdMutex::new(Log::default()));
         let (dom_tx, dom_rx) = watch::channel(0u64);
         let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let gone = alive.clone();
-        let (pump_cdp, pump_sid, pump_log) = (cdp.clone(), sid.clone(), log.clone());
+        let (pump_cdp, pump_sid, pump_log, pump_root) = (cdp.clone(), sid.clone(), log.clone(), root.clone());
         tokio::spawn(async move {
-            pump(events, pump_cdp, pump_sid, pump_log, dom_tx).await;
+            pump(events, pump_cdp, pump_sid, pump_log, dom_tx, pump_root).await;
             gone.store(false, std::sync::atomic::Ordering::SeqCst);
         });
-        Ok(Page { cdp, sid, log, dom: dom_rx, alive })
+        Ok(Page { cdp, sid, target, root, log, dom: dom_rx, alive, casting: Default::default() })
     }
 
     pub fn alive(&self) -> bool {
         self.alive.load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    pub fn sid(&self) -> &str {
+        &self.sid
+    }
+
+    fn root(&self) -> Option<PathBuf> {
+        self.root.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// The chat's workspace moved (a rename): `file:` pages are judged against the new folder.
+    pub fn moved_to(&self, root: PathBuf) {
+        *self.root.lock().unwrap_or_else(|e| e.into_inner()) = Some(root);
+    }
+
+    /// Closes the page's window. The browser stays up for the other chats.
+    pub async fn close(&self) -> Result<(), String> {
+        self.alive.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.cdp.call("Target.closeTarget", json!({ "targetId": self.target }), None).await.map(|_| ())
+    }
+
     /// Frames of the page as it is drawn, for the Browser pane (`live::frame`).
+    /// Starts or stops the frames. Asked twice, it starts once: a second start while the first was under way left the
+    /// browser sending nothing at all, and the pane said "Opening…" for good (two runs in five, 2026-10-28).
     pub async fn screencast(&self, on: bool) -> Result<(), String> {
-        // Room for the tallest pane at the widest layout, so a frame is never shrunk before the pane draws it.
-        if on {
-            self.call("Page.startScreencast", json!({ "format": "jpeg", "quality": 72, "maxWidth": 1280, "maxHeight": 1600, "everyNthFrame": 1 })).await.map(|_| ())
+        use std::sync::atomic::Ordering::SeqCst;
+        if self.casting.swap(on, SeqCst) == on {
+            return Ok(());
+        }
+        // Room for a stretched page at its widest, so a frame is never shrunk before the pane draws it.
+        let done = if on {
+            self.call("Page.startScreencast", json!({ "format": "jpeg", "quality": 80, "maxWidth": 1920, "maxHeight": 1920, "everyNthFrame": 1 })).await.map(|_| ())
         } else {
             self.call("Page.stopScreencast", json!({})).await.map(|_| ())
+        };
+        if done.is_err() {
+            self.casting.store(!on, SeqCst);
+        }
+        done
+    }
+
+    /// Starts the frames over, if they are on.
+    pub async fn recast(&self) {
+        if self.casting.load(std::sync::atomic::Ordering::SeqCst) {
+            let _ = self.screencast(false).await;
+            let _ = self.screencast(true).await;
         }
     }
 
@@ -532,32 +595,49 @@ impl Page {
         }
     }
 
-    /// Wait until the element is there (and shown, unless forced), scroll it into view, and return its centre.
-    async fn locate(&self, selector: &str, force: bool, timeout: Duration) -> Result<(f64, f64), String> {
+    /// Wait until the element is there (and shown, unless forced), scroll it into view, and return its centre and what
+    /// it says (its label, its text or its placeholder), for the pane's pointer, and whether it holds a password: a
+    /// password field's value is never put on the screen, which shows it as dots.
+    async fn locate(&self, selector: &str, force: bool, timeout: Duration) -> Result<(f64, f64, String, bool), String> {
         let sel = serde_json::to_string(selector).unwrap_or_default();
         let js = format!(
-            r#"(() => {{ const el = document.querySelector({sel}); if (!el) return null; el.scrollIntoView({{block: "center", inline: "center"}}); const r = el.getBoundingClientRect(); const shown = r.width > 0 && r.height > 0; if (!shown && !{force}) return null; return [r.left + r.width / 2, r.top + r.height / 2]; }})()"#
+            r#"(() => {{ const el = document.querySelector({sel}); if (!el) return null; el.scrollIntoView({{block: "center", inline: "center"}}); const r = el.getBoundingClientRect(); const shown = r.width > 0 && r.height > 0; if (!shown && !{force}) return null; const secret = el.type === "password" || /password/i.test(el.autocomplete || ""); const said = (el.getAttribute("aria-label") || el.innerText || el.placeholder || el.title || (secret ? "" : el.value) || "").trim().split("\n")[0].slice(0, 40); return [r.left + r.width / 2, r.top + r.height / 2, said, secret]; }})()"#
         );
         let v = self.poll(&js, timeout).await?;
-        Ok((v[0].as_f64().unwrap_or(0.0), v[1].as_f64().unwrap_or(0.0)))
+        Ok((v[0].as_f64().unwrap_or(0.0), v[1].as_f64().unwrap_or(0.0), v[2].as_str().unwrap_or("").to_string(), v[3].as_bool().unwrap_or(false)))
     }
 
-    pub async fn click(&self, selector: &str, force: bool) -> Result<(), String> {
-        let (x, y) = self.locate(selector, force, NAV_TIMEOUT).await?;
+    /// Shows the agent's pointer going to a point, and gives someone watching the moment to see it get there.
+    async fn point(&self, x: f64, y: f64, what: String, click: bool) {
+        crate::browser::live::pointer(&self.sid, x, y, what, click);
+        if crate::browser::live::watched(&self.sid) {
+            tokio::time::sleep(Duration::from_millis(320)).await;
+        }
+    }
+
+    /// Clicks the element's centre. True when it holds a password.
+    pub async fn click(&self, selector: &str, force: bool) -> Result<bool, String> {
+        let (x, y, said, secret) = self.locate(selector, force, NAV_TIMEOUT).await?;
+        self.point(x, y, if said.is_empty() { "Clicking".to_string() } else { format!("Clicking “{said}”") }, true).await;
         for kind in ["mousePressed", "mouseReleased"] {
             self.call("Input.dispatchMouseEvent", json!({ "type": kind, "x": x, "y": y, "button": "left", "clickCount": 1 })).await?;
         }
-        Ok(())
+        Ok(secret)
     }
 
     /// Click to focus, clear the field the way fill("") does, then send one key event per character.
     pub async fn type_text(&self, selector: &str, text: &str, press_enter: bool) -> Result<(), String> {
-        self.click(selector, false).await?;
+        let secret = self.click(selector, false).await?;
         let sel = serde_json::to_string(selector).unwrap_or_default();
         self.eval(&format!(
             r#"(() => {{ const el = document.querySelector({sel}); if (!el) return; el.focus(); try {{ const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype; Object.getOwnPropertyDescriptor(proto, "value").set.call(el, ""); }} catch (e) {{}} el.dispatchEvent(new Event("input", {{bubbles: true}})); }})()"#
         ))
         .await?;
+        if let Some(at) = crate::browser::live::with_sid_pointer(&self.sid) {
+            let shown: String = text.chars().take(32).collect();
+            let what = if secret { "Typing a password".to_string() } else { format!("Typing “{shown}{}”", if text.chars().count() > 32 { "…" } else { "" }) };
+            self.point(at.0 as f64, at.1 as f64, what, false).await;
+        }
         for c in text.chars() {
             let key = c.to_string();
             self.call("Input.dispatchKeyEvent", json!({ "type": "keyDown", "key": key, "text": key, "unmodifiedText": key })).await?;
@@ -620,7 +700,7 @@ impl Page {
 
     /// Navigate and wait for DOMContentLoaded. Returns the landed URL and the document's HTTP status.
     pub async fn goto(&self, url: &str) -> Result<(String, Option<u16>), String> {
-        policy::check(url).await?;
+        policy::check(url, self.root().as_deref()).await?;
         let mut dom = self.dom.clone();
         dom.borrow_and_update();
         self.log.lock().unwrap().doc_status = None;
@@ -636,7 +716,7 @@ impl Page {
         let landed = self.url().await?;
         let status = self.log.lock().unwrap().doc_status;
         // A redirect hop is not always stopped by the request check, so the final address is checked too.
-        if policy::check(&landed).await.is_err() {
+        if policy::check(&landed, self.root().as_deref()).await.is_err() {
             let _ = self.call("Page.navigate", json!({ "url": "about:blank" })).await;
             return Err(format!("Redirected to {landed}, which is not on the public web — not loaded."));
         }
@@ -655,7 +735,7 @@ impl Page {
 }
 
 /// Reads the browser's events for one page: console, exceptions, network failures, DOM events, and paused requests.
-async fn pump(mut events: mpsc::UnboundedReceiver<Value>, cdp: Cdp, sid: String, log: Arc<StdMutex<Log>>, dom: watch::Sender<u64>) {
+async fn pump(mut events: mpsc::UnboundedReceiver<Value>, cdp: Cdp, sid: String, log: Arc<StdMutex<Log>>, dom: watch::Sender<u64>, root: Arc<StdMutex<Option<PathBuf>>>) {
     let verdicts: Arc<StdMutex<HashMap<String, bool>>> = Default::default();
     while let Some(ev) = events.recv().await {
         if ev["sessionId"].as_str() != Some(sid.as_str()) {
@@ -702,15 +782,15 @@ async fn pump(mut events: mpsc::UnboundedReceiver<Value>, cdp: Cdp, sid: String,
             "Page.screencastFrame" => crate::browser::live::frame(&cdp, &sid, p),
             "Page.frameNavigated" if p["frame"]["parentId"].is_null() => {
                 let url = p["frame"]["url"].as_str().unwrap_or("").to_string();
-                crate::browser::live::navigated(Some(&url), None, None);
+                crate::browser::live::navigated(&sid, Some(&url), None, None);
             }
-            "Page.frameStartedLoading" => crate::browser::live::navigated(None, Some(true), None),
+            "Page.frameStartedLoading" => crate::browser::live::navigated(&sid, None, Some(true), None),
             "Page.loadEventFired" | "Page.frameStoppedLoading" => {
-                crate::browser::live::navigated(None, Some(false), None);
+                crate::browser::live::navigated(&sid, None, Some(false), None);
                 let (cdp, sid) = (cdp.clone(), sid.clone());
                 tokio::spawn(async move {
                     if let Ok(r) = cdp.call("Runtime.evaluate", json!({ "expression": "document.title", "returnByValue": true }), Some(&sid)).await {
-                        crate::browser::live::navigated(None, None, Some(r["result"]["value"].as_str().unwrap_or("").to_string()));
+                        crate::browser::live::navigated(&sid, None, None, Some(r["result"]["value"].as_str().unwrap_or("").to_string()));
                     }
                 });
             }
@@ -718,9 +798,9 @@ async fn pump(mut events: mpsc::UnboundedReceiver<Value>, cdp: Cdp, sid: String,
             "Fetch.requestPaused" => {
                 let id = p["requestId"].as_str().unwrap_or("").to_string();
                 let url = p["request"]["url"].as_str().unwrap_or("").to_string();
-                let (cdp, sid, verdicts) = (cdp.clone(), sid.clone(), verdicts.clone());
+                let (cdp, sid, verdicts, root) = (cdp.clone(), sid.clone(), verdicts.clone(), root.lock().unwrap_or_else(|e| e.into_inner()).clone());
                 tokio::spawn(async move {
-                    let ok = allowed_cached(&verdicts, &url).await;
+                    let ok = allowed_cached(&verdicts, &url, root.as_deref()).await;
                     let (method, params) = if ok {
                         ("Fetch.continueRequest", json!({ "requestId": id }))
                     } else {
@@ -735,16 +815,16 @@ async fn pump(mut events: mpsc::UnboundedReceiver<Value>, cdp: Cdp, sid: String,
 }
 
 /// The request rule, with one verdict kept per scheme and host.
-async fn allowed_cached(cache: &StdMutex<HashMap<String, bool>>, url: &str) -> bool {
+async fn allowed_cached(cache: &StdMutex<HashMap<String, bool>>, url: &str, root: Option<&std::path::Path>) -> bool {
     // A file's verdict is its own path's: one for the scheme would let every file through after the first.
     if url.starts_with("file:") {
-        return policy::check(url).await.is_ok();
+        return policy::check(url, root).await.is_ok();
     }
     let Some(key) = policy::host_key(url) else { return false };
     if let Some(v) = cache.lock().unwrap().get(&key).copied() {
         return v;
     }
-    let v = policy::check(url).await.is_ok();
+    let v = policy::check(url, root).await.is_ok();
     cache.lock().unwrap().insert(key, v);
     v
 }

@@ -1017,7 +1017,11 @@ impl Conversation {
             if moved {
                 // Files can arrive before the chat is named; they follow it.
                 let old = if self.slug.is_empty() { self.id.clone() } else { self.slug.clone() };
-                let _ = std::fs::rename(data_dir().join("workspaces").join(&old), data_dir().join("workspaces").join(&wanted));
+                let (from, to) = (data_dir().join("workspaces").join(&old), data_dir().join("workspaces").join(&wanted));
+                if std::fs::rename(&from, &to).is_ok() {
+                    // The chat's page in the Browser pane is known by this folder.
+                    crate::browser::live::moved(&from, &to);
+                }
                 let _ = std::fs::rename(data_dir().join("state").join(&old), data_dir().join("state").join(&wanted));
                 // A connected GitHub repository is keyed by the same folder name, so it follows too.
                 let links = data_dir().join("github").join("workspaces");
@@ -1045,6 +1049,7 @@ impl Conversation {
         // ponytail: a program closed in that second leaves what was not yet removed; sweep folders without a chat.json at start if that shows.
         let folders = [chats_dir().join(&meta.slug), data_dir().join("workspaces").join(&meta.slug), data_dir().join("state").join(&meta.slug)];
         let _ = std::fs::remove_file(folders[0].join("chat.json"));
+        crate::browser::live::forget(&folders[1]);
         crate::background(move || {
             for folder in folders {
                 let _ = std::fs::remove_dir_all(folder);

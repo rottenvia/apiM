@@ -292,6 +292,13 @@ pub fn stage(app: &mut App, token: &str) {
         // the page's first frame.
         "browser" => {
             let root = app.conv.workspace();
+            // `APIM_SHOT_URL` opens an address instead.
+            if let Ok(url) = std::env::var("APIM_SHOT_URL") {
+                crate::browser::live::with(&root, |v| v.wanted = true);
+                let at = root.clone();
+                app.rt.spawn(async move { crate::browser::live::act(&at, crate::browser::live::Input::Go(url)).await });
+                return;
+            }
             let named = std::env::var("APIM_SHOT_FILE").ok();
             let page = named.or_else(|| snapshots::list_files(&root).into_iter().map(|f| f.0).find(|p| is_html(p)));
             match page.and_then(|p| snapshots::resolve_inside(&root, &p).ok()) {

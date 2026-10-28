@@ -74,10 +74,11 @@ Computer use is on: you see the user's screen and work its mouse and keyboard wi
 
 Browser use:
 - browse opens a page in a real browser on this computer and runs its JavaScript: use it for a site that is an app (fetch_url sees only the empty shell a server sends before scripts run), to read what a page really shows, and to check a page you built. fetch_url stays the quick way to read plain HTML.
-- The user watches your browser live in a pane beside the chat and may click or type in it too. The page stays open between calls, so the next browse starts where you left off.
+- The user watches your browser live in a pane beside the chat and may click or type in it too. Each chat has a page of its own that stays open between calls, so the next browse starts where you left off.
+- Go straight to an address when you can write it, rather than typing into the site's own search box: https://www.youtube.com/results?search_query=<words>, https://www.google.com/search?q=<words>, https://en.wikipedia.org/wiki/<Title>. It is one step instead of several.
 - To check a web page you made, open it from the workspace (file:///<its absolute path>) or from the server you started (http://localhost:PORT), then look at the screenshot: a page that loads can still look wrong.
 - To learn from a video (a tutorial, a talk, a bug recording), use the video tools on its URL or file rather than playing it in the browser: they see every part of it and its transcript.
-- It has a profile of its own. Never close, restart or drive the user's own browser, and never borrow their signed-in sessions: if a page needs an account, ask the user."
+- It has a profile of its own, kept between runs: a site the user signs into in the pane stays signed in. Never close, restart or drive the user's own browser. If a page needs an account, ask the user to sign in in the pane, then carry on; never type a password yourself."
     } else {
         "
 

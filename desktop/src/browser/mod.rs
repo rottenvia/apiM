@@ -1,8 +1,8 @@
 //! Drives a Chromium-family browser that is already installed. Nothing is bundled or downloaded.
 //!
 //! The web app drives Playwright's own Chromium. Here the browser is found on the machine (Edge is always
-//! there on Windows 11), started headless with a fresh temporary profile, and driven over the DevTools
-//! Protocol. Its own profile is never touched.
+//! there on Windows 11), started headless on apiM's own profile, and driven over the DevTools Protocol. The
+//! user's own browser profile is never touched.
 
 pub mod cdp;
 pub mod live;
@@ -11,7 +11,7 @@ pub mod policy;
 pub mod window;
 
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
@@ -71,18 +71,24 @@ pub fn available() -> bool {
     *FOUND
 }
 
-/// The child process and its profile. Dropping it kills the whole process tree and removes the profile.
+/// The child process, and the profile to remove after it when it was a throwaway one. Dropping it kills the whole
+/// process tree.
 struct Process {
     child: Child,
-    profile: PathBuf,
+    throwaway: Option<PathBuf>,
 }
 
 impl Drop for Process {
     fn drop(&mut self) {
-        crate::tools::exec::kill_tree(self.child.id());
+        // A browser that already quit is not killed: its number may belong to another program by now.
+        if !matches!(self.child.try_wait(), Ok(Some(_))) {
+            crate::tools::exec::kill_tree(self.child.id());
+        }
         let _ = self.child.wait();
         // ponytail: Edge can still hold files for a moment after the kill, so a leftover temp profile is possible.
-        let _ = std::fs::remove_dir_all(&self.profile);
+        if let Some(profile) = &self.throwaway {
+            let _ = std::fs::remove_dir_all(profile);
+        }
     }
 }
 
@@ -92,15 +98,45 @@ pub struct Browser {
     pub cdp: cdp::Cdp,
 }
 
-/// Start a fresh headless browser on a temporary profile and connect to it.
-/// Returns the browser and the stream of its events (console, exceptions, network).
+impl Browser {
+    /// Asks the browser to close and gives it two seconds to be gone before it is killed: it writes the profile's
+    /// cookies on its way out, and killed at once a sign-in of the last half minute could be lost.
+    pub async fn quit(mut self) {
+        let _ = tokio::time::timeout(Duration::from_secs(2), self.cdp.call("Browser.close", serde_json::json!({}), None)).await;
+        for _ in 0..40 {
+            if matches!(self._proc.child.try_wait(), Ok(Some(_))) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
+/// Start a headless browser and connect to it. Returns the browser and the stream of its events (console, exceptions,
+/// network), for every page it will have.
+///
+/// Its profile is kept in the data folder, so an account signed into in the Browser pane is still signed in the next
+/// time; on a throwaway profile every start began signed out (asked for, 2026-10-28). The profile is apiM's, never the
+/// user's own browser's. Another apiM on the same data folder holds it, and a browser on a held profile hands its
+/// window over and quits: then this one runs on a throwaway profile.
 pub async fn launch() -> Result<(Browser, mpsc::UnboundedReceiver<Value>), String> {
     let exe = find_browser().ok_or_else(|| NOT_INSTALLED.to_string())?;
-    let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    let profile = std::env::temp_dir().join(format!("apim-browser-{}-{stamp}", std::process::id()));
-    std::fs::create_dir_all(&profile).map_err(|e| format!("Could not start the browser: {e}"))?;
+    match start(&exe, &crate::store::data_dir().join("browser"), false).await {
+        Ok(started) => Ok(started),
+        Err(_) => {
+            let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+            start(&exe, &std::env::temp_dir().join(format!("apim-browser-{}-{stamp}", std::process::id())), true).await
+        }
+    }
+}
 
-    let mut cmd = Command::new(&exe);
+async fn start(exe: &Path, profile: &Path, throwaway: bool) -> Result<(Browser, mpsc::UnboundedReceiver<Value>), String> {
+    std::fs::create_dir_all(profile).map_err(|e| format!("Could not start the browser: {e}"))?;
+    // Left by the last run, it names a port long closed, and would be read before the new browser writes its own.
+    let file = profile.join("DevToolsActivePort");
+    let _ = std::fs::remove_file(&file);
+
+    let mut cmd = Command::new(exe);
     cmd.args(["--headless=new", "--remote-debugging-port=0", "--no-first-run", "--no-default-browser-check", "--disable-gpu", "--window-size=1280,800", "--autoplay-policy=no-user-gesture-required"])
         .arg(format!("--user-agent={USER_AGENT}"))
         .arg(format!("--user-data-dir={}", profile.display()))
@@ -111,12 +147,14 @@ pub async fn launch() -> Result<(Browser, mpsc::UnboundedReceiver<Value>), Strin
     let child = quiet(&mut cmd).spawn().map_err(|e| format!("Could not start the browser: {e}"))?;
     #[cfg(windows)]
     tie_to_this_process(child.id());
-    // From here on, any early return drops `proc`, which kills the browser and removes the profile.
-    let proc = Process { child, profile: profile.clone() };
+    // From here on, any early return drops `proc`, which kills the browser (and removes a throwaway profile).
+    let mut proc = Process { child, throwaway: throwaway.then(|| profile.to_path_buf()) };
 
-    let file = profile.join("DevToolsActivePort");
     let started = Instant::now();
     let (port, path) = loop {
+        if let Ok(Some(_)) = proc.child.try_wait() {
+            return Err("Could not start the browser: it quit at once (its profile is in use by another apiM).".to_string());
+        }
         if let Ok(text) = std::fs::read_to_string(&file) {
             let mut lines = text.lines();
             if let (Some(port), Some(path)) = (lines.next(), lines.next()) {
