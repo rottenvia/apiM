@@ -604,7 +604,15 @@ fn effort_panel(app: &mut App, ui: &mut egui::Ui) {
         // The title and the switches share a row; the line under the title has the whole width, so a long model name
         // never runs under the switch.
         ui.horizontal(|ui| {
-            ui.label(widgets::lines("Thinking effort", 13.0, 20.0, W::Semibold, p.text));
+            // "Effort High", as Claude's own menu names the depth in its title.
+            let mut title = egui::text::LayoutJob::default();
+            let part = |weight, color| egui::TextFormat { font_id: theme::font(13.0, weight), color, line_height: Some(20.0), ..Default::default() };
+            title.append("Effort", 0.0, part(W::Medium, p.text2));
+            if !levels.is_empty() {
+                let name = if auto { "Auto" } else { EFFORTS.iter().find(|e| e.0 == current).map_or(current, |e| e.1) };
+                title.append(name, 6.0, part(W::Semibold, p.text));
+            }
+            ui.label(title);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 if widgets::popover_close(ui).clicked() {
@@ -632,7 +640,7 @@ fn effort_panel(app: &mut App, ui: &mut egui::Ui) {
         return;
     }
 
-    egui::Frame::new().inner_margin(egui::Margin { left: 22, right: 22, top: 18, bottom: 14 }).show(ui, |ui| {
+    egui::Frame::new().inner_margin(egui::Margin { left: 16, right: 16, top: 14, bottom: 14 }).show(ui, |ui| {
         if let Some(picked) = slider(ui, &levels, current, auto) {
             app.settings.effort = picked.into();
             app.settings.save();
@@ -642,13 +650,9 @@ fn effort_panel(app: &mut App, ui: &mut egui::Ui) {
     // Claude always thinks: its Low is the least it does, not a light extra.
     let what = if model_is_claude(app) && about.0 == "low" { "Claude always thinks a little; Low keeps it short." } else { about.2 };
     egui::Frame::new().inner_margin(egui::Margin { left: 16, right: 16, top: 0, bottom: 14 }).show(ui, |ui| {
+        // The depth's name is in the title.
         ui.set_width(ui.available_width());
-        let mut job = egui::text::LayoutJob::default();
-        job.wrap.max_width = ui.available_width();
-        let name = if auto { "Auto" } else { about.1 };
-        job.append(&format!("{name} · "), 0.0, egui::TextFormat { font_id: theme::font(12.0, W::Semibold), color: p.text, line_height: Some(18.0), ..Default::default() });
-        job.append(what, 0.0, egui::TextFormat { font_id: theme::font(12.0, W::Regular), color: p.text2, line_height: Some(18.0), ..Default::default() });
-        ui.label(job);
+        ui.add(egui::Label::new(widgets::lines(what, 12.0, 18.0, W::Regular, p.text2)).wrap());
         if !about.3.is_empty() {
             ui.add_space(4.0);
             ui.label(widgets::lines(about.3, 11.0, 16.0, W::Regular, p.warning));
@@ -660,18 +664,20 @@ fn model_is_claude(app: &App) -> bool {
     models::resolve(&app.settings.model, &app.settings.custom_models).provider == models::ProviderId::Anthropic
 }
 
-/// The track with a stop for each depth and a knob that is dragged or clicked to one. Drawn after the effort card the
-/// user held up (2026-10-28): a thick track lit in the theme's accent up to a big accent knob, the knob ringed in the
-/// theme's lightest colour over a soft shadow, two sparks off it while it is held, the names in small capitals. Dimmed
-/// while Auto picks; touching it hands the choice back. Returns the depth let go on.
+/// The track with a stop for each depth and a knob that is dragged or clicked to one, squared off as Claude's own
+/// effort menu draws it (asked for, 2026-10-28): "Faster" and "Smarter" over a thick track, lit in the theme's accent up
+/// to a tall rounded knob in its lightest colour. The depth's name is in the panel's title. Greyed while Auto picks;
+/// touching it hands the choice back. Returns the depth let go on.
 fn slider(ui: &mut egui::Ui, levels: &[&'static str], current: &str, auto: bool) -> Option<&'static str> {
+    const KNOB: egui::Vec2 = vec2(22.0, 34.0);
     let p = p();
     let width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(vec2(width, 52.0), Sense::click_and_drag());
+    let (rect, response) = ui.allocate_exact_size(vec2(width, 60.0), Sense::click_and_drag());
     let cursor = if response.dragged() { CursorIcon::Grabbing } else { CursorIcon::PointingHand };
     let response = response.on_hover_cursor(cursor);
     let n = levels.len().max(2) as f32 - 1.0;
-    let (left, right) = (rect.left() + 10.0, rect.right() - 10.0);
+    // The knob's centre at each end sits a few points inside the track, so the knob never pokes out of it.
+    let (left, right) = (rect.left() + 4.0 + KNOB.x / 2.0, rect.right() - 4.0 - KNOB.x / 2.0);
     let x_of = |i: f32| left + (right - left) * i / n;
     let index = levels.iter().position(|l| *l == current).unwrap_or(0) as f32;
     // Dragged, the knob follows the pointer; let go, it glides to the nearest stop.
@@ -680,52 +686,35 @@ fn slider(ui: &mut egui::Ui, levels: &[&'static str], current: &str, auto: bool)
     let at = ui.ctx().animate_value_with_time(response.id.with("knob"), target, if response.dragged() { 0.0 } else { 0.14 });
     let picked = if response.drag_stopped() || response.clicked() { pointer.map(|f| levels[f.round() as usize]) } else { None };
 
-    // Auto greys the accent rather than fading it: a see-through knob shows the track through it.
-    let fade = ui.ctx().animate_bool_with_time(response.id.with("auto"), auto, 0.15);
-    let accent = mix(p.muted, 55.0 * fade, p.accent);
-    let ring = if p.is_dark() { mix(p.text, 90.0, p.elevated) } else { Color32::WHITE };
-    let hot = widgets::fade(ui, response.id, response.hovered() || response.dragged());
-    let held = widgets::fade(ui, response.id.with("held"), response.dragged() || response.is_pointer_button_down_on());
-    let y = rect.top() + 15.0;
-    let knob = pos2(x_of(at), y);
-    let painter = ui.painter();
-    let track = Rect::from_min_max(pos2(left - 6.0, y - 5.0), pos2(right + 6.0, y + 5.0));
-    painter.rect_filled(track, 5.0, alpha(p.text, if p.is_dark() { 8.0 } else { 7.0 }));
-    painter.rect_filled(Rect::from_min_max(track.min, pos2(knob.x, track.max.y)), 5.0, alpha(accent, 30.0));
-    for i in 0..levels.len() {
-        let x = x_of(i as f32);
-        let lit = (i as f32) <= at + 0.01;
-        painter.circle_filled(pos2(x, y), 2.0, if lit { alpha(accent, 70.0) } else { alpha(p.text, 26.0) });
-    }
-    // A shadow egui cannot blur, laid down as three widening rings.
-    let r = 11.0 + hot;
-    for (grow, a) in [(3.5, 14u8), (2.0, 24), (0.8, 36)] {
-        painter.circle_filled(knob + vec2(0.0, 2.0), r + grow, Color32::from_black_alpha(if p.is_dark() { a * 2 } else { a }));
-    }
-    painter.circle_filled(knob, r, ring);
-    painter.circle_filled(knob, r - 3.0, accent);
-    // The sparks: two short strokes thrown up off the knob, out further while it is held.
-    let sparks = hot.max(held) * (1.0 - fade);
-    if sparks > 0.01 {
-        let stroke = Stroke::new(1.6, alpha(accent, 100.0 * sparks));
-        for angle in [-2.25f32, -0.89] {
-            let dir = vec2(angle.cos(), angle.sin());
-            let from = r + 3.0 + 1.5 * held;
-            painter.line_segment([knob + dir * from, knob + dir * (from + 3.5 + 1.5 * held)], stroke);
-        }
-    }
+    let small = |text: &str| widgets::galley(ui, text, theme::font(12.0, W::Regular), p.text2);
+    let (faster, smarter) = (small("Faster"), small("Smarter"));
+    widgets::text_at(ui, rect.left() + 2.0, rect.top() + 8.0, faster);
+    let smarter_x = rect.right() - 2.0 - smarter.size().x;
+    widgets::text_at(ui, smarter_x, rect.top() + 8.0, smarter);
 
-    // Each name under its stop in small capitals; the end ones kept inside the track's ends.
-    for (i, level) in levels.iter().enumerate() {
-        let on = !auto && *level == current;
-        let label = EFFORTS.iter().find(|e| e.0 == *level).map_or(*level, |e| e.1).to_uppercase();
-        let mut job = egui::text::LayoutJob::default();
-        let format = egui::TextFormat { font_id: theme::font(10.0, if on { W::Bold } else { W::Medium }), color: if on { p.text } else { p.muted }, extra_letter_spacing: 0.8, ..Default::default() };
-        job.append(&label, 0.0, format);
-        let g = ui.painter().layout_job(job);
-        let x = (x_of(i as f32) - g.size().x / 2.0).clamp(rect.left(), rect.right() - g.size().x);
-        widgets::text_at(ui, x, rect.top() + 42.0, g);
+    // Auto greys the accent rather than fading the knob: a see-through knob shows the track through it.
+    let fade = ui.ctx().animate_bool_with_time(response.id.with("auto"), auto, 0.15);
+    let accent = mix(p.muted, 60.0 * fade, p.accent);
+    let light = if p.is_dark() { mix(p.text, 92.0, p.elevated) } else { Color32::WHITE };
+    let hot = widgets::fade(ui, response.id, response.hovered() || response.dragged());
+    let y = rect.bottom() - KNOB.y / 2.0;
+    let knob_x = x_of(at);
+    let painter = ui.painter();
+    let track = Rect::from_min_max(pos2(rect.left(), y - 13.0), pos2(rect.right(), y + 13.0));
+    painter.rect(track, 8.0, alpha(p.text, if p.is_dark() { 7.0 } else { 6.0 }), Stroke::new(1.0, alpha(p.text, 6.0)), egui::StrokeKind::Inside);
+    painter.rect_filled(Rect::from_min_max(track.min, pos2(knob_x, track.max.y)), 8.0, alpha(accent, if p.is_dark() { 52.0 } else { 38.0 }));
+    for i in 0..levels.len() {
+        let lit = (i as f32) <= at + 0.01;
+        painter.circle_filled(pos2(x_of(i as f32), y), 2.2, if lit { alpha(light, 62.0) } else { alpha(p.text, 28.0) });
     }
+    // A shadow egui cannot blur, laid down as two widening rounded rects under the knob.
+    let knob = Rect::from_center_size(pos2(knob_x, y), KNOB + vec2(1.0, 1.0) * hot);
+    let dark = if p.is_dark() { 2u8 } else { 1 };
+    for (grow, a) in [(2.5, 20u8), (1.0, 34)] {
+        painter.rect_filled(knob.translate(vec2(0.0, 1.5)).expand(grow), 9.0 + grow, Color32::from_black_alpha(a * dark));
+    }
+    painter.rect(knob, 8.0, light, Stroke::new(1.0, Color32::from_black_alpha(22 * dark)), egui::StrokeKind::Inside);
+
     if response.dragged() || ui.ctx().animate_value_with_time(response.id.with("settle"), index, 0.14) != index {
         ui.ctx().request_repaint();
     }
