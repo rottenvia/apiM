@@ -2,7 +2,7 @@
 //! (src/lib/patch.ts, markers.ts, symbols.ts, code-index.ts, logs.ts, syntax-check.ts and their cases in
 //! src/lib/tools.ts). The text handed back is the web's, word for word: the model reads it.
 
-use crate::snapshots::{MAX_FILE_BYTES, clip_utf16, is_protected_path, list_files, record_previous};
+use crate::snapshots::{MAX_FILE_BYTES, clip_utf16, list_files, protected_at, record_previous};
 use crate::tools::files::resolve;
 use crate::tools::{Output, str_arg};
 use regex::Regex;
@@ -369,8 +369,11 @@ pub fn apply_patch(root: &Path, args: &Value) -> Output {
     for (at, hunk) in placed.iter().rev() {
         lines.splice(*at..at + hunk.expected.len(), hunk.replacement.iter().copied());
     }
-    if is_protected_path(rel) {
+    if protected_at(root, rel) {
         return error(root, args, &format!("{rel} is inside a protected folder (.git, .history or .snapshots) and cannot be written, moved or deleted by the file tools"));
+    }
+    if crate::tools::files::hard_linked(&path) {
+        return error(root, args, &format!("{rel} is a hard link to another file, and writing it would change that file too."));
     }
     record_previous(root, rel, &old);
     if let Err(e) = std::fs::write(&path, lines.join("\n")) {
@@ -420,7 +423,7 @@ const JSONC_NAMES: &str = r"(?i)(?:^|/)(?:\.eslintrc(?:\.[\w-]+)?\.json|\.babelr
 /// Parses each JS/TS file with the TypeScript parser when one is installed beside the app; prints JSON problems.
 const TS_CHECKER: &str = r#"
 let ts;
-try { ts = require(require.resolve("typescript", { paths: [process.cwd()] })); }
+try { ts = require(require.resolve("typescript", { paths: [process.argv[1]] })); }
 catch { process.stdout.write("NO_TS"); process.exit(0); }
 const fs = require("fs");
 const files = JSON.parse(require("fs").readFileSync(0, "utf8"));
@@ -465,8 +468,9 @@ print(json.dumps(out))
 fn run_checker(program: &str, args: &[&str], input: Option<&str>) -> Option<(Option<i32>, String, String)> {
     use std::io::{Read, Write};
     use std::process::{Command, Stdio};
+    // A fixed folder, so nothing a checker finds next to its working folder is the app's or the workspace's.
     let mut command = Command::new(program);
-    command.args(args).env_clear().stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    command.args(args).current_dir(std::env::temp_dir()).env_clear().stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     for name in ["PATH", "SYSTEMROOT"] {
         command.env(name, std::env::var_os(name).unwrap_or_default());
     }
@@ -581,7 +585,9 @@ pub fn check_syntax(root: &Path, rels: &[String]) -> Vec<SyntaxProblem> {
 
     // Flow-typed JavaScript is not TypeScript: its annotations would all be reported as errors. Skipped, not guessed at.
     let js_ts: Vec<&(String, PathBuf)> = files.iter().filter(|(rel, abs)| is(r"(?i)\.(?:[cm]?[jt]sx?)$", rel) && !(is(r"(?i)\.[cm]?jsx?$", rel) && is(r"@flow\b", &clip_utf16(&read(abs), 2048)))).collect();
-    if !js_ts.is_empty() && let Some((_, stdout, _)) = run_checker("node", &["-e", TS_CHECKER], Some(&list(&js_ts))) {
+    // The TypeScript the app ships beside itself, if any: the checker looks for it from the app's folder.
+    let app_dir = std::env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| dir.display().to_string())).unwrap_or_default();
+    if !js_ts.is_empty() && let Some((_, stdout, _)) = run_checker("node", &["-e", TS_CHECKER, &app_dir], Some(&list(&js_ts))) {
         if trim(&stdout) != "NO_TS" {
             problems.extend(serde_json::from_str::<Vec<SyntaxProblem>>(&stdout).unwrap_or_default());
         } else {
@@ -602,7 +608,7 @@ pub fn check_syntax(root: &Path, rels: &[String]) -> Vec<SyntaxProblem> {
     if !py.is_empty() {
         for program in if cfg!(windows) { ["python", "py"] } else { ["python3", "python"] } {
             // The Windows Store "python" stub answers with a message instead of JSON: try the next one.
-            let Some((_, stdout, _)) = run_checker(program, &["-c", PY_CHECKER], Some(&list(&py))) else { continue };
+            let Some((_, stdout, _)) = run_checker(program, &["-I", "-c", PY_CHECKER], Some(&list(&py))) else { continue };
             if !stdout.trim_start().starts_with('[') {
                 continue;
             }

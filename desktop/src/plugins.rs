@@ -298,7 +298,7 @@ fn parse_catalog(text: &str) -> Option<Vec<Plugin>> {
         }
         match &p.origin {
             // A pointer at a skill on GitHub: it holds no instructions of its own, and names where they are.
-            Some(origin) => p.id == skill_id(&origin.repo, &origin.file) && crate::skillhub::parse_source(&origin.repo).is_some_and(|s| s.path.is_empty()) && !origin.file.contains("..") && !origin.refs.contains("..") && p.prompt.is_empty() && !p.description.trim().is_empty(),
+            Some(origin) => p.id == skill_id(&origin.repo, &origin.file) && crate::skillhub::parse_source(&origin.repo).is_some_and(|s| s.path.is_empty()) && !origin.file.contains("..") && !origin.refs.contains("..") && origin.files.iter().all(|file| safe_file(file)) && p.prompt.is_empty() && !p.description.trim().is_empty(),
             None => p.id.starts_with("skill-") && p.id.len() <= 60 && !p.prompt.trim().is_empty() && p.prompt.chars().count() <= MAX_RULE && p.guide.chars().count() <= MAX_GUIDE && p.reminder.chars().count() <= MAX_REMINDER,
         }
     };
@@ -360,11 +360,21 @@ pub fn listed(repo: &str, file: &str) -> Option<Plugin> {
     catalog().into_iter().find(|p| p.origin.as_ref().is_some_and(|o| o.repo.eq_ignore_ascii_case(repo) && o.file == file))
 }
 
-/// One of the files a downloaded skill carries. None when it carries no such file.
+/// A file name a skill may carry: relative, no `..` or `.`, no backslash, no `:` (a drive or a stream).
+fn safe_file(name: &str) -> bool {
+    !name.is_empty() && name.split('/').all(|part| !part.is_empty() && part != ".." && part != "." && !part.contains(['\\', ':']))
+}
+
+/// One of the files a downloaded skill carries. None when it carries no such file, or when it resolves outside the skill's folder.
 pub fn carried(skill: &Plugin, name: &str) -> Option<String> {
     let origin = skill.origin.as_ref()?;
     let known = origin.files.iter().find(|have| have.as_str() == name.trim().trim_start_matches("./"))?;
-    std::fs::read_to_string(skill_dir(&skill.id).join(known)).ok()
+    let dir = skill_dir(&skill.id).canonicalize().ok()?;
+    let real = dir.join(known).canonicalize().ok()?;
+    if !real.starts_with(&dir) {
+        return None;
+    }
+    std::fs::read_to_string(real).ok()
 }
 
 /// Adds a downloaded skill to the user's plugins, or renews the one already there, and puts its files beside it.
@@ -377,7 +387,7 @@ pub fn install_package(found: &crate::skillhub::Found, refs: &str) -> Result<Plu
     let mut files = Vec::new();
     for (name, text) in &skill.carried {
         // A name is a path inside the skill's own folder, and nothing else.
-        let safe = !name.is_empty() && name.split('/').all(|part| !part.is_empty() && part != ".." && part != "." && !part.contains(['\\', ':']));
+        let safe = safe_file(name);
         let path = dir.join(name);
         if safe && path.parent().is_some_and(|parent| std::fs::create_dir_all(parent).is_ok()) && std::fs::write(&path, text).is_ok() {
             files.push(name.clone());
@@ -423,6 +433,11 @@ fn clip(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_skill_file_name_stays_inside_its_folder() {
+        assert!(safe_file("references/a.md") && !safe_file("../x") && !safe_file("/etc/x") && !safe_file("C:x") && !safe_file("a\\b") && !safe_file(""));
+    }
 
     /// The catalog's pointers are ones the app can follow, a short skill is sent whole and a long one is pointed at.
     #[test]

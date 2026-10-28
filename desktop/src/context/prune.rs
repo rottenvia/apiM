@@ -269,7 +269,10 @@ fn stub_arguments(args: &str) -> String {
 /// Collapses old tool results and stubs fat arguments, leaving structure and recent context intact.
 /// Below the threshold the input comes back as is.
 pub fn prune_transcript<'a>(messages: &'a [Value], o: &Options) -> (Cow<'a, [Value]>, PruneStats) {
-    if transcript_chars(messages) < o.threshold_chars {
+    // The rules are not history and are never pruned: counted, they brought the stubbing of written files forward to
+    // a reply's third round, and each stub rewrote Claude's cache from that message on (3,043 tokens, Haiku 5.5).
+    let rules: usize = messages.iter().filter(|m| m["role"] == "system").map(|m| m["content"].as_str().map_or(0, js_len)).sum();
+    if transcript_chars(messages).saturating_sub(rules) < o.threshold_chars {
         return (Cow::Borrowed(messages), PruneStats::default());
     }
     let results: Vec<usize> = (0..messages.len()).filter(|&i| messages[i]["role"] == "tool").collect();

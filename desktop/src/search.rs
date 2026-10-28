@@ -915,30 +915,51 @@ pub fn assert_public_url(raw: &str, allow_loopback: bool) -> Result<reqwest::Url
 /// `assert_public_url`, then resolves the name and checks where it really
 /// points: a public NAME can point at loopback (127.0.0.1.nip.io). For use
 /// before every connection, and every redirect hop.
-// ponytail: checks the addresses, then the HTTP client resolves again. Pin the checked address on the client (resolve_to_addrs) if DNS rebinding becomes a concern.
 pub async fn assert_public_url_resolved(raw: &str, allow_loopback: bool) -> Result<reqwest::Url, String> {
+    resolve_public(raw, allow_loopback).await.map(|(url, _)| url)
+}
+
+/// `assert_public_url_resolved`, also giving the addresses the name was checked at, so a request can be pinned to them.
+// ponytail: browser and video fetches still resolve twice; pin them the way web.rs `pinned_client` does if they take model-chosen URLs.
+pub async fn resolve_public(raw: &str, allow_loopback: bool) -> Result<(reqwest::Url, Vec<IpAddr>), String> {
     let url = assert_public_url(raw, allow_loopback)?;
+    let check = url.clone();
+    let addresses = tokio::task::spawn_blocking(move || checked_addresses(&check, allow_loopback)).await.map_err(|e| e.to_string())??;
+    Ok((url, addresses))
+}
+
+/// The addresses a URL's name resolves to, refused when any is on this machine or a private network. Empty for an
+/// allowed loopback name. Blocking: the name is looked up on the calling thread.
+pub fn checked_addresses(url: &reqwest::Url, allow_loopback: bool) -> Result<Vec<IpAddr>, String> {
     let host = url.host_str().unwrap_or("").trim_matches(['[', ']']).to_string();
     if allow_loopback && is_loopback_host(url.host_str().unwrap_or("")) {
-        return Ok(url);
+        return Ok(Vec::new());
     }
     let addresses: Vec<IpAddr> = match host.parse() {
         Ok(ip) => vec![ip],
-        Err(_) => {
-            let name = host.clone();
-            let resolved = tokio::task::spawn_blocking(move || (name.as_str(), 0).to_socket_addrs().map(|found| found.map(|a| a.ip()).collect::<Vec<_>>())).await;
-            resolved.ok().and_then(Result::ok).filter(|found| !found.is_empty()).ok_or_else(|| format!("Could not resolve {host}."))?
-        }
+        Err(_) => (host.as_str(), url.port_or_known_default().unwrap_or(443)).to_socket_addrs().ok().map(|found| found.map(|a| a.ip()).collect::<Vec<_>>()).filter(|found| !found.is_empty()).ok_or_else(|| format!("Could not resolve {host}."))?,
     };
-    match addresses.into_iter().find(|ip| non_public(*ip) && !(allow_loopback && loopback_ip(*ip))) {
+    match addresses.iter().find(|ip| non_public(**ip) && !(allow_loopback && loopback_ip(**ip))) {
         Some(address) => Err(format!("{host} points at {address}, which is on this machine or a private network — this tool will not fetch it.")),
-        None => Ok(url),
+        None => Ok(addresses),
     }
+}
+
+/// A link from a reply may be followed: web addresses, and mail when `mail` is set. Anything else (`file:`,
+/// `javascript:`, an app's own scheme) is shown but not opened.
+pub fn followable(url: &str, mail: bool) -> bool {
+    reqwest::Url::parse(url).is_ok_and(|u| matches!(u.scheme(), "http" | "https") || (mail && u.scheme() == "mailto"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_web_and_mail_links_are_followed() {
+        assert!(followable("https://example.com/a?b=1", false) && followable("mailto:me@example.com", true));
+        assert!(!followable("mailto:me@example.com", false) && !followable("file:///C:/x", true) && !followable("javascript:alert(1)", true));
+    }
 
     fn hit(url: &str, provider: &str, score: Option<f64>) -> SearchResult {
         SearchResult { title: format!("T {url}"), url: url.to_string(), content: "x".repeat(60), score, provider: Some(provider.to_string()), ..Default::default() }

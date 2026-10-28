@@ -101,6 +101,9 @@ pub fn header(app: &mut App, ui: &mut egui::Ui) {
         if widgets::icon_btn(ui, icons::FIND, "Find in this chat (Ctrl+F)").clicked() {
             app.find_open = !app.find_open;
         }
+        if crate::browser::available() && widgets::icon_btn(ui, icons::GLOBE, if app.browser.open { "Hide the browser" } else { "Show the browser: watch the agent browse, or open a page yourself" }).clicked() {
+            super::browser_pane::toggle(app);
+        }
         if !app.settings.workspace_open && widgets::icon_btn(ui, icons::PANEL_RIGHT, "Show the workspace panel").clicked() {
             app.settings.workspace_open = true;
             app.files_stale = true;
@@ -110,11 +113,14 @@ pub fn header(app: &mut App, ui: &mut egui::Ui) {
         let totals = app.totals();
         // The first cost of a chat fades in beside the files chip, which is changing its words just then.
         let priced = widgets::fade(ui, ui.id().with("cost-in"), totals.priced > 0);
-        if priced > 0.0 {
+        let cost = format_cost(totals.cost);
+        // Left out where it does not fit: in a narrow chat beside the Browser pane it ran under the sidebar button.
+        let fits = ui.available_width() >= widgets::galley(ui, &cost, theme::font(11.0, W::Regular), p.muted).size().x + 12.0;
+        if priced > 0.0 && fits {
             ui.add_space(4.0);
             ui.scope(|ui| {
                 ui.multiply_opacity(priced);
-                ui.label(widgets::text(format_cost(totals.cost), 11.0, W::Regular, p.muted)).on_hover_text("What this chat has cost so far, estimated from published rates — the full breakdown is at the top of the conversation");
+                ui.label(widgets::text(cost, 11.0, W::Regular, p.muted)).on_hover_text("What this chat has cost so far, estimated from published rates — the full breakdown is at the top of the conversation");
             });
         }
     });
@@ -305,7 +311,9 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
         let tail_gap = if !running || asking { gap } else if has_output { 6.0 } else { 18.0 };
         let rewind = rewind.as_ref();
         // Bubbles stop at three quarters of the column; a narrow window gives them a little more.
-        let cap = column * if ui.ctx().content_rect().width() < 768.0 { 0.85 } else { 0.75 };
+        // A narrow column (the chat beside the Browser pane) is not cut to three quarters below 480 points: replies
+        // there wrapped at about 25 characters.
+        let cap = (column * if ui.ctx().content_rect().width() < 768.0 { 0.85 } else { 0.75 }).max(column.min(480.0));
         // A thought's clock goes on from the line before it ("Thinking… · 4s" became "Thinking · 0s"): the round's.
         let thinking_secs = run.map(|r| r.request.as_ref().filter(|q| q.number > 1).map_or(r.started, |q| q.fired).elapsed().as_secs());
         let drafted = run.map(super::Run::drafted).unwrap_or_default();
@@ -501,7 +509,14 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
             }
         }
         Some(bubble::Action::Copy(text)) => ui.ctx().copy_text(text),
-        Some(bubble::Action::Link(url)) => ui.ctx().open_url(egui::OpenUrl::new_tab(url)),
+        Some(bubble::Action::Link(url)) => {
+            // Web and mail only: a link with any other scheme is shown in the reply but not followed.
+            if crate::search::followable(&url, true) {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+            } else {
+                app.toast(format!("Not opened: {url} is not a web or mail link."));
+            }
+        }
         Some(bubble::Action::OpenCode(title, language, code)) => app.artifact = Some(super::overlay::Artifact { title, language, code, copied: None }),
         Some(bubble::Action::Image(name, uri)) => app.lightbox = Some((name, uri)),
         Some(bubble::Action::OpenFile(path)) => super::workspace::open(app, path),

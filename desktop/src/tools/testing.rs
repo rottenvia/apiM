@@ -95,7 +95,7 @@ pub fn detect_runner(dir: &Path) -> Option<TestRunner> {
     }
     for marker in ["pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini"] {
         if exists(marker) {
-            return Some(runner("pytest", "pytest", &["-q", "--no-header", "-rN"], format!("{marker} is present")));
+            return Some(runner("pytest", "pytest", &["-q", "--no-header", "-rfE", "--tb=short"], format!("{marker} is present")));
         }
     }
     // Node's own runner, for a project whose tests are files beside the code with no package.json script: run_tests
@@ -111,13 +111,13 @@ pub fn detect_runner(dir: &Path) -> Option<TestRunner> {
     }
     for d in ["tests", "test"] {
         if exists(d) {
-            return Some(runner("pytest", "pytest", &["-q", "--no-header", "-rN", d], format!("a {d}/ directory exists")));
+            return Some(runner("pytest", "pytest", &["-q", "--no-header", "-rfE", "--tb=short", d], format!("a {d}/ directory exists")));
         }
     }
     // Past the web's markers: a small project keeps its tests beside the code, test_x.py or x_test.py.
     let beside = std::fs::read_dir(dir).ok().and_then(|entries| entries.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).find(|name| name.ends_with(".py") && (name.starts_with("test_") || name.ends_with("_test.py"))));
     if let Some(file) = beside {
-        return Some(runner("pytest", "pytest", &["-q", "--no-header", "-rN"], format!("{file} is a test file")));
+        return Some(runner("pytest", "pytest", &["-q", "--no-header", "-rfE", "--tb=short"], format!("{file} is a test file")));
     }
     if exists("Cargo.toml") {
         return Some(runner("cargo test", "cargo", &["test"], "Cargo.toml is present".into()));
@@ -295,7 +295,28 @@ pub fn format_summary(s: &Summary, raw: &str) -> String {
             lines.push(format!("  … and {} more", s.failures.len() - 25));
         }
     }
+    // Why they failed, from the runner's own report: a list of names alone ("see output", with no output) sent the agent
+    // to run the suite again by hand, a whole extra round (Haiku 5.5, 2026-10-28).
+    let why = failure_report(raw);
+    if !why.is_empty() {
+        lines.push(String::new());
+        lines.push(why);
+    }
     lines.join("\n")
+}
+
+/// pytest's FAILURES / ERRORS section, or the last lines of any other runner, at most 60 lines.
+fn failure_report(raw: &str) -> String {
+    let lines: Vec<&str> = raw.lines().collect();
+    let start = lines.iter().position(|l| l.starts_with('=') && (l.contains(" FAILURES ") || l.contains(" ERRORS ")));
+    let end = lines.iter().rposition(|l| l.starts_with('=') && l.contains("short test summary")).unwrap_or(lines.len());
+    let part = match start {
+        Some(at) if at < end => &lines[at..end],
+        _ => &lines[lines.len().saturating_sub(30)..],
+    };
+    let shown = &part[..part.len().min(60)];
+    let more = if part.len() > shown.len() { format!("\n… {} more lines", part.len() - shown.len()) } else { String::new() };
+    if shown.iter().all(|l| l.trim().is_empty()) { String::new() } else { format!("{}{more}", shown.join("\n")) }
 }
 
 #[cfg(test)]
@@ -323,7 +344,9 @@ mod tests {
             let got: Vec<Value> = s.failures.iter().map(|f| json!({ "name": f.name, "detail": f.detail })).collect();
             let wanted: Vec<Value> = want["failures"].as_array().unwrap().iter().map(|f| json!({ "name": f["name"], "detail": f["detail"] })).collect();
             assert_eq!(got, wanted, "{name}");
-            assert_eq!(format_summary(&s, &format!("{stdout}\n{stderr}")), case["text"].as_str().unwrap(), "{name}");
+            // The web's text, and after it (since 2026-10-28) the runner's own account of why a test failed.
+            let text = format_summary(&s, &format!("{stdout}\n{stderr}"));
+            assert!(text.starts_with(case["text"].as_str().unwrap()), "{name}: {text}");
         }
     }
 
@@ -340,7 +363,9 @@ mod tests {
                 std::fs::write(&p, content.as_str().unwrap()).unwrap();
             }
             let got = detect_runner(&dir).map(|r| json!({ "name": r.name, "command": r.command, "args": r.args, "because": r.because }));
-            assert_eq!(got.unwrap_or(Value::Null), case["expect"], "{name}");
+            // pytest is asked for its FAILED lines and short tracebacks, where the web hides them (-rN).
+            let want = serde_json::from_str::<Value>(&case["expect"].to_string().replace(r#""-rN""#, r#""-rfE","--tb=short""#)).unwrap();
+            assert_eq!(got.unwrap_or(Value::Null), want, "{name}");
             let _ = std::fs::remove_dir_all(&dir);
         }
     }

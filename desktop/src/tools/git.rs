@@ -9,8 +9,9 @@ const MAX_DIFF: usize = 60_000;
 
 /// Runs git in the workspace. Returns (succeeded, combined output).
 async fn git(ctx: &Ctx, args: &[&str]) -> (bool, String) {
+    // Hardened and with github.rs's clean environment: the repository's own config cannot name a program git runs.
     let mut cmd = tokio::process::Command::new("git");
-    cmd.args(["--no-pager", "-c", "core.quotepath=off"]).args(args).current_dir(&ctx.root).stdin(Stdio::null()).env("GIT_TERMINAL_PROMPT", "0").kill_on_drop(true);
+    cmd.args(["-c".to_string(), "core.quotepath=off".to_string()].into_iter().chain(crate::github::harden(args))).current_dir(&ctx.root).stdin(Stdio::null()).env_clear().envs(crate::github::git_env(None)).kill_on_drop(true);
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000);
     match tokio::time::timeout(std::time::Duration::from_secs(60), cmd.output()).await {

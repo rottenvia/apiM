@@ -2,7 +2,7 @@
 //! the web app's src/lib/data-query.ts and src/lib/extract.ts and their cases in src/lib/tools.ts.
 
 use super::code::{bad, commas, inside, int_arg, js_num, js_string, len16, plural, quote, space, to_fixed, trim};
-use crate::snapshots::{clip_utf16, is_protected_path, record_previous};
+use crate::snapshots::{clip_utf16, protected_at, record_previous};
 use crate::tools::files::resolve;
 use crate::tools::{Output, str_arg};
 use regex::Regex;
@@ -1003,10 +1003,13 @@ fn preview(v: &J, depth: usize) -> J {
 /// Writes text into the workspace the way the web's writeFile does: never into a protected folder, and what was
 /// there before is kept for undo.
 fn write_workspace(root: &Path, rel: &str, text: &str) -> Result<(), String> {
-    if is_protected_path(rel) {
+    if protected_at(root, rel) {
         return Err(format!("{rel} is inside a protected folder (.git, .history or .snapshots) and cannot be written, moved or deleted by the file tools"));
     }
     let path = inside(root, rel)?;
+    if crate::tools::files::hard_linked(&path) {
+        return Err(format!("{rel} is a hard link to another file, and writing it would change that file too."));
+    }
     if let Ok(old) = std::fs::read(&path) {
         record_previous(root, rel, &old);
     }
@@ -1757,7 +1760,7 @@ fn merge_into(root: &Path, src: &Path, rel: &str, dest: &str, not_moved: &mut Ve
         let child = if rel.is_empty() { name } else { format!("{rel}/{name}") };
         let ws_rel = join_rel(&[dest, &child]);
         let target = resolve(root, &ws_rel)?;
-        if is_protected_path(&ws_rel) {
+        if protected_at(root, &ws_rel) {
             sink.skip(&child, format!("would write {ws_rel}, a protected path (.git, .history, .snapshots)"));
             not_moved.push(child);
             continue;
@@ -1822,14 +1825,14 @@ fn extract(root: &Path, archive: &str, dest: &str, encoding: Option<&'static str
     let parent_of = |path: &str| path.rsplit_once('/').map_or(String::new(), |(dir, _)| dir.to_string());
     let archive_dir = parent_of(&rel);
     let dest = trim(dest).replace('\\', "/");
-    if dest.is_empty() && is_protected_path(&archive_dir) {
+    if dest.is_empty() && protected_at(root, &archive_dir) {
         return Err(format!("{rel} is inside a protected folder; pass a destination folder to extract it elsewhere."));
     }
     let explicit = if dest.is_empty() {
         None
     } else {
         let clean = if dest.trim_end_matches('/').is_empty() { "." } else { dest.trim_end_matches('/') };
-        if clean != "." && is_protected_path(clean) {
+        if clean != "." && protected_at(root, clean) {
             return Err(format!("{clean} is a protected folder; choose another destination."));
         }
         resolve(root, clean).map_err(|e| format!("Invalid destination {clean}: {e}"))?;

@@ -20,11 +20,13 @@ pub enum Popover {
 }
 
 /// (id, label, what it does, warning)
-const EFFORTS: [(&str, &str, &str, &str); 5] = [
-    ("auto", "Auto", "Adjusts reasoning depth per message.", "Can spend more tokens on complex prompts."),
+const EFFORTS: [(&str, &str, &str, &str); 7] = [
+    ("auto", "Auto", "Picks a depth for each message: none for a greeting, deep for a bug hunt.", "Can spend more tokens on complex prompts."),
     ("none", "None", "No reasoning. Fastest and cheapest responses.", ""),
     ("low", "Low", "Light reasoning for everyday questions.", ""),
+    ("medium", "Medium", "Thinks it through without dwelling. A good default.", ""),
     ("high", "High", "Deep reasoning for complex problems and debugging.", ""),
+    ("xhigh", "X-High", "Deeper still, for long multi-step work.", "Slower and costlier than High."),
     ("max", "Max", "Maximum depth — 50K+ thinking tokens per reply.", "Slowest and most expensive. Use sparingly."),
 ];
 
@@ -38,6 +40,7 @@ fn efforts_for(model: &str) -> Vec<(&'static str, &'static str, &'static str, &'
             ("qwen-3.8-27b", "low") => (id, label, "Qwen reasoning_effort=low.", warning),
             ("qwen-3.8-27b", "high") => (id, label, "Qwen reasoning_effort=medium (its middle setting).", warning),
             ("qwen-3.8-27b", "max") => (id, label, "Qwen reasoning_effort=xhigh — the model default.", "Can think for a very long time. Use medium unless you need it."),
+            ("deepseek-v4-pro", "high") => (id, label, "V4 Pro's standard depth.", warning),
             _ => (id, label, what, warning),
         })
         .collect()
@@ -329,7 +332,10 @@ fn row(app: &mut App, ui: &mut egui::Ui, running: bool, is_note: bool, has_keys:
         app.toggle_popover(Popover::Model);
     }
 
-    let effort = EFFORTS.iter().find(|e| e.0 == app.settings.effort).unwrap_or(&EFFORTS[0]);
+    // The depth the model will really get: a setting it lacks shows as its nearest (Claude has no None).
+    let levels = models::effort_levels(&app.settings.model, &app.settings.custom_models);
+    let shown = if app.settings.effort == "auto" { "auto" } else { models::fit_effort(&levels, &app.settings.effort) };
+    let effort = EFFORTS.iter().find(|e| e.0 == shown).unwrap_or(&EFFORTS[0]);
     let chip = Chip { icon: Some(icons::SPARKLES), text: if wide { effort.1 } else { "" }, active: effort.0 != "auto", open: app.popover == Popover::Effort, chevron: wide, pad, ..Default::default() };
     if chip.show(ui).on_hover_text("Thinking effort — how deeply the model reasons").clicked() {
         app.toggle_popover(Popover::Effort);
@@ -358,7 +364,7 @@ fn row(app: &mut App, ui: &mut egui::Ui, running: bool, is_note: bool, has_keys:
         (true, false) => "Computer use on — the agent can see your screen and use your mouse and keyboard. Click to turn off",
         (true, true) => "Computer use is on, but this model cannot see pictures, so it cannot use the computer. Pick a model that can",
     };
-    let chip = Chip { icon: Some(icons::MONITOR), text: if wide { "Computer" } else { "" }, active: computer, dot: blind.then_some(p.warning), pad, ..Default::default() };
+    let chip = Chip { icon: Some(icons::MONITOR), text: if wide { "Use" } else { "" }, active: computer, dot: blind.then_some(p.warning), pad, ..Default::default() };
     if chip.show(ui).on_hover_text(tip).clicked() {
         app.settings.computer_use = !computer;
         app.settings.save();
@@ -561,24 +567,7 @@ fn popovers(app: &mut App, ctx: &egui::Context) {
             });
             model_menu(app, ui.ctx());
         }),
-        Popover::Effort => popover(app, ctx, 336.0, false, |app, ui| {
-            let model = app.settings.model.clone();
-            head(app, ui, "Thinking effort", if model == "deepseek-v4-pro" { "V4 Pro has two real depths: High and Max" } else { "How deeply the model reasons before replying" });
-            egui::Frame::new().inner_margin(egui::Margin::same(6)).show(ui, |ui| {
-                for (id, label, what, warning) in efforts_for(&model) {
-                    let selected = app.settings.effort == id;
-                    let mut lines = vec![(what, 12.0, 20.0, p.text2, false)];
-                    if !warning.is_empty() {
-                        lines.push((warning, 11.0, 16.0, p.warning, false));
-                    }
-                    if option(ui, label, selected, None, &lines).clicked() {
-                        app.settings.effort = id.into();
-                        app.settings.save();
-                        app.popover = Popover::None;
-                    }
-                }
-            });
-        }),
+        Popover::Effort => popover(app, ctx, 352.0, false, effort_panel),
         Popover::Web => popover(app, ctx, 304.0, false, |app, ui| {
             egui::Frame::new().inner_margin(egui::Margin::same(6)).show(ui, |ui| {
                 let modes = [
@@ -597,6 +586,126 @@ fn popovers(app: &mut App, ctx: &egui::Context) {
         }),
         Popover::Context => popover(app, ctx, 352.0, true, context_panel),
     }
+}
+
+/// The effort popover: Auto as a switch in its head, the model's own depths on a slider (Codex's and Claude's effort
+/// control), and under it what the picked depth does. A model without a depth (None on Claude) has no stop for it.
+fn effort_panel(app: &mut App, ui: &mut egui::Ui) {
+    let p = p();
+    let model = app.settings.model.clone();
+    let levels = models::effort_levels(&model, &app.settings.custom_models);
+    let auto = app.settings.effort == "auto";
+    // The depth Auto was switched on from, so switching it off goes back there.
+    let kept_id = egui::Id::new("effort-kept");
+    let kept: String = ui.data(|d| d.get_temp(kept_id)).unwrap_or_else(|| "medium".into());
+    let current = models::fit_effort(&levels, if auto { &kept } else { &app.settings.effort });
+
+    egui::Frame::new().inner_margin(egui::Margin { left: 16, right: 12, top: 12, bottom: 12 }).show(ui, |ui| {
+        // The title and the switches share a row; the line under the title has the whole width, so a long model name
+        // never runs under the switch.
+        ui.horizontal(|ui| {
+            ui.label(widgets::lines("Thinking effort", 13.0, 20.0, W::Semibold, p.text));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                if widgets::popover_close(ui).clicked() {
+                    app.popover = Popover::None;
+                }
+                if !levels.is_empty() {
+                    ui.add_space(4.0);
+                    let mut on = auto;
+                    if widgets::toggle(ui, &mut on).on_hover_text("Auto: a depth picked for each message").changed() {
+                        if on {
+                            ui.data_mut(|d| d.insert_temp(kept_id, current.to_string()));
+                        }
+                        app.settings.effort = if on { "auto".into() } else { current.into() };
+                        app.settings.save();
+                    }
+                    ui.label(widgets::lines("Auto", 12.0, 16.0, W::Medium, if auto { p.text } else { p.text2 }));
+                }
+            });
+        });
+        let sub = if levels.is_empty() { "This model answers without a thinking step".to_string() } else { format!("How deeply {} reasons before replying", models::resolve(&model, &app.settings.custom_models).short_label) };
+        ui.label(widgets::lines(&sub, 11.0, 16.0, W::Regular, p.muted));
+    });
+    widgets::rule(ui);
+    if levels.is_empty() {
+        return;
+    }
+
+    egui::Frame::new().inner_margin(egui::Margin { left: 22, right: 22, top: 18, bottom: 14 }).show(ui, |ui| {
+        if let Some(picked) = slider(ui, &levels, current, auto) {
+            app.settings.effort = picked.into();
+            app.settings.save();
+        }
+    });
+    let about = efforts_for(&model).into_iter().find(|e| e.0 == if auto { "auto" } else { current }).unwrap_or(EFFORTS[0]);
+    // Claude always thinks: its Low is the least it does, not a light extra.
+    let what = if model_is_claude(app) && about.0 == "low" { "Claude always thinks a little; Low keeps it short." } else { about.2 };
+    egui::Frame::new().inner_margin(egui::Margin { left: 16, right: 16, top: 0, bottom: 14 }).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        let mut job = egui::text::LayoutJob::default();
+        job.wrap.max_width = ui.available_width();
+        let name = if auto { "Auto" } else { about.1 };
+        job.append(&format!("{name} · "), 0.0, egui::TextFormat { font_id: theme::font(12.0, W::Semibold), color: p.text, line_height: Some(18.0), ..Default::default() });
+        job.append(what, 0.0, egui::TextFormat { font_id: theme::font(12.0, W::Regular), color: p.text2, line_height: Some(18.0), ..Default::default() });
+        ui.label(job);
+        if !about.3.is_empty() {
+            ui.add_space(4.0);
+            ui.label(widgets::lines(about.3, 11.0, 16.0, W::Regular, p.warning));
+        }
+    });
+}
+
+fn model_is_claude(app: &App) -> bool {
+    models::resolve(&app.settings.model, &app.settings.custom_models).provider == models::ProviderId::Anthropic
+}
+
+/// The track with a stop for each depth and a knob that is dragged or clicked to one. Dimmed while Auto picks; touching
+/// it hands the choice back. Returns the depth let go on.
+fn slider(ui: &mut egui::Ui, levels: &[&'static str], current: &str, auto: bool) -> Option<&'static str> {
+    let p = p();
+    let width = ui.available_width();
+    let (rect, response) = ui.allocate_exact_size(vec2(width, 46.0), Sense::click_and_drag());
+    let response = response.on_hover_cursor(CursorIcon::PointingHand);
+    let n = levels.len().max(2) as f32 - 1.0;
+    let (left, right) = (rect.left() + 9.0, rect.right() - 9.0);
+    let x_of = |i: f32| left + (right - left) * i / n;
+    let index = levels.iter().position(|l| *l == current).unwrap_or(0) as f32;
+    // Dragged, the knob follows the pointer; let go, it glides to the nearest stop.
+    let pointer = response.interact_pointer_pos().map(|at| ((at.x - left) / (right - left) * n).clamp(0.0, n));
+    let target = if response.dragged() { pointer.unwrap_or(index) } else { index };
+    let at = ui.ctx().animate_value_with_time(response.id.with("knob"), target, if response.dragged() { 0.0 } else { 0.14 });
+    let picked = if response.drag_stopped() || response.clicked() { pointer.map(|f| levels[f.round() as usize]) } else { None };
+
+    let fade = ui.ctx().animate_bool_with_time(response.id.with("auto"), auto, 0.15);
+    let dim = |c: Color32| c.gamma_multiply(1.0 - 0.55 * fade);
+    let y = rect.top() + 9.0;
+    let track = Rect::from_min_max(pos2(left, y - 2.5), pos2(right, y + 2.5));
+    ui.painter().rect_filled(track, 2.5, alpha(p.text, 9.0));
+    ui.painter().rect_filled(Rect::from_min_max(track.min, pos2(x_of(at), track.max.y)), 2.5, dim(p.accent));
+    for i in 0..levels.len() {
+        let x = x_of(i as f32);
+        let filled = i as f32 <= at + 0.01;
+        ui.painter().circle_filled(pos2(x, y), 2.0, if filled { dim(Color32::from_white_alpha(170)) } else { alpha(p.text, 28.0) });
+    }
+    let hot = widgets::fade(ui, response.id, response.hovered() || response.dragged());
+    let knob = pos2(x_of(at), y);
+    ui.painter().circle_filled(knob + vec2(0.0, 1.0), 9.5 + hot, Color32::from_black_alpha(70));
+    ui.painter().circle(knob, 8.5 + hot, dim(Color32::WHITE), Stroke::new(1.0, Color32::from_black_alpha(40)));
+    ui.painter().circle_filled(knob, 3.0, dim(p.accent));
+
+    // Each name under its stop; the end ones kept inside the track's ends.
+    for (i, level) in levels.iter().enumerate() {
+        let on = !auto && *level == current;
+        let label = EFFORTS.iter().find(|e| e.0 == *level).map_or(*level, |e| e.1);
+        let g = widgets::galley(ui, label, theme::font(11.5, if on { W::Semibold } else { W::Regular }), if on { p.text } else { p.muted });
+        let x = (x_of(i as f32) - g.size().x / 2.0).clamp(rect.left(), rect.right() - g.size().x);
+        widgets::text_at(ui, x, rect.top() + 34.0, g);
+    }
+    if response.dragged() || ui.ctx().animate_value_with_time(response.id.with("settle"), index, 0.14) != index {
+        ui.ctx().request_repaint();
+    }
+    picked
 }
 
 /// DeepSeek's peak / off-peak strip in the model menu.

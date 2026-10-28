@@ -468,7 +468,7 @@ pub fn openrouter_reasoning_mandatory(model_id: &str) -> bool {
 
 /// Provider-specific thinking fields. `effort` is low | high | max.
 pub fn apply_thinking(body: &mut Map<String, Value>, style: ThinkingStyle, enabled: bool, effort: &str, mandatory: bool) {
-    let level = if matches!(effort, "low" | "high" | "max") { effort } else { "high" };
+    let level = if matches!(effort, "low" | "medium" | "high" | "xhigh" | "max") { effort } else { "high" };
     match style {
         ThinkingStyle::Deepseek => {
             body.insert("thinking".into(), json!({ "type": if enabled { "enabled" } else { "disabled" } }));

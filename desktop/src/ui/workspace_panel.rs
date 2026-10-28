@@ -35,11 +35,23 @@ enum Tab {
     Changes,
 }
 
+/// What the right column shows a file as.
+#[derive(Default, PartialEq, Clone, Copy)]
+enum Look {
+    #[default]
+    Text,
+    /// A picture, drawn rather than read as text: a .png used to open as a page of replacement characters.
+    Image,
+    /// Not text and not a picture: there is nothing to show or edit.
+    Binary,
+}
+
 #[derive(Default)]
 pub struct State {
     open: bool,
     selected: Option<String>,
     tab: Tab,
+    look: Look,
     /// The file before its last write, when one is kept: what Changes compares with and Undo write puts back.
     previous: Option<String>,
     /// The file as it is on disk.
@@ -65,7 +77,11 @@ enum Act {
     Open(String),
     Delete(String),
     Save,
+    /// A copy somewhere else on the computer, through the system's save dialog.
+    SaveAs,
+    Preview,
     Undo,
+    File(super::workspace::FileAct),
 }
 
 /// Opens the panel, on `path` when there is one.
@@ -167,6 +183,46 @@ fn delete_file(root: &Path, rel: &str) -> Result<(), String> {
     std::fs::remove_file(&path).map_err(|_| format!("No such file: {rel}"))
 }
 
+/// A picture by its name; anything else whose first 8 KB hold a NUL byte is binary, as git decides.
+fn look_of(root: &Path, rel: &str) -> Look {
+    let lower = rel.to_ascii_lowercase();
+    if [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico"].iter().any(|ext| lower.ends_with(ext)) {
+        return Look::Image;
+    }
+    let mut head = Vec::new();
+    let read = snapshots::resolve_inside(root, rel).ok().and_then(|path| std::fs::File::open(path).ok()).map(|file| file.take(8000).read_to_end(&mut head));
+    if read.is_some() && head.contains(&0) { Look::Binary } else { Look::Text }
+}
+
+/// Deletes a file after asking, from the bin on its row or its right-click menu.
+pub fn delete(app: &mut App, path: String) {
+    if !confirm(&format!("Delete {path}? This cannot be undone.")) {
+        return;
+    }
+    let root = app.conv.workspace();
+    let selected = app.ws.panel.selected.clone();
+    match delete_file(&root, &path) {
+        Ok(()) if selected.as_deref() == Some(path.as_str()) => app.ws.panel = State { open: app.ws.panel.open, error: app.ws.panel.error.take(), ..Default::default() },
+        Ok(()) => {}
+        Err(why) => app.ws.panel.error = Some(why),
+    }
+    app.files_stale = true;
+}
+
+/// Writes the file, or the text being edited, to a place the user picks.
+fn save_as(app: &mut App, path: &str) {
+    let root = app.conv.workspace();
+    let st = &mut app.ws.panel;
+    let name = Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "file".into());
+    let Some(target) = rfd::FileDialog::new().set_file_name(name).save_file() else { return };
+    let done = match (st.look, snapshots::resolve_inside(&root, path)) {
+        (Look::Text, _) if !st.truncated => std::fs::write(&target, &st.draft).map_err(|e| e.to_string()),
+        (_, Ok(from)) => std::fs::copy(from, &target).map(|_| ()).map_err(|e| e.to_string()),
+        (_, Err(why)) => Err(why),
+    };
+    st.error = done.err().map(|why| format!("Could not save a copy to {}: {why}", target.display()));
+}
+
 /// Shows a file in the editor. Unsaved edits to the one open are asked about first.
 fn open_file(app: &mut App, path: &str) {
     let root = app.conv.workspace();
@@ -175,6 +231,11 @@ fn open_file(app: &mut App, path: &str) {
         return;
     }
     (st.selected, st.tab, st.error, st.changes) = (Some(path.to_string()), Tab::File, None, None);
+    st.look = look_of(&root, path);
+    if st.look != Look::Text {
+        (st.content, st.draft, st.truncated, st.previous) = (String::new(), String::new(), false, None);
+        return;
+    }
     match read_for_editor(&root, path) {
         Ok((text, truncated)) => {
             (st.content, st.draft, st.truncated) = (text.clone(), text, truncated);
@@ -194,6 +255,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     }
     let p = p();
     let root = app.conv.workspace();
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new("workspace-root"), root.clone()));
     let mut act = None;
     let shown = overlay::slide_over(ctx, "workspace-files", 736.0, 0.15, p.border, |ui, close| {
         let App { ws, files, .. } = &mut *app;
@@ -245,17 +307,16 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     let selected = app.ws.panel.selected.clone();
     match (act, selected) {
         (Act::Open(path), _) => open_file(app, &path),
-        (Act::Delete(path), selected) => {
-            if !confirm(&format!("Delete {path}? This cannot be undone.")) {
-                return;
+        (Act::Delete(path), _) => delete(app, path),
+        (Act::SaveAs, Some(path)) => save_as(app, &path),
+        (Act::Preview, Some(path)) => {
+            if let Ok(abs) = snapshots::resolve_inside(&root, &path) {
+                super::browser_pane::preview(app, &abs);
+                // The page shows beside the chat, not under this panel.
+                app.ws.panel.open = false;
             }
-            match delete_file(&root, &path) {
-                Ok(()) if selected.as_deref() == Some(path.as_str()) => app.ws.panel = State { open: true, error: app.ws.panel.error.take(), ..Default::default() },
-                Ok(()) => {}
-                Err(why) => app.ws.panel.error = Some(why),
-            }
-            app.files_stale = true;
         }
+        (Act::File(pick), _) => super::workspace::file_act(app, ctx, pick),
         (Act::Save, Some(path)) => {
             let st = &mut app.ws.panel;
             st.error = write_file(&root, &path, &st.draft).err();
@@ -311,7 +372,9 @@ fn file_list(ui: &mut egui::Ui, files: &[(String, u64)], st: &State, act: &mut O
             if t > 0.0 {
                 icons::paint(ui, icons::TOOL_DELETE.stroke(1.8), bin.center(), 13.0, if delete.hovered() { RED_400 } else { p.muted }.gamma_multiply(t));
             }
-            if delete.on_hover_text("Delete").clicked() {
+            if let Some(pick) = super::workspace::file_menu(&row, path, false, true) {
+                *act = Some(Act::File(pick));
+            } else if delete.on_hover_text("Delete").clicked() {
                 *act = Some(Act::Delete(path.clone()));
             } else if row.on_hover_text(path.as_str()).clicked() {
                 *act = Some(Act::Open(path.clone()));
@@ -337,16 +400,20 @@ fn editor_column(ui: &mut egui::Ui, st: &mut State, dirty: bool, act: &mut Optio
     ui.painter().hline(bar.x_range(), bar.bottom() - 0.5, rule);
     let mut chips = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_max(pos2(bar.left() + 12.0, bar.top() + 8.0), pos2(bar.right() - 12.0, bar.top() + 40.0))).layout(egui::Layout::right_to_left(egui::Align::Center)));
     chips.spacing_mut().item_spacing.x = 6.0;
-    // Save without changes keeps its look and takes no click, as a disabled `.chip` does.
-    let save = Chip { text: "Save", active: dirty, pad: 11.0, ..Default::default() }.show(&mut chips);
-    let save = if dirty { save } else { save.on_hover_cursor(CursorIcon::NotAllowed) };
-    if save.on_hover_text(if dirty { "Save changes" } else { "No changes to save" }).clicked() && dirty {
-        *act = Some(Act::Save);
+    // With edits, Save writes them (Ctrl+S too). Without, it saves a copy elsewhere: a Save that took no click read as
+    // broken (2026-10-28, on a picture, which can never have edits).
+    let save_keys = dirty && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S));
+    let save = Chip { text: if dirty { "Save" } else { "Save as…" }, active: dirty, pad: 11.0, ..Default::default() }.show(&mut chips);
+    if save.on_hover_text(if dirty { "Save changes (Ctrl+S)" } else { "Save a copy somewhere on this computer" }).clicked() || save_keys {
+        *act = Some(if dirty { Act::Save } else { Act::SaveAs });
     }
     let fresh = st.copied.is_some_and(|at| at.elapsed() < Duration::from_millis(1600));
-    if (Chip { text: if fresh { "Copied" } else { "Copy" }, pad: 11.0, ..Default::default() }).show(&mut chips).on_hover_text("Copy file contents").clicked() {
+    if st.look == Look::Text && (Chip { text: if fresh { "Copied" } else { "Copy" }, pad: 11.0, ..Default::default() }).show(&mut chips).on_hover_text("Copy file contents").clicked() {
         ui.ctx().copy_text(st.draft.clone());
         st.copied = Some(Instant::now());
+    }
+    if super::workspace::is_html(&path) && crate::browser::available() && (Chip { icon: Some(icons::GLOBE), text: "Preview", pad: 11.0, ..Default::default() }).show(&mut chips).on_hover_text("Open the page in the browser beside the chat").clicked() {
+        *act = Some(Act::Preview);
     }
     if fresh {
         ui.ctx().request_repaint_after(Duration::from_millis(100));
@@ -394,11 +461,51 @@ fn editor_column(ui: &mut egui::Ui, st: &mut State, dirty: bool, act: &mut Optio
     }
 
     let area = Rect::from_min_max(pos2(rect.left(), y), rect.max);
+    if st.look != Look::Text {
+        ui.painter().rect_filled(area, 0.0, p.bg);
+        part(ui, area, |ui| picture(ui, st, &path));
+        return;
+    }
     if st.tab == Tab::Changes && st.previous.is_some() {
         part(ui, area, |ui| changes(ui, st));
     } else {
         ui.painter().rect_filled(area, 0.0, p.bg);
         part(ui, area, |ui| text_area(ui, st, &path));
+    }
+}
+
+/// A picture fitted into the column on a faint checkerboard (so a transparent one shows its edges), with its size
+/// under it; a binary file says what it is instead.
+fn picture(ui: &mut egui::Ui, st: &State, path: &str) {
+    let p = p();
+    let area = ui.max_rect().shrink(16.0);
+    let Some(root) = ui.ctx().data(|d| d.get_temp::<std::path::PathBuf>(egui::Id::new("workspace-root"))) else { return };
+    let Ok(abs) = snapshots::resolve_inside(&root, path) else { return };
+    let kb = std::fs::metadata(&abs).map(|m| format_size(m.len())).unwrap_or_default();
+    if st.look == Look::Binary {
+        let words = widgets::galley(ui, &format!("Binary file · {kb} — no preview. Right-click it in the list to open it with its app."), theme::font(12.0, W::Regular), p.muted);
+        widgets::text_at(ui, area.center().x - words.size().x / 2.0, area.center().y, words);
+        return;
+    }
+    let uri = format!("file:///{}", abs.display().to_string().replace('\\', "/"));
+    let image = egui::Image::new(uri).show_loading_spinner(true);
+    let natural = image.load_for_size(ui.ctx(), area.size()).ok().and_then(|poll| poll.size());
+    let room = area.size() - vec2(0.0, 24.0);
+    // Never blown up past its own pixels: a 16px icon stays 16px, not a blur.
+    let shown = natural.map_or(vec2(64.0, 64.0), |n| n * (room.x / n.x).min(room.y / n.y).min(1.0 / ui.ctx().pixels_per_point()).max(0.01));
+    let frame = Rect::from_center_size(area.center() - vec2(0.0, 12.0), shown);
+    let cell = 8.0;
+    let (cols, rows) = ((frame.width() / cell).ceil() as i32, (frame.height() / cell).ceil() as i32);
+    let painter = ui.painter().with_clip_rect(frame);
+    for r in 0..rows {
+        for c in (r % 2..cols).step_by(2) {
+            painter.rect_filled(Rect::from_min_size(frame.min + vec2(c as f32 * cell, r as f32 * cell), vec2(cell, cell)), 0.0, alpha(p.text, 4.0));
+        }
+    }
+    ui.put(frame, image.fit_to_exact_size(shown));
+    if let Some(n) = natural {
+        let words = widgets::galley(ui, &format!("{} × {} px · {kb}", n.x as u32, n.y as u32), theme::font(11.0, W::Regular), p.muted);
+        widgets::text_at(ui, frame.center().x - words.size().x / 2.0, frame.bottom() + 14.0, words);
     }
 }
 

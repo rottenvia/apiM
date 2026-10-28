@@ -58,6 +58,103 @@ enum Act {
     Open(String),
     /// (snapshot id, when it was taken)
     Restore(String, String),
+    File(FileAct),
+}
+
+/// What the right-click menu of a file or folder asks for.
+pub enum FileAct {
+    Open(String),
+    Preview(String),
+    Reveal(String),
+    OpenOutside(String),
+    CopyPath(String, bool),
+    Delete(String),
+}
+
+/// Kinds Windows runs rather than opens: "Open with its app" is not offered for them, so a file the agent wrote
+/// cannot be started by a click that reads as opening it.
+const RUNS: [&str; 18] = ["exe", "bat", "cmd", "com", "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "hta", "msi", "scr", "lnk", "url", "reg"];
+
+fn runs(path: &str) -> bool {
+    let ext = std::path::Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    RUNS.contains(&ext.as_str())
+}
+
+pub fn is_html(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.ends_with(".html") || lower.ends_with(".htm")
+}
+
+/// The right-click menu of a row in either file list.
+pub fn file_menu(response: &egui::Response, path: &str, is_dir: bool, can_delete: bool) -> Option<FileAct> {
+    let mut picked = None;
+    egui::Popup::context_menu(response).frame(widgets::popover_frame(12).inner_margin(egui::Margin::same(4))).width(212.0).show(|ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let mut item = |icon, label: &str, act: FileAct| {
+            if widgets::menu_item(ui, icon, label, false).clicked() {
+                picked = Some(act);
+            }
+        };
+        if !is_dir {
+            item(icons::FILE, "Open", FileAct::Open(path.into()));
+            if is_html(path) && crate::browser::available() {
+                item(icons::GLOBE, "Preview in browser", FileAct::Preview(path.into()));
+            }
+            if !runs(path) {
+                item(icons::EXTERNAL, "Open with its app", FileAct::OpenOutside(path.into()));
+            }
+        }
+        item(icons::FOLDER, if cfg!(windows) { "Show in Explorer" } else { "Show in folder" }, FileAct::Reveal(path.into()));
+        item(icons::COPY, "Copy path", FileAct::CopyPath(path.into(), true));
+        item(icons::COPY_SMALL, "Copy relative path", FileAct::CopyPath(path.into(), false));
+        if can_delete && !is_dir {
+            ui.add_space(4.0);
+            widgets::rule(ui);
+            ui.add_space(4.0);
+            if widgets::menu_item(ui, icons::TRASH, "Delete", true).clicked() {
+                picked = Some(FileAct::Delete(path.into()));
+            }
+        }
+    });
+    picked
+}
+
+/// Carries out a menu pick that is not the panel's own (opening and deleting are).
+pub fn file_act(app: &mut App, ctx: &egui::Context, act: FileAct) {
+    let root = app.conv.workspace();
+    let Ok(abs) = snapshots::resolve_inside(&root, match &act {
+        FileAct::Open(p) | FileAct::Preview(p) | FileAct::Reveal(p) | FileAct::OpenOutside(p) | FileAct::CopyPath(p, _) | FileAct::Delete(p) => p,
+    }) else {
+        return;
+    };
+    match act {
+        FileAct::Open(path) => open(app, path),
+        FileAct::Delete(path) => workspace_panel::delete(app, path),
+        FileAct::Preview(_) => super::browser_pane::preview(app, &abs),
+        FileAct::Reveal(_) => reveal(&abs),
+        // explorer.exe opens a file with the app Windows has for it, with no shell to quote through.
+        FileAct::OpenOutside(path) if !runs(&path) => {
+            let program = if cfg!(windows) { "explorer" } else if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+            let _ = std::process::Command::new(program).arg(&abs).spawn();
+        }
+        FileAct::OpenOutside(_) => {}
+        FileAct::CopyPath(path, full) => ctx.copy_text(if full { abs.display().to_string() } else { path }),
+    }
+}
+
+/// The file's folder in Explorer, with the file selected.
+fn reveal(path: &std::path::Path) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // explorer reads `/select,"path"` itself; passed as one quoted argument by Rust, a path with a space failed.
+        let _ = std::process::Command::new("explorer").raw_arg(format!("/select,\"{}\"", path.display())).spawn();
+    }
+    #[cfg(not(windows))]
+    {
+        let folder = if path.is_dir() { path } else { path.parent().unwrap_or(path) };
+        let _ = std::process::Command::new(if cfg!(target_os = "macos") { "open" } else { "xdg-open" }).arg(folder).spawn();
+    }
 }
 
 /// The browser's `window.confirm`: a native OK / Cancel box that holds the window until it is answered.
@@ -191,6 +288,17 @@ pub fn stage(app: &mut App, token: &str) {
             refresh(app);
             app.ws.open = app.ws.dirs.iter().cloned().collect();
         }
+        // The Browser pane on the workspace's first .html file (`APIM_SHOT_FILE` picks another); the picture waits for
+        // the page's first frame.
+        "browser" => {
+            let root = app.conv.workspace();
+            let named = std::env::var("APIM_SHOT_FILE").ok();
+            let page = named.or_else(|| snapshots::list_files(&root).into_iter().map(|f| f.0).find(|p| is_html(p)));
+            match page.and_then(|p| snapshots::resolve_inside(&root, &p).ok()) {
+                Some(abs) => super::browser_pane::preview(app, &abs),
+                None => super::browser_pane::toggle(app),
+            }
+        }
         _ => {}
     }
     workspace_panel::stage(app, token);
@@ -314,6 +422,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         }
         Some(Act::Open(path)) => open(app, path),
         Some(Act::Restore(id, taken)) => restore(app, &id, &taken),
+        Some(Act::File(pick)) => file_act(app, &ui.ctx().clone(), pick),
     }
 }
 
@@ -372,7 +481,9 @@ fn tree_rows(ui: &mut egui::Ui, nodes: &[Node], depth: usize, st: &State, act: &
                 let files_left = right - files.size().x;
                 widgets::text_at(ui, files_left, mid, files);
                 widgets::text_at(ui, name_left, mid, widgets::clipped(ui, &node.name, theme::font(RAIL_TEXT, W::Regular), ink, files_left - 8.0 - name_left));
-                if response.on_hover_text(node.path.as_str()).clicked() {
+                if let Some(pick) = file_menu(&response, &node.path, true, false) {
+                    *act = Some(Act::File(pick));
+                } else if response.on_hover_text(node.path.as_str()).clicked() {
                     *act = Some(Act::Toggle(node.path.clone()));
                 }
             } else {
@@ -384,7 +495,9 @@ fn tree_rows(ui: &mut egui::Ui, nodes: &[Node], depth: usize, st: &State, act: &
                 let size_left = right - size.size().x;
                 widgets::text_at(ui, size_left, mid, size);
                 widgets::text_at(ui, name_left, mid, widgets::clipped(ui, &node.name, theme::font(RAIL_TEXT, W::Regular), if changed { p.accent_light } else { ink }, size_left - 8.0 - name_left));
-                if response.on_hover_text(node.path.as_str()).clicked() {
+                if let Some(pick) = file_menu(&response, &node.path, false, true) {
+                    *act = Some(Act::File(pick));
+                } else if response.on_hover_text(node.path.as_str()).clicked() {
                     *act = Some(Act::Open(node.path.clone()));
                 }
             }

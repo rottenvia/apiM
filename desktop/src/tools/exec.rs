@@ -20,7 +20,7 @@ const ALLOWED: &[&str] = &[
     "python", "python3", "node", "npm", "npx", "pip", "pip3", "tsc", "go", "cargo", "rustc", "java", "javac", "ruby", "php", "dotnet",
     "pytest", "jest", "vitest", "pnpm", "yarn", "bun", "deno", "tsx", "eslint", "prettier", "vite", "next", "git", "make", "cmake", "msbuild",
     "cl", "clang", "clang++", "clang-cl", "gcc", "g++", "csc", "vbc", "link", "rc", "uv", "poetry", "ruff", "black", "mypy", "curl", "wget",
-    "which", "where", "unzip", "tar", "grep", "rg", "find", "diff", "cat", "wc", "head", "tail", "ls", "echo",
+    "which", "where", "unzip", "tar", "grep", "rg", "find", "diff", "cat", "wc", "head", "tail", "ls", "echo", "py",
 ];
 /// The system's own tools for questions about the computer: what runs, what is installed, what its logs say.
 const SYSTEM: &[&str] = &["tasklist", "systeminfo", "whoami", "hostname", "driverquery", "ipconfig", "getmac", "wevtutil", "sc", "reg", "ping", "nslookup", "netstat", "nvidia-smi", "ps", "uname", "df", "uptime", "id", "free", "lscpu", "lsb_release", "sw_vers", "file", "stat", "du"];
@@ -41,6 +41,15 @@ const SLOW_SUBCOMMANDS: &[&str] = &["install", "i", "add", "ci", "get", "restore
 const INFO_FLAGS: &[&str] = &["--version", "-v", "-V", "--help", "-h"];
 /// git subcommands that only look at the repository.
 const GIT_LOOKS: &[&str] = &["status", "log", "diff", "show", "branch", "remote", "ls-files", "rev-parse", "describe", "blame"];
+/// The flags a read-only git look may take: how its output is shaped and what it selects. `--` ends the flags.
+const GIT_LOOK_FLAGS: &[&str] = &[
+    "--", "--no-pager", "--short", "-s", "--branch", "-b", "-sb", "--porcelain", "--long", "--ignored", "--untracked-files", "-uno", "-uall", "-unormal", "--oneline", "--graph", "--decorate", "--no-decorate", "--all",
+    "--stat", "--numstat", "--shortstat", "--name-only", "--name-status", "--no-merges", "--merges", "--first-parent", "--reverse", "--abbrev-commit", "--no-abbrev-commit", "--follow", "--date-order", "--topo-order", "-p", "--patch",
+    "--no-patch", "--format", "--pretty", "--date", "--author", "--committer", "--grep", "--since", "--until", "--after", "--before", "--max-count", "--skip", "-n", "--invert-grep", "-i", "--regexp-ignore-case", "-E", "--extended-regexp", "-z",
+    "--staged", "--cached", "--no-color", "--color", "--no-ext-diff", "--no-textconv", "--word-diff", "--unified", "--diff-filter", "--find-renames", "--no-renames", "-v", "--verbose", "-vv", "--list", "-a", "-r", "--remotes", "--show-current",
+    "--merged", "--no-merged", "--contains", "--no-contains", "--tags", "--always", "--abbrev", "--dirty", "--exact-match", "--match", "--abbrev-ref", "--show-toplevel", "--show-prefix", "--is-inside-work-tree", "--is-bare-repository",
+    "--verify", "--quiet", "-q", "--symbolic-full-name", "--show-cdup", "--stage", "--others", "--modified", "--deleted", "--exclude-standard", "--error-unmatch", "--directory", "--ignore-submodules",
+];
 /// The environment a child keeps. Everything else apiM has is withheld, API keys included. Profile paths stay so rustup and npm can find their homes.
 const CHILD_ENV: &[&str] = &[
     "COMPUTERNAME", "ALLUSERSPROFILE", "PUBLIC", "HOMEDRIVE", "HOMEPATH", "ProgramW6432", "CommonProgramFiles", "PSModulePath",
@@ -108,7 +117,8 @@ fn read_only(name: &str, args: &[String]) -> bool {
     }
     match name {
         // The forms that change things were refused before this is asked (`LOOKING_FORMS`).
-        "tasklist" | "systeminfo" | "whoami" | "hostname" | "driverquery" | "ipconfig" | "getmac" | "wevtutil" | "sc" | "nvidia-smi" | "ps" | "uname" | "df" | "uptime" | "id" | "free" | "lscpu" | "lsb_release" | "sw_vers" => true,
+        "tasklist" | "systeminfo" | "driverquery" | "getmac" | "wevtutil" | "nvidia-smi" => look_switches(name, args),
+        "whoami" | "hostname" | "ipconfig" | "sc" | "ps" | "uname" | "df" | "uptime" | "id" | "free" | "lscpu" | "lsb_release" | "sw_vers" => true,
         "git" => git_read_only(first, args),
         "npm" => matches!(first, "ls" | "list" | "view" | "outdated" | "why" | "root" | "prefix"),
         "pnpm" => matches!(first, "ls" | "list" | "why" | "outdated"),
@@ -119,19 +129,21 @@ fn read_only(name: &str, args: &[String]) -> bool {
     }
 }
 
-/// git looks without a prompt only in listing form, and never with an argument that can write a file, run a helper or reach outside the repo.
-// ponytail: git config overrides (core.fsmonitor, hooksPath) are not forced off as the web does; only the argument rules above apply.
+/// git looks without a prompt only in listing form, and only with the flags on `GIT_LOOK_FLAGS`: a flag that writes a
+/// file, names a helper or reads a path (`blame --contents`, `diff --output`, `--no-index`) asks first.
 fn git_read_only(first: &str, args: &[String]) -> bool {
     if !GIT_LOOKS.contains(&first) {
         return false;
     }
     let risky = args.iter().any(|a| {
         let a = a.as_str();
-        ["--output", "-O", "--ext-diff", "--textconv", "--no-index", "--exec-path", "--work-tree", "--git-dir", "--orderfile", "--config-env", "-c", "-C", "-d"].iter().any(|p| a.starts_with(p))
-            || matches!(a, "-D" | "-m" | "-M" | "add" | "remove" | "set-url")
-            || Path::new(a).is_absolute()
-            || a.starts_with('~')
-            || a.split(['/', '\\']).any(|p| p == "..")
+        if !a.starts_with('-') {
+            return leaves_repo(a);
+        }
+        // A flag's value is a path too when it names one: `--format=%H` passes, `--since=/etc` does not.
+        let (flag, value) = a.split_once('=').unwrap_or((a, ""));
+        let count = flag.len() > 1 && flag[1..].bytes().all(|b| b.is_ascii_digit());
+        !(GIT_LOOK_FLAGS.contains(&flag) || count) || leaves_repo(value)
     });
     if risky {
         return false;
@@ -144,6 +156,33 @@ fn git_read_only(first: &str, args: &[String]) -> bool {
         "remote" => positional.len() == 1 || (positional.len() == 3 && positional[1] == "get-url"),
         _ => true,
     }
+}
+
+/// A word that leaves the repository: an absolute path, a rooted one (`/etc` is rooted, not absolute, on Windows), a
+/// drive-relative one (`C:x`), a home-relative one, or one that climbs with `..`.
+fn leaves_repo(word: &str) -> bool {
+    let bytes = word.as_bytes();
+    let drive = bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic();
+    Path::new(word).is_absolute() || drive || word.starts_with(['~', '/', '\\']) || word.split(['/', '\\']).any(|p| p == "..")
+}
+
+/// The switches a system tool may take when it is only asked to look. Any other switch makes the call ask first: `/S`
+/// names another host, `/r:` reads a remote log, `-f` writes a file, `-r` resets a GPU. Values are not switches.
+fn look_switches(name: &str, args: &[String]) -> bool {
+    let listed: &[&str] = match name {
+        "tasklist" => &["/v", "/svc", "/m", "/fi", "/fo", "/nh"],
+        "systeminfo" => &["/fo", "/nh"],
+        "driverquery" => &["/v", "/fo", "/nh", "/si"],
+        "getmac" => &["/fo", "/nh", "/v"],
+        "wevtutil" => &["/c", "/rd", "/q", "/l", "/f"],
+        "nvidia-smi" => &["-q", "-d", "--display", "-x", "-L", "--list-gpus", "--query-gpu", "--format", "-i", "--id", "-h", "--help"],
+        _ => &[],
+    };
+    args.iter().all(|a| {
+        let a = a.as_str();
+        let switch = a.split(['=', ':']).next().unwrap_or(a).to_ascii_lowercase();
+        !a.starts_with(['/', '-']) || listed.contains(&switch.as_str())
+    })
 }
 
 /// Finds the program the way a terminal would. Rust's own lookup misses `npm.cmd` and friends on Windows.
@@ -452,7 +491,16 @@ fn prepare(ctx: &Ctx, command: &str, argv: Vec<String>) -> Result<Launch, String
     let lookup = if cfg!(windows) && command.eq_ignore_ascii_case("python3") { "python" } else { command };
     let found = find_program(&ctx.root, lookup);
     let own = found.as_ref().is_some_and(|p| p.starts_with(&ctx.root));
-    if !own && !ALLOWED.contains(&name.as_str()) && !SYSTEM.contains(&name.as_str()) {
+    // "Open it in Explorer" shows the user a folder and changes nothing. A file is refused: Explorer starts it with its app.
+    let explorer = cfg!(windows) && name == "explorer";
+    if explorer {
+        let target = argv.first().map(|a| a.strip_prefix("/select,").unwrap_or(a).trim_matches('"').to_string()).unwrap_or_default();
+        let at = if Path::new(&target).is_absolute() { PathBuf::from(&target) } else { ctx.root.join(&target) };
+        if argv.len() != 1 || !(at.is_dir() || argv[0].starts_with("/select,") && at.exists()) {
+            return Err("explorer is run here only to show a folder: give the folder as its one argument (or /select,<file> to point at a file). A file given alone would be started by its app.".into());
+        }
+    }
+    if !own && !explorer && !ALLOWED.contains(&name.as_str()) && !SYSTEM.contains(&name.as_str()) {
         return Err(format!(
             "\"{name}\" is not an allowed command. Allowed: {}. A program you built yourself can be run by its path inside the workspace, e.g. \"build/app.exe\" — the file has to exist there first. A tool installed with pip runs as `python -m {name}`, one from npm as `npx {name}`.{}",
             ALLOWED.join(", "),
@@ -470,8 +518,11 @@ fn prepare(ctx: &Ctx, command: &str, argv: Vec<String>) -> Result<Launch, String
     // an install into the machine but nothing else. "Run automatically" asks for nothing, installs included.
     let ask = (ctx.settings.approval.asks_routine() && (own || !read_only(&name, &argv)))
         || (ctx.settings.approval.asks_critical() && !own && installs_on_machine(&name, &argv));
+    let git = name == "git";
     let display = std::iter::once(command.to_string()).chain(argv.iter().map(|a| if a.contains(' ') { format!("\"{a}\"") } else { a.clone() })).collect::<Vec<_>>().join(" ");
     let key = serde_json::to_string(&std::iter::once(name).chain(argv.iter().cloned()).collect::<Vec<_>>()).unwrap_or_default();
+    // git runs hardened from here too: a cloned repository's own config cannot name a program that git then runs.
+    let argv = if git { crate::github::harden(&argv.iter().map(String::as_str).collect::<Vec<_>>()) } else { argv };
     Ok(Launch { program, args: argv, display, key, ask })
 }
 
@@ -802,7 +853,9 @@ fn split_words(line: &str) -> Vec<String> {
 }
 
 /// cmd's built-in commands that PowerShell also takes by name.
-const CMD_WORDS: &[&str] = &["del", "erase", "dir", "type", "copy", "move", "ren", "md", "mkdir", "rd", "rmdir", "echo", "cls", "cd"];
+/// PowerShell's own names for the Unix ones (rm, cp, mv, pwd, sleep) go the same way: refused as programs, they cost a
+/// round each (2026-10-28).
+const CMD_WORDS: &[&str] = &["del", "erase", "dir", "type", "copy", "move", "ren", "md", "mkdir", "rd", "rmdir", "echo", "cls", "cd", "rm", "cp", "mv", "pwd", "sleep"];
 
 /// A word only a shell reads: `&&`, `||`, a pipe, `;`, a redirect.
 fn shell_word(word: &str) -> bool {
@@ -1571,6 +1624,19 @@ mod tests {
         assert!(!read_only("git", &s(&["remote", "add", "x", "url"])));
         assert!(read_only("git", &s(&["remote", "-v"])));
         assert!(read_only("git", &s(&["remote", "get-url", "origin"])));
+        assert!(!read_only("git", &s(&["blame", "--contents=secret.txt", "a.rs"])));
+        assert!(!read_only("git", &s(&["log", "--since=/etc"])));
+        assert!(read_only("git", &s(&["log", "--format=%h %s", "-n", "5"])));
+        assert!(read_only("git", &s(&["diff", "--", "src/a.rs"])));
+    }
+
+    #[test]
+    fn system_tools_look_only_with_plain_switches() {
+        assert!(!read_only("tasklist", &s(&["/S", "server1"])));
+        assert!(read_only("tasklist", &s(&["/fi", "IMAGENAME eq x.exe", "/fo", "csv", "/nh"])));
+        assert!(!read_only("nvidia-smi", &s(&["-f", "out.txt"])));
+        assert!(!read_only("wevtutil", &s(&["qe", "System", "/r:server1"])));
+        assert!(read_only("wevtutil", &s(&["qe", "System", "/c:5"])));
     }
 
     #[test]

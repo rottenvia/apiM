@@ -39,7 +39,7 @@ pub const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
 pub const MAX_FILES_PER_WORKSPACE: usize = 100_000;
 
 /// Names the web's listing skips at any depth, files and folders alike: its own bookkeeping and installed packages.
-const IGNORED: &[&str] = &[".history", ".snapshots", ".packages", ".analysis", ".outputs", ".workspace-id", "node_modules", ".git", ".next", "__pycache__", ".venv", "venv"];
+const IGNORED: &[&str] = &[".history", ".snapshots", ".packages", ".analysis", ".outputs", ".video", ".workspace-id", "node_modules", ".git", ".next", "__pycache__", ".venv", "venv"];
 /// Build output, hidden only at the top of the workspace: a `build` folder deeper in is as likely to be source.
 const IGNORED_AT_ROOT: &[&str] = &["dist", "build"];
 
@@ -89,10 +89,32 @@ fn modified_ms(meta: &std::fs::Metadata) -> u64 {
 
 /// Paths the file tools may read but never write: a `.git` anywhere (its config can name programs git runs), and
 /// this app's own undo state at the top, where a forged manifest or history slot would restore anything.
+/// Windows drops trailing dots and spaces from a name, and `name:stream` is the file itself: both are folded or refused.
 pub fn is_protected_path(rel: &str) -> bool {
     let posix = rel.replace('\\', "/");
-    let parts: Vec<String> = posix.split('/').filter(|p| !p.is_empty() && *p != ".").map(|p| if cfg!(windows) { p.to_lowercase() } else { p.to_string() }).collect();
-    parts.iter().any(|p| p == ".git") || parts.first().is_some_and(|p| [".history", ".snapshots", ".workspace-id"].contains(&p.as_str()))
+    let parts: Vec<String> = posix.split('/').filter(|p| !p.is_empty() && *p != ".").map(|p| if cfg!(windows) { p.trim_end_matches(['.', ' ']).to_lowercase() } else { p.to_string() }).collect();
+    let stream = cfg!(windows) && posix.split('/').any(|p| p.contains(':'));
+    stream || parts.iter().any(|p| p == ".git") || parts.first().is_some_and(|p| [".history", ".snapshots", ".workspace-id"].contains(&p.as_str()))
+}
+
+/// `is_protected_path`, judged where the path really lands: a junction, a symlink or an 8.3 short name (`GIT~1`)
+/// can reach `.git` under another spelling. A path not made yet is judged by its nearest existing parent.
+pub fn protected_at(workspace: &Path, rel: &str) -> bool {
+    if is_protected_path(rel) {
+        return true;
+    }
+    let path = workspace.join(rel.replace('\\', "/"));
+    let mut existing = path.as_path();
+    while existing.symlink_metadata().is_err() {
+        match existing.parent() {
+            Some(parent) => existing = parent,
+            None => return true,
+        }
+    }
+    let (Ok(real), Ok(real_root)) = (existing.canonicalize(), workspace.canonicalize()) else { return true };
+    let Ok(inside) = real.strip_prefix(&real_root) else { return true };
+    let rest = path.strip_prefix(existing).unwrap_or(Path::new(""));
+    is_protected_path(&inside.join(rest).to_string_lossy())
 }
 
 /// A path from the model or from a manifest as a real one inside the workspace, or the web app's reason why not.
@@ -973,6 +995,9 @@ mod tests {
         assert_eq!(restore_previous(&ws, "../x").unwrap_err(), "Path must not contain '..'");
         assert_eq!(restore_previous(&ws, "/etc/passwd").unwrap_err(), "Path must be relative to the workspace");
         assert!(is_protected_path("src\\.git/config") && is_protected_path("./.snapshots/x") && !is_protected_path("src/.history/x"));
+        // Windows spells the same folder other ways: a trailing dot or space, and a stream suffix.
+        assert!(!cfg!(windows) || (is_protected_path(".git.") && is_protected_path(".GIT ") && is_protected_path("sub\\x:stream")));
+        assert!(!protected_at(&ws, "src/a.rs") && protected_at(&ws, "src/../.git/config"));
         let _ = std::fs::remove_dir_all(ws);
     }
 

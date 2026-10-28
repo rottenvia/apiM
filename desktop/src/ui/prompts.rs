@@ -85,22 +85,25 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> bool {
                         // Its name, then the lines of the check, wrapped: nothing here is a command to scroll along.
                         let (name, rest) = command.split_once('\n').unwrap_or((command.as_str(), ""));
                         ui.spacing_mut().item_spacing.y = 2.0;
-                        ui.add(egui::Label::new(widgets::lines(name, 13.0, 19.0, W::Medium, p.text)).wrap());
+                        ui.add(egui::Label::new(widgets::lines(&reveal(name).0, 13.0, 19.0, W::Medium, p.text)).wrap());
                         for line in rest.lines() {
                             let warns = line.starts_with("- ") || (line.starts_with("Trust check:") && !line.contains("Nothing suspicious"));
-                            ui.add(egui::Label::new(widgets::lines(line, 12.0, 18.0, W::Regular, if warns { p.warning } else { p.text2 })).wrap());
+                            ui.add(egui::Label::new(widgets::lines(&reveal(line).0, 12.0, 18.0, W::Regular, if warns { p.warning } else { p.text2 })).wrap());
                         }
                         return;
                     }
-                    egui::ScrollArea::horizontal().id_salt("command").show(ui, |ui| {
-                        let mut job = egui::text::LayoutJob::default();
-                        let format = |colour| egui::TextFormat { font_id: theme::mono(12.0), color: colour, line_height: Some(18.0), ..Default::default() };
-                        if !mcp && !look {
-                            job.append("$ ", 0.0, format(p.muted));
-                        }
-                        job.append(&command.replace('\n', " "), 0.0, format(p.text2));
-                        ui.add(egui::Label::new(job).extend().selectable(true));
-                    });
+                    // Wrapped, not scrolled: the whole command is read, and its tail is never out of sight.
+                    let (text, hidden) = reveal(&command.replace(['\n', '\t'], " "));
+                    let mut job = egui::text::LayoutJob::default();
+                    let format = |colour| egui::TextFormat { font_id: theme::mono(12.0), color: colour, line_height: Some(18.0), ..Default::default() };
+                    if !mcp && !look {
+                        job.append("$ ", 0.0, format(p.muted));
+                    }
+                    job.append(&text, 0.0, format(p.text2));
+                    ui.add(egui::Label::new(job).wrap().selectable(true));
+                    if hidden > 0 {
+                        ui.add(egui::Label::new(widgets::lines(&format!("{hidden} hidden control or direction character{} shown above as <U+code>.", if hidden == 1 { "" } else { "s" }), 12.0, 18.0, W::Regular, p.warning)).wrap());
+                    }
                 });
             },
             |ui| {
@@ -203,4 +206,31 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) -> bool {
         }
     }
     drew
+}
+
+/// Characters a command can hide text with: controls, and the bidirectional and zero-width marks. Each is shown as
+/// `<U+XXXX>`, and the count is given back so the card can say how many there were.
+fn reveal(text: &str) -> (String, usize) {
+    let mut hidden = 0;
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_control() || matches!(c as u32, 0x200B..=0x200F | 0x202A..=0x202E | 0x2066..=0x2069) {
+            hidden += 1;
+            out.push_str(&format!("<U+{:04X}>", c as u32));
+        } else {
+            out.push(c);
+        }
+    }
+    (out, hidden)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hidden_characters_are_shown_and_counted() {
+        let (text, hidden) = reveal("ls\u{202E}rm\u{200B} -rf\u{7}");
+        assert_eq!((text.as_str(), hidden), ("ls<U+202E>rm<U+200B> -rf<U+0007>", 3));
+    }
 }

@@ -198,7 +198,11 @@ pub fn render(conv: &Conversation, format: &str) -> String {
                     let sources = if m.search_results.is_empty() {
                         String::new()
                     } else {
-                        let items: String = m.search_results.iter().map(|r| format!("<li><a href=\"{}\">{}</a> <span>{}</span></li>", escape(&r.url), escape(&r.title), escape(&r.domain))).collect();
+                        let items: String = m.search_results.iter().map(|r| {
+                            // Only web addresses become links; anything else is plain text.
+                            let title = if crate::search::followable(&r.url, false) { format!("<a href=\"{}\" rel=\"noopener noreferrer\">{}</a>", escape(&r.url), escape(&r.title)) } else { escape(&r.title) };
+                            format!("<li>{title} <span>{}</span></li>", escape(&r.domain))
+                        }).collect();
                         format!("<div class=\"sources\"><strong>Sources</strong><ol>{items}</ol></div>")
                     };
                     let reasoning = m.reasoning();

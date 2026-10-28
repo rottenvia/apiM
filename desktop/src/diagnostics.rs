@@ -103,7 +103,8 @@ pub fn cause(kind: &str, subject: &str, detail: &str) -> Cause {
     let has = |words: &[&str]| words.iter().any(|word| text.contains(word));
     let starts = |words: &[&str]| words.iter().any(|word| text.starts_with(word));
     match kind {
-        "ui_error" | "ui_freeze" | "text_held" => Cause::App,
+        "ui_error" | "ui_freeze" | "text_held" | "tool_hung" | "tool_abandoned" => Cause::App,
+        "tool_slow" => Cause::Setup,
         "api_error" | "endpoint_moved" => Cause::Provider,
         "run_stopped" if subject == "spending limit" => Cause::Routine,
         "unverified_claim" | "limit_hit" | "browser_blocked" | "run_stopped" | "run_checkpoint" => Cause::Model,
@@ -156,10 +157,11 @@ fn trim(text: &str, max: usize) -> String {
 
 /// Anything that could carry a secret is dropped before it is written: the log is meant to be pasteable.
 fn scrub(text: &str) -> String {
-    static RULES: LazyLock<[(Regex, &str); 4]> = LazyLock::new(|| {
+    static RULES: LazyLock<[(Regex, &str); 5]> = LazyLock::new(|| {
         [
             (r"sk-[A-Za-z0-9_-]{8,}", "sk-***"),
             (r"tvly-[A-Za-z0-9_-]{8,}", "tvly-***"),
+            (r"(gh[pos]_|github_pat_)[A-Za-z0-9_]{8,}", "${1}***"),
             (r"(?i:Bearer)\s+[A-Za-z0-9._-]{8,}", "Bearer ***"),
             (r"([?&](?i:api_?key|token|secret)=)[^&\s]+", "${1}***"),
         ]
@@ -177,9 +179,81 @@ pub fn record(kind: &str, subject: &str, detail: &str) {
 /// `record` with extra small facts, stored as `context` (pass a JSON object of scalars).
 /// What is routine (the user's own choice, a command's failing exit) is not a problem and is not written down.
 pub fn record_with(kind: &str, subject: &str, detail: &str, context: Value) {
-    if cause(kind, subject, detail) != Cause::Routine {
+    let why = cause(kind, subject, detail);
+    if why != Cause::Routine {
         append(&log_path(), kind, subject, detail, context);
     }
+    // What points at the app, this PC or the provider is kept readable beside the log, newest problems first, for
+    // whoever fixes the app next: they read it there rather than in the chats.
+    if why < Cause::Model {
+        let _ = std::fs::write(log_path().with_file_name("problems.md"), markdown());
+    }
+}
+
+/// How long a tool may run before the log hears of it. Builds and installs can take longer; they are written down as
+/// slow, not as a fault.
+const HUNG_AFTER: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// One tool call, watched. A call still running after `HUNG_AFTER` is written down while it runs, one that ends late is
+/// written down as slow, and one dropped unfinished (the reply was stopped while it ran) is written down with how long
+/// it had run. A browse that never came back ("Opening", 2026-10-28) left nothing behind: the chat was not saved
+/// and no tool had failed.
+pub struct Watch {
+    tool: String,
+    gist: String,
+    model: String,
+    started: std::time::Instant,
+    finished: bool,
+    timer: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Watch {
+    pub fn start(tool: &str, args: &Value, model: &str) -> Watch {
+        let (name, gist, by) = (tool.to_string(), gist(tool, args), model.to_string());
+        let timer = tokio::runtime::Handle::try_current().ok().map(|rt| {
+            let (name, gist, by) = (name.clone(), gist.clone(), by.clone());
+            rt.spawn(async move {
+                tokio::time::sleep(HUNG_AFTER).await;
+                record_with("tool_hung", &name, &format!("still running after {} s: {gist}", HUNG_AFTER.as_secs()), serde_json::json!({ "model": by }));
+            })
+        });
+        Watch { tool: name, gist, model: by, started: std::time::Instant::now(), finished: false, timer }
+    }
+
+    pub fn done(mut self, ok: bool) {
+        self.finished = true;
+        let secs = self.started.elapsed().as_secs();
+        if secs >= HUNG_AFTER.as_secs() {
+            record_with("tool_slow", &self.tool, &format!("took {secs} s ({}): {}", if ok { "finished" } else { "failed" }, self.gist), serde_json::json!({ "model": self.model }));
+        }
+    }
+}
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        if let Some(timer) = self.timer.take() {
+            timer.abort();
+        }
+        let secs = self.started.elapsed().as_secs();
+        // A stop in the first seconds is the user changing their mind, not a tool that would not finish.
+        if !self.finished && secs >= 8 {
+            record_with("tool_abandoned", &self.tool, &format!("the reply was stopped {secs} s into it: {}", self.gist), serde_json::json!({ "model": self.model }));
+        }
+    }
+}
+
+/// What a call was doing, in a line: the command, the address, the path, a browse's steps. Never a file's body.
+fn gist(tool: &str, args: &Value) -> String {
+    let s = |key: &str| args[key].as_str().map(str::to_string);
+    let line = if let Some(steps) = args["actions"].as_array() {
+        steps.iter().map(|step| step.as_object().and_then(|o| o.iter().find(|(k, _)| *k != "name").map(|(k, v)| format!("{k} {}", v.as_str().map_or_else(|| v.to_string(), str::to_string)))).unwrap_or_default()).collect::<Vec<_>>().join(" → ")
+    } else if let Some(command) = s("command") {
+        let rest = args["args"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" ")).unwrap_or_default();
+        format!("{command} {rest}")
+    } else {
+        s("url").or_else(|| s("source")).or_else(|| s("path")).or_else(|| s("query")).or_else(|| s("name")).unwrap_or_else(|| tool.to_string())
+    };
+    trim(&line, 160)
 }
 
 /// A crash is written down before the program goes: where it happened and what it said.
@@ -193,11 +267,19 @@ pub fn watch_for_crashes() {
     }));
 }
 
-fn append(path: &Path, kind: &str, subject: &str, detail: &str, context: Value) {
+fn append(path: &Path, kind: &str, subject: &str, detail: &str, mut context: Value) {
+    // Text facts are scrubbed too: a context can carry a URL or a header that holds a key.
+    if let Some(facts) = context.as_object_mut() {
+        for value in facts.values_mut() {
+            if let Value::String(text) = value {
+                *text = scrub(text.as_str());
+            }
+        }
+    }
     let entry = Diagnostic {
         at: crate::store::iso(crate::store::now_ms()),
         kind: kind.to_string(),
-        subject: trim(subject, 80),
+        subject: scrub(&trim(subject, 80)),
         detail: scrub(&trim(detail, 300)),
         context: (!context.is_null()).then_some(context),
     };
@@ -291,6 +373,9 @@ pub fn kind_label(kind: &str) -> &str {
         "ui_freeze" => "Window froze",
         "text_held" => "Text held back",
         "unverified_claim" => "Claimed work no tool did",
+        "tool_hung" => "Tool still running",
+        "tool_abandoned" => "Stopped mid-tool",
+        "tool_slow" => "Slow tool",
         other => other,
     }
 }
@@ -365,6 +450,13 @@ pub fn render_report(entries: &[Diagnostic]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn github_tokens_are_scrubbed() {
+        assert_eq!(scrub("gho_abcdefgh12 and ghs_ABCDEFGH34"), "gho_*** and ghs_***");
+        let text = scrub("token github_pat_11ABCDEFG0123456789xyz here");
+        assert!(!text.contains("11ABCDEFG") && text.contains("github_pat_***"), "{text}");
+    }
 
     fn entry(at: &str, kind: &str, subject: &str, detail: &str) -> Diagnostic {
         Diagnostic { at: format!("2026-10-08T10:00:{at}Z"), kind: kind.into(), subject: subject.into(), detail: detail.into(), context: None }

@@ -7,7 +7,7 @@ use regex::{Regex, RegexBuilder};
 use serde_json::Value;
 use std::path::{Component, Path, PathBuf};
 
-const IGNORED: &[&str] = &[".history", ".snapshots", ".packages", ".analysis", ".outputs", "node_modules", ".git", ".next", "__pycache__", ".venv", "venv", "target"];
+const IGNORED: &[&str] = &[".history", ".snapshots", ".packages", ".analysis", ".outputs", ".video", "node_modules", ".git", ".next", "__pycache__", ".venv", "venv", "target"];
 /// Build output, hidden only at the top of the workspace: a `build` folder deeper in is as likely to be source.
 const IGNORED_AT_ROOT: &[&str] = &["dist", "build"];
 const MAX_WALK: usize = 50_000;
@@ -74,7 +74,10 @@ pub fn expand(path: &str) -> String {
 // ponytail: the common places, matched on the path alone. A program the model writes and runs is not held by it.
 /// The app's own keys are in the list too: a PowerShell command is held to this list alone, and `settings.json`
 /// was only kept from the file tools.
-const CLOSED: &[&str] = &["/.ssh", "/.gnupg", "/.aws", "/user data", "/firefox/profiles", "/microsoft/credentials", "/microsoft/protect", "/system32/config", "/apim/settings.json", "/apim/github-app.json"];
+const CLOSED: &[&str] = &[
+    "/.ssh", "/.gnupg", "/.aws", "/user data", "/firefox/profiles", "/microsoft/credentials", "/microsoft/protect", "/system32/config", "/apim/settings.json", "/apim/github-app.json",
+    "/gh/hosts.yml", "/github cli/hosts.yml", "/.docker/config.json", "/.cargo/credentials", "/login data", "/network/cookies", "/discord/local storage", "/discord/leveldb", "/slack/local storage", "/slack/leveldb",
+];
 const CLOSED_FILES: &[&str] = &[".env", ".netrc", "_netrc", ".git-credentials", ".npmrc", ".pypirc"];
 pub const CLOSED_WHY: &str = "that place keeps sign-ins or keys, and apiM does not read it for a model. If the task needs one file from it, ask the user to copy that file into the workspace.";
 
@@ -482,12 +485,45 @@ pub fn read_files(ctx: &Ctx, args: &Value) -> Output {
     Output::ok(out, format!("Read {read} of {} files", paths.len()))
 }
 
-/// Why the file tools will not write here, if they will not.
-fn protected(rel: &str) -> Result<(), String> {
-    if crate::snapshots::is_protected_path(rel) {
+/// Why the file tools will not write here, if they will not. Judged where the path really lands (`protected_at`).
+pub fn protected(root: &Path, rel: &str) -> Result<(), String> {
+    if crate::snapshots::protected_at(root, rel) {
         return Err(format!("{rel} is inside a protected folder (.git, .history or .snapshots) and cannot be written, moved or deleted by the file tools"));
     }
     Ok(())
+}
+
+/// Whether a file has more than one name. Writing a hard link would change the file it links to, wherever that is.
+pub fn hard_linked(path: &Path) -> bool {
+    link_count(path) > 1
+}
+
+#[cfg(windows)]
+fn link_count(path: &Path) -> u32 {
+    use std::os::windows::io::AsRawHandle;
+    #[derive(Default)]
+    #[repr(C)]
+    struct ByHandleInfo {
+        attributes: u32,
+        times: [u32; 6],
+        volume: u32,
+        size: [u32; 2],
+        links: u32,
+        index: [u32; 2],
+    }
+    unsafe extern "system" {
+        fn GetFileInformationByHandle(file: *mut std::ffi::c_void, info: *mut ByHandleInfo) -> i32;
+    }
+    let Ok(file) = std::fs::File::open(path) else { return 1 };
+    let mut info = ByHandleInfo::default();
+    // SAFETY: the handle stays open for the call, and the struct has the layout of BY_HANDLE_FILE_INFORMATION.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } != 0 { info.links } else { 1 }
+}
+
+#[cfg(not(windows))]
+fn link_count(path: &Path) -> u32 {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).map_or(1, |m| m.nlink() as u32)
 }
 
 /// Keeps the file as it is now, so undo_file can put it back. The history is the web app's: <workspace>/.history.
@@ -503,9 +539,12 @@ fn write_checked(ctx: &Ctx, rel: &str, content: &str) -> Result<String, String> 
     if path == ctx.root {
         return Err("path is required.".into());
     }
-    protected(rel)?;
+    protected(&ctx.root, rel)?;
     if path.is_dir() {
         return Err(format!("{rel} is a folder. Name a file inside it."));
+    }
+    if hard_linked(&path) {
+        return Err(format!("{rel} is a hard link to another file, and writing it would change that file too. Delete the link first."));
     }
     backup(ctx, rel, &path);
     if let Some(dir) = path.parent() {
@@ -567,7 +606,7 @@ pub fn delete_file(ctx: &Ctx, args: &Value) -> Output {
         Ok(_) => return Output::fail(format!("{rel} is not a file in the workspace.")),
         Err(e) => return Output::fail(e),
     };
-    if let Err(e) = protected(rel) {
+    if let Err(e) = protected(&ctx.root, rel) {
         return Output::fail(e);
     }
     backup(ctx, rel, &path);
@@ -584,7 +623,7 @@ fn delete_folder(ctx: &Ctx, rel: &str, dir: &Path) -> Output {
     if inside.len() > 500 {
         return Output::fail(format!("{rel} holds {} files: too many to delete in one step. Delete the parts of it you made, by name.", inside.len()));
     }
-    if let Some(e) = std::iter::once(rel).chain(inside.iter().map(|(file, _)| file.as_str())).find_map(|file| protected(file).err()) {
+    if let Some(e) = std::iter::once(rel).chain(inside.iter().map(|(file, _)| file.as_str())).find_map(|file| protected(&ctx.root, file).err()) {
         return Output::fail(e);
     }
     for (file, _) in &inside {
@@ -602,7 +641,7 @@ pub fn move_file(ctx: &Ctx, args: &Value) -> Output {
         (Ok(s), Ok(d)) => (s, d),
         (Err(e), _) | (_, Err(e)) => return Output::fail(e),
     };
-    if let Err(e) = protected(from).and(protected(to)) {
+    if let Err(e) = protected(&ctx.root, from).and(protected(&ctx.root, to)) {
         return Output::fail(e);
     }
     if !src.is_file() {
@@ -637,6 +676,12 @@ pub fn undo_file(ctx: &Ctx, args: &Value) -> Output {
         };
         return Output { ok: false, text, summary: format!("No history for {rel}"), ..Default::default() };
     };
+    if let Err(e) = protected(&ctx.root, rel) {
+        return Output::fail(e);
+    }
+    if hard_linked(&path) {
+        return Output::fail(format!("{rel} is a hard link to another file, and undoing would change that file too."));
+    }
     // Reverting is itself a write, so it goes into history too: undoing an undo falls out for free.
     backup(ctx, rel, &path);
     if let Some(dir) = path.parent() {
@@ -1055,7 +1100,8 @@ pub fn search_files(ctx: &Ctx, args: &Value) -> Output {
     let scope = scope.trim().trim_start_matches("./").trim_matches('/');
     // Walked from the named place itself: a folder the file list leaves out (`.outputs`, where command outputs are
     // kept) is searched when it is asked for by name.
-    let named_place = Some(ctx.root.join(scope)).filter(|place| !scope.is_empty() && !scope.split('/').any(|part| part == "..") && place.exists());
+    // Resolved like every file tool's path: a place outside the workspace is not searched, whatever the argument says.
+    let named_place = resolve(&ctx.root, scope).ok().filter(|place| !scope.is_empty() && place.exists());
     let inside: Vec<(String, u64)> = match &named_place {
         Some(place) => walk(&ctx.root, place),
         None if scope.is_empty() => walk(&ctx.root, &ctx.root),
@@ -1194,6 +1240,33 @@ pub fn replace_in_files(ctx: &Ctx, args: &Value) -> Output {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hard_link_is_not_written_through_and_secret_places_stay_closed() {
+        let root = crate::tools::scratch("hardlink");
+        std::fs::write(root.join("a.txt"), "one").unwrap();
+        std::fs::hard_link(root.join("a.txt"), root.join("b.txt")).unwrap();
+        assert!(hard_linked(&root.join("a.txt")));
+        let ctx = crate::tools::test_ctx(&root, crate::store::Approval::Auto);
+        assert!(!write_file(&ctx, &serde_json::json!({ "path": "b.txt", "content": "two" })).ok);
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "one");
+        std::fs::remove_file(root.join("b.txt")).unwrap();
+        assert!(!hard_linked(&root.join("a.txt")));
+        assert!(closed_text("C:/Users/me/.docker/config.json") && closed_text("C:\\Users\\me\\AppData\\Roaming\\GitHub CLI\\hosts.yml"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn search_stays_inside_the_workspace() {
+        let root = crate::tools::scratch("search-scope");
+        let outside = crate::tools::scratch("search-outside");
+        std::fs::write(outside.join("secret.txt"), "needle").unwrap();
+        let ctx = crate::tools::test_ctx(&root, crate::store::Approval::Auto);
+        let out = search_files(&ctx, &serde_json::json!({ "query": "needle", "path": outside.to_string_lossy() }));
+        assert!(!out.ok && !out.text.contains("needle"), "{}", out.text);
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(outside);
+    }
 
     #[test]
     fn a_read_from_a_line_on_shows_that_place_not_the_rest_of_the_file() {

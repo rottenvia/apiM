@@ -32,6 +32,11 @@ fn generation(id: &str) -> Option<(String, (u32, u32))> {
 
 /// Whether the model thinks the adaptive way (Claude 4.6 and later), and whether it is told to show its thinking (4.7
 /// and later show none unless asked; 4.6 shows a summary by itself). An id this app cannot read is a newer model.
+/// Claude 4.6 and later: thinking with a depth (effort) and no off switch.
+pub fn adaptive(id: &str) -> bool {
+    thinks(id).0
+}
+
 fn thinks(id: &str) -> (bool, bool) {
     generation(id).map_or((true, true), |(_, version)| (version >= (4, 6), version >= (4, 7)))
 }
@@ -211,7 +216,20 @@ pub fn request(body: &Value) -> Value {
             Some(tool)
         })
         .collect();
-    let (system, turns) = conversation(body["messages"].as_array().map_or(&[][..], Vec::as_slice), !tools.is_empty());
+    let mut tools = tools;
+    let (mut system, turns) = conversation(body["messages"].as_array().map_or(&[][..], Vec::as_slice), !tools.is_empty());
+    // The everyday tools end at `load_tools`; groups loaded later come after it. Marked there, the tools are read from
+    // the cache even when a group was just loaded or another chat loaded others: a list one tool shorter read 0 of
+    // 16,876 tokens and wrote them all again at the hour's double price (Haiku 5.5, 2026-10-28). The mark takes the
+    // rules' place, as only four are allowed and the rules are kept by the history's mark after them anyway.
+    let marked = system.iter().find_map(|block| block.get("cache_control").cloned());
+    let everyday_end = tools.iter().position(|t| t["name"] == "load_tools").or(tools.len().checked_sub(1));
+    if let (Some(mark), Some(end)) = (marked, everyday_end) {
+        tools[end]["cache_control"] = mark;
+        system.iter_mut().for_each(|block| {
+            block.as_object_mut().map(|b| b.remove("cache_control"));
+        });
+    }
     let mut out = Map::new();
     for key in ["model", "max_tokens", "stream", "cache_control", "thinking", "output_config"] {
         if let Some(value) = body.get(key) {
@@ -446,7 +464,9 @@ mod tests {
         for gone in ["stream_options", "session_id", "temperature"] {
             assert!(sent.get(gone).is_none(), "{gone}");
         }
-        assert_eq!(sent["system"], json!([{ "type": "text", "text": "rules", "cache_control": { "type": "ephemeral" } }, { "type": "text", "text": "summary" }]));
+        // The rules' cache mark moves to the end of the everyday tools, before the rules in Claude's cache order.
+        assert_eq!(sent["system"], json!([{ "type": "text", "text": "rules" }, { "type": "text", "text": "summary" }]));
+        assert_eq!(sent["tools"][0]["cache_control"], json!({ "type": "ephemeral" }));
         assert_eq!(sent["tools"][0]["input_schema"]["properties"]["path"]["type"], "string");
         assert_eq!((sent["tool_choice"].clone(), sent["cache_control"].clone(), sent["output_config"]["effort"].clone()), (json!({ "type": "auto" }), json!({ "type": "ephemeral" }), json!("high")));
         let turns = sent["messages"].as_array().unwrap();

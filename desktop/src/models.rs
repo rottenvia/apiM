@@ -86,6 +86,34 @@ fn default_max_output() -> u32 {
     65_536
 }
 
+/// Thinking depths from shallowest to deepest, by the names the settings keep.
+pub const EFFORT_ORDER: [&str; 6] = ["none", "low", "medium", "high", "xhigh", "max"];
+
+/// The depths a model really has, shallowest first; empty when it has no thinking to set. Claude 4.6 and later
+/// cannot stop thinking (off is its low effort) and takes five depths; DeepSeek V4 Pro's low is its high; GLM's
+/// pinned endpoint refuses reasoning off (`provider::openrouter_reasoning_mandatory`). A slider stop that changed
+/// nothing on the wire would only mislead.
+pub fn effort_levels(id: &str, customs: &[CustomModel]) -> Vec<&'static str> {
+    let model = resolve(id, customs);
+    match model.provider {
+        ProviderId::Anthropic if crate::anthropic::adaptive(&model.api_model) => vec!["low", "medium", "high", "xhigh", "max"],
+        ProviderId::Anthropic => Vec::new(),
+        ProviderId::Deepseek if model.api_model == "deepseek-v4-pro" => vec!["none", "high", "max"],
+        ProviderId::Deepseek | ProviderId::Local => vec!["none", "low", "high", "max"],
+        ProviderId::Openrouter if crate::provider::openrouter_reasoning_mandatory(id) => vec!["low", "medium", "high", "max"],
+        ProviderId::Openrouter => vec!["none", "low", "medium", "high", "max"],
+    }
+}
+
+/// The depth sent for `asked`: itself when the model has it, else the model's nearest (the deeper one on a tie).
+pub fn fit_effort(levels: &[&'static str], asked: &str) -> &'static str {
+    let rank = |level: &str| EFFORT_ORDER.iter().position(|l| *l == level).unwrap_or(3) as i32;
+    let want = rank(asked);
+    // Some thinking asked for is never turned into none: V4 Pro's Low is its High.
+    let thinking = levels.iter().copied().filter(|level| asked == "none" || *level != "none");
+    thinking.min_by_key(|level| ((rank(level) - want).abs(), -rank(level))).unwrap_or(EFFORT_ORDER[want as usize])
+}
+
 pub const CUSTOM_PREFIX: &str = "custom:";
 pub const DEFAULT_MODEL_ID: &str = "glm-5.3-flash";
 pub const FALLBACK_CONTEXT_TOKENS: u64 = 128_000;
@@ -303,6 +331,21 @@ impl Usage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_model_offers_only_the_depths_it_has() {
+        let claude = CustomModel { api_model: "claude-haiku-5-5".into(), provider: ProviderId::Anthropic, label: "Claude Haiku 5.5".into(), vision: Vision::Native, max_output_tokens: 64_000, context_length: None, input_price: None, output_price: None, open_limits: false };
+        let customs = [claude.clone()];
+        let levels = effort_levels(&claude.id(), &customs);
+        assert_eq!(levels, ["low", "medium", "high", "xhigh", "max"]);
+        assert_eq!(fit_effort(&levels, "none"), "low");
+        assert_eq!(effort_levels("deepseek-v4-pro", &[]), ["none", "high", "max"]);
+        assert_eq!(fit_effort(&effort_levels("deepseek-v4-pro", &[]), "low"), "high");
+        assert_eq!(fit_effort(&effort_levels("deepseek-v4-pro", &[]), "medium"), "high");
+        assert!(!effort_levels("glm-5.3-flash", &[]).contains(&"none"));
+        assert_eq!(fit_effort(&effort_levels("glm-5.3-flash", &[]), "none"), "low");
+        assert_eq!(fit_effort(&effort_levels("deepseek-v4-flash", &[]), "xhigh"), "max");
+    }
 
     #[test]
     fn catalog_loads_and_resolves() {

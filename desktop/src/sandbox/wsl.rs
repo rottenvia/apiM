@@ -255,21 +255,10 @@ if libc.mount(sys.argv[1].encode(), sys.argv[2].encode(), b"drvfs", 0, b"") != 0
   return 1
 }
 if ! grep -qsF " $m " /proc/mounts; then
+  # Only the chat folder is mounted. A folder that will not mount is an error: the whole drive is never mounted instead.
   if ! drvfs "$w" "$m"; then
-    d="${w%%:*}"; rest="${w#?:}"; rest="${rest//\\//}"; rest="${rest#/}"
-    r="${APIM_DRIVES:-/mnt/.apim}/$d"
-    if [ "${#d}" = 1 ]; then
-      mkdir -p "$r"
-      grep -qsF " $r " /proc/mounts || drvfs "$d:\\" "$r"
-      if [ -d "$r/$rest" ]; then
-        LIBMOUNT_FORCE_MOUNT2=always mount --bind "$r/$rest" "$m" 2>/dev/null || m="$r/$rest"
-        errs=""
-      fi
-    fi
-    if [ -n "$errs" ]; then
-      echo "[sandbox] the chat folder could not be mounted at $m:$errs. Working in $work instead: files there are NOT visible to your other tools." >&2
-      m="$work"
-    fi
+    echo "[sandbox] the chat folder could not be mounted at $m:$errs. Nothing was run." >&2
+    exit 1
   fi
 fi
 if [ -n "$DISPLAY" ] && command -v xdpyinfo >/dev/null && ! xdpyinfo -display "$DISPLAY" >/dev/null 2>&1; then
@@ -1226,7 +1215,8 @@ mod tests {
             assert!(s.contains("\r\n") && !s.replace("\r\n", "").contains('\n'));
         }
         assert!(SANDBOX_RUNNER.contains("bash -l \"$f\"; s=$?"));
-        assert!(SANDBOX_RUNNER.contains(r#"rest="${rest//\\//}""#));
+        // The whole drive is never mounted for the sandbox, where a folder that will not mount is an error.
+        assert!(!SANDBOX_RUNNER.contains("drvfs \"$d:") && !SANDBOX_RUNNER.contains("Working in"));
     }
 
     #[test]

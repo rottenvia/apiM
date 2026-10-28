@@ -2,6 +2,7 @@
 //! is no web view anywhere. The layout follows the web app's src/app/page.tsx.
 
 mod attachments;
+mod browser_pane;
 mod bubble;
 mod chat;
 mod compare;
@@ -298,6 +299,8 @@ pub struct App {
     editing: Option<(String, String)>,
     /// A long code block opened in the side viewer.
     artifact: Option<overlay::Artifact>,
+    /// The Browser pane beside the chat.
+    browser: browser_pane::State,
     /// A picture opened large: (name, where egui loads it from).
     lightbox: Option<(String, String)>,
     /// Why the last thing dropped or picked was not attached.
@@ -397,6 +400,8 @@ impl App {
         theme::install_fonts(&cc.egui_ctx);
         theme::apply(&cc.egui_ctx, theme::Palette::for_theme(&settings.theme, &settings.custom_theme));
         egui_extras::install_image_loaders(&cc.egui_ctx);
+        let wake = cc.egui_ctx.clone();
+        crate::browser::live::set_wake(move || wake.request_repaint(), rt.handle().clone());
         cc.egui_ctx.set_zoom_factor(settings.zoom.clamp(0.6, 2.0));
         cc.egui_ctx.options_mut(|o| {
             // A notch of the wheel moves as far as it does in a browser (egui's own 40 feels like wading).
@@ -421,6 +426,7 @@ impl App {
             drafts: drafts::Drafts::load(),
             editing: None,
             artifact: None,
+            browser: Default::default(),
             lightbox: None,
             attach_error: None,
             always_allow: HashMap::new(),
@@ -1207,10 +1213,15 @@ impl App {
         let wake = ctx.clone();
         let notes = request.notes.clone();
         let handle = self.rt.spawn(agent::run(request, Emitter::new(tx, move || wake.request_repaint()), self.procs.clone()));
+        let mut typing = pacer::Typing::default();
+        // Claude's summarized thinking comes a burst at a time, seconds apart.
+        if crate::models::resolve(&self.settings.model, &self.settings.custom_models).provider == crate::models::ProviderId::Anthropic {
+            typing.expect_bursts();
+        }
         self.runs.push(Run {
             rx,
             inbox: Default::default(),
-            typing: Default::default(),
+            typing,
             handle,
             conv_id: self.conv.id.clone(),
             status: "Thinking",
@@ -1486,6 +1497,7 @@ impl App {
             None => &mut self.conv,
         };
         let mut finished = false;
+        let workspace = conv.workspace();
         loop {
             // Text is typed out at the pace it arrives. What says how the work is going passes it by; anything
             // that adds a row or ends the reply waits until the text before it is on screen, so nothing overtakes it.
@@ -1566,6 +1578,9 @@ impl App {
                         tool.ok = Some(ok);
                         tool.summary = summary;
                         tool.image = image;
+                        if let Some(path) = changed.as_ref().filter(|_| ok) {
+                            crate::browser::live::written(&workspace.join(path));
+                        }
                         tool.changed_path = changed;
                         tool.started_at = started_at;
                         tool.duration_ms = duration_ms;
@@ -1904,6 +1919,19 @@ impl App {
                 self.toggle_fullscreen(ctx);
             }
         }
+        // `browser` waits for the page's first frame (a headless browser takes a second or two to start).
+        if self.staged("browser") && self.shot.as_ref().is_some_and(|shot| shot.started.elapsed() < Duration::from_secs(15)) {
+            let v = crate::browser::live::view();
+            let landed = v.seq > 0 && !v.loading && v.url.starts_with("file:");
+            drop(v);
+            let since = ctx.data_mut(|d| *d.get_temp_mut_or_insert_with(egui::Id::new("browser-landed"), || landed.then(Instant::now)));
+            if !landed || since.is_none_or(|at| at.elapsed() < Duration::from_millis(1800)) {
+                if landed && since.is_none() {
+                    ctx.data_mut(|d| d.insert_temp(egui::Id::new("browser-landed"), Some(Instant::now())));
+                }
+                return;
+            }
+        }
         // A film of a `send` is of the reply itself: it does not wait for the end.
         let filmed = self.shot.as_ref().is_some_and(|shot| shot.film.is_some());
         if self.staged("send") && !filmed && (!self.runs.is_empty() || self.summary_job.is_some()) {
@@ -1993,6 +2021,7 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        crate::browser::live::shutdown_now();
         drafts::keep(self, true);
         // Chats are written by another thread: the last save has to land before the program goes. Listed once
         // more after it, they leave the kept list with the size and time each file really ended at, so the next
@@ -2019,10 +2048,12 @@ impl eframe::App for App {
                 ctx.add_plugin(selection::Told);
                 selection::replay(raw_input, shot.started.elapsed(), egui::pos2(x1, y1), egui::pos2(x2, y2));
             }
-            // `click-150-200`: the mouse comes to that point and clicks it, 400 ms in.
-            let point: Vec<f32> = shot.state.split(',').find_map(|token| token.strip_prefix("click-")).into_iter().flat_map(|at| at.split('-')).filter_map(|n| n.parse().ok()).collect();
-            if let [x, y] = point[..] {
-                selection::click(raw_input, shot.started.elapsed(), egui::pos2(x, y));
+            // `click-150-200`: the mouse comes to that point and clicks it, 400 ms in; `rclick-150-200` right-clicks.
+            for (prefix, button) in [("click-", egui::PointerButton::Primary), ("rclick-", egui::PointerButton::Secondary)] {
+                let point: Vec<f32> = shot.state.split(',').find_map(|token| token.strip_prefix(prefix)).into_iter().flat_map(|at| at.split('-')).filter_map(|n| n.parse().ok()).collect();
+                if let [x, y] = point[..] {
+                    selection::click(raw_input, shot.started.elapsed(), egui::pos2(x, y), button);
+                }
             }
         }
         // `up-600`: the wheel is turned once, that many points back through the transcript.
@@ -2107,7 +2138,9 @@ impl eframe::App for App {
         // chrome wherever it would otherwise touch the window's own edge. It used to be the square hole the panels
         // left, ruled off from them by two bright lines.
         let edge = |covered: f32| ((1.0 - covered) * CARD_GAP).round() as i8;
-        let around = egui::Margin { left: edge(open), right: edge(rail), top: edge(!self.fullscreen as u8 as f32), bottom: CARD_GAP as i8 };
+        // The Browser pane is a second card beside it, as far from it as the cards are from the window's edge.
+        let browsing = browser_pane::panel(self, ui, edge(rail) as f32, edge(!self.fullscreen as u8 as f32) as f32, CARD_GAP, CARD_ROUND);
+        let around = egui::Margin { left: edge(open), right: if browsing { CARD_GAP as i8 } else { edge(rail) }, top: edge(!self.fullscreen as u8 as f32), bottom: CARD_GAP as i8 };
         egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg2).inner_margin(around)).show(ui, |ui| {
             let card = ui.max_rect();
             ui.painter().rect(card, CARD_ROUND, p.bg, egui::Stroke::new(1.0, theme::alpha(p.border, 70.0)), egui::StrokeKind::Inside);

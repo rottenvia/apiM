@@ -5,6 +5,7 @@
 //! Protocol. Its own profile is never touched.
 
 pub mod cdp;
+pub mod live;
 pub mod page;
 pub mod policy;
 pub mod window;
@@ -65,7 +66,9 @@ pub fn find_browser() -> Option<PathBuf> {
 
 /// Is a browser available? The tool list is filtered on this, as the web withholds `browse` when it is missing.
 pub fn available() -> bool {
-    find_browser().is_some()
+    // Looked up once: the search starts `where`, and the header asks every frame.
+    static FOUND: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| find_browser().is_some());
+    *FOUND
 }
 
 /// The child process and its profile. Dropping it kills the whole process tree and removes the profile.
@@ -98,7 +101,7 @@ pub async fn launch() -> Result<(Browser, mpsc::UnboundedReceiver<Value>), Strin
     std::fs::create_dir_all(&profile).map_err(|e| format!("Could not start the browser: {e}"))?;
 
     let mut cmd = Command::new(&exe);
-    cmd.args(["--headless=new", "--remote-debugging-port=0", "--no-first-run", "--no-default-browser-check", "--disable-gpu", "--window-size=1280,900"])
+    cmd.args(["--headless=new", "--remote-debugging-port=0", "--no-first-run", "--no-default-browser-check", "--disable-gpu", "--window-size=1280,800", "--autoplay-policy=no-user-gesture-required"])
         .arg(format!("--user-agent={USER_AGENT}"))
         .arg(format!("--user-data-dir={}", profile.display()))
         .arg("about:blank")
@@ -106,6 +109,8 @@ pub async fn launch() -> Result<(Browser, mpsc::UnboundedReceiver<Value>), Strin
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let child = quiet(&mut cmd).spawn().map_err(|e| format!("Could not start the browser: {e}"))?;
+    #[cfg(windows)]
+    tie_to_this_process(child.id());
     // From here on, any early return drops `proc`, which kills the browser and removes the profile.
     let proc = Process { child, profile: profile.clone() };
 
@@ -128,6 +133,40 @@ pub async fn launch() -> Result<(Browser, mpsc::UnboundedReceiver<Value>), Strin
 
     let (cdp, events) = cdp::Cdp::connect(port, &path).await.map_err(|e| format!("Could not start the browser: {e}"))?;
     Ok((Browser { _proc: proc, cdp }, events))
+}
+
+/// Puts the browser in a job that Windows closes with this process, so a crash or a killed apiM cannot leave headless
+/// Edge running: the shared page lives in a static, whose `Drop` never runs at exit.
+#[cfg(windows)]
+fn tie_to_this_process(pid: u32) {
+    #[repr(C)]
+    #[derive(Default)]
+    struct Basic { user_time: i64, job_time: i64, flags: u32, min_ws: usize, max_ws: usize, processes: u32, affinity: usize, priority: u32, scheduling: u32 }
+    #[repr(C)]
+    #[derive(Default)]
+    struct Extended { basic: Basic, io: [u64; 6], process_memory: usize, job_memory: usize, peak_process: usize, peak_job: usize }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn CreateJobObjectW(attrs: *const core::ffi::c_void, name: *const u16) -> isize;
+        fn SetInformationJobObject(job: isize, class: i32, info: *const core::ffi::c_void, len: u32) -> i32;
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> isize;
+        fn AssignProcessToJobObject(job: isize, process: isize) -> i32;
+        fn CloseHandle(h: isize) -> i32;
+    }
+    static JOB: std::sync::OnceLock<isize> = std::sync::OnceLock::new();
+    let job = *JOB.get_or_init(|| unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        let info = Extended { basic: Basic { flags: 0x2000, ..Default::default() }, ..Default::default() }; // KILL_ON_JOB_CLOSE
+        SetInformationJobObject(job, 9, &info as *const Extended as *const _, std::mem::size_of::<Extended>() as u32);
+        job // never closed: it goes with the process
+    });
+    unsafe {
+        let process = OpenProcess(0x0101, 0, pid); // PROCESS_TERMINATE | PROCESS_SET_QUOTA
+        if process != 0 {
+            AssignProcessToJobObject(job, process);
+            CloseHandle(process);
+        }
+    }
 }
 
 #[cfg(test)]

@@ -39,10 +39,10 @@ The same things as the web app, with the same look:
 - Tools on demand and a catalog of skills, both described below: a request carries about a third of what it did, and plugins can be added, by you or by the assistant, to one chat or to all
 - A problem report (Settings, Reports) that sorts what went wrong by likely cause: the app first (crashes, frozen frames), then this PC, the provider, and a model's slips only when the same one repeats
 - A theme wall of its own: deep, tinted grounds with one vivid accent each, and the editor classics on darker grounds than the web's
-- Computer use, behind the **Computer** chip beside Web: the agent sees your screen and uses your mouse and keyboard (open a game, click Play, test it), described below
+- Computer use, behind the **Use** chip beside Web: the agent sees your screen and uses your mouse and keyboard (open a game, click Play, test it), described below
 - A terminal mode: `apim --ask "your question"` (add `--auto` to let it run commands, `--computer` to let it use the screen, `--dir FOLDER` to pick the folder, `--note "text"` to hand the reply a "btw" after its first step, `--think` to print its thinking, every line of it marked `~`)
 
-The browser tool drives a Chromium-family browser already on the PC (Edge, Chrome, Chromium, Brave or Thorium, or the one `APIM_BROWSER_PATH` names) with a throwaway profile. Nothing is bundled or downloaded.
+The browser tool drives a Chromium-family browser already on the PC (Edge, Chrome, Chromium, Brave or Thorium, or the one `APIM_BROWSER_PATH` names) with a throwaway profile, and shows it live in the Browser pane beside the chat (below). Nothing is bundled or downloaded.
 
 ## The computer, not only the chat's folder
 
@@ -584,6 +584,107 @@ Measured after, on four more films of the same task, each checked frame by frame
 Measured after, on eleven films of the same task, checked frame by frame and one by a second pair of eyes: each step comes in as its call starts streaming rather than when the call is whole (0.3 to 1.8 s later in these runs); the chip's left edge moves 22 points over 0.2 s in one direction; nothing over a reply moves when it ends; the chat glides 80 points onto the end of a finished reply in 0.45 s, rising to 290 points a second and settling; the window drew a frame every 6.9 ms (95th percentile 7.0 ms). The full suite passed five times, three of them while a second copy ran beside it.
 
 The film itself had to change: half a minute of 2400x1720 frames held in memory ran out of it (16.5 MB a frame, 9.6 GB of PNGs). Frames are written by another thread as they come, at the window's size in points as JPEG, one every 14 ms at most, and dropped (and counted) rather than slowing the window when the writer falls behind. `APIM_SHOT_INBOX` also takes `type <text>`, `attach <path>`, `open <part of a title>`, `new` and `send`, which is how the drafts and the parallel chats above were filmed.
+
+## The Browser pane
+
+The agent's browser is on screen now, in a card beside the chat (`ui/browser_pane.rs`, `browser/live.rs`), as Claude's desktop app shows its own. Before, each `browse` call started a headless browser, did its steps and threw it away: nobody saw the page, and the next call started from nothing.
+
+- **One page, kept open.** `browse` and the pane share one headless page. It streams its frames as JPEG (`Page.startScreencast`), decoded off the UI thread. The pane opens itself when the agent starts browsing and says "apiM is browsing · <title>" while it does; the next call starts where the last one left off. Closed and unused for ten minutes, the browser is shut, and a Windows job object ends it with apiM, so a crash leaves no browser behind.
+- **The user can take over.** Back, forward, reload or stop, an address box (a URL, `example.com`, `localhost:8000`, or words to search DuckDuckGo), open in your own browser, and close. Clicks, the wheel, mouse moves, typing and the editing keys go to the page.
+- **The page is laid out at the pane's size**, as a browser window that size would lay it out. At the fixed 1280×800 of the first version, a 660-point pane drew the page at 0.52×: body text about 8 points, and half the pane empty under it. The layout is capped at 1280 wide, past which the frame is scaled up, so the agent's screenshots stay that size at most. A resize waits until the pane's edge has stopped for 250 ms, and never lands while the agent is mid-step, so the points it read off a screenshot stay where they were.
+- **It slides** in and out as the sidebar and the files rail do (0.3 s, its content held at full width and cut at the edge). It used to fade in at full width, which moved the chat 600 points sideways in one frame. Its bar is the chat header's 56 points, so the two rows of buttons line up.
+- **What the page may open** (`browser::policy::check`): data:, blob: and about:; http and https on the public web and on this machine (`localhost`, to look at a site being built); a `file:` only from inside the chat's workspace, judged on the canonical path, so `..` or a junction cannot step out. The LAN and the cloud metadata address are refused before a request leaves, as before.
+- **Live reload** (`live::written`): when a step writes a file the page on show is made of (the page itself, or a style, script, picture or data file in its folder or under it) and the agent is not driving, the page loads again. Filmed with Haiku 5.5 changing a word on a page open in the pane: the old word at 5.1 s, the new one at 6.6 s with the page's own progress bar back at its start, and nobody touching Reload.
+- **Preview** on an .html file (the file panel's chip, or the right-click menu) opens it in the pane.
+
+### "Opening" for good
+
+A `browse` once stayed on "Opening" until the app was closed. A motion page, to be screenshot a few seconds in, left a CDP command waiting for an answer that never came, and nothing had a clock. Every CDP command now gives up after 45 s (`cdp::CALL_TIMEOUT`), and every step of a session has its own bound on top. A step that runs out marks the page wedged, the next call starts a new one, and the result says which step hung. The step row says "Browsing", not "Opening". The last screenshot of a session goes back to a model that can see as a picture with the result; it used to be told to open it with another call.
+
+## The effort slider
+
+The effort menu is a slider (`composer::effort_panel`) with the depths the chat's model really has (`models::effort_levels`). A stop that changed nothing on the wire would only mislead.
+
+| Model | Stops |
+| --- | --- |
+| Claude 4.6 and later | Low, Medium, High, X-High, Max. No None: they cannot stop thinking, and Low is their shortest |
+| DeepSeek V4 Pro | None, High, Max (its Low is its High) |
+| DeepSeek, local models | None, Low, High, Max |
+| GLM 5.3 Flash's pinned endpoint | Low, Medium, High, Max (it refuses reasoning off) |
+| Other OpenRouter models | None, Low, Medium, High, Max |
+| Claude before 4.6 | no slider |
+
+Auto is a switch above it, and turning Auto off keeps the stop it was on. A setting a model does not have is sent as its nearest one, the deeper on a tie, and a thinking depth is never sent as None (`models::fit_effort`). The chip says what is really sent. All five Claude depths were sent to Haiku 5.5 and accepted.
+
+## Claude's thinking, as it comes
+
+Claude's summarized thinking does not stream. It comes in bursts with silences between: on one Haiku 5.5 reply, 108 characters at 2.3 s, 142 at 2.7 s, 172 at 5.1 s. The typing pace read each silence as the end and shot the burst out, so the box stood still and then filled at once. The pacer (`ui/pacer.rs`) now notices the pattern (a pause of half a second or more). For a thought, it spreads what it holds over the time until the next burst is expected, never slower than 5% a frame, and the end of a thought drains in 0.6 s. A Claude reply expects bursts from its first token. In the test that replays the pattern, the longest still stretch fell from over 1 s to 0.7 s. Each thought also ended with "\n\n", which left a blank line at the foot of the box; it is trimmed.
+
+Filmed after, on Haiku 5.5 at High: the one still stretch left was the second the API itself sent nothing ("Total time" held for 1 s). The box filled to its last line and folded to "Thought · 83 tok" as the answer came.
+
+## Files: pictures, right-click, Save as
+
+- A picture opens as itself on a checkerboard, at most 1:1, with its size. It used to open as a page of replacement characters. Any other file with a NUL byte in its first 8 KB is binary and says so (`workspace_panel::look_of`).
+- **Save** writes the file (Ctrl+S too) when it has changes, and is **Save as…** otherwise, through the system's dialog. On a file with no changes it used to do nothing, which read as broken.
+- A right-click on any file or folder in either list: Open, Preview in browser (.html), Open with its app, Show in Explorer (with the file selected), Copy path, Copy relative path, Delete. "Open with its app" is not offered for kinds Windows runs (.exe, .bat, .ps1 and the like), so a file the agent wrote cannot be started by a click that reads as opening it.
+
+## The problem log
+
+Some faults leave nothing to see. The browse stuck on "Opening" was not a failed tool, no reply ended, and the chat was never saved. Every tool call is now watched (`diagnostics::Watch`):
+
+- one still running at 90 s is written down while it runs (`tool_hung`);
+- one that ends after that is written down as slow (`tool_slow`);
+- one dropped unfinished after 8 s or more is written down with how long it had run (`tool_abandoned`).
+
+Each comes with a one-line account of what the call was doing: the command, the address, the browse's steps, never a file's body, with keys scrubbed. Whatever points at the app, this PC or the provider is also written to `problems.md` beside `diagnostics.jsonl`, newest first. Whoever fixes the app next reads what went wrong there, not in a chat.
+
+## Cheaper, steadier rounds
+
+Six tasks of different kinds (a bug fix with tests, a web page, a data question, research, a refactor, a shell job) were run on Claude Haiku 5.5, GLM 5.3 Flash, DeepSeek and a free Nemotron, and read request by request. Cache reads ran at about 72% of input on Haiku, 9–13% on GLM, 20–25% on DeepSeek and 27–31% on Nemotron, and every task passed. What the models lost rounds and tokens to, and the fixes:
+
+- **Claude's cache broke whenever the tool list changed.** A list one tool shorter read 0 of 16,876 tokens from the cache and wrote them all again at the hour's double price. The mark that held the rules now sits at the end of the everyday tools (`load_tools`), before any group loaded later, so the tools are read from the cache whatever was loaded since (`anthropic::request`).
+- **Pruning counted the rules as history.** It started stubbing written files at a reply's third round, and each stub rewrote Claude's cache from there (3,043 tokens each time). The rules are not counted now.
+- **A draft carried over after a cut-off rode in every later request**: 18.5K characters a round on GLM, after its files were written. It shrinks once they are.
+- **"tests" in a request loaded all of code navigation**: 6.9K characters of tools a round for a plain pytest task. Running tests is now a group of its own.
+- **A failing test said only its name**, and the agent ran the suite again by hand to see why. The result now carries pytest's FAILURES section with short tracebacks (or another runner's last lines), at most 60 lines.
+- **Smaller slips:** a URL in quotes or angle brackets is read without them (a quoted URL cost GLM a round); a `find` in a fetched page shows 600 characters around each match; `py`, `rm`, `cp`, `mv`, `pwd` and `sleep` run (the last five through PowerShell); `explorer` opens a folder or selects a file.
+
+Not measured again after the fixes: the numbers above are from before them.
+
+## Security: the app's own gaps
+
+The app was attacked as a target, not the models: what a web page, a repository, a downloaded skill or a crafted reply could make it do. Fixed:
+
+- **Protected paths, by any spelling.** `.git` and the other protected places are judged where a path really lands (`snapshots::protected_at`). A junction, a symlink, an 8.3 short name (`GIT~1`), a trailing dot or space, or a `:stream` suffix reached them under another name. A file with more than one name (a hard link) is not written: writing it would change a file outside the workspace.
+- **Requests that end up somewhere private.** A public-looking name that resolves to this machine or the LAN is refused. The request is pinned to the addresses that were checked, so a second lookup cannot answer differently. Each redirect hop is checked as the first URL was, and a download has one clock from request to last byte. A request to this machine asks first in Manual and Critical modes.
+- **Commands that look but write.** A git "look" runs without asking only with the flags on a list: `blame --contents`, `diff --output`, `--no-index` and the like ask first, as do paths outside the repository. A system tool asked only to look may take only its looking switches (`/S` names another host, `-f` writes a file). git runs with a clean environment, so a repository's own config cannot name a program for it to run.
+- **A skill's files** must be plain relative names inside the skill's folder: no `..`, no drive, no stream.
+- **The approval card shows hidden characters.** Control, bidirectional and zero-width marks are shown as `<U+XXXX>` and counted. The command is wrapped, never scrolled, so its tail is always in sight.
+- **Links in a reply** open only for web and mail. `file:`, `javascript:` and app schemes are shown, not followed; the export does the same.
+- **Bounds.** An MCP server's answer is read only up to a size limit, so a server that keeps sending cannot fill memory before the timeout. The type checker runs from a fixed folder of its own. The sandbox never mounts a whole drive. The diagnostics log scrubs keys from text facts too.
+
+## Watching a video
+
+After Gemini's agentic video mode, the model navigates a video instead of being fed every frame (`tools/video.rs`, the `video` group):
+
+- `video_overview`: one contact sheet and a text map of the whole video;
+- `video_look`: a stretch;
+- `video_frame`: one frame up close;
+- `video_scenes`: the cuts;
+- `video_transcript`: the speech (faster-whisper when installed).
+
+A URL is fetched with yt-dlp; ffmpeg and ffprobe come from PATH, and nothing is bundled. The two tools that are only pictures are offered to models that can see; the overview, the scenes and the transcript serve any model. Timestamps are drawn with a 5×7 bitmap font of the app's own: ffmpeg's drawtext needs a font file and two levels of escaping.
+
+Checked in terminal mode on a 6-second clip (3 s of a test pattern, then 3 s of red). Haiku 5.5 loaded the group, took the overview, asked for the cuts and looked at 2.5–3.5 s. It answered that the picture cuts to red at 3.0 s, and said which stretches it had not looked at, in four rounds for $0.0047. The transcript path (faster-whisper) is not checked yet.
+
+## Smaller things
+
+- The panels that slide over from the right started at the window's top and covered the title bar. They now start below it.
+- The **Computer** chip is now **Use**.
+- In a chat narrowed by the Browser pane:
+  - the reply's small print was faded in scopes that could not wrap, so a piece of it ran past the column and widened the whole reply (the prose wrapped 9 points outside the chat card);
+  - replies under 480 points are no longer cut to three quarters of the column (they wrapped at about 25 characters);
+  - the cost in the header is left out where it would run under the sidebar button.
 
 ## Checking the look without touching the window
 

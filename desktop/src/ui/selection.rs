@@ -98,9 +98,9 @@ pub fn replay(input: &mut egui::RawInput, at: Duration, from: Pos2, to: Pos2) {
 
 /// A self-portrait's `click-X-Y`: the mouse comes to rest on the point, goes down 400 ms in and comes up 70 ms
 /// later, as a hand does it. Fed to the app as input: no real mouse moves.
-pub fn click(input: &mut egui::RawInput, at: Duration, on: Pos2) {
+pub fn click(input: &mut egui::RawInput, at: Duration, on: Pos2, which: egui::PointerButton) {
     static STEP: AtomicU8 = AtomicU8::new(0);
-    let button = |pressed| egui::Event::PointerButton { pos: on, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+    let button = |pressed| egui::Event::PointerButton { pos: on, button: which, pressed, modifiers: Default::default() };
     let (step, ms) = (STEP.load(Ordering::Relaxed), at.as_millis());
     let event = match step {
         0 if ms >= 250 => egui::Event::PointerMoved(on),

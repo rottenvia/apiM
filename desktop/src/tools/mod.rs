@@ -18,6 +18,7 @@ pub mod recall;
 pub mod sandbox;
 pub mod skills;
 pub mod testing;
+pub mod video;
 pub mod web;
 pub mod winproc;
 
@@ -166,6 +167,7 @@ static SCHEMAS: LazyLock<Vec<Value>> = LazyLock::new(|| {
     all.extend(winproc::schemas());
     all.push(read_chat_schema());
     all.extend(computer::schemas());
+    all.extend(video::schemas());
     all.retain(|t| implemented(t["function"]["name"].as_str().unwrap_or("")));
     // Without a browser on this computer `browse` is withheld, as the web app does.
     if !crate::browser::available() {
@@ -372,7 +374,7 @@ fn a_call_with_the_models_markup_in_it_is_put_back() {
 }
 
 pub fn implemented(name: &str) -> bool {
-    IMPLEMENTED.contains(&name) || winproc::NAMES.contains(&name) || computer::NAMES.contains(&name)
+    IMPLEMENTED.contains(&name) || winproc::NAMES.contains(&name) || computer::NAMES.contains(&name) || video::NAMES.contains(&name)
 }
 
 /// The tool list for one request. A tool that cannot work is withheld rather than
@@ -427,6 +429,8 @@ pub fn definitions(web_search: bool, native_vision: bool, git_repo: bool, github
         .filter(|t| match t["function"]["name"].as_str().unwrap_or("") {
             "web_search" => web_search,
             "view_image" => native_vision,
+            // The two that are only pictures; the overview, the scenes and the transcript are text as well, and serve any model.
+            "video_look" | "video_frame" => native_vision,
             "git_pull_base" => github.is_some(),
             // Push and pull requests need the token as well as the connection.
             n if n.starts_with("github_") => github == Some(true),
@@ -522,6 +526,7 @@ pub async fn run(name: &str, args: &Value, ctx: &Ctx) -> Output {
         "screenshot_window" => browser::screenshot_window(ctx, args).await,
         "computer_look" => computer::look(ctx, args).await,
         "computer_act" => computer::act(ctx, args).await,
+        n if video::NAMES.contains(&n) => video::run(n, ctx, args).await,
         "http_request" => web::http_request(ctx, args).await,
         "download_file" => web::download_file(ctx, args).await,
         "web_search" => web::web_search(ctx, args).await,
@@ -533,7 +538,7 @@ pub async fn run(name: &str, args: &Value, ctx: &Ctx) -> Output {
             // Changing a process the app did not start is a critical action: it asks first in every mode but "Run automatically".
             if let Some(what) = winproc::changes_a_process(n).filter(|_| ctx.settings.approval.asks_critical()) {
                 let target = args["pid"].as_u64().map(|p| format!(" (pid {p})")).or_else(|| args.get("tids").or_else(|| args.get("tid")).map(|t| format!(" ({t})"))).unwrap_or_default();
-                if !ctx.emit.approve_keyed(&format!("{n}: {what}{target}"), "This changes a running process the app did not start.", "winproc_change").await {
+                if !ctx.emit.approve_keyed(&format!("{n}: {what}{target}"), "This changes a running process the app did not start.", &format!("winproc_change:{n}{target}")).await {
                     return Output::fail(format!("The user did not allow {n}."));
                 }
             }

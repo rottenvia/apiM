@@ -472,7 +472,12 @@ fn describe(name: &str, args: &str) -> Display {
         "list_processes" => (Run, "Listing processes", "Listed processes"),
         "web_search" => (Web, "Searching the web", "Searched the web"),
         "fetch_url" => (Web, "Fetching", "Fetched"),
-        "browse" => (Web, "Opening", "Opened"),
+        "browse" => (Web, "Browsing", "Browsed"),
+        "video_overview" => (Image, "Watching", "Watched"),
+        "video_look" => (Image, "Watching a stretch of", "Watched a stretch of"),
+        "video_frame" => (Image, "Looking closely at", "Looked closely at"),
+        "video_scenes" => (Image, "Finding the cuts in", "Found the cuts in"),
+        "video_transcript" => (Image, "Listening to", "Listened to"),
         "inspect_page" => (Web, "Inspecting", "Inspected"),
         "http_request" => (Web, "Requesting", "Requested"),
         "download_file" => (Web, "Downloading", "Downloaded"),
@@ -581,7 +586,7 @@ fn target_of(name: &str, args: &str) -> (Option<String>, bool) {
     if let Some(query) = s("query").or_else(|| s("pattern")).or_else(|| s("question")) {
         return (Some(query), name == "search_files");
     }
-    if let Some(url) = s("url") {
+    if let Some(url) = s("url").or_else(|| s("source")) {
         return (Some(url.trim_start_matches("https://").trim_start_matches("http://").to_string()), true);
     }
     (s("message").or_else(|| s("title")).or_else(|| s("claim")).or_else(|| s("reason")), false)
@@ -955,7 +960,9 @@ fn thought_body(ui: &mut Ui, text: &str, live: bool, max_height: f32, margin: eg
         }
         let out = area.show(ui, |ui| {
             ui.set_width(ui.available_width());
-            let shown = text.trim_start();
+            // Claude ends each thought with a blank line (two newlines before its answer): kept, it stood as an empty band
+            // at the bottom of the box.
+            let shown = text.trim();
             // A long live stream only draws its tail: laying out megabytes every frame would stall the window.
             let tail = if live && shown.chars().count() > 12_000 { shown.char_indices().rev().nth(11_999).map_or(shown, |(i, _)| &shown[i..]) } else { shown };
             ui.add(egui::Label::new(widgets::lines(tail, 13.0, 20.0, W::Regular, p.muted)).wrap().selectable(true));
@@ -1128,12 +1135,15 @@ fn meta_row(ui: &mut Ui, msg: &Message, env: &Env, sources_open: &mut bool) -> b
             response
         };
         // A count that arrives while the reply is live fades in where it lands, as the lines under the reply do.
+        // Faded in place, not in a scope of its own: a scope starts at the cursor, so a piece that did not fit the
+        // row could not wrap under it and ran on past the column, widening the whole reply with it (beside the
+        // Browser pane the prose wrapped 9 points outside the chat).
         let fade = |ui: &mut Ui, key: &str, add: &mut dyn FnMut(&mut Ui)| {
             let come = widgets::arrival(ui, ui.id().with(("meta", key)), env.live, STEP_IN);
-            ui.scope(|ui| {
-                ui.multiply_opacity(come);
-                add(ui);
-            });
+            let before = ui.opacity();
+            ui.multiply_opacity(come);
+            add(ui);
+            ui.set_opacity(before);
         };
         if let Some(effort) = effort {
             pill(ui, icons::SPARKLE, effort, p.thinking, None);

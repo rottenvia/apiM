@@ -154,9 +154,10 @@ impl<'a> Card<'a> {
     }
 }
 
-/// A panel as tall as the window that slides in from its right edge.
+/// A panel as tall as the window under its title bar, sliding in from the right edge.
 pub fn slide_over(ctx: &egui::Context, name: &str, width: f32, secs: f32, border: Color32, add: impl FnOnce(&mut egui::Ui, &mut bool)) -> State {
     let p = p();
+    let bar = if ctx.input(|i| i.viewport().fullscreen.unwrap_or(false)) { 0.0 } else { titlebar::HEIGHT };
     overlay(
         ctx,
         name,
@@ -164,8 +165,11 @@ pub fn slide_over(ctx: &egui::Context, name: &str, width: f32, secs: f32, border
         128,
         true,
         |screen, t| {
+            // Under the title bar, not behind it: drawn from the window's top, the bar hid the panel's own heading and its
+            // close button and cut the panel's top edge.
             let width = width.min(screen.width());
-            Rect::from_min_size(pos2(screen.right() - width * t, screen.top()), vec2(width, screen.height()))
+            let top = screen.top() + bar;
+            Rect::from_min_size(pos2(screen.right() - width * t, top), vec2(width, screen.bottom() - top))
         },
         |ui, close| {
             let rect = ui.max_rect();

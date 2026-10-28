@@ -614,6 +614,8 @@ async fn run_inner(mut req: Request, emit: &Emitter, procs: Arc<Procs>) -> Resul
     let effort = if s.effort == "auto" { prompt::auto_effort(&req.text) } else { s.effort.as_str() };
     // Local models on a CPU cannot spend the top effort: thinking fills the output budget and no answer comes.
     let effort = if target.style == ThinkingStyle::Qwen && s.effort == "auto" && effort == "max" { "high" } else { effort };
+    // Kept to the depths the model has: a chat moved to another model keeps its setting, and Claude has no None.
+    let effort = models::fit_effort(&models::effort_levels(&target.model.id, customs), effort);
 
     std::fs::create_dir_all(&req.workspace).map_err(|e| format!("Cannot open the workspace folder {}: {e}", req.workspace.display()))?;
     let native_vision = target.model.vision == Vision::Native;
@@ -805,9 +807,16 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
     }
     let mut halt = None;
     let mut round = 0;
+    // Where a cut-over draft was handed back: once its files are written it is history, and kept whole it rode in every
+    // later request (18.5K characters a round for GLM 5.3 Flash, 2026-10-28).
+    let mut carried_draft: Option<usize> = None;
 
     loop {
         round += 1;
+        if let Some(at) = carried_draft.filter(|at| messages.len() > at + 3 && messages[at + 2..].iter().any(|m| m["role"] == "tool")) {
+            messages[at] = assistant("(My draft from the cut-off think. It has been written to the files since; read them for the current code.)", "");
+            carried_draft = None;
+        }
         if round > round_cap {
             let done = done_steps();
             if done > steps_paid {
@@ -1024,6 +1033,7 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
         // The think was drafting a whole program: hand it back as the model's own words and have it write the files, without another think.
         if let Some(lines) = draft_cut {
             draft_cutovers += 1;
+            carried_draft = Some(messages.len());
             messages.push(assistant(&stall::draft_carry(&reasoning, None), ""));
             messages.push(user(stall::draft_cutover_text(lines)));
             no_think_next = true;
@@ -1213,7 +1223,10 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
                 }
                 Ok(args) => {
                     tools_used.push(call.name.clone());
-                    tools::run(&call.name, args, ctx).await
+                    let watch = crate::diagnostics::Watch::start(&call.name, args, &target.model.id);
+                    let out = tools::run(&call.name, args, ctx).await;
+                    watch.done(out.ok);
+                    out
                 }
                 Err(e) if hard || e.is_eof() => {
                     // The broken half of a huge call is not sent back with every later request.
@@ -2377,9 +2390,12 @@ mod tests {
         assert_eq!((ran.text.as_str(), ran.sent.len()), ("Done.", 2));
         let first = &ran.sent[0];
         assert_eq!((first["thinking"].clone(), first["output_config"].clone(), first["cache_control"].clone()), (json!({ "type": "adaptive", "display": "summarized" }), json!({ "effort": "high" }), json!({ "type": "ephemeral" })));
-        // The rules and the chat before the question are kept an hour; the note before the question is not part of either.
+        // The tools (and with them the rules after them) and the chat before the question are kept an hour; the note
+        // before the question is not part of either.
         let hour = json!({ "type": "ephemeral", "ttl": "1h" });
-        assert_eq!((&first["system"][0]["cache_control"], &first["messages"][1]["content"][0]["cache_control"]), (&hour, &hour));
+        let tools = first["tools"].as_array().unwrap();
+        assert_eq!((&tools[tools.len() - 1]["cache_control"], &first["messages"][1]["content"][0]["cache_control"]), (&hour, &hour));
+        assert!(first["system"][0].get("cache_control").is_none());
         assert!(first["messages"][2]["content"][0]["text"].as_str().unwrap().contains("Today is") && first["messages"][2]["content"][0].get("cache_control").is_none());
         // The turns alternate, the call and its result pair up, and the request ends on the user's turn.
         let turns = ran.sent[1]["messages"].as_array().unwrap();

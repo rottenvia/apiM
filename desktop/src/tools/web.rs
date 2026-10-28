@@ -4,18 +4,21 @@ use super::{Ctx, Output, bool_arg, clip, files, str_arg};
 use futures_util::StreamExt;
 use regex::Regex;
 use serde_json::Value;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::LazyLock;
 use std::time::Duration;
 
 const DOWNLOAD_BYTES: u64 = 200 * 1024 * 1024;
+/// The whole of one download, from the request to the last byte: a server that trickles cannot hold the call forever.
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(900);
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) apiM/0.1";
 
 /// Refuses addresses on this machine and the local network, so a page or a model
 /// cannot use these tools to reach a router, a NAS or a cloud metadata service.
 /// `allow_loopback` opens only localhost, for testing a development server.
 fn check_url(raw: &str, allow_loopback: bool) -> Result<reqwest::Url, String> {
-    let url = reqwest::Url::parse(raw.trim()).map_err(|_| format!("Not a valid URL: {raw}. Include https://"))?;
+    // Quotes and angle brackets around it are the model's punctuation, not the address: a quoted URL cost GLM a round.
+    let url = reqwest::Url::parse(raw.trim().trim_matches(['"', '\'', '`', '<', '>'])).map_err(|_| format!("Not a valid URL: {raw}. Include https://"))?;
     if !matches!(url.scheme(), "http" | "https") {
         return Err(format!("Only http and https URLs are supported, not {}:", url.scheme()));
     }
@@ -36,15 +39,42 @@ fn check_url(raw: &str, allow_loopback: bool) -> Result<reqwest::Url, String> {
     Ok(url)
 }
 
-/// `check_url`, then the same question asked of the addresses the name really resolves to,
-/// so a public-looking name that points at this machine or the LAN is refused too.
-async fn public_url(raw: &str, allow_loopback: bool) -> Result<reqwest::Url, String> {
+/// `check_url`, then the same question asked of the addresses the name really resolves to, so a public-looking name
+/// that points at this machine or the LAN is refused too. Gives back the client that fetches it: its name is pinned to
+/// the addresses that passed, so the request cannot land on a second lookup that answers differently.
+async fn public_client(raw: &str, allow_loopback: bool) -> Result<(reqwest::Url, reqwest::Client), String> {
     check_url(raw, allow_loopback)?;
-    crate::search::assert_public_url_resolved(raw, allow_loopback).await
+    let (url, addresses) = crate::search::resolve_public(raw, allow_loopback).await?;
+    let mut builder = reqwest::Client::builder().connect_timeout(Duration::from_secs(20)).redirect(redirect_policy(allow_loopback));
+    if !addresses.is_empty() {
+        let port = url.port_or_known_default().unwrap_or(443);
+        let pins: Vec<SocketAddr> = addresses.iter().map(|ip| SocketAddr::new(*ip, port)).collect();
+        builder = builder.resolve_to_addrs(url.host_str().unwrap_or("").trim_matches(['[', ']']), &pins);
+    }
+    Ok((url, builder.build().expect("HTTP client")))
+}
+
+/// Each redirect hop is checked the way the first URL was, so a page cannot send these tools to this machine or the LAN.
+// ponytail: a hop is checked by its address, but the client looks its name up once more: pin hops too if redirects ever need trust.
+fn redirect_policy(allow_loopback: bool) -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.previous().len() >= 10 {
+            return attempt.error("Too many redirects.");
+        }
+        match check_url(attempt.url().as_str(), allow_loopback).and_then(|url| crate::search::checked_addresses(&url, allow_loopback)) {
+            Ok(_) => attempt.follow(),
+            Err(why) => attempt.error(why),
+        }
+    })
+}
+
+/// A request to this machine is asked about in Manual and Critical modes, as the other critical actions are.
+async fn local_allowed(ctx: &Ctx, url: &reqwest::Url) -> bool {
+    !ctx.settings.approval.asks_critical() || ctx.emit.approve_keyed(url.as_str(), "This reaches a server on this computer.", "local-request").await
 }
 
 /// Reads a response body up to `max` bytes. Returns the bytes and whether more was left.
-async fn read_capped(resp: reqwest::Response, max: usize) -> Result<(Vec<u8>, bool), String> {
+pub async fn read_capped(resp: reqwest::Response, max: usize) -> Result<(Vec<u8>, bool), String> {
     let mut body = Vec::new();
     let mut stream = resp.bytes_stream();
     while let Some(chunk) = stream.next().await {
@@ -98,6 +128,15 @@ pub fn html_to_text(html: &str) -> String {
     BLANKS.replace_all(&lines.join("\n"), "\n\n").trim().to_string()
 }
 
+/// 600 characters of a line, around the match when there is one: on a page that is one long line (PyPI's JSON,
+/// 119,911 characters) the first 600 never reached the version that was asked for.
+fn window(line: &str, at: Option<usize>) -> String {
+    let start = at.map_or(0, |byte| line[..byte].chars().count().saturating_sub(250));
+    let shown: String = line.chars().skip(start).take(600).collect();
+    let (before, after) = (start > 0, line.chars().count() > start + 600);
+    format!("{}{shown}{}", if before { "…" } else { "" }, if after { "…" } else { "" })
+}
+
 /// Only the lines matching `find`, each with a little context.
 fn find_lines(text: &str, find: &str, max: usize) -> String {
     let needle = Regex::new(&format!("(?i){find}")).unwrap_or_else(|_| re(&format!("(?i){}", regex::escape(find))));
@@ -109,7 +148,7 @@ fn find_lines(text: &str, find: &str, max: usize) -> String {
     let mut out = format!("{} matching lines (showing up to {max}):\n", hits.len());
     for &i in hits.iter().take(max) {
         for n in i.saturating_sub(1)..(i + 2).min(lines.len()) {
-            let line: String = lines[n].chars().take(600).collect();
+            let line = window(lines[n], if n == i { needle.find(lines[n]).map(|m| m.start()) } else { None });
             out.push_str(&format!("{}{} {line}\n", n + 1, if n == i { ":" } else { "-" }));
         }
         out.push_str("--\n");
@@ -118,11 +157,11 @@ fn find_lines(text: &str, find: &str, max: usize) -> String {
 }
 
 pub async fn fetch_url(ctx: &Ctx, args: &Value) -> Output {
-    let url = match public_url(str_arg(args, "url"), false).await {
+    let (url, client) = match public_client(str_arg(args, "url"), false).await {
         Ok(u) => u,
         Err(e) => return Output::fail(e),
     };
-    let resp = match ctx.client.get(url.clone()).header("User-Agent", USER_AGENT).header("Accept", "text/html,application/json,text/plain,*/*").timeout(Duration::from_secs(30)).send().await {
+    let resp = match client.get(url.clone()).header("User-Agent", USER_AGENT).header("Accept", "text/html,application/json,text/plain,*/*").timeout(Duration::from_secs(30)).send().await {
         Ok(r) => r,
         Err(e) => return Output::fail(format!("Could not open {url}: {e}")),
     };
@@ -142,16 +181,19 @@ pub async fn fetch_url(ctx: &Ctx, args: &Value) -> Output {
 }
 
 pub async fn http_request(ctx: &Ctx, args: &Value) -> Output {
-    let url = match public_url(str_arg(args, "url"), bool_arg(args, "allow_local")).await {
+    let (url, client) = match public_client(str_arg(args, "url"), bool_arg(args, "allow_local")).await {
         Ok(u) => u,
         Err(e) => return Output::fail(e),
     };
+    if bool_arg(args, "allow_local") && !local_allowed(ctx, &url).await {
+        return Output::fail(format!("The user did not allow a request to {url}."));
+    }
     let method = str_arg(args, "method").to_ascii_uppercase();
     let method = if method.is_empty() { "GET".to_string() } else { method };
     if !matches!(method.as_str(), "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS") {
         return Output::fail(format!("Unsupported method {method}."));
     }
-    let mut req = ctx.client.request(method.parse().expect("checked above"), url.clone()).header("User-Agent", USER_AGENT).timeout(Duration::from_secs(30));
+    let mut req = client.request(method.parse().expect("checked above"), url.clone()).header("User-Agent", USER_AGENT).timeout(Duration::from_secs(30));
     let mut has_type = false;
     for (name, value) in args["headers"].as_object().into_iter().flatten() {
         if let Some(v) = value.as_str() {
@@ -185,16 +227,25 @@ pub async fn http_request(ctx: &Ctx, args: &Value) -> Output {
 
 pub async fn download_file(ctx: &Ctx, args: &Value) -> Output {
     let rel = str_arg(args, "path");
-    let url = match public_url(str_arg(args, "url"), bool_arg(args, "allow_local")).await {
+    let (url, client) = match public_client(str_arg(args, "url"), bool_arg(args, "allow_local")).await {
         Ok(u) => u,
         Err(e) => return Output::fail(e),
     };
+    if bool_arg(args, "allow_local") && !local_allowed(ctx, &url).await {
+        return Output::fail(format!("The user did not allow a request to {url}."));
+    }
     let path = match files::resolve(&ctx.root, rel) {
         Ok(p) if p != ctx.root => p,
         Ok(_) => return Output::fail("path is required: where to save the file in the workspace."),
         Err(e) => return Output::fail(e),
     };
-    let resp = match ctx.client.get(url.clone()).header("User-Agent", USER_AGENT).send().await {
+    if let Err(e) = files::protected(&ctx.root, rel) {
+        return Output::fail(e);
+    }
+    if files::hard_linked(&path) {
+        return Output::fail(format!("{rel} is a hard link to another file, and a download over it would change that file too."));
+    }
+    let resp = match client.get(url.clone()).header("User-Agent", USER_AGENT).timeout(DOWNLOAD_TIMEOUT).send().await {
         Ok(r) if r.status().is_success() => r,
         Ok(r) => return Output::fail(format!("{url} answered {}. Nothing was saved.", r.status())),
         Err(e) => return Output::fail(format!("Could not download {url}: {e}")),

@@ -4,7 +4,7 @@
 //! (`load_tools`). A group, once loaded, stays for the chat, and is added after everything already sent,
 //! so the start of the request does not change from round to round.
 
-use super::{Output, winproc};
+use super::{Output, video, winproc};
 use serde_json::{Value, json};
 
 pub struct Group {
@@ -27,8 +27,16 @@ pub const GROUPS: &[Group] = &[
     Group {
         name: "code",
         what: "code navigation and builds: a symbol's definition, every use of a name, a syntax check, log analysis, test and build runners",
-        tools: &["read_symbol", "find_references", "verify_file", "analyze_log", "run_tests", "build_project"],
-        hints: &["tests", "unit test", "compile", "cmake", "cargo", "gradle", "msbuild", "stack trace", "the log", "references to"],
+        tools: &["read_symbol", "find_references", "verify_file", "analyze_log", "build_project"],
+        hints: &["compile", "cmake", "cargo", "gradle", "msbuild", "stack trace", "the log", "references to"],
+    },
+    // Its own group: "tests" in a request used to load all of code navigation with it, 6.9K characters of tools a
+    // round for a plain pytest task (2026-10-28).
+    Group {
+        name: "tests",
+        what: "the project's test suite: run it and get the failures back with why they failed",
+        tools: &["run_tests"],
+        hints: &["tests", "unit test", "pytest", "jest", "vitest", "test suite", "cargo test"],
     },
     Group {
         name: "processes",
@@ -49,6 +57,12 @@ pub const GROUPS: &[Group] = &[
         what: "pictures: show the user an image from the workspace, look at one yourself, capture a window on their screen",
         tools: &["show_image", "view_image", "screenshot_window"],
         hints: &["image", "picture", "screenshot", "photo", ".png", ".jpg", "show me"],
+    },
+    Group {
+        name: "video",
+        what: "watching a video file or URL by navigating it: an overview with a contact sheet, a stretch, one frame in detail, scene changes, the transcript",
+        tools: video::NAMES,
+        hints: &["video", ".mp4", ".mkv", ".webm", ".mov", "youtube", "youtu.be", "footage"],
     },
     Group {
         name: "git",

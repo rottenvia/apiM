@@ -36,6 +36,16 @@ const DUMP_DRAIN_MS: f64 = 350.0;
 const FLOOR: f64 = 0.04;
 /// Before a row or the end of the reply, the text still waiting is typed out in at most this long.
 const DRAIN_MAX_MS: f64 = 220.0;
+/// A pause this long between batches marks a stream that comes in bursts. Claude's summarized thinking does
+/// (claude-sonnet-5-5 at max effort, 2026-10-28: 108 characters at 2.3 s, 142 at 2.7 s, then nothing until 172 at
+/// 5.1 s with the answer right behind), while GLM's longest gap was 350 ms.
+const BURSTY_GAP_MS: f64 = 500.0;
+/// The time from one burst's start to the next's assumed before any is measured: Claude's came 2.3-2.8 s apart.
+const BURST_EVERY_MS: f64 = 2_500.0;
+/// A bursty thought's slowest speed: ten words a second.
+const THOUGHT_FLOOR: f64 = 0.05;
+/// The last burst of a bursty thought, with the answer waiting behind it, is typed out in this long, not dumped.
+const THOUGHT_DRAIN_MS: f64 = 600.0;
 
 /// How many characters to show per frame. Times are milliseconds on any clock that only goes forward.
 pub struct StreamPacer {
@@ -43,11 +53,17 @@ pub struct StreamPacer {
     gap_ms: f64,
     last_arrival: Option<f64>,
     carry: f64,
+    /// A pause between batches of `BURSTY_GAP_MS` up to a few seconds was seen, or the model is known for them:
+    /// thoughts are spread over the silences.
+    bursty: bool,
+    /// When the burst now being shown began, and how far apart bursts begin (averaged).
+    burst_start: Option<f64>,
+    burst_every: f64,
 }
 
 impl Default for StreamPacer {
     fn default() -> Self {
-        StreamPacer { arrivals: VecDeque::new(), gap_ms: FRESH_GAP_MS, last_arrival: None, carry: 0.0 }
+        StreamPacer { arrivals: VecDeque::new(), gap_ms: FRESH_GAP_MS, last_arrival: None, carry: 0.0, bursty: false, burst_start: None, burst_every: BURST_EVERY_MS }
     }
 }
 
@@ -56,6 +72,17 @@ impl StreamPacer {
     pub fn arrive(&mut self, chars: usize, now: f64) {
         if chars == 0 {
             return;
+        }
+        let pause = self.last_arrival.map_or(f64::INFINITY, |last| now - last);
+        // Longer than twice the window is a tool at work, not the stream's own rhythm.
+        if (BURSTY_GAP_MS..RATE_WINDOW_MS * 2.0).contains(&pause) {
+            self.bursty = true;
+            if let Some(start) = self.burst_start {
+                self.burst_every = self.burst_every * 0.6 + (now - start) * 0.4;
+            }
+        }
+        if pause >= BURSTY_GAP_MS {
+            self.burst_start = Some(now);
         }
         match self.last_arrival.map(|last| now - last) {
             // A silence this long is the model thinking or a tool at work, not a gap between batches: what
@@ -91,13 +118,18 @@ impl StreamPacer {
 
     /// How many of `backlog` waiting characters to show in a frame `dt` ms long. The text slows, it never stalls:
     /// what a frame is owed and cannot show whole is carried to the next.
-    pub fn take(&mut self, backlog: usize, now: f64, dt: f64) -> usize {
+    /// `thought`: the text in front is thinking, which a bursty stream types out at a reading pace instead.
+    pub fn take(&mut self, backlog: usize, now: f64, dt: f64, thought: bool) -> usize {
         if backlog == 0 {
             self.carry = 0.0;
             return 0;
         }
         let (waiting, target, rate) = (backlog as f64, self.target_ms(), self.rate(now));
-        let speed = if rate <= 0.0 {
+        let speed = if thought && self.bursty {
+            // Each burst is shown by the time the next is due, so it reads on through the silence after it.
+            let due = self.burst_start.map_or(now, |start| start + self.burst_every);
+            (waiting / (due - now).max(300.0)).max(THOUGHT_FLOOR)
+        } else if rate <= 0.0 {
             // One batch and nothing measured yet (a short answer often comes whole): typed out over the target
             // at one speed. Sized by what is left instead, its last words took as long as all the rest.
             waiting.max(self.arrivals.back().map_or(0.0, |(_, n)| *n as f64)) / target
@@ -158,6 +190,12 @@ impl Typing {
         self.owed.push_back((now, chars));
     }
 
+    /// The model sends its thinking in bursts with silences between (Claude's summarized thinking): spread from the
+    /// first burst, not only once a silence has been seen.
+    pub fn expect_bursts(&mut self) {
+        self.pacer.bursty = true;
+    }
+
     /// Its turn has come: it joins what is being typed out.
     pub fn push(&mut self, prose: bool, text: String) {
         // Nothing to type: an empty piece at the front would be given out as nothing, frame after frame.
@@ -205,9 +243,10 @@ impl Typing {
         }
         let n = match (held, self.chars) {
             (_, 0) => 0,
-            (false, _) => self.pacer.take(self.chars, self.ms(now), dt),
+            (false, _) => self.pacer.take(self.chars, self.ms(now), dt, !self.prose_next()),
             (true, _) => {
-                let left = DRAIN_MAX_MS - now.duration_since(*self.draining.get_or_insert(now)).as_secs_f64() * 1000.0;
+                let most = if self.pacer.bursty && !self.prose_next() { THOUGHT_DRAIN_MS } else { DRAIN_MAX_MS };
+                let left = most - now.duration_since(*self.draining.get_or_insert(now)).as_secs_f64() * 1000.0;
                 if left <= 16.0 { self.chars } else { ((self.chars as f64 * dt / left).ceil() as usize).max(1) }
             }
         };
@@ -278,7 +317,11 @@ mod tests {
     /// of it waited to be shown and, after `settle` ms, the longest the text stood still before its last
     /// batch came, both in ms.
     fn replay(arrivals: &[(f64, usize)], settle: f64) -> (f64, f64) {
-        let mut pacer = StreamPacer::default();
+        replay_as(arrivals, settle, false)
+    }
+
+    fn replay_as(arrivals: &[(f64, usize)], settle: f64, thought: bool) -> (f64, f64) {
+        let mut pacer = StreamPacer { bursty: thought, ..Default::default() };
         let mut owed: VecDeque<(f64, usize)> = VecDeque::new();
         let (mut next, mut now, mut moved, mut wait, mut stop) = (0, arrivals[0].0, arrivals[0].0, 0.0_f64, 0.0_f64);
         let end = arrivals[arrivals.len() - 1].0;
@@ -288,7 +331,7 @@ mod tests {
                 owed.push_back(arrivals[next]);
                 next += 1;
             }
-            let mut n = pacer.take(owed.iter().map(|(_, chars)| chars).sum(), now, 16.0);
+            let mut n = pacer.take(owed.iter().map(|(_, chars)| chars).sum(), now, 16.0, thought);
             if n > 0 {
                 if now > arrivals[0].0 + settle && now <= end {
                     stop = stop.max(now - moved);
@@ -316,6 +359,17 @@ mod tests {
         let (wait, stop) = replay(RECORDED, 500.0);
         assert!(stop <= 150.0, "the text stood still for {stop} ms");
         assert!(wait <= 500.0, "text waited {wait} ms");
+    }
+
+    /// Claude's summarized thinking as it came (claude-sonnet-5-5, max effort, 2026-10-28; 100 ms buckets): it used to
+    /// land a burst at a time and stand still for two seconds between them.
+    #[test]
+    fn a_bursty_thought_flows_through_its_silences() {
+        let claude = [(2300.0, 97), (2400.0, 11), (2700.0, 117), (2800.0, 25), (5100.0, 172), (7400.0, 140), (7500.0, 60)];
+        let (_, stop) = replay_as(&claude, 0.0, true);
+        assert!(stop <= 700.0, "the thought stood still for {stop} ms");
+        let (_, before) = replay_as(&claude, 0.0, false);
+        assert!(before > 1_000.0, "paced as prose it stood still for only {before} ms: the check no longer tells");
     }
 
     /// The web's own check (scripts/test-ux.mjs): a 16 tok/s endpoint sending a handful of tokens every

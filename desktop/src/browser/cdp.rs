@@ -38,6 +38,9 @@ fn lost(e: std::io::Error) -> String {
     format!("lost the connection to the browser: {e}")
 }
 
+/// The longest any one command may take. A navigation has its own, shorter, wait on top (`page::NAV_TIMEOUT`).
+pub const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+
 impl Cdp {
     /// Open `ws://127.0.0.1:{port}{path}`. Returns the client and the stream of events (messages with no id).
     pub async fn connect(port: u16, path: &str) -> Result<(Cdp, mpsc::UnboundedReceiver<Value>), String> {
@@ -107,9 +110,15 @@ impl Cdp {
             self.pending.lock().unwrap().remove(&id);
             return Err(e);
         }
-        match rx.await {
-            Ok(answer) => answer,
-            Err(_) => Err("the browser closed the connection".to_string()),
+        // Bounded: a page stuck in a script loop, or a promise that never settles, once left `browse` showing "Opening"
+        // for good (2026-10-28, a motion page that was to be captured a few seconds in).
+        match tokio::time::timeout(CALL_TIMEOUT, rx).await {
+            Ok(Ok(answer)) => answer,
+            Ok(Err(_)) => Err("the browser closed the connection".to_string()),
+            Err(_) => {
+                self.pending.lock().unwrap().remove(&id);
+                Err(format!("the browser did not answer {method} within {} seconds", CALL_TIMEOUT.as_secs()))
+            }
         }
     }
 }

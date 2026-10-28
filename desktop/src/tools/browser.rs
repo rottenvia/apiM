@@ -5,7 +5,7 @@
 //! ponytail: inspect_page stops reading a body at the byte cap and says so, but does not report the full size the web gives.
 //! ponytail: redirect hops are followed by the shared HTTP client without a per-hop public-address check. fetch_url has the same gap.
 
-use crate::browser::page::{self, Page, Selectors, SCREENSHOT_DIR};
+use crate::browser::page::{self, Selectors, SCREENSHOT_DIR};
 use crate::browser::window;
 use crate::tools::{Ctx, Output, bool_arg, num_arg, str_arg};
 use futures_util::StreamExt;
@@ -118,11 +118,9 @@ pub async fn browse(ctx: &Ctx, args: &Value) -> Output {
         Ok(s) => s,
         Err(e) => return fail(format!("Error: {e}"), "Invalid browser actions"),
     };
-    let (browser, events) = match crate::browser::launch().await {
-        Ok(b) => b,
-        Err(e) => return fail(format!("Error: {e}"), "Browser not available"),
-    };
-    let session_page = match Page::open(browser.cdp.clone(), events).await {
+    // The shared page the Browser pane shows: the user watches the steps, and the next call starts where this one ends.
+    let _driving = crate::browser::live::Driving::start(&ctx.root);
+    let session_page = match crate::browser::live::page().await {
         Ok(p) => p,
         Err(e) => return fail(format!("Error: {e}"), "Browser not available"),
     };
@@ -140,8 +138,11 @@ pub async fn browse(ctx: &Ctx, args: &Value) -> Output {
         Ok(rel)
     };
     let result = page::run_session(&session_page, &steps, &mut save).await;
-    drop(session_page);
-    drop(browser);
+    if result.stuck {
+        crate::browser::live::discard().await;
+        let steps = result.results.iter().map(|r| format!("{} {}", r.action, if r.ok { "ok" } else { r.detail.as_str() })).collect::<Vec<_>>().join(" → ");
+        crate::diagnostics::record_with("tool_hung", "browse", &format!("the page stopped answering; the browser was restarted: {steps}"), serde_json::json!({ "url": result.final_url }));
+    }
 
     let failed = result.results.iter().filter(|r| !r.ok).count();
     let summary = if failed > 0 {
@@ -149,13 +150,14 @@ pub async fn browse(ctx: &Ctx, args: &Value) -> Output {
     } else {
         format!("Browsed {}", if result.title.is_empty() { "page" } else { &result.title })
     };
-    Output {
-        ok: result.results.iter().any(|r| r.ok),
-        text: page::format_session(&result),
-        summary,
-        image: shots.last().cloned(),
-        ..Default::default()
+    // The last screenshot goes to a model that can see, with the result: told to open it with view_image, Haiku 5.5
+    // described the page from its text instead and said it had not looked (2026-10-28).
+    let look = shots.last().cloned().filter(|_| crate::tools::video::can_see(ctx));
+    let mut text = page::format_session(&result);
+    if look.is_some() {
+        text.push_str("\n\nThe last screenshot is attached below: look at it before you describe the page.");
     }
+    Output { ok: result.results.iter().any(|r| r.ok), text, summary, image: shots.last().cloned(), look, ..Default::default() }
 }
 
 /// The success text for a capture. `by_id` is true when the window was picked by pid or process id.

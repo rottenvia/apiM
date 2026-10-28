@@ -114,6 +114,9 @@ fn head(text: &str, n: usize) -> String {
 
 // ---------------------------------------------------------------- client
 
+/// The most of one answer that is read: a tool's result is clipped far below this anyway.
+const MAX_ANSWER: usize = 16 << 20;
+
 /// One JSON-RPC message as one POST. Gives back its `result` (Null when there is none).
 async fn rpc(client: &reqwest::Client, url: &str, token: Option<&str>, method: &str, params: Option<Value>, timeout_ms: u64) -> Result<Value, McpError> {
     let fail = |kind, message: String| McpError { kind, message };
@@ -132,12 +135,13 @@ async fn rpc(client: &reqwest::Client, url: &str, token: Option<&str>, method: &
         req = req.bearer_auth(token);
     }
     // The limit covers the whole answer. The web's stops at the headers, so an SSE answer that never ends hangs it.
+    // The body is cut at MAX_ANSWER bytes: a server that keeps sending cannot fill memory before the timeout does.
     let exchange = async {
-        let res = req.send().await?;
+        let res = req.send().await.map_err(|e| e.to_string())?;
         let status = res.status();
-        let text = res.text().await;
+        let text = crate::tools::web::read_capped(res, MAX_ANSWER).await.map(|(bytes, _)| String::from_utf8_lossy(&bytes).into_owned());
         // An error answer whose body cannot be read is still that error answer.
-        Ok::<_, reqwest::Error>((status, if status.is_success() { text? } else { text.unwrap_or_default() }))
+        Ok::<_, String>((status, if status.is_success() { text? } else { text.unwrap_or_default() }))
     };
     let (status, text) = match tokio::time::timeout(Duration::from_millis(timeout_ms), exchange).await {
         Err(_) => return Err(fail(ErrorKind::Timeout, format!("MCP server did not answer within {}s — is it running at {url}?", (timeout_ms + 500) / 1000))),

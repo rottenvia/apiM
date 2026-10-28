@@ -135,14 +135,28 @@ pub fn check_browser_policy(command: &str, args: &[String], workspace_dir: &str)
     }
 }
 
-/// The request rule from browser-playwright.ts `allowed()`. data:, blob: and about: pass.
-/// http and https pass only when the shared public-address guard does. Everything else is refused.
-pub async fn url_allowed(raw: &str) -> bool {
-    let Ok(url) = reqwest::Url::parse(raw) else { return false };
+/// The rule the live page keeps: data:, blob: and about: pass; http and https pass for the public web and for this
+/// machine (`localhost`), so the agent can look at the site it is building; a file passes only from inside the
+/// chat's workspace (`live::root`). Private networks, the cloud metadata address and every other file are refused.
+pub async fn check(raw: &str) -> Result<(), String> {
+    allowed_in(raw, crate::browser::live::root().as_deref()).await
+}
+
+async fn allowed_in(raw: &str, root: Option<&std::path::Path>) -> Result<(), String> {
+    let url = reqwest::Url::parse(raw).map_err(|_| format!("{raw} is not a web address."))?;
     match url.scheme() {
-        "data" | "blob" | "about" => true,
-        "http" | "https" => crate::search::assert_public_url_resolved(raw, false).await.is_ok(),
-        _ => false,
+        "data" | "blob" | "about" => Ok(()),
+        "http" | "https" => crate::search::assert_public_url_resolved(raw, true).await.map(|_| ()),
+        "file" => {
+            let outside = || format!("{raw} is outside this chat's workspace — the browser opens only the workspace's own files.");
+            let (Some(root), Ok(path)) = (root, url.to_file_path()) else { return Err(outside()) };
+            // Canonical on both sides, so `..`, a junction or another spelling of the path cannot step out.
+            match (std::fs::canonicalize(&path), std::fs::canonicalize(root)) {
+                (Ok(path), Ok(root)) if path.starts_with(&root) => Ok(()),
+                _ => Err(outside()),
+            }
+        }
+        other => Err(format!("{other}: addresses cannot be opened in the browser.")),
     }
 }
 
@@ -199,10 +213,22 @@ mod tests {
     fn request_rule_and_host_cache_key() {
         let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
         rt.block_on(async {
-            assert!(url_allowed("data:text/html,hi").await);
-            assert!(url_allowed("about:blank").await);
-            assert!(!url_allowed("file:///home/u/.ssh/id_rsa").await);
-            assert!(!url_allowed("not a url").await);
+            assert!(allowed_in("data:text/html,hi", None).await.is_ok());
+            assert!(allowed_in("about:blank", None).await.is_ok());
+            assert!(!allowed_in("file:///home/u/.ssh/id_rsa", None).await.is_ok());
+            assert!(!allowed_in("not a url", None).await.is_ok());
+            let dir = std::env::temp_dir().join(format!("apim-policy-{}", std::process::id()));
+            std::fs::create_dir_all(dir.join("w")).unwrap();
+            std::fs::write(dir.join("w").join("a.html"), "x").unwrap();
+            std::fs::write(dir.join("secret.txt"), "x").unwrap();
+            let url = |p: &std::path::Path| reqwest::Url::from_file_path(p).unwrap().to_string();
+            assert!(allowed_in(&url(&dir.join("w").join("a.html")), Some(&dir.join("w"))).await.is_ok());
+            assert!(allowed_in(&url(&dir.join("secret.txt")), Some(&dir.join("w"))).await.is_err());
+            assert!(allowed_in(&format!("{}/../secret.txt", url(&dir.join("w"))), Some(&dir.join("w"))).await.is_err());
+            assert!(allowed_in("http://127.0.0.1:8000/", None).await.is_ok());
+            assert!(allowed_in("http://169.254.169.254/latest/meta-data", None).await.is_err());
+            assert!(allowed_in("http://192.168.1.1/", None).await.is_err());
+            let _ = std::fs::remove_dir_all(&dir);
         });
         assert_eq!(host_key("https://x.test:8443/a?b").as_deref(), Some("https://x.test:8443"));
         assert_eq!(host_key("https://x.test/a").as_deref(), Some("https://x.test"));

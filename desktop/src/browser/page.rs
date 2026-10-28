@@ -260,6 +260,8 @@ pub struct Session {
     pub console: Vec<String>,
     pub failed_requests: Vec<String>,
     pub blocked: Option<&'static str>,
+    /// A step ran out of time: the page may be wedged, and is not reused.
+    pub stuck: bool,
 }
 
 /// Render a session for the model. The challenge note comes first, then steps, then selectors (before text).
@@ -329,7 +331,13 @@ pub async fn run_session(page: &Page, steps: &[Step], save: &mut (dyn FnMut(&str
     let mut s = Session::default();
     let mut navigated = false;
     for (i, step) in steps.iter().enumerate() {
-        let outcome: Result<String, String> = match step {
+        // Every step is bounded, over and above each command's own limit: a step polls, and its polls could add up.
+        let limit = match step {
+            Step::Goto(_) => NAV_TIMEOUT,
+            Step::WaitFor { selector: None, ms } => Duration::from_millis(ms.unwrap_or(0)),
+            _ => ACTION_TIMEOUT * 2,
+        } + Duration::from_secs(5);
+        let work = async { match step {
             Step::Goto(url) => match page.goto(url).await {
                 Ok((landed, status)) => {
                     navigated = true;
@@ -363,11 +371,21 @@ pub async fn run_session(page: &Page, steps: &[Step], save: &mut (dyn FnMut(&str
                     format!("{} match(es):\n{}", vals.len(), shown.join("\n"))
                 }
             }),
+        } };
+        let outcome: Result<String, String> = match tokio::time::timeout(limit, work).await {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                s.stuck = true;
+                Err(format!("Stopped after {} s: the page did not respond. The remaining steps were skipped; browse again to start on a fresh page.", limit.as_secs()))
+            }
         };
         s.results.push(match outcome {
             Ok(detail) => ActionResult { action: step.name(), ok: true, detail },
             Err(e) => ActionResult { action: step.name(), ok: false, detail: clip(first_line(&e), 300) },
         });
+        if s.stuck {
+            return s;
+        }
     }
 
     let (console, failed) = page.logs();
@@ -404,6 +422,8 @@ pub struct Page {
     log: Arc<StdMutex<Log>>,
     /// Counts DOMContentLoaded events, so a navigation can wait for the next one.
     dom: watch::Receiver<u64>,
+    /// Cleared when the browser's connection is gone.
+    alive: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Page {
@@ -415,14 +435,68 @@ impl Page {
         for method in ["Page.enable", "Runtime.enable", "Network.enable"] {
             cdp.call(method, json!({}), Some(&sid)).await?;
         }
-        cdp.call("Emulation.setDeviceMetricsOverride", json!({ "width": 1280, "height": 900, "deviceScaleFactor": 1, "mobile": false }), Some(&sid)).await?;
+        let (width, height) = crate::browser::live::VIEWPORT;
+        cdp.call("Emulation.setDeviceMetricsOverride", json!({ "width": width, "height": height, "deviceScaleFactor": 1, "mobile": false }), Some(&sid)).await?;
         // Every request pauses here, so a non-public address is refused before the browser opens it.
         cdp.call("Fetch.enable", json!({ "patterns": [{ "urlPattern": "*" }] }), Some(&sid)).await?;
 
         let log = Arc::new(StdMutex::new(Log::default()));
         let (dom_tx, dom_rx) = watch::channel(0u64);
-        tokio::spawn(pump(events, cdp.clone(), sid.clone(), log.clone(), dom_tx));
-        Ok(Page { cdp, sid, log, dom: dom_rx })
+        let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let gone = alive.clone();
+        let (pump_cdp, pump_sid, pump_log) = (cdp.clone(), sid.clone(), log.clone());
+        tokio::spawn(async move {
+            pump(events, pump_cdp, pump_sid, pump_log, dom_tx).await;
+            gone.store(false, std::sync::atomic::Ordering::SeqCst);
+        });
+        Ok(Page { cdp, sid, log, dom: dom_rx, alive })
+    }
+
+    pub fn alive(&self) -> bool {
+        self.alive.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Frames of the page as it is drawn, for the Browser pane (`live::frame`).
+    pub async fn screencast(&self, on: bool) -> Result<(), String> {
+        // Room for the tallest pane at the widest layout, so a frame is never shrunk before the pane draws it.
+        if on {
+            self.call("Page.startScreencast", json!({ "format": "jpeg", "quality": 72, "maxWidth": 1280, "maxHeight": 1600, "everyNthFrame": 1 })).await.map(|_| ())
+        } else {
+            self.call("Page.stopScreencast", json!({})).await.map(|_| ())
+        }
+    }
+
+    /// Any CDP command on this page: the pane's reload, stop, wheel and typing.
+    pub async fn raw(&self, method: &str, params: Value) -> Result<Value, String> {
+        self.call(method, params).await
+    }
+
+    /// Back (-1) or forward (1) in the page's history; nothing there is not an error.
+    pub async fn history(&self, delta: i64) -> Result<(), String> {
+        let h = self.call("Page.getNavigationHistory", json!({})).await?;
+        let at = h["currentIndex"].as_i64().unwrap_or(0) + delta;
+        match h["entries"].as_array().and_then(|e| e.get(at.max(0) as usize).filter(|_| at >= 0)) {
+            Some(entry) => self.call("Page.navigateToHistoryEntry", json!({ "entryId": entry["id"] })).await.map(|_| ()),
+            None => Ok(()),
+        }
+    }
+
+    /// A pointer move, or a left click, at a point of the page.
+    pub async fn mouse(&self, x: f32, y: f32, click: bool) -> Result<(), String> {
+        if !click {
+            return self.call("Input.dispatchMouseEvent", json!({ "type": "mouseMoved", "x": x, "y": y })).await.map(|_| ());
+        }
+        for kind in ["mousePressed", "mouseReleased"] {
+            self.call("Input.dispatchMouseEvent", json!({ "type": kind, "x": x, "y": y, "button": "left", "clickCount": 1 })).await?;
+        }
+        Ok(())
+    }
+
+    /// One key that is not text: Enter, Backspace, an arrow. Enter carries a carriage return so a form submits.
+    pub async fn key(&self, key: &str, code: &str, vk: u32) -> Result<(), String> {
+        let text = if key == "Enter" { "\r" } else { "" };
+        self.call("Input.dispatchKeyEvent", json!({ "type": "keyDown", "key": key, "code": code, "windowsVirtualKeyCode": vk, "text": text })).await?;
+        self.call("Input.dispatchKeyEvent", json!({ "type": "keyUp", "key": key, "code": code, "windowsVirtualKeyCode": vk })).await.map(|_| ())
     }
 
     async fn call(&self, method: &str, params: Value) -> Result<Value, String> {
@@ -546,7 +620,7 @@ impl Page {
 
     /// Navigate and wait for DOMContentLoaded. Returns the landed URL and the document's HTTP status.
     pub async fn goto(&self, url: &str) -> Result<(String, Option<u16>), String> {
-        crate::search::assert_public_url_resolved(url, false).await?;
+        policy::check(url).await?;
         let mut dom = self.dom.clone();
         dom.borrow_and_update();
         self.log.lock().unwrap().doc_status = None;
@@ -562,7 +636,7 @@ impl Page {
         let landed = self.url().await?;
         let status = self.log.lock().unwrap().doc_status;
         // A redirect hop is not always stopped by the request check, so the final address is checked too.
-        if !policy::url_allowed(&landed).await {
+        if policy::check(&landed).await.is_err() {
             let _ = self.call("Page.navigate", json!({ "url": "about:blank" })).await;
             return Err(format!("Redirected to {landed}, which is not on the public web — not loaded."));
         }
@@ -625,6 +699,21 @@ async fn pump(mut events: mpsc::UnboundedReceiver<Value>, cdp: Cdp, sid: String,
                     l.failed.push(format!("{status} {}", clip(p["response"]["url"].as_str().unwrap_or(""), 200)));
                 }
             }
+            "Page.screencastFrame" => crate::browser::live::frame(&cdp, &sid, p),
+            "Page.frameNavigated" if p["frame"]["parentId"].is_null() => {
+                let url = p["frame"]["url"].as_str().unwrap_or("").to_string();
+                crate::browser::live::navigated(Some(&url), None, None);
+            }
+            "Page.frameStartedLoading" => crate::browser::live::navigated(None, Some(true), None),
+            "Page.loadEventFired" | "Page.frameStoppedLoading" => {
+                crate::browser::live::navigated(None, Some(false), None);
+                let (cdp, sid) = (cdp.clone(), sid.clone());
+                tokio::spawn(async move {
+                    if let Ok(r) = cdp.call("Runtime.evaluate", json!({ "expression": "document.title", "returnByValue": true }), Some(&sid)).await {
+                        crate::browser::live::navigated(None, None, Some(r["result"]["value"].as_str().unwrap_or("").to_string()));
+                    }
+                });
+            }
             "Page.domContentEventFired" => dom.send_modify(|n| *n += 1),
             "Fetch.requestPaused" => {
                 let id = p["requestId"].as_str().unwrap_or("").to_string();
@@ -647,11 +736,15 @@ async fn pump(mut events: mpsc::UnboundedReceiver<Value>, cdp: Cdp, sid: String,
 
 /// The request rule, with one verdict kept per scheme and host.
 async fn allowed_cached(cache: &StdMutex<HashMap<String, bool>>, url: &str) -> bool {
+    // A file's verdict is its own path's: one for the scheme would let every file through after the first.
+    if url.starts_with("file:") {
+        return policy::check(url).await.is_ok();
+    }
     let Some(key) = policy::host_key(url) else { return false };
     if let Some(v) = cache.lock().unwrap().get(&key).copied() {
         return v;
     }
-    let v = policy::url_allowed(url).await;
+    let v = policy::check(url).await.is_ok();
     cache.lock().unwrap().insert(key, v);
     v
 }
