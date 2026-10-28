@@ -241,7 +241,7 @@ fn page(app: &mut App, ui: &mut egui::Ui, view: Rect, round: f32, widest: f32, i
     let p = p();
     let root = app.conv.workspace();
     let key = live::key(&root);
-    let (title, driving, error, size, seq, running, viewport, pointer) = live::with(&root, |v| (v.title.clone(), v.driving > 0, v.error.clone(), v.size, v.seq, v.running, v.viewport, v.pointer.clone()));
+    let (title, driving, error, size, seq, running, viewport, pointer, url) = live::with(&root, |v| (v.title.clone(), v.driving > 0, v.error.clone(), v.size, v.seq, v.running, v.viewport, v.pointer.clone(), v.url.clone()));
     if (key.as_str(), seq) != (app.browser.shown.0.as_str(), app.browser.shown.1) {
         let rgba = live::with(&root, |v| v.rgba.clone());
         if size[0] > 0 && rgba.len() == size[0] * size[1] * 4 {
@@ -311,8 +311,45 @@ fn page(app: &mut App, ui: &mut egui::Ui, view: Rect, round: f32, widest: f32, i
         agent_pointer(ui, view, image, viewport, &pointer, driving);
     }
     error_strip(ui, view, error.as_deref());
+    signin_note(ui, view, &url);
     if driving && in_pane {
         badge(ui, view, &title);
+    }
+}
+
+/// Google turns away a sign-in from a browser that is headless or driven by a program ("This browser or app may not be
+/// secure"), and this one is both: the agent drives it. It is not dressed up as an ordinary browser to get past that,
+/// which would also hide what the agent's browser is from every other site. On Google's sign-in pages the pane says so
+/// and offers the user's own browser.
+fn signin_note(ui: &mut egui::Ui, view: Rect, url: &str) {
+    let host = url.split("://").nth(1).and_then(|rest| rest.split(['/', '?', '#']).next()).unwrap_or("");
+    if host != "accounts.google.com" {
+        return;
+    }
+    let p = p();
+    let inner = view.shrink(12.0);
+    // Stretched over the window, a card the page's width would leave the button far from the words.
+    let width = inner.width().min(620.0);
+    let label = "Open in your browser";
+    let button_w = widgets::galley(ui, label, theme::font(12.0, W::Medium), p.text).size().x + 20.0;
+    let text_w = (width - 28.0 - button_w - 14.0).max(120.0);
+    let head = ui.painter().layout("Google won't sign you in here".into(), theme::font(12.5, W::Semibold), p.text, text_w);
+    let body = ui.painter().layout("It turns away browsers that a program drives, and the agent drives this one.\nSign in from your own browser instead.".into(), theme::font(11.5, W::Regular), p.text2, text_w);
+    let height = 14.0 + head.size().y + 3.0 + body.size().y + 14.0;
+    let card = Rect::from_min_size(pos2(inner.center().x - width / 2.0, inner.bottom() - height), vec2(width, height));
+    let painter = ui.painter().with_clip_rect(view);
+    painter.rect_filled(card.translate(vec2(0.0, 4.0)).expand(2.0), 14.0, Color32::from_black_alpha(if p.is_dark() { 70 } else { 24 }));
+    painter.rect(card, 12.0, p.elevated, Stroke::new(1.0, p.border_light), StrokeKind::Inside);
+    let top = card.top() + 14.0;
+    let head_h = head.size().y;
+    painter.galley(pos2(card.left() + 14.0, top), head, p.text);
+    painter.galley(pos2(card.left() + 14.0, top + head_h + 3.0), body, p.text2);
+    // On top of the page's own hit area, so a click on the card's words does not reach the page under it.
+    ui.interact(card, ui.id().with("signin-note"), Sense::click());
+    let button = Rect::from_center_size(pos2(card.right() - 14.0 - button_w / 2.0, card.center().y), vec2(button_w, 26.0));
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(button));
+    if widgets::small_btn(&mut child, label, p.text, p.hover, p.border_light).clicked() {
+        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
     }
 }
 
