@@ -567,7 +567,7 @@ fn popovers(app: &mut App, ctx: &egui::Context) {
             });
             model_menu(app, ui.ctx());
         }),
-        Popover::Effort => popover(app, ctx, 352.0, false, effort_panel),
+        Popover::Effort => popover(app, ctx, 320.0, false, effort_panel),
         Popover::Web => popover(app, ctx, 304.0, false, |app, ui| {
             egui::Frame::new().inner_margin(egui::Margin::same(6)).show(ui, |ui| {
                 let modes = [
@@ -640,7 +640,7 @@ fn effort_panel(app: &mut App, ui: &mut egui::Ui) {
         return;
     }
 
-    egui::Frame::new().inner_margin(egui::Margin { left: 16, right: 16, top: 14, bottom: 14 }).show(ui, |ui| {
+    egui::Frame::new().inner_margin(egui::Margin { left: 16, right: 16, top: 12, bottom: 12 }).show(ui, |ui| {
         if let Some(picked) = slider(ui, &levels, current, auto) {
             app.settings.effort = picked.into();
             app.settings.save();
@@ -669,10 +669,10 @@ fn model_is_claude(app: &App) -> bool {
 /// to a tall rounded knob in its lightest colour. The depth's name is in the panel's title. Greyed while Auto picks;
 /// touching it hands the choice back. Returns the depth let go on.
 fn slider(ui: &mut egui::Ui, levels: &[&'static str], current: &str, auto: bool) -> Option<&'static str> {
-    const KNOB: egui::Vec2 = vec2(22.0, 34.0);
+    const KNOB: egui::Vec2 = vec2(14.0, 20.0);
     let p = p();
     let width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(vec2(width, 60.0), Sense::click_and_drag());
+    let (rect, response) = ui.allocate_exact_size(vec2(width, 40.0), Sense::click_and_drag());
     let cursor = if response.dragged() { CursorIcon::Grabbing } else { CursorIcon::PointingHand };
     let response = response.on_hover_cursor(cursor);
     let n = levels.len().max(2) as f32 - 1.0;
@@ -686,11 +686,11 @@ fn slider(ui: &mut egui::Ui, levels: &[&'static str], current: &str, auto: bool)
     let at = ui.ctx().animate_value_with_time(response.id.with("knob"), target, if response.dragged() { 0.0 } else { 0.14 });
     let picked = if response.drag_stopped() || response.clicked() { pointer.map(|f| levels[f.round() as usize]) } else { None };
 
-    let small = |text: &str| widgets::galley(ui, text, theme::font(12.0, W::Regular), p.text2);
+    let small = |text: &str| widgets::galley(ui, text, theme::font(11.0, W::Regular), p.text2);
     let (faster, smarter) = (small("Faster"), small("Smarter"));
-    widgets::text_at(ui, rect.left() + 2.0, rect.top() + 8.0, faster);
+    widgets::text_at(ui, rect.left() + 2.0, rect.top() + 7.0, faster);
     let smarter_x = rect.right() - 2.0 - smarter.size().x;
-    widgets::text_at(ui, smarter_x, rect.top() + 8.0, smarter);
+    widgets::text_at(ui, smarter_x, rect.top() + 7.0, smarter);
 
     // Auto greys the accent rather than fading the knob: a see-through knob shows the track through it.
     let fade = ui.ctx().animate_bool_with_time(response.id.with("auto"), auto, 0.15);
@@ -700,20 +700,20 @@ fn slider(ui: &mut egui::Ui, levels: &[&'static str], current: &str, auto: bool)
     let y = rect.bottom() - KNOB.y / 2.0;
     let knob_x = x_of(at);
     let painter = ui.painter();
-    let track = Rect::from_min_max(pos2(rect.left(), y - 13.0), pos2(rect.right(), y + 13.0));
-    painter.rect(track, 8.0, alpha(p.text, if p.is_dark() { 7.0 } else { 6.0 }), Stroke::new(1.0, alpha(p.text, 6.0)), egui::StrokeKind::Inside);
-    painter.rect_filled(Rect::from_min_max(track.min, pos2(knob_x, track.max.y)), 8.0, alpha(accent, if p.is_dark() { 52.0 } else { 38.0 }));
+    let track = Rect::from_min_max(pos2(rect.left(), y - 7.0), pos2(rect.right(), y + 7.0));
+    painter.rect(track, 5.0, alpha(p.text, if p.is_dark() { 7.0 } else { 6.0 }), Stroke::new(1.0, alpha(p.text, 6.0)), egui::StrokeKind::Inside);
+    painter.rect_filled(Rect::from_min_max(track.min, pos2(knob_x, track.max.y)), 5.0, alpha(accent, if p.is_dark() { 52.0 } else { 38.0 }));
     for i in 0..levels.len() {
         let lit = (i as f32) <= at + 0.01;
-        painter.circle_filled(pos2(x_of(i as f32), y), 2.2, if lit { alpha(light, 62.0) } else { alpha(p.text, 28.0) });
+        painter.circle_filled(pos2(x_of(i as f32), y), 1.6, if lit { alpha(light, 62.0) } else { alpha(p.text, 28.0) });
     }
     // A shadow egui cannot blur, laid down as two widening rounded rects under the knob.
     let knob = Rect::from_center_size(pos2(knob_x, y), KNOB + vec2(1.0, 1.0) * hot);
     let dark = if p.is_dark() { 2u8 } else { 1 };
-    for (grow, a) in [(2.5, 20u8), (1.0, 34)] {
-        painter.rect_filled(knob.translate(vec2(0.0, 1.5)).expand(grow), 9.0 + grow, Color32::from_black_alpha(a * dark));
+    for (grow, a) in [(1.5, 18u8), (0.6, 30)] {
+        painter.rect_filled(knob.translate(vec2(0.0, 1.0)).expand(grow), 6.0 + grow, Color32::from_black_alpha(a * dark));
     }
-    painter.rect(knob, 8.0, light, Stroke::new(1.0, Color32::from_black_alpha(22 * dark)), egui::StrokeKind::Inside);
+    painter.rect(knob, 5.0, light, Stroke::new(1.0, Color32::from_black_alpha(22 * dark)), egui::StrokeKind::Inside);
 
     if response.dragged() || ui.ctx().animate_value_with_time(response.id.with("settle"), index, 0.14) != index {
         ui.ctx().request_repaint();
