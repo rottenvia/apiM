@@ -195,13 +195,40 @@ fn action_btn(ui: &mut Ui, icon: Icon, label: &str, tip: &str, height: f32, dang
     if tip.is_empty() { response } else { response.on_hover_text(tip) }
 }
 
-/// What the user typed, without the note that hands a large attached file to the model (its size, its first
-/// lines, which tool reads the rest): the file's chip says it is there. Only notes that end in a fixed sentence
-/// are taken off. A small file shown whole stays, since nothing marks where it ends and the words begin.
+/// What the user typed, without the note the composer prepends for each attachment (a file's size and which tool reads
+/// it, a binary's inspect_binary hint, a picture's `<image>` block, a folder's map): the chips already say what is there,
+/// so the note is for the model, not the reader. Each note is cut by the fixed sentence it ends on. A note that embeds the
+/// file's own text whole — a small text file, or a short document shown in full — is left: nothing marks where the file
+/// ends and the user's words begin. The user's typed text is always appended last, after every note.
 fn without_file_notes(text: &str) -> &str {
-    let mut rest = text;
-    while rest.starts_with("Attached file: ") && rest.lines().next().is_some_and(|line| line.contains("too large to show whole")) {
-        let Some(end) = ["or process it with a script.", "run a script against the file."].iter().filter_map(|last| rest.find(last).map(|at| at + last.len())).min() else { break };
+    /// The byte length of a generated note at the front of `rest`, or None when `rest` begins with the user's own words.
+    fn note_end(rest: &str) -> Option<usize> {
+        let first = rest.lines().next().unwrap_or("");
+        let after = |s: &str| rest.find(s).map(|at| at + s.len());
+        if rest.starts_with("Attached file: ") && first.contains("too large to show whole") {
+            ["or process it with a script.", "run a script against the file."].iter().filter_map(|s| after(s)).min()
+        } else if rest.starts_with("Attached ") && first.contains("saved as exact bytes") {
+            after("Do not dump the whole binary.")
+        } else if rest.starts_with("Attached image: ") {
+            after(" looks at it.")
+        } else if rest.starts_with("Attached document: ") && rest.contains("read_document path=\"") {
+            // The error and preview variants both close on `read_document path="<rel>".`; a whole document shown in full
+            // has no such sentence and is left in place, like a small text file.
+            rest.find("read_document path=\"").and_then(|at| rest[at..].find("\".").map(|d| at + d + 2))
+        } else if rest.starts_with("Attached folder: ") {
+            after("or delegate a survey of it.")
+        } else if rest.starts_with("<image name=\"") {
+            after("</image>")
+        } else if rest.starts_with("<video name=\"") {
+            after("</video>")
+        } else if rest.starts_with('[') && first.contains("is also saved in the workspace at") && first.ends_with(']') {
+            Some(first.len())
+        } else {
+            None
+        }
+    }
+    let mut rest = text.trim_start_matches(['\n', '\r']);
+    while let Some(end) = note_end(rest) {
         rest = rest[end..].trim_start_matches(['\n', '\r']);
     }
     rest
@@ -1800,6 +1827,18 @@ mod tests {
         let note = "Attached file: uploads/a.txt (592.0 KB, 3 lines, 606,231 characters) — saved in the workspace; too large to show whole.\nFirst 3 lines:\n```txt\nx\n\ny\n```\nRead more with read_file path=\"uploads/a.txt\" start_line=… end_line=…, find things with search_files, or process it with a script.";
         assert_eq!(without_file_notes(&format!("{note}\n\n{note}\n\nfix it\n\nplease")), "fix it\n\nplease");
         assert_eq!((without_file_notes(note), without_file_notes("Attached file: a.rs\n```rs\nfn main(){}\n```\n\nwhy")), ("", "Attached file: a.rs\n```rs\nfn main(){}\n```\n\nwhy"));
+        // The model's note for a binary/image/document/folder is stripped too; the chips carry the file, the bubble the words.
+        let pe = |n: &str| format!("Attached Windows PE: uploads/{n} (2.7 MB) — saved as exact bytes; it was not executed. Use inspect_binary path=\"uploads/{n}\": start with analyses:[\"summary\"] or [\"strings\"], then decompile only the functions you need (focus_terms). Do not dump the whole binary.");
+        assert_eq!(without_file_notes(&format!("{}\n\n{}\n\ndeco – decompiler\nmymodule – app", pe("deco.exe"), pe("mymodule.exe"))), "deco – decompiler\nmymodule – app");
+        assert_eq!(without_file_notes(&pe("x.dll")), "");
+        assert_eq!(without_file_notes("Attached image: uploads/p.png (PNG, 12.0 KB) — saved in the workspace; view_image path=\"uploads/p.png\" looks at it.\n\nwhat is this"), "what is this");
+        assert_eq!(without_file_notes("Attached document: uploads/a.pdf (1.0 MB) — saved in the workspace, but its text could not be extracted here (bad). Try read_document path=\"uploads/a.pdf\".\n\nsummarize"), "summarize");
+        assert_eq!(without_file_notes("Attached folder: uploads/proj/ — 10 files, 1.0 MB, saved in the workspace with its structure.\nTypes: rs 5\nTree:\n  src/\nExplore it with list_files path=\"uploads/proj\", search_files, read_files and find_references — or delegate a survey of it.\n\nreview"), "review");
+        assert_eq!(without_file_notes("<image name=\"p.png\">\na cat\n</image>\n\nnice"), "nice");
+        assert_eq!(without_file_notes("[p.png is also saved in the workspace at uploads/p.png]\n\nok"), "ok");
+        // A short document shown whole has no closing tool-sentence, so it is left in place like a small text file.
+        let whole_doc = "Attached document: uploads/a.md (2.0 KB) — saved in the workspace.\n# Title\n\nbody\n\nmy question";
+        assert_eq!(without_file_notes(whole_doc), whole_doc);
         assert_eq!(describe("fetch_url", r#"{"url":"https://example.com/a"}"#).target.as_deref(), Some("example.com/a"));
         let search = describe("web_search", r#"{"query":"rust egui"}"#);
         assert_eq!((search.target.as_deref(), search.mono), (Some("rust egui"), false));
