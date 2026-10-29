@@ -99,3 +99,9 @@ report.txt
 
 # graphify knowledge graph (local, regenerated with `graphify update .`).
 graphify-out/
+
+# iOS app: the project and its Info.plist are generated from ios/project.yml (XcodeGen)
+ios/apiM.xcodeproj/
+ios/apiM/Info.plist
+ios/MockServer/target/
+ios/build/

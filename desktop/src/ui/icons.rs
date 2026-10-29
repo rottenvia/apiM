@@ -201,4 +201,5 @@ pub const TAB_THEME: Icon = line(
     1.7,
 );
 pub const TAB_REPORTS: Icon = line(concat!(path!("M9 3h6l4 4v14H5V3h4zM9 3v5h6"), r#"<path stroke-linecap="round" d="M8.5 13h7M8.5 16.5h4.5"/>"#), 1.7);
+pub const TAB_PHONE: Icon = line(r#"<rect x="6.5" y="2.5" width="11" height="19" rx="2.5"/><path stroke-linecap="round" d="M10.5 18.5h3"/>"#, 1.7);
 pub const TAB_SAFETY: Icon = line(path!("M12 3l7 3v6c0 4.2-2.9 7.6-7 9-4.1-1.4-7-4.8-7-9V6z"), 1.7);

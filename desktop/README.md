@@ -480,6 +480,15 @@ What saves tokens, in order: fewer tools sent (above), then writing less code (L
 
 Text in a reply, your own messages, the notices between steps, the "Context compacted" line and the words of a step row can be selected with the mouse and copied; a click on a step row's words still opens the row. A selection has rounded corners and its letters keep their colour (`ui/selection.rs`: egui draws square boxes and inks the letters in a border's grey). One limit is egui's: a selection is dropped when its first or last line scrolls out of view, because rows that do not show are not laid out.
 
+## Your phone
+
+The apiM iPhone app (`ios/`) drives this window from anywhere on the same network: it shows the chat on screen and the chats beside it, sends messages and photos into the message box here, answers the approval card and `ask_user`'s questions, and stops a reply. It mirrors rather than keeps its own state: a chat opened on the phone opens here, and a message from the phone goes through the same Send as one typed here, so a command runs, and words sent while a reply runs reach it as a note. Settings > Phone turns it on and shows the code to scan.
+
+- **No server in between.** The phone connects straight to this computer on port 47100 (`APIM_REMOTE_PORT` moves it). The QR code holds the addresses (the one the default route leaves by and, with Tailscale, the Tailscale one, which reaches it from anywhere) and a 32-byte key. Every frame after the two hellos is ChaCha20-Poly1305 under keys HKDF-SHA256 derives from that key and both sides' random values, one key per direction, a counter as the nonce (`remote.rs`, on the `ring` already in the tree). A phone without the key is dropped before it sees anything; a frame replayed from an earlier connection or within one does not open. "Unpair all phones" makes a new key. A phone that connects is named above the message box ("iPhone connected. It can send messages and approve commands here."), so one that should not be there does not go unseen.
+- **Only what changed travels.** The phone is sent the chat once, then each message whose JSON differs from what it was last sent, at most every 120 ms: a reply being written re-sends only itself. A whole real reply with a command and its approval (below) took 17 frames and 10 KB. A chat of 80 long replies (486 KB) is sent in 1.4 ms of work, and each frame while one of them grows costs 0.18 ms and 7 KB (`a_long_chat_patches_quickly`).
+- **Minimized is fine.** The link is served from `logic`, which eframe runs while the window is down: a test window minimized through `ShowWindow` stayed minimized through a phone connecting, a new chat, a message and its reply.
+- Measured end to end against this window, with a Python phone written from the description above rather than from this code (a third implementation, after Rust and Swift): a message from the phone ran on GLM 5.3 Flash, its `powershell echo hello-from-phone` waited for approval on the phone (3.0 s after sending), ran once allowed, and the answer came back 2.4 s later. A phone holding another key got nothing. The crypto's bytes are pinned by a test on each side (`sealing_matches_the_phone`, `WireTests`) and agree with Python's `cryptography`.
+
 ## Not here yet
 
 - Screenshots of a hidden desktop for apps the agent starts
@@ -496,6 +505,7 @@ The desktop app and the web app share chats, workspaces, plugins, MCP servers an
 | Settings and keys | `%APPDATA%\apiM\settings.json` |
 | Chats, workspaces and the rest | the repo's `data` folder when the program runs from inside the repo, otherwise `%APPDATA%\apiM` |
 | Unsent messages, pasted pictures | `drafts.json` and `pasted/` beside the chats |
+| The phone link's key, and photos sent from the phone | `remote.json` and `phone/` beside the chats |
 
 Set `APIM_DATA_DIR` to keep the data somewhere else.
 

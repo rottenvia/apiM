@@ -26,6 +26,7 @@ mod plugins;
 mod prompt;
 mod provider;
 mod refusal;
+mod remote;
 mod run;
 mod sandbox;
 mod search;

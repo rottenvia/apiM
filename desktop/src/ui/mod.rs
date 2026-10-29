@@ -20,6 +20,7 @@ mod pacer;
 mod plan_panel;
 mod plugin_modal;
 mod prompts;
+mod remote;
 mod rewind;
 mod selection;
 mod sandbox_panel;
@@ -392,6 +393,8 @@ pub struct App {
     plugin_ui: plugin_modal::State,
     console: dialogs::Console,
     search: dialogs::Search,
+    /// The phone link: Settings > Phone.
+    remote: remote::State,
 }
 
 impl App {
@@ -482,8 +485,10 @@ impl App {
             console: Default::default(),
             search: Default::default(),
             settings,
+            remote: Default::default(),
         };
         drafts::start(&mut app);
+        remote::boot(&mut app);
         app.stage_shot();
         app
     }
@@ -2034,6 +2039,7 @@ impl eframe::App for App {
             self.side.arrive();
         }
         self.take_inbox();
+        remote::tick(self);
         self.keep_chat_model();
         drafts::keep(self, false);
         // `minimized` puts the self-portrait's window down once its message is sent, and back up when the reply ends.

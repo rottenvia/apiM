@@ -44,7 +44,7 @@ pub struct State {
 }
 
 /// (label, the line under "Settings", icon)
-const TABS: [(&str, &str, Icon); 7] = [
+const TABS: [(&str, &str, Icon); 8] = [
     ("API keys", "Credentials for the services this app talks to", icons::TAB_KEYS),
     ("Model", "Which model answers, and how hard it thinks", icons::TAB_MODEL),
     ("Theme", "The app's colours, MonkeyType-style", icons::TAB_THEME),
@@ -52,6 +52,7 @@ const TABS: [(&str, &str, Icon); 7] = [
     ("Reports", "What has been failing, so it can be fixed", icons::TAB_REPORTS),
     ("MCP servers", "Remote tools the AI may call, with permission", icons::MCP.stroke(1.7)),
     ("Safety", "Guards on the actions that touch your machine", icons::TAB_SAFETY),
+    ("Phone", "Drive this app from your iPhone", icons::TAB_PHONE),
 ];
 
 /// A child with its own rectangle, laid out top down.
@@ -137,7 +138,8 @@ pub fn show(app: &mut App, ctx: &egui::Context) -> bool {
                         3 => super::settings_panels::search(app, ui),
                         4 => super::settings_panels::reports(app, ui),
                         5 => super::settings_panels::mcp(app, ui),
-                        _ => safety(app, ui),
+                        6 => safety(app, ui),
+                        _ => super::remote::settings(app, ui),
                     });
                 });
             });

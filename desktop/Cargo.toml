@@ -32,6 +32,8 @@ base64 = "0.22"
 # Already built for rustls: signs the GitHub App's sign-in (RS256).
 ring = "0.17"
 pdf-extract = "0.12.1"
+# The phone pairing code (Settings > Phone). No dependencies of its own.
+qrcodegen = "1.8"
 
 [profile.dev.package."*"]
 opt-level = 2

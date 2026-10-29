@@ -1,0 +1,122 @@
+# Builds the iPhone app on a Mac: the unsigned .ipa, the unit tests, and the UI tests against the test server
+# (ios/MockServer, the desktop's own link code), with screenshots in light and dark.
+name: iOS app
+
+on:
+  push:
+    paths:
+      - "ios/**"
+      - "desktop/src/remote.rs"
+      - ".github/workflows/ios.yml"
+  workflow_dispatch:
+
+jobs:
+  ios:
+    runs-on: macos-15
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      # The test server's key, the same as in FlowTests.swift: it guards nothing but the test.
+      MOCK_SECRET: AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tools
+        run: |
+          brew install xcodegen
+          xcodebuild -version
+          cargo --version
+          mkdir -p build
+
+      - name: Test server
+        working-directory: ios/MockServer
+        run: cargo build --release
+
+      - name: Project
+        working-directory: ios
+        run: xcodegen generate
+
+      - name: Simulator
+        run: |
+          UDID=$(xcrun simctl list devices available --json | python3 -c '
+          import json, sys
+          best = None
+          for runtime, devices in json.load(sys.stdin)["devices"].items():
+              if "iOS" not in runtime:
+                  continue
+              version = tuple(int(x) for x in runtime.split("iOS-")[1].split("-"))
+              for d in devices:
+                  if d["name"].startswith("iPhone") and "Pro" in d["name"] and "Max" not in d["name"]:
+                      key = (version, d["name"])
+                      if best is None or key > best[0]:
+                          best = (key, d["udid"], d["name"])
+          print(best[1]); print(best[2], best[0][0], file=sys.stderr)')
+          echo "UDID=$UDID" >> "$GITHUB_ENV"
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b
+          xcrun simctl status_bar "$UDID" override --time 9:41 --batteryState charged --batteryLevel 100 --wifiBars 3 --cellularMode active --cellularBars 4
+
+      - name: Unsigned IPA
+        run: |
+          if ! xcodebuild -project ios/apiM.xcodeproj -scheme apiM -configuration Release -sdk iphoneos \
+              -destination 'generic/platform=iOS' -derivedDataPath build/device \
+              CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build > build/ipa.log 2>&1; then
+            grep -E "error:" build/ipa.log | sort -u | head -80
+            tail -30 build/ipa.log
+            exit 1
+          fi
+          grep -E "warning:" build/ipa.log | grep "/ios/" | sort -u | head -40 || true
+          mkdir -p build/ipa/Payload
+          cp -R build/device/Build/Products/Release-iphoneos/apiM.app build/ipa/Payload/
+          (cd build/ipa && zip -qry ../apiM.ipa Payload)
+          ls -la build/apiM.ipa
+
+      - name: Tests, light
+        run: |
+          ios/MockServer/target/release/apim-mock --port 47199 --secret "$MOCK_SECRET" > build/mock-light.log 2>&1 &
+          MOCK=$!
+          xcrun simctl ui "$UDID" appearance light
+          status=0
+          TEST_RUNNER_APIM_SHOTS=light xcodebuild test -project ios/apiM.xcodeproj -scheme apiM -destination "id=$UDID" \
+            -derivedDataPath build/sim -resultBundlePath build/light.xcresult > build/test-light.log 2>&1 || status=$?
+          kill $MOCK || true
+          grep -E "^Test Case .*(passed|failed)|error:|XCTAssert|Executed" build/test-light.log | tail -60
+          exit $status
+
+      - name: Screens, dark
+        if: always()
+        run: |
+          ios/MockServer/target/release/apim-mock --port 47199 --secret "$MOCK_SECRET" > build/mock-dark.log 2>&1 &
+          MOCK=$!
+          xcrun simctl ui "$UDID" appearance dark
+          status=0
+          TEST_RUNNER_APIM_SHOTS=dark xcodebuild test-without-building -project ios/apiM.xcodeproj -scheme apiM -destination "id=$UDID" \
+            -derivedDataPath build/sim -only-testing:apiMUITests/FlowTests -resultBundlePath build/dark.xcresult > build/test-dark.log 2>&1 || status=$?
+          kill $MOCK || true
+          grep -E "^Test Case .*(passed|failed)|error:|XCTAssert|Executed" build/test-dark.log | tail -40
+          exit $status
+
+      - name: Collect screenshots
+        if: always()
+        run: |
+          mkdir -p build/shots
+          cp -R ~/apim-shots/. build/shots/ 2>/dev/null || true
+          find build/shots -name '*.png' | sort
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: apiM-ipa
+          path: build/apiM.ipa
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: |
+            build/shots
+            build/*.log
+          if-no-files-found: warn

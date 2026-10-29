@@ -200,7 +200,7 @@ fn action_btn(ui: &mut Ui, icon: Icon, label: &str, tip: &str, height: f32, dang
 /// so the note is for the model, not the reader. Each note is cut by the fixed sentence it ends on. A note that embeds the
 /// file's own text whole — a small text file, or a short document shown in full — is left: nothing marks where the file
 /// ends and the user's words begin. The user's typed text is always appended last, after every note.
-fn without_file_notes(text: &str) -> &str {
+pub(super) fn without_file_notes(text: &str) -> &str {
     /// The byte length of a generated note at the front of `rest`, or None when `rest` begins with the user's own words.
     fn note_end(rest: &str) -> Option<usize> {
         let first = rest.lines().next().unwrap_or("");
@@ -549,6 +549,28 @@ fn describe(name: &str, args: &str) -> Display {
     };
     let (target, mono) = target_of(name, args);
     Display { kind, running, done, target, mono }
+}
+
+/// A step in the window's words, for the phone (`remote`): what it is doing or did, what it acted on, and which icon it gets.
+pub(super) fn step_words(name: &str, args: &str, done: bool) -> (String, String, &'static str) {
+    let d = describe(name, args);
+    let kind = match d.kind {
+        Kind::Read => "read",
+        Kind::Write => "write",
+        Kind::Delete => "delete",
+        Kind::Search => "search",
+        Kind::Run => "run",
+        Kind::Web => "web",
+        Kind::Plan => "plan",
+        Kind::Git => "git",
+        Kind::Note => "note",
+        Kind::Ask => "ask",
+        Kind::Image => "image",
+        Kind::Computer => "computer",
+        Kind::Done => "done",
+        Kind::Other => "other",
+    };
+    (if done { d.done } else { d.running }, d.target.unwrap_or_default(), kind)
 }
 
 fn plural(n: usize, word: &str) -> String {

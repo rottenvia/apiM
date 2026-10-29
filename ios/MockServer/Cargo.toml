@@ -1,0 +1,16 @@
+[package]
+name = "apim-mock"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "A scripted stand-in for apiM on the computer, for the iOS app's UI tests"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ring = "0.17"
+base64 = "0.22"
+
+# Its own workspace: never part of anything above it.
+[workspace]
