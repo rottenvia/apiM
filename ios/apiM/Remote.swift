@@ -1,6 +1,7 @@
 import Foundation
 import Network
 import Observation
+import os
 import SwiftUI
 import UIKit
 
@@ -86,6 +87,10 @@ final class Remote {
         }
     }
 
+    /// What the link does, in the system log (Console, or `log stream --predicate 'subsystem == "com.rottenvia.apim"'`):
+    /// never what is said over it.
+    static let log = Logger(subsystem: "com.rottenvia.apim", category: "link")
+
     var name: String { pc.isEmpty ? (pairing?.name ?? "your PC") : pc }
     var online: Bool { phase == .online }
 
@@ -141,6 +146,7 @@ final class Remote {
     func setActive(_ on: Bool) {
         // Asked twice at launch (the first appearance and the scene turning active): the second finds it under way.
         if on, active, connection != nil { return }
+        Remote.log.notice("active \(on, privacy: .public)")
         active = on
         if on {
             failures = 0
@@ -158,10 +164,12 @@ final class Remote {
         guard id != chat.id else { return }
         let row = chats.first { $0.id == id }
         let shown = cache[id] ?? ChatState(id: id, title: row?.title ?? "", earlier: 0, messages: [])
+        // Marked as on its way before it is shown: its first frame is the loading shape, not the welcome of an
+        // empty chat.
+        if online { opening = id }
         withAnimation(.smooth(duration: 0.22)) { chat = shown }
         fetchingEarlier = false
         guard online else { return }
-        opening = id
         send(["t": "open", "id": id])
         DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
             if self?.opening == id { self?.opening = nil }
@@ -285,6 +293,7 @@ final class Remote {
         guard let pairing, active else { return }
         disconnect()
         phase = .connecting
+        Remote.log.notice("connecting to \(pairing.hosts.count, privacy: .public) addresses")
         attempt(host: 0, pairing: pairing, generation: generation)
     }
 
@@ -379,6 +388,7 @@ final class Remote {
         guard let plain = try? sealer!.open(frame) else { return lost("A message from \(name) did not decrypt.") }
         if !opened {
             opened = true
+            Remote.log.notice("online")
             failures = 0
             problem = nil
             phase = .online
@@ -404,6 +414,7 @@ final class Remote {
             }
             DispatchQueue.main.async {
                 guard let self, generation == self.generation else { return }
+                Remote.log.debug("frame \(incoming.t, privacy: .public): \(plain.count, privacy: .public) bytes, \(incoming.chat?.messages.count ?? -1, privacy: .public) messages")
                 if let picture {
                     Images.shared.put(picture)
                 } else {
@@ -516,6 +527,7 @@ final class Remote {
     }
 
     private func lost(_ reason: String) {
+        Remote.log.notice("lost: \(reason, privacy: .public)")
         disconnect()
         guard pairing != nil else { return }
         phase = .connecting

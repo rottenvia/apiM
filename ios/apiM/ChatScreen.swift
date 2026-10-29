@@ -463,6 +463,9 @@ private struct Transcript: View {
         }
         .scrollPosition($position)
         .defaultScrollAnchor(.bottom, for: .initialOffset)
+        // Following, the end stays put as a reply grows, a card comes, rows are laid out or the keyboard takes room;
+        // scrolled up to read, the words being read stay put instead.
+        .defaultScrollAnchor(follow ? .bottom : nil, for: .sizeChanges)
         .scrollDismissesKeyboard(.interactively)
         .onScrollPhaseChange { _, phase, context in
             touching = phase == .tracking || phase == .interacting || phase == .decelerating
@@ -480,13 +483,6 @@ private struct Transcript: View {
             if touching || atEnd {
                 withAnimation(.easeInOut(duration: 0.2)) { follow = atEnd }
             }
-        }
-        .onScrollGeometryChange(for: CGFloat.self) { geometry in
-            geometry.contentSize.height - geometry.containerSize.height
-        } action: { old, new in
-            // Only when the end moved further down (a reply grew, a card came, the keyboard took room): a lazy stack's
-            // estimates also shrink as rows are laid out, and answering those would chase its own layout.
-            if follow && !touching && new > old + 0.5 { position.scrollTo(edge: .bottom) }
         }
         .onChange(of: chat.earlier) { _, _ in
             if let keep {

@@ -7,14 +7,19 @@ final class FlowTests: XCTestCase {
     /// The test server's key: it guards nothing but the test.
     static let link = "apim://pair?v=1&n=MOCK-PC&p=47199&h=127.0.0.1&k=AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
 
+    /// The app the test launched, for what it shows when the test fails.
+    private var app: XCUIApplication?
+
     override func setUp() {
         continueAfterFailure = false
     }
 
-    /// A failed test leaves the screen it stopped on.
+    /// A failed test leaves the screen it stopped on, and what the app said was on it.
     override func tearDown() {
         if let run = testRun, run.failureCount > 0 {
             shot("x-" + name.split(separator: " ").last!.dropLast())
+            if let app { print("apim-tree \(name):
+\(app.debugDescription)") }
         }
     }
 
@@ -25,6 +30,7 @@ final class FlowTests: XCTestCase {
             app.launchEnvironment["APIM_PAIR"] = link
         }
         app.launch()
+        self.app = app
         return app
     }
 
@@ -45,9 +51,10 @@ final class FlowTests: XCTestCase {
         try? screenshot.pngRepresentation.write(to: folder.appendingPathComponent(name + ".png"))
     }
 
-    /// Anything showing these words: a text, or a button or row whose label holds them.
+    /// Anything showing these words, in any case (a list's section headers are capitals): a text, or a button or
+    /// row whose label holds them.
     private func text(_ app: XCUIApplication, _ fragment: String) -> XCUIElement {
-        app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", fragment)).firstMatch
+        app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS[c] %@", fragment)).firstMatch
     }
 
     private func button(_ app: XCUIApplication, _ fragment: String) -> XCUIElement {
