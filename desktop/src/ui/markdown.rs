@@ -404,11 +404,15 @@ pub fn show(ui: &mut Ui, text: &str, color: Color32, marks: &mut Option<Marks>, 
                 continue;
             };
             let (key, print) = (name.with(i), lazy::print((width.to_bits(), parsed.prints[i])));
-            if rows.skip(ui, key, print, guess(block, width)) {
+            let place = rows.place(ui, key, print, guess(block, width));
+            if place == lazy::Place::Skipped {
                 continue;
             }
             let y = ui.cursor().top();
-            ui.push_id(i, |ui| draw(ui, block, color, 0, &mut click, marks));
+            ui.push_id(i, |ui| {
+                place.apply(ui);
+                draw(ui, block, color, 0, &mut click, marks)
+            });
             rows.store(key, print, ui.cursor().top() - y);
         }
         ui.add_space(below);

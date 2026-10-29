@@ -1676,11 +1676,13 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
                 tools.iter().any(|tool| tool.name == "show_image").then(super::trim::generation),
             ));
             let guess = 40.0 + tools.len() as f32 * 31.0 + (chars as f32 / (width / 7.5).max(20.0)).ceil() * 25.5;
-            if !writing && env.rows.skip(ui, key, print, guess) {
+            let place = if writing { lazy::Place::Shown } else { env.rows.place(ui, key, print, guess) };
+            if place == lazy::Place::Skipped {
                 continue;
             }
             let top = ui.cursor().top();
             ui.push_id(i, |ui| {
+                place.apply(ui);
                 if let Some((thought, live)) = think {
                     hung(ui, |ui| think_row(ui, thought, *live, env));
                 } else if let Some(notice) = notice {

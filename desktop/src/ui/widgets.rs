@@ -361,9 +361,10 @@ mod tests {
     fn a_glide_travels_to_a_new_target_and_takes_one_it_is_told_not_to_travel_to() {
         let ctx = egui::Context::default();
         let id = egui::Id::new("glide");
-        let mut at = |time: f64, target: f32, travel: bool| {
+        let at = |time: f64, target: f32, travel: bool| {
             let mut seen = 0.0;
-            let _ = ctx.run_ui(egui::RawInput { time: Some(time), ..Default::default() }, |ui| seen = glide(ui.ctx(), id, target, 0.2, travel));
+            // The font picture a frame makes is thrown away: a debug build of egui panics on one dropped unseen.
+            ctx.run_ui(egui::RawInput { time: Some(time), ..Default::default() }, |ui| seen = glide(ui.ctx(), id, target, 0.2, travel)).textures_delta.clear();
             seen
         };
         // Where it is first asked for, it simply is.

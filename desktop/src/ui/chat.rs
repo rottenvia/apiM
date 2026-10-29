@@ -4,7 +4,7 @@
 use super::theme::{self, W, mix, p};
 use super::widgets;
 use super::lazy::{self, Measured};
-use super::{App, Dialog, bubble, composer, icons, markdown};
+use super::{App, Dialog, bubble, composer, icons, markdown, selection};
 use crate::store::{Bucket, Message, Part, Role};
 use eframe::egui::{self, Color32, Rect, Sense, Stroke, pos2, vec2};
 
@@ -233,6 +233,30 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
     if let Some(offset) = forced {
         scroll = scroll.vertical_scroll_offset(offset);
     }
+    // Text being selected. egui turns no wheel while anything is dragged, and a selection held past the top or the
+    // bottom left the view where it was: here the wheel goes on scrolling it, and a hold past an edge scrolls it.
+    if !ui.ctx().with_plugin(|s: &mut egui::text_selection::LabelSelectionState| s.has_selection()).unwrap_or(false) {
+        app.span = None;
+    }
+    let (pressed, pointer) = ui.input(|i| (i.pointer.primary_pressed().then(|| i.pointer.press_origin()).flatten(), i.pointer.latest_pos()));
+    let selecting = pressed.is_none() && app.span.is_some() && ui.input(|i| i.pointer.primary_down()) && ui.ctx().dragged_id().is_some();
+    if selecting && !jump && !landing {
+        let wheel = ui.input_mut(|i| std::mem::take(&mut i.smooth_scroll_delta.y));
+        let edge = pointer.map_or(0.0, |at| selection::edge_scroll(at.y, area.top(), area.bottom(), ui.input(|i| i.stable_dt).min(0.05)));
+        let (now, room) = (app.scroll_y + shift, (app.scroll_end - area.height()).max(0.0));
+        let to = (now - wheel + edge).clamp(0.0, room.max(now));
+        // A hold past an edge goes on scrolling with the mouse still, as long as there is further to go.
+        if to != now {
+            scroll = scroll.vertical_scroll_offset(to);
+            ui.ctx().request_repaint();
+        }
+    }
+    // Where a selection was started this frame, and the window's top and bottom while one is started or dragged,
+    // each found among the messages below. Not a press on a dialog over the transcript.
+    let press = pressed.filter(|at| area.contains(*at) && ui.ctx().layer_id_at(*at).is_none_or(|layer| layer == ui.layer_id())).map(|at| at.y);
+    let points = [press, (press.is_some() || selecting).then_some(area.top()), (press.is_some() || selecting).then_some(area.bottom() - 1.0)];
+    let mut found: [Option<(usize, f32)>; 3] = [None; 3];
+    let span = app.span;
     // What this frame may spend measuring messages nobody is looking at. A chat just opened gets more: nothing
     // of it shows until its end is measured.
     // of it shows until its end is measured, so one longer frame there is cheaper than several empty ones.
@@ -257,11 +281,18 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
         // The room it gives up above its place comes off the room below it: the whole is as tall as ever.
         ui.add_space(24.0 + (1.0 - come) * ENTER_DROP);
         // `unseen` lays it out without drawing it, to learn its height. `come` under 1 draws it that far into its
-        // entrance, fainter and lower than its place; the room it takes is the same.
-        let column_in = |ui: &mut egui::Ui, unseen: bool, come: f32, add: &mut dyn FnMut(&mut egui::Ui)| {
+        // entrance, fainter and lower than its place; the room it takes is the same. A message is given an `id` of
+        // its own: egui numbers what has none in the order it comes, a message out of sight takes one number and a
+        // laid out one two, and every message under one coming into sight or leaving it got new names for its
+        // texts. A selection is held by those names, and went.
+        let column_in = |ui: &mut egui::Ui, unseen: bool, come: f32, id: Option<egui::Id>, add: &mut dyn FnMut(&mut egui::Ui)| {
             let (top, drop) = (ui.cursor().top(), (1.0 - come) * 14.0);
             let rect = Rect::from_min_size(pos2(left, top + drop), vec2(column, 0.0));
             let builder = egui::UiBuilder::new().max_rect(rect.with_max_y(f32::INFINITY));
+            let builder = match id {
+                Some(id) => builder.id(id),
+                None => builder,
+            };
             let used = ui.scope_builder(if unseen { builder.invisible() } else { builder }, |ui| {
                 ui.set_width(column);
                 if come < 1.0 {
@@ -271,7 +302,7 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
             });
             ui.advance_cursor_after_rect(Rect::from_min_max(pos2(area.left(), top), pos2(area.right(), used.response.rect.bottom() - drop)));
         };
-        let column_ui = |ui: &mut egui::Ui, add: &mut dyn FnMut(&mut egui::Ui)| column_in(ui, false, 1.0, add);
+        let column_ui = |ui: &mut egui::Ui, add: &mut dyn FnMut(&mut egui::Ui)| column_in(ui, false, 1.0, None, add);
 
         // The chat's totals come with its first reply's first count of tokens. Their room is there from the moment a
         // reply runs, and the words fade in when the count comes: arriving then, they pushed the whole of a new chat
@@ -372,8 +403,10 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
             let exact = known.is_some_and(|m| m.exact && m.width == column && m.print == print);
             let room = known.map_or_else(|| guess(msg, cap), |m| m.height);
             let rect = Rect::from_min_size(ui.cursor().min, vec2(area.width(), room));
-            // On the frame that jumps to the end nothing is where it will be, so nothing counts as showing.
-            let shows = !jump && (live || wanted || ui.is_rect_visible(rect));
+            // On the frame that jumps to the end nothing is where it will be, so nothing counts as showing. What a
+            // selection runs over is laid out wherever it is.
+            let (kept, seen) = (span.and_then(|span| span.keep(i, rect.top())), ui.is_rect_visible(rect));
+            let shows = !jump && (live || wanted || kept.is_some() || seen);
             if !shows && (exact || !(pending.contains(&i) && rows.has_time())) {
                 // Off screen: it keeps its room. One not measured yet waits its turn at the height it had, or a guess.
                 ui.allocate_space(rect.size());
@@ -381,12 +414,17 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
             } else {
                 let top = ui.cursor().top();
                 rows.guessed = false;
+                rows.keep = kept;
                 let mut marks = matcher.as_ref().filter(|_| hits > 0).map(|matcher| markdown::Marks { matcher, active: focused, seen: 0, reveal: wanted, shown: false });
-                column_in(ui, !shows, fresh.filter(|(from, _)| i >= *from).map_or(1.0, |(_, come)| come), &mut |ui| {
+                column_in(ui, !shows, fresh.filter(|(from, _)| i >= *from).map_or(1.0, |(_, come)| come), Some(egui::Id::new(("message", &conv.id, &msg.id))), &mut |ui| {
+                    if let Some(stretch) = kept.filter(|_| !seen) {
+                        lazy::offstage(ui, stretch);
+                    }
                     let mut env = bubble::Env { settings, workspace: &workspace, live, newest: i == last, busy: running, cap, thinking_secs, drafted: &drafted, editing, action: &mut action, rewind, marks: marks.take(), rows };
                     ui.push_id(&msg.id, |ui| bubble::show(ui, msg, &mut env));
                     marks = env.marks.take();
                 });
+                rows.keep = None;
                 let height = ui.cursor().top() - top;
                 if shows {
                     // The match sits where nothing marks it (inside code): show its message at least.
@@ -417,6 +455,13 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
                     ui.add_space(16.0);
                 }
                 None => ui.add_space(if i == last { tail_gap } else { gap }),
+            }
+            // A point above the first message is at its top, one under the last in the last.
+            let bottom = ui.cursor().top();
+            for (point, found) in points.iter().zip(&mut found) {
+                if let Some(y) = point.filter(|y| found.is_none() && (*y < bottom || i == last)) {
+                    *found = Some((i, (y - rect.top()).max(0.0)));
+                }
             }
         }
 
@@ -470,6 +515,15 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
     }
     if more {
         app.mounted += 60;
+    }
+    // A selection started in the transcript begins a span there (shift-click moves the end of the one there was),
+    // and one dragged takes the window along.
+    if let [press, Some(top), Some(bottom)] = found {
+        let view = [top, bottom];
+        match press {
+            Some(at) => app.span = Some(app.span.filter(|_| ui.input(|i| i.modifiers.shift)).map_or(selection::Span { from: at, view }, |span| selection::Span { view, ..span })),
+            None => app.span.iter_mut().for_each(|span| span.view = view),
+        }
     }
     let distance = out.content_size.y - out.state.offset.y - out.inner_rect.height();
     // A wheel or the bar took the view up from where it was put: it stops following. Otherwise it goes on, also
@@ -860,7 +914,8 @@ mod tests {
         let ctx = egui::Context::default();
         theme::install_fonts(&ctx);
         for text in LABELS {
-            let _ = ctx.run_ui(egui::RawInput { time: Some(0.3), ..Default::default() }, |ui| {
+            // The font picture a frame makes is thrown away: a debug build of egui panics on one dropped unseen.
+            ctx.run_ui(egui::RawInput { time: Some(0.3), ..Default::default() }, |ui| {
                 let lit = ui.painter().layout_job(shimmer(ui, text, 13.0, W::Regular));
                 let plain = widgets::galley(ui, text, theme::font(13.0, W::Regular), Color32::WHITE);
                 let places = |g: &egui::Galley| g.rows.iter().flat_map(|r| r.glyphs.iter().map(|g| (g.chr, g.pos.x))).collect::<Vec<_>>();
@@ -869,7 +924,9 @@ mod tests {
                 for ((c, x), (_, want)) in lit.iter().zip(&plain) {
                     assert!((x - want).abs() <= 2.5, "{text}: '{c}' stands at {x} lit, {want} plain\nlit   {lit:?}\nplain {plain:?}");
                 }
-            });
+            })
+            .textures_delta
+            .clear();
         }
     }
 
@@ -884,7 +941,8 @@ mod tests {
             // colour towards one bright one. Sections of equal colour are merged by egui, so they are spread back out.
             let mut sweep: Vec<Vec<f32>> = Vec::new();
             for step in 0..30 {
-                let _ = ctx.run_ui(egui::RawInput { time: Some(step as f64 * 0.05), ..Default::default() }, |ui| {
+                // The font picture a frame makes is thrown away: a debug build of egui panics on one dropped unseen.
+                ctx.run_ui(egui::RawInput { time: Some(step as f64 * 0.05), ..Default::default() }, |ui| {
                     let job = shimmer(ui, text, 13.0, W::Regular);
                     let mut frame = Vec::new();
                     for section in &job.sections {
@@ -892,7 +950,9 @@ mod tests {
                         frame.extend(span.chars().map(|_| section.format.color.r() as f32));
                     }
                     sweep.push(frame);
-                });
+                })
+                .textures_delta
+                .clear();
             }
             let all = || sweep.iter().flatten().copied();
             let (low, high) = (all().fold(f32::MAX, f32::min), all().fold(0.0, f32::max));

@@ -312,6 +312,8 @@ pub struct App {
     heights: HashMap<String, lazy::Measured>,
     /// The same for the rows inside long replies.
     rows: lazy::Rows,
+    /// The text selected in the transcript, from where it was started to where it was taken (`chat::messages`).
+    span: Option<selection::Span>,
     /// Where the transcript is scrolled to, and how far it has to follow messages above it that changed height.
     scroll_y: f32,
     anchor: f32,
@@ -435,6 +437,7 @@ impl App {
             always_allow: HashMap::new(),
             heights: HashMap::new(),
             rows: Default::default(),
+            span: None,
             scroll_y: 0.0,
             anchor: 0.0,
             scroll_end: 0.0,
@@ -766,6 +769,7 @@ impl App {
             run.parked = Some(std::mem::take(&mut self.conv));
         }
         self.forget_layout();
+        self.span = None;
         self.opening = None;
         self.entered = None;
         self.files_stale = true;
@@ -2071,12 +2075,14 @@ impl eframe::App for App {
             raw_input.events.push(event);
             ctx.request_repaint();
         }
-        // `select-300-200-600-260`: a drag between two points, then Ctrl+C. What it copies is printed.
+        // `select-300-200-600-260`: a drag between two points, then Ctrl+C. What it copies is printed. `wheel-N`,
+        // `hold-MS` and `away-N` scroll on the way, and `late-MS` starts it later (`selection::replay`).
         if let Some(shot) = self.shot.as_ref() {
             let points: Vec<f32> = shot.state.split(',').find_map(|token| token.strip_prefix("select-")).into_iter().flat_map(|at| at.split('-')).filter_map(|n| n.parse().ok()).collect();
             if let [x1, y1, x2, y2] = points[..] {
                 ctx.add_plugin(selection::Told);
-                selection::replay(raw_input, shot.started.elapsed(), egui::pos2(x1, y1), egui::pos2(x2, y2));
+                let number = |prefix: &str| shot.state.split(',').find_map(|token| token.strip_prefix(prefix)?.parse::<f32>().ok()).unwrap_or(0.0);
+                selection::replay(raw_input, shot.started.elapsed(), egui::pos2(x1, y1), egui::pos2(x2, y2), [number("wheel-"), number("away-")], number("hold-") as u128, number("late-") as u128);
             }
             // `click-150-200`: the mouse comes to that point and clicks it, 400 ms in; `rclick-150-200` right-clicks.
             for (prefix, button) in [("click-", egui::PointerButton::Primary), ("rclick-", egui::PointerButton::Secondary)] {

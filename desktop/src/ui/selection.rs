@@ -1,4 +1,5 @@
-//! How selected text looks, and a way to select and copy in a self-portrait with no mouse.
+//! How selected text looks, what keeps a selection in a long chat alive while it is scrolled, and a way to select
+//! and copy in a self-portrait with no mouse.
 //!
 //! egui paints a selection as a square box inside each line of the text it belongs to. `round` runs when a frame
 //! has been drawn: it empties those boxes and draws the same shape, with rounded corners, under the text.
@@ -78,22 +79,63 @@ pub fn round(ctx: &egui::Context) {
     });
 }
 
+/// A selection in the transcript, kept as places in it: the message each is in and how far down that message.
+/// egui lets a selection go in any frame that does not lay out both its ends, and a long chat lays out only what
+/// shows: scrolled while selecting, the start went out of sight and the selection with it. What lies between the
+/// start and the window the selection was last dragged in is laid out for as long as it lasts, off screen too
+/// (`chat::messages`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Span {
+    /// Where the mouse went down.
+    pub from: (usize, f32),
+    /// The window's top and bottom when the selection was last dragged. Its other end is in there: under the
+    /// mouse, or, with the mouse between texts or past an edge, on the last text it crossed. egui finds that text
+    /// where it was a frame ago, so a wheel that moved the view a long way took it out of sight of a point.
+    pub view: [(usize, f32); 2],
+}
+
+impl Span {
+    /// The stretch of message `i`, its top at `top` on screen, that has to be laid out: none outside the selection.
+    /// Nothing past the window: egui takes a text laid out below the window, with the mouse below it, as dragged
+    /// over, and the selection would run to the end of the chat at once.
+    pub fn keep(&self, i: usize, top: f32) -> Option<(f32, f32)> {
+        let (a, b) = (if self.from < self.view[0] { self.from } else { self.view[0] }, if self.from > self.view[1] { self.from } else { self.view[1] });
+        (a.0 <= i && i <= b.0).then(|| (if i == a.0 { top + a.1 } else { f32::NEG_INFINITY }, if i == b.0 { top + b.1 } else { f32::INFINITY }))
+    }
+}
+
+/// How far a selection held at height `y` scrolls a view from `top` to `bottom` in `dt` seconds: not at all inside
+/// it, and past an edge towards it, the faster the further past, as a browser does.
+pub fn edge_scroll(y: f32, top: f32, bottom: f32, dt: f32) -> f32 {
+    let past = (y - bottom).max(0.0) + (y - top).min(0.0);
+    if past == 0.0 { 0.0 } else { past.signum() * (60.0 + past.abs() * 10.0).min(3000.0) * dt }
+}
+
 /// A self-portrait's `select-X1-Y1-X2-Y2`: the mouse goes down at one point, is dragged to the other and let
-/// go, and Ctrl+C follows, one step a frame from 800 ms on (after an `up-N` has settled). Fed to the app as input: no real mouse moves.
-pub fn replay(input: &mut egui::RawInput, at: Duration, from: Pos2, to: Pos2) {
+/// go, and Ctrl+C follows, one step a frame from 800 ms on, or `late-MS` later (an `up-N` glides for a while). With
+/// `wheel-N` the wheel turns N points down halfway there, with `hold-MS` the mouse stays down at the other point
+/// that long before it is let go (past an edge, the view scrolls meanwhile), and with `away-N` the wheel turns N
+/// points down once it is let go, before Ctrl+C. Fed to the app as input: no real mouse moves.
+pub fn replay(input: &mut egui::RawInput, at: Duration, from: Pos2, to: Pos2, [wheel, away]: [f32; 2], hold: u128, late: u128) {
     static STEP: AtomicU8 = AtomicU8::new(0);
     let button = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
-    let (step, ms) = (STEP.load(Ordering::Relaxed), at.as_millis());
-    let events = match step {
-        0 if ms >= 800 => vec![egui::Event::PointerMoved(from), button(from, true)],
-        1 if ms >= 870 => vec![egui::Event::PointerMoved(from + (to - from) / 2.0)],
-        2 if ms >= 940 => vec![egui::Event::PointerMoved(to)],
-        3 if ms >= 1010 => vec![button(to, false)],
-        4 if ms >= 1110 => vec![egui::Event::Copy],
-        _ => return,
-    };
-    input.events.extend(events);
-    STEP.store(step + 1, Ordering::Relaxed);
+    let turn = |points: f32| if points == 0.0 { vec![] } else { vec![egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -points), phase: egui::TouchPhase::Move, modifiers: Default::default() }] };
+    let (turned, gone) = (if wheel == 0.0 { 0 } else { 700 }, if away == 0.0 { 0 } else { 700 });
+    let plan = [
+        (800, vec![egui::Event::PointerMoved(from), button(from, true)]),
+        (870, vec![egui::Event::PointerMoved(from + (to - from) / 2.0)]),
+        (900, turn(wheel)),
+        (940 + turned, vec![egui::Event::PointerMoved(to)]),
+        (1010 + turned + hold, vec![button(to, false)]),
+        (1060 + turned + hold, turn(away)),
+        (1110 + turned + hold + gone, vec![egui::Event::Copy]),
+    ];
+    let step = STEP.load(Ordering::Relaxed) as usize;
+    let Some((due, events)) = plan.into_iter().nth(step) else { return };
+    if at.as_millis() >= due + late {
+        input.events.extend(events);
+        STEP.store(step as u8 + 1, Ordering::Relaxed);
+    }
 }
 
 /// A self-portrait's `click-X-Y`: the mouse comes to rest on the point, goes down 400 ms in and comes up 70 ms
@@ -143,6 +185,30 @@ mod tests {
         let corners: Vec<CornerRadius> = rounded(&boxes, Color32::WHITE).into_iter().map(|shape| if let Shape::Rect(rect) = shape { rect.corner_radius } else { unreachable!() }).collect();
         let c = |nw, ne, sw, se| CornerRadius { nw, ne, sw, se };
         assert_eq!(corners, [c(RADIUS, RADIUS, 0, 0), c(RADIUS, 0, 0, RADIUS), c(0, 0, RADIUS, RADIUS)]);
+    }
+
+    #[test]
+    fn a_span_keeps_what_lies_between_its_start_and_the_window() {
+        // Started 30 points into message 2, last dragged with the window from 50 points into message 4 to 10 into 6.
+        let span = Span { from: (2, 30.0), view: [(4, 50.0), (6, 10.0)] };
+        assert_eq!(span.keep(1, 0.0), None);
+        assert_eq!(span.keep(2, 100.0), Some((130.0, f32::INFINITY)));
+        assert_eq!(span.keep(4, 900.0), Some((f32::NEG_INFINITY, f32::INFINITY)));
+        assert_eq!(span.keep(6, 2000.0), Some((f32::NEG_INFINITY, 2010.0)));
+        assert_eq!(span.keep(7, 0.0), None);
+        // Dragged up from below the window, and from inside it.
+        assert_eq!(Span { from: (8, 40.0), view: [(4, 50.0), (6, 10.0)] }.keep(4, 900.0), Some((950.0, f32::INFINITY)));
+        assert_eq!(Span { from: (5, 20.0), view: [(5, 0.0), (5, 600.0)] }.keep(5, 0.0), Some((0.0, 600.0)));
+    }
+
+    #[test]
+    fn a_selection_scrolls_only_past_an_edge() {
+        let at = |y| edge_scroll(y, 100.0, 700.0, 0.5);
+        assert_eq!([at(100.0), at(400.0), at(700.0)], [0.0; 3]);
+        assert_eq!(at(710.0), 80.0, "just past the bottom: slow, down");
+        assert_eq!(at(90.0), -80.0, "just past the top: slow, up");
+        assert!(at(800.0) > at(710.0) * 5.0, "further past, faster");
+        assert_eq!(at(5000.0), 1500.0, "never faster than 3000 points a second");
     }
 
     #[test]
