@@ -542,25 +542,17 @@ struct Working: View {
 }
 
 /// Three dots in the accent colour, rising one after another.
-struct Dots: View {
+struct Dots: UIViewRepresentable {
     var size: CGFloat = 6
 
-    var body: some View {
-        TimelineView(.animation) { context in
-            let t = context.date.timeIntervalSinceReferenceDate
-            HStack(spacing: size * 0.7) {
-                ForEach(0..<3, id: \.self) { i in
-                    let wave = max(0, sin(t * 5 - Double(i) * 0.8))
-                    Circle()
-                        .fill(Palette.accent)
-                        .frame(width: size, height: size)
-                        .opacity(0.35 + 0.65 * wave)
-                        .offset(y: -size * 0.45 * wave)
-                }
-            }
-            .frame(height: size * 2)
-        }
-        .accessibilityHidden(true)
+    func makeUIView(context: Context) -> DotsView { DotsView() }
+
+    func updateUIView(_ view: DotsView, context: Context) {
+        view.set(size: size)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: DotsView, context: Context) -> CGSize? {
+        CGSize(width: size * 4.4, height: size * 2)
     }
 }
 

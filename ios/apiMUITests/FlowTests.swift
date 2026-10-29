@@ -67,7 +67,8 @@ final class FlowTests: XCTestCase {
     /// Scrolls until it is on screen: a list draws only the rows near what it shows.
     private func reach(_ app: XCUIApplication, _ target: XCUIElement, down: Bool = false, fast: Bool = false, tries: Int = 6) {
         for _ in 0..<tries where !(target.exists && target.isHittable) {
-            let velocity: XCUIGestureVelocity = fast ? .fast : .default
+            // A flick a reader gives a long chat, a few thousand points a second.
+            let velocity: XCUIGestureVelocity = fast ? XCUIGestureVelocity(rawValue: 5000) : .default
             if down { app.swipeDown(velocity: velocity) } else { app.swipeUp(velocity: velocity) }
         }
     }
@@ -279,7 +280,7 @@ final class FlowTests: XCTestCase {
         see(app, "Step 119 of the migration")
         print("apim-timing: long chat shown again \(Int(Date().timeIntervalSince(again) * 1000)) ms after the tap")
         let earlier = element(app, "earlier")
-        reach(app, earlier, down: true, fast: true, tries: 16)
+        reach(app, earlier, down: true, fast: true, tries: 30)
         XCTAssertTrue(earlier.waitForExistence(timeout: 5))
         see(app, "160 earlier messages")
         earlier.tap()

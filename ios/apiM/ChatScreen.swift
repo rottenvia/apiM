@@ -421,6 +421,8 @@ private struct Transcript: View {
     @State private var follow = true
     /// The reader's finger is on it, or it is still gliding from one.
     @State private var touching = false
+    /// The end is in view.
+    @State private var atEnd = true
     /// The message that was first before older ones were asked for: kept in place when they arrive above it.
     @State private var keep: String?
 
@@ -490,19 +492,21 @@ private struct Transcript: View {
         }
         .onScrollGeometryChange(for: Bool.self) { geometry in
             geometry.contentSize.height - geometry.visibleRect.maxY < 90
-        } action: { _, atEnd in
+        } action: { _, now in
+            atEnd = now
             // Only the reader's own scrolling says whether to follow: the end also moves when a reply grows, a card
             // arrives or the keyboard takes room.
-            if touching || atEnd {
-                withAnimation(.easeInOut(duration: 0.2)) { follow = atEnd }
+            if touching || now {
+                withAnimation(.easeInOut(duration: 0.2)) { follow = now }
             }
         }
-        .onScrollGeometryChange(for: CGSize.self) { geometry in
-            CGSize(width: geometry.containerSize.height, height: geometry.contentSize.height)
-        } action: { _, _ in
-            // A reply grew, a card came, rows were laid out or the keyboard took room: the end stays in view.
-            if follow && !touching { position.scrollTo(edge: .bottom) }
-        }
+        // What moves the end, followed: never the layout itself. Scrolling from a layout callback made the lazy stack
+        // estimate its rows again, which called it again, inside one frame, for good: the app froze on a chat with
+        // pictures.
+        .onScrollGeometryChange(for: CGFloat.self) { $0.containerSize.height } action: { _, _ in keepUp() }
+        .onChange(of: chat.messages.count) { _, _ in keepUp() }
+        .onChange(of: chat.messages.last) { _, _ in keepUp() }
+        .onChange(of: remote.run.approval != nil || remote.run.question != nil) { _, _ in keepUp() }
         .onChange(of: chat.earlier) { _, _ in
             if let keep {
                 position.scrollTo(id: keep, anchor: .top)
@@ -535,6 +539,19 @@ private struct Transcript: View {
                 .padding(.bottom, 10)
                 .transition(.opacity.combined(with: .scale(scale: 0.7)))
             }
+        }
+    }
+}
+
+private extension Transcript {
+    /// To the end, while the reader is there. A lazy stack learns its rows' heights as it lays them out, so the end it
+    /// scrolled to can move by the next frame: it is looked for again, a few times at most.
+    func keepUp(_ tries: Int = 3) {
+        guard follow, !touching else { return }
+        position.scrollTo(edge: .bottom)
+        guard tries > 1 else { return }
+        DispatchQueue.main.async {
+            if !atEnd { keepUp(tries - 1) }
         }
     }
 }

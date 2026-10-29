@@ -59,6 +59,8 @@ final class Remote {
     @ObservationIgnored private var cache: [String: ChatState] = [:]
     @ObservationIgnored private var cacheOrder: [String] = []
     @ObservationIgnored private var saving: DispatchWorkItem?
+    /// When the chat on its way was asked for, for the log.
+    @ObservationIgnored private var askedAt = Date()
 
     init() {
         let process = ProcessInfo.processInfo
@@ -166,7 +168,10 @@ final class Remote {
         let shown = cache[id] ?? ChatState(id: id, title: row?.title ?? "", earlier: 0, messages: [])
         // Marked as on its way before it is shown: its first frame is the loading shape, not the welcome of an
         // empty chat.
-        if online { opening = id }
+        if online {
+            opening = id
+            askedAt = Date()
+        }
         withAnimation(.smooth(duration: 0.22)) { chat = shown }
         fetchingEarlier = false
         guard online else { return }
@@ -479,7 +484,10 @@ final class Remote {
         state.apply(patch)
         remember(state)
         if let opening, opening != state.id { return }
-        if opening == state.id { opening = nil }
+        if opening == state.id {
+            opening = nil
+            Remote.log.notice("chat of \(state.messages.count, privacy: .public) messages in \(Int(Date().timeIntervalSince(self.askedAt) * 1000), privacy: .public) ms")
+        }
         let earlier = state.earlier != chat.earlier
         if !wasShown {
             withAnimation(.smooth(duration: 0.22)) { chat = state }

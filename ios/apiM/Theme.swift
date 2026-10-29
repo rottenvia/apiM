@@ -84,26 +84,19 @@ enum Haptics {
 }
 
 /// The mark from the desktop's icon: three dots, the middle one mid-bounce. Bouncing, the middle one and the outer
-/// two take turns; the timeline stops when it stops, so a still mark costs nothing.
-struct Mark: View {
+/// two take turns.
+struct Mark: UIViewRepresentable {
     var size: CGFloat = 44
     var bouncing = false
 
-    var body: some View {
-        TimelineView(.animation(paused: !bouncing)) { context in
-            // 0 to 1 and back every 1.1 s, eased at both ends as the spring it replaces was.
-            let wave = bouncing ? (1 - cos(context.date.timeIntervalSinceReferenceDate * .pi / 0.55)) / 2 : 1
-            HStack(spacing: size * 0.08) {
-                ForEach(0..<3) { i in
-                    Circle()
-                        .fill(Palette.accent)
-                        .frame(width: size * 0.26, height: size * 0.26)
-                        .offset(y: -size * 0.09 * (i == 1 ? wave : 1 - wave))
-                }
-            }
-        }
-        .frame(width: size, height: size * 0.5)
-        .accessibilityHidden(true)
+    func makeUIView(context: Context) -> MarkView { MarkView() }
+
+    func updateUIView(_ view: MarkView, context: Context) {
+        view.set(size: size, bouncing: bouncing)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: MarkView, context: Context) -> CGSize? {
+        CGSize(width: size, height: size * 0.5)
     }
 }
 
@@ -149,56 +142,298 @@ struct Secondary: ButtonStyle {
 }
 
 /// A placeholder with a light passing over it, for what is on its way.
-struct Skeleton: View {
+struct Skeleton: UIViewRepresentable {
     var radius: CGFloat = 12
 
-    var body: some View {
-        TimelineView(.animation) { context in
-            let t = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.4) / 1.4
-            RoundedRectangle(cornerRadius: radius, style: .continuous)
-                .fill(Palette.hover.opacity(0.75))
-                .overlay {
-                    GeometryReader { box in
-                        LinearGradient(colors: [.clear, Palette.surface.opacity(0.55), .clear], startPoint: .leading, endPoint: .trailing)
-                            .frame(width: box.size.width * 0.55)
-                            .offset(x: (t * 1.6 - 0.55) * box.size.width)
-                    }
-                }
-                .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
-        }
-        // Redrawn every frame: out of the accessibility tree, which would be rebuilt as often (and UI tests wait on it).
-        .accessibilityHidden(true)
+    func makeUIView(context: Context) -> SkeletonView { SkeletonView() }
+
+    func updateUIView(_ view: SkeletonView, context: Context) {
+        view.set(radius: radius)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: SkeletonView, context: Context) -> CGSize? {
+        CGSize(width: proposal.width ?? 120, height: proposal.height ?? 14)
     }
 }
 
 /// "Thinking" with a light running through the letters while it lasts.
 struct ShimmerText: View {
     let text: String
-    var font: Font = .system(size: 14, weight: .medium)
     var active = true
 
     var body: some View {
         if active {
-            TimelineView(.animation) { context in
-                let t = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.8) / 1.8
-                let at = t * 1.6 - 0.3
-                let clamp = { (x: Double) in min(max(x, 0), 1) }
-                Text(text)
-                    .font(font)
-                    .foregroundStyle(LinearGradient(stops: [
-                        .init(color: Palette.muted, location: 0),
-                        .init(color: Palette.muted, location: clamp(at - 0.22)),
-                        .init(color: Palette.text, location: clamp(at)),
-                        .init(color: Palette.muted, location: clamp(at + 0.22)),
-                        .init(color: Palette.muted, location: 1),
-                    ], startPoint: .leading, endPoint: .trailing))
-            }
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(text)
+            Shimmer(text: text)
         } else {
             Text(text)
-                .font(font)
+                .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(Palette.text2)
         }
+    }
+}
+
+private struct Shimmer: UIViewRepresentable {
+    let text: String
+
+    func makeUIView(context: Context) -> ShimmerView { ShimmerView() }
+
+    func updateUIView(_ view: ShimmerView, context: Context) {
+        view.set(text: text)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: ShimmerView, context: Context) -> CGSize? {
+        uiView.base.intrinsicContentSize
+    }
+}
+
+// MARK: - endless motion
+
+/// Motion that lasts as long as its view, run by Core Animation. A SwiftUI animation that never ends redraws its view
+/// on the main thread every frame and rebuilds the accessibility tree as often (the UI tests' queries never finished
+/// while one was on screen); these cost the main thread nothing once started.
+class Looping: UIView {
+    private var laidOut = CGSize.zero
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isUserInteractionEnabled = false
+        backgroundColor = .clear
+        registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (view: Looping, _: UITraitCollection) in view.paint() }
+        // Core Animation drops a layer's animations while the app is away.
+        NotificationCenter.default.addObserver(self, selector: #selector(restart), name: UIApplication.willEnterForegroundNotification, object: nil)
+    }
+
+    required init?(coder: NSCoder) { fatalError("not from a storyboard") }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard bounds.size != laidOut else { return }
+        laidOut = bounds.size
+        restart()
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window != nil { restart() }
+    }
+
+    @objc func restart() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        paint()
+        place()
+        CATransaction.commit()
+        animate()
+    }
+
+    /// Colours, again whenever light and dark change: a layer's colour does not follow them on its own.
+    func paint() {}
+    func place() {}
+    func animate() {}
+
+    func color(_ color: Color, alpha: CGFloat = 1) -> CGColor {
+        UIColor(color).resolvedColor(with: traitCollection).withAlphaComponent(alpha).cgColor
+    }
+
+    static func forever(_ animation: CAAnimation, duration: CFTimeInterval) -> CAAnimation {
+        animation.duration = duration
+        animation.repeatCount = .infinity
+        animation.isRemovedOnCompletion = false
+        return animation
+    }
+}
+
+final class MarkView: Looping {
+    private let dots = (0..<3).map { _ in CALayer() }
+    private var size: CGFloat = 44
+    private var bouncing = false
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        dots.forEach(layer.addSublayer)
+        isAccessibilityElement = false
+        accessibilityElementsHidden = true
+    }
+
+    required init?(coder: NSCoder) { fatalError("not from a storyboard") }
+
+    func set(size: CGFloat, bouncing: Bool) {
+        guard size != self.size || bouncing != self.bouncing else { return }
+        self.size = size
+        self.bouncing = bouncing
+        restart()
+    }
+
+    override func paint() {
+        dots.forEach { $0.backgroundColor = color(Palette.accent) }
+    }
+
+    override func place() {
+        let side = size * 0.26, gap = size * 0.08
+        let left = (bounds.width - side * 3 - gap * 2) / 2
+        for (i, dot) in dots.enumerated() {
+            dot.bounds = CGRect(x: 0, y: 0, width: side, height: side)
+            dot.cornerRadius = side / 2
+            dot.position = CGPoint(x: left + side / 2 + CGFloat(i) * (side + gap), y: bounds.midY)
+            dot.transform = CATransform3DMakeTranslation(0, i == 1 ? -size * 0.09 : 0, 0)
+        }
+    }
+
+    override func animate() {
+        for (i, dot) in dots.enumerated() {
+            dot.removeAllAnimations()
+            guard bouncing else { continue }
+            let hop = CABasicAnimation(keyPath: "transform.translation.y")
+            hop.fromValue = i == 1 ? -size * 0.09 : 0
+            hop.toValue = i == 1 ? 0 : -size * 0.09
+            hop.autoreverses = true
+            hop.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            dot.add(Looping.forever(hop, duration: 0.55), forKey: "hop")
+        }
+    }
+}
+
+final class DotsView: Looping {
+    private let dots = (0..<3).map { _ in CALayer() }
+    private var size: CGFloat = 6
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        dots.forEach(layer.addSublayer)
+        isAccessibilityElement = false
+        accessibilityElementsHidden = true
+    }
+
+    required init?(coder: NSCoder) { fatalError("not from a storyboard") }
+
+    func set(size: CGFloat) {
+        guard size != self.size else { return }
+        self.size = size
+        restart()
+    }
+
+    override func paint() {
+        dots.forEach { $0.backgroundColor = color(Palette.accent) }
+    }
+
+    override func place() {
+        for (i, dot) in dots.enumerated() {
+            dot.bounds = CGRect(x: 0, y: 0, width: size, height: size)
+            dot.cornerRadius = size / 2
+            dot.position = CGPoint(x: size / 2 + CGFloat(i) * size * 1.7, y: bounds.midY)
+            dot.opacity = 0.35
+        }
+    }
+
+    override func animate() {
+        let now = CACurrentMediaTime()
+        let ease = CAMediaTimingFunction(name: .easeInEaseOut)
+        for (i, dot) in dots.enumerated() {
+            dot.removeAllAnimations()
+            // Up and back in the first half of each 1.26 s, still in the second; each dot a little after the last.
+            let rise = CAKeyframeAnimation(keyPath: "transform.translation.y")
+            rise.values = [0, -size * 0.45, 0, 0]
+            let glow = CAKeyframeAnimation(keyPath: "opacity")
+            glow.values = [0.35, 1, 0.35, 0.35]
+            for part in [rise, glow] {
+                part.duration = 1.26
+                part.keyTimes = [0, 0.25, 0.5, 1]
+                part.timingFunctions = [ease, ease, CAMediaTimingFunction(name: .linear)]
+            }
+            let wave = CAAnimationGroup()
+            wave.animations = [rise, glow]
+            wave.beginTime = now + Double(i) * 0.16
+            wave.fillMode = .backwards
+            dot.add(Looping.forever(wave, duration: 1.26), forKey: "wave")
+        }
+    }
+}
+
+final class SkeletonView: Looping {
+    private let shine = CAGradientLayer()
+    private var radius: CGFloat = 12
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        layer.masksToBounds = true
+        layer.cornerCurve = .continuous
+        shine.startPoint = CGPoint(x: 0, y: 0.5)
+        shine.endPoint = CGPoint(x: 1, y: 0.5)
+        layer.addSublayer(shine)
+        isAccessibilityElement = false
+        accessibilityElementsHidden = true
+    }
+
+    required init?(coder: NSCoder) { fatalError("not from a storyboard") }
+
+    func set(radius: CGFloat) {
+        guard radius != self.radius else { return }
+        self.radius = radius
+        layer.cornerRadius = radius
+    }
+
+    override func paint() {
+        layer.backgroundColor = color(Palette.hover, alpha: 0.75)
+        shine.colors = [color(Palette.surface, alpha: 0), color(Palette.surface, alpha: 0.55), color(Palette.surface, alpha: 0)]
+    }
+
+    override func place() {
+        layer.cornerRadius = radius
+        shine.frame = CGRect(x: 0, y: 0, width: bounds.width * 0.55, height: bounds.height)
+    }
+
+    override func animate() {
+        shine.removeAllAnimations()
+        let sweep = CABasicAnimation(keyPath: "transform.translation.x")
+        sweep.fromValue = -bounds.width * 0.55
+        sweep.toValue = bounds.width * 1.05
+        shine.add(Looping.forever(sweep, duration: 1.4), forKey: "sweep")
+    }
+}
+
+/// The words twice: dim, and bright under a band that runs across them.
+final class ShimmerView: Looping {
+    let base = UILabel()
+    private let lit = UILabel()
+    private let band = CAGradientLayer()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        for label in [base, lit] {
+            label.font = .systemFont(ofSize: 14, weight: .medium)
+            addSubview(label)
+        }
+        base.textColor = UIColor(Palette.muted)
+        lit.textColor = UIColor(Palette.text)
+        band.startPoint = CGPoint(x: 0, y: 0.5)
+        band.endPoint = CGPoint(x: 1, y: 0.5)
+        band.colors = [UIColor.clear.cgColor, UIColor.black.cgColor, UIColor.clear.cgColor]
+        lit.layer.mask = band
+        isAccessibilityElement = true
+        accessibilityTraits = .staticText
+    }
+
+    required init?(coder: NSCoder) { fatalError("not from a storyboard") }
+
+    func set(text: String) {
+        guard text != base.text else { return }
+        base.text = text
+        lit.text = text
+        accessibilityLabel = text
+        invalidateIntrinsicContentSize()
+    }
+
+    override func place() {
+        base.frame = bounds
+        lit.frame = bounds
+        band.frame = CGRect(x: 0, y: 0, width: bounds.width * 0.44, height: bounds.height)
+    }
+
+    override func animate() {
+        band.removeAllAnimations()
+        let run = CABasicAnimation(keyPath: "transform.translation.x")
+        run.fromValue = -bounds.width * 0.52
+        run.toValue = bounds.width * 1.08
+        band.add(Looping.forever(run, duration: 1.8), forKey: "run")
     }
 }
