@@ -854,6 +854,16 @@ public class ApimDecompile extends GhidraScript {
                         : focusedOnly ? "focused-only" : "full-plus-focused") +
                 "\n"
             );
+            // What was actually mapped, and how. A file loaded raw has only what the caller said to make of it, and
+            // when nothing came back there was no way to tell a wrong base address from a block the analyzers skipped
+            // because it was never marked executable.
+            for (ghidra.program.model.mem.MemoryBlock block : currentProgram.getMemory().getBlocks()) {
+              summary.write(
+                "Block: " + block.getName() + " " + block.getStart() + "-" + block.getEnd() +
+                " " + (block.isRead() ? "r" : "-") + (block.isWrite() ? "w" : "-") + (block.isExecute() ? "x" : "-") +
+                " " + block.getSize() + " bytes\n"
+              );
+            }
             summary.write("Focus terms: " + String.join(", ", focusTerms) + "\n");
             summary.write("Behavior fallback used: " + fallbackBehavior + "\n");
             summary.write("Full fallback used: " + fallbackFull + "\n");

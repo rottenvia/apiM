@@ -499,6 +499,10 @@ async fn run_ilspy(tools: &Tools, root: &Path, target: &str, inspection: &PeInsp
 /// Analyzers that add substantial time and whose output we do not surface.
 const FAST_DISABLED_ANALYZERS: [&str; 3] = ["Decompiler Parameter ID", "Decompiler Switch Analysis", "Stack"];
 
+/// Ghidra's only analyzer that finds code with nothing pointing at it. Off by default, and the difference between a
+/// headerless dump decompiling and coming back empty.
+const AGGRESSIVE_FINDER: &str = "Aggressive Instruction Finder";
+
 /// Preset first, then the caller's enable/disable, so Parameter ID can be turned on without also paying for the rest.
 fn resolve_analyzer_config(o: &AnalyzerOverrides) -> (Vec<String>, Vec<String>) {
     let mut disable: Vec<String> = if o.preset.as_deref() == Some("full") { vec![] } else { FAST_DISABLED_ANALYZERS.iter().map(|s| s.to_string()).collect() };
@@ -592,7 +596,13 @@ async fn run_ghidra(tools: &Tools, root: &Path, target: &str, inspection: &PeIns
     let max_cpu = number_env("APIM_BINARY_MAX_CPU", (cpus - 1.0).clamp(1.0, 16.0), 1.0, 64.0);
     let default_analysis_ms = if inspection.packing.status == "likely" { 15.0 * 60_000.0 } else if inspection.bytes <= 10 * 1024 * 1024 { 10.0 * 60_000.0 } else { 30.0 * 60_000.0 };
     let analysis_timeout_ms = number_env("APIM_GHIDRA_ANALYSIS_TIMEOUT_MS", default_analysis_ms, 30_000.0, 9.0e15);
-    let (disable, enable) = resolve_analyzer_config(&o.analyzers);
+    let (disable, mut enable) = resolve_analyzer_config(&o.analyzers);
+    // Loaded raw there is no entry point to start disassembling from, and "Disassemble Entry Points" has nothing to
+    // work with: a 16KB blob of real x86 came back with 0 functions decompiled. The one analyzer that finds code in a
+    // flat block is off by default, so a raw load turns it on unless the caller said not to.
+    if o.raw.base().is_some() && !disable.iter().any(|d| d == AGGRESSIVE_FINDER) && !enable.iter().any(|e| e == AGGRESSIVE_FINDER) {
+        enable.push(AGGRESSIVE_FINDER.into());
+    }
     let analyzer_cfg = project_dir.join("analyzers.json");
     let _ = std::fs::write(&analyzer_cfg, serde_json::to_string_pretty(&serde_json::json!({ "disable": disable, "enable": enable })).unwrap_or_default());
     let out = output.to_string_lossy().to_string();
@@ -615,6 +625,9 @@ async fn run_ghidra(tools: &Tools, root: &Path, target: &str, inspection: &PeIns
         "ApimAnalysisOptions.java".into(),
         analyzer_cfg.to_string_lossy().to_string(),
         out.clone(),
+        // Loaded raw, nothing points at any code: the pre-script marks each executable block's start as an entry
+        // point so the disassembler has somewhere to begin.
+        if raw.is_empty() { "file".into() } else { "raw".into() },
         "-scriptPath".into(),
         script_dir.to_string_lossy().to_string(),
         "-postScript".into(),

@@ -39,25 +39,22 @@ public class ApimAnalysisOptions extends GhidraScript {
 
     // First, optionally record every analyzer the installed Ghidra knows
     // about, so a caller can pick exact names without guessing.
-    if (args.length >= 2 && args[1] != null && !args[1].isBlank()) {
-      File listOut = new File(args[1], "analyzers.txt");
-      try (Writer w = Files.newBufferedWriter(listOut.toPath(), StandardCharsets.UTF_8)) {
-        List<String> names = options.getOptionNames();
-        java.util.Collections.sort(names, String.CASE_INSENSITIVE_ORDER);
-        for (String name : names) {
-          boolean enabled = false;
-          try {
-            enabled = options.getBoolean(name, false);
-          } catch (Exception ignored) {
-            // Non-boolean option; skip it from the enabled list.
-          }
-          w.write((enabled ? "[on] " : "[off] ") + name + "\n");
-        }
-      }
+    String listDir = args.length >= 2 && args[1] != null && !args[1].isBlank() ? args[1] : null;
+    if (listDir != null) {
+      writeAnalyzerList(options, new File(listDir, "analyzers.txt"));
     }
 
     if (args.length < 1 || args[0] == null || args[0].isBlank()) {
       return; // no overrides requested - leave Ghidra defaults intact
+    }
+
+    // A third argument "raw" means the file was loaded as bytes at an address, with no header. Nothing then points at
+    // any code, so "Disassemble Entry Points" — on by default, and the thing that starts every other analyzer off —
+    // has nowhere to begin, and the program came back with zero functions however the analyzers were set. The start of
+    // each executable block is marked as an entry point here, in the pre-script, so that analysis has a seed to follow.
+    // Only for a raw load: a file with a header has its own entry, and seeding a section start would read data as code.
+    if (args.length >= 3 && "raw".equalsIgnoreCase(args[2])) {
+      seedEntryPoints();
     }
 
     File cfg = new File(args[0]);
@@ -69,6 +66,40 @@ public class ApimAnalysisOptions extends GhidraScript {
     String text = Files.readString(cfg.toPath(), StandardCharsets.UTF_8);
     applyList(text, options, "disable", false);
     applyList(text, options, "enable", true);
+
+    // And again once they are applied. Only the before picture was written, so an override that never arrived looked
+    // exactly like one that did, and a reader comparing them had no way to tell which.
+    if (listDir != null) {
+      writeAnalyzerList(options, new File(listDir, "analyzers-applied.txt"));
+    }
+  }
+
+  /// The first address of every executable block, as an entry point for the disassembler to start from.
+  private void seedEntryPoints() {
+    for (ghidra.program.model.mem.MemoryBlock block : currentProgram.getMemory().getBlocks()) {
+      if (!block.isExecute()) continue;
+      try {
+        currentProgram.getSymbolTable().addExternalEntryPoint(block.getStart());
+      } catch (Exception ignored) {
+        // A block the symbol table will not take an entry point for is left alone.
+      }
+    }
+  }
+
+  private void writeAnalyzerList(Options options, File out) throws Exception {
+    try (Writer w = Files.newBufferedWriter(out.toPath(), StandardCharsets.UTF_8)) {
+      List<String> names = options.getOptionNames();
+      java.util.Collections.sort(names, String.CASE_INSENSITIVE_ORDER);
+      for (String name : names) {
+        boolean enabled = false;
+        try {
+          enabled = options.getBoolean(name, false);
+        } catch (Exception ignored) {
+          // Non-boolean option; skip it from the enabled list.
+        }
+        w.write((enabled ? "[on] " : "[off] ") + name + "\n");
+      }
+    }
   }
 
   private void applyList(String text, Options options, String key, boolean value) {

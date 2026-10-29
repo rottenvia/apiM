@@ -41,6 +41,7 @@ mod ui;
 #[cfg(windows)]
 mod winproc;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 fn runtime() -> tokio::runtime::Runtime {
@@ -93,7 +94,44 @@ pub(crate) fn background(job: impl FnOnce() + Send + 'static) {
     let _ = tx.send(Box::new(job));
 }
 
+/// `KEY=value` lines of a `.env.local`, with `#` comments, blank lines and `export ` ignored, and one pair of
+/// surrounding quotes taken off the value. A line with no `=`, or an empty name, is skipped rather than guessed at.
+fn env_pairs(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| line.strip_prefix("export ").unwrap_or(line).split_once('='))
+        .map(|(name, value)| {
+            let value = value.trim();
+            let unquoted = ["\"", "'"].iter().find_map(|q| value.strip_prefix(q).and_then(|v| v.strip_suffix(q))).unwrap_or(value);
+            (name.trim().to_string(), unquoted.to_string())
+        })
+        .filter(|(name, _)| !name.is_empty())
+        .collect()
+}
+
+/// Reads the nearest `.env.local` into the environment, from this folder or the program's, upwards.
+///
+/// Every setup line the binary tools print ("set APIM_GHIDRA_HOME in .env.local") named a file nothing here read: the
+/// web app loads it, this app never did, so a Ghidra sitting ready beside the app stayed invisible and the advice
+/// could not be followed. What is already in the environment wins, so a variable set for one run still overrides it.
+///
+/// Called as the first thing in `main`, before any thread exists: setting an environment variable is unsound once
+/// another thread may be reading one.
+fn load_env_local() {
+    let starts = [std::env::current_dir().ok(), std::env::current_exe().ok().and_then(|exe| exe.parent().map(PathBuf::from))];
+    let found = starts.into_iter().flatten().find_map(|start| start.ancestors().map(|dir| dir.join(".env.local")).find(|p| p.is_file()));
+    let Some(text) = found.and_then(|path| std::fs::read_to_string(path).ok()) else { return };
+    for (name, value) in env_pairs(&text) {
+        if std::env::var_os(&name).is_none() {
+            // SAFETY: single-threaded, before `background` or the window starts.
+            unsafe { std::env::set_var(&name, &value) };
+        }
+    }
+}
+
 fn main() -> eframe::Result {
+    load_env_local();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("--pdf-pages") {
         // A PDF on stdin, its pages as JSON on stdout: the app parses PDFs in a child of itself so a crash stays out of it.
@@ -289,5 +327,37 @@ fn headless(args: &[String]) {
             }
             Status(_) | Reasoning(_) | Unsaid | ToolDraft { .. } | State(_) | Context(_) | Checkpoint(_) | ToolProgress { .. } | Skill { .. } | Groups(_) | ModelAdded(_) => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::env_pairs;
+
+    #[test]
+    fn an_env_local_is_read_the_way_the_web_app_reads_it() {
+        let text = "# a comment
+
+APIM_GHIDRA_HOME=C:/tools/ghidra_12.2_PUBLIC
+export APIM_CAPA_PATH=\"C:/Program Files/capa/capa.exe\"
+  SPACED  =  'x y'  
+NO_EQUALS
+=orphan
+EMPTY=
+";
+        let pairs = env_pairs(text);
+        assert_eq!(
+            pairs,
+            [
+                ("APIM_GHIDRA_HOME".to_string(), "C:/tools/ghidra_12.2_PUBLIC".to_string()),
+                ("APIM_CAPA_PATH".to_string(), "C:/Program Files/capa/capa.exe".to_string()),
+                ("SPACED".to_string(), "x y".to_string()),
+                ("EMPTY".to_string(), String::new()),
+            ]
+        );
+        // A value with an = in it keeps the rest of the line, and only a matching pair of quotes comes off.
+        assert_eq!(env_pairs("K=a=b
+Q=\"half'
+"), [("K".into(), "a=b".into()), ("Q".into(), "\"half'".into())]);
     }
 }
