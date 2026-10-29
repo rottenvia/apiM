@@ -192,8 +192,22 @@ private struct DrawerPan: UIViewRepresentable {
             guard let drawer, let pan = gesture as? UIPanGestureRecognizer, let view = pan.view else { return false }
             let velocity = pan.velocity(in: view)
             guard abs(velocity.x) > abs(velocity.y) * 1.4 else { return false }
-            if drawer.open { return velocity.x < 0 }
-            return velocity.x > 0 && pan.location(in: view).x < view.bounds.width * 0.5
+            let at = pan.location(in: view)
+            let moved = pan.translation(in: view)
+            let start = CGPoint(x: at.x - moved.x, y: at.y - moved.y)
+            if drawer.open {
+                guard velocity.x < 0 else { return false }
+                // Begun on a chat in the list, it is that row's swipe (archive, delete), not the drawer's.
+                if start.x < drawer.width {
+                    var hit = view.hitTest(start, with: nil)
+                    while let current = hit {
+                        if current is UICollectionViewCell { return false }
+                        hit = current.superview
+                    }
+                }
+                return true
+            }
+            return velocity.x > 0 && start.x < view.bounds.width * 0.5
         }
 
         @objc func panned(_ pan: UIPanGestureRecognizer) {
@@ -462,17 +476,16 @@ private struct Transcript: View {
             .scrollTargetLayout()
         }
         .scrollPosition($position)
-        .defaultScrollAnchor(.bottom, for: .initialOffset)
-        // Following, the end stays put as a reply grows, a card comes, rows are laid out or the keyboard takes room;
-        // scrolled up to read, the words being read stay put instead.
-        .defaultScrollAnchor(follow ? .bottom : nil, for: .sizeChanges)
+        // The end at the leading edge: `.bottom` is also the middle across, which moved the whole chat sideways
+        // whenever its content measured wider than the screen for a moment.
+        .defaultScrollAnchor(.bottomLeading, for: .initialOffset)
         .scrollDismissesKeyboard(.interactively)
         .onScrollPhaseChange { _, phase, context in
             touching = phase == .tracking || phase == .interacting || phase == .decelerating
-            // Come to rest: follow from here on only if the reader left it at the end.
-            if phase == .idle {
-                let atEnd = context.geometry.contentSize.height - context.geometry.visibleRect.maxY < 90
-                if atEnd != follow { withAnimation(.easeInOut(duration: 0.2)) { follow = atEnd } }
+            // Taken hold of away from the end: following stops before anything else can move it.
+            let geometry = context.geometry
+            if touching, follow, geometry.contentSize.height - geometry.visibleRect.maxY >= 90 {
+                withAnimation(.easeInOut(duration: 0.2)) { follow = false }
             }
         }
         .onScrollGeometryChange(for: Bool.self) { geometry in
@@ -483,6 +496,12 @@ private struct Transcript: View {
             if touching || atEnd {
                 withAnimation(.easeInOut(duration: 0.2)) { follow = atEnd }
             }
+        }
+        .onScrollGeometryChange(for: CGSize.self) { geometry in
+            CGSize(width: geometry.containerSize.height, height: geometry.contentSize.height)
+        } action: { _, _ in
+            // A reply grew, a card came, rows were laid out or the keyboard took room: the end stays in view.
+            if follow && !touching { position.scrollTo(edge: .bottom) }
         }
         .onChange(of: chat.earlier) { _, _ in
             if let keep {

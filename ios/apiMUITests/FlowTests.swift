@@ -308,7 +308,8 @@ final class FlowTests: XCTestCase {
         effort.tap()
         XCTAssertTrue(app.switches["effort-auto"].waitForExistence(timeout: 5))
         shot("23-effort-auto")
-        app.switches["effort-auto"].tap()
+        // On the switch itself: the middle of the row is its label, which does not toggle it.
+        app.switches["effort-auto"].coordinate(withNormalizedOffset: CGVector(dx: 0.93, dy: 0.5)).tap()
         see(app, "Deep reasoning for complex problems")
         shot("24-effort-high")
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15)).tap()
