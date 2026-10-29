@@ -417,6 +417,9 @@ private struct Transcript: View {
     let size: CGFloat
     @Environment(Remote.self) private var remote
     @State private var position = ScrollPosition(edge: .bottom)
+    /// The last thing in the chat. Scrolled to by name, the lazy stack lays out the real end; scrolled to the bottom
+    /// edge, it went where its estimate of the rows put the end, and a long chat showed nothing.
+    static let end = "end"
     /// The reader is at the end: new words keep it there.
     @State private var follow = true
     /// The reader's finger is on it, or it is still gliding from one.
@@ -470,7 +473,7 @@ private struct Transcript: View {
                 }
                 Color.clear
                     .frame(height: 1)
-                    .id("end")
+                    .id(Transcript.end)
             }
             .padding(.horizontal, 18)
             .padding(.top, 14)
@@ -516,7 +519,7 @@ private struct Transcript: View {
         .onChange(of: remote.sending) { _, now in
             if now != nil {
                 follow = true
-                withAnimation(.snappy(duration: 0.3)) { position.scrollTo(edge: .bottom) }
+                withAnimation(.snappy(duration: 0.3)) { position.scrollTo(id: Transcript.end, anchor: .bottom) }
             }
         }
         .overlay(alignment: .bottom) {
@@ -524,7 +527,7 @@ private struct Transcript: View {
                 Button {
                     Haptics.tap()
                     follow = true
-                    withAnimation(.snappy(duration: 0.35)) { position.scrollTo(edge: .bottom) }
+                    withAnimation(.snappy(duration: 0.35)) { position.scrollTo(id: Transcript.end, anchor: .bottom) }
                 } label: {
                     Image(systemName: "arrow.down")
                         .font(.system(size: 14, weight: .semibold))
@@ -548,7 +551,7 @@ private extension Transcript {
     /// scrolled to can move by the next frame: it is looked for again, a few times at most.
     func keepUp(_ tries: Int = 3) {
         guard follow, !touching else { return }
-        position.scrollTo(edge: .bottom)
+        position.scrollTo(id: Transcript.end, anchor: .bottom)
         guard tries > 1 else { return }
         DispatchQueue.main.async {
             if !atEnd { keepUp(tries - 1) }
