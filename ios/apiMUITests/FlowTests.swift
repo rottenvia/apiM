@@ -18,8 +18,7 @@ final class FlowTests: XCTestCase {
     override func tearDown() {
         if let run = testRun, run.failureCount > 0 {
             shot("x-" + name.split(separator: " ").last!.dropLast())
-            if let app { print("apim-tree \(name):
-\(app.debugDescription)") }
+            if let app { print("apim-tree \(name):\n\(app.debugDescription)") }
         }
     }
 
