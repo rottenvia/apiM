@@ -56,21 +56,20 @@ enum Frames {
     }
 
     /// Takes every whole frame off the front of `buffer`. Nil when a frame says it is larger than `max`: the stream
-    /// is not ours, or is broken.
+    /// is not ours, or is broken. A frame still arriving is not copied: a chat of a few MB comes in hundreds of
+    /// pieces, and copying the buffer for each one cost more than reading the chat.
     static func take(from buffer: inout Data, max: Int = 64 << 20) -> [Data]? {
         var frames: [Data] = []
-        var bytes = [UInt8](buffer)
-        var at = 0
-        while bytes.count - at >= 4 {
-            let length = Int(bytes[at]) << 24 | Int(bytes[at + 1]) << 16 | Int(bytes[at + 2]) << 8 | Int(bytes[at + 3])
+        var at = buffer.startIndex
+        while buffer.endIndex - at >= 4 {
+            let length = Int(buffer[at]) << 24 | Int(buffer[at + 1]) << 16 | Int(buffer[at + 2]) << 8 | Int(buffer[at + 3])
             if length > max { return nil }
-            guard bytes.count - at - 4 >= length else { break }
-            frames.append(Data(bytes[(at + 4)..<(at + 4 + length)]))
+            guard buffer.endIndex - at - 4 >= length else { break }
+            frames.append(buffer.subdata(in: (at + 4)..<(at + 4 + length)))
             at += 4 + length
         }
-        if at > 0 {
-            bytes.removeFirst(at)
-            buffer = Data(bytes)
+        if at > buffer.startIndex {
+            buffer = buffer.subdata(in: at..<buffer.endIndex)
         }
         return frames
     }

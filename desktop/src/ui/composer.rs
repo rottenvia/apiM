@@ -31,7 +31,7 @@ const EFFORTS: [(&str, &str, &str, &str); 7] = [
 ];
 
 /// What the model actually does with each level (DeepSeek's and Qwen's own mapping).
-fn efforts_for(model: &str) -> Vec<(&'static str, &'static str, &'static str, &'static str)> {
+pub(super) fn efforts_for(model: &str) -> Vec<(&'static str, &'static str, &'static str, &'static str)> {
     EFFORTS
         .iter()
         .map(|&(id, label, what, warning)| match (model, id) {

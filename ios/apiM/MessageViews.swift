@@ -2,46 +2,65 @@ import SwiftUI
 import UIKit
 
 /// One message: the user's in a bubble on the right, apiM's as open prose with its thinking and steps in between.
+/// Equatable, so the rows a patch did not touch are not drawn again: a reply being written redraws only itself.
 struct MessageRow: View, Equatable {
     let message: Message
     /// The reply still being written.
     let live: Bool
     let status: String
+    /// The newest message: its reply gets the action bar.
+    let last: Bool
+    /// A reply is being written in this chat (nothing can be edited, deleted or written again meanwhile).
+    let busy: Bool
+    let size: CGFloat
 
     var body: some View {
         if message.isUser {
             if message.note == true {
                 NoteChip(text: message.text)
             } else {
-                UserBubble(message: message)
+                UserBubble(message: message, busy: busy)
             }
         } else {
-            AssistantBody(message: message, live: live, status: status)
+            AssistantBody(message: message, live: live, status: status, last: last, busy: busy, size: size)
         }
     }
 }
 
+private let photoTypes = [".jpg", ".jpeg", ".png", ".heic", ".webp", ".gif"]
+
 struct UserBubble: View {
     let message: Message
+    var busy = false
     var pending = false
+    @Environment(Remote.self) private var remote
+    @Environment(Screen.self) private var screen
 
     var body: some View {
+        let images = message.images ?? []
+        // A picture's file is shown as the picture; any other file as a chip.
+        let files = (message.files ?? []).filter { name in !images.contains { $0.name == name } }
         HStack {
             Spacer(minLength: 52)
             VStack(alignment: .trailing, spacing: 6) {
-                if let files = message.files, !files.isEmpty {
-                    ForEach(files, id: \.self) { name in
-                        // A photo's file name is one the computer made up; what it is says more.
-                        let photo = [".jpg", ".jpeg", ".png", ".heic", ".webp", ".gif"].contains { name.lowercased().hasSuffix($0) }
-                        Label(photo ? "Photo" : name, systemImage: photo ? "photo" : "doc")
-                            .font(.system(size: 12.5, weight: .medium))
-                            .foregroundStyle(Palette.text2)
-                            .lineLimit(1)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(Palette.surface, in: Capsule())
-                            .overlay(Capsule().stroke(Palette.border, lineWidth: 1))
+                if !images.isEmpty {
+                    let side: CGFloat = images.count == 1 ? 200 : 104
+                    HStack(spacing: 6) {
+                        ForEach(images) { picture in
+                            Thumbnail(picture: picture, width: side, height: images.count == 1 ? 150 : 104)
+                        }
                     }
+                }
+                ForEach(files, id: \.self) { name in
+                    let photo = photoTypes.contains { name.lowercased().hasSuffix($0) }
+                    Label(photo ? "Photo" : name, systemImage: photo ? "photo" : "doc")
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(Palette.text2)
+                        .lineLimit(1)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(Palette.surface, in: Capsule())
+                        .overlay(Capsule().stroke(Palette.border, lineWidth: 1))
                 }
                 if !message.text.isEmpty {
                     Text(message.text)
@@ -51,13 +70,41 @@ struct UserBubble: View {
                         .padding(.horizontal, 15)
                         .padding(.vertical, 10)
                         .background(Palette.userBubble, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-                        .textSelection(.enabled)
                 }
+            }
+            .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .contextMenu {
+                if !pending { menu }
             }
         }
         .opacity(pending ? 0.55 : 1)
-        .contextMenu {
-            Button { UIPasteboard.general.string = message.text } label: { Label("Copy", systemImage: "doc.on.doc") }
+    }
+
+    @ViewBuilder
+    private var menu: some View {
+        Button {
+            UIPasteboard.general.string = message.text
+            Haptics.tap()
+        } label: {
+            Label("Copy", systemImage: "doc.on.doc")
+        }
+        Button {
+            screen.selecting = Selection(text: message.text)
+        } label: {
+            Label("Select Text", systemImage: "selection.pin.in.out")
+        }
+        if !busy && remote.online {
+            Button {
+                screen.edit(message)
+            } label: {
+                Label("Edit", systemImage: "pencil")
+            }
+            Divider()
+            Button(role: .destructive) {
+                remote.delete(message.id)
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
         }
     }
 }
@@ -87,6 +134,11 @@ struct AssistantBody: View {
     let message: Message
     let live: Bool
     let status: String
+    let last: Bool
+    let busy: Bool
+    let size: CGFloat
+    @Environment(Remote.self) private var remote
+    @Environment(Screen.self) private var screen
 
     private enum Segment {
         case text(String)
@@ -124,32 +176,70 @@ struct AssistantBody: View {
     var body: some View {
         let segments = self.segments
         VStack(alignment: .leading, spacing: 14) {
-            ForEach(Array(segments.enumerated()), id: \.offset) { index, segment in
-                switch segment {
-                case .text(let text):
-                    MarkdownView(text: text)
-                case .think(let text, let ms):
-                    ThoughtRow(text: text, ms: ms, live: live && index == segments.count - 1)
-                case .steps(let tools):
-                    StepsBox(tools: tools)
-                case .notice(let text):
-                    Text(text)
-                        .font(.system(size: 13))
-                        .italic()
-                        .foregroundStyle(Palette.muted)
+            VStack(alignment: .leading, spacing: 14) {
+                ForEach(segments.indices, id: \.self) { index in
+                    switch segments[index] {
+                    case .text(let text):
+                        MarkdownView(text: text, size: size)
+                            .equatable()
+                    case .think(let text, let ms):
+                        ThoughtRow(text: text, ms: ms, live: live && index == segments.count - 1)
+                    case .steps(let tools):
+                        StepsBox(tools: tools)
+                    case .notice(let text):
+                        Text(text)
+                            .font(.system(size: 13))
+                            .italic()
+                            .foregroundStyle(Palette.muted)
+                    }
+                }
+                if let error = message.error, !error.isEmpty {
+                    ErrorCard(text: error)
+                }
+                if live, segments.isEmpty || !isWriting(segments.last) {
+                    Working(status: status)
+                        .transition(.opacity)
                 }
             }
-            if let error = message.error, !error.isEmpty {
-                ErrorCard(text: error)
-            }
-            if live, segments.isEmpty || !isWriting(segments.last) {
-                Working(status: status)
+            .contentShape(.contextMenuPreview, Rectangle())
+            .contextMenu { menu }
+            if last && !busy && !message.isEmpty && !live {
+                ActionBar(message: message)
+                    .transition(.opacity.combined(with: .offset(y: -4)))
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .contextMenu {
-            if !message.text.isEmpty {
-                Button { UIPasteboard.general.string = message.text } label: { Label("Copy", systemImage: "doc.on.doc") }
+    }
+
+    @ViewBuilder
+    private var menu: some View {
+        if !message.text.isEmpty {
+            Button {
+                UIPasteboard.general.string = message.text
+                Haptics.tap()
+            } label: {
+                Label("Copy", systemImage: "doc.on.doc")
+            }
+            Button {
+                screen.selecting = Selection(text: message.text)
+            } label: {
+                Label("Select Text", systemImage: "selection.pin.in.out")
+            }
+        }
+        if !busy && remote.online {
+            if last {
+                Button {
+                    Haptics.tap()
+                    remote.regenerate()
+                } label: {
+                    Label("Regenerate", systemImage: "arrow.clockwise")
+                }
+            }
+            Divider()
+            Button(role: .destructive) {
+                remote.delete(message.id)
+            } label: {
+                Label("Delete", systemImage: "trash")
             }
         }
     }
@@ -166,6 +256,64 @@ struct AssistantBody: View {
     }
 }
 
+/// Under the newest reply: copy it, write it again, share it, and which model wrote it.
+private struct ActionBar: View {
+    let message: Message
+    @Environment(Remote.self) private var remote
+    @State private var copied = false
+
+    var body: some View {
+        HStack(spacing: 2) {
+            if !message.text.isEmpty {
+                Button {
+                    UIPasteboard.general.string = message.text
+                    Haptics.tap()
+                    withAnimation(.snappy(duration: 0.2)) { copied = true }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { withAnimation(.snappy(duration: 0.2)) { copied = false } }
+                } label: {
+                    icon(copied ? "checkmark" : "doc.on.doc", tint: copied ? Palette.success : Palette.text2)
+                        .contentTransition(.symbolEffect(.replace))
+                }
+                .buttonStyle(Press())
+                .accessibilityLabel(copied ? "Copied" : "Copy")
+            }
+            if remote.online {
+                Button {
+                    Haptics.tap()
+                    remote.regenerate()
+                } label: {
+                    icon("arrow.clockwise", tint: Palette.text2)
+                }
+                .buttonStyle(Press())
+                .accessibilityLabel("Regenerate")
+            }
+            if !message.text.isEmpty {
+                ShareLink(item: message.text) {
+                    icon("square.and.arrow.up", tint: Palette.text2)
+                }
+                .buttonStyle(Press())
+                .accessibilityLabel("Share")
+            }
+            Spacer(minLength: 8)
+            if let model = message.model, !model.isEmpty {
+                Text(model)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Palette.muted)
+                    .lineLimit(1)
+            }
+        }
+        .padding(.leading, -8)
+    }
+
+    private func icon(_ name: String, tint: Color) -> some View {
+        Image(systemName: name)
+            .font(.system(size: 14, weight: .medium))
+            .foregroundStyle(tint)
+            .frame(width: 34, height: 32)
+            .contentShape(Rectangle())
+    }
+}
+
 /// "Thinking" while it thinks, "Thought for 12s" after; opens to show the thought.
 struct ThoughtRow: View {
     let text: String
@@ -176,18 +324,20 @@ struct ThoughtRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Button {
-                withAnimation(.easeInOut(duration: 0.2)) { open.toggle() }
+                Haptics.pick()
+                withAnimation(.snappy(duration: 0.25)) { open.toggle() }
             } label: {
                 HStack(spacing: 7) {
                     Image(systemName: "lightbulb")
                         .font(.system(size: 12.5, weight: .medium))
-                    Text(label)
-                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(Palette.text2)
+                        .symbolEffect(.pulse, isActive: live && ms == 0)
+                    ShimmerText(text: label, active: live && ms == 0)
                     Image(systemName: "chevron.right")
                         .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Palette.text2)
                         .rotationEffect(.degrees(open ? 90 : 0))
                 }
-                .foregroundStyle(Palette.text2)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -201,10 +351,10 @@ struct ThoughtRow: View {
                     .overlay(alignment: .leading) {
                         Rectangle().fill(Palette.border).frame(width: 2)
                     }
-                    .textSelection(.enabled)
-                    .transition(.opacity)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
+        .clipped()
     }
 
     private var label: String {
@@ -225,7 +375,8 @@ struct StepsBox: View {
         VStack(alignment: .leading, spacing: 0) {
             if hidden > 0 {
                 Button {
-                    withAnimation(.easeInOut(duration: 0.2)) { all = true }
+                    Haptics.pick()
+                    withAnimation(.snappy(duration: 0.28)) { all = true }
                 } label: {
                     HStack(spacing: 8) {
                         Image(systemName: "ellipsis")
@@ -247,6 +398,7 @@ struct StepsBox: View {
                     Rectangle().fill(Palette.border).frame(height: 1).padding(.leading, 44)
                 }
                 StepRow(tool: tool)
+                    .transition(.opacity)
             }
         }
         .background(Palette.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -259,7 +411,7 @@ struct StepRow: View {
     @State private var open = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
                 Image(systemName: StepRow.symbol(tool.kind))
                     .font(.system(size: 13, weight: .medium))
@@ -279,18 +431,29 @@ struct StepRow: View {
                     }
                 }
                 Spacer(minLength: 8)
-                switch tool.ok {
-                case nil:
-                    ProgressView()
-                        .controlSize(.small)
-                case true?:
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(Palette.success)
-                case false?:
-                    Image(systemName: "xmark")
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(Palette.danger)
+                Group {
+                    switch tool.ok {
+                    case nil:
+                        ProgressView()
+                            .controlSize(.small)
+                    case true?:
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(Palette.success)
+                            .transition(.scale.combined(with: .opacity))
+                    case false?:
+                        Image(systemName: "xmark")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(Palette.danger)
+                            .transition(.scale.combined(with: .opacity))
+                    }
+                }
+                .animation(.spring(response: 0.3, dampingFraction: 0.6), value: tool.ok)
+                if !tool.summary.isEmpty {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Palette.muted)
+                        .rotationEffect(.degrees(open ? 180 : 0))
                 }
             }
             if open, !tool.summary.isEmpty {
@@ -299,7 +462,12 @@ struct StepRow: View {
                     .foregroundStyle(Palette.text2)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.leading, 32)
-                    .textSelection(.enabled)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+            if !tool.image.isEmpty {
+                Thumbnail(picture: Picture(id: tool.image, name: "\(tool.title) \(tool.target)".trimmingCharacters(in: .whitespaces)), height: 180, radius: 10)
+                    .padding(.leading, 32)
+                    .padding(.bottom, 3)
             }
         }
         .padding(.horizontal, 12)
@@ -307,8 +475,10 @@ struct StepRow: View {
         .contentShape(Rectangle())
         .onTapGesture {
             guard !tool.summary.isEmpty else { return }
-            withAnimation(.easeInOut(duration: 0.18)) { open.toggle() }
+            Haptics.pick()
+            withAnimation(.snappy(duration: 0.25)) { open.toggle() }
         }
+        .clipped()
     }
 
     static func symbol(_ kind: String) -> String {
@@ -343,7 +513,6 @@ struct ErrorCard: View {
                 .font(.system(size: 14))
                 .foregroundStyle(Palette.text)
                 .fixedSize(horizontal: false, vertical: true)
-                .textSelection(.enabled)
             Spacer(minLength: 0)
         }
         .padding(12)
@@ -359,9 +528,9 @@ struct Working: View {
     var body: some View {
         HStack(spacing: 10) {
             Dots()
-            Text(status.isEmpty ? "Thinking" : status)
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(Palette.text2)
+            ShimmerText(text: status.isEmpty ? "Thinking" : status)
+                .contentTransition(.opacity)
+                .animation(.easeInOut(duration: 0.2), value: status)
         }
         .padding(.vertical, 2)
         .accessibilityElement(children: .combine)
@@ -387,5 +556,60 @@ struct Dots: View {
             }
             .frame(height: size * 2)
         }
+    }
+}
+
+/// Text to select a part of: long-press a message, Select Text.
+struct Selection: Identifiable {
+    let id = UUID()
+    let text: String
+}
+
+struct SelectSheet: View {
+    let text: String
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            SelectableText(text: text)
+                .background(Palette.bg)
+                .navigationTitle("Select Text")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Copy All") {
+                            UIPasteboard.general.string = text
+                            Haptics.success()
+                            dismiss()
+                        }
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { dismiss() }
+                    }
+                }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+    }
+}
+
+/// UIKit's text view: SwiftUI's selection takes a whole Text at once, this one a word, a line, any part.
+private struct SelectableText: UIViewRepresentable {
+    let text: String
+
+    func makeUIView(context: Context) -> UITextView {
+        let view = UITextView()
+        view.isEditable = false
+        view.isSelectable = true
+        view.backgroundColor = .clear
+        view.textContainerInset = UIEdgeInsets(top: 16, left: 14, bottom: 24, right: 14)
+        view.font = UIFont.systemFont(ofSize: 16)
+        view.textColor = UIColor(Palette.text)
+        view.adjustsFontForContentSizeCategory = true
+        return view
+    }
+
+    func updateUIView(_ view: UITextView, context: Context) {
+        if view.text != text { view.text = text }
     }
 }

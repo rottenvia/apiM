@@ -37,12 +37,50 @@ extension UIColor {
 
 /// The type: prose from the model is set in a serif, like Claude's replies; everything the app says is the system sans.
 enum Typeface {
-    static let prose = Font.system(size: 17, weight: .regular, design: .serif)
-    static let proseSize: CGFloat = 17
     static let body = Font.system(size: 16)
     static let mono = Font.system(size: 13, design: .monospaced)
     static let small = Font.system(size: 13)
     static let tiny = Font.system(size: 11.5)
+
+    /// The size replies are set in: Settings › Text size (`textSize`, 0 to 2).
+    static var proseSize: CGFloat {
+        [15.5, 17, 19][min(max(UserDefaults.standard.integer(forKey: "textSize"), 0), 2)]
+    }
+
+    /// The phone's own settings before the user touches them.
+    static func registerDefaults() {
+        UserDefaults.standard.register(defaults: ["textSize": 1, "haptics": true, "appearance": 0])
+    }
+}
+
+/// Taps the app answers with, all off at once in Settings › Haptics.
+enum Haptics {
+    private static var on: Bool { UserDefaults.standard.bool(forKey: "haptics") }
+
+    static func tap() {
+        guard on else { return }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
+
+    static func press() {
+        guard on else { return }
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+    }
+
+    static func pick() {
+        guard on else { return }
+        UISelectionFeedbackGenerator().selectionChanged()
+    }
+
+    static func success() {
+        guard on else { return }
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+    }
+
+    static func warn() {
+        guard on else { return }
+        UINotificationFeedbackGenerator().notificationOccurred(.warning)
+    }
 }
 
 /// The mark from the desktop's icon: three dots, the middle one mid-bounce.
@@ -72,5 +110,97 @@ struct Mark: View {
             return (phase == (i == 1)) ? -size * 0.09 : 0
         }
         return i == 1 ? -size * 0.09 : 0
+    }
+}
+
+/// Shrinks under the finger and springs back: every tappable thing in the app answers the same way.
+struct Press: ButtonStyle {
+    var scale: CGFloat = 0.92
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? scale : 1)
+            .opacity(configuration.isPressed ? 0.8 : 1)
+            .animation(.spring(response: 0.22, dampingFraction: 0.65), value: configuration.isPressed)
+    }
+}
+
+struct Primary: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 16, weight: .semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 18)
+            .frame(minHeight: 46)
+            .background(Palette.accent.opacity(configuration.isPressed ? 0.82 : 1), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .scaleEffect(configuration.isPressed ? 0.97 : 1)
+            .animation(.spring(response: 0.22, dampingFraction: 0.7), value: configuration.isPressed)
+    }
+}
+
+struct Secondary: ButtonStyle {
+    var alignment: Alignment = .center
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 16, weight: .medium))
+            .foregroundStyle(Palette.text)
+            .padding(.horizontal, 16)
+            .frame(maxWidth: .infinity, minHeight: 46, alignment: alignment)
+            .background(configuration.isPressed ? Palette.hover : Palette.bg, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Palette.border, lineWidth: 1))
+            .scaleEffect(configuration.isPressed ? 0.97 : 1)
+            .animation(.spring(response: 0.22, dampingFraction: 0.7), value: configuration.isPressed)
+    }
+}
+
+/// A placeholder with a light passing over it, for what is on its way.
+struct Skeleton: View {
+    var radius: CGFloat = 12
+
+    var body: some View {
+        TimelineView(.animation) { context in
+            let t = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.4) / 1.4
+            RoundedRectangle(cornerRadius: radius, style: .continuous)
+                .fill(Palette.hover.opacity(0.75))
+                .overlay {
+                    GeometryReader { box in
+                        LinearGradient(colors: [.clear, Palette.surface.opacity(0.55), .clear], startPoint: .leading, endPoint: .trailing)
+                            .frame(width: box.size.width * 0.55)
+                            .offset(x: (t * 1.6 - 0.55) * box.size.width)
+                    }
+                }
+                .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+        }
+    }
+}
+
+/// "Thinking" with a light running through the letters while it lasts.
+struct ShimmerText: View {
+    let text: String
+    var font: Font = .system(size: 14, weight: .medium)
+    var active = true
+
+    var body: some View {
+        if active {
+            TimelineView(.animation) { context in
+                let t = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.8) / 1.8
+                let at = t * 1.6 - 0.3
+                let clamp = { (x: Double) in min(max(x, 0), 1) }
+                Text(text)
+                    .font(font)
+                    .foregroundStyle(LinearGradient(stops: [
+                        .init(color: Palette.muted, location: 0),
+                        .init(color: Palette.muted, location: clamp(at - 0.22)),
+                        .init(color: Palette.text, location: clamp(at)),
+                        .init(color: Palette.muted, location: clamp(at + 0.22)),
+                        .init(color: Palette.muted, location: 1),
+                    ], startPoint: .leading, endPoint: .trailing))
+            }
+        } else {
+            Text(text)
+                .font(font)
+                .foregroundStyle(Palette.text2)
+        }
     }
 }

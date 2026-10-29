@@ -4,13 +4,13 @@ name: apiM
 options:
   bundleIdPrefix: com.rottenvia
   deploymentTarget:
-    iOS: "17.0"
+    iOS: "18.0"
   createIntermediateGroups: true
 settings:
   base:
     SWIFT_VERSION: "5.0"
     SWIFT_STRICT_CONCURRENCY: minimal
-    MARKETING_VERSION: "1.0"
+    MARKETING_VERSION: "1.1"
     CURRENT_PROJECT_VERSION: "1"
     # Signed ad hoc for the simulator; the .ipa is built unsigned and signed by whatever installs it (Sideloadly, AltStore).
     CODE_SIGN_STYLE: Manual
@@ -36,7 +36,8 @@ targets:
           - UIInterfaceOrientationPortrait
         UIApplicationSupportsIndirectInputEvents: true
         NSLocalNetworkUsageDescription: apiM connects to the apiM app on your computer over your network.
-        NSCameraUsageDescription: apiM scans the pairing code that apiM shows on your computer.
+        NSCameraUsageDescription: apiM uses the camera to scan the pairing code on your computer, and for photos you send.
+        NSPhotoLibraryAddUsageDescription: apiM saves pictures from your chats to Photos when you ask it to.
         CFBundleURLTypes:
           - CFBundleURLName: com.rottenvia.apim.pair
             CFBundleURLSchemes:

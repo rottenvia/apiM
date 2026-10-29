@@ -22,7 +22,7 @@ use ring::{aead, hkdf};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio::time::Instant;
 
 pub const PORT: u16 = 47100;
@@ -50,6 +50,10 @@ pub struct View {
     pub run: RunView,
     /// The window's latest toast (a message that was not sent says why here), empty when there is none.
     pub notice: String,
+    /// The settings the phone shows and changes (`Command::Set`), as the window has them.
+    pub conf: Conf,
+    /// What the window's model menu lists.
+    pub models: Vec<ModelRow>,
 }
 
 #[derive(Serialize, Clone, Debug, Default, PartialEq)]
@@ -58,6 +62,67 @@ pub struct ChatRow {
     pub title: String,
     pub updated: u64,
     pub running: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub archived: bool,
+}
+
+/// Each field is a `Command::Set` key, with the values the window's own controls take.
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+pub struct Conf {
+    /// A `ModelRow` id.
+    pub model: String,
+    /// "auto", or the depth sent: the model's nearest to the one picked.
+    pub effort: String,
+    /// "auto" and the model's own depths, shallowest first, with what each does there. Empty: the model has no
+    /// thinking to set.
+    pub efforts: Vec<Depth>,
+    /// auto | always | off
+    pub web: String,
+    /// quality | balanced | cheap
+    pub search: String,
+    pub computer: bool,
+    /// manual | critical | auto
+    pub approval: String,
+    pub lessons: bool,
+    /// Whether a key is set for each provider. The keys themselves never leave the computer.
+    pub keys: Vec<KeyRow>,
+}
+
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+pub struct Depth {
+    pub id: String,
+    pub label: String,
+    pub about: String,
+    /// A caution under `about`, empty when there is none.
+    pub warn: String,
+}
+
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+pub struct KeyRow {
+    pub name: String,
+    pub set: bool,
+}
+
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+pub struct ModelRow {
+    pub id: String,
+    pub label: String,
+    /// The name in a tight spot: the phone's chip.
+    pub short: String,
+    pub about: String,
+    pub specs: String,
+    /// It reads pictures itself.
+    pub vision: bool,
+    /// Added by the user (Settings > Model), listed under theirs.
+    pub mine: bool,
+}
+
+/// A picture in a message. Its bytes come on request (`Command::Image`), so a chat full of screenshots costs
+/// nothing until one is looked at.
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+pub struct Picture {
+    pub id: String,
+    pub name: String,
 }
 
 /// The chat on screen: its newest messages, and how many older ones were left on the computer.
@@ -87,6 +152,9 @@ pub struct Msg {
     /// Names of the files it carried.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<String>,
+    /// The pictures among them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<Picture>,
     pub at: u64,
 }
 
@@ -98,7 +166,17 @@ pub enum Piece {
     Think { text: String, ms: u64 },
     /// `title` in the window's words ("Ran", "Editing"), `target` what it acted on, `kind` which icon it gets
     /// (read, write, delete, search, run, web, plan, git, note, ask, image, computer, done, other).
-    Tool { id: String, kind: String, title: String, target: String, ok: Option<bool>, summary: String },
+    /// `image`: a `Picture` id for what the step showed (a computer step's screen, `show_image`), empty for none.
+    Tool {
+        id: String,
+        kind: String,
+        title: String,
+        target: String,
+        ok: Option<bool>,
+        summary: String,
+        #[serde(skip_serializing_if = "String::is_empty")]
+        image: String,
+    },
     Notice { text: String },
 }
 
@@ -109,6 +187,9 @@ pub struct RunView {
     pub status: String,
     pub approval: Option<Approval>,
     pub question: Option<Question>,
+    /// The last reply was cut off and can be continued (`Command::Resume`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub resume: bool,
 }
 
 #[derive(Serialize, Clone, Debug, Default, PartialEq)]
@@ -141,13 +222,43 @@ pub enum Command {
     Answer { text: String },
     /// Answered here and never handed on: it is how each side knows the other is still there.
     Ping,
+    /// A `Conf` field changed on the phone.
+    Set { key: String, value: serde_json::Value },
+    Rename { id: String, title: String },
+    Archive { id: String, archived: bool },
+    #[serde(rename = "delete_chat")]
+    DeleteChat { id: String },
+    /// A question and its reply, by the id of either.
+    Delete { id: String },
+    /// A question asked again in other words: the replies after it go.
+    Edit { id: String, text: String },
+    /// The last reply, written again.
+    Retry,
+    /// The last reply, cut off, carried on.
+    Resume,
+    /// Older messages of the chat on screen.
+    More,
+    /// A `Picture`'s bytes, sent back to the phones as an `image` frame (`Remote::give`).
+    Image { id: String },
 }
 
+/// A photo or a file from the phone.
 #[derive(Deserialize, Debug, PartialEq)]
 pub struct Photo {
+    /// A photo's has no extension and is a JPEG; a file's is its own.
     pub name: String,
-    /// JPEG, base64.
+    /// Base64.
     pub data: String,
+}
+
+/// The bytes of a picture a phone asked for.
+#[derive(Debug, PartialEq)]
+pub enum Found {
+    /// A data URL's own base64, as an attachment keeps it.
+    Base64(String),
+    /// A file the window shows, read off the window's thread.
+    File(std::path::PathBuf),
+    Missing,
 }
 
 // ------------------------------------------------------------------ the server
@@ -156,9 +267,14 @@ struct Shared {
     secret: [u8; 32],
     view: watch::Sender<Arc<View>>,
     commands: mpsc::UnboundedSender<Command>,
+    // ponytail: every phone gets every picture asked for; per-phone replies if two phones ever look at once.
+    pictures: broadcast::Sender<Arc<(String, Found)>>,
     phones: Mutex<Vec<String>>,
     wake: Box<dyn Fn() + Send + Sync>,
 }
+
+/// Larger than any screenshot: a picture file past this is not sent.
+const MAX_PICTURE: u64 = 24 << 20;
 
 /// The listening link. Dropping it closes the port and every phone's connection.
 pub struct Remote {
@@ -181,7 +297,7 @@ impl Remote {
             TcpListener::from_std(listener)?
         };
         let (commands_tx, commands) = mpsc::unbounded_channel();
-        let shared = Arc::new(Shared { secret, view: watch::channel(Arc::new(View::default())).0, commands: commands_tx, phones: Mutex::new(Vec::new()), wake: Box::new(wake) });
+        let shared = Arc::new(Shared { secret, view: watch::channel(Arc::new(View::default())).0, commands: commands_tx, pictures: broadcast::channel(16).0, phones: Mutex::new(Vec::new()), wake: Box::new(wake) });
         let task = rt.spawn(accept(listener, shared.clone()));
         Ok(Remote { shared, commands, task, port })
     }
@@ -195,6 +311,11 @@ impl Remote {
             }
             changed
         });
+    }
+
+    /// Answers a `Command::Image`. A file is read by the connections, not here on the window's thread.
+    pub fn give(&self, id: String, found: Found) {
+        let _ = self.shared.pictures.send(Arc::new((id, found)));
     }
 
     /// What the phones asked for since the last call.
@@ -279,6 +400,7 @@ async fn talk(mut rd: tokio::net::tcp::OwnedReadHalf, mut wr: tokio::net::tcp::O
         }
     });
     let mut view = shared.view.subscribe();
+    let mut pictures = shared.pictures.subscribe();
     let mut sent = Sent::default();
     let mut heard = Instant::now();
     loop {
@@ -307,10 +429,36 @@ async fn talk(mut rd: tokio::net::tcp::OwnedReadHalf, mut wr: tokio::net::tcp::O
                 }
             }
             changed = view.changed() => if changed.is_err() { break },
+            picture = pictures.recv() => match picture {
+                Ok(picture) => {
+                    if !send(&mut wr, &mut keys, &picture_frame(&picture).await).await {
+                        break;
+                    }
+                }
+                // Missed while a big one was being written: the phone asks again when it still wants it.
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => break,
+            },
             _ = tokio::time::sleep_until(heard + SILENT) => break,
         }
     }
     reader.abort();
+}
+
+/// `{"t":"image","id":…,"data":<base64>}`, or `"missing":true` when there is nothing to send.
+async fn picture_frame((id, found): &(String, Found)) -> serde_json::Value {
+    let data = match found {
+        Found::Base64(data) => Some(data.clone()),
+        Found::File(path) => match tokio::fs::metadata(path).await {
+            Ok(meta) if meta.len() <= MAX_PICTURE => tokio::fs::read(path).await.ok().map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes)),
+            _ => None,
+        },
+        Found::Missing => None,
+    };
+    match data {
+        Some(data) => serde_json::json!({ "t": "image", "id": id, "data": data }),
+        None => serde_json::json!({ "t": "image", "id": id, "missing": true }),
+    }
 }
 
 /// Seals and writes one message. False when the phone has gone or stopped reading.
@@ -349,6 +497,8 @@ struct Sent {
     chats: String,
     run: String,
     top: String,
+    conf: String,
+    models: String,
 }
 
 impl Sent {
@@ -365,6 +515,8 @@ impl Sent {
         changed("chats", json!(view.chats), &mut self.chats);
         changed("run", json!(view.run), &mut self.run);
         changed("top", json!({ "pc": view.pc, "model": view.model, "notice": view.notice }), &mut self.top);
+        changed("conf", json!(view.conf), &mut self.conf);
+        changed("models", json!(view.models), &mut self.models);
 
         let chat = &view.chat;
         let fresh = self.chat.as_deref() != Some(chat.id.as_str());
@@ -538,6 +690,11 @@ mod tests {
         assert_eq!(read(r#"{"t":"send","text":"hi"}"#), Command::Send { text: "hi".into(), photos: vec![] });
         assert_eq!(read(r#"{"t":"allow","allow":true}"#), Command::Allow { allow: true });
         assert_eq!(read(r#"{"t":"open","id":"x"}"#), Command::Open { id: "x".into() });
+        assert_eq!(read(r#"{"t":"set","key":"effort","value":"high"}"#), Command::Set { key: "effort".into(), value: serde_json::json!("high") });
+        assert_eq!(read(r#"{"t":"delete_chat","id":"c"}"#), Command::DeleteChat { id: "c".into() });
+        assert_eq!(read(r#"{"t":"archive","id":"c","archived":true}"#), Command::Archive { id: "c".into(), archived: true });
+        assert_eq!(read(r#"{"t":"edit","id":"m","text":"again"}"#), Command::Edit { id: "m".into(), text: "again".into() });
+        assert_eq!(read(r#"{"t":"more"}"#), Command::More);
         assert!(serde_json::from_str::<Command>(r#"{"t":"teleport"}"#).is_err(), "unknown: skipped by `talk`, not fatal");
     }
 
@@ -570,17 +727,38 @@ mod tests {
             Some((serde_json::from_slice(&state).ok()?, stream, keys))
         }
 
-        rt.block_on(async {
+        let (mut stream, mut keys) = rt.block_on(async {
             assert!(phone(port, new_secret()).await.is_none(), "a phone with another secret sees nothing");
             let (state, mut stream, mut keys) = phone(port, secret).await.expect("the paired phone gets the state");
             assert_eq!(state["t"], "state");
             assert_eq!(state["top"]["pc"], "PC");
             assert_eq!(state["chat"]["id"], "c1");
+            assert!(state.get("conf").is_some() && state.get("models").is_some());
             write_frame(&mut stream, &keys.seal(br#"{"t":"send","text":"from the phone"}"#)).await.unwrap();
+            write_frame(&mut stream, &keys.seal(br#"{"t":"image","id":"m1\u001fa0"}"#)).await.unwrap();
             tokio::time::sleep(Duration::from_millis(200)).await;
+            (stream, keys)
         });
         assert_eq!(remote.phones(), vec!["Test iPhone".to_string()]);
-        assert_eq!(remote.commands(), vec![Command::Send { text: "from the phone".into(), photos: vec![] }]);
+        assert_eq!(remote.commands(), vec![Command::Send { text: "from the phone".into(), photos: vec![] }, Command::Image { id: "m1\u{1f}a0".into() }]);
+
+        // The picture asked for comes back on its own frame, and a file is read by the connection.
+        let file = std::env::temp_dir().join(format!("apim-remote-test-{}.png", std::process::id()));
+        std::fs::write(&file, b"PNG!").unwrap();
+        remote.give("m1\u{1f}a0".into(), Found::Base64("QUJD".into()));
+        remote.give("m1\u{1f}t9".into(), Found::File(file.clone()));
+        remote.give("gone".into(), Found::Missing);
+        async fn next(stream: &mut TcpStream, keys: &mut Keys) -> serde_json::Value {
+            let frame = tokio::time::timeout(Duration::from_secs(5), read_frame(stream, MAX_FRAME)).await.unwrap().unwrap();
+            serde_json::from_slice(&keys.open(&frame).unwrap()).unwrap()
+        }
+        rt.block_on(async {
+            let first = next(&mut stream, &mut keys).await;
+            assert_eq!((first["t"].as_str(), first["id"].as_str(), first["data"].as_str()), (Some("image"), Some("m1\u{1f}a0"), Some("QUJD")));
+            assert_eq!(next(&mut stream, &mut keys).await["data"], "UE5HIQ==");
+            assert_eq!(next(&mut stream, &mut keys).await["missing"], true);
+        });
+        let _ = std::fs::remove_file(file);
     }
 }
 

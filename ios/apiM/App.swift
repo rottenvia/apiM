@@ -2,14 +2,23 @@ import SwiftUI
 
 @main
 struct ApiMApp: App {
-    @State private var remote = Remote()
+    @State private var remote: Remote
+    @State private var screen = Screen()
+    @AppStorage("appearance") private var appearance = 0
     @Environment(\.scenePhase) private var scene
+
+    init() {
+        Typeface.registerDefaults()
+        _remote = State(initialValue: Remote())
+    }
 
     var body: some Scene {
         WindowGroup {
             Root()
                 .environment(remote)
+                .environment(screen)
                 .tint(Palette.accent)
+                .preferredColorScheme(appearance == 1 ? .light : appearance == 2 ? .dark : nil)
                 // The Camera app opens `apim://pair?...` straight into here.
                 .onOpenURL { url in remote.pair(url.absoluteString) }
                 .onChange(of: scene) { _, now in

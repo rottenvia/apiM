@@ -29,6 +29,12 @@ final class WireTests: XCTestCase {
 
         var huge = Data([0x7F, 0xFF, 0xFF, 0xFF])
         XCTAssertNil(Frames.take(from: &huge), "a length no phone message has means the stream is not ours")
+
+        // A buffer that is itself a slice (its indices do not start at 0) reads the same.
+        let both = Data([0xAA]) + a + b
+        var slice = both[1...]
+        XCTAssertEqual(Frames.take(from: &slice), [Data("hello".utf8), Data(repeating: 9, count: 70_000)])
+        XCTAssertTrue(slice.isEmpty)
     }
 
     func testThePairingLinkReads() throws {

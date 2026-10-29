@@ -38,6 +38,9 @@ pub struct State {
     looked: Option<(Instant, Vec<String>)>,
     /// The phones connected at the last frame: one that joins is said above the message box.
     phones: Vec<String>,
+    /// How many messages from the end the phone has of each chat: `SHOWN`, and more each time it scrolls to the top
+    /// and asks (`Command::More`). Kept for the chat on screen only.
+    window: (String, usize),
 }
 
 /// `remote.json` in the data folder: whether the link is on, and the secret phones were paired with.
@@ -119,6 +122,9 @@ pub fn tick(app: &mut App) {
         // something else to wake the window.
         Some(since) if since < EVERY => app.ctx.request_repaint_after(EVERY - since),
         _ => {
+            if app.remote.window.0 != app.conv.id {
+                app.remote.window = (app.conv.id.clone(), SHOWN);
+            }
             let view = view(app);
             if let Some(link) = &app.remote.link {
                 link.publish(view);
@@ -157,8 +163,7 @@ fn act(app: &mut App, command: Command) {
             let _ = std::fs::create_dir_all(&folder);
             for (i, photo) in photos.iter().enumerate() {
                 let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(photo.data.trim()) else { continue };
-                let stem: String = photo.name.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').take(40).collect();
-                let path = folder.join(format!("{}-{i}-{}.jpg", store::now_ms(), if stem.is_empty() { "photo" } else { &stem }));
+                let path = folder.join(format!("{}-{i}-{}", store::now_ms(), file_name(&photo.name)));
                 if std::fs::write(&path, bytes).is_ok() {
                     attachments::add(app, path);
                 }
@@ -166,7 +171,99 @@ fn act(app: &mut App, command: Command) {
             app.remote.held = Some(text);
         }
         Command::Ping => {}
+        Command::Set { key, value } => set(app, &key, &value),
+        Command::Rename { id, title } => {
+            if let Err(why) = app.rename_chat(&id, &title) {
+                app.toast(why);
+            }
+        }
+        Command::Archive { id, archived } => app.archive_chat(&id, archived),
+        Command::DeleteChat { id } => app.delete_chats(&[id]),
+        Command::Delete { id } => app.delete_exchange(&id),
+        Command::Edit { id, text } => {
+            let ctx = app.ctx.clone();
+            app.resend_edited(&ctx, &id, text);
+        }
+        Command::Retry => {
+            let ctx = app.ctx.clone();
+            app.retry(&ctx);
+        }
+        Command::Resume => {
+            let ctx = app.ctx.clone();
+            if let Err(why) = app.resume(&ctx, String::new()) {
+                app.toast(why);
+            }
+        }
+        Command::More => {
+            let window = &mut app.remote.window;
+            if window.0 == app.conv.id {
+                window.1 += SHOWN;
+            }
+        }
+        Command::Image { id } => {
+            let found = picture(app, &id);
+            if let Some(link) = &app.remote.link {
+                link.give(id, found);
+            }
+        }
     }
+}
+
+/// A phone file's name as it is kept here: its own extension, and a photo's (which has none) `.jpg`.
+fn file_name(name: &str) -> String {
+    let clean: String = name.chars().filter(|c| c.is_ascii_alphanumeric() || "-_.".contains(*c)).take(60).collect();
+    let clean = clean.trim_matches('.');
+    match clean.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() => clean.to_string(),
+        _ => format!("{}.jpg", if clean.is_empty() { "photo" } else { clean }),
+    }
+}
+
+/// A setting changed on the phone, checked as the window's own control would have it. Anything else is ignored.
+fn set(app: &mut App, key: &str, value: &serde_json::Value) {
+    let s = &mut app.settings;
+    let (text, on) = (value.as_str().unwrap_or_default(), value.as_bool());
+    match (key, on) {
+        ("model", _) if crate::models::all(&s.custom_models).iter().any(|m| m.id == text) => s.model = text.into(),
+        ("effort", _) if text == "auto" || crate::models::EFFORT_ORDER.contains(&text) => s.effort = text.into(),
+        ("web", _) if ["auto", "always", "off"].contains(&text) => s.set_web_mode(text),
+        ("search", _) if ["quality", "balanced", "cheap"].contains(&text) => s.search_profile = text.into(),
+        ("approval", _) if ["manual", "critical", "auto"].contains(&text) => {
+            s.approval = match text {
+                "auto" => store::Approval::Auto,
+                "critical" => store::Approval::Critical,
+                _ => store::Approval::Manual,
+            }
+        }
+        ("computer", Some(on)) => s.computer_use = on,
+        ("lessons", Some(on)) => s.lessons_enabled = on,
+        _ => return,
+    }
+    s.save();
+}
+
+/// Where a `Picture` id points: an attachment's data URL, or the file a step showed.
+fn picture(app: &App, id: &str) -> wire::Found {
+    let Some((message, which)) = id.split_once(PICTURE) else { return wire::Found::Missing };
+    let Some(m) = app.conv.messages.iter().find(|m| m.id == message) else { return wire::Found::Missing };
+    if let Some(index) = which.strip_prefix('a').and_then(|i| i.parse::<usize>().ok()) {
+        let data = m.attachments.get(index).filter(|a| a.kind == "image").and_then(|a| a.data_url.as_deref()).and_then(|url| url.split_once(','));
+        return data.map_or(wire::Found::Missing, |(_, b64)| wire::Found::Base64(b64.to_string()));
+    }
+    let tool = which.strip_prefix('t').and_then(|tool| m.parts.iter().find_map(|part| if let Part::Tool(t) = part { (t.id == tool).then_some(t) } else { None }));
+    match tool.and_then(|t| t.image.as_ref()).filter(|_| tool.is_some_and(shows_picture)) {
+        Some(path) if path.is_absolute() => wire::Found::File(path.clone()),
+        Some(path) => wire::Found::File(app.conv.workspace().join(path)),
+        None => wire::Found::Missing,
+    }
+}
+
+/// Between a `Picture` id's message and which picture of it: a character no id holds.
+const PICTURE: char = '\u{1f}';
+
+/// The pictures the window shows under a step: a computer step's screen, and `show_image`'s once it worked.
+fn shows_picture(t: &store::ToolEvent) -> bool {
+    t.image.is_some() && (t.name.starts_with("computer_") || (t.ok == Some(true) && t.name == "show_image"))
 }
 
 /// Sends the phone's words as if typed here, through everything the Send button does: a command runs, a reply
@@ -211,7 +308,8 @@ fn message(m: &store::Message) -> wire::Msg {
                 Part::Thinking { text, ms } => wire::Piece::Think { text: tail(text, THOUGHT), ms: *ms },
                 Part::Tool(t) => {
                     let (title, target, kind) = bubble::step_words(&t.name, &t.args, t.ok.is_some());
-                    wire::Piece::Tool { id: t.id.clone(), kind: kind.into(), title, target: cut(&target, 300), ok: t.ok, summary: cut(&t.summary, 300) }
+                    let image = if shows_picture(t) { format!("{}{PICTURE}t{}", m.id, t.id) } else { String::new() };
+                    wire::Piece::Tool { id: t.id.clone(), kind: kind.into(), title, target: cut(&target, 300), ok: t.ok, summary: cut(&t.summary, 300), image }
                 }
                 Part::Notice(text) => wire::Piece::Notice { text: text.clone() },
             })
@@ -226,13 +324,18 @@ fn message(m: &store::Message) -> wire::Msg {
         incomplete: m.incomplete,
         note: m.note,
         files: m.attachments.iter().map(|a| a.name.clone()).collect(),
+        images: m.attachments.iter().enumerate().filter(|(_, a)| a.kind == "image" && a.data_url.is_some()).map(|(i, a)| wire::Picture { id: format!("{}{PICTURE}a{i}", m.id), name: a.name.clone() }).collect(),
         at: m.created_at,
     }
 }
 
 fn view(app: &App) -> wire::View {
     let run = app.runs.iter().find(|run| run.conv_id == app.conv.id);
-    let skip = app.conv.messages.len().saturating_sub(SHOWN);
+    let skip = app.conv.messages.len().saturating_sub(app.remote.window.1.max(SHOWN));
+    // "This reply stopped before it finished": the window offers Resume when anything of it arrived.
+    let last = app.conv.messages.last().filter(|m| m.role == Role::Assistant && m.incomplete);
+    let resume = run.is_none() && last.is_some_and(|m| m.parts.iter().any(|part| !matches!(part, Part::Notice(_))));
+    let row = |c: &store::ChatMeta| wire::ChatRow { id: c.id.clone(), title: c.title.clone(), updated: c.updated_at, running: app.runs.iter().any(|run| run.conv_id == c.id), archived: c.archived };
     let notice = match (&app.toast, &app.slash.notice) {
         (Some((text, at)), _) if at.elapsed() < TOAST => text.clone(),
         (_, Some(notice)) if notice.error && notice.since.elapsed() < TOAST => notice.text.clone(),
@@ -241,15 +344,80 @@ fn view(app: &App) -> wire::View {
     wire::View {
         pc: pc_name(),
         model: crate::models::resolve(&app.settings.model, &app.settings.custom_models).label,
-        chats: app.chats.iter().filter(|c| !c.archived).take(300).map(|c| wire::ChatRow { id: c.id.clone(), title: c.title.clone(), updated: c.updated_at, running: app.runs.iter().any(|run| run.conv_id == c.id) }).collect(),
+        chats: app.chats.iter().filter(|c| !c.archived).take(300).chain(app.chats.iter().filter(|c| c.archived).take(100)).map(row).collect(),
         chat: wire::ChatView { id: app.conv.id.clone(), title: app.conv.title.clone(), earlier: skip, messages: app.conv.messages[skip..].iter().map(message).collect() },
         run: wire::RunView {
             running: run.is_some(),
             status: run.map_or("", |run| run.status).to_string(),
             approval: run.and_then(|run| run.approval.as_ref()).map(|a| wire::Approval { command: a.command.clone(), reason: a.reason.clone() }),
             question: run.and_then(|run| run.question.as_ref()).map(|q| wire::Question { question: q.question.clone(), options: q.options.clone(), context: q.context.clone() }),
+            resume,
         },
         notice,
+        conf: conf(app),
+        models: models(app),
+    }
+}
+
+/// The model menu's rows, as the window lists them: its own (but those taken out of it), then the user's.
+fn models(app: &App) -> Vec<wire::ModelRow> {
+    let s = &app.settings;
+    let own = crate::models::MODELS.iter().filter(|m| s.model == m.id || !s.hidden_models.contains(&m.id)).map(|m| (m.clone(), false));
+    let mine = s.custom_models.iter().map(|c| (c.to_info(), true));
+    own.chain(mine)
+        .map(|(m, mine)| wire::ModelRow {
+            vision: m.vision == crate::models::Vision::Native,
+            specs: if mine { format!("{} · {}", m.provider.name(), m.specs) } else { m.specs.clone() },
+            id: m.id,
+            label: m.label,
+            short: m.short_label,
+            about: m.description,
+            mine,
+        })
+        .collect()
+}
+
+fn conf(app: &App) -> wire::Conf {
+    let s = &app.settings;
+    let levels = crate::models::effort_levels(&s.model, &s.custom_models);
+    let claude = crate::models::resolve(&s.model, &s.custom_models).provider == crate::models::ProviderId::Anthropic;
+    let efforts = if levels.is_empty() {
+        Vec::new()
+    } else {
+        super::composer::efforts_for(&s.model)
+            .into_iter()
+            .filter(|e| e.0 == "auto" || levels.contains(&e.0))
+            .map(|(id, label, about, warn)| wire::Depth {
+                // Claude always thinks: its Low is the least it does, not a light extra (as the window's effort panel says).
+                about: if claude && id == "low" { "Claude always thinks a little; Low keeps it short.".into() } else { about.into() },
+                id: id.into(),
+                label: label.into(),
+                warn: warn.into(),
+            })
+            .collect()
+    };
+    let key = |name: &str, set: bool| wire::KeyRow { name: name.into(), set };
+    wire::Conf {
+        model: s.model.clone(),
+        effort: if s.effort == "auto" { "auto".into() } else { crate::models::fit_effort(&levels, &s.effort).into() },
+        efforts,
+        web: s.web_mode().into(),
+        search: s.search_profile.clone(),
+        computer: s.computer_use,
+        approval: match s.approval {
+            store::Approval::Manual => "manual",
+            store::Approval::Critical => "critical",
+            store::Approval::Auto => "auto",
+        }
+        .into(),
+        lessons: s.lessons_enabled,
+        keys: vec![
+            key("Anthropic", !s.anthropic().is_empty()),
+            key("OpenRouter", !s.openrouter().is_empty()),
+            key("DeepSeek", !s.deepseek().is_empty()),
+            key("Tavily", !s.tavily().is_empty()),
+            key("Exa", !s.exa().is_empty()),
+        ],
     }
 }
 
