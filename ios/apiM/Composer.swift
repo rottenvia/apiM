@@ -329,8 +329,10 @@ private struct ModelChip: View {
             Haptics.tap()
             screen.models = true
         } label: {
+            let name = remote.modelShort.isEmpty ? "Model" : remote.modelShort
             HStack(spacing: 4) {
-                Text(remote.modelShort.isEmpty ? "Model" : remote.modelShort)
+                // Its own width, not a share of the row's: a long custom name is cut here instead.
+                Text(name.count > 16 ? String(name.prefix(15)) + "…" : name)
                     .lineLimit(1)
                     .contentTransition(.opacity)
                 Image(systemName: "chevron.down")
@@ -339,7 +341,8 @@ private struct ModelChip: View {
             .font(.system(size: 13, weight: .medium))
             .foregroundStyle(Palette.text2)
             .padding(.horizontal, 10)
-            .frame(maxWidth: 150, minHeight: 32)
+            .frame(minHeight: 32)
+            .fixedSize()
             .background(Palette.hover.opacity(0.55), in: Capsule())
         }
         .buttonStyle(Press())

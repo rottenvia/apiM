@@ -29,6 +29,9 @@ struct ChatScreen: View {
     @Namespace private var zoom
     /// 0 closed, 1 open; follows the finger while the drawer is dragged.
     @State private var drawer: CGFloat = 0
+    /// Still on screen while it slides away; taken out once it is gone, so a closed drawer draws nothing (its rows'
+    /// dots for running chats would otherwise animate unseen, and the app would never be idle).
+    @State private var drawerShown = false
     @State private var title = ""
     @AppStorage("textSize") private var textSize = 1
 
@@ -53,19 +56,28 @@ struct ChatScreen: View {
                 .background(Palette.bg.ignoresSafeArea())
                 .offset(x: drawer * width * 0.18)
 
-                if drawer > 0 {
+                if drawerShown {
                     Color.black.opacity(0.36 * drawer)
                         .ignoresSafeArea()
                         .onTapGesture { setDrawer(false) }
+                        .transition(.identity)
                     ChatDrawer(close: { setDrawer(false) })
                         .frame(width: width)
-                        .offset(x: (drawer - 1) * width)
-                        .shadow(color: .black.opacity(0.18 * drawer), radius: 18, x: 4)
+                        // The shadow is the panel's own, behind it: on the drawer itself it fell on every row.
+                        .background {
+                            Rectangle()
+                                .fill(Palette.bg2)
+                                .shadow(color: .black.opacity(0.18 * drawer), radius: 18, x: 4)
+                                .ignoresSafeArea()
+                        }
+                        .offset(x: (drawer - 1) * (width + 24))
+                        .transition(.identity)
                 }
             }
             .background {
                 DrawerPan(open: drawer > 0.5, width: width, moved: { progress in
                     if drawer == 0 { hideKeyboard() }
+                    drawerShown = true
                     drawer = progress
                 }, ended: { open in
                     setDrawer(open)
@@ -112,9 +124,14 @@ struct ChatScreen: View {
     }
 
     private func setDrawer(_ open: Bool) {
-        if open { hideKeyboard() }
+        hideKeyboard()
         if open != (drawer > 0.5) { Haptics.tap() }
-        withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) { drawer = open ? 1 : 0 }
+        if open { drawerShown = true }
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+            drawer = open ? 1 : 0
+        } completion: {
+            if drawer == 0 { drawerShown = false }
+        }
     }
 
     private func hideKeyboard() {
@@ -447,8 +464,13 @@ private struct Transcript: View {
         .scrollPosition($position)
         .defaultScrollAnchor(.bottom, for: .initialOffset)
         .scrollDismissesKeyboard(.interactively)
-        .onScrollPhaseChange { _, phase in
+        .onScrollPhaseChange { _, phase, context in
             touching = phase == .tracking || phase == .interacting || phase == .decelerating
+            // Come to rest: follow from here on only if the reader left it at the end.
+            if phase == .idle {
+                let atEnd = context.geometry.contentSize.height - context.geometry.visibleRect.maxY < 90
+                if atEnd != follow { withAnimation(.easeInOut(duration: 0.2)) { follow = atEnd } }
+            }
         }
         .onScrollGeometryChange(for: Bool.self) { geometry in
             geometry.contentSize.height - geometry.visibleRect.maxY < 90
@@ -459,10 +481,12 @@ private struct Transcript: View {
                 withAnimation(.easeInOut(duration: 0.2)) { follow = atEnd }
             }
         }
-        .onScrollGeometryChange(for: CGSize.self) { geometry in
-            CGSize(width: geometry.containerSize.height, height: geometry.contentSize.height)
-        } action: { _, _ in
-            if follow && !touching { position.scrollTo(edge: .bottom) }
+        .onScrollGeometryChange(for: CGFloat.self) { geometry in
+            geometry.contentSize.height - geometry.containerSize.height
+        } action: { old, new in
+            // Only when the end moved further down (a reply grew, a card came, the keyboard took room): a lazy stack's
+            // estimates also shrink as rows are laid out, and answering those would chase its own layout.
+            if follow && !touching && new > old + 0.5 { position.scrollTo(edge: .bottom) }
         }
         .onChange(of: chat.earlier) { _, _ in
             if let keep {

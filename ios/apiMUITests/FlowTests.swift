@@ -11,6 +11,13 @@ final class FlowTests: XCTestCase {
         continueAfterFailure = false
     }
 
+    /// A failed test leaves the screen it stopped on.
+    override func tearDown() {
+        if let run = testRun, run.failureCount > 0 {
+            shot("x-" + name.split(separator: " ").last!.dropLast())
+        }
+    }
+
     private func launch(paired: Bool, link: String = FlowTests.link) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = ["-reset"]
@@ -49,6 +56,14 @@ final class FlowTests: XCTestCase {
 
     private func element(_ app: XCUIApplication, _ identifier: String) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: identifier).firstMatch
+    }
+
+    /// Scrolls until it is on screen: a list draws only the rows near what it shows.
+    private func reach(_ app: XCUIApplication, _ target: XCUIElement, down: Bool = false, fast: Bool = false, tries: Int = 6) {
+        for _ in 0..<tries where !(target.exists && target.isHittable) {
+            let velocity: XCUIGestureVelocity = fast ? .fast : .default
+            if down { app.swipeDown(velocity: velocity) } else { app.swipeUp(velocity: velocity) }
+        }
     }
 
     private func see(_ app: XCUIApplication, _ fragment: String, timeout: TimeInterval = 20, file: StaticString = #filePath, line: UInt = #line) {
@@ -240,15 +255,25 @@ final class FlowTests: XCTestCase {
         chats(app)
         let row = button(app, "Database migration, step by step")
         XCTAssertTrue(row.waitForExistence(timeout: 5))
+        let tapped = Date()
         row.tap()
         see(app, "Step 119 of the migration")
+        // Read in the CI log: how long a chat of 240 messages takes from the tap to its end on screen, the round
+        // trip to the test server included.
+        print("apim-timing: long chat shown \(Int(Date().timeIntervalSince(tapped) * 1000)) ms after the tap")
         shot("20-long-chat")
-        app.swipeDown(velocity: .fast)
-        app.swipeDown(velocity: .fast)
+
+        // Opened again, it is on screen from what the phone kept, before the computer answers.
+        chats(app)
+        button(app, "Fix the login redirect loop").tap()
+        see(app, "The loop comes from")
+        chats(app)
+        let again = Date()
+        button(app, "Database migration, step by step").tap()
+        see(app, "Step 119 of the migration")
+        print("apim-timing: long chat shown again \(Int(Date().timeIntervalSince(again) * 1000)) ms after the tap")
         let earlier = element(app, "earlier")
-        for _ in 0..<12 where !earlier.isHittable {
-            app.swipeDown(velocity: .fast)
-        }
+        reach(app, earlier, down: true, fast: true, tries: 16)
         XCTAssertTrue(earlier.waitForExistence(timeout: 5))
         see(app, "160 earlier messages")
         earlier.tap()
@@ -265,6 +290,7 @@ final class FlowTests: XCTestCase {
         XCTAssertTrue(model.waitForExistence(timeout: 10))
         model.tap()
         see(app, "DeepSeek V4 Flash")
+        reach(app, text(app, "Your models"))
         see(app, "Your models")
         shot("22-models")
         button(app, "DeepSeek V4 Flash").tap()
@@ -302,15 +328,17 @@ final class FlowTests: XCTestCase {
         let app = launch(paired: true)
         see(app, "MOCK-PC")
         app.buttons["connection"].tap()
-        XCTAssertTrue(app.buttons["Unpair this phone"].waitForExistence(timeout: 5) || text(app, "Web search").waitForExistence(timeout: 5))
-        see(app, "Running commands")
+        see(app, "Web search")
         shot("11-settings")
-        button(app, "Frugal").tap()
-        app.swipeUp()
+        let frugal = button(app, "Frugal")
+        reach(app, frugal)
+        frugal.tap()
+        reach(app, text(app, "Running commands"))
+        see(app, "Running commands")
+        reach(app, text(app, "API keys"))
         see(app, "API keys")
         shot("26-settings-more")
-        app.swipeUp()
-        app.swipeUp()
+        reach(app, app.buttons["Unpair this phone"])
         XCTAssertTrue(app.buttons["Unpair this phone"].waitForExistence(timeout: 5))
         see(app, "127.0.0.1:47199")
         shot("27-settings-phone")

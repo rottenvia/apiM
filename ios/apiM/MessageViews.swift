@@ -70,11 +70,15 @@ struct UserBubble: View {
                         .padding(.horizontal, 15)
                         .padding(.vertical, 10)
                         .background(Palette.userBubble, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                        // Held, the bubble lifts on its own: with the pictures it lifted the empty room beside them too.
+                        .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 20, style: .continuous))
+                        .contextMenu {
+                            if !pending { menu }
+                        }
                 }
             }
-            .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 20, style: .continuous))
             .contextMenu {
-                if !pending { menu }
+                if message.text.isEmpty && !pending { menu }
             }
         }
         .opacity(pending ? 0.55 : 1)
