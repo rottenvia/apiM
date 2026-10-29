@@ -560,6 +560,7 @@ struct Dots: View {
             }
             .frame(height: size * 2)
         }
+        .accessibilityHidden(true)
     }
 }
 

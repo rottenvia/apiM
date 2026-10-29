@@ -83,33 +83,27 @@ enum Haptics {
     }
 }
 
-/// The mark from the desktop's icon: three dots, the middle one mid-bounce.
+/// The mark from the desktop's icon: three dots, the middle one mid-bounce. Bouncing, the middle one and the outer
+/// two take turns; the timeline stops when it stops, so a still mark costs nothing.
 struct Mark: View {
     var size: CGFloat = 44
     var bouncing = false
-    @State private var phase = false
 
     var body: some View {
-        HStack(spacing: size * 0.08) {
-            ForEach(0..<3) { i in
-                Circle()
-                    .fill(Palette.accent)
-                    .frame(width: size * 0.26, height: size * 0.26)
-                    .offset(y: lift(i))
+        TimelineView(.animation(paused: !bouncing)) { context in
+            // 0 to 1 and back every 1.1 s, eased at both ends as the spring it replaces was.
+            let wave = bouncing ? (1 - cos(context.date.timeIntervalSinceReferenceDate * .pi / 0.55)) / 2 : 1
+            HStack(spacing: size * 0.08) {
+                ForEach(0..<3) { i in
+                    Circle()
+                        .fill(Palette.accent)
+                        .frame(width: size * 0.26, height: size * 0.26)
+                        .offset(y: -size * 0.09 * (i == 1 ? wave : 1 - wave))
+                }
             }
         }
         .frame(width: size, height: size * 0.5)
-        .onAppear {
-            guard bouncing else { return }
-            withAnimation(.easeInOut(duration: 0.55).repeatForever(autoreverses: true)) { phase = true }
-        }
-    }
-
-    private func lift(_ i: Int) -> CGFloat {
-        if bouncing {
-            return (phase == (i == 1)) ? -size * 0.09 : 0
-        }
-        return i == 1 ? -size * 0.09 : 0
+        .accessibilityHidden(true)
     }
 }
 
@@ -172,6 +166,8 @@ struct Skeleton: View {
                 }
                 .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
         }
+        // Redrawn every frame: out of the accessibility tree, which would be rebuilt as often (and UI tests wait on it).
+        .accessibilityHidden(true)
     }
 }
 
@@ -197,6 +193,8 @@ struct ShimmerText: View {
                         .init(color: Palette.muted, location: 1),
                     ], startPoint: .leading, endPoint: .trailing))
             }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(text)
         } else {
             Text(text)
                 .font(font)
