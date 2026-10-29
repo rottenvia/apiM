@@ -111,6 +111,7 @@ fn options_from_args(args: &Value) -> InspectBinaryOptions {
         },
         allow_full_fallback: args["allow_full_fallback"] == true,
         raw: RawImage { image_base: js_str(args, "image_base"), arch: js_str(args, "arch") },
+        seeds: strings_of(&args["seed_addresses"]),
     }
 }
 
@@ -165,6 +166,19 @@ mod tests {
     use crate::binary::types::test_dir;
     use serde_json::json;
 
+    /// The tool on a real file with the real decompilers, called as the model calls it: `APIM_REAL_ROOT=<workspace>
+    /// APIM_REAL_CALL='{"path":"uploads/x.bin","deep":true,…}' cargo test real_inspection -- --ignored --nocapture`,
+    /// with APIM_GHIDRA_HOME and the like set for this process only.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn real_inspection() {
+        let (Ok(root), Ok(call)) = (std::env::var("APIM_REAL_ROOT"), std::env::var("APIM_REAL_CALL")) else { return };
+        let started = std::time::Instant::now();
+        let out = inspect_binary(Path::new(&root), &serde_json::from_str(&call).unwrap()).await;
+        println!("{}
+[{:.0} s]", out.text, started.elapsed().as_secs_f32());
+    }
+
     #[test]
     fn arguments_map_to_the_webs_defaults() {
         let o = options_from_args(&json!({ "path": "a.exe" }));
@@ -172,6 +186,7 @@ mod tests {
         assert_eq!((l.summary, l.strings, l.entropy, l.carve), (true, false, false, false));
         assert_eq!((o.artifacts, o.dependencies, o.run_capa, o.deep, o.strings.include_strings), (Some(true), Some(false), Some(false), Some(false), Some(true)));
         assert_eq!((o.analyzers.preset.as_deref(), o.focused_only), (Some("fast"), Some(true)));
+        assert_eq!(options_from_args(&json!({ "path": "a.bin", "seed_addresses": ["0x1400112e0"] })).seeds, ["0x1400112e0"]);
         let all = options_from_args(&json!({ "path": "a.exe", "analyses": ["ALL"], "analyzer_preset": "full", "focus_terms": ["x", 5], "max_strings": "20", "string_filter": "http" }));
         assert_eq!((all.dependencies, all.run_capa, all.deep, all.strings.max_strings), (Some(true), Some(true), Some(true), Some(20.0)));
         assert_eq!((all.focus_terms, all.analyzers.preset.as_deref(), all.strings.string_filter.as_deref()), (vec!["x".to_string(), "5".to_string()], Some("full"), Some("http")));

@@ -50,6 +50,12 @@ public class ApimAnalysisOptions extends GhidraScript {
         + " disable_analyzers/enable_analyzers. What actually ran is in analyzers-applied.txt.");
     }
 
+    // The caller's seed_addresses, one per line in seeds.txt beside the output. Code that nothing flows into - the
+    // functions before the first call in an image that starts mid-function, or one reached only through a pointer - is
+    // never disassembled. As entry points, "Disassemble Entry Points" makes each one a function before the other
+    // analyzers run, so what it calls is found too. ApimDecompile then makes sure each is a function and decompiles it.
+    long seedsMarked = listDir == null ? 0 : markSeeds(new File(listDir, "seeds.txt"));
+
     if (args.length < 1 || args[0] == null || args[0].isBlank()) {
       return; // no overrides requested - leave Ghidra defaults intact
     }
@@ -86,8 +92,26 @@ public class ApimAnalysisOptions extends GhidraScript {
           ? "\n# Raw load (no header): entry points seeded at " + seeded + " executable block start(s). Nothing in"
             + " a headerless image points at code, so those seeds and whatever the two lines above turn on are all"
             + " the disassembler has to start from. Analyzers named on neither line keep their preset value."
-          : "\n# Loaded through a file format loader; no entry points were seeded."));
+          : "\n# Loaded through a file format loader; no block starts were seeded.")
+        + "\n# seed_addresses marked as entry points: " + seedsMarked);
     }
+  }
+
+  /// Each in-memory address of the seeds file as an entry point; how many were marked. ApimDecompile reports the rest.
+  private long markSeeds(File file) throws Exception {
+    if (!file.isFile()) return 0;
+    long marked = 0;
+    for (String line : Files.readAllLines(file.toPath(), StandardCharsets.UTF_8)) {
+      try {
+        ghidra.program.model.address.Address at = toAddr(Long.parseUnsignedLong(line.trim().replaceFirst("^0[xX]", ""), 16));
+        if (!currentProgram.getMemory().contains(at)) continue;
+        currentProgram.getSymbolTable().addExternalEntryPoint(at);
+        marked++;
+      } catch (Exception ignored) {
+        // Not an address, or not one the symbol table takes: left to ApimDecompile, which says which and why.
+      }
+    }
+    return marked;
   }
 
   /// An override list as it was asked for, for the header of the applied list.

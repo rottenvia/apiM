@@ -94,6 +94,7 @@ public class ApimDecompile extends GhidraScript {
     private long coveredBytes = 0;
     private String firstFunctionAt = "-";
     private String lastFunctionAt = "-";
+    private String seedReport = "(none asked)";
     private BufferedWriter indexWriter;
     private BufferedWriter focusIndexWriter;
     private BufferedWriter focusCodeWriter;
@@ -585,6 +586,50 @@ public class ApimDecompile extends GhidraScript {
         return focused;
     }
 
+    /**
+     * The caller's seed_addresses (seeds.txt beside the output, already marked as entry points by
+     * ApimAnalysisOptions). Each becomes a function here if analysis did not make one, and joins the focused set, so it
+     * is decompiled in either mode although no focus term names it. Runs before the work list and the coverage count,
+     * so both include what it creates.
+     */
+    private void addSeeds(Map<Function, Set<String>> focused) throws Exception {
+        File file = new File(outputDir, "seeds.txt");
+        if (!file.isFile()) return;
+        int asked = 0;
+        int created = 0;
+        List<String> missed = new ArrayList<>();
+        for (String line : java.nio.file.Files.readAllLines(file.toPath(), StandardCharsets.UTF_8)) {
+            String text = line.trim();
+            if (text.isEmpty()) continue;
+            asked++;
+            Address at;
+            try {
+                at = toAddr(Long.parseUnsignedLong(text.replaceFirst("^0[xX]", ""), 16));
+            } catch (Exception error) {
+                missed.add(text + " (not a hex address)");
+                continue;
+            }
+            // Said, not skipped: a seed outside every block means the image_base is wrong, not that there is no code.
+            if (!currentProgram.getMemory().contains(at)) {
+                missed.add(text + " (outside every loaded block)");
+                continue;
+            }
+            Function function = getFunctionAt(at);
+            if (function == null) {
+                if (getInstructionAt(at) == null) disassemble(at);
+                function = createFunction(at, null);
+                if (function == null) {
+                    missed.add(text + " (no function could be made there: data, or the middle of an instruction)");
+                    continue;
+                }
+                created++;
+            }
+            focused.computeIfAbsent(function, ignored -> new LinkedHashSet<>()).add("seed " + text);
+        }
+        seedReport = asked + " asked, " + (asked - missed.size()) + " selected for decompilation, " + created
+            + " of them made into functions by this script" + (missed.isEmpty() ? "" : "; not used: " + String.join(", ", missed));
+    }
+
     private static final int DISASM_INSN_CAP = 4000;
 
     /**
@@ -672,10 +717,13 @@ public class ApimDecompile extends GhidraScript {
                     " first - a wrong base makes every reference resolve to nothing. Otherwise the flow was cut by" +
                     " calls the disassembler could not follow: analyzer_preset \"full\" (which keeps Decompiler Switch" +
                     " Analysis, for jump tables) and enable_analyzers [\"Aggressive Instruction Finder\"] (a linear" +
-                    " sweep of what flow never reached) are the two that move this number.\n"
+                    " sweep of what flow never reached) are the two that move this number. The sweep is not cheap: on a" +
+                    " 15MB raw .text it took the analysis from 85 s in 2G to filling a 6G heap. To reach particular" +
+                    " functions nothing calls, pass their addresses as seed_addresses instead.\n"
                 );
             }
             summary.write("Focus terms: " + String.join(", ", summaryFocusTerms) + "\n");
+            summary.write("Seed addresses: " + seedReport + "\n");
             summary.write("Behavior fallback used: " + summaryMode.endsWith("behavior") + "\n");
             summary.write("Full fallback used: " + summaryMode.endsWith("full") + "\n");
             summary.write("Undefined strings recovered: " + stringsDefined + "\n");
@@ -730,6 +778,7 @@ public class ApimDecompile extends GhidraScript {
         }
 
         Map<Function, Set<String>> focused = collectFocused(focusTerms);
+        addSeeds(focused);
         List<Function> work = new ArrayList<>();
         boolean fallbackBehavior = false;
         boolean fallbackFull = false;

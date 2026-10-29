@@ -4,7 +4,7 @@
 //! data and never launched. Results are cached next to the web's artifacts (`analysis/<name>-<sha12>/{ilspy,ghidra,capa}`).
 //!
 //! Environment (same names as the web app): APIM_ILSPYCMD_PATH, APIM_GHIDRA_HOME / GHIDRA_HOME, APIM_CAPA_PATH,
-//! APIM_CAPA_RULES_PATH, APIM_CAPA_SIGNATURES_PATH, APIM_GHIDRA_MAX_MEMORY, APIM_BINARY_MAX_CPU,
+//! APIM_CAPA_RULES_PATH, APIM_CAPA_SIGNATURES_PATH, APIM_GHIDRA_MAX_MEMORY (Ghidra's GHIDRA_HEADLESS_MAXMEM), APIM_BINARY_MAX_CPU,
 //! APIM_GHIDRA_ANALYSIS_TIMEOUT_MS, APIM_BINARY_DECOMPILE_TIMEOUT_MS. The Ghidra scripts (ApimAnalysisOptions.java,
 //! ApimDecompile.java) are the web repo's `scripts/ghidra` folder: set APIM_GHIDRA_SCRIPTS, or run from a folder that holds it.
 
@@ -74,6 +74,9 @@ pub struct DeepOptions {
     pub focused_only: Option<bool>,
     pub analyzers: AnalyzerOverrides,
     pub allow_full_fallback: bool,
+    /// Function starts to make functions at and decompile whatever the focus finds (`seed_addresses`): code nothing
+    /// flows into, like the functions above the first call in an image cut out mid-function.
+    pub seeds: Vec<String>,
 }
 
 /// How to load an image that carries no header of its own. Empty means the file has one and is loaded normally.
@@ -165,9 +168,12 @@ fn minimal_env() -> Vec<(String, String)> {
         ("TEMP".into(), get("TEMP").unwrap_or_else(|| temp.clone())),
         ("TMP".into(), get("TMP").unwrap_or(temp)),
         ("NO_COLOR".into(), "1".into()),
-        // Ghidra's launcher reads MAX_MEMORY for the JVM heap; a big decompile can exhaust the default.
-        ("MAX_MEMORY".into(), env_trim("APIM_GHIDRA_MAX_MEMORY").or_else(|| env_trim("MAX_MEMORY")).unwrap_or_else(|| "4G".into())),
     ];
+    // The JVM heap, under the launcher's own names: Ghidra 12's analyzeHeadless reads GHIDRA_HEADLESS_MAXMEM (2G
+    // unset), older ones MAXMEM. This exported MAX_MEMORY, which no Ghidra reads, so every run had 2G whatever
+    // APIM_GHIDRA_MAX_MEMORY said, and a 15 MB raw image ran out of heap in auto-analysis before decompiling anything.
+    let heap = env_trim("APIM_GHIDRA_MAX_MEMORY").or_else(|| env_trim("MAX_MEMORY")).unwrap_or_else(|| "4G".into());
+    env.extend([("GHIDRA_HEADLESS_MAXMEM".to_string(), heap.clone()), ("MAXMEM".to_string(), heap)]);
     // Node hands a Windows child these as well (Python's getpass.getuser, used by vivisect inside capa, fails without USERNAME).
     for key in ["USERNAME", "USERDOMAIN", "LOGONSERVER", "HOMEDRIVE", "HOMEPATH", "SYSTEMDRIVE"] {
         if let Some(v) = get(key) {
@@ -342,8 +348,27 @@ fn write_marker_status(file: &Path, hash: &str, engine: &str, profile: &str, sta
 
 /// The end of a log, the part with the error.
 fn tail(text: &str) -> String {
+    tail_of(text, 6000)
+}
+
+fn tail_of(text: &str, chars: usize) -> String {
     let n = text.chars().count();
-    if n <= 6000 { text.trim().to_string() } else { format!("…{}", text.chars().skip(n - 6000).collect::<String>().trim()) }
+    if n <= chars { text.trim().to_string() } else { format!("…{}", text.chars().skip(n - chars).collect::<String>().trim()) }
+}
+
+/// What a failed Ghidra run shows of its log: the lines naming the cause, then the end. The end alone is startup chatter
+/// and two dozen script-path lines, and an analyzer's OutOfMemoryError or a script's compile error sits above its stack
+/// trace and the shutdown, so the one line saying why could fall outside the tail while the tail still looked whole.
+fn ghidra_failure_log(text: &str) -> String {
+    let strong = regex::Regex::new(r"(?i)OutOfMemoryError|SCRIPT ERROR|: error:|No load spec|Import failed|Abort due to|Exception in thread|Could not create the Java Virtual Machine|Invalid maximum heap|supported JDK|timed out").unwrap();
+    let weak = regex::Regex::new(r"^ERROR\b|^Caused by:").unwrap();
+    let mut seen = std::collections::HashSet::new();
+    let lines: Vec<String> = text.lines().map(|line| line.trim().chars().take(400).collect::<String>()).filter(|line| seen.insert(line.clone())).collect();
+    let causes: Vec<&str> = lines.iter().filter(|line| strong.is_match(line)).take(16).chain(lines.iter().filter(|line| !strong.is_match(line) && weak.is_match(line)).take(8)).map(String::as_str).collect();
+    if causes.is_empty() {
+        return tail(text);
+    }
+    format!("Lines naming the cause:\n{}\n\nLast lines:\n{}", causes.join("\n"), tail_of(text, 3000))
 }
 
 fn normalise_focus_terms(terms: &[String]) -> Vec<String> {
@@ -510,9 +535,14 @@ async fn run_ilspy(tools: &Tools, root: &Path, target: &str, inspection: &PeInsp
 /// Analyzers that add substantial time and whose output we do not surface.
 const FAST_DISABLED_ANALYZERS: [&str; 3] = ["Decompiler Parameter ID", "Decompiler Switch Analysis", "Stack"];
 
-/// Ghidra's only analyzer that finds code with nothing pointing at it. Off by default, and the difference between a
-/// headerless dump decompiling and coming back empty.
+/// Ghidra's only analyzer that finds code with nothing pointing at it: a linear sweep of what flow never reached.
 const AGGRESSIVE_FINDER: &str = "Aggressive Instruction Finder";
+
+/// Up to this size a raw image gets the finder unasked. Above it the sweep is what breaks the run: a 15.3 MB carved
+/// .text ran out of a 2G heap in X86Analyzer, and with 6G it filled the heap and reached the 15-minute limit at 53%
+/// coverage, where without the finder it finished in 85 s at 27%. A 2.7 MB .text with it finished in 279 s.
+// ponytail: a size measured on two images, not a model of what the sweep costs; seed_addresses reach chosen functions.
+const RAW_FINDER_BYTES: i64 = 4 * 1024 * 1024;
 
 /// Preset first, then the caller's enable/disable, so Parameter ID can be turned on without also paying for the rest.
 fn resolve_analyzer_config(o: &AnalyzerOverrides) -> (Vec<String>, Vec<String>) {
@@ -548,14 +578,41 @@ fn resolve_analyzer_config(o: &AnalyzerOverrides) -> (Vec<String>, Vec<String>) 
 fn ghidra_profile(focus_terms: &[String], focused_only: bool, o: &DeepOptions, analysis_ms: u64, kill_ms: u64) -> String {
     let (disable, enable) = resolve_analyzer_config(&o.analyzers);
     format!(
-        "{}:fallback{}:analyzers[{}|{}]:raw[{}|{}]:limit{analysis_ms}/{kill_ms}",
+        "{}:fallback{}:analyzers[{}|{}]:raw[{}|{}]:seeds[{}]:limit{analysis_ms}/{kill_ms}",
         focus_profile(focus_terms, focused_only),
         o.allow_full_fallback,
         disable.join(","),
         enable.join(","),
         o.raw.image_base.trim(),
         o.raw.arch.trim(),
+        o.seeds.join(","),
     )
+}
+
+/// The analysis limit Ghidra is given: at most half the whole-process one. The two were equal (30 minutes each above
+/// 10 MB), and the process limit counts from launch, so whenever analysis ran into its own the kill came first and the
+/// post-script never decompiled a function.
+// ponytail: half is a guess at what decompiling needs; it is not known until the functions are counted.
+fn analysis_limit(asked_ms: f64, kill_ms: f64) -> f64 {
+    if kill_ms > 0.0 { asked_ms.min((kill_ms / 2.0).max(30_000.0)) } else { asked_ms }
+}
+
+/// `seed_addresses` as `0x…`, deduplicated, or the first one that is not a hex address.
+fn seed_list(seeds: &[String]) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = Vec::new();
+    for seed in seeds.iter().map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty()) {
+        let digits = seed.trim_start_matches("0x");
+        if digits.is_empty() || digits.len() > 16 || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(seed);
+        }
+        let seed = format!("0x{digits}");
+        if !out.contains(&seed) {
+            out.push(seed);
+        }
+    }
+    // ponytail: the first 256; more than that is a full run's job.
+    out.truncate(256);
+    Ok(out)
 }
 
 fn describe_analyzer_config(o: &AnalyzerOverrides) -> String {
@@ -603,8 +660,8 @@ async fn run_ghidra(tools: &Tools, root: &Path, target: &str, inspection: &PeIns
     let output = root_dir.join("ghidra");
     let cpus = std::thread::available_parallelism().map_or(1, |n| n.get()) as f64;
     let default_analysis_ms = if inspection.packing.status == "likely" { 15.0 * 60_000.0 } else if inspection.bytes <= 10 * 1024 * 1024 { 10.0 * 60_000.0 } else { 30.0 * 60_000.0 };
-    let analysis_timeout_ms = number_env("APIM_GHIDRA_ANALYSIS_TIMEOUT_MS", default_analysis_ms, 30_000.0, 9.0e15);
     let kill_timeout_ms = number_env("APIM_BINARY_DECOMPILE_TIMEOUT_MS", DEFAULT_TIMEOUT_MS, 0.0, 9.0e15);
+    let analysis_timeout_ms = analysis_limit(number_env("APIM_GHIDRA_ANALYSIS_TIMEOUT_MS", default_analysis_ms, 30_000.0, 9.0e15), kill_timeout_ms);
     let profile = ghidra_profile(&focus_terms, focused_only, o, analysis_timeout_ms as u64, kill_timeout_ms as u64);
     let marker = output.join(".apim-analysis.json");
     if !o.force {
@@ -637,11 +694,21 @@ async fn run_ghidra(tools: &Tools, root: &Path, target: &str, inspection: &PeIns
     let script_dir = ghidra_script_dir();
     let max_cpu = number_env("APIM_BINARY_MAX_CPU", (cpus - 1.0).clamp(1.0, 16.0), 1.0, 64.0);
     let (disable, mut enable) = resolve_analyzer_config(&o.analyzers);
-    // Loaded raw there is no entry point to start disassembling from, and "Disassemble Entry Points" has nothing to
-    // work with: a 16KB blob of real x86 came back with 0 functions decompiled. The one analyzer that finds code in a
-    // flat block is off by default, so a raw load turns it on unless the caller said not to.
-    if o.raw.base().is_some() && !disable.iter().any(|d| d == AGGRESSIVE_FINDER) && !enable.iter().any(|e| e == AGGRESSIVE_FINDER) {
+    // Loaded raw there is no entry point but the block starts the pre-script marks, so a small raw load also gets the
+    // finder unless the caller said otherwise. A big one does not (`RAW_FINDER_BYTES`), and the result says so.
+    let asked_finder = disable.iter().chain(&enable).any(|name| name == AGGRESSIVE_FINDER);
+    let finder_left_off = o.raw.base().is_some() && !asked_finder && inspection.bytes > RAW_FINDER_BYTES;
+    if o.raw.base().is_some() && !asked_finder && !finder_left_off {
         enable.push(AGGRESSIVE_FINDER.into());
+    }
+    let finder_note = if finder_left_off {
+        format!(" Aggressive Instruction Finder was left off for a raw image over {} MB: on a 15 MB one it filled a 6G heap and ran into the time limit. Pass enable_analyzers: [\"Aggressive Instruction Finder\"] to run it anyway, or the starts of the functions you need as seed_addresses.", RAW_FINDER_BYTES >> 20)
+    } else {
+        String::new()
+    };
+    // Both scripts read seeds.txt from the output folder, which also keeps what was asked beside what came back.
+    if !o.seeds.is_empty() {
+        let _ = std::fs::write(output.join("seeds.txt"), o.seeds.join("\n") + "\n");
     }
     let analyzer_cfg = project_dir.join("analyzers.json");
     let _ = std::fs::write(&analyzer_cfg, serde_json::to_string_pretty(&serde_json::json!({ "disable": disable, "enable": enable })).unwrap_or_default());
@@ -685,6 +752,10 @@ async fn run_ghidra(tools: &Tools, root: &Path, target: &str, inspection: &PeIns
         r.setup = Some(format!("Install Ghidra and Java 21, set APIM_GHIDRA_HOME, then restart apiM. The configured folder must contain support\\analyzeHeadless.bat. {}", crate::env_local_source()));
         return r;
     }
+    // The whole log, beside the output. It lived only in this process, and Ghidra's own application.log is one file
+    // under %APPDATA% that every run on the machine writes into.
+    let log_file = format!("{rel_root}/ghidra/ghidra.log");
+    let _ = std::fs::write(output.join("ghidra.log"), &result.output);
     let outputs = list_outputs(&output, root);
     let summary_text = std::fs::read_to_string(output.join("summary.txt")).unwrap_or_default();
     let decompiled = regex::Regex::new(r"(?i)Functions decompiled:\s*(\d+)").unwrap().captures(&summary_text).and_then(|c| c[1].parse::<u64>().ok());
@@ -708,11 +779,14 @@ async fn run_ghidra(tools: &Tools, root: &Path, target: &str, inspection: &PeIns
         } else {
             "Placeholder names (param_1, var_1...) are expected: rerun with enable_analyzers: [\"Decompiler Parameter ID\"] to recover them. "
         };
-        let summary = format!("Ghidra decompiled {} function(s) and produced {} artifact(s) under {rel_root}/ghidra. {how} Analyzer config: {}. {hint}", decompiled.unwrap_or(0), outputs.len(), describe_analyzer_config(&o.analyzers));
+        let seeds = if o.seeds.is_empty() { String::new() } else { format!(" Seed addresses: {}; the \"Seed addresses\" line of summary.txt says which became functions.", o.seeds.join(", ")) };
+        let summary = format!("Ghidra decompiled {} function(s) and produced {} artifact(s) under {rel_root}/ghidra. {how}{seeds}{finder_note} Analyzer config: {}. {hint}", decompiled.unwrap_or(0), outputs.len(), describe_analyzer_config(&o.analyzers));
         return with(DeepDecompilationResult::new(true, "complete", "ghidra", summary), outputs, Some(tail(&result.output)));
     }
     let empty_success = result.code == Some(0) && decompiled == Some(0);
-    let status = if empty_success || outputs.is_empty() { "failed" } else { "partial" };
+    // Partial means some code came back. The analyzer lists and the log come from every run, so counting files called a
+    // run that died in auto-analysis "partial" with nothing decompiled.
+    let status = if decompiled.is_some_and(|n| n > 0) { "partial" } else { "failed" };
     // A run the limit stopped is kept, not thrown away. The next inspection used to delete this output and start the
     // same analysis again, reach the same limit and delete it again — half an hour of every core, each time, for
     // artifacts that were already on disk. The limit is in the profile above, so raising it still reruns.
@@ -728,9 +802,15 @@ async fn run_ghidra(tools: &Tools, root: &Path, target: &str, inspection: &PeIns
             outputs.len()
         )
     } else {
-        format!("Ghidra exited with code {}; {} partial output file(s) were kept. The log tail below contains the actual Java, loader or post-script error.", result.code.map_or("unknown".to_string(), |c| c.to_string()), outputs.len())
+        let how_far = match decompiled {
+            None => "before its post-script wrote a summary, so nothing was decompiled".to_string(),
+            Some(n) => format!("after decompiling {n} function(s)"),
+        };
+        format!("Ghidra exited with code {} {how_far}. The lines naming the cause are below.", result.code.map_or("unknown".to_string(), |c| c.to_string()))
     };
-    with(DeepDecompilationResult::new(true, status, "ghidra", format!("{launcher_fact} {detail}")), outputs, Some(tail(&result.output)))
+    // Ghidra exits 0 when the import itself fails, so the code alone says nothing.
+    let no_loader = if o.raw.base().is_none() && result.output.contains("No load spec found") { " The file has no header Ghidra recognises: if it is a memory dump or a carved section, pass image_base (and arch) to load it raw." } else { "" };
+    with(DeepDecompilationResult::new(true, status, "ghidra", format!("{launcher_fact} {detail}{no_loader}{finder_note} The whole log is {log_file}.")), outputs, Some(ghidra_failure_log(&result.output)))
 }
 
 struct CapaResource {
@@ -860,13 +940,19 @@ pub async fn run_deep_decompilation_with(tools: &Tools, root: &Path, target: &st
     let engine = if inspection.managed.is_some() { "ilspy" } else { "ghidra" };
     let focus_terms = normalise_focus_terms(&o.focus_terms);
     let focused_only = o.focused_only != Some(false);
+    // Refused up front: a word in an address list would otherwise reach Ghidra and come back as one line of summary.txt
+    // after minutes of analysis.
+    let seeds = match seed_list(&o.seeds) {
+        Ok(seeds) => seeds,
+        Err(bad) => return DeepDecompilationResult::new(false, "failed", engine, format!("\"{bad}\" is not a hex address (seed_addresses takes values like 0x140001000). Nothing was started.")),
+    };
     // Do not launch Ghidra/ILSpy until the caller named what they want: an unfocused run on a big DLL can go on for hours.
-    if focused_only && focus_terms.is_empty() && !o.allow_full_fallback {
+    if focused_only && focus_terms.is_empty() && (seeds.is_empty() || engine != "ghidra") && !o.allow_full_fallback {
         let mut r = DeepDecompilationResult::new(
             false,
             "disabled",
             engine,
-            format!("Deep decompilation was not started. Name the functions or strings you need in focus_terms (from a summary/strings pass), enable a specific analyzer such as \"Decompiler Parameter ID\" via enable_analyzers, or set focused_only=false / allow_full_fallback=true only if you really want the whole {}.", if engine == "ghidra" { "binary" } else { "assembly" }),
+            format!("Deep decompilation was not started. Name the functions or strings you need in focus_terms (from a summary/strings pass), give their start addresses in seed_addresses, or set focused_only=false / allow_full_fallback=true only if you really want the whole {}.", if engine == "ghidra" { "binary" } else { "assembly" }),
         );
         r.focus_terms = Some(focus_terms);
         r.focused_only = Some(focused_only);
@@ -890,7 +976,7 @@ pub async fn run_deep_decompilation_with(tools: &Tools, root: &Path, target: &st
     if inspection.managed.is_some() {
         run_ilspy(tools, root, target, inspection, o.force, focus_terms, focused_only).await
     } else {
-        run_ghidra(tools, root, target, inspection, o, focus_terms, focused_only).await
+        run_ghidra(tools, root, target, inspection, &DeepOptions { seeds, ..o.clone() }, focus_terms, focused_only).await
     }
 }
 
@@ -924,8 +1010,10 @@ mod tests {
         arch.raw.arch = "x86".into();
         let mut fallback = base.clone();
         fallback.allow_full_fallback = true;
+        let mut seeded = base.clone();
+        seeded.seeds = vec!["0x14002d6d0".into()];
 
-        let mut keys = vec![key(&base), key(&named), key(&preset), key(&off), key(&raw), key(&arch), key(&fallback)];
+        let mut keys = vec![key(&base), key(&named), key(&preset), key(&off), key(&raw), key(&arch), key(&fallback), key(&seeded)];
         keys.push(ghidra_profile(&terms, true, &base, 60_000, 1_800_000)); // a shorter analysis limit
         keys.push(ghidra_profile(&terms, true, &base, 600_000, 60_000)); // a shorter kill limit
         keys.push(ghidra_profile(&terms, false, &base, 600_000, 1_800_000)); // full rather than focused
@@ -934,6 +1022,37 @@ mod tests {
         keys.sort();
         keys.dedup();
         assert_eq!(keys.len(), total, "two different questions share one cache key");
+    }
+
+    #[test]
+    fn analysis_stops_in_time_for_the_decompiling() {
+        // Asked for the same hour as the kill, analysis gets half of it; with no kill, all it asked for.
+        assert_eq!(analysis_limit(3_600_000.0, 3_600_000.0), 1_800_000.0);
+        assert_eq!(analysis_limit(600_000.0, 1_800_000.0), 600_000.0);
+        assert_eq!(analysis_limit(3_600_000.0, 0.0), 3_600_000.0);
+        assert_eq!(analysis_limit(600_000.0, 20_000.0), 30_000.0, "never under the analysis limit's own floor");
+    }
+
+    #[test]
+    fn seed_addresses_are_read_as_hex_or_refused() {
+        let list = |seeds: &[&str]| seed_list(&seeds.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(list(&["0x14002D6D0", "14002d6d0", " ", "0x1"]), Ok(vec!["0x14002d6d0".to_string(), "0x1".to_string()]));
+        assert_eq!(list(&["0x1", "CreateMove"]), Err("createmove".to_string()));
+        assert_eq!(list(&["0x"]), Err("0x".to_string()));
+        assert_eq!(list(&["0x11112222333344445"]), Err("0x11112222333344445".to_string()), "longer than 64 bits");
+    }
+
+    #[test]
+    fn a_failed_run_shows_the_line_that_says_why() {
+        let mut log = String::from("INFO  Using log file\n");
+        log += "ERROR (X86Analyzer) java.lang.OutOfMemoryError: Java heap space\n";
+        for i in 0..400 {
+            log += &format!("INFO  shutdown chatter line {i} that goes on long enough to push the cause out of the tail\n");
+        }
+        let shown = ghidra_failure_log(&log);
+        assert!(shown.starts_with("Lines naming the cause:\nERROR (X86Analyzer) java.lang.OutOfMemoryError: Java heap space\n"), "{shown}");
+        assert!(!tail(&log).contains("OutOfMemoryError"), "the cause was outside the old tail");
+        assert_eq!(ghidra_failure_log("all fine"), "all fine");
     }
 
     fn sample() -> PeInspection {
@@ -1052,13 +1171,13 @@ mod tests {
         let r = run_deep_decompilation_with(&tools, &root, "uploads/a.exe", &p, &opts).await;
         let rel_root = binary_analysis_root("uploads/a.exe", &p.hashes.sha256);
         assert_eq!((r.status, r.attempted, r.cached), ("complete", true, false), "{r:?}");
-        assert_eq!(r.outputs, [format!("{rel_root}/ghidra/functions.tsv"), format!("{rel_root}/ghidra/summary.txt")]);
-        assert!(r.summary.starts_with(&format!("Ghidra decompiled 3 function(s) and produced 2 artifact(s) under {rel_root}/ghidra. Focus terms: CreateMove. Analyzer config: preset fast · off: Decompiler Parameter ID")), "{}", r.summary);
+        assert_eq!(r.outputs, [format!("{rel_root}/ghidra/functions.tsv"), format!("{rel_root}/ghidra/ghidra.log"), format!("{rel_root}/ghidra/summary.txt")]);
+        assert!(r.summary.starts_with(&format!("Ghidra decompiled 3 function(s) and produced 3 artifact(s) under {rel_root}/ghidra. Focus terms: CreateMove. Analyzer config: preset fast · off: Decompiler Parameter ID")), "{}", r.summary);
         assert!(r.summary.ends_with("to recover them. "));
         assert!(r.log_tail.unwrap().contains("fake ghidra ran"));
         let again = run_deep_decompilation_with(&tools, &root, "uploads/a.exe", &p, &opts).await;
         assert_eq!((again.status, again.attempted, again.cached), ("complete", false, true));
-        assert!(again.summary.starts_with("Reused 2 native decompilation artifact(s) from "));
+        assert!(again.summary.starts_with("Reused 3 native decompilation artifact(s) from "));
         std::fs::remove_dir_all(&root).ok();
     }
 }

@@ -206,6 +206,10 @@ export interface InspectBinaryOptions {
   analyzers?: import("./binary-decompiler").AnalyzerOverrides;
   /** Opt in to the expensive "focus miss → decompile everything" path. */
   allowFullFallback?: boolean;
+  /** Function starts Ghidra should create and decompile (seed_addresses). */
+  seeds?: string[];
+  /** A headerless image: load raw at this base (image_base, arch). */
+  raw?: import("./binary-decompiler").RawImage;
   signal?: AbortSignal;
 }
 
@@ -1717,6 +1721,8 @@ export async function inspectWorkspaceBinary(
           focusedOnly: options.focusedOnly,
           analyzers: options.analyzers,
           allowFullFallback: options.allowFullFallback,
+          seeds: options.seeds,
+          raw: options.raw,
         });
 
   const result: WorkspaceBinaryInspection = {

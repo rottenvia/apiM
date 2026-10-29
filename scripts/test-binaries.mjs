@@ -12,9 +12,11 @@ import { promises as fs } from "node:fs";
 import { finishSuite } from "./lib/proc.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
-const DATA_ROOT = process.env.APIM_DATA_ROOT
-  ? path.resolve(process.env.APIM_DATA_ROOT)
-  : path.join(ROOT, "data");
+// This suite deletes <data root>/workspaces. Run alone (npm run test:binaries,
+// as the README says) it used to default to the app's own data/ and wiped
+// every real workspace; it gets its own folder like the other suites.
+process.env.APIM_DATA_ROOT ??= path.join(ROOT, ".test-data", "binaries");
+const DATA_ROOT = path.resolve(process.env.APIM_DATA_ROOT);
 const load = (p) => import(pathToFileURL(path.join(ROOT, p)).href);
 const B = await load("src/lib/binaries.ts");
 const BT = await load("src/lib/binary-types.ts");
@@ -481,7 +483,8 @@ await fs.writeFile(
   JSON.stringify({
     hash,
     engine: "ghidra",
-    profile: "analysis-v9:full:",
+    // The marker carries everything that changes Ghidra's output (fast preset here).
+    profile: "analysis-v9:full::fallback=false:off=Decompiler Parameter ID,Decompiler Switch Analysis,Stack:on=:seeds=:raw=",
     complete: true,
   })
 );
@@ -634,6 +637,143 @@ check(
       fallbackGhidra.deep.summary
     ),
   fallbackGhidra.deep.summary
+);
+
+// A raw image with seeds, against a Ghidra that dies in auto-analysis: what
+// apiM passes (loader, heap, seeds) and what the model reads back.
+const DC = await load("src/lib/binary-decompiler.ts");
+await W.writeFileBytes(WS, "uploads/binaries/text.bin", Buffer.alloc(4096, 0xcc));
+await fs.writeFile(
+  fakeGhidraScript,
+  `const fs=require('fs'); const path=require('path');\n` +
+    `const at=process.argv.indexOf('ApimDecompile.java'); const out=process.argv[at+1];\n` +
+    `fs.writeFileSync(path.join(out,'analyzers.txt'),'# fake\\n');\n` +
+    `fs.writeFileSync(path.join(out,'argv.json'),JSON.stringify({argv:process.argv.slice(2),heap:process.env.GHIDRA_HEADLESS_MAXMEM,seeds:fs.readFileSync(path.join(out,'seeds.txt'),'utf8')}));\n` +
+    `console.log('INFO  startup chatter\\n'.repeat(60));\n` +
+    `console.log('ERROR (X86Analyzer) caught exception java.lang.OutOfMemoryError: Java heap space');\n` +
+    `console.log('\\tat ghidra.program.util.SymbolicPropogator.flowConstants(SymbolicPropogator.java:216)\\n'.repeat(120));\n` +
+    `process.exit(1);\n`
+);
+process.env.APIM_GHIDRA_HOME = fakeGhidra;
+process.env.APIM_GHIDRA_MAX_MEMORY = "3G";
+process.env.APIM_GHIDRA_ANALYSIS_TIMEOUT_MS = "3600000";
+process.env.APIM_BINARY_DECOMPILE_TIMEOUT_MS = "3600000";
+const rawRun = await B.inspectWorkspaceBinary(WS, "uploads/binaries/text.bin", {
+  artifacts: false,
+  runCapa: false,
+  deep: true,
+  forceDeep: true,
+  dependencies: false,
+  includeStrings: false,
+  focusedOnly: true,
+  seeds: ["0x140012A40", "140001000"],
+  raw: { imageBase: "0x140001000" },
+});
+delete process.env.APIM_GHIDRA_MAX_MEMORY;
+delete process.env.APIM_GHIDRA_ANALYSIS_TIMEOUT_MS;
+delete process.env.APIM_BINARY_DECOMPILE_TIMEOUT_MS;
+const rawOut =path.join(W.workspaceDirectory(WS), rawRun.deep.outputs.find((o) => o.endsWith("argv.json")) ?? "missing");
+const rawSeen = JSON.parse(await fs.readFile(rawOut, "utf8").catch(() => "{}"));
+const rawArgs = (rawSeen.argv ?? []).join(" ");
+check(
+  "a raw image is loaded by BinaryLoader at image_base, and the pre-script is told it is raw",
+  /-loader BinaryLoader -loader-baseAddr 0x140001000 -processor x86:LE:64:default -import/.test(rawArgs) &&
+    /ApimAnalysisOptions\.java \S+ \S+ raw -scriptPath/.test(rawArgs),
+  rawArgs.slice(0, 300)
+);
+check(
+  "seed_addresses reach both scripts as seeds.txt beside the output, without a focus term",
+  rawSeen.seeds === "0x140012a40\n0x140001000\n",
+  JSON.stringify(rawSeen.seeds)
+);
+check(
+  "APIM_GHIDRA_MAX_MEMORY reaches the launcher under the name it reads",
+  rawSeen.heap === "3G",
+  String(rawSeen.heap)
+);
+check(
+  "equal analysis and process limits leave the post-script half the time",
+  /-analysisTimeoutPerFile 1800 /.test(rawArgs)
+);
+check(
+  "a run that died before decompiling anything is failed, not partial, and keeps its whole log",
+  rawRun.deep.status === "failed" &&
+    rawRun.deep.outputs.some((o) => o.endsWith("ghidra/ghidra.log")) &&
+    /ghidra\.log/.test(rawRun.deep.summary),
+  `${rawRun.deep.status}: ${rawRun.deep.summary.slice(-200)}`
+);
+check(
+  "the line naming the cause reaches the model even when the stack after it outgrows the tail",
+  /Lines naming the cause:\nERROR \(X86Analyzer\) caught exception java\.lang\.OutOfMemoryError/.test(
+    B.formatBinaryInspection(rawRun)
+  )
+);
+const badSeed = await B.inspectWorkspaceBinary(WS, "uploads/binaries/text.bin", {
+  artifacts: false,
+  runCapa: false,
+  deep: true,
+  dependencies: false,
+  includeStrings: false,
+  seeds: ["sub_140012a40"],
+});
+check(
+  "a seed that is not a hex address is refused before Ghidra starts",
+  badSeed.deep.status === "failed" && badSeed.deep.attempted === false && /sub_140012a40/.test(badSeed.deep.summary)
+);
+check(
+  "image_base and arch map to a Ghidra loader and language",
+  DC.rawLoaderArgs({ imageBase: "7FF782798000", arch: "arm64" }).join(" ") ===
+    "-loader BinaryLoader -loader-baseAddr 0x7ff782798000 -processor AARCH64:LE:64:v8A" &&
+    DC.rawLoaderArgs({ imageBase: "0x1000", arch: "x86" }).at(-1) === "x86:LE:32:default" &&
+    DC.rawLoaderArgs({ imageBase: "nope" }).length === 0 &&
+    DC.rawLoaderArgs(undefined).length === 0
+);
+
+// The cache marker is keyed on the analyzers, and a limit past setTimeout's
+// 32-bit range must not fire at once.
+await fs.writeFile(
+  fakeGhidraScript,
+  `const fs=require('fs'); const path=require('path');\n` +
+    `const at=process.argv.indexOf('ApimDecompile.java'); const out=process.argv[at+1];\n` +
+    `setTimeout(()=>{fs.writeFileSync(path.join(out,'functions.tsv'),'address\\tname\\n1000\\tentry\\n');\n` +
+    `fs.writeFileSync(path.join(out,'summary.txt'),'Functions decompiled: 1\\n');},300);\n`
+);
+process.env.APIM_BINARY_DECOMPILE_TIMEOUT_MS = "3000000000";
+const cacheRun = (enable) =>
+  B.inspectWorkspaceBinary(WS, "uploads/binaries/app.exe", {
+    artifacts: false,
+    runCapa: false,
+    deep: true,
+    dependencies: false,
+    includeStrings: false,
+    focusTerms: ["CacheKey"],
+    analyzers: enable ? { preset: "fast", enable } : { preset: "fast" },
+  });
+const fastRun = await cacheRun();
+delete process.env.APIM_BINARY_DECOMPILE_TIMEOUT_MS;
+check(
+  "a decompile time limit beyond 2^31 ms does not kill Ghidra on start",
+  fastRun.deep.status === "complete",
+  fastRun.deep.summary.slice(0, 200)
+);
+const paramIdRun = await cacheRun(["Decompiler Parameter ID"]);
+const paramIdAgain = await cacheRun(["Decompiler Parameter ID"]);
+check(
+  "the enable_analyzers rerun the result recommends is not answered from the fast run's cache",
+  !paramIdRun.deep.cached && paramIdRun.deep.status === "complete" && paramIdAgain.deep.cached,
+  `${paramIdRun.deep.cached}/${paramIdAgain.deep.cached}`
+);
+if (previousGhidra === undefined) delete process.env.APIM_GHIDRA_HOME;
+else process.env.APIM_GHIDRA_HOME = previousGhidra;
+
+const longLog =
+  "INFO  chatter\n".repeat(100) +
+  "ApimDecompile.java:58: error: illegal start of expression\n" +
+  "\tat frame\n".repeat(2000);
+check(
+  "a compile error above a long trace is named; the old 6000-char tail alone missed it",
+  /ApimDecompile\.java:58: error/.test(DC.ghidraFailureLog(longLog)) &&
+    !/ApimDecompile\.java:58: error/.test(longLog.slice(-6000))
 );
 
 const fakeCapa = path.join(

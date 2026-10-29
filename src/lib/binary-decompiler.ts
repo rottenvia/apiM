@@ -67,19 +67,23 @@ function numberEnv(name: string, fallback: number, min: number, max: number): nu
 }
 
 function minimalEnv(): NodeJS.ProcessEnv {
+  const heap =
+    process.env.APIM_GHIDRA_MAX_MEMORY?.trim() ||
+    process.env.MAX_MEMORY?.trim() ||
+    "4G";
   const env: Record<string, string | undefined> = {
     PATH: process.env.PATH ?? "",
     HOME: process.env.HOME ?? process.cwd(),
     TEMP: process.env.TEMP ?? os.tmpdir(),
     TMP: process.env.TMP ?? os.tmpdir(),
     NO_COLOR: "1",
-    // Ghidra's analyzeHeadless launcher reads MAX_MEMORY for the JVM heap.
-    // A 46MB full decompile can exhaust the default and the JVM exits with
-    // code 1 and no output. Default high, overridable for low-memory hosts.
-    MAX_MEMORY:
-      process.env.APIM_GHIDRA_MAX_MEMORY?.trim() ||
-      process.env.MAX_MEMORY?.trim() ||
-      "4G",
+    // The JVM heap, under the launcher's own names: Ghidra 12's
+    // analyzeHeadless reads GHIDRA_HEADLESS_MAXMEM (default 2G), older ones
+    // MAXMEM. This used to export MAX_MEMORY, which no Ghidra reads, so every
+    // run got 2G whatever APIM_GHIDRA_MAX_MEMORY said, and a 15MB raw image
+    // ran out of heap in auto-analysis, before any decompiling.
+    GHIDRA_HEADLESS_MAXMEM: heap,
+    MAXMEM: heap,
   };
   // Java, .NET and Windows process creation need these. API keys and app
   // secrets are intentionally not copied into a third-party decompiler.
@@ -241,11 +245,13 @@ function runCaptured(
     // full decompile is never killed by an artificial cap - Stop aborts the
     // passed-in signal instead.
     if (timeoutMs > 0 && timeoutMs < Number.MAX_SAFE_INTEGER) {
+      // setTimeout turns anything above 2^31-1 ms into 1 ms, so a limit of
+      // 25+ days killed Ghidra the moment it started. Capped, it is ~25 days.
       timer = setTimeout(() => {
         void killTree(child).finally(() =>
           finish({ started, code: null, timedOut: true, output })
         );
-      }, timeoutMs);
+      }, Math.min(timeoutMs, 2_147_483_647));
     }
   });
 }
@@ -340,6 +346,64 @@ async function writeMarker(
 
 function tail(text: string, chars = 6000): string {
   return text.length <= chars ? text.trim() : `…${text.slice(-chars).trim()}`;
+}
+
+// Lines that say why a Ghidra run failed. The strong ones name a cause
+// outright; the weak ones are every other ERROR/Caused-by line, kept after.
+const GHIDRA_CAUSE =
+  /OutOfMemoryError|SCRIPT ERROR|: error:|No load spec|Import failed|Abort due to|Exception in thread|Could not create the Java Virtual Machine|Invalid maximum heap|supported JDK|timed out/i;
+const GHIDRA_ERROR = /^ERROR\b|^Caused by:/;
+
+/**
+ * What a failed Ghidra run shows of its log: the lines naming the cause, then
+ * the end. The end alone is mostly startup chatter and two dozen script-path
+ * lines, and a script compile error or an analyzer's OutOfMemoryError sits
+ * above its stack trace and the shutdown lines, so the one line that said why
+ * could fall outside the 6000 characters while the tail still looked whole.
+ */
+export function ghidraFailureLog(text: string): string {
+  const lines = [...new Set(text.split(/\r?\n/).map((line) => line.trim().slice(0, 400)))];
+  const causes = [
+    ...lines.filter((line) => GHIDRA_CAUSE.test(line)).slice(0, 16),
+    ...lines.filter((line) => !GHIDRA_CAUSE.test(line) && GHIDRA_ERROR.test(line)).slice(0, 8),
+  ];
+  return causes.length
+    ? `Lines naming the cause:\n${causes.join("\n")}\n\nLast lines:\n${tail(text, 3000)}`
+    : tail(text);
+}
+
+/** How to load a file with no header of its own; the desktop app's RawImage. */
+export interface RawImage {
+  /** Where the bytes were mapped, as hex ("0x140001000"). */
+  imageBase?: string;
+  /** "x86-64" (default), "x86", "arm64", "arm", or a Ghidra language id. */
+  arch?: string;
+}
+
+/**
+ * BinaryLoader arguments for a headerless image, or none without a base.
+ * A memory dump or carved .text has no header, so plain -import finds no
+ * loader at all ("No load spec found") and nothing is decompiled.
+ */
+export function rawLoaderArgs(raw: RawImage | undefined): string[] {
+  const base = /^(?:0x)?([0-9a-f]{1,16})$/i.exec(raw?.imageBase?.trim() ?? "")?.[1];
+  if (!base) return [];
+  const arch = raw?.arch?.trim() ?? "";
+  const name = arch.toLowerCase().replace(/[_ ]/g, "-");
+  const language = arch.includes(":")
+    ? arch
+    : ["x86", "x86-32", "i386", "ia32", "32"].includes(name)
+      ? "x86:LE:32:default"
+      : ["arm64", "aarch64"].includes(name)
+        ? "AARCH64:LE:64:v8A"
+        : ["arm", "arm32"].includes(name)
+          ? "ARM:LE:32:v8"
+          : "x86:LE:64:default";
+  return [
+    "-loader", "BinaryLoader",
+    "-loader-baseAddr", `0x${BigInt(`0x${base}`).toString(16)}`,
+    "-processor", language,
+  ];
 }
 
 function normaliseFocusTerms(terms: string[] | undefined): string[] {
@@ -647,14 +711,24 @@ async function runGhidra(
   focusedOnly: boolean,
   analyzers: AnalyzerOverrides | undefined,
   signal?: AbortSignal,
-  allowFullFallback = false
+  allowFullFallback = false,
+  seeds: string[] = [],
+  raw?: RawImage
 ): Promise<DeepDecompilationResult> {
   const workspaceRoot = workspaceDirectory(workspaceId);
   const targetPath = resolveInside(workspaceId, target);
   const relRoot = binaryAnalysisRoot(target, inspection.hashes.sha256);
   const root = resolveInside(workspaceId, relRoot);
   const output = path.join(root, "ghidra");
-  const profile = focusProfile(focusTerms, focusedOnly);
+  const loaderArgs = rawLoaderArgs(raw);
+  const cfg = resolveAnalyzerConfig(analyzers);
+  // Keyed on everything that changes what Ghidra produces. With only the focus
+  // terms in it, a fast run's cache answered the enable_analyzers rerun this
+  // very result recommends, so that rerun returned the same param_1 output.
+  const profile =
+    `${focusProfile(focusTerms, focusedOnly)}:fallback=${allowFullFallback}` +
+    `:off=${cfg.disable.join(",")}:on=${cfg.enable.join(",")}` +
+    `:seeds=${seeds.join(",")}:raw=${loaderArgs.join(" ")}`;
   const marker = path.join(output, ".apim-analysis.json");
   if (
     !force &&
@@ -721,16 +795,20 @@ async function runGhidra(
       : inspection.bytes <= 10 * 1024 * 1024
         ? 10 * 60_000
         : 30 * 60_000;
-  const analysisTimeoutMs = numberEnv(
-    "APIM_GHIDRA_ANALYSIS_TIMEOUT_MS",
-    defaultAnalysisMs,
-    30_000,
-    MAX_TIMEOUT_MS
+  // Analysis gets at most half of the whole-process limit. The two used to be
+  // equal (30 min each above 10MB, or both raised to the same value), and the
+  // process limit counts from launch, so whenever analysis ran into its limit
+  // the kill came first and the post-script never decompiled a function.
+  // ponytail: half is a guess at what decompiling needs; it is not known
+  // until the functions are counted.
+  const killMs = numberEnv("APIM_BINARY_DECOMPILE_TIMEOUT_MS", DEFAULT_TIMEOUT_MS, 0, MAX_TIMEOUT_MS);
+  const analysisTimeoutMs = Math.min(
+    numberEnv("APIM_GHIDRA_ANALYSIS_TIMEOUT_MS", defaultAnalysisMs, 30_000, MAX_TIMEOUT_MS),
+    killMs > 0 ? Math.max(30_000, killMs / 2) : MAX_TIMEOUT_MS
   );
   // Write the analyzer overrides chosen for this binary next to the output
   // (in the project dir), and have the pre-script also dump the available
   // analyzer list into the output dir so the model can see exact names.
-  const cfg = resolveAnalyzerConfig(analyzers);
   const analyzerCfgPath = path.join(projectDir, "analyzers.json");
   await fs.mkdir(output, { recursive: true });
   await fs.writeFile(
@@ -738,9 +816,15 @@ async function runGhidra(
     JSON.stringify({ disable: cfg.disable, enable: cfg.enable }, null, 2),
     "utf8"
   );
+  // Both scripts read seeds.txt from the output folder, which also leaves a
+  // record of what was asked beside what came back.
+  if (seeds.length) {
+    await fs.writeFile(path.join(output, "seeds.txt"), seeds.join("\n") + "\n", "utf8");
+  }
   const args = [
     projectDir,
     `apim-${inspection.hashes.sha256.slice(0, 12)}`,
+    ...loaderArgs,
     "-import",
     targetPath,
     "-overwrite",
@@ -750,11 +834,13 @@ async function runGhidra(
     String(maxCpu),
     "-deleteProject",
     // Pre-script applies the chosen analyzer overrides. Its first arg is the
-    // overrides JSON, second is where to write the available-analyzer list.
+    // overrides JSON, second is where to write the available-analyzer list,
+    // third says a raw load, whose block starts it seeds as entry points.
     "-preScript",
     "ApimAnalysisOptions.java",
     analyzerCfgPath,
     output,
+    loaderArgs.length ? "raw" : "file",
     "-scriptPath",
     scriptDir,
     "-postScript",
@@ -786,6 +872,11 @@ async function runGhidra(
     };
   }
 
+  // The whole log, beside the output. -deleteProject never touched it, but it
+  // lived only in this process's memory, and Ghidra's own application.log is
+  // one shared file under %APPDATA% interleaving every run on the machine.
+  const logFile = `${relRoot}/ghidra/ghidra.log`;
+  await fs.writeFile(path.join(output, "ghidra.log"), result.output, "utf8").catch(() => {});
   const outputs = await listOutputs(output, workspaceRoot);
   const summaryText = await fs
     .readFile(path.join(output, "summary.txt"), "utf8")
@@ -794,6 +885,10 @@ async function runGhidra(
   const decompiledFunctions = decompiledMatch
     ? Number(decompiledMatch[1])
     : null;
+  // Partial means some code came back. The analyzer lists and the log are
+  // written by every run, so counting files called a run that died in
+  // auto-analysis "partial" with nothing decompiled.
+  const kept = (decompiledFunctions ?? 0) > 0;
   const behaviorFallbackUsed = /Behavior fallback used:\s*true/i.test(
     summaryText
   );
@@ -804,14 +899,14 @@ async function runGhidra(
   if (result.error === "Executable decompilation was stopped") {
     return {
       attempted: true,
-      status: outputs.length ? "partial" : "failed",
+      status: kept ? "partial" : "failed",
       engine: "ghidra",
       outputs,
       cached: false,
       focusTerms,
       focusedOnly,
-      summary: `Ghidra was stopped; ${outputs.length} partial file(s) were kept.`,
-      logTail: tail(result.output),
+      summary: `Ghidra was stopped after decompiling ${decompiledFunctions ?? 0} function(s); ${outputs.length} file(s) were kept, the whole log in ${logFile}.`,
+      logTail: ghidraFailureLog(result.output),
     };
   }
   if (
@@ -842,6 +937,9 @@ async function runGhidra(
           : fullFallbackUsed
             ? `No surviving ${focusTerms.join("/")} or behavioral API references were found, so bounded full decompilation ran automatically.`
             : `Focus terms: ${focusTerms.join(", ") || "(none)"}.`) +
+        (seeds.length
+          ? ` Seed addresses: ${seeds.join(", ")}; the "Seed addresses" line of summary.txt says which became functions.`
+          : "") +
         // The model must see what this run paid for: without the effective
         // analyzer set it cannot tell a placeholder parameter name between
         // "the binary has no names" and "Parameter ID was off", and it
@@ -855,9 +953,14 @@ async function runGhidra(
     };
   }
   const emptySuccess = result.code === 0 && decompiledFunctions === 0;
+  // Ghidra exits 0 when the import itself fails, so the code alone says nothing.
+  const noLoader =
+    !loaderArgs.length && /No load spec found/.test(result.output)
+      ? " The file has no header Ghidra recognises: if it is a memory dump or a carved section, pass image_base (and arch) to load it raw."
+      : "";
   return {
     attempted: true,
-    status: emptySuccess ? "failed" : outputs.length ? "partial" : "failed",
+    status: kept ? "partial" : "failed",
     engine: "ghidra",
     outputs,
     cached: false,
@@ -869,9 +972,11 @@ async function runGhidra(
       (emptySuccess
         ? `Ghidra exited successfully but decompiled zero functions. This is not accepted as a completed analysis; inspect the log tail below for loader, language or packing failures.`
         : result.timedOut
-          ? `Ghidra exceeded the configured time limit; ${outputs.length} partial output file(s) were kept. Increase APIM_BINARY_DECOMPILE_TIMEOUT_MS only for binaries that justify it.`
-          : `Ghidra exited with code ${result.code ?? "unknown"}; ${outputs.length} partial output file(s) were kept. The log tail below contains the actual Java, loader or post-script error.`),
-    logTail: tail(result.output),
+          ? `Ghidra exceeded the configured time limit after decompiling ${decompiledFunctions ?? 0} function(s); ${outputs.length} output file(s) were kept. Increase APIM_BINARY_DECOMPILE_TIMEOUT_MS only for binaries that justify it.`
+          : `Ghidra exited with code ${result.code ?? "unknown"} ${decompiledFunctions === null ? "before its post-script wrote a summary, so nothing was decompiled" : `after decompiling ${decompiledFunctions} function(s)`}. The lines naming the cause are below.`) +
+      noLoader +
+      ` The whole log is ${logFile}.`,
+    logTail: ghidraFailureLog(result.output),
   };
 }
 
@@ -1097,6 +1202,10 @@ export async function runDeepDecompilation(
      * not auto-decompile every function just because CreateMove was absent.
      */
     allowFullFallback?: boolean;
+    /** Addresses to make functions at and decompile whatever the focus finds. */
+    seeds?: string[];
+    /** Set for a file with no header: load its bytes raw at this address. */
+    raw?: RawImage;
   } = {}
 ): Promise<DeepDecompilationResult> {
   /*
@@ -1124,6 +1233,30 @@ export async function runDeepDecompilation(
   const focusTerms = normaliseFocusTerms(options.focusTerms);
   const focusedOnly = options.focusedOnly !== false;
   const allowFullFallback = options.allowFullFallback === true;
+  const seedText = (options.seeds ?? [])
+    .map((seed) => seed.trim().toLowerCase())
+    .filter(Boolean);
+  // Refused up front: a word in an address list would otherwise reach Ghidra
+  // and come back as one line in summary.txt after minutes of analysis.
+  const badInput =
+    seedText.find((seed) => !/^(0x)?[0-9a-f]{1,16}$/.test(seed)) ??
+    (options.raw?.imageBase?.trim() && !rawLoaderArgs(options.raw).length
+      ? options.raw.imageBase
+      : undefined);
+  // ponytail: the first 256; more than that is a full-mode job.
+  const seeds = [
+    ...new Set(seedText.map((seed) => (seed.startsWith("0x") ? seed : `0x${seed}`))),
+  ].slice(0, 256);
+  if (badInput !== undefined) {
+    return {
+      attempted: false,
+      status: "failed",
+      engine,
+      outputs: [],
+      cached: false,
+      summary: `"${badInput}" is not a hex address (seed_addresses and image_base take values like 0x140001000). Nothing was started.`,
+    };
+  }
 
   /*
    * Do not launch Ghidra/ILSpy until the caller named what they want.
@@ -1133,7 +1266,12 @@ export async function runDeepDecompilation(
    * fallback. On a 37MB game DLL that ran for hours and survived a page
    * refresh with no UI to stop it.
    */
-  if (focusedOnly && focusTerms.length === 0 && !allowFullFallback) {
+  if (
+    focusedOnly &&
+    focusTerms.length === 0 &&
+    (seeds.length === 0 || inspection.managed) &&
+    !allowFullFallback
+  ) {
     return {
       attempted: false,
       status: "disabled",
@@ -1144,9 +1282,8 @@ export async function runDeepDecompilation(
       focusedOnly,
       summary:
         `Deep decompilation was not started. Name the functions or strings ` +
-        `you need in focus_terms (from a summary/strings pass), enable a ` +
-        `specific analyzer such as "Decompiler Parameter ID" via ` +
-        `enable_analyzers, or set focused_only=false / allow_full_fallback=` +
+        `you need in focus_terms (from a summary/strings pass), give their ` +
+        `start addresses in seed_addresses, or set focused_only=false / allow_full_fallback=` +
         `true only if you really want the whole ${
           engine === "ghidra" ? "binary" : "assembly"
         }.`,
@@ -1156,7 +1293,7 @@ export async function runDeepDecompilation(
   // Distinct analyzer settings must not collide in the in-flight cache.
   const analyzerKey = JSON.stringify(options.analyzers ?? { preset: "fast" });
   const profile = focusProfile(focusTerms, focusedOnly);
-  const key = `${workspaceId}:${inspection.hashes.sha256}:${engine}:${profile}:${analyzerKey}:${options.force === true}:${allowFullFallback}`;
+  const key = `${workspaceId}:${inspection.hashes.sha256}:${engine}:${profile}:${analyzerKey}:${options.force === true}:${allowFullFallback}:${seeds.join(",")}:${rawLoaderArgs(options.raw).join(" ")}`;
   const existing = active.get(key);
   if (existing) return existing;
 
@@ -1179,7 +1316,9 @@ export async function runDeepDecompilation(
         focusedOnly,
         options.analyzers,
         options.signal,
-        allowFullFallback
+        allowFullFallback,
+        seeds,
+        options.raw
       )
   ).finally(() => active.delete(key));
   active.set(key, work);

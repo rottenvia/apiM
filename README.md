@@ -175,8 +175,12 @@ start until those are set. Enable a specific analyzer such as
 APIs and then a bounded full dump. `force_decompile` reruns only Ghidra/ILSpy
 while preserving cached strings, entropy, carving and capa. Set
 `focused_only:false` to retain full Ghidra output immediately in searchable
-~350KB chunks or the complete ILSpy C# project. Completed results are cached
-by SHA-256 plus focus profile.
+~350KB chunks or the complete ILSpy C# project. A file with no header (a
+memory dump, a carved `.text`) needs `image_base` (and `arch` if not x86-64);
+`seed_addresses` makes and decompiles functions at the addresses given.
+Completed results are cached by SHA-256 plus everything asked (focus terms,
+analyzers, seeds, image base). Every Ghidra run leaves its whole log as
+`ghidra.log` beside its output.
 
 Closing or refreshing the tab does not kill a running Ghidra job. The header
 process dock lists leftover decompilers, and the agent can call
@@ -185,13 +189,16 @@ process dock lists leftover decompilers, and the agent can call
 `client.dll` is stored as exact bytes. `next dev` raises the proxy body
 limit to 256MB so Next does not silently keep only the first 10MB.
 
-Packed automatic analysis defaults to 90 seconds (small ordinary files 120s),
-with four CPU cores, 100MB decompiler text and 512MB exhaustive static output;
-tune only when needed:
+Ghidra's auto-analysis stops after 10 minutes for files up to 10MB, 30 for
+larger ones and 15 for likely-packed ones, and never runs past half of the
+whole-process limit (30 minutes), so the decompile step still gets time. It
+uses all cores but one (at most 16), a 4G Java heap, 100MB decompiler text and
+512MB exhaustive static output; tune only when needed:
 
 ```env
-APIM_BINARY_DECOMPILE_TIMEOUT_MS=240000
-APIM_GHIDRA_ANALYSIS_TIMEOUT_MS=120000
+APIM_BINARY_DECOMPILE_TIMEOUT_MS=1800000
+APIM_GHIDRA_ANALYSIS_TIMEOUT_MS=600000
+APIM_GHIDRA_MAX_MEMORY=4G
 APIM_BINARY_MAX_CPU=4
 APIM_BINARY_MAX_OUTPUT_MB=100
 APIM_BINARY_MAX_STATIC_OUTPUT_MB=512

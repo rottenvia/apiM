@@ -119,6 +119,8 @@ pub struct InspectBinaryOptions {
     pub allow_full_fallback: bool,
     /// Where a headerless image was mapped, for a dump that has no header of its own.
     pub raw: crate::binary::decompiler::RawImage,
+    /// `seed_addresses`: function starts to make functions at and decompile.
+    pub seeds: Vec<String>,
 }
 
 pub struct WorkspaceBinaryInspection {
@@ -353,7 +355,7 @@ pub async fn finish_inspection_with(tools: &Tools, root: &Path, target: &str, pa
     let deep = if opts.deep == Some(false) {
         DeepDecompilationResult::disabled()
     } else {
-        let o = DeepOptions { force: opts.force_deep, focus_terms: opts.focus_terms.clone(), focused_only: opts.focused_only, analyzers: opts.analyzers.clone(), allow_full_fallback: opts.allow_full_fallback, raw: opts.raw.clone() };
+        let o = DeepOptions { force: opts.force_deep, focus_terms: opts.focus_terms.clone(), focused_only: opts.focused_only, analyzers: opts.analyzers.clone(), allow_full_fallback: opts.allow_full_fallback, raw: opts.raw.clone(), seeds: opts.seeds.clone() };
         run_deep_decompilation_with(tools, root, target, &part.inspection, &o).await
     };
     // deepRan tells a real CPU run from a cache hit, which is what makes "already decompiled" trustworthy.

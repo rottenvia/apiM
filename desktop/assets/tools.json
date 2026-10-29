@@ -1061,6 +1061,13 @@
       "type": "number",
       "description": "Maximum selected strings to return, 1-300 (default 160)."
      },
+     "seed_addresses": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "description": "Hex function starts to make functions at and decompile regardless of focus_terms, e.g. in a raw image that starts mid-function, where nothing calls the functions above the first call."
+     },
      "image_base": {
       "type": "string",
       "description": "Where a headerless image was mapped, as hex (\"0x7ff782798000\"). For a dump of a running process or a carved section, which carries no PE/ELF header: Ghidra then loads the bytes raw at that address instead of looking for a header. Without it such a file cannot be decompiled at all, and a wrong address is worse than none, since every reference in the image resolves against it. Leave it out for an ordinary file that has its own header."

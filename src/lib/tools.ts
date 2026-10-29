@@ -1386,6 +1386,26 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
               "and then a bounded full dump. Defaults to false. Do not " +
               "enable on a huge downloaded DLL unless the user asked.",
           },
+          seed_addresses: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Hex function starts to make functions at and decompile " +
+              "regardless of focus_terms, e.g. in a raw image that starts " +
+              "mid-function.",
+          },
+          image_base: {
+            type: "string",
+            description:
+              "Hex load address of a headerless file (memory dump, carved " +
+              "section); Ghidra loads it raw there. Omit if it has a header.",
+          },
+          arch: {
+            type: "string",
+            description:
+              "With image_base: x86-64 (default), x86, arm64, arm, or a " +
+              "Ghidra language id.",
+          },
           analyzer_preset: {
             type: "string",
             enum: ["fast", "full"],
@@ -5656,6 +5676,16 @@ async function runToolInner(
           focusTerms,
           focusedOnly: args.focused_only !== false,
           allowFullFallback: args.allow_full_fallback === true,
+          seeds: Array.isArray(args.seed_addresses)
+            ? args.seed_addresses.map((seed) => String(seed))
+            : undefined,
+          raw:
+            typeof args.image_base === "string"
+              ? {
+                  imageBase: args.image_base,
+                  arch: typeof args.arch === "string" ? args.arch : undefined,
+                }
+              : undefined,
           analyzers,
           signal: context.signal,
           dependencies: inspectDependencies,
