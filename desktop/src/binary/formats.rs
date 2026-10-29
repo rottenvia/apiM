@@ -117,6 +117,8 @@ pub struct InspectBinaryOptions {
     pub focused_only: Option<bool>,
     pub analyzers: AnalyzerOverrides,
     pub allow_full_fallback: bool,
+    /// Where a headerless image was mapped, for a dump that has no header of its own.
+    pub raw: crate::binary::decompiler::RawImage,
 }
 
 pub struct WorkspaceBinaryInspection {
@@ -351,7 +353,7 @@ pub async fn finish_inspection_with(tools: &Tools, root: &Path, target: &str, pa
     let deep = if opts.deep == Some(false) {
         DeepDecompilationResult::disabled()
     } else {
-        let o = DeepOptions { force: opts.force_deep, focus_terms: opts.focus_terms.clone(), focused_only: opts.focused_only, analyzers: opts.analyzers.clone(), allow_full_fallback: opts.allow_full_fallback };
+        let o = DeepOptions { force: opts.force_deep, focus_terms: opts.focus_terms.clone(), focused_only: opts.focused_only, analyzers: opts.analyzers.clone(), allow_full_fallback: opts.allow_full_fallback, raw: opts.raw.clone() };
         run_deep_decompilation_with(tools, root, target, &part.inspection, &o).await
     };
     // deepRan tells a real CPU run from a cache hit, which is what makes "already decompiled" trustworthy.
@@ -562,7 +564,10 @@ pub fn format_binary_inspection(result: &WorkspaceBinaryInspection) -> String {
         }
     }
 
-    if result.deep.status != "disabled" || result.deep.summary.contains("was not started") {
+    // "disabled" with engine "none" is the only case nobody asked for (`deep: false`); every other one has a
+    // decompiler behind it and a reason worth reading. Keyed on the words "was not started" instead, a new reason
+    // that did not happen to use them was dropped from the report and the run looked as if nothing had stopped it.
+    if result.deep.status != "disabled" || result.deep.engine != "none" {
         lines.push(String::new());
         lines.push(format!("Deep decompilation: {} via {}{}", result.deep.status, result.deep.engine, if result.deep.cached { " (cached)" } else { "" }));
         lines.push(result.deep.summary.clone());

@@ -420,6 +420,8 @@ async fn run_helpers(target: &Target, ctx: &Ctx, tool_defs: &[Value], listing: &
         chat: Default::default(),
         procs: ctx.procs.clone(),
         planner: ctx.planner.clone(),
+        // A helper reports to the round that called it; the user's words are that round's to read.
+        notes: Default::default(),
     });
     let run_tool: ToolRunner = Arc::new(move |name, args| {
         let own = own.clone();
@@ -644,6 +646,7 @@ async fn run_inner(mut req: Request, emit: &Emitter, procs: Arc<Procs>) -> Resul
         chat: Arc::new(Mutex::new(req.chat.clone())),
         procs,
         planner: provider::helper_target(s).map(|h| crate::search::Planner { api_key: h.api_key, base_url: h.base_url, api_model: h.api_model, deepseek: h.style == ThinkingStyle::Deepseek }),
+        notes: req.notes.clone(),
     };
 
     let every = plugins::all(&s.custom_plugins);
@@ -2442,6 +2445,7 @@ mod tests {
             chat: Arc::new(Mutex::new(ChatState::default())),
             procs: Arc::new(Procs::default()),
             planner: None,
+            notes: Default::default(),
         };
         let target = target_for(base);
         let (opening, start) = open(&dir);

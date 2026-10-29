@@ -160,6 +160,7 @@ fn tool_calls(args: &[String]) {
         chat: Default::default(),
         procs: Default::default(),
         planner: None,
+        notes: Default::default(),
     };
     // Whatever asks is declined, and whatever else a tool reports while it runs is dropped.
     std::thread::spawn(move || {

@@ -136,7 +136,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             let hint = if !has_keys {
                 "Add your API keys in Settings to start chatting"
             } else if running {
-                "Working… start with \"btw\" to tell it something"
+                "Working… say something and it reaches the task"
             } else if !app.attachments.is_empty() {
                 "Add a question about these files…"
             } else {
@@ -176,13 +176,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             let enter = edit.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
             super::slash_menu::after_edit(app, ui, &edit, !menu.1.is_empty());
 
-            let is_note = running && btw_note(&app.draft).is_some();
+            // Anything in the box reaches the running task, so the button says so rather than offering to stop: with
+            // the box empty it is Stop again, and `/stop` is there either way.
+            let is_note = running && (!app.draft.trim().is_empty() || !app.attachments.is_empty());
             if is_note {
                 ui.horizontal(|ui| {
                     ui.add_space(16.0);
                     ui.spacing_mut().item_spacing.x = 6.0;
                     pulse(ui);
-                    ui.label(widgets::text("Passes it to the running task — nothing stops", 11.0, W::Regular, p.search));
+                    ui.label(widgets::text("Reaches the running task — nothing stops", 11.0, W::Regular, p.search));
                 });
                 ui.add_space(4.0);
             }

@@ -67,10 +67,52 @@ pub struct AnalyzerOverrides {
 #[derive(Clone, Debug, Default)]
 pub struct DeepOptions {
     pub force: bool,
+    /// Where a headerless image was mapped, and what it was built for: a dump of a running process has no header to
+    /// read either from, so Ghidra is told to load the bytes raw at this address instead of looking for one.
+    pub raw: RawImage,
     pub focus_terms: Vec<String>,
     pub focused_only: Option<bool>,
     pub analyzers: AnalyzerOverrides,
     pub allow_full_fallback: bool,
+}
+
+/// How to load an image that carries no header of its own. Empty means the file has one and is loaded normally.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RawImage {
+    /// The virtual address the bytes were mapped at, as written (`0x7ff782798000`).
+    pub image_base: String,
+    /// A processor as the caller named it ("x86-64", "x86", "arm64", "arm"), or a Ghidra language id passed straight through.
+    pub arch: String,
+}
+
+impl RawImage {
+    /// The Ghidra language id for `arch`, defaulting to 64-bit x86. A name holding colons is already one.
+    pub fn language(&self) -> String {
+        let arch = self.arch.trim();
+        if arch.contains(':') {
+            return arch.to_string();
+        }
+        match arch.to_ascii_lowercase().replace(['_', ' '], "-").as_str() {
+            "x86" | "x86-32" | "i386" | "ia32" | "32" => "x86:LE:32:default",
+            "arm64" | "aarch64" => "AARCH64:LE:64:v8A",
+            "arm" | "arm32" => "ARM:LE:32:v8",
+            _ => "x86:LE:64:default",
+        }
+        .to_string()
+    }
+
+    /// `0x…`, or a plain number read as hexadecimal, since that is how a mapped address is always written.
+    pub fn base(&self) -> Option<u64> {
+        let text = self.image_base.trim().trim_start_matches("0x").trim_start_matches("0X");
+        (!text.is_empty()).then(|| u64::from_str_radix(text, 16).ok()).flatten()
+    }
+
+    /// The arguments that make headless Ghidra load the file as bytes at that address instead of parsing a header.
+    /// Empty unless a base was given: without one the loader would place the image at 0, where nothing resolves.
+    pub fn loader_args(&self) -> Vec<String> {
+        let Some(base) = self.base() else { return Vec::new() };
+        ["-loader".into(), "BinaryLoader".into(), "-loader-baseAddr".into(), format!("0x{base:x}"), "-processor".into(), self.language()].into()
+    }
 }
 
 /// The launcher commands, resolved from the environment like the web app does.
@@ -203,8 +245,13 @@ async fn run_captured(command: &str, args: &[String], cwd: &Path) -> RunResult {
     let program = find_program(cwd, command).unwrap_or_else(|| PathBuf::from(command));
     let mut cmd = tokio::process::Command::new(program);
     cmd.args(args).current_dir(cwd).env_clear().envs(minimal_env()).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+    // CREATE_NO_WINDOW, and below normal priority. Ghidra runs one `decompile.exe` per analysis thread — five of them on
+    // a six-core machine — and at ordinary priority they take the whole computer: the user's own windows stuttered while
+    // a binary was being read. Below normal, Windows hands a core back the moment anything else wants one, and the
+    // analysis still has them all to itself while the machine is idle, so nothing is given up but the lag. The JVM's
+    // own children inherit the class, so the decompilers come along.
     #[cfg(windows)]
-    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    cmd.creation_flags(0x0800_0000 | 0x0000_4000);
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -549,6 +596,9 @@ async fn run_ghidra(tools: &Tools, root: &Path, target: &str, inspection: &PeIns
     let analyzer_cfg = project_dir.join("analyzers.json");
     let _ = std::fs::write(&analyzer_cfg, serde_json::to_string_pretty(&serde_json::json!({ "disable": disable, "enable": enable })).unwrap_or_default());
     let out = output.to_string_lossy().to_string();
+    // A dump of mapped memory has no header for Ghidra to read either, so it is told to take the bytes raw at the
+    // address they were mapped at. Without this the loader places the image at 0 and nothing in it resolves.
+    let raw = o.raw.loader_args();
     let mut args: Vec<String> = vec![
         project_dir.to_string_lossy().to_string(),
         format!("apim-{}", &sha[..12.min(sha.len())]),
@@ -573,6 +623,7 @@ async fn run_ghidra(tools: &Tools, root: &Path, target: &str, inspection: &PeIns
         (if focused_only { if o.allow_full_fallback { "focused-fallback" } else { "focused" } } else { "full" }).into(),
     ];
     args.extend(focus_terms.iter().cloned());
+    args.splice(2..2, raw);
     let result = run_captured(&command, &args, root).await;
     let launcher_fact = format!("The apiM server resolved and started the Ghidra launcher at {command}. Agent run_command processes use a separate scrubbed environment, so echoing APIM_GHIDRA_HOME or running where from them cannot diagnose this server-side launch.");
     let _ = std::fs::remove_dir_all(&project_dir);
@@ -737,7 +788,10 @@ pub async fn run_capa_analysis(root: &Path, target: &str, inspection: &PeInspect
 pub async fn run_deep_decompilation_with(tools: &Tools, root: &Path, target: &str, inspection: &PeInspection, o: &DeepOptions) -> DeepDecompilationResult {
     // Headless Ghidra detects ELF and Mach-O itself; only the legacy DOS images are out of reach.
     let ghidra_formats = ["ELF", "Mach-O", "Mach-O universal", "unknown binary"];
-    if !inspection.format.starts_with("PE") && !ghidra_formats.contains(&inspection.format.as_str()) {
+    // An address given for it says to ignore whatever header it has and take the bytes raw, so a dump wearing an MZ
+    // header that leads nowhere is not turned away as a 16-bit program — which is what it looks like from the outside.
+    let raw_asked = o.raw.base().is_some();
+    if !raw_asked && !inspection.format.starts_with("PE") && !ghidra_formats.contains(&inspection.format.as_str()) {
         return DeepDecompilationResult::new(false, "unavailable", "none", format!("{} is a legacy executable format; the configured modern decompilers cannot reconstruct it. Static strings and hashes are still shown.", inspection.format));
     }
     let engine = if inspection.managed.is_some() { "ilspy" } else { "ghidra" };
@@ -750,6 +804,20 @@ pub async fn run_deep_decompilation_with(tools: &Tools, root: &Path, target: &st
             "disabled",
             engine,
             format!("Deep decompilation was not started. Name the functions or strings you need in focus_terms (from a summary/strings pass), enable a specific analyzer such as \"Decompiler Parameter ID\" via enable_analyzers, or set focused_only=false / allow_full_fallback=true only if you really want the whole {}.", if engine == "ghidra" { "binary" } else { "assembly" }),
+        );
+        r.focus_terms = Some(focus_terms);
+        r.focused_only = Some(focused_only);
+        return r;
+    }
+    // An image with no header of its own (a dump of mapped memory, a carved section) needs to be told where it
+    // belongs before anything in it can be followed: an address is a fact only the caller has.
+    let headerless = inspection.sections.is_empty() && (inspection.format == "unknown binary" || inspection.format.starts_with("DOS/"));
+    if headerless && o.raw.base().is_none() {
+        let mut r = DeepDecompilationResult::new(
+            false,
+            "disabled",
+            "ghidra",
+            format!("{} carries no header, so there is nothing to say where its bytes belong in memory. Pass image_base (the address it was mapped at, as hex) to load it raw there, and arch when it is not x86-64 (\"x86\", \"arm64\", \"arm\", or a Ghidra language id). Everything in it resolves against that address, so a wrong one is worse than none.", inspection.format),
         );
         r.focus_terms = Some(focus_terms);
         r.focused_only = Some(focused_only);
@@ -774,6 +842,58 @@ mod tests {
 
     fn sample() -> PeInspection {
         inspect_portable_executable(&samples::pe64(), &StringOptions::default()).unwrap()
+    }
+
+    /// Everything the decompilers start must run under the user's own windows, so reading a binary never takes the
+    /// computer. Asked from inside the process itself, since the class is what its children inherit.
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn what_a_decompiler_starts_runs_below_normal_priority() {
+        let cwd = std::env::temp_dir();
+        let args = ["-NoProfile".to_string(), "-Command".to_string(), "(Get-Process -Id $PID).PriorityClass".to_string()];
+        let run = run_captured("powershell", &args, &cwd).await;
+        assert!(run.started && run.code == Some(0), "started {} code {:?} error {:?}", run.started, run.code, run.error);
+        assert_eq!(run.output.trim(), "BelowNormal", "{}", run.output);
+    }
+
+    /// A dump of mapped memory has no header, so Ghidra is told where the bytes belong and what reads them.
+    #[test]
+    fn a_headerless_image_is_loaded_raw_at_the_address_it_was_mapped_at() {
+        let at = |base: &str, arch: &str| RawImage { image_base: base.into(), arch: arch.into() }.loader_args().join(" ");
+        assert_eq!(at("0x7ff782798000", ""), "-loader BinaryLoader -loader-baseAddr 0x7ff782798000 -processor x86:LE:64:default");
+        // Written without the 0x, as a mapped address often is, and with the processors a caller names.
+        assert_eq!(at("400000", "x86"), "-loader BinaryLoader -loader-baseAddr 0x400000 -processor x86:LE:32:default");
+        assert_eq!(at("0x1000", "ARM64"), "-loader BinaryLoader -loader-baseAddr 0x1000 -processor AARCH64:LE:64:v8A");
+        // A Ghidra language id is passed straight through, so an unusual processor needs no list here.
+        assert_eq!(at("0x1000", "MIPS:BE:32:default"), "-loader BinaryLoader -loader-baseAddr 0x1000 -processor MIPS:BE:32:default");
+        // No address, nothing to say: the file is loaded the ordinary way.
+        assert!(at("", "x86").is_empty() && at("not a number", "").is_empty() && RawImage::default().base().is_none());
+    }
+
+    /// Without that address nothing in the image resolves, so it says what to pass rather than running a useless load.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_headerless_image_without_an_address_says_what_to_pass() {
+        let root = crate::tools::scratch("rawbase");
+        let raw = crate::binary::formats::inspect_generic_binary(&[0x66u8; 4096], &StringOptions::default(), "MQg.bin");
+        assert_eq!(raw.format, "unknown binary");
+        let asked = DeepOptions { focus_terms: vec!["CreateMove".into()], ..Default::default() };
+        let r = run_deep_decompilation_with(&missing(), &root, "MQg.bin", &raw, &asked).await;
+        assert_eq!((r.status, r.attempted), ("disabled", false), "{}", r.summary);
+        assert!(r.summary.contains("carries no header") && r.summary.contains("image_base") && r.summary.contains("arch"), "{}", r.summary);
+        // Given one, it goes on to the launcher (which is not installed here, so it reports that instead).
+        let with_base = DeepOptions { raw: RawImage { image_base: "0x7ff782798000".into(), arch: String::new() }, ..asked.clone() };
+        let r = run_deep_decompilation_with(&missing(), &root, "MQg.bin", &raw, &with_base).await;
+        assert_eq!(r.status, "unavailable", "{}", r.summary);
+        // A dump wearing a hand-built MZ header reads as a 16-bit program and was turned away before any of this.
+        // With an address it is taken raw like any other headerless file, header and all.
+        let mut mz = raw.clone();
+        mz.format = "DOS/MZ".into();
+        let without = run_deep_decompilation_with(&missing(), &root, "MQg.bin", &mz, &asked).await;
+        assert!(without.summary.contains("legacy executable format"), "{}", without.summary);
+        let r = run_deep_decompilation_with(&missing(), &root, "MQg.bin", &mz, &with_base).await;
+        assert_eq!(r.status, "unavailable", "{}", r.summary);
+        assert!(r.summary.contains("Ghidra") && !r.summary.contains("legacy executable format"), "{}", r.summary);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn missing() -> Tools {

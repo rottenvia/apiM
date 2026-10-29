@@ -115,6 +115,7 @@ mod tests {
             planner: None,
             limits: crate::context::tool_limits::tool_limits_for(false),
             memory: Default::default(),
+            notes: Default::default(),
         }
     }
 

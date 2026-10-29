@@ -1334,6 +1334,15 @@ impl Watch {
     }
 }
 
+/// Why a wait gives up early. The user typed while the reply worked, and their words are read at the top of the next
+/// round: waiting out a ten-minute `timeout_ms` first would leave a question hanging for ten minutes.
+fn spoken_while_waiting(started: Instant, state: &str) -> String {
+    format!(
+        "Stopped waiting after {:.1}s: the user said something while you waited, and it is in this conversation just below. Nothing was lost — {state}.\n\nRead what they said and answer it. Then call wait_for_output again to go on waiting, unless what they said means you should do something else first.",
+        started.elapsed().as_secs_f64()
+    )
+}
+
 pub async fn wait_for_output(ctx: &Ctx, args: &Value) -> Output {
     let id = str_arg(args, "id");
     let watched = str_arg(args, "process").trim();
@@ -1355,6 +1364,9 @@ pub async fn wait_for_output(ctx: &Ctx, args: &Value) -> Output {
             if started.elapsed() >= limit {
                 let state = if watch.pids.is_empty() { "has not started" } else { "is still open" };
                 return Output::fail(format!("Timed out after {:.0}s: {} {state}.", limit.as_secs_f64(), watch.name));
+            }
+            if ctx.spoken_to() {
+                return Output::ok(spoken_while_waiting(started, &format!("{} is still open", watch.name)), "The user said something");
             }
             tokio::time::sleep(Duration::from_millis(150)).await;
         }
@@ -1381,9 +1393,14 @@ pub async fn wait_for_output(ctx: &Ctx, args: &Value) -> Output {
             "closed"
         } else if started.elapsed() >= limit {
             "timeout"
+        } else if ctx.spoken_to() {
+            "spoken to"
         } else {
             "waiting"
         };
+        if outcome == "spoken to" {
+            return Output::ok(spoken_while_waiting(started, &format!("the process {id} is still running")), "The user said something");
+        }
         if outcome != "waiting" {
             let ms = started.elapsed().as_millis();
             // ponytail: the web shows only output printed since the wait began; this shows the recent log.
@@ -1415,6 +1432,30 @@ mod tests {
         assert!(note.contains("found on PATH") && note.ends_with("`.\\cmd.exe` runs that one.]"), "{note}");
         assert!(shadowed(&root, "cmd").is_some() && shadowed(&root, ".\\cmd.exe").is_none() && shadowed(&root, "whoami").is_none());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A wait of minutes must not sit on a question. The user types while the reply works, and the next round reads
+    /// what they said — so the wait gives it up at once, leaving the program it watched running.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_wait_gives_up_as_soon_as_the_user_says_something() {
+        let dir = crate::tools::scratch("waitnote");
+        let ctx = crate::tools::test_ctx(&dir, Approval::Auto);
+        let sleep = if cfg!(windows) { json!({ "command": "powershell", "args": ["Start-Sleep -Seconds 30"] }) } else { json!({ "command": "sleep", "args": ["30"] }) };
+        let started = start_process(&ctx, &sleep).await;
+        let id = started.text.split_once("id ").map(|(_, rest)| rest.split(|c: char| !c.is_alphanumeric() && c != '-' && c != '_').next().unwrap_or("").to_string()).unwrap_or_default();
+        assert!(started.ok && !id.is_empty(), "{}", started.text);
+        let notes = ctx.notes.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            notes.lock().unwrap().push("btw how long does this take?".into());
+        });
+        let waited = tokio::time::timeout(Duration::from_secs(20), wait_for_output(&ctx, &json!({ "id": id, "timeout_ms": 600_000 }))).await.expect("the wait never came back");
+        assert!(waited.ok && waited.text.starts_with("Stopped waiting after") && waited.text.contains("is still running"), "{}", waited.text);
+        assert_eq!(waited.summary, "The user said something");
+        // The program it watched was left alone.
+        assert!(ctx.procs.get(&id, &ctx.state_dir).is_some_and(|p| p.exit.lock().unwrap().is_none()));
+        let _ = stop_process(&ctx, &json!({ "id": id }));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

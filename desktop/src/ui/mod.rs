@@ -605,6 +605,18 @@ impl App {
                     self.fake_run(true);
                     self.pass_note("also keep the old tests green".into());
                 }
+                // A step that waits on a program, with a note passed to it: the state the sweeping label was seen
+                // breaking its words in.
+                "wait-output" | "wait-output-note" => {
+                    self.conv.messages.push(Message::new(Role::User, "Start the game and tell me when it closes."));
+                    let mut reply = Message::new(Role::Assistant, "");
+                    reply.parts = vec![Part::Text("Started it. Waiting for it to close.".into()), Part::Tool(store::ToolEvent { id: "w1".into(), name: "wait_for_output".into(), args: r#"{"process":"game.exe","timeout_ms":600000}"#.into(), summary: "game.exe".into(), started_at: 1, ..Default::default() })];
+                    self.conv.messages.push(reply);
+                    self.fake_run(true);
+                    if part.ends_with("note") {
+                        self.pass_note("btw check the log too".into());
+                    }
+                }
                 "draft" => self.draft = "Explain how the context meter decides when to compact, and show me where that lives in the code.".into(),
                 "search" => {
                     self.dialog = Dialog::Search;
@@ -1087,9 +1099,11 @@ impl App {
         }
         let text = self.draft.trim().to_string();
         if self.running_here() {
-            // "btw …" while a reply runs is handed to it; anything else waits.
-            if let Some(note) = composer::btw_note(&text) {
-                self.pass_note(note.to_string());
+            // Anything said while a reply runs is handed to it, "btw" or not: typed plainly it used to go nowhere at
+            // all, and a question asked while it waited on a program went unread until the waiting was over.
+            let note = composer::btw_note(&text).unwrap_or(&text).to_string();
+            if !note.is_empty() || !self.attachments.is_empty() {
+                self.pass_note(note);
             }
             return;
         }

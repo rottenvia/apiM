@@ -64,6 +64,17 @@ pub struct Ctx {
     pub procs: Arc<exec::Procs>,
     /// The cheap model that plans web searches, when there is one.
     pub planner: Option<crate::search::Planner>,
+    /// What the user has said while this reply runs, waiting for the next round to read it. A tool that waits a long
+    /// while (`wait_for_output`) gives up as soon as something is here, so a question is answered in a moment rather
+    /// than when the program it watches finally closes.
+    pub notes: Arc<Mutex<Vec<String>>>,
+}
+
+impl Ctx {
+    /// The user said something while this reply runs and the next round has not read it yet.
+    pub fn spoken_to(&self) -> bool {
+        !self.notes.lock().unwrap().is_empty()
+    }
 }
 
 /// What a tool hands back.
@@ -199,7 +210,7 @@ static SCHEMAS: LazyLock<Vec<Value>> = LazyLock::new(|| {
             let f = &mut t["function"];
             f["parameters"]["properties"]["process"] = serde_json::json!({ "type": "string", "description": "A program's name (RobloxStudioBeta, notepad) or pid: the wait also ends the moment it closes, its window or its process, whichever goes first. Without `id`, that is all it waits for. Use it for a program a launcher, Start-Process or computer_act opened, rather than Start-Process -Wait (which also waits for every helper the program left behind) or a script that polls." });
             f["parameters"]["required"] = serde_json::json!([]);
-            f["description"] = Value::String(format!("{} With `process` it also watches a program you did not start here, and returns as soon as it closes.", f["description"].as_str().unwrap_or("")));
+            f["description"] = Value::String(format!("{} With `process` it also watches a program you did not start here, and returns as soon as it closes. It also comes back the moment the user says something while you wait, so a long wait never leaves them unanswered: answer them, then call it again to go on waiting.", f["description"].as_str().unwrap_or("")));
         }
         // Options this build cannot honour are removed, so the model never asks for them.
         if t["function"]["name"] == "start_process" {
@@ -227,6 +238,7 @@ pub fn test_ctx(root: &std::path::Path, approval: crate::store::Approval) -> Ctx
         planner: None,
         limits: crate::context::tool_limits::tool_limits_for(false),
         memory: Default::default(),
+        notes: Default::default(),
     }
 }
 

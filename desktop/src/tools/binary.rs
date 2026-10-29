@@ -4,7 +4,7 @@
 
 use super::Output;
 use crate::binary::artifacts::StaticArtifactLayers;
-use crate::binary::decompiler::AnalyzerOverrides;
+use crate::binary::decompiler::{AnalyzerOverrides, RawImage};
 use crate::binary::formats::{InspectBinaryOptions, finish_inspection, format_binary_inspection, inspect_static};
 use crate::binary::ledger::note_binary_inspection;
 use crate::binary::pe::StringOptions;
@@ -110,6 +110,7 @@ fn options_from_args(args: &Value) -> InspectBinaryOptions {
             enable: analyzer_list("enable_analyzers").unwrap_or_default(),
         },
         allow_full_fallback: args["allow_full_fallback"] == true,
+        raw: RawImage { image_base: js_str(args, "image_base"), arch: js_str(args, "arch") },
     }
 }
 

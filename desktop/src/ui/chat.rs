@@ -62,22 +62,32 @@ pub struct Totals {
 }
 
 /// A label whose colour sweeps like the web app's `.thinking-shimmer`.
-pub fn shimmer(ui: &egui::Ui, text: &str, size: f32) -> egui::text::LayoutJob {
+///
+/// The band travels in points, across a span wider than any letter. Stepped by letter index instead, it crawled over a
+/// wide "W" and jumped over a narrow "i", and next-door letters differed enough in brightness that "Waiting for output"
+/// read as "W aiting" — a lit letter beside a dim one rather than one word being swept.
+pub fn shimmer(ui: &egui::Ui, text: &str, size: f32, weight: W) -> egui::text::LayoutJob {
     let p = p();
     let dim = mix(p.thinking, 55.0, p.muted);
     let bright = mix(p.thinking, 65.0, Color32::WHITE);
-    let time = ui.input(|i| i.time);
-    // The band crosses the text once every 1.5s, right to left like the CSS.
-    let centre = 1.5 - (time % 1.5) / 1.5 * 2.0;
-    let count = text.chars().count().max(1) as f64;
+    let font = theme::font(size, weight);
+    // Where each letter will stand, from the words laid out whole: a section per letter lays out the same way (test below).
+    let laid = ui.painter().layout_no_wrap(text.to_string(), font.clone(), dim);
+    let span = laid.size().x;
+    let band = (span * 0.6).clamp(40.0, 140.0);
+    // The band crosses the words once every 1.5s, right to left like the CSS, from fully off one end to fully off the other.
+    let centre = span + band - (ui.input(|i| i.time) as f32 % 1.5) / 1.5 * (span + 2.0 * band);
     let mut job = egui::text::LayoutJob::default();
-    for (i, ch) in text.chars().enumerate() {
-        let x = i as f64 / count;
-        let near = (1.0 - ((x - centre).abs() / 0.3)).clamp(0.0, 1.0) as f32;
-        let format = egui::TextFormat { font_id: theme::font(size, W::Regular), color: dim.lerp_to_gamma(bright, near), line_height: Some(20.0), ..Default::default() };
-        job.append(&ch.to_string(), 0.0, format);
+    // ponytail: a letter per section is kerned against nothing, so a pair like "To" stands a point wide. Paint the
+    // whole galley once per band slice, clipped, if that point ever shows.
+    for glyph in laid.rows.iter().flat_map(|row| row.glyphs.iter()) {
+        let near = (1.0 - (glyph.pos.x + glyph.advance_width / 2.0 - centre).abs() / band).clamp(0.0, 1.0);
+        let format = egui::TextFormat { font_id: font.clone(), color: dim.lerp_to_gamma(bright, near), line_height: Some(20.0), ..Default::default() };
+        job.append(&glyph.chr.to_string(), 0.0, format);
     }
-    widgets::tick(ui);
+    // A sweep wants frames, not glances: at the 50ms of `widgets::tick` it stepped. 30 a second is smooth for a band
+    // this soft and costs half of what the window's own rate would, over the minutes a long reply runs.
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(if ui.input(|i| i.focused) { 33 } else { 140 }));
     job
 }
 
@@ -568,7 +578,7 @@ fn opening_pill(app: &App, ui: &mut egui::Ui, area: Rect) {
     let id = app.current_id();
     let title = app.chats.iter().find(|c| c.id == id).map_or("chat", |c| c.title.as_str());
     let short: String = if title.chars().count() > 36 { format!("{}…", title.chars().take(35).collect::<String>()) } else { title.to_string() };
-    let label = ui.painter().layout_job(shimmer(ui, &format!("Opening {short}…"), 13.0));
+    let label = ui.painter().layout_job(shimmer(ui, &format!("Opening {short}…"), 13.0, W::Regular));
     // A chat of some size says how long it still takes, and shows it: its file is read at a known pace.
     let (share, secs) = app.opening.as_ref().map_or((1.0, 0.0), |opening| opening.progress.eta());
     let wait = (secs >= 0.2).then(|| widgets::galley(ui, &super::splash::left(secs), theme::font(11.0, W::Regular), p.muted));
@@ -732,7 +742,7 @@ fn wait_rows(ui: &mut egui::Ui, run: &super::Run, has_output: bool) {
         }
     };
     let glow = |ui: &mut egui::Ui, text: String| {
-        let job = shimmer(ui, &text, 13.0);
+        let job = shimmer(ui, &text, 13.0, W::Regular);
         ui.add(egui::Label::new(job).truncate());
     };
     let body = |r: &super::Round| r.buckets.iter().map(|b| format!("{} {}", b.label, k(b.chars))).collect::<Vec<_>>().join(" · ");
@@ -840,5 +850,63 @@ mod tests {
         assert_eq!(describe_request(&[bucket("your message", 812)]), (812, "812 in (your message 812)".into()));
         assert_eq!(describe_request(&[]), (0, "0 in".into()));
         assert_eq!((k(999), k(1000), k(2500)), ("999".into(), "1k".into(), "3k".into()));
+    }
+
+    const LABELS: [&str; 4] = ["Waiting for the model…", "Waiting for output", "Thinking…", "AV Toy"];
+
+    /// The lit words must stand where the same words stand unlit, give or take the kerning a section per letter costs.
+    #[test]
+    fn a_sweeping_label_stands_where_plain_words_do() {
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        for text in LABELS {
+            let _ = ctx.run_ui(egui::RawInput { time: Some(0.3), ..Default::default() }, |ui| {
+                let lit = ui.painter().layout_job(shimmer(ui, text, 13.0, W::Regular));
+                let plain = widgets::galley(ui, text, theme::font(13.0, W::Regular), Color32::WHITE);
+                let places = |g: &egui::Galley| g.rows.iter().flat_map(|r| r.glyphs.iter().map(|g| (g.chr, g.pos.x))).collect::<Vec<_>>();
+                let (lit, plain) = (places(&lit), places(&plain));
+                assert_eq!(lit.iter().map(|g| g.0).collect::<Vec<_>>(), plain.iter().map(|g| g.0).collect::<Vec<_>>(), "{text}: other letters when lit");
+                for ((c, x), (_, want)) in lit.iter().zip(&plain) {
+                    assert!((x - want).abs() <= 2.5, "{text}: '{c}' stands at {x} lit, {want} plain\nlit   {lit:?}\nplain {plain:?}");
+                }
+            });
+        }
+    }
+
+    /// One word must be swept, not spelled out. The band used to step by letter index, so a wide "W" beside a narrow
+    /// "a" jumped most of the way from dim to lit in one letter and "Waiting" read as "W aiting".
+    #[test]
+    fn a_sweeping_label_never_jumps_between_two_letters() {
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        for text in LABELS {
+            // One brightness per letter, over a whole sweep. Red alone orders them: the band only ever mixes one dim
+            // colour towards one bright one. Sections of equal colour are merged by egui, so they are spread back out.
+            let mut sweep: Vec<Vec<f32>> = Vec::new();
+            for step in 0..30 {
+                let _ = ctx.run_ui(egui::RawInput { time: Some(step as f64 * 0.05), ..Default::default() }, |ui| {
+                    let job = shimmer(ui, text, 13.0, W::Regular);
+                    let mut frame = Vec::new();
+                    for section in &job.sections {
+                        let span = &job.text[section.byte_range.start.0..section.byte_range.end.0];
+                        frame.extend(span.chars().map(|_| section.format.color.r() as f32));
+                    }
+                    sweep.push(frame);
+                });
+            }
+            let all = || sweep.iter().flatten().copied();
+            let (low, high) = (all().fold(f32::MAX, f32::min), all().fold(0.0, f32::max));
+            assert!(high - low > 20.0, "{text}: the whole sweep spans {} of brightness", high - low);
+            for (step, frame) in sweep.iter().enumerate() {
+                assert_eq!(frame.len(), text.chars().count(), "{text} at {step}: {} letters", frame.len());
+                for (i, pair) in frame.windows(2).enumerate() {
+                    let jump = (pair[1] - pair[0]).abs() / (high - low);
+                    assert!(jump < 0.25, "{text} at {step}: letter {i} is {:.0}% of the way from dim to lit above the one beside it\n{frame:?}", jump * 100.0);
+                }
+            }
+            // And it travels: a band that stood still would light the same letter all the way through.
+            let brightest: std::collections::HashSet<usize> = sweep.iter().filter_map(|f| f.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|(i, _)| i)).collect();
+            assert!(brightest.len() > 3, "{text}: the band lit {} letters over a whole sweep", brightest.len());
+        }
     }
 }

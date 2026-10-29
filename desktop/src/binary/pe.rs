@@ -1217,7 +1217,20 @@ pub fn inspect_portable_executable(input: &[u8], opts: &StringOptions) -> R<PeIn
             b"LX" => "DOS/LX",
             _ => "DOS/MZ",
         };
-        let mut p = non_pe_inspection(input, legacy, "legacy DOS/Windows", "legacy", opts, "Legacy executable format: PE packing heuristics do not apply.", vec!["Legacy MZ executable: modern PE import/decompile metadata is unavailable.".into()], "unknown", true);
+        // A real 16-bit program has one of those signatures. Anything else means the four bytes `e_lfanew` points at
+        // are not a header at all: a raw or truncated image, or a hand-built MZ whose `e_lfanew` does not match where
+        // its PE header was written. Reported as a legacy executable with `imageBase 0x0` and no sections, that read
+        // as a successful inspection and cost a reader two runs before the header was found to be wrong.
+        let indicators = if legacy == "DOS/MZ" {
+            let found: String = input[pe_at as usize..pe_at as usize + 4].iter().map(|b| if b.is_ascii_graphic() { (*b as char).to_string() } else { format!("\\x{b:02x}") }).collect();
+            vec![format!(
+                "MZ header but no PE signature at e_lfanew=0x{pe_at:x} (found \"{found}\", not \"PE\\0\\0\"): this is a raw or truncated image, or an MZ header whose e_lfanew does not point at where its PE header was written — not a legacy DOS program. Nothing below (image base, sections, imports, entry point) was read from a header, so they are all empty or zero. To take it apart anyway, pass image_base (and arch when it is not x86-64) so the decompiler loads it as raw bytes at that address."
+            )]
+        } else {
+            // A real NE/LE/LX keeps the web app's wording, which its recorded output is checked against.
+            vec!["Legacy MZ executable: modern PE import/decompile metadata is unavailable.".into()]
+        };
+        let mut p = non_pe_inspection(input, legacy, "legacy DOS/Windows", "legacy", opts, "Legacy executable format: PE packing heuristics do not apply.", indicators, "unknown", true);
         p.hashes = hashes;
         return Ok(p);
     }
@@ -1278,7 +1291,11 @@ pub fn inspect_portable_executable(input: &[u8], opts: &StringOptions) -> R<PeIn
         }
     }
     let entry_section = sections.iter().find(|s| in_section(s, entry_point_rva));
-    if entry_point_rva != 0 && entry_section.is_none() {
+    if entry_point_rva == 0 {
+        // Only an object file legitimately has none. In a hand-built or rebuilt header it means the field was never
+        // filled in, and a decompiler then has no first function to follow: it guesses where the code begins.
+        indicators.push("Entry point RVA is 0: this image declares no entry point, so a decompiler has no starting function and falls back to guessing where code begins. In a rebuilt or hand-written header, AddressOfEntryPoint was left unset.".into());
+    } else if entry_section.is_none() {
         indicators.push("Entry point does not fall inside a declared section.".into());
     } else if let Some(s) = entry_section.filter(|s| !s.executable) {
         indicators.push(format!("Entry point is inside non-executable section {}.", s.name));
@@ -1621,6 +1638,17 @@ mod tests {
         dos[0x80..0x82].copy_from_slice(b"NE");
         let p = inspect_portable_executable(&dos, &opts()).unwrap();
         assert_eq!((p.format.as_str(), p.packing.status.as_str()), ("DOS/NE", "unknown"));
+        assert!(p.indicators[0].starts_with("Legacy MZ executable"), "{:?}", p.indicators);
+        // An MZ whose e_lfanew points at anything else is a raw or truncated image, or a header built by hand with
+        // the field and the signature in disagreement. Reported as a legacy DOS program it read as a clean result
+        // with imageBase 0x0, and cost a reader two runs before the header itself was found to be wrong.
+        let mut wrong = dos.clone();
+        wrong[0x80..0x84].copy_from_slice(&[0x48, 0x8b, 0x05, 0x00]);
+        let p = inspect_portable_executable(&wrong, &opts()).unwrap();
+        assert_eq!(p.format.as_str(), "DOS/MZ");
+        let said = &p.indicators[0];
+        assert!(said.contains("no PE signature at e_lfanew=0x80") && said.contains("H") && said.contains("\\x8b"), "{said}");
+        assert!(said.contains("raw or truncated image") && said.contains("image_base"), "{said}");
         let mut truncated = samples::pe64();
         truncated.truncate(0x100);
         assert_eq!(inspect_portable_executable(&truncated, &opts()).unwrap_err(), "PE optional header is truncated");

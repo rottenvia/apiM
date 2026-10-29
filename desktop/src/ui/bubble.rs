@@ -813,8 +813,7 @@ fn step(ui: &mut Ui, tool: &ToolEvent, env: &mut Env, open: &mut Option<String>)
     let previewed = tool.summary.starts_with("Preview");
     let verb = if running { d.running.as_str() } else if previewed { "Previewed" } else { d.done.as_str() };
     if running {
-        let mut job = chat::shimmer(ui, verb, 13.0);
-        job.sections.iter_mut().for_each(|s| s.format.font_id = theme::font(13.0, W::Medium));
+        let job = chat::shimmer(ui, verb, 13.0, W::Medium);
         x += widgets::text_at(ui, x, row.center().y, ui.painter().layout_job(job));
     } else {
         let verb = widgets::galley(ui, verb, theme::font(13.0, W::Medium), base);
@@ -1045,8 +1044,7 @@ fn thinking_panel(ui: &mut Ui, text: &str, ms: u64, live: bool, env: &mut Env, u
         let chars = text.chars().count();
         if live {
             let label = format!("Thinking · {}s{}", env.thinking_secs.unwrap_or(0), if chars > 0 { format!(" · {} tok", tokens_of_chars(chars, 0)) } else { String::new() });
-            let mut job = chat::shimmer(ui, &label, 13.0);
-            job.sections.iter_mut().for_each(|s| s.format.font_id = theme::font(13.0, W::Medium));
+            let job = chat::shimmer(ui, &label, 13.0, W::Medium);
             let w = widgets::text_at(ui, x, row.center().y, ui.painter().layout_job(job));
             let mut spot = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(pos2(x + w + 6.0, row.center().y - 1.0), vec2(20.0, 6.0))));
             dots(&mut spot, 3.0, p.thinking);
@@ -1110,8 +1108,7 @@ fn think_row(ui: &mut Ui, text: &str, live: bool, env: &mut Env) {
         let amount = tokens_of_chars(text.chars().count(), 1);
         if live {
             let label = format!("Thinking · {}s · {amount} tok", env.thinking_secs.unwrap_or(0));
-            let mut job = chat::shimmer(ui, &label, 13.0);
-            job.sections.iter_mut().for_each(|s| s.format.font_id = theme::font(13.0, W::Medium));
+            let job = chat::shimmer(ui, &label, 13.0, W::Medium);
             x += widgets::text_at(ui, x, row.center().y, ui.painter().layout_job(job));
         } else {
             x += widgets::text_at(ui, x, row.center().y, widgets::galley(ui, "Thought", theme::font(13.0, W::Medium), colour));
