@@ -309,13 +309,23 @@ fn list_outputs(dir: &Path, workspace_root: &Path) -> Vec<String> {
     out
 }
 
-fn read_marker(file: &Path, hash: &str, engine: &str, profile: &str) -> bool {
-    let Ok(text) = std::fs::read_to_string(file) else { return false };
-    let Ok(m) = serde_json::from_str::<serde_json::Value>(&text) else { return false };
-    m["hash"] == hash && m["engine"] == engine && m["profile"] == profile && m["complete"] == true
+/// The status the cached artifacts were left in ("complete", or "partial" for a run the time limit cut short), or
+/// `None` when nothing on disk describes this hash, engine and profile. A marker without a status is from before
+/// partial runs were kept, and every one of those was a complete run.
+fn read_marker(file: &Path, hash: &str, engine: &str, profile: &str) -> Option<String> {
+    let text = std::fs::read_to_string(file).ok()?;
+    let m = serde_json::from_str::<serde_json::Value>(&text).ok()?;
+    if !(m["hash"] == hash && m["engine"] == engine && m["profile"] == profile && m["complete"] == true) {
+        return None;
+    }
+    Some(m["status"].as_str().unwrap_or("complete").to_string())
 }
 
 fn write_marker(file: &Path, hash: &str, engine: &str, profile: &str) {
+    write_marker_status(file, hash, engine, profile, "complete");
+}
+
+fn write_marker_status(file: &Path, hash: &str, engine: &str, profile: &str, status: &str) {
     #[derive(serde::Serialize)]
     #[serde(rename_all = "camelCase")]
     struct Marker<'a> {
@@ -323,9 +333,10 @@ fn write_marker(file: &Path, hash: &str, engine: &str, profile: &str) {
         engine: &'a str,
         profile: &'a str,
         complete: bool,
+        status: &'a str,
         created_at: String,
     }
-    let body = Marker { hash, engine, profile, complete: true, created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true) };
+    let body = Marker { hash, engine, profile, complete: true, status, created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true) };
     let _ = std::fs::write(file, serde_json::to_string_pretty(&body).unwrap_or_default() + "\n");
 }
 
@@ -450,7 +461,7 @@ async fn run_ilspy(tools: &Tools, root: &Path, target: &str, inspection: &PeInsp
     let project_output = output.join("project");
     let profile = focus_profile(&focus_terms, focused_only);
     let marker = output.join(".apim-analysis.json");
-    if !force && read_marker(&marker, sha, "ilspy", &profile) {
+    if !force && read_marker(&marker, sha, "ilspy", &profile).is_some() {
         let outputs = list_outputs(&output, root);
         let mut r = DeepDecompilationResult::new(false, "complete", "ilspy", format!("Reused {} managed decompilation artifact(s) from {rel_root}/ilspy.", outputs.len()));
         r.cached = true;
@@ -458,7 +469,7 @@ async fn run_ilspy(tools: &Tools, root: &Path, target: &str, inspection: &PeInsp
     }
     if !command_could_exist(&tools.ilspy) {
         let mut r = DeepDecompilationResult::new(false, "unavailable", "ilspy", "The binary is managed .NET, but ILSpy is not installed at the configured path.".into());
-        r.setup = Some("Install the .NET SDK, run `dotnet tool install --global ilspycmd`, restart apiM, and optionally set APIM_ILSPYCMD_PATH in .env.local if it is not on PATH.".into());
+        r.setup = Some(format!("Install the .NET SDK, run `dotnet tool install --global ilspycmd`, restart apiM, and optionally set APIM_ILSPYCMD_PATH if it is not on PATH. {}", crate::env_local_source()));
         return r;
     }
     // A cache miss means the hash/profile does not describe what is on disk: rebuild from empty.
@@ -523,6 +534,30 @@ fn resolve_analyzer_config(o: &AnalyzerOverrides) -> (Vec<String>, Vec<String>) 
 }
 
 /// One line the model can read back: the preset and the analyzers that ended up off or on.
+/// The cache key for one Ghidra run: everything that changes what Ghidra is asked to do.
+///
+/// It held only the focus terms, so a rerun that asked for a different analyzer set, a different preset or a different
+/// load address was answered in a tenth of a second out of the old artifacts — including the one rerun the tool's own
+/// description asks the caller to make, `enable_analyzers: ["Decompiler Parameter ID"]` to get real parameter names
+/// instead of `param_1`, which could therefore never work.
+///
+/// Both time limits are in it because a run they cut short is cached too: the same limits would stop in the same place,
+/// and a raised one is a different question. They are different knobs — `APIM_GHIDRA_ANALYSIS_TIMEOUT_MS` gives up on
+/// Ghidra's own analysis and still runs the post-script, `APIM_BINARY_DECOMPILE_TIMEOUT_MS` kills the whole process —
+/// and only the second one produces `timed_out`.
+fn ghidra_profile(focus_terms: &[String], focused_only: bool, o: &DeepOptions, analysis_ms: u64, kill_ms: u64) -> String {
+    let (disable, enable) = resolve_analyzer_config(&o.analyzers);
+    format!(
+        "{}:fallback{}:analyzers[{}|{}]:raw[{}|{}]:limit{analysis_ms}/{kill_ms}",
+        focus_profile(focus_terms, focused_only),
+        o.allow_full_fallback,
+        disable.join(","),
+        enable.join(","),
+        o.raw.image_base.trim(),
+        o.raw.arch.trim(),
+    )
+}
+
 fn describe_analyzer_config(o: &AnalyzerOverrides) -> String {
     let (disable, enable) = resolve_analyzer_config(o);
     let mut parts = vec![format!("preset {}", o.preset.as_deref().unwrap_or("fast"))];
@@ -566,18 +601,26 @@ async fn run_ghidra(tools: &Tools, root: &Path, target: &str, inspection: &PeIns
         (Err(e), _) | (_, Err(e)) => return DeepDecompilationResult::new(false, "failed", "ghidra", e),
     };
     let output = root_dir.join("ghidra");
-    let profile = focus_profile(&focus_terms, focused_only);
+    let cpus = std::thread::available_parallelism().map_or(1, |n| n.get()) as f64;
+    let default_analysis_ms = if inspection.packing.status == "likely" { 15.0 * 60_000.0 } else if inspection.bytes <= 10 * 1024 * 1024 { 10.0 * 60_000.0 } else { 30.0 * 60_000.0 };
+    let analysis_timeout_ms = number_env("APIM_GHIDRA_ANALYSIS_TIMEOUT_MS", default_analysis_ms, 30_000.0, 9.0e15);
+    let kill_timeout_ms = number_env("APIM_BINARY_DECOMPILE_TIMEOUT_MS", DEFAULT_TIMEOUT_MS, 0.0, 9.0e15);
+    let profile = ghidra_profile(&focus_terms, focused_only, o, analysis_timeout_ms as u64, kill_timeout_ms as u64);
     let marker = output.join(".apim-analysis.json");
-    if !o.force && read_marker(&marker, sha, "ghidra", &profile) {
-        let outputs = list_outputs(&output, root);
-        let mut r = DeepDecompilationResult::new(false, "complete", "ghidra", format!("Reused {} native decompilation artifact(s) from {rel_root}/ghidra.", outputs.len()));
-        r.cached = true;
-        return with(r, outputs, None);
+    if !o.force {
+        if let Some(status) = read_marker(&marker, sha, "ghidra", &profile) {
+            let outputs = list_outputs(&output, root);
+            let partial = status == "partial";
+            let more = if partial { " That run was stopped by the time limit, so these artifacts cover only the part of the binary it reached: read summary.txt for the coverage, and raise APIM_BINARY_DECOMPILE_TIMEOUT_MS or pass force to go further." } else { "" };
+            let mut r = DeepDecompilationResult::new(false, if partial { "partial" } else { "complete" }, "ghidra", format!("Reused {} native decompilation artifact(s) from {rel_root}/ghidra.{more}", outputs.len()));
+            r.cached = true;
+            return with(r, outputs, None);
+        }
     }
     let command = tools.ghidra.clone();
     if !command_could_exist(&command) {
         let mut r = DeepDecompilationResult::new(false, "unavailable", "ghidra", "Native static inspection completed, but Ghidra is not installed at the configured path.".into());
-        r.setup = Some("Install Ghidra and Java 21, set APIM_GHIDRA_HOME in .env.local to the extracted Ghidra directory (the one containing support\\analyzeHeadless.bat), then restart apiM.".into());
+        r.setup = Some(format!("Install Ghidra and Java 21, set APIM_GHIDRA_HOME to the extracted Ghidra directory (the one containing support\\analyzeHeadless.bat), then restart apiM. {}", crate::env_local_source()));
         return r;
     }
     let _ = std::fs::remove_dir_all(&output);
@@ -592,10 +635,7 @@ async fn run_ghidra(tools: &Tools, root: &Path, target: &str, inspection: &PeIns
         return DeepDecompilationResult::new(false, "failed", "ghidra", e.to_string());
     }
     let script_dir = ghidra_script_dir();
-    let cpus = std::thread::available_parallelism().map_or(1, |n| n.get()) as f64;
     let max_cpu = number_env("APIM_BINARY_MAX_CPU", (cpus - 1.0).clamp(1.0, 16.0), 1.0, 64.0);
-    let default_analysis_ms = if inspection.packing.status == "likely" { 15.0 * 60_000.0 } else if inspection.bytes <= 10 * 1024 * 1024 { 10.0 * 60_000.0 } else { 30.0 * 60_000.0 };
-    let analysis_timeout_ms = number_env("APIM_GHIDRA_ANALYSIS_TIMEOUT_MS", default_analysis_ms, 30_000.0, 9.0e15);
     let (disable, mut enable) = resolve_analyzer_config(&o.analyzers);
     // Loaded raw there is no entry point to start disassembling from, and "Disassemble Entry Points" has nothing to
     // work with: a 16KB blob of real x86 came back with 0 functions decompiled. The one analyzer that finds code in a
@@ -642,7 +682,7 @@ async fn run_ghidra(tools: &Tools, root: &Path, target: &str, inspection: &PeIns
     let _ = std::fs::remove_dir_all(&project_dir);
     if !result.started {
         let mut r = DeepDecompilationResult::new(false, "unavailable", "ghidra", format!("Ghidra headless could not start{}", result.error.as_ref().map_or(".".to_string(), |e| format!(": {e}"))));
-        r.setup = Some("Install Ghidra and Java 21, set APIM_GHIDRA_HOME in .env.local, then restart apiM. The configured folder must contain support\\analyzeHeadless.bat.".into());
+        r.setup = Some(format!("Install Ghidra and Java 21, set APIM_GHIDRA_HOME, then restart apiM. The configured folder must contain support\\analyzeHeadless.bat. {}", crate::env_local_source()));
         return r;
     }
     let outputs = list_outputs(&output, root);
@@ -673,10 +713,20 @@ async fn run_ghidra(tools: &Tools, root: &Path, target: &str, inspection: &PeIns
     }
     let empty_success = result.code == Some(0) && decompiled == Some(0);
     let status = if empty_success || outputs.is_empty() { "failed" } else { "partial" };
+    // A run the limit stopped is kept, not thrown away. The next inspection used to delete this output and start the
+    // same analysis again, reach the same limit and delete it again — half an hour of every core, each time, for
+    // artifacts that were already on disk. The limit is in the profile above, so raising it still reruns.
+    if status == "partial" && result.timed_out && decompiled.is_some_and(|n| n > 0) {
+        write_marker_status(&marker, sha, "ghidra", &profile, "partial");
+    }
     let detail = if empty_success {
         "Ghidra exited successfully but decompiled zero functions. This is not accepted as a completed analysis; inspect the log tail below for loader, language or packing failures.".to_string()
     } else if result.timed_out {
-        format!("Ghidra exceeded the configured time limit; {} partial output file(s) were kept. Increase APIM_BINARY_DECOMPILE_TIMEOUT_MS only for binaries that justify it.", outputs.len())
+        format!(
+            "Ghidra exceeded the configured time limit after decompiling {} function(s); {} output file(s) were kept and are cached as a partial result, so re-inspecting this hash reuses them instead of starting over. summary.txt holds the coverage, including how much of the executable bytes any function covers. Raise APIM_BINARY_DECOMPILE_TIMEOUT_MS (the whole-process limit that stopped it), or pass force, to go further.",
+            decompiled.map_or("an unrecorded number of".to_string(), |n| n.to_string()),
+            outputs.len()
+        )
     } else {
         format!("Ghidra exited with code {}; {} partial output file(s) were kept. The log tail below contains the actual Java, loader or post-script error.", result.code.map_or("unknown".to_string(), |c| c.to_string()), outputs.len())
     };
@@ -723,7 +773,7 @@ pub async fn run_capa_analysis_with(tools: &Tools, root: &Path, target: &str, in
     };
     if let Some(summary) = missing {
         let mut r = result(false, "unavailable", summary);
-        r.setup = Some("Fix APIM_CAPA_RULES_PATH/APIM_CAPA_SIGNATURES_PATH in .env.local. Relative paths are resolved from the apiM folder.".into());
+        r.setup = Some(format!("Fix APIM_CAPA_RULES_PATH/APIM_CAPA_SIGNATURES_PATH. Relative paths are resolved from the apiM folder. {}", crate::env_local_source()));
         return r;
     }
     let sha = &inspection.hashes.sha256;
@@ -736,7 +786,7 @@ pub async fn run_capa_analysis_with(tools: &Tools, root: &Path, target: &str, in
     let marker = output_dir.join(".apim-analysis.json");
     let show = |p: &Option<PathBuf>| p.as_ref().map_or("embedded".to_string(), |p| p.to_string_lossy().to_string());
     let profile = format!("text-v2:rules={}:sigs={}", show(&rules.path), show(&signatures.path));
-    if !force && read_marker(&marker, sha, "capa", &profile) {
+    if !force && read_marker(&marker, sha, "capa", &profile).is_some() {
         let out = rel(root, &output);
         let mut r = result(false, "complete", format!("Reused cached capa report at {out}."));
         r.output = Some(out);
@@ -763,7 +813,7 @@ pub async fn run_capa_analysis_with(tools: &Tools, root: &Path, target: &str, in
     let run = run_captured(&tools.capa, &args, root).await;
     if !run.started {
         let mut r = result(false, "unavailable", format!("capa could not start{}", run.error.as_ref().map_or(".".to_string(), |e| format!(": {e}"))));
-        r.setup = Some("Install FLARE capa and put capa.exe on PATH, or set APIM_CAPA_PATH to the executable in .env.local.".into());
+        r.setup = Some(format!("Install FLARE capa and put capa.exe on PATH, or set APIM_CAPA_PATH to the executable. {}", crate::env_local_source()));
         return r;
     }
     let _ = std::fs::write(&output, if run.output.is_empty() { "(capa produced no text output)\n" } else { &run.output });
@@ -852,6 +902,39 @@ pub async fn run_deep_decompilation(root: &Path, target: &str, inspection: &PeIn
 mod tests {
     use super::*;
     use crate::binary::pe::{inspect_portable_executable, samples, StringOptions};
+
+    #[test]
+    fn a_rerun_that_asks_for_something_else_does_not_hit_the_cache() {
+        let terms = ["CreateMove".to_string()];
+        let key = |o: &DeepOptions| ghidra_profile(&terms, true, o, 600_000, 1_800_000);
+        let base = DeepOptions::default();
+        assert_eq!(key(&base), key(&DeepOptions::default()), "the same question must reuse its answer");
+
+        // Each of these changes what Ghidra is handed, so each has to miss. The analyzer set is the one that mattered
+        // in practice: the tool tells the caller to rerun with Decompiler Parameter ID for real parameter names.
+        let mut named = base.clone();
+        named.analyzers.enable = vec!["Decompiler Parameter ID".into()];
+        let mut preset = base.clone();
+        preset.analyzers.preset = Some("full".into());
+        let mut off = base.clone();
+        off.analyzers.disable = vec!["Aggressive Instruction Finder".into()];
+        let mut raw = base.clone();
+        raw.raw.image_base = "0x7ff782798000".into();
+        let mut arch = raw.clone();
+        arch.raw.arch = "x86".into();
+        let mut fallback = base.clone();
+        fallback.allow_full_fallback = true;
+
+        let mut keys = vec![key(&base), key(&named), key(&preset), key(&off), key(&raw), key(&arch), key(&fallback)];
+        keys.push(ghidra_profile(&terms, true, &base, 60_000, 1_800_000)); // a shorter analysis limit
+        keys.push(ghidra_profile(&terms, true, &base, 600_000, 60_000)); // a shorter kill limit
+        keys.push(ghidra_profile(&terms, false, &base, 600_000, 1_800_000)); // full rather than focused
+        keys.push(ghidra_profile(&[], true, &base, 600_000, 1_800_000)); // different focus terms
+        let total = keys.len();
+        keys.sort();
+        keys.dedup();
+        assert_eq!(keys.len(), total, "two different questions share one cache key");
+    }
 
     fn sample() -> PeInspection {
         inspect_portable_executable(&samples::pe64(), &StringOptions::default()).unwrap()
@@ -944,7 +1027,7 @@ mod tests {
         let opts = DeepOptions { focus_terms: vec!["CreateMove".into()], ..Default::default() };
         let g = run_deep_decompilation_with(&missing(), &root, "a.exe", &sample(), &opts).await;
         assert_eq!((g.status, g.summary.as_str()), ("unavailable", "Native static inspection completed, but Ghidra is not installed at the configured path."));
-        assert!(g.setup.unwrap().starts_with("Install Ghidra and Java 21, set APIM_GHIDRA_HOME in .env.local to the extracted Ghidra directory"));
+        assert!(g.setup.unwrap().starts_with("Install Ghidra and Java 21, set APIM_GHIDRA_HOME to the extracted Ghidra directory"));
         let mut managed = sample();
         managed.managed = Some(crate::binary::pe::ManagedAssembly { name: None, version: None, runtime_version: None, flags: 1, references: vec![] });
         let i = run_deep_decompilation_with(&missing(), &root, "a.exe", &managed, &opts).await;

@@ -81,6 +81,19 @@ public class ApimDecompile extends GhidraScript {
     private long stringsDefined = 0;
     private long undefinedStringRefs = 0;
     private long disassemblyFallbacks = 0;
+    private int total = 0;
+    private int completed = 0;
+    private int failed = 0;
+    private int focusedCount = 0;
+    private boolean capped = false;
+    private File summaryFile;
+    private String summaryMode = "focused";
+    private List<String> summaryFocusTerms = List.of();
+    private boolean summaryFinished = false;
+    private long execBytes = 0;
+    private long coveredBytes = 0;
+    private String firstFunctionAt = "-";
+    private String lastFunctionAt = "-";
     private BufferedWriter indexWriter;
     private BufferedWriter focusIndexWriter;
     private BufferedWriter focusCodeWriter;
@@ -600,6 +613,87 @@ public class ApimDecompile extends GhidraScript {
         return out.toString();
     }
 
+    /// Executable bytes, and how many of them sit inside a function, measured once: the function set does not change
+    /// while decompiling, so recomputing this per function would be quadratic for no new information.
+    private void measureCoverage() {
+        for (MemoryBlock block : currentProgram.getMemory().getBlocks()) {
+            if (block.isExecute()) execBytes += block.getSize();
+        }
+        Address first = null;
+        Address last = null;
+        FunctionIterator functions = currentProgram.getFunctionManager().getFunctions(true);
+        while (functions.hasNext()) {
+            Function f = functions.next();
+            AddressSetView body = f.getBody();
+            if (body != null) coveredBytes += body.getNumAddresses();
+            Address entry = f.getEntryPoint();
+            if (entry == null || !entry.isMemoryAddress()) continue;
+            if (first == null || entry.compareTo(first) < 0) first = entry;
+            if (last == null || entry.compareTo(last) > 0) last = entry;
+        }
+        if (first != null) firstFunctionAt = first.toString();
+        if (last != null) lastFunctionAt = last.toString();
+    }
+
+    /// The whole summary, rewritten from scratch. Called as each function starts so a kill at the wall timeout still
+    /// leaves a readable count, and once more when the run ends.
+    private void writeSummary() {
+        if (summaryFile == null) return;
+        try (BufferedWriter summary = new BufferedWriter(
+            new OutputStreamWriter(new FileOutputStream(summaryFile), StandardCharsets.UTF_8)
+        )) {
+            summary.write("Program: " + currentProgram.getName() + "\n");
+            summary.write("Language: " + currentProgram.getLanguageID() + "\n");
+            summary.write("Compiler: " + currentProgram.getCompilerSpec().getCompilerSpecID() + "\n");
+            summary.write("Mode: " + summaryMode + "\n");
+            // Finished, or cut short. Without this a summary left behind by a killed run reads like a complete one.
+            summary.write("Progress: " + (summaryFinished ? "complete" : "in-progress") + "\n");
+            // What was actually mapped, and how. A file loaded raw has only what the caller said to make of it, and
+            // when nothing came back there was no way to tell a wrong base address from a block the analyzers skipped
+            // because it was never marked executable.
+            for (MemoryBlock block : currentProgram.getMemory().getBlocks()) {
+                summary.write(
+                    "Block: " + block.getName() + " " + block.getStart() + "-" + block.getEnd() +
+                    " " + (block.isRead() ? "r" : "-") + (block.isWrite() ? "w" : "-") + (block.isExecute() ? "x" : "-") +
+                    " " + block.getSize() + " bytes\n"
+                );
+            }
+            // How much code was recovered at all, which is not what the function count says: a stripped dump whose
+            // flow stops a tenth of the way in reports a healthy count and covers almost nothing. Working this out by
+            // hand from functions.tsv took a reader three rounds.
+            long percent = execBytes == 0 ? 0 : coveredBytes * 100 / execBytes;
+            summary.write("Executable bytes: " + execBytes + "\n");
+            summary.write("Bytes inside a function: " + coveredBytes + " (" + percent + "% of executable bytes)\n");
+            summary.write("First/last function at: " + firstFunctionAt + " / " + lastFunctionAt + "\n");
+            if (execBytes > 0 && percent < 50) {
+                summary.write(
+                    "WARNING: " + (100 - percent) + "% of the executable bytes are in no function, so that much of the" +
+                    " code was never recovered and nothing below counts it. For a raw image check image_base and arch" +
+                    " first - a wrong base makes every reference resolve to nothing. Otherwise the flow was cut by" +
+                    " calls the disassembler could not follow: analyzer_preset \"full\" (which keeps Decompiler Switch" +
+                    " Analysis, for jump tables) and enable_analyzers [\"Aggressive Instruction Finder\"] (a linear" +
+                    " sweep of what flow never reached) are the two that move this number.\n"
+                );
+            }
+            summary.write("Focus terms: " + String.join(", ", summaryFocusTerms) + "\n");
+            summary.write("Behavior fallback used: " + summaryMode.endsWith("behavior") + "\n");
+            summary.write("Full fallback used: " + summaryMode.endsWith("full") + "\n");
+            summary.write("Undefined strings recovered: " + stringsDefined + "\n");
+            summary.write("Near-string reference fallbacks: " + undefinedStringRefs + "\n");
+            summary.write("Disassembly fallbacks: " + disassemblyFallbacks + "\n");
+            summary.write("Functions selected/visited: " + total + "\n");
+            summary.write("Functions decompiled: " + completed + "\n");
+            summary.write("Focused functions: " + focusedCount + "\n");
+            summary.write("Functions failed: " + failed + "\n");
+            summary.write("Full-output chunks: " + chunkNumber + "\n");
+            summary.write("Full-output characters: " + totalChars + "\n");
+            summary.write("Output cap reached: " + capped + "\n");
+            summary.write("Target executed: false\n");
+        } catch (Exception ignored) {
+            // The summary is a report, not the result: a disk error writing it must not lose the decompilation.
+        }
+    }
+
     @Override
     protected void run() throws Exception {
         String[] args = getScriptArgs();
@@ -623,12 +717,7 @@ public class ApimDecompile extends GhidraScript {
         File indexFile = new File(outputDir, "functions.tsv");
         File focusIndexFile = new File(outputDir, "focused-functions.tsv");
         File focusCodeFile = new File(outputDir, "focused-functions.c");
-        File summaryFile = new File(outputDir, "summary.txt");
-        int total = 0;
-        int completed = 0;
-        int failed = 0;
-        int focusedCount = 0;
-        boolean capped = false;
+        summaryFile = new File(outputDir, "summary.txt");
 
         DecompInterface decompiler = new DecompInterface();
         DecompileOptions options = new DecompileOptions();
@@ -684,6 +773,17 @@ public class ApimDecompile extends GhidraScript {
             while (functions.hasNext() && work.size() < MAX_FUNCTIONS) work.add(functions.next());
         }
         final boolean writeFullOutput = !focusedOnly || fallbackFull;
+        summaryMode = fallbackFull
+            ? "focused-miss-fallback-full"
+            : fallbackBehavior
+                ? "focused-miss-fallback-behavior"
+                : focusedOnly ? "focused-only" : "full-plus-focused";
+        summaryFocusTerms = focusTerms;
+        measureCoverage();
+        // Written before the first function, and again as each one starts. The wall timeout kills this process from
+        // outside and the summary used to be written only after the loop, so the longest runs - the ones that actually
+        // reach the limit - left every artifact except the one file saying how far they had got.
+        writeSummary();
         Collections.sort(
             work,
             (left, right) -> left.getEntryPoint().compareTo(right.getEntryPoint())
@@ -718,6 +818,7 @@ public class ApimDecompile extends GhidraScript {
             for (Function function : work) {
                 if (total >= MAX_FUNCTIONS || monitor.isCancelled()) break;
                 total++;
+                writeSummary();
                 String address = function.getEntryPoint().toString();
                 String name = safe(function.getName());
                 String namespace = safe(function.getParentNamespace().getName(true));
@@ -839,46 +940,8 @@ public class ApimDecompile extends GhidraScript {
             decompiler.dispose();
         }
 
-        try (BufferedWriter summary = new BufferedWriter(
-            new OutputStreamWriter(new FileOutputStream(summaryFile), StandardCharsets.UTF_8)
-        )) {
-            summary.write("Program: " + currentProgram.getName() + "\n");
-            summary.write("Language: " + currentProgram.getLanguageID() + "\n");
-            summary.write("Compiler: " + currentProgram.getCompilerSpec().getCompilerSpecID() + "\n");
-            summary.write(
-                "Mode: " +
-                (fallbackFull
-                    ? "focused-miss-fallback-full"
-                    : fallbackBehavior
-                        ? "focused-miss-fallback-behavior"
-                        : focusedOnly ? "focused-only" : "full-plus-focused") +
-                "\n"
-            );
-            // What was actually mapped, and how. A file loaded raw has only what the caller said to make of it, and
-            // when nothing came back there was no way to tell a wrong base address from a block the analyzers skipped
-            // because it was never marked executable.
-            for (ghidra.program.model.mem.MemoryBlock block : currentProgram.getMemory().getBlocks()) {
-              summary.write(
-                "Block: " + block.getName() + " " + block.getStart() + "-" + block.getEnd() +
-                " " + (block.isRead() ? "r" : "-") + (block.isWrite() ? "w" : "-") + (block.isExecute() ? "x" : "-") +
-                " " + block.getSize() + " bytes\n"
-              );
-            }
-            summary.write("Focus terms: " + String.join(", ", focusTerms) + "\n");
-            summary.write("Behavior fallback used: " + fallbackBehavior + "\n");
-            summary.write("Full fallback used: " + fallbackFull + "\n");
-            summary.write("Undefined strings recovered: " + stringsDefined + "\n");
-            summary.write("Near-string reference fallbacks: " + undefinedStringRefs + "\n");
-            summary.write("Disassembly fallbacks: " + disassemblyFallbacks + "\n");
-            summary.write("Functions selected/visited: " + total + "\n");
-            summary.write("Functions decompiled: " + completed + "\n");
-            summary.write("Focused functions: " + focusedCount + "\n");
-            summary.write("Functions failed: " + failed + "\n");
-            summary.write("Full-output chunks: " + chunkNumber + "\n");
-            summary.write("Full-output characters: " + totalChars + "\n");
-            summary.write("Output cap reached: " + capped + "\n");
-            summary.write("Target executed: false\n");
-        }
+        summaryFinished = true;
+        writeSummary();
 
         println(
             "apiM decompiled " + completed + "/" + total + " selected functions; " +

@@ -13,8 +13,10 @@
 // post-script is already going to decompile the functions it outputs).
 //
 // When the second argument is a directory path, the full list of available
-// analyzers (name + default-enabled) is written there as analyzers.txt, so
-// the model can see exact names before choosing.
+// analyzers (name + default-enabled) is written there twice: analyzers.txt
+// before the overrides, so the model can see exact names before choosing, and
+// analyzers-applied.txt after them. Each file opens with a line saying which
+// stage it is from and what was asked for, so the two cannot be mixed up.
 //
 //@category apiM
 //@runtime Java
@@ -41,7 +43,11 @@ public class ApimAnalysisOptions extends GhidraScript {
     // about, so a caller can pick exact names without guessing.
     String listDir = args.length >= 2 && args[1] != null && !args[1].isBlank() ? args[1] : null;
     if (listDir != null) {
-      writeAnalyzerList(options, new File(listDir, "analyzers.txt"));
+      // Each list says which stage it is from. Two files of [on]/[off] lines with near-identical names and opposite
+      // answers read as a contradiction; a reader comparing them could not tell which one was the truth.
+      writeAnalyzerList(options, new File(listDir, "analyzers.txt"),
+        "# Ghidra's own defaults for this program, BEFORE apiM applied anything. These are the exact names to pass to"
+        + " disable_analyzers/enable_analyzers. What actually ran is in analyzers-applied.txt.");
     }
 
     if (args.length < 1 || args[0] == null || args[0].isBlank()) {
@@ -53,8 +59,10 @@ public class ApimAnalysisOptions extends GhidraScript {
     // has nowhere to begin, and the program came back with zero functions however the analyzers were set. The start of
     // each executable block is marked as an entry point here, in the pre-script, so that analysis has a seed to follow.
     // Only for a raw load: a file with a header has its own entry, and seeding a section start would read data as code.
-    if (args.length >= 3 && "raw".equalsIgnoreCase(args[2])) {
-      seedEntryPoints();
+    long seeded = 0;
+    boolean rawLoad = args.length >= 3 && "raw".equalsIgnoreCase(args[2]);
+    if (rawLoad) {
+      seeded = seedEntryPoints();
     }
 
     File cfg = new File(args[0]);
@@ -70,24 +78,55 @@ public class ApimAnalysisOptions extends GhidraScript {
     // And again once they are applied. Only the before picture was written, so an override that never arrived looked
     // exactly like one that did, and a reader comparing them had no way to tell which.
     if (listDir != null) {
-      writeAnalyzerList(options, new File(listDir, "analyzers-applied.txt"));
+      writeAnalyzerList(options, new File(listDir, "analyzers-applied.txt"),
+        "# What actually ran, AFTER apiM's overrides." +
+        "\n# apiM asked to turn off: " + describe(readStringArray(text, "disable")) +
+        "\n# apiM asked to turn on: " + describe(readStringArray(text, "enable")) +
+        (rawLoad
+          ? "\n# Raw load (no header): entry points seeded at " + seeded + " executable block start(s). Nothing in"
+            + " a headerless image points at code, so those seeds and whatever the two lines above turn on are all"
+            + " the disassembler has to start from. Analyzers named on neither line keep their preset value."
+          : "\n# Loaded through a file format loader; no entry points were seeded."));
     }
   }
 
+  /// An override list as it was asked for, for the header of the applied list.
+  private String describe(String[] names) {
+    if (names == null || names.length == 0) return "(nothing)";
+    StringBuilder out = new StringBuilder();
+    for (String name : names) {
+      String trimmed = name.trim();
+      if (trimmed.isEmpty()) continue;
+      if (out.length() > 0) out.append(", ");
+      out.append(trimmed);
+      // Said plainly: an analyzer this Ghidra does not have is the one case where an override silently does nothing.
+      if (!options().contains(trimmed)) out.append(" (NOT PRESENT in this Ghidra)");
+    }
+    return out.length() == 0 ? "(nothing)" : out.toString();
+  }
+
+  private Options options() {
+    return currentProgram.getOptions("Analyzers");
+  }
+
   /// The first address of every executable block, as an entry point for the disassembler to start from.
-  private void seedEntryPoints() {
+  private long seedEntryPoints() {
+    long seeded = 0;
     for (ghidra.program.model.mem.MemoryBlock block : currentProgram.getMemory().getBlocks()) {
       if (!block.isExecute()) continue;
       try {
         currentProgram.getSymbolTable().addExternalEntryPoint(block.getStart());
+        seeded++;
       } catch (Exception ignored) {
         // A block the symbol table will not take an entry point for is left alone.
       }
     }
+    return seeded;
   }
 
-  private void writeAnalyzerList(Options options, File out) throws Exception {
+  private void writeAnalyzerList(Options options, File out, String header) throws Exception {
     try (Writer w = Files.newBufferedWriter(out.toPath(), StandardCharsets.UTF_8)) {
+      w.write(header + "\n");
       List<String> names = options.getOptionNames();
       java.util.Collections.sort(names, String.CASE_INSENSITIVE_ORDER);
       for (String name : names) {

@@ -110,6 +110,19 @@ fn env_pairs(text: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+static ENV_LOCAL: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+
+/// Which `.env.local` was read, in the words of a setup line that tells the reader to edit it.
+///
+/// Every "set APIM_… in .env.local" message named a file without saying which one, and finding out took a round of
+/// guessing per tool. Printed by the tools that have just failed to find what such a file would have configured.
+pub(crate) fn env_local_source() -> String {
+    match ENV_LOCAL.get().and_then(Clone::clone) {
+        Some(path) => format!("apiM read {} at startup, so add it there.", path.display()),
+        None => "apiM found no .env.local (it looks in the working folder and beside the program, then upwards), so create one.".to_string(),
+    }
+}
+
 /// Reads the nearest `.env.local` into the environment, from this folder or the program's, upwards.
 ///
 /// Every setup line the binary tools print ("set APIM_GHIDRA_HOME in .env.local") named a file nothing here read: the
@@ -121,6 +134,7 @@ fn env_pairs(text: &str) -> Vec<(String, String)> {
 fn load_env_local() {
     let starts = [std::env::current_dir().ok(), std::env::current_exe().ok().and_then(|exe| exe.parent().map(PathBuf::from))];
     let found = starts.into_iter().flatten().find_map(|start| start.ancestors().map(|dir| dir.join(".env.local")).find(|p| p.is_file()));
+    let _ = ENV_LOCAL.set(found.clone());
     let Some(text) = found.and_then(|path| std::fs::read_to_string(path).ok()) else { return };
     for (name, value) in env_pairs(&text) {
         if std::env::var_os(&name).is_none() {
