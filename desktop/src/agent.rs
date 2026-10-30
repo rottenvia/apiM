@@ -356,6 +356,8 @@ fn resume_transcript(mut resume: Resume, mut messages: Vec<Value>, start: &mut S
             brief
         }
     };
+    // The saved note before the question has the day the reply began; a reply resumed days later took that for today.
+    let brief = format!("{brief}\n\n{}", tools::clock::now_full(crate::store::now_ms()));
     // Anything typed next to "resume" goes last: the final thing read before continuing is where a course correction belongs.
     let note = resume.note.trim();
     messages.push(user(if note.is_empty() { brief } else { format!("{brief}\n\nThe user added this instruction for the rest of the work — follow it:\n{note}") }));
@@ -663,7 +665,10 @@ async fn run_inner(mut req: Request, emit: &Emitter, procs: Arc<Procs>) -> Resul
     // workspace's store) rides in a note just before the question, after the history. In the system prompt, a finding
     // recorded in one reply changed the start of the next reply's requests, and the whole chat went out at full price
     // again: a finding was recorded in 28% of replies.
-    let mut context = crate::machine::today(&req.workspace);
+    let now = crate::store::now_ms();
+    let clock = format!("{}{}", tools::clock::now_line(now), tools::clock::note(&req.chat, now));
+    let mut context = crate::machine::today(&req.workspace, &clock);
+    context.push_str(&tools::clock::timers(&req.chat, now));
     let findings_path = findings::store_path(&req.workspace);
     if !findings_path.exists() {
         // Findings this chat recorded before the store was shared lived only in the chat file: they move over once.
@@ -751,6 +756,12 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
     let notice = |text: &str| emit.send(Event::Notice(text.to_string()));
     let done_steps = || chat.lock().unwrap().plan.as_ref().map_or(0, |p| plan::progress(p).done);
     let started = Instant::now();
+    // The run hears the time in its tool results (`clock::tick`): a task given "15 minutes" is kept to them.
+    let asked_at = match chat.lock().unwrap().asked_at {
+        0 => crate::store::now_ms(),
+        at => at,
+    };
+    let mut ticked = asked_at;
 
     // A resumed reply keeps counting its tokens from where it stopped. The spending limit starts over: Resume is how a run stopped by it goes on.
     let mut usage = resumed_usage;
@@ -1344,6 +1355,13 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
         if calls.iter().any(|call| call.name != "finish") {
             since_work.clear();
         }
+        let now = crate::store::now_ms();
+        if let Some(line) = tools::clock::tick(&chat.lock().unwrap(), asked_at, ticked, now) {
+            if let Some(content) = messages.last_mut().filter(|m| m["role"] == "tool").and_then(|m| m.get_mut("content")).filter(|c| c.is_string()) {
+                *content = json!(format!("{}\n\n{line}", content.as_str().unwrap_or("")));
+                ticked = now;
+            }
+        }
         if let Some((reason, note)) = stopped {
             // Every call left unrun still gets an answer, so the transcript a Resume replays stays legal.
             let answered = messages.len() - 1 - turn_at;
@@ -1681,6 +1699,19 @@ async fn call_model(client: &reqwest::Client, target: &Target, body: &mut Map<St
             continue;
         }
 
+        // Any other host that says the request is too long gets the oldest turns folded, twice at most. Only OpenRouter's
+        // rejections were reshaped: on DeepSeek or Claude direct, a chat that outgrew the estimate ended in an error.
+        if !openrouter && reshapes < 2 && retry::is_size_rejection(status, &detail) {
+            let (dropped, media) = (fold_body(body), strip_media_body(body));
+            if dropped > 0 || media {
+                reshapes += 1;
+                attempt = policy.attempts;
+                let tries = (policy.attempts + reshapes) as usize;
+                let reason = format!("payload too large — retrying with {dropped} older turn{} folded", if dropped == 1 { "" } else { "s" });
+                emit.send(Event::Retry { reason, attempt: tries, attempts: tries, wait: Duration::ZERO });
+                continue;
+            }
+        }
         // OpenRouter turned the body itself away: send it once more in a shape it may take, and once more after that, smaller still.
         let rejected = matches!(status, 400 | 413 | 422) || (status >= 500 && said.contains("endpoint is unavailable"));
         if openrouter && rejected && reshapes < 2 && !retry::is_unknown_model_rejection(&detail) {

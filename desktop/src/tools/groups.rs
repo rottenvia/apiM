@@ -107,6 +107,12 @@ pub const GROUPS: &[Group] = &[
         hints: &["openrouter.ai/", "add model", "add this model", "add the model", "install model", "install this model", "model list", "add claude", "claude-"],
     },
     Group {
+        name: "time",
+        what: "a countdown or a stopwatch for the user, counted from their message",
+        tools: &["timer"],
+        hints: &["timer", "stopwatch", "count down", "countdown", "minutes", "seconds", "seccond", "count it", "start counting", "how long did", "how much time", "be back", "come back", "comeback", "remind me", "alarm"],
+    },
+    Group {
         name: "helpers",
         what: "a helper with a context of its own, for broad surveys, research, and running something to see what happens; it reads, searches, browses and runs commands and tests, but does not edit files",
         tools: &["delegate"],

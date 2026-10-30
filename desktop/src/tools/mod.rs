@@ -4,6 +4,7 @@
 pub mod binary;
 pub mod browser;
 pub mod build;
+pub mod clock;
 pub mod code;
 pub mod computer;
 pub mod data;
@@ -43,6 +44,13 @@ pub struct ChatState {
     /// The tools earlier replies in this chat ran. A closing summary of work an earlier reply did was marked as
     /// invented: only this reply's tools were counted, and the model wrote correction notes instead of finishing.
     pub tools_run: Vec<String>,
+    /// The countdowns and stopwatches the model set for the user (`clock::timer`).
+    pub timers: Vec<clock::Timer>,
+    /// When the question was sent and when the user's message before it was, and when the answer to that one
+    /// ended, in ms since the epoch (0: unknown). Timers count from the first; the note says the gaps.
+    pub asked_at: u64,
+    pub previous_at: u64,
+    pub answered_at: u64,
 }
 
 /// Everything a tool may touch.
@@ -157,6 +165,7 @@ const IMPLEMENTED: &[&str] = &[
     "git_status", "git_diff", "git_log", "git_commit", "git_branch", "apply_patch", "verify_file", "read_symbol", "find_references",
     "analyze_log", "extract_archive", "query_data", "list_snapshots", "restore_snapshot", "search_conversation", "read_chat",
     "git_pull_base", "github_push", "github_create_pr", "github_pr_status", "read_document", "build_project", "inspect_binary", "note_binary", "sandbox_run", "sandbox_screenshot",
+    "timer",
 ];
 
 /// `read_chat` is this app's own, not in the web's tools.json, so its schema is built here (like the winproc tools).
@@ -177,6 +186,7 @@ static SCHEMAS: LazyLock<Vec<Value>> = LazyLock::new(|| {
     let mut all: Vec<Value> = serde_json::from_str(include_str!("../../assets/tools.json")).expect("assets/tools.json is valid");
     all.extend(winproc::schemas());
     all.push(read_chat_schema());
+    all.push(clock::schema());
     all.extend(computer::schemas());
     all.extend(video::schemas());
     all.retain(|t| implemented(t["function"]["name"].as_str().unwrap_or("")));
@@ -463,7 +473,8 @@ async fn mcp_call(name: &str, args: &Value, ctx: &Ctx) -> Output {
         Some(call) if ctx.settings.approval == crate::store::Approval::Auto || ctx.emit.approve_mcp(&call.display, &call.remember_key).await => mcp::call_bridged(&ctx.client, &call).await,
         Some(call) => mcp::declined(&call.display, "The user declined this call."),
     };
-    Output { ok: result.ok, text: result.content, summary: result.summary, ..Default::default() }
+    // Cut like a file read: an outside tool's answer went in whole, however long, and filled the context in one round.
+    Output { ok: result.ok, text: clip(&result.content, ctx.read_chars), summary: result.summary, ..Default::default() }
 }
 
 pub async fn run(name: &str, args: &Value, ctx: &Ctx) -> Output {
@@ -516,6 +527,7 @@ pub async fn run(name: &str, args: &Value, ctx: &Ctx) -> Output {
         "update_plan" => sync(plan::update_plan),
         "note_finding" => sync(plan::note_finding),
         "finish" => sync(plan::finish),
+        "timer" => sync(clock::timer),
         "view_image" => sync(plan::view_image),
         "show_image" => sync(plan::show_image),
         "ask_user" => plan::ask_user(ctx, args).await,

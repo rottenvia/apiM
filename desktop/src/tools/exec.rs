@@ -252,10 +252,13 @@ pub fn on_path(name: &str) -> bool {
     find_program(Path::new(""), name).is_some()
 }
 
+/// `git push --force` (or `-f`, `--force-with-lease`, `--mirror`), in either shell.
+static FORCE_PUSH: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| Regex::new(r"(?i)\bgit\s+push\b[^;|&\n]*\s(--force\S*|-f|--mirror)\b").unwrap());
+
 /// What `shell` treats as taking the computer apart: a disk format, a boot/registry/account/protection change
 /// (bcdedit, diskpart, reg delete, …), or a delete naming a place outside the chat's folder, where a restore point
-/// (which brings back the chat's folder and nothing else) could not undo it. The caller decides what to do with a
-/// match by the approval mode: Auto runs it unasked, Manual and Critical show it for approval first.
+/// (which brings back the chat's folder and nothing else) could not undo it, or a force push, which rewrites a
+/// remote for everyone. A match is refused in Auto, where nobody may be there to answer, and asked about in Manual and Critical.
 // ponytail: a reading of the text, there to catch a wreck made in passing. It is not a parser, and a script the
 // model writes to a file and runs was never held by it. Use PowerShell's own parser
 // (System.Management.Automation.Language) if this has to hold against a command written to get past it.
@@ -275,6 +278,9 @@ fn shell_wrecks(script: &str, root: &Path) -> Option<&'static str> {
     if SYSTEM.is_match(script) {
         return Some("Not run: this changes the computer itself (its disks, its start-up, its accounts, its protection, or it deletes from the registry) and cannot be undone. Leave it to the user: say what should be run and why.");
     }
+    if FORCE_PUSH.is_match(script) {
+        return Some("Not run: a force push rewrites the remote's history for everyone who has it, and nothing here can restore it. Push without --force, or leave it to the user: say what should be pushed and why.");
+    }
     let script = &PROCESS.replace_all(script, "").into_owned();
     // The chat's own folder written out in full is inside. A reply cleaning a project wrote `Remove-Item 'C:\…\chat\build'`,
     // was told the place was outside, and concluded that a shell cannot delete in the folder at all.
@@ -288,8 +294,7 @@ fn shell_wrecks(script: &str, root: &Path) -> Option<&'static str> {
 
 /// PowerShell on Windows: the one shell let through, for what only it can ask the system (event logs, services,
 /// installed programs, hardware). With "Ask me first" the user is shown its text whole. With commands running
-/// automatically it runs unasked, like any program; a `shell_wrecks` match still runs in Auto but is shown for
-/// approval first in Critical. The web has no such thing, because it runs on a server and not on the user's own computer.
+/// automatically it runs unasked, like any program; a `shell_wrecks` match is refused there and asked about in the other modes. The web has no such thing, because it runs on a server and not on the user's own computer.
 fn shell(ctx: &Ctx, command: &str, argv: Vec<String>) -> Result<Launch, String> {
     let mut words = argv.into_iter().peekable();
     while let Some(flag) = words.peek().map(|word| word.to_ascii_lowercase()) {
@@ -309,9 +314,13 @@ fn shell(ctx: &Ctx, command: &str, argv: Vec<String>) -> Result<Launch, String> 
     }
     let Some(program) = find_program(&ctx.root, command) else { return Err(format!("`{command}` was not found on this machine.")) };
     let mut ask = ctx.settings.approval.asks_routine();
-    // A command that takes the computer apart (bcdedit, diskpart, a disk format, a delete outside the folder):
-    // Auto runs it unasked; Manual and Critical show it for approval first rather than refusing it outright.
-    if shell_wrecks(&script, &ctx.root).is_some() && ctx.settings.approval != crate::store::Approval::Auto {
+    // A command that takes the computer apart (bcdedit, diskpart, a disk format, a delete outside the folder, a force
+    // push): refused in Auto, shown for approval in Manual and Critical. Auto ran it unasked, while the prompt and the
+    // README said it was refused.
+    if let Some(why) = shell_wrecks(&script, &ctx.root) {
+        if ctx.settings.approval == crate::store::Approval::Auto {
+            return Err(why.into());
+        }
         ask = true;
     }
     let key = serde_json::to_string(&["powershell", script.as_str()]).unwrap_or_default();
@@ -334,6 +343,9 @@ fn bash_wrecks(script: &str, root: &Path) -> Option<&'static str> {
     if SYSTEM.is_match(script) {
         return Some("Not run: this changes the computer itself (its disks, its start-up) or deletes from the root, your home or everything, and cannot be undone. Leave it to the user: say what should be run and why.");
     }
+    if FORCE_PUSH.is_match(script) {
+        return Some("Not run: a force push rewrites the remote's history for everyone who has it, and nothing here can restore it. Push without --force, or leave it to the user: say what should be pushed and why.");
+    }
     // The chat's own folder written out in full is inside; everything else a delete names is outside.
     let own = regex::escape(&root.to_string_lossy().to_lowercase().replace('\\', "/"));
     let inside = Regex::new(&format!(r#"{own}(/|['",;)\s]|$)"#)).map(|re| re.replace_all(&script.to_lowercase().replace('\\', "/"), ".$1").into_owned());
@@ -345,7 +357,7 @@ fn bash_wrecks(script: &str, root: &Path) -> Option<&'static str> {
 
 /// bash/sh as a real shell, the counterpart of `shell`: the script is run with `bash -c`, so its pipes, redirects, `&&`
 /// and loops work. On Windows this needs git-bash's bash.exe on PATH. Asked for in "Ask me first"; while commands run
-/// automatically it runs unasked like any program; a `bash_wrecks` match still runs in Auto but is shown for approval first in Critical.
+/// automatically it runs unasked like any program; a `bash_wrecks` match is refused there and asked about in the other modes.
 fn bash_shell(ctx: &Ctx, command: &str, argv: Vec<String>) -> Result<Launch, String> {
     let mut words = argv.into_iter().peekable();
     // Drop the usual invocation flags; whatever remains is the script.
@@ -366,7 +378,10 @@ fn bash_shell(ctx: &Ctx, command: &str, argv: Vec<String>) -> Result<Launch, Str
         return Err(format!("`{command}` was not found on this machine.{}", if cfg!(windows) { " Install Git for Windows and make sure bash.exe is on PATH, or use powershell instead." } else { "" }));
     };
     let mut ask = ctx.settings.approval.asks_routine();
-    if bash_wrecks(&script, &ctx.root).is_some() && ctx.settings.approval != crate::store::Approval::Auto {
+    if let Some(why) = bash_wrecks(&script, &ctx.root) {
+        if ctx.settings.approval == crate::store::Approval::Auto {
+            return Err(why.into());
+        }
         ask = true;
     }
     let key = serde_json::to_string(&["bash", script.as_str()]).unwrap_or_default();
@@ -548,7 +563,8 @@ fn command(ctx: &Ctx, launch: &Launch) -> Command {
         }
     }
     // Colour codes and pagers only add noise to captured output.
-    cmd.env("NO_COLOR", "1").env("FORCE_COLOR", "0").env("GIT_PAGER", "cat").env("PAGER", "cat").env("PYTHONUNBUFFERED", "1").env("PYTHONIOENCODING", "utf-8");
+    // A git asking for a password on the terminal waited on a closed stdin until the command's time ran out.
+    cmd.env("NO_COLOR", "1").env("FORCE_COLOR", "0").env("GIT_PAGER", "cat").env("PAGER", "cat").env("PYTHONUNBUFFERED", "1").env("PYTHONIOENCODING", "utf-8").env("GIT_TERMINAL_PROMPT", "0");
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000);
     cmd
@@ -607,6 +623,9 @@ impl Kept {
 fn pump(mut pipe: impl tokio::io::AsyncRead + Unpin + Send + 'static, into: Arc<Mutex<String>>, keep: Option<Arc<Mutex<Kept>>>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut buf = [0u8; 8192];
+        // The end of a letter cut by the read's edge waits for the rest: decoded alone, each half became U+FFFD, and
+        // non-English output came back with holes in it.
+        let mut held = Vec::new();
         while let Ok(n) = pipe.read(&mut buf).await {
             if n == 0 {
                 break;
@@ -614,12 +633,22 @@ fn pump(mut pipe: impl tokio::io::AsyncRead + Unpin + Send + 'static, into: Arc<
             if let Some(keep) = &keep {
                 keep.lock().unwrap().take(&buf[..n]);
             }
+            held.extend_from_slice(&buf[..n]);
+            let whole = match std::str::from_utf8(&held) {
+                Err(e) if e.error_len().is_none() => e.valid_up_to(),
+                _ => held.len(),
+            };
             let mut log = into.lock().unwrap();
-            log.push_str(&String::from_utf8_lossy(&buf[..n]));
+            log.push_str(&String::from_utf8_lossy(&held[..whole]));
+            held.drain(..whole);
             if log.len() > MAX_PROCESS_LOG {
                 let cut = (log.len() - MAX_PROCESS_LOG / 2..log.len()).find(|&i| log.is_char_boundary(i)).unwrap_or(0);
                 log.drain(..cut);
             }
+        }
+        // A letter the program never finished is shown as what it is.
+        if !held.is_empty() {
+            into.lock().unwrap().push_str(&String::from_utf8_lossy(&held));
         }
     })
 }
@@ -1070,7 +1099,13 @@ impl Procs {
         let ended = Arc::new(Mutex::new(None));
         let proc = Arc::new(Proc { display, pid: child.id().unwrap_or(0), owner, started: Instant::now(), log: log.clone(), exit: exit.clone(), ended: ended.clone(), stopped: AtomicBool::new(false), stdin: tokio::sync::Mutex::new(child.stdin.take()) });
         let id = format!("p{}", self.next.fetch_add(1, Ordering::Relaxed) + 1);
-        self.map.lock().unwrap().insert(id.clone(), proc.clone());
+        {
+            let mut map = self.map.lock().unwrap();
+            // A process that ended half an hour ago is let go with its log (up to 1 MB): a day of servers started and
+            // stopped kept every one of them.
+            map.retain(|_, p| p.ended.lock().unwrap().is_none_or(|at| at.elapsed() < Duration::from_secs(1800)));
+            map.insert(id.clone(), proc.clone());
+        }
         tokio::spawn(async move {
             let code = child.wait().await.ok().and_then(|s| s.code()).unwrap_or(-1);
             *exit.lock().unwrap() = Some(code);
@@ -1572,9 +1607,12 @@ mod tests {
             assert!(prep(Approval::Manual, "powershell", &["Get-Process"]).ok().unwrap().ask && prep(Approval::Manual, "powershell", &[r"Remove-Item C:\x"]).ok().unwrap().ask);
             let change = prep(Approval::Auto, "powershell Remove-Item 'a b'", &[]).ok().unwrap();
             assert!(!change.ask && change.display == "powershell Remove-Item 'a b'");
-            // Auto runs even what cannot be undone, unasked; Critical shows it for approval instead of refusing.
-            assert!(!prep(Approval::Auto, "powershell", &[r"Remove-Item C:\Users\x -Recurse"]).ok().unwrap().ask);
-            assert!(!prep(Approval::Auto, "powershell", &["bcdedit /set {current} nx AlwaysOff"]).ok().unwrap().ask);
+            // What cannot be undone is refused in Auto, where nobody may be there to answer; Critical asks.
+            assert!(prep(Approval::Auto, "powershell", &[r"Remove-Item C:\Users\x -Recurse"]).is_err());
+            assert!(prep(Approval::Auto, "powershell", &["bcdedit /set {current} nx AlwaysOff"]).is_err());
+            assert!(prep(Approval::Auto, "powershell", &["git push --force origin main"]).err().unwrap().contains("force push"));
+            assert!(prep(Approval::Auto, "powershell", &["git push -f"]).is_err() && prep(Approval::Critical, "powershell", &["git push origin main -f"]).ok().unwrap().ask);
+            assert!(!prep(Approval::Auto, "powershell", &["git push origin main; git status"]).ok().unwrap().ask);
             assert!(prep(Approval::Critical, "powershell", &["bcdedit /set {current} nx AlwaysOff"]).ok().unwrap().ask);
             assert!(prep(Approval::Critical, "powershell", &[r"Remove-Item C:\Users\x -Recurse"]).ok().unwrap().ask);
             assert!(prep(Approval::Auto, "powershell", &["-EncodedCommand", "AAAA"]).is_err() && prep(Approval::Auto, "powershell", &["Get-Content ~/.ssh/id_rsa"]).is_err());

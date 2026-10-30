@@ -56,6 +56,33 @@ pub fn header(app: &mut App, ui: &mut egui::Ui) {
         files(app, ui);
     }
     processes(app, ui);
+    timers(app, ui);
+}
+
+/// The chat's countdowns and stopwatches while they count, left of the chips: "back 12:40". The card on hover has
+/// what the model is told. The window wakes on each second's turn while one shows, and not otherwise.
+fn timers(app: &App, ui: &mut egui::Ui) {
+    let timers = app.conv.timers();
+    let now = crate::store::now_ms();
+    let p = p();
+    for timer in timers.iter().filter(|t| t.running(now)) {
+        let secs = (timer.shown(now) + if timer.length_ms.is_some() { 999 } else { 0 }) / 1000;
+        let clock = if secs >= 3600 { format!("{}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60) } else { format!("{}:{:02}", secs / 60, secs % 60) };
+        let font = theme::font(13.0, W::Medium);
+        let name = widgets::galley(ui, &timer.label, font.clone(), p.text2);
+        // Measured as zeros, so the chip keeps its width while the digits turn.
+        let room = widgets::galley(ui, &clock.replace(|c: char| c.is_ascii_digit(), "0"), font.clone(), p.text).size().x;
+        let digits = widgets::galley(ui, &clock, font, if timer.length_ms.is_some() { p.accent_light } else { p.text });
+        let (rect, response) = ui.allocate_exact_size(vec2(11.0 + 14.0 + 6.0 + name.size().x + 6.0 + room + 11.0, 32.0), Sense::hover());
+        ui.painter().rect(rect, 8.0, Color32::TRANSPARENT, Stroke::new(1.0, p.border), StrokeKind::Inside);
+        let (x, y) = (rect.left() + 11.0, rect.center().y);
+        icons::paint(ui, icons::CLOCK, pos2(x + 7.0, y), 14.0, p.text2);
+        let x = x + 14.0 + 6.0;
+        ui.painter().galley(pos2(x, (y - name.size().y / 2.0).round()), name.clone(), p.text2);
+        ui.painter().galley(pos2(x + name.size().x + 6.0, (y - digits.size().y / 2.0).round()), digits, p.text);
+        response.on_hover_text(timer.describe(now));
+        ui.ctx().request_repaint_after(Duration::from_millis(1000 - now % 1000 + 5));
+    }
 }
 
 enum Lead {

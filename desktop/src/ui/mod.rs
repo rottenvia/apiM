@@ -378,6 +378,8 @@ pub struct App {
     /// The Sandbox dialog, while it is open.
     sandbox: Option<sandbox_panel::State>,
     toast: Option<(String, Instant)>,
+    /// Countdowns still to ring, with their chat's id: a toast and a flash of the taskbar when one is up.
+    alarms: Vec<(String, crate::tools::clock::Timer)>,
     /// The toast is shown without its warning sign (the web's delete toast has none).
     toast_bare: bool,
     focus_composer: bool,
@@ -476,6 +478,7 @@ impl App {
             ws: Default::default(),
             sandbox: None,
             toast: None,
+            alarms: Vec::new(),
             toast_bare: false,
             focus_composer: true,
             applied_theme: (settings.theme.clone(), settings.custom_theme.clone()),
@@ -727,6 +730,21 @@ impl App {
         self.toast_bare = false;
     }
 
+    /// A countdown that is up says so, wherever its chat is; the window wakes for the next one due.
+    fn ring(&mut self, ctx: &egui::Context) {
+        let now = store::now_ms();
+        let (up, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.alarms).into_iter().partition(|(_, t)| !t.running(now));
+        self.alarms = waiting;
+        if let Some((_, timer)) = up.last() {
+            self.toast(format!("Time is up: {} ({})", timer.label, crate::tools::clock::span(timer.length_ms.unwrap_or(0))));
+            self.toast_bare = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Critical));
+        }
+        if let Some(next) = self.alarms.iter().filter_map(|(_, t)| t.ends()).min() {
+            ctx.request_repaint_after(Duration::from_millis(next.saturating_sub(now).max(50)));
+        }
+    }
+
     fn running_here(&self) -> bool {
         self.runs.iter().any(|r| r.conv_id == self.conv.id)
     }
@@ -764,6 +782,21 @@ impl App {
         // A new chat nothing was sent from is the one "New chat" comes back to.
         if self.conv.messages.is_empty() {
             self.drafts.left_blank(&self.conv.id);
+        }
+        // The pictures of the chat being left: egui keeps every one it decoded, at full size and as a texture, until it
+        // is told to let go, and a session of opening chats with screenshots held them all. Shown again, each is decoded again.
+        let workspace = self.conv.workspace();
+        for msg in &self.conv.messages {
+            for (i, _) in msg.attachments.iter().enumerate().filter(|(_, a)| a.kind == "image") {
+                self.ctx.forget_image(&format!("bytes://{}-{i}", msg.id));
+            }
+            for part in &msg.parts {
+                if let Part::Tool(t) = part
+                    && let Some(path) = &t.image
+                {
+                    self.ctx.forget_image(&file_uri(&if path.is_absolute() { path.clone() } else { workspace.join(path) }));
+                }
+            }
         }
         if let Some(run) = self.runs.iter_mut().find(|r| r.conv_id == self.conv.id) {
             run.parked = Some(std::mem::take(&mut self.conv));
@@ -851,6 +884,10 @@ impl App {
     fn show_chat(&mut self, conv: Conversation) {
         self.leave_current();
         self.conv = conv;
+        // Its countdowns ring here too: set before the app was last closed, they were known only to the chat's file.
+        let now = store::now_ms();
+        self.alarms.retain(|(id, _)| *id != self.conv.id);
+        self.alarms.extend(self.conv.timers().into_iter().filter(|t| t.length_ms.is_some() && t.running(now)).map(|t| (self.conv.id.clone(), t)));
         self.editing = None;
         self.jump_to_latest = true;
         drafts::unstash(self);
@@ -1183,7 +1220,9 @@ impl App {
             self.conv.title = store::derive_title(if text.trim().is_empty() { "Attached files" } else { &text });
         }
 
+        let (previous_at, answered_at) = crate::tools::clock::last_exchange(&self.conv.messages);
         let mut user = Message::new(Role::User, &text);
+        let asked_at = user.created_at;
         user.attachments = attached.clone();
         self.fresh = Some((user.id.clone(), Instant::now()));
         self.conv.messages.push(user);
@@ -1212,7 +1251,7 @@ impl App {
             images: attached.into_iter().filter(|a| a.kind == "image").collect(),
             workspace: self.conv.workspace(),
             state_dir: self.conv.state_dir(),
-            chat: self.chat_state(),
+            chat: ChatState { asked_at, previous_at, answered_at, ..self.chat_state() },
             conv_id: self.conv.id.clone(),
             notes: Default::default(),
             resume: None,
@@ -1231,6 +1270,7 @@ impl App {
             skills_all: self.settings.enabled_plugins.clone(),
             groups: self.conv.names("toolGroups"),
             tools_run: self.conv.messages.iter().flat_map(|m| &m.parts).filter_map(|part| match part { Part::Tool(t) if t.ok == Some(true) => Some(t.name.clone()), _ => None }).collect::<BTreeSet<_>>().into_iter().collect(),
+            timers: self.conv.timers(),
             ..Default::default()
         }
     }
@@ -1292,6 +1332,7 @@ impl App {
         provider::resolve_target(&self.settings.model, &self.settings)?;
         // The request is rebuilt as it was asked: the turns before the question, then the question.
         let (earlier, question) = (&self.conv.messages[..start], &self.conv.messages[start]);
+        let (previous_at, answered_at) = crate::tools::clock::last_exchange(earlier);
         let request = agent::Request {
             settings: self.settings.clone(),
             history: crate::context::transcript::history_before(&self.conv.messages, start, self.conv.summary.as_ref()),
@@ -1301,7 +1342,7 @@ impl App {
             images: question.attachments.iter().filter(|a| a.kind == "image").cloned().collect(),
             workspace: self.conv.workspace(),
             state_dir: self.conv.state_dir(),
-            chat: self.chat_state(),
+            chat: ChatState { asked_at: question.created_at, previous_at, answered_at, ..self.chat_state() },
             conv_id: self.conv.id.clone(),
             notes: Default::default(),
             resume: Some(agent::Resume { prior, note, usage: last.usage }),
@@ -1651,6 +1692,10 @@ impl App {
                     msg.context_breakdown = breakdown;
                 }
                 Event::State(state) => {
+                    conv.set_timers(&state.timers);
+                    let now = store::now_ms();
+                    self.alarms.retain(|(id, _)| *id != conv.id);
+                    self.alarms.extend(state.timers.iter().filter(|t| t.length_ms.is_some() && t.running(now)).map(|t| (conv.id.clone(), t.clone())));
                     conv.plan = state.plan;
                     conv.findings = state.findings;
                 }
@@ -2043,6 +2088,7 @@ impl eframe::App for App {
             self.side.arrive();
         }
         self.take_inbox();
+        self.ring(ctx);
         remote::tick(self);
         self.keep_chat_model();
         drafts::keep(self, false);

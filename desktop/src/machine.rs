@@ -47,7 +47,7 @@ pub fn block(approval: crate::store::Approval) -> String {
     let asks = match approval {
         Approval::Manual => "The user approves each command before it runs, except a program that only looks (git status or log, tasklist, systeminfo, which, a --version), and each folder you look into outside the workspace. Every PowerShell call is shown to them whole: put the steps that go together in one.",
         Approval::Critical => "Commands and looks outside the workspace run without asking; the critical actions still ask the user — installing a package into the machine (pip into the system Python, npm -g, cargo install), adding a skill, pushing to a remote or opening a pull request, calling an outside tool, and changing a process the app did not start. Prefer what is already there: the standard library's unittest needs nothing installed.",
-        Approval::Auto => "Commands and looks outside the workspace run without asking, installing a package into the machine (pip into the system Python, npm -g, cargo install) included; nothing asks. A system command that takes the computer itself apart is refused outright, not asked. Prefer what is already there: the standard library's unittest needs nothing installed.",
+        Approval::Auto => "Commands and looks outside the workspace run without asking, installing a package into the machine (pip into the system Python, npm -g, cargo install) included; nothing asks. A command that takes the computer itself apart, deletes outside the workspace or force-pushes is refused outright, not asked: say what should be run and leave it to the user. Prefer what is already there: the standard library's unittest needs nothing installed.",
     };
     format!(
         "\n\nThis computer, as the app found it when it started (take it as given, do not spend a round checking it):\n{}\n- {asks}",
@@ -59,8 +59,9 @@ pub fn block(approval: crate::store::Approval) -> String {
 /// every request at midnight, and a chat open across it was sent again whole at full price. The workspace made each
 /// folder's chats a prompt of their own: Claude, which reads its cache only up to a mark, wrote all 13,800 tokens of
 /// rules and tools again for every new chat in another folder.
-pub fn today(workspace: &Path) -> String {
-    format!("Today is {}. Your workspace: {}", chrono::Local::now().format("%Y-%m-%d, %A"), workspace.display())
+/// `clock` is what `tools::clock` adds: the time, and the gaps between messages.
+pub fn today(workspace: &Path, clock: &str) -> String {
+    format!("Today is {}. {clock} Your workspace: {}", chrono::Local::now().format("%Y-%m-%d, %A"), workspace.display())
 }
 
 #[cfg(test)]
@@ -75,7 +76,7 @@ mod tests {
         use crate::store::Approval;
         let told = block(Approval::Manual);
         assert!(told.contains(".\n- The user approves") && told.contains("Programs found: ") && told.ends_with("put the steps that go together in one.") && !told.contains("workspace:"), "{told}");
-        let today = today(Path::new("/w/chat"));
+        let today = today(Path::new("/w/chat"), "The time is 12:00:00 (UTC+02:00).");
         assert!(today.starts_with("Today is 20") && today.ends_with(". Your workspace: /w/chat") && !told.contains("Today is"));
         assert!(block(Approval::Critical).contains("cargo install), adding a skill"));
         assert!(block(Approval::Auto).contains("cargo install) included; nothing asks"));

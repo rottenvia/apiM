@@ -45,6 +45,33 @@ pub fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
+/// Where a clip's data URL points once its bytes are in a file beside the chat (`set_clips_aside`).
+pub const CLIP_FILE: &str = "file:media/";
+
+/// A clip rides once, with the message it came in: `media_windows` never sends one again, and the window shows only
+/// its name. Yet each kept its whole data URL in the chat: one chat held 109 MB of three clips, read into memory on
+/// opening and written out again with every save. Each goes to a file of its own in the chat's `media/` folder,
+/// kept whole, and the chat keeps a stand-in that says a clip was there. True when one moved, so the chat is saved.
+fn set_clips_aside(messages: &mut [Message], dir: &Path) -> bool {
+    use base64::Engine;
+    let mut moved = false;
+    for m in messages {
+        let id: String = m.id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+        for (i, a) in m.attachments.iter_mut().enumerate() {
+            let Some((_, data)) = a.data_url.as_deref().filter(|url| a.kind == "video" && url.starts_with("data:")).and_then(|url| url.split_once(',')) else { continue };
+            let ext = Path::new(&a.name).extension().and_then(|e| e.to_str()).filter(|e| e.len() <= 5 && e.chars().all(|c| c.is_ascii_alphanumeric())).unwrap_or("mp4");
+            let name = format!("{id}-{i}.{ext}");
+            let path = dir.join("media").join(&name);
+            let kept = path.is_file() || base64::engine::general_purpose::STANDARD.decode(data.trim()).is_ok_and(|bytes| write_atomic(&path, &bytes).is_ok());
+            if kept {
+                a.data_url = Some(format!("{CLIP_FILE}{name}"));
+                moved = true;
+            }
+        }
+    }
+    moved
+}
+
 /// Unique enough for local files: time plus a per-process counter.
 pub fn new_id() -> String {
     static N: AtomicU32 = AtomicU32::new(0);
@@ -53,6 +80,12 @@ pub fn new_id() -> String {
 
 /// Writes through a temp file so a crash mid-write never leaves half a file.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic_with(path, |out| std::io::Write::write_all(out, bytes))
+}
+
+/// `write_atomic` for what is written as it is made: a chat goes to the disk as it is turned into JSON, never held
+/// whole as text first (180 MB more, for the moment of each save of the longest chat).
+pub fn write_atomic_with(path: &Path, write: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> std::io::Result<()>) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -64,9 +97,11 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     // sync_all() before rename: without it a crash after rename leaves the file as zeros (data still in page cache).
     let wrote = (|| {
         use std::io::Write;
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
+        let mut out = std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(&tmp)?);
+        write(&mut out)?;
+        out.flush()?;
+        out.get_ref().sync_all()?;
+        drop(out);
         std::fs::rename(&tmp, path)
     })();
     if wrote.is_err() {
@@ -328,6 +363,7 @@ pub struct Attachment {
     pub name: String,
     /// text | image | video
     pub kind: String,
+    /// A picture's or a clip's bytes as a `data:` URL; a clip kept in a file beside its chat has `CLIP_FILE` and its name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1000,7 +1036,11 @@ impl Conversation {
             progress.total.store(stamp_of(&path).map_or(0, |stamp| stamp.0), Ordering::Relaxed);
         }
         let w: wire::Conv = read_chat(&path, progress, true)?;
-        Some(Self::from_wire(w, slug))
+        let mut conv = Self::from_wire(w, slug);
+        if set_clips_aside(&mut conv.messages, &chats_dir().join(&conv.slug)) {
+            conv.save();
+        }
+        Some(conv)
     }
 
     /// Saves the chat. The folder is named after the title and follows a rename, and the workspace folder with it.
@@ -1040,7 +1080,7 @@ impl Conversation {
         let _ = WRITER.send(Job::Write(path, Box::new(self.to_wire())));
     }
 
-    /// Removes the chat and its own folder. A folder the user picked is never touched.
+    /// Removes the chat and its own folder (its clips with it, in `media/`). A folder the user picked is never touched.
     pub fn delete(id: &str) {
         flush();
         let Some(meta) = Self::list().into_iter().find(|c| c.id == id) else { return };
@@ -1070,6 +1110,19 @@ impl Conversation {
     /// (the tool groups it has loaded).
     pub fn names(&self, key: &str) -> Vec<String> {
         self.other.get(key).and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default()
+    }
+
+    /// The countdowns and stopwatches the model set in this chat (`tools::clock`).
+    pub fn timers(&self) -> Vec<crate::tools::clock::Timer> {
+        self.other.get("timers").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default()
+    }
+
+    pub fn set_timers(&mut self, timers: &[crate::tools::clock::Timer]) {
+        if timers.is_empty() {
+            self.other.remove("timers");
+        } else {
+            self.other.insert("timers".into(), serde_json::json!(timers));
+        }
     }
 
     pub fn set_names(&mut self, key: &str, names: Vec<String>) {
@@ -1305,8 +1358,7 @@ static WRITER: std::sync::LazyLock<std::sync::mpsc::Sender<Job>> = std::sync::La
                         // Several saves of one chat in line: only the newest is worth the disk.
                         let newest = !jobs[i + 1..].iter().any(|later| matches!(later, Job::Write(other, _) if other == path));
                         let started = std::time::Instant::now();
-                        if newest && let Ok(json) = serde_json::to_vec_pretty(conv) {
-                            let _ = write_atomic(path, &json);
+                        if newest && write_atomic_with(path, |out| serde_json::to_writer_pretty(out, &**conv).map_err(std::io::Error::other)).is_ok() {
                             WRITE_MS.store(started.elapsed().as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
                         }
                         if let Some(listed) = LISTED.lock().unwrap().get_mut(path) {
@@ -1353,6 +1405,26 @@ pub fn derive_title(message: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// A clip's bytes leave the chat for a file beside it, whole; a picture stays; a second pass finds nothing to move.
+    #[test]
+    fn a_clip_is_kept_beside_the_chat_not_in_it() {
+        use super::{Attachment, Message, Role, set_clips_aside};
+        let dir = std::env::temp_dir().join(format!("apim-clips-{}", super::new_id()));
+        let mut m = Message::new(Role::User, "watch this");
+        m.attachments = vec![
+            Attachment { name: "run.mp4".into(), kind: "video".into(), data_url: Some("data:video/mp4;base64,AAEC".into()), ..Default::default() },
+            Attachment { name: "a.png".into(), kind: "image".into(), data_url: Some("data:image/png;base64,AQID".into()), ..Default::default() },
+        ];
+        let mut messages = vec![m];
+        assert!(set_clips_aside(&mut messages, &dir));
+        let stand_in = format!("file:media/{}-0.mp4", messages[0].id);
+        assert_eq!(messages[0].attachments[0].data_url.as_deref(), Some(stand_in.as_str()));
+        assert_eq!(std::fs::read(dir.join("media").join(format!("{}-0.mp4", messages[0].id))).unwrap(), [0, 1, 2]);
+        assert_eq!(messages[0].attachments[1].data_url.as_deref(), Some("data:image/png;base64,AQID"));
+        assert!(!set_clips_aside(&mut messages, &dir));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn a_model_leaves_the_menu_and_the_one_in_use_moves() {
         use crate::models::{CustomModel, MODELS, Vision};

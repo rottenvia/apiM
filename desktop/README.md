@@ -39,6 +39,7 @@ The same things as the web app, with the same look:
 - Tools on demand and a catalog of skills, both described below: a request carries about a third of what it did, and plugins can be added, by you or by the assistant, to one chat or to all
 - A problem report (Settings, Reports) that sorts what went wrong by likely cause: the app first (crashes, frozen frames), then this PC, the provider, and a model's slips only when the same one repeats
 - A theme wall of its own: deep, tinted grounds with one vivid accent each, and the editor classics on darker grounds than the web's
+- A clock for the agent: the time, how long you were away, and timers and stopwatches it keeps for you, described below
 - Computer use, behind the **Use** chip beside Web: the agent sees your screen and uses your mouse and keyboard (open a game, click Play, test it), described below
 - A terminal mode: `apim --ask "your question"` (add `--auto` to let it run commands, `--computer` to let it use the screen, `--dir FOLDER` to pick the folder, `--note "text"` to hand the reply a "btw" after its first step, `--think` to print its thinking, every line of it marked `~`)
 
@@ -50,7 +51,7 @@ The assistant runs on your own computer, and it is told so. It works at three de
 
 - **What it is told about the computer** (`src/machine.rs`), read once when the app starts and sent with every request: the system and its build, the home folder and where programs keep their data, which of the usual programs are installed, the workspace's path, today's date, and how approvals are set. No chat starts by finding these out.
 - **Looking at files.** `list_files`, `read_file` and `read_files` take a path written in full (`C:\...`, `~/...`, `%LOCALAPPDATA%\...`). Outside the workspace a folder is listed one level at a time, newest files first. Writing, editing, moving and deleting stay inside the workspace.
-- **Asking the system.** `run_command` runs the system's own looking tools (`tasklist`, `systeminfo`, `wevtutil qe`, `reg query`, `sc query` and others; their changing forms are refused) and, on Windows, PowerShell. With "Ask me first" you are shown its text whole. With "Run automatically" it runs unasked like any other program, with two refusals that come back at once and wait for nobody: a command that takes the computer itself apart (disks, start-up, accounts, the system's protection, deleting from the registry), and a delete that names a place outside the chat's folder, because a restore point brings back that folder and nothing else. It used to ask about any text that could change the computer, in every mode: a reply left to run alone stood five minutes at each such question and then dropped the command. The reading is a word list, there to catch a wreck made in passing; it does not hold a program the assistant writes and runs, which was always free to do what you can do.
+- **Asking the system.** `run_command` runs the system's own looking tools (`tasklist`, `systeminfo`, `wevtutil qe`, `reg query`, `sc query` and others; their changing forms are refused) and, on Windows, PowerShell. With "Ask me first" you are shown its text whole. With "Run automatically" it runs unasked like any other program, with three refusals that come back at once and wait for nobody: a command that takes the computer itself apart (disks, start-up, accounts, the system's protection, deleting from the registry), a delete that names a place outside the chat's folder, because a restore point brings back that folder and nothing else, and a force push, which rewrites a remote for everyone. Until 2026-10-30 the code ran all three unasked in this mode, while this page and the model's instructions said they were refused; they are refused now, in PowerShell and in bash. It used to ask about any text that could change the computer, in every mode: a reply left to run alone stood five minutes at each such question and then dropped the command. The reading is a word list, there to catch a wreck made in passing; it does not hold a program the assistant writes and runs, which was always free to do what you can do.
 - **Approval.** With "Ask me first" you allow each folder outside the workspace before it is looked into ("Look in this folder?", once or for the chat) and each command. With "Run automatically" looking does not ask.
 - **Closed places.** Folders and files that keep sign-ins and keys (SSH and cloud keys, browser profiles, the system's credential stores, `.env` files, this app's own settings) are not read by a file tool or named in a PowerShell command, in any mode: what a tool reads goes to the model's provider.
 
@@ -120,6 +121,16 @@ A Personal Access Token acts as you, on everything it reaches, until it is revok
 Setting it up is two clicks on GitHub. "Set up apiM's GitHub App" in the GitHub dialog opens GitHub's "new app" form in your browser, filled in from a manifest (name, the permissions below, no webhook). Pressing Create GitHub App sends the browser back to a one-time listener on 127.0.0.1, checked by a random state, and apiM trades GitHub's code for the app's id and private key. The browser then goes on to the app's install page, where you pick the repositories; the dialog reads them when its window is back in front. The app asks for write access to contents, pull requests, issues and workflows, and read access to checks, statuses and actions.
 
 The key is kept in `github-app.json` beside `settings.json`, and neither file is read by a file tool or named in a PowerShell command. Each request signs a nine-minute sign-in with the key (RS256 through `ring`, already built for TLS), trades it for the repository's installation token and keeps that token for 55 minutes. The app comes first wherever a token is needed: listing repositories, cloning, pushing, the pull request and its checks. A repository it is not installed on falls back to the token when there is one, and otherwise says where to add it. "Disconnect" forgets the key on this computer; the app stays on GitHub until it is deleted on its page there. The rules for pushing are the same either way: only the `apim/…` working branch, never the base, never forced.
+
+## Time
+
+A model has no clock. It read "count 15 minutes" and could not tell when they were up, could not say how long you had been away or had run, and took the year it remembered for this one. The app has the times, so it says them (`src/tools/clock.rs`):
+
+- **Each of your earlier messages** starts, for the model, with when you sent it: `[2026-10-30 Thu 15:20:07]`. The stamp follows from the message, so the cached start of a request does not move.
+- **The note before the question** gives the date, the time with your offset from UTC (your clock, not your city: `The time is 15:42:07 (UTC+02:00).`), how long since your previous message and since the answer to it ended, and when a retried question was first asked. A reply resumed later is told the date again, rather than taking the day it began for today.
+- **During a run** the tool results carry `[Clock: 15:27:41, 7 min 34 s since the question.]` once a minute, and every round while a timer counts, so a task given 15 minutes is kept to them.
+- **`timer`**: a countdown or a stopwatch, counted from when your message was sent, not from when the model answered. "I start running in 3 seconds" starts it 3 s after your message; your "done" stops it at your message. A countdown shows in the chat's header with its time left, a stopwatch with its time so far, and when a countdown is up the window says so and flashes the taskbar, whichever chat is open, after a restart too. The note before every question repeats each timer's exact times, so the model tells you what it counted when you come back.
+- **Anything dated** (an event, tickets, a sale, a deadline) is measured against today before the model acts on it; what is over, it says is over. The instructions say so: other agents have bought a ticket for the wrong hour (codex#48436) and written last year's date into a mail with this year's in their context (claude-code#96178).
 
 ## What a request carries
 
@@ -538,6 +549,36 @@ npx tsx desktop/sync-from-web.mts
 ```bash
 cargo test
 ```
+
+## Memory
+
+Measured on the longest chat here (1,062 messages, a 180 MB file: three attached clips were 109 MB of it as base64, the thinking 43 MB), opened by the screenshot hook from a spare data folder (`APIM_DATA_DIR`), memory sampled every 0.1 s. Before, then after:
+
+| | Before | After |
+|---|---|---|
+| Window with no chat | 83 MB | 85 MB |
+| The chat opened, settled | 283 MB | 197 MB |
+| The chat opened, peak | 374 MB | 212 MB |
+| Opened and saved at once (peak) | 728 MB | 430 MB (the one-time move below included) |
+| The chat's file | 180.7 MB | 76.4 MB, and its clips as 78 MB of plain .mp4 beside it |
+
+- **Clips beside the chat.** A clip rides once, with the message it came in, and the window shows only its name, yet each kept its whole data URL in the chat, read into memory on opening and written out with every save. On opening, each goes to `chats/<chat>/media/` as the file it was, and the chat keeps a short stand-in. Nothing is lost.
+- **Saves written as they are made.** A chat was turned into one block of text and then written; it now goes to the disk as it is turned, which takes away a copy the size of the file at each save.
+- **Pictures let go.** egui kept every picture it decoded (attachments and the screenshots of computer steps, at full size, with a texture each) until the app closed. Leaving a chat now lets go of its pictures; shown again, each is decoded again.
+- **Finished background programs** are let go half an hour after they end, with their output (up to 1 MB each).
+
+## What other agents are known to get wrong
+
+Checked on 2026-10-30 against what users of Claude Code, Codex, Cursor, Gemini CLI, Cline and OpenClaw reported, and what this app did about each (most were already handled: the loop breaker, timeouts and process-tree kills, closed stdin, unique-match edits, retries that never re-run a tool, a `max_tokens` cut that never runs a broken call, the spending limit). Changed:
+
+- **Time**, as above: the date was the only thing the model was told.
+- **A request too long for the model** was folded and sent again only on OpenRouter. On DeepSeek or Claude direct it ended the reply with an error; it is folded there too now.
+- **The guard's size count** saw a message with pictures as empty, so a transcript of screenshots looked small until the provider turned it away. A picture counts as some 1,600 tokens.
+- **An outside (MCP) tool's answer** went in whole, however long. It is cut like a file read.
+- **Destructive commands in Auto** ran unasked although this page and the instructions said they were refused; they are refused, and a force push with them.
+- **A git asking for a password** waited on a closed input until the command's time ran out; it is told not to ask.
+- **Output in other alphabets** had holes where a letter fell across the edge of a read; the halves are joined now.
+- **Text from pages, files and tools** is data, not instructions: the model is told that whatever such text says, it does not change what you asked, and to tell you instead of doing it.
 
 ## When it feels slow
 

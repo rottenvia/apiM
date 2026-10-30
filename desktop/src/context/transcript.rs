@@ -19,7 +19,18 @@ pub fn replays(m: &Message) -> bool {
 
 /// The earlier turns a request replays, oldest first, as (role, prose, attachments): the rolling window the web keeps.
 pub fn history(messages: &[Message], stored: Option<&HistorySummary>) -> Vec<(Role, String, Vec<Attachment>)> {
-    summary::shape(messages, stored).verbatim.iter().map(|m| (m.role, m.text(), m.attachments.clone())).collect()
+    summary::shape(messages, stored).verbatim.iter().map(|m| (m.role, stamped(m), m.attachments.clone())).collect()
+}
+
+/// A user's message as the model reads it: after when it was sent, so "how long did I run" and "I'm back" can be
+/// answered from the times themselves. The stamp follows from the message, so the cached start of a request stays put.
+fn stamped(m: &Message) -> String {
+    let text = m.text();
+    if m.role == Role::User && m.created_at > 0 && !(text.trim().is_empty() && m.attachments.is_empty()) {
+        format!("{}\n{text}", crate::tools::clock::stamp(m.created_at))
+    } else {
+        text
+    }
 }
 
 /// `history` for a reply being resumed: the turns before its question (`messages[question]`). The whole chat is
@@ -27,7 +38,7 @@ pub fn history(messages: &[Message], stored: Option<&HistorySummary>) -> Vec<(Ro
 /// itself, which stands after the question.
 pub fn history_before(messages: &[Message], question: usize, stored: Option<&HistorySummary>) -> Vec<(Role, String, Vec<Attachment>)> {
     let earlier: std::collections::HashSet<&str> = messages[..question].iter().map(|m| m.id.as_str()).collect();
-    summary::shape(messages, stored).verbatim.iter().filter(|m| earlier.contains(m.id.as_str())).map(|m| (m.role, m.text(), m.attachments.clone())).collect()
+    summary::shape(messages, stored).verbatim.iter().filter(|m| earlier.contains(m.id.as_str())).map(|m| (m.role, stamped(m), m.attachments.clone())).collect()
 }
 
 /// The web's `mediaWindowFor`: on a native model the two newest pictures in the history ride in full, and a clip never
@@ -129,6 +140,18 @@ pub fn wire_turns(history: &[(Role, String, Vec<Attachment>)], text: &str, image
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The user's earlier messages carry when they were sent; the replies do not, so the model never learns to write a stamp.
+    #[test]
+    fn earlier_questions_say_when_they_were_sent() {
+        let mut asked = Message::new(Role::User, "I start running in 3 seconds");
+        asked.created_at = 1_800_000_000_000;
+        let answered = Message::new(Role::Assistant, "Counting.");
+        let turns = history(&[asked.clone(), answered], None);
+        assert_eq!(turns[0].1, format!("{}\nI start running in 3 seconds", crate::tools::clock::stamp(asked.created_at)));
+        assert!(turns[0].1.starts_with("[20") && turns[0].1.contains(':'));
+        assert_eq!(turns[1].1, "Counting.");
+    }
 
     #[test]
     fn a_resumed_transcript_loses_its_old_pastes_and_keeps_the_request() {

@@ -24,8 +24,17 @@ fn threshold_chars(window: u64) -> usize {
     (compact_at(window) as f64 * CHARS_PER_TOKEN) as usize
 }
 
+/// A picture, in characters of the estimate: some 1,600 tokens.
+const PICTURE_CHARS: usize = 5_600;
+
+/// A message's size in characters. Content in parts counts its text and its pictures: counted as nothing, a
+/// transcript of screenshots looked small to the guard until the provider turned it away.
 fn len(v: &Value) -> usize {
-    v.as_str().map_or(0, str::len)
+    match v {
+        Value::String(s) => s.len(),
+        Value::Array(parts) => parts.iter().map(|part| part["text"].as_str().map_or(if part["type"] == "image_url" { PICTURE_CHARS } else { 0 }, str::len)).sum(),
+        _ => 0,
+    }
 }
 
 fn calls(m: &Value) -> &[Value] {
