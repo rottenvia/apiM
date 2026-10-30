@@ -84,9 +84,9 @@ pub fn width(app: &App, window: f32) -> f32 {
     width.clamp(380.0, (window * 0.62).max(420.0))
 }
 
-/// Opens itself when the agent starts browsing in this chat; drawn as a right panel. Returns how far it is open: 0 when
-/// it is not on screen, 1 all the way open.
-pub fn panel(app: &mut App, ui: &mut egui::Ui, right_gap: f32, top_gap: f32, gap: f32, round: f32) -> f32 {
+/// Opens itself when the agent starts browsing in this chat; drawn as a right panel, beside the rail `beside` wide (as
+/// it slides, not rounded). Returns how far it is open: 0 when it is not on screen, 1 all the way open.
+pub fn panel(app: &mut App, ui: &mut egui::Ui, beside: f32, right_gap: f32, top_gap: f32, gap: f32, round: f32) -> f32 {
     let open = open_here(app);
     let elsewhere = app.browser.stretch.as_ref().is_some_and(|root| live::key(root) != live::key(&app.conv.workspace()));
     if !open || elsewhere {
@@ -107,7 +107,10 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui, right_gap: f32, top_gap: f32, gap
     // The first frame all the way open takes `full` exactly too. Left to the size egui kept from the slide's last
     // frame, a point short, the pane came out a point narrower every time it opened.
     let settled = shown >= 1.0 && app.browser.settled;
-    let panel = if settled { panel.resizable(true).default_size(full).size_range(380.0..=most) } else { panel.exact_size((full * shown).round()).resizable(false) };
+    // Rounded with the rail it makes way for, as one: each rounded on its own, the two at times came to a point more
+    // than the frame before, and the chat's edge stepped back.
+    let sliding = ((beside + full * shown).round() - beside.round()).max(0.0);
+    let panel = if settled { panel.resizable(true).default_size(full).size_range(380.0..=most) } else { panel.exact_size(sliding).resizable(false) };
     let shown_whole = shown >= 1.0;
     app.browser.settled = shown_whole;
     let stretched = app.browser.stretch.is_some();

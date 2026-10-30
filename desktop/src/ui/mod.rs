@@ -2257,8 +2257,9 @@ impl eframe::App for App {
         // chat list does: its content keeps its width and is cut off at the window's edge. It makes way for the Browser
         // pane and comes back when the pane closes: the two side by side left the chat a strip.
         let rail = ctx.animate_bool_with_time_and_easing(egui::Id::new("rail-open"), self.rail_shown() && ctx.content_rect().width() >= 1024.0, 0.3, egui::emath::easing::cubic_out);
+        let rail_width = workspace::WIDTH * rail;
         if rail > 0.0 {
-            egui::Panel::right("workspace").exact_size((workspace::WIDTH * rail).round()).resizable(false).show_separator_line(false).frame(egui::Frame::new().fill(p.bg2)).show(ui, |ui| {
+            egui::Panel::right("workspace").exact_size(rail_width.round()).resizable(false).show_separator_line(false).frame(egui::Frame::new().fill(p.bg2)).show(ui, |ui| {
                 let rect = ui.max_rect();
                 ui.set_clip_rect(rect);
                 let full = Rect::from_min_size(rect.min, vec2(workspace::WIDTH, rect.height()));
@@ -2270,8 +2271,11 @@ impl eframe::App for App {
         // left, ruled off from them by two bright lines.
         let edge = |covered: f32| ((1.0 - covered) * CARD_GAP).round() as i8;
         // The Browser pane is a second card beside it, as far from it as the cards are from the window's edge.
-        let browsing = browser_pane::panel(self, ui, edge(rail) as f32, edge(!self.fullscreen as u8 as f32) as f32, CARD_GAP, CARD_ROUND);
-        let around = egui::Margin { left: edge(open), right: if browsing > 0.0 { CARD_GAP as i8 } else { edge(rail) }, top: edge(!self.fullscreen as u8 as f32), bottom: CARD_GAP as i8 };
+        let browsing = browser_pane::panel(self, ui, rail_width, edge(rail) as f32, edge(!self.fullscreen as u8 as f32) as f32, CARD_GAP, CARD_ROUND);
+        // The strip on the card's right is the pane's gap while the pane is there and the window's edge while the rail
+        // is not, so it goes with whichever is leaving. Kept whole until the pane was all gone, it let the card come to
+        // rest 9 points short at the end of every close and then jump the rest.
+        let around = egui::Margin { left: edge(open), right: (CARD_GAP * browsing.max(1.0 - rail)).round() as i8, top: edge(!self.fullscreen as u8 as f32), bottom: CARD_GAP as i8 };
         // The card's width once whatever slides has stopped: the sidebar or a strip of chrome on the left, and on the
         // right the Browser pane and a strip, the rail, or a strip.
         let sliding = |t: f32| t > 0.0 && t < 1.0;
