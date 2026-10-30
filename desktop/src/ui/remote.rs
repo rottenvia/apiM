@@ -573,4 +573,13 @@ mod tests {
         // A finder pattern's dark corner sits right inside the quiet zone.
         assert_ne!(image.pixels[4 * n + 4], Color32::WHITE);
     }
+
+    #[test]
+    fn a_phone_file_stays_in_its_folder() {
+        assert_eq!(file_name("../../evil.exe"), "evil.exe");
+        assert_eq!(file_name("C:\\Windows\\win.ini"), "CWindowswin.ini");
+        assert_eq!(file_name("IMG_0001"), "IMG_0001.jpg", "a photo has no extension");
+        assert_eq!(file_name("..."), "photo.jpg");
+        assert_eq!(file_name("notes.final.pdf"), "notes.final.pdf");
+    }
 }
