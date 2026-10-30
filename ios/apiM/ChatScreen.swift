@@ -1,104 +1,305 @@
-import PhotosUI
 import SwiftUI
 import UIKit
 
-/// The chat on the computer's screen, mirrored: what is open there is open here, and the other way round.
+/// What the screen has open over the chat: the drawer's dialogs, the sheets, the picture viewer, a message being
+/// edited. Kept apart from `Remote`, which is only what the computer said.
+@Observable
+final class Screen {
+    var settings = false
+    var models = false
+    var effort = false
+    var viewer: Picture?
+    var selecting: Selection?
+    var renaming: ChatRow?
+    var deleting: ChatRow?
+    /// The question being asked again in other words, in the message box.
+    var editing: Message?
+
+    func edit(_ message: Message) {
+        Haptics.tap()
+        withAnimation(.snappy(duration: 0.25)) { editing = message }
+    }
+}
+
+/// The chat on the computer's screen, mirrored: what is open there is open here, and the other way round. Swipe
+/// right from the left half of the screen for the chats.
 struct ChatScreen: View {
     @Environment(Remote.self) private var remote
-    @State private var drawer = false
-    @State private var settings = false
+    @Environment(Screen.self) private var screen
+    @Namespace private var zoom
+    /// 0 closed, 1 open; follows the finger while the drawer is dragged.
+    @State private var drawer: CGFloat = 0
+    /// Still on screen while it slides away; taken out once it is gone, so a closed drawer draws nothing (its rows'
+    /// dots for running chats would otherwise animate unseen, and the app would never be idle).
+    @State private var drawerShown = false
+    @State private var title = ""
+    @AppStorage("textSize") private var textSize = 1
 
     var body: some View {
         GeometryReader { geometry in
+            let width = min(330, geometry.size.width * 0.84)
             ZStack(alignment: .leading) {
                 VStack(spacing: 0) {
-                    TopBar(openDrawer: { setDrawer(true) }, openSettings: { settings = true })
+                    TopBar(openDrawer: { setDrawer(true) })
                     ZStack(alignment: .top) {
-                        Conversation()
+                        Transcript(size: Typeface.proseSize)
+                            .id(remote.chat.id)
+                            .transition(.opacity)
                         // Words scrolling up fade out under the title instead of being cut at a hard edge.
                         LinearGradient(colors: [Palette.bg, Palette.bg.opacity(0)], startPoint: .top, endPoint: .bottom)
                             .frame(height: 16)
                             .allowsHitTesting(false)
-                        VStack(spacing: 8) {
-                            if let problem = remote.problem, remote.phase != .online {
-                                Banner(icon: "wifi.exclamationmark", text: problem, tint: Palette.warning, action: ("Retry", { remote.connect() }), close: nil)
-                            }
-                            if let notice = remote.banner {
-                                Banner(icon: "exclamationmark.circle", text: notice, tint: Palette.danger, action: nil, close: { remote.banner = nil })
-                                    .task(id: notice) {
-                                        try? await Task.sleep(nanoseconds: 7_000_000_000)
-                                        if remote.banner == notice { remote.banner = nil }
-                                    }
-                            }
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.top, 6)
-                        .animation(.easeInOut(duration: 0.25), value: remote.banner)
-                        .animation(.easeInOut(duration: 0.25), value: remote.problem)
+                        Banners()
                     }
                     Composer()
                 }
                 .background(Palette.bg.ignoresSafeArea())
+                .offset(x: drawer * width * 0.18)
 
-                if drawer {
-                    Color.black.opacity(0.32)
+                if drawerShown {
+                    Color.black.opacity(0.36 * drawer)
                         .ignoresSafeArea()
                         .onTapGesture { setDrawer(false) }
-                        .transition(.opacity)
-                    ChatDrawer(close: { setDrawer(false) }, openSettings: {
-                        setDrawer(false)
-                        settings = true
-                    })
-                    .frame(width: min(330, geometry.size.width * 0.86))
-                    .transition(.move(edge: .leading))
-                    // Alongside the list's own scrolling, not instead of it: only a sideways swipe closes.
-                    .simultaneousGesture(DragGesture(minimumDistance: 20).onEnded { drag in
-                        if drag.translation.width < -60, abs(drag.translation.width) > abs(drag.translation.height) { setDrawer(false) }
-                    })
+                        .transition(.identity)
+                    ChatDrawer(close: { setDrawer(false) })
+                        .frame(width: width)
+                        // The shadow is the panel's own, behind it: on the drawer itself it fell on every row.
+                        .background {
+                            Rectangle()
+                                .fill(Palette.bg2)
+                                .shadow(color: .black.opacity(0.18 * drawer), radius: 18, x: 4)
+                                .ignoresSafeArea()
+                        }
+                        .offset(x: (drawer - 1) * (width + 24))
+                        .transition(.identity)
                 }
             }
+            .background {
+                DrawerPan(open: drawer > 0.5, width: width, moved: { progress in
+                    if drawer == 0 { hideKeyboard() }
+                    drawerShown = true
+                    drawer = progress
+                }, ended: { open in
+                    setDrawer(open)
+                })
+            }
         }
-        .sheet(isPresented: $settings) {
-            SettingsSheet()
+        .environment(\.zoomSpace, zoom)
+        .sheet(isPresented: Bindable(screen).settings) {
+            SettingsView()
+        }
+        .sheet(isPresented: Bindable(screen).models) {
+            ModelSheet()
+        }
+        .sheet(isPresented: Bindable(screen).effort) {
+            EffortSheet()
+        }
+        .sheet(item: Bindable(screen).selecting) { selection in
+            SelectSheet(text: selection.text)
+        }
+        .fullScreenCover(item: Bindable(screen).viewer) { picture in
+            ImageViewer(picture: picture)
+                .navigationTransition(.zoom(sourceID: picture.id, in: zoom))
+        }
+        .alert("Rename chat", isPresented: Binding(get: { screen.renaming != nil }, set: { if !$0 { screen.renaming = nil } })) {
+            TextField("Title", text: $title)
+            Button("Cancel", role: .cancel) {}
+            Button("Rename") {
+                if let row = screen.renaming { remote.rename(row.id, title) }
+            }
+        } message: {
+            Text("The new name shows on \(remote.name) too.")
+        }
+        .onChange(of: screen.renaming) { _, row in
+            if let row { title = row.title }
+        }
+        .confirmationDialog("Delete this chat?", isPresented: Binding(get: { screen.deleting != nil }, set: { if !$0 { screen.deleting = nil } }), titleVisibility: .visible, presenting: screen.deleting) { row in
+            Button("Delete", role: .destructive) {
+                Haptics.press()
+                remote.deleteChat(row.id)
+            }
+        } message: { row in
+            Text("\u{201c}\(row.title.isEmpty ? "Untitled" : row.title)\u{201d} is deleted on \(remote.name) too. This can't be undone.")
         }
     }
 
     private func setDrawer(_ open: Bool) {
-        if open { UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil) }
-        withAnimation(.spring(response: 0.34, dampingFraction: 0.9)) { drawer = open }
+        hideKeyboard()
+        if open != (drawer > 0.5) { Haptics.tap() }
+        if open { drawerShown = true }
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+            drawer = open ? 1 : 0
+        } completion: {
+            if drawer == 0 { drawerShown = false }
+        }
+    }
+
+    private func hideKeyboard() {
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+    }
+}
+
+/// The drawer's swipe. A UIKit pan on the window's root view, which sheets and the viewer are not under: it begins
+/// only for a sideways drag (rightwards from the left half of the screen to open, leftwards to close), so the
+/// transcript's own scrolling and a code block's sideways scrolling keep their drags.
+private struct DrawerPan: UIViewRepresentable {
+    var open: Bool
+    var width: CGFloat
+    var moved: (CGFloat) -> Void
+    var ended: (Bool) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> Anchor {
+        let view = Anchor()
+        view.coordinator = context.coordinator
+        view.isUserInteractionEnabled = false
+        context.coordinator.pan = view.pan
+        return view
+    }
+
+    func updateUIView(_ view: Anchor, context: Context) {
+        context.coordinator.drawer = self
+    }
+
+    static func dismantleUIView(_ view: Anchor, coordinator: Coordinator) {
+        view.pan.view?.removeGestureRecognizer(view.pan)
+    }
+
+    final class Anchor: UIView {
+        weak var coordinator: Coordinator?
+        lazy var pan: UIPanGestureRecognizer = {
+            let pan = UIPanGestureRecognizer(target: nil, action: nil)
+            pan.maximumNumberOfTouches = 1
+            return pan
+        }()
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            guard let window, let coordinator, pan.view == nil else { return }
+            pan.addTarget(coordinator, action: #selector(Coordinator.panned(_:)))
+            pan.delegate = coordinator
+            (window.rootViewController?.view ?? window).addGestureRecognizer(pan)
+        }
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var drawer: DrawerPan?
+        weak var pan: UIPanGestureRecognizer?
+        private var from: CGFloat = 0
+
+        func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
+            guard let drawer, let pan = gesture as? UIPanGestureRecognizer, let view = pan.view else { return false }
+            let velocity = pan.velocity(in: view)
+            guard abs(velocity.x) > abs(velocity.y) * 1.4 else { return false }
+            let at = pan.location(in: view)
+            let moved = pan.translation(in: view)
+            let start = CGPoint(x: at.x - moved.x, y: at.y - moved.y)
+            if drawer.open {
+                guard velocity.x < 0 else { return false }
+                // Begun on a chat in the list, it is that row's swipe (archive, delete), not the drawer's.
+                if start.x < drawer.width {
+                    var hit = view.hitTest(start, with: nil)
+                    while let current = hit {
+                        if current is UICollectionViewCell { return false }
+                        hit = current.superview
+                    }
+                }
+                return true
+            }
+            return velocity.x > 0 && start.x < view.bounds.width * 0.5
+        }
+
+        @objc func panned(_ pan: UIPanGestureRecognizer) {
+            guard let drawer, let view = pan.view else { return }
+            let dx = pan.translation(in: view).x
+            let progress = min(1, max(0, from + dx / max(drawer.width, 1)))
+            switch pan.state {
+            case .began:
+                from = drawer.open ? 1 : 0
+            case .changed:
+                drawer.moved(progress)
+            case .ended:
+                let speed = pan.velocity(in: view).x
+                drawer.ended(abs(speed) > 450 ? speed > 0 : progress > 0.5)
+            case .cancelled, .failed:
+                drawer.ended(drawer.open)
+            default:
+                break
+            }
+        }
     }
 }
 
 private struct TopBar: View {
     @Environment(Remote.self) private var remote
+    @Environment(Screen.self) private var screen
     let openDrawer: () -> Void
-    let openSettings: () -> Void
 
     var body: some View {
         HStack(spacing: 4) {
             IconButton(symbol: "line.3.horizontal", label: "Chats", action: openDrawer)
             Spacer(minLength: 4)
             VStack(spacing: 2) {
-                Text(remote.chat.title.isEmpty ? "New chat" : remote.chat.title)
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(Palette.text)
-                    .lineLimit(1)
-                Button(action: openSettings) {
+                titleMenu
+                Button {
+                    screen.settings = true
+                } label: {
                     StatusLine()
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(Press(scale: 0.96))
                 .accessibilityIdentifier("connection")
             }
             Spacer(minLength: 4)
             IconButton(symbol: "square.and.pencil", label: "New chat") {
-                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                Haptics.tap()
                 remote.newChat()
             }
-            .disabled(remote.phase != .online)
+            .disabled(!remote.online)
         }
         .padding(.horizontal, 8)
         .frame(height: 54)
         .background(Palette.bg)
+    }
+
+    /// The chat's name; tapped, what can be done to the chat.
+    @ViewBuilder
+    private var titleMenu: some View {
+        let title = Text(remote.chat.title.isEmpty ? "New chat" : remote.chat.title)
+            .font(.system(size: 16, weight: .semibold))
+            .foregroundStyle(Palette.text)
+            .lineLimit(1)
+            .contentTransition(.opacity)
+        if let row = remote.chats.first(where: { $0.id == remote.chat.id }), remote.online {
+            Menu {
+                Button {
+                    screen.renaming = row
+                } label: {
+                    Label("Rename", systemImage: "pencil")
+                }
+                Button {
+                    remote.archive(row.id, !row.isArchived)
+                } label: {
+                    Label(row.isArchived ? "Unarchive" : "Archive", systemImage: "archivebox")
+                }
+                Divider()
+                Button(role: .destructive) {
+                    screen.deleting = row
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    title
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(Palette.muted)
+                }
+            }
+            .accessibilityIdentifier("chat-title")
+        } else {
+            title
+        }
     }
 }
 
@@ -109,13 +310,16 @@ struct StatusLine: View {
     var body: some View {
         HStack(spacing: 5) {
             Circle()
-                .fill(remote.phase == .online ? Palette.success : Palette.warning)
+                .fill(remote.online ? Palette.success : Palette.warning)
                 .frame(width: 6, height: 6)
-            Text(remote.phase == .online ? [remote.name, remote.model].filter { !$0.isEmpty }.joined(separator: " · ") : "Connecting to \(remote.name)…")
+                .shadow(color: (remote.online ? Palette.success : Palette.warning).opacity(0.6), radius: 3)
+            Text(remote.online ? [remote.name, remote.model].filter { !$0.isEmpty }.joined(separator: " · ") : "Connecting to \(remote.name)…")
                 .font(.system(size: 12))
                 .foregroundStyle(Palette.text2)
                 .lineLimit(1)
+                .contentTransition(.opacity)
         }
+        .animation(.easeInOut(duration: 0.25), value: remote.online)
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("status")
     }
@@ -134,8 +338,31 @@ struct IconButton: View {
                 .frame(width: 42, height: 42)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(Press())
         .accessibilityLabel(label)
+    }
+}
+
+private struct Banners: View {
+    @Environment(Remote.self) private var remote
+
+    var body: some View {
+        VStack(spacing: 8) {
+            if let problem = remote.problem, !remote.online {
+                Banner(icon: "wifi.exclamationmark", text: problem, tint: Palette.warning, action: ("Retry", { remote.connect() }), close: nil)
+            }
+            if let notice = remote.banner {
+                Banner(icon: "exclamationmark.circle", text: notice, tint: Palette.danger, action: nil, close: { remote.banner = nil })
+                    .task(id: notice) {
+                        try? await Task.sleep(nanoseconds: 7_000_000_000)
+                        if remote.banner == notice { withAnimation { remote.banner = nil } }
+                    }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 6)
+        .animation(.snappy(duration: 0.3), value: remote.banner)
+        .animation(.snappy(duration: 0.3), value: remote.problem)
     }
 }
 
@@ -161,6 +388,7 @@ struct Banner: View {
                 Button(action.0, action: action.1)
                     .font(.system(size: 13.5, weight: .semibold))
                     .foregroundStyle(Palette.accent)
+                    .buttonStyle(Press())
             }
             if let close {
                 Button(action: close) {
@@ -169,7 +397,7 @@ struct Banner: View {
                         .foregroundStyle(Palette.text2)
                         .frame(width: 22, height: 22)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(Press())
                 .accessibilityLabel("Dismiss")
             }
         }
@@ -183,122 +411,218 @@ struct Banner: View {
 
 // MARK: - the transcript
 
-private struct EndKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
-}
-
-private struct Conversation: View {
+/// The chat, lazily: only the messages on screen are laid out, so a chat of hundreds opens as fast as a short one.
+/// It starts at the end and stays there while a reply is written, unless the reader has scrolled up to read.
+private struct Transcript: View {
+    let size: CGFloat
     @Environment(Remote.self) private var remote
-    /// The reader is at the end of the transcript: new words keep it there.
+    @State private var position = ScrollPosition(edge: .bottom)
+    /// The last thing in the chat. Scrolled to by name, the lazy stack lays out the real end; scrolled to the bottom
+    /// edge, it went where its estimate of the rows put the end, and a long chat showed nothing.
+    static let end = "end"
+    /// The reader is at the end: new words keep it there.
     @State private var follow = true
-    /// The transcript and room `follow` was last brought up to date with (`layout`).
-    @State private var seen = ""
+    /// The reader's finger is on it, or it is still gliding from one.
+    @State private var touching = false
+    /// The message that was first before older ones were asked for: kept in place when they arrive above it.
+    @State private var keep: String?
 
     var body: some View {
-        GeometryReader { outer in
-            ScrollViewReader { proxy in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 24) {
-                        if remote.chat.messages.isEmpty && remote.sending == nil {
-                            Welcome()
-                                .frame(minHeight: outer.size.height - 40)
-                        }
-                        if remote.chat.earlier > 0 {
-                            Text("\(remote.chat.earlier) earlier message\(remote.chat.earlier == 1 ? "" : "s") on \(remote.name)")
-                                .font(Typeface.tiny)
-                                .foregroundStyle(Palette.muted)
-                                .frame(maxWidth: .infinity)
-                        }
-                        ForEach(remote.chat.messages) { message in
-                            MessageRow(message: message, live: isLive(message), status: remote.run.status)
-                                .equatable()
-                                .id(message.id)
-                        }
-                        if let sending = remote.sending {
-                            UserBubble(message: Message(id: "sending", role: "user", parts: [.text(sending)], at: 0), pending: true)
-                        }
-                        if let approval = remote.run.approval {
-                            ApprovalCard(approval: approval)
-                        }
-                        if let question = remote.run.question {
-                            QuestionCard(question: question)
-                        }
-                        Color.clear
-                            .frame(height: 1)
-                            .id("end")
-                            .background(GeometryReader { inner in
-                                Color.clear.preference(key: EndKey.self, value: inner.frame(in: .named("transcript")).minY)
-                            })
+        let chat = remote.chat
+        let busy = remote.run.running
+        let lastID = chat.messages.last?.id
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 22) {
+                if chat.earlier > 0 {
+                    EarlierRow(count: chat.earlier, loading: remote.fetchingEarlier) {
+                        keep = chat.messages.first?.id
+                        remote.more()
                     }
-                    .padding(.horizontal, 18)
-                    .padding(.top, 14)
-                    .padding(.bottom, 18)
                 }
-                .coordinateSpace(name: "transcript")
-                .scrollDismissesKeyboard(.interactively)
-                .onPreferenceChange(EndKey.self) { y in
-                    // Only the reader's own scrolling says whether to follow. The end also moves when the transcript
-                    // grows or the keyboard takes room, and taking that as "scrolled away" left an approval card
-                    // under the message box: the card arrived, pushed the end off screen, and was not followed.
-                    guard layout(outer.size.height) == seen else { return }
-                    follow = y < outer.size.height + 60
+                if chat.messages.isEmpty && remote.sending == nil {
+                    if remote.opening == chat.id && !chat.id.isEmpty {
+                        LoadingChat()
+                    } else {
+                        Welcome()
+                            .containerRelativeFrame(.vertical) { length, _ in max(length - 60, 0) }
+                    }
                 }
-                .onChange(of: remote.chat.id) { _, _ in
+                ForEach(chat.messages) { message in
+                    let isLast = message.id == lastID
+                    MessageRow(message: message, live: busy && isLast && !message.isUser, status: isLast ? remote.run.status : "", last: isLast, busy: busy, size: size)
+                        .equatable()
+                        .transition(.asymmetric(insertion: .opacity.combined(with: .offset(y: 16)), removal: .opacity))
+                }
+                if let sending = remote.sending {
+                    UserBubble(message: Message(id: "sending", role: "user", parts: [.text(sending)], at: 0), pending: true)
+                        .transition(.opacity.combined(with: .offset(y: 16)))
+                }
+                if remote.run.resume == true, !busy {
+                    InterruptedCard(resume: true)
+                } else if !busy, let last = chat.messages.last, !last.isUser, last.incomplete == true {
+                    InterruptedCard(resume: false)
+                }
+                if let approval = remote.run.approval {
+                    ApprovalCard(approval: approval)
+                }
+                if let question = remote.run.question {
+                    QuestionCard(question: question)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+                Color.clear
+                    .frame(height: 1)
+                    .id(Transcript.end)
+            }
+            .padding(.horizontal, 18)
+            .padding(.top, 14)
+            .padding(.bottom, 18)
+            .scrollTargetLayout()
+        }
+        .scrollPosition($position)
+        // The end at the leading edge: `.bottom` is also the middle across, which moved the whole chat sideways
+        // whenever its content measured wider than the screen for a moment.
+        .defaultScrollAnchor(.bottomLeading, for: .initialOffset)
+        .scrollDismissesKeyboard(.interactively)
+        .onScrollPhaseChange { _, phase, context in
+            touching = phase == .tracking || phase == .interacting || phase == .decelerating
+            // Taken hold of away from the end: following stops before anything else can move it.
+            let geometry = context.geometry
+            if touching, follow, geometry.contentSize.height - geometry.visibleRect.maxY >= 90 {
+                withAnimation(.easeInOut(duration: 0.2)) { follow = false }
+            }
+        }
+        .onScrollGeometryChange(for: Bool.self) { geometry in
+            geometry.contentSize.height - geometry.visibleRect.maxY < 90
+        } action: { _, now in
+            // Only the reader's own scrolling says whether to follow: the end also moves when a reply grows, a card
+            // arrives or the keyboard takes room.
+            if touching || now {
+                withAnimation(.easeInOut(duration: 0.2)) { follow = now }
+            }
+        }
+        // What moves the end, followed: never the layout itself. Scrolling from a layout callback made the lazy stack
+        // estimate its rows again, which called it again, inside one frame, for good: the app froze on a chat with
+        // pictures.
+        .onScrollGeometryChange(for: CGFloat.self) { $0.containerSize.height } action: { _, _ in keepUp() }
+        .onChange(of: chat.messages.count) { _, _ in keepUp() }
+        .onChange(of: chat.messages.last) { _, _ in keepUp() }
+        .onChange(of: remote.run.approval != nil || remote.run.question != nil) { _, _ in keepUp() }
+        .onChange(of: chat.earlier) { _, _ in
+            if let keep {
+                hold(keep)
+                self.keep = nil
+            }
+        }
+        // A chat whose messages came with it, in one go, changed nothing to follow: it starts at the end from here.
+        .onAppear { keepUp() }
+        .onChange(of: remote.sending) { _, now in
+            if now != nil {
+                follow = true
+                withAnimation(.snappy(duration: 0.3)) { position.scrollTo(id: Transcript.end, anchor: .bottom) }
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if !follow {
+                Button {
+                    Haptics.tap()
                     follow = true
-                    proxy.scrollTo("end", anchor: .bottom)
+                    withAnimation(.snappy(duration: 0.35)) { position.scrollTo(id: Transcript.end, anchor: .bottom) }
+                } label: {
+                    Image(systemName: "arrow.down")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Palette.text)
+                        .frame(width: 36, height: 36)
+                        .background(Palette.elevated, in: Circle())
+                        .overlay(Circle().stroke(Palette.border, lineWidth: 1))
+                        .shadow(color: .black.opacity(0.12), radius: 8, y: 2)
                 }
-                .onChange(of: layout(outer.size.height)) { _, now in
-                    seen = now
-                    if follow { proxy.scrollTo("end", anchor: .bottom) }
-                }
-                .onChange(of: remote.sending) { _, now in
-                    if now != nil {
-                        withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo("end", anchor: .bottom) }
-                    }
-                }
-                .onAppear {
-                    seen = layout(outer.size.height)
-                    proxy.scrollTo("end", anchor: .bottom)
-                }
-                .overlay(alignment: .bottom) {
-                    if !follow {
-                        Button {
-                            withAnimation(.easeOut(duration: 0.3)) { proxy.scrollTo("end", anchor: .bottom) }
-                        } label: {
-                            Image(systemName: "arrow.down")
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundStyle(Palette.text)
-                                .frame(width: 36, height: 36)
-                                .background(Palette.elevated, in: Circle())
-                                .overlay(Circle().stroke(Palette.border, lineWidth: 1))
-                                .shadow(color: .black.opacity(0.12), radius: 8, y: 2)
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Jump to latest")
-                        .padding(.bottom, 10)
-                        .transition(.opacity.combined(with: .scale(scale: 0.8)))
-                    }
-                }
-                .animation(.easeInOut(duration: 0.2), value: follow)
+                .buttonStyle(Press())
+                .accessibilityLabel("Jump to latest")
+                .padding(.bottom, 10)
+                .transition(.opacity.combined(with: .scale(scale: 0.7)))
+            }
+        }
+    }
+}
+
+private extension Transcript {
+    /// To the end, while the reader is there. A lazy stack learns its rows' heights as it lays them out, and a card or
+    /// a row can still be sliding in: the end is looked for again on the next turn and once the insertion settles.
+    func keepUp() {
+        guard follow, !touching else { return }
+        position.scrollTo(id: Transcript.end, anchor: .bottom)
+        for delay in [0.0, 0.05, 0.4] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                if follow && !touching { position.scrollTo(id: Transcript.end, anchor: .bottom) }
             }
         }
     }
 
-    private func isLive(_ message: Message) -> Bool {
-        remote.run.running && !message.isUser && message.id == remote.chat.messages.last?.id
+    /// The message that was first stays where it was read while older ones arrive above it, once they are laid out.
+    func hold(_ id: String) {
+        for delay in [0.0, 0.0, 0.05] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { position.scrollTo(id: id, anchor: .top) }
+        }
     }
+}
 
-    /// The transcript and the room it has: what moves its end without the reader scrolling.
-    private func layout(_ height: CGFloat) -> String {
-        "\(signature)|\(Int(height))"
+/// "160 earlier messages": the computer keeps a long chat's start until it is asked for.
+private struct EarlierRow: View {
+    let count: Int
+    let loading: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: {
+            Haptics.tap()
+            action()
+        }) {
+            HStack(spacing: 8) {
+                if loading {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 11, weight: .bold))
+                }
+                Text(loading ? "Loading earlier messages" : "\(count) earlier message\(count == 1 ? "" : "s")")
+                    .font(.system(size: 13, weight: .medium))
+            }
+            .foregroundStyle(Palette.text2)
+            .padding(.horizontal, 14)
+            .frame(height: 34)
+            .background(Palette.hover.opacity(0.6), in: Capsule())
+            .contentTransition(.opacity)
+        }
+        .buttonStyle(Press())
+        .disabled(loading)
+        .frame(maxWidth: .infinity)
+        .animation(.snappy(duration: 0.2), value: loading)
+        .accessibilityIdentifier("earlier")
     }
+}
 
-    /// Changes whenever the transcript grows: a message added, a reply's words, a step, a card.
-    private var signature: String {
-        let last = remote.chat.messages.last
-        let size = last.map { $0.parts.count * 100_000 + $0.text.count } ?? 0
-        return "\(remote.chat.messages.count):\(size):\(remote.run.approval != nil):\(remote.run.question != nil):\(remote.run.running)"
+/// A chat on its way from the computer for the first time: its shape, shimmering.
+private struct LoadingChat: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            HStack {
+                Spacer(minLength: 80)
+                Skeleton(radius: 20).frame(width: 210, height: 44)
+            }
+            VStack(alignment: .leading, spacing: 10) {
+                Skeleton(radius: 6).frame(height: 14)
+                Skeleton(radius: 6).frame(height: 14)
+                Skeleton(radius: 6).frame(width: 220, height: 14)
+            }
+            Skeleton(radius: 14).frame(height: 96)
+            VStack(alignment: .leading, spacing: 10) {
+                Skeleton(radius: 6).frame(height: 14)
+                Skeleton(radius: 6).frame(width: 180, height: 14)
+            }
+        }
+        .padding(.top, 8)
+        .transition(.opacity)
+        .accessibilityLabel("Loading the chat")
     }
 }
 
@@ -307,18 +631,19 @@ private struct Welcome: View {
 
     var body: some View {
         VStack(spacing: 18) {
-            Mark(size: 58)
+            Mark(size: 58, bouncing: !remote.online)
             Text(greeting)
                 .font(.system(size: 30, weight: .regular, design: .serif))
                 .foregroundStyle(Palette.text)
                 .multilineTextAlignment(.center)
-            Text(remote.phase == .online ? "Whatever you send here runs in apiM on \(remote.name)." : "Waiting for apiM on \(remote.name)…")
+            Text(remote.online ? "Whatever you send here runs in apiM on \(remote.name)." : "Waiting for apiM on \(remote.name)…")
                 .font(.system(size: 15))
                 .foregroundStyle(Palette.text2)
                 .multilineTextAlignment(.center)
+                .contentTransition(.opacity)
         }
         .padding(.horizontal, 24)
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var greeting: String {
@@ -341,6 +666,7 @@ private struct ApprovalCard: View {
             HStack(spacing: 8) {
                 Image(systemName: "hand.raised.fill")
                     .foregroundStyle(Palette.warning)
+                    .symbolEffect(.bounce, options: .nonRepeating, value: approval.command)
                 Text("apiM wants to run this")
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(Palette.text)
@@ -361,14 +687,14 @@ private struct ApprovalCard: View {
             }
             HStack(spacing: 10) {
                 Button {
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    Haptics.tap()
                     remote.allow(false)
                 } label: {
                     Text("Deny").frame(maxWidth: .infinity)
                 }
                 .buttonStyle(Secondary())
                 Button {
-                    UINotificationFeedbackGenerator().notificationOccurred(.success)
+                    Haptics.success()
                     remote.allow(true)
                 } label: {
                     Text("Allow").frame(maxWidth: .infinity)
@@ -379,6 +705,7 @@ private struct ApprovalCard: View {
         .padding(14)
         .background(Palette.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(Palette.warning.opacity(0.4), lineWidth: 1))
+        .shadow(color: Palette.warning.opacity(0.12), radius: 14, y: 4)
         .transition(.move(edge: .bottom).combined(with: .opacity))
     }
 }
@@ -406,6 +733,7 @@ private struct QuestionCard: View {
             }
             ForEach(question.options, id: \.self) { option in
                 Button {
+                    Haptics.tap()
                     remote.answer(option)
                 } label: {
                     Text(option)
@@ -421,7 +749,9 @@ private struct QuestionCard: View {
                     .padding(.vertical, 9)
                     .background(Palette.bg, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                     .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Palette.border, lineWidth: 1))
+                let empty = answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 Button {
+                    Haptics.tap()
                     remote.answer(answer.trimmingCharacters(in: .whitespacesAndNewlines))
                 } label: {
                     Image(systemName: "arrow.up")
@@ -430,14 +760,16 @@ private struct QuestionCard: View {
                         .frame(width: 36, height: 36)
                         .background(Palette.accent, in: Circle())
                 }
-                .buttonStyle(.plain)
-                .disabled(answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                .opacity(answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.4 : 1)
+                .buttonStyle(Press())
+                .disabled(empty)
+                .opacity(empty ? 0.4 : 1)
+                .animation(.easeInOut(duration: 0.15), value: empty)
                 .accessibilityLabel("Answer")
             }
             Button("Skip") { remote.answer("") }
                 .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(Palette.text2)
+                .buttonStyle(Press())
         }
         .padding(14)
         .background(Palette.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -445,175 +777,41 @@ private struct QuestionCard: View {
     }
 }
 
-struct Primary: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 16, weight: .semibold))
-            .foregroundStyle(.white)
-            .padding(.horizontal, 18)
-            .frame(minHeight: 46)
-            .background(Palette.accent.opacity(configuration.isPressed ? 0.82 : 1), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .scaleEffect(configuration.isPressed ? 0.98 : 1)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
-    }
-}
-
-struct Secondary: ButtonStyle {
-    var alignment: Alignment = .center
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 16, weight: .medium))
-            .foregroundStyle(Palette.text)
-            .padding(.horizontal, 16)
-            .frame(maxWidth: .infinity, minHeight: 46, alignment: alignment)
-            .background(configuration.isPressed ? Palette.hover : Palette.bg, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Palette.border, lineWidth: 1))
-            .scaleEffect(configuration.isPressed ? 0.98 : 1)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
-    }
-}
-
-// MARK: - the message box
-
-private struct Picked: Identifiable {
-    let id = UUID()
-    let jpeg: Data
-    let thumbnail: UIImage
-}
-
-private struct Composer: View {
+/// "This reply stopped before it finished": carried on from where it stopped, or asked again.
+private struct InterruptedCard: View {
+    let resume: Bool
     @Environment(Remote.self) private var remote
-    @State private var draft = ""
-    @State private var items: [PhotosPickerItem] = []
-    @State private var photos: [Picked] = []
-    @FocusState private var focused: Bool
-
-    private var empty: Bool { draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && photos.isEmpty }
-    private var online: Bool { remote.phase == .online }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if !photos.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(photos) { photo in
-                            Image(uiImage: photo.thumbnail)
-                                .resizable()
-                                .scaledToFill()
-                                .frame(width: 58, height: 58)
-                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                                .overlay(alignment: .topTrailing) {
-                                    Button {
-                                        photos.removeAll { $0.id == photo.id }
-                                    } label: {
-                                        Image(systemName: "xmark")
-                                            .font(.system(size: 9, weight: .bold))
-                                            .foregroundStyle(.white)
-                                            .frame(width: 20, height: 20)
-                                            .background(Color.black.opacity(0.6), in: Circle())
-                                    }
-                                    .buttonStyle(.plain)
-                                    .padding(4)
-                                    .accessibilityLabel("Remove photo")
-                                }
-                        }
-                    }
-                }
+        HStack(alignment: .center, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Palette.warning)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("This reply stopped before it finished")
+                    .font(.system(size: 13.5, weight: .semibold))
+                    .foregroundStyle(Palette.text)
+                Text(resume ? "Resume carries on from where it stopped, keeping what it did." : "Nothing arrived, so it is asked again from the start.")
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(Palette.text2)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            TextField(placeholder, text: $draft, axis: .vertical)
-                .font(Typeface.body)
-                .foregroundStyle(Palette.text)
-                .lineLimit(1...7)
-                .focused($focused)
-                .accessibilityIdentifier("composer")
-                .padding(.horizontal, 4)
-            HStack(spacing: 10) {
-                PhotosPicker(selection: $items, maxSelectionCount: 4, matching: .images) {
-                    Image(systemName: "plus")
-                        .font(.system(size: 17, weight: .medium))
-                        .foregroundStyle(Palette.text)
-                        .frame(width: 34, height: 34)
-                        .overlay(Circle().stroke(Palette.border, lineWidth: 1))
-                }
-                .accessibilityLabel("Add photos")
-                Spacer()
-                if remote.run.running && empty {
-                    Button {
-                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                        remote.stop()
-                    } label: {
-                        Image(systemName: "stop.fill")
-                            .font(.system(size: 13, weight: .bold))
-                            .foregroundStyle(Palette.bg)
-                            .frame(width: 34, height: 34)
-                            .background(Palette.text, in: Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Stop")
-                } else {
-                    Button(action: send) {
-                        Image(systemName: "arrow.up")
-                            .font(.system(size: 16, weight: .bold))
-                            .foregroundStyle(.white)
-                            .frame(width: 34, height: 34)
-                            .background(empty || !online ? Palette.muted.opacity(0.5) : Palette.accent, in: Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(empty || !online)
-                    .accessibilityLabel("Send")
-                }
+            Spacer(minLength: 6)
+            Button(resume ? "Resume" : "Try again") {
+                Haptics.tap()
+                if resume { remote.resume() } else { remote.regenerate() }
             }
+            .font(.system(size: 14, weight: .semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 14)
+            .frame(height: 34)
+            .background(Palette.accent, in: Capsule())
+            .buttonStyle(Press())
+            .disabled(!remote.online)
         }
-        .padding(.horizontal, 12)
-        .padding(.top, 12)
-        .padding(.bottom, 10)
-        .background(Palette.surface, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).stroke(Palette.border, lineWidth: 1))
-        .shadow(color: .black.opacity(0.05), radius: 14, y: 2)
-        .padding(.horizontal, 10)
-        .padding(.bottom, 6)
-        .padding(.top, 2)
-        .background(Palette.bg)
-        .onChange(of: items) { _, picked in
-            guard !picked.isEmpty else { return }
-            items = []
-            Task { await load(picked) }
-        }
-    }
-
-    private var placeholder: String {
-        if remote.run.running { return "Add to the task…" }
-        return remote.chat.messages.isEmpty ? "Message apiM" : "Reply to apiM"
-    }
-
-    private func send() {
-        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty || !photos.isEmpty else { return }
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        remote.say(text, photos: photos.map(\.jpeg))
-        draft = ""
-        photos = []
-        // The keyboard goes down so the reply has the screen, as in Claude.
-        focused = false
-    }
-
-    /// Photos go as JPEGs no longer than 1600 px on a side: what a model reads well, a few hundred KB each.
-    private func load(_ picked: [PhotosPickerItem]) async {
-        for item in picked {
-            guard let data = try? await item.loadTransferable(type: Data.self), let image = UIImage(data: data) else { continue }
-            let scale = min(1, 1600 / max(image.size.width, image.size.height))
-            let size = CGSize(width: (image.size.width * scale).rounded(), height: (image.size.height * scale).rounded())
-            let format = UIGraphicsImageRendererFormat()
-            format.scale = 1
-            let resized = UIGraphicsImageRenderer(size: size, format: format).image { _ in image.draw(in: CGRect(origin: .zero, size: size)) }
-            guard let jpeg = resized.jpegData(compressionQuality: 0.8) else { continue }
-            let thumb = UIGraphicsImageRenderer(size: CGSize(width: 120, height: 120 * size.height / max(size.width, 1)), format: format).image { context in
-                resized.draw(in: context.format.bounds)
-            }
-            await MainActor.run {
-                if photos.count < 4 { photos.append(Picked(jpeg: jpeg, thumbnail: thumb)) }
-            }
-        }
+        .padding(12)
+        .background(Palette.warning.opacity(0.07), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Palette.warning.opacity(0.3), lineWidth: 1))
+        .transition(.opacity)
     }
 }

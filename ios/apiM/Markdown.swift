@@ -22,6 +22,9 @@ struct ListItem: Equatable {
 }
 
 enum Markdown {
+    /// A heading's size by its level.
+    static let headings: [CGFloat] = [0, 24, 21, 19, 17.5, 17, 17]
+
     static func blocks(_ source: String) -> [Block] {
         let lines = source.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
         var blocks: [Block] = []
@@ -188,24 +191,95 @@ enum Markdown {
     }
 }
 
+/// A block laid out: its words already styled, so drawing it parses nothing.
+enum Styled {
+    case paragraph(AttributedString)
+    case heading(level: Int, text: AttributedString)
+    case list([(depth: Int, marker: String, text: AttributedString)])
+    case quote(AttributedString)
+    case code(language: String, text: String)
+    case table(header: [AttributedString], rows: [[AttributedString]])
+    case rule
+}
+
+/// A model's markdown, laid out once and kept by the text itself. A long chat opens without parsing on the main
+/// thread (`Remote` warms this as the chat arrives), and a reply being written restyles only its last block.
+enum Prose {
+    private final class Box<T>: NSObject {
+        let value: T
+        init(_ value: T) { self.value = value }
+    }
+
+    private static let blocks: NSCache<NSString, Box<[Styled]>> = {
+        let cache = NSCache<NSString, Box<[Styled]>>()
+        cache.countLimit = 600
+        return cache
+    }()
+
+    private static let inline: NSCache<NSString, Box<AttributedString>> = {
+        let cache = NSCache<NSString, Box<AttributedString>>()
+        cache.countLimit = 4000
+        return cache
+    }()
+
+    static func render(_ text: String, size: CGFloat) -> [Styled] {
+        let key = "\(size)|\(text)" as NSString
+        if let hit = blocks.object(forKey: key) { return hit.value }
+        let styled = Markdown.blocks(text).map { style($0, size: size) }
+        blocks.setObject(Box(styled), forKey: key)
+        return styled
+    }
+
+    /// Bold, italics, links and inline code for one stretch of text, kept: the blocks above the one being written
+    /// come back from here unchanged.
+    static func words(_ text: String, size: CGFloat) -> AttributedString {
+        let key = "\(size)|\(text)" as NSString
+        if let hit = inline.object(forKey: key) { return hit.value }
+        let styled = Markdown.inline(text, size: size)
+        inline.setObject(Box(styled), forKey: key)
+        return styled
+    }
+
+    /// Lays out every reply's prose off the main thread, before the chat is shown.
+    static func warm(_ messages: [Message], size: CGFloat) {
+        for message in messages where !message.isUser {
+            for piece in message.parts {
+                if case .text(let text) = piece, !text.isEmpty { _ = render(text, size: size) }
+            }
+        }
+    }
+
+    private static func style(_ block: Block, size: CGFloat) -> Styled {
+        switch block {
+        case .paragraph(let text): return .paragraph(words(text, size: size))
+        case .heading(let level, let text): return .heading(level: level, text: words(text, size: Markdown.headings[min(level, 6)]))
+        case .list(let items): return .list(items.map { (depth: $0.depth, marker: $0.marker, text: words($0.text, size: size)) })
+        case .quote(let text): return .quote(words(text, size: size))
+        case .code(let language, let text, _): return .code(language: language, text: text)
+        case .table(let header, let rows): return .table(header: header.map { words($0, size: size - 2) }, rows: rows.map { $0.map { words($0, size: size - 2) } })
+        case .rule: return .rule
+        }
+    }
+}
+
 /// A model's answer, block by block.
 struct MarkdownView: View, Equatable {
     let text: String
-    var size: CGFloat = Typeface.proseSize
+    var size: CGFloat
 
     var body: some View {
+        let blocks = Prose.render(text, size: size)
         VStack(alignment: .leading, spacing: 14) {
-            ForEach(Array(Markdown.blocks(text).enumerated()), id: \.offset) { _, block in
-                BlockView(block: block, size: size)
+            ForEach(blocks.indices, id: \.self) { i in
+                BlockView(block: blocks[i], size: size)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
-private struct BlockView: View {
-    static let headings: [CGFloat] = [0, 24, 21, 19, 17.5, 17, 17]
-    let block: Block
+struct BlockView: View {
+    let block: Styled
     let size: CGFloat
 
     var body: some View {
@@ -213,22 +287,22 @@ private struct BlockView: View {
         case .paragraph(let text):
             prose(text)
         case .heading(let level, let text):
-            Text(Markdown.inline(text, size: size))
-                .font(.system(size: BlockView.headings[min(level, 6)], weight: .semibold, design: .serif))
+            Text(text)
+                .font(.system(size: Markdown.headings[min(level, 6)], weight: .semibold, design: .serif))
                 .foregroundStyle(Palette.text)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.top, level <= 2 ? 6 : 2)
         case .list(let items):
             VStack(alignment: .leading, spacing: 7) {
-                ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                ForEach(items.indices, id: \.self) { i in
                     HStack(alignment: .firstTextBaseline, spacing: 9) {
-                        Text(item.marker)
-                            .font(.system(size: item.marker == "•" ? size : size - 1, weight: .medium, design: .serif))
+                        Text(items[i].marker)
+                            .font(.system(size: items[i].marker == "•" ? size : size - 1, weight: .medium, design: .serif))
                             .foregroundStyle(Palette.text2)
                             .frame(minWidth: 14, alignment: .trailing)
-                        prose(item.text)
+                        prose(items[i].text)
                     }
-                    .padding(.leading, CGFloat(item.depth) * 18)
+                    .padding(.leading, CGFloat(items[i].depth) * 18)
                 }
             }
         case .quote(let text):
@@ -237,7 +311,7 @@ private struct BlockView: View {
                 prose(text).foregroundStyle(Palette.text2)
             }
             .fixedSize(horizontal: false, vertical: true)
-        case .code(let language, let text, _):
+        case .code(let language, let text):
             CodeBlock(language: language, code: text)
         case .table(let header, let rows):
             TableBlock(header: header, rows: rows, size: size)
@@ -246,13 +320,12 @@ private struct BlockView: View {
         }
     }
 
-    private func prose(_ text: String) -> some View {
-        Text(Markdown.inline(text, size: size))
+    private func prose(_ text: AttributedString) -> some View {
+        Text(text)
             .font(.system(size: size, design: .serif))
             .foregroundStyle(Palette.text)
             .lineSpacing(size * 0.28)
             .fixedSize(horizontal: false, vertical: true)
-            .textSelection(.enabled)
     }
 }
 
@@ -270,15 +343,18 @@ struct CodeBlock: View {
                 Spacer()
                 Button {
                     UIPasteboard.general.string = code
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                    copied = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { copied = false }
+                    Haptics.tap()
+                    withAnimation(.snappy(duration: 0.2)) { copied = true }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { withAnimation(.snappy(duration: 0.2)) { copied = false } }
                 } label: {
                     Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(copied ? Palette.success : Palette.text2)
+                        .contentTransition(.symbolEffect(.replace))
+                        .padding(.vertical, 4)
+                        .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(Press())
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
@@ -289,7 +365,6 @@ struct CodeBlock: View {
                     .foregroundStyle(Palette.text)
                     .lineSpacing(3)
                     .fixedSize(horizontal: true, vertical: true)
-                    .textSelection(.enabled)
                     .padding(12)
             }
         }
@@ -299,8 +374,8 @@ struct CodeBlock: View {
 }
 
 private struct TableBlock: View {
-    let header: [String]
-    let rows: [[String]]
+    let header: [AttributedString]
+    let rows: [[AttributedString]]
     let size: CGFloat
 
     var body: some View {
@@ -319,14 +394,14 @@ private struct TableBlock: View {
         Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
             GridRow {
                 ForEach(0..<columns, id: \.self) { c in
-                    cell(c < header.count ? header[c] : "", bold: true, wrap: wrap)
+                    cell(c < header.count ? header[c] : AttributedString(), bold: true, wrap: wrap)
                 }
             }
-            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+            ForEach(rows.indices, id: \.self) { r in
                 Rectangle().fill(Palette.border).frame(height: 1).gridCellColumns(columns)
                 GridRow {
                     ForEach(0..<columns, id: \.self) { c in
-                        cell(c < row.count ? row[c] : "", bold: false, wrap: wrap)
+                        cell(c < rows[r].count ? rows[r][c] : AttributedString(), bold: false, wrap: wrap)
                     }
                 }
             }
@@ -335,8 +410,8 @@ private struct TableBlock: View {
         .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
-    private func cell(_ text: String, bold: Bool, wrap: Bool) -> some View {
-        Text(Markdown.inline(text, size: size - 2))
+    private func cell(_ text: AttributedString, bold: Bool, wrap: Bool) -> some View {
+        Text(text)
             .font(.system(size: size - 2, weight: bold ? .semibold : .regular))
             .foregroundStyle(Palette.text)
             .frame(minWidth: wrap ? 0 : 70, maxWidth: wrap ? .infinity : 260, alignment: .leading)

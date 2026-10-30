@@ -1,5 +1,6 @@
 # Builds the iPhone app on a Mac: the unsigned .ipa, the unit tests, and the UI tests against the test server
-# (ios/MockServer, the desktop's own link code), with screenshots in light and dark.
+# (ios/MockServer, the desktop's own link code), with screenshots in light and dark. On main, once every test passed,
+# the .ipa and a SideStore/AltStore source (apps.json) go to the `ios` release, so a phone updates in place.
 name: iOS app
 
 on:
@@ -14,12 +15,16 @@ jobs:
   ios:
     runs-on: macos-15
     timeout-minutes: 60
+    permissions:
+      contents: write
     defaults:
       run:
         shell: bash
     env:
       # The test server's key, the same as in FlowTests.swift: it guards nothing but the test.
       MOCK_SECRET: AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8
+      # Each build a higher version than the last: what SideStore and AltStore compare to offer an update.
+      APP_VERSION: 1.1.${{ github.run_number }}
     steps:
       - uses: actions/checkout@v4
 
@@ -56,12 +61,15 @@ jobs:
           echo "UDID=$UDID" >> "$GITHUB_ENV"
           xcrun simctl boot "$UDID" || true
           xcrun simctl bootstatus "$UDID" -b
+          # A fresh simulator explains swipe typing over the first keyboard: it would cover the screenshots.
+          xcrun simctl spawn "$UDID" defaults write com.apple.keyboard.preferences DidShowContinuousPathIntroduction -bool true || true
           xcrun simctl status_bar "$UDID" override --time 9:41 --batteryState charged --batteryLevel 100 --wifiBars 3 --cellularMode active --cellularBars 4
 
       - name: Unsigned IPA
         run: |
           if ! xcodebuild -project ios/apiM.xcodeproj -scheme apiM -configuration Release -sdk iphoneos \
               -destination 'generic/platform=iOS' -derivedDataPath build/device \
+              MARKETING_VERSION="$APP_VERSION" CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
               CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build > build/ipa.log 2>&1; then
             grep -E "error:" build/ipa.log | sort -u | head -80
             tail -30 build/ipa.log
@@ -78,11 +86,21 @@ jobs:
           ios/MockServer/target/release/apim-mock --port 47199 --secret "$MOCK_SECRET" > build/mock-light.log 2>&1 &
           MOCK=$!
           xcrun simctl ui "$UDID" appearance light
+          # What the app is doing while the tests wait on it: its own log, its CPU, and a 2 s sample of its threads every 15 s.
+          xcrun simctl spawn "$UDID" log stream --level debug --style compact --predicate 'subsystem == "com.rottenvia.apim"' > build/app-log.log 2>&1 &
+          LOGS=$!
+          ( set +e; while sleep 15; do
+              P=$(pgrep -x apiM | head -1); [ -n "$P" ] || { echo "$(date +%T) no apiM" >> build/app-cpu.log; continue; }
+              echo "$(date +%T) $(ps -o %cpu=,rss= -p "$P")" >> build/app-cpu.log
+              sample "$P" 2 -mayDie -file "build/sample-$(date +%H%M%S).log" > /dev/null 2>&1 || true
+            done ) &
+          SAMPLER=$!
           status=0
           TEST_RUNNER_APIM_SHOTS=light xcodebuild test -project ios/apiM.xcodeproj -scheme apiM -destination "id=$UDID" \
             -derivedDataPath build/sim -resultBundlePath build/light.xcresult > build/test-light.log 2>&1 || status=$?
-          kill $MOCK || true
-          grep -E "^Test Case .*(passed|failed)|error:|XCTAssert|Executed" build/test-light.log | tail -60
+          kill $MOCK $SAMPLER $LOGS || true
+          grep -E "^Test Case .*(passed|failed)|error:|XCTAssert|Executed|apim-timing" build/test-light.log | tail -60
+          tail -40 build/app-cpu.log 2>/dev/null || true
           exit $status
 
       - name: Screens, dark
@@ -95,7 +113,7 @@ jobs:
           TEST_RUNNER_APIM_SHOTS=dark xcodebuild test-without-building -project ios/apiM.xcodeproj -scheme apiM -destination "id=$UDID" \
             -derivedDataPath build/sim -only-testing:apiMUITests/FlowTests -resultBundlePath build/dark.xcresult > build/test-dark.log 2>&1 || status=$?
           kill $MOCK || true
-          grep -E "^Test Case .*(passed|failed)|error:|XCTAssert|Executed" build/test-dark.log | tail -40
+          grep -E "^Test Case .*(passed|failed)|error:|XCTAssert|Executed|apim-timing" build/test-dark.log | tail -40
           exit $status
 
       - name: Collect screenshots
@@ -104,6 +122,38 @@ jobs:
           mkdir -p build/shots
           cp -R ~/apim-shots/. build/shots/ 2>/dev/null || true
           find build/shots -name '*.png' | sort
+
+      - name: Publish for SideStore and AltStore
+        if: success() && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BASE="https://github.com/${{ github.repository }}/releases/download/ios"
+          ICON="https://raw.githubusercontent.com/${{ github.repository }}/main/ios/apiM/Assets.xcassets/AppIcon.appiconset/icon-1024.png"
+          python3 - "$APP_VERSION" "${{ github.run_number }}" "$(stat -f%z build/apiM.ipa)" "$BASE" "$ICON" "$(git log -1 --format=%s)" > build/apps.json <<'EOF'
+          import datetime, json, sys
+          version, build, size, base, icon, change = sys.argv[1:7]
+          date = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+          about = "Drives apiM on your computer from your phone: chats, models, effort, settings, photos and approvals, straight over your own network."
+          app = {
+              "name": "apiM", "bundleIdentifier": "com.rottenvia.apim", "developerName": "rottenvia",
+              "subtitle": "Your computer's apiM, in your pocket.", "localizedDescription": about,
+              "iconURL": icon, "tintColor": "#C2603E",
+              "versions": [{"version": version, "buildVersion": build, "date": date, "localizedDescription": change,
+                            "downloadURL": base + "/apiM.ipa", "size": int(size), "minOSVersion": "18.0"}],
+              # Older SideStore reads the newest version from here.
+              "version": version, "versionDate": date, "versionDescription": change, "downloadURL": base + "/apiM.ipa", "size": int(size),
+              "appPermissions": {"entitlements": [], "privacy": {
+                  "NSLocalNetworkUsageDescription": "apiM connects to the apiM app on your computer over your network.",
+                  "NSCameraUsageDescription": "apiM uses the camera to scan the pairing code on your computer, and for photos you send.",
+                  "NSPhotoLibraryAddUsageDescription": "apiM saves pictures from your chats to Photos when you ask it to."}},
+          }
+          print(json.dumps({"name": "apiM", "identifier": "com.rottenvia.apim.source", "subtitle": app["subtitle"],
+                            "iconURL": icon, "tintColor": "#C2603E", "apps": [app], "news": []}, indent=2))
+          EOF
+          gh release view ios > /dev/null 2>&1 || gh release create ios --prerelease --title "iPhone app" --notes "The iPhone app, built from main."
+          gh release upload ios build/apiM.ipa build/apps.json --clobber
+          gh release edit ios --notes "apiM $APP_VERSION for iPhone, built from $(git rev-parse --short HEAD): $(git log -1 --format=%s). Add $BASE/apps.json as a source in SideStore or AltStore to get each new build as an update."
 
       - uses: actions/upload-artifact@v4
         if: always()

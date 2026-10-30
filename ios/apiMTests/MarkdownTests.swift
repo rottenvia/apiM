@@ -45,6 +45,20 @@ final class MarkdownTests: XCTestCase {
         XCTAssertEqual(Markdown.blocks("Here:\n```py\nprint(1)"), [.paragraph("Here:"), .code(language: "py", text: "print(1)", open: true)])
     }
 
+    /// Laid out once: the same text comes back from the cache, and a block above the one being written is not
+    /// styled again.
+    func testProseIsKept() {
+        let text = "First **bold** paragraph.\n\nSecond, being written"
+        let first = Prose.render(text, size: 17)
+        XCTAssertEqual(first.count, 2)
+        guard case .paragraph(let bold) = first[0] else { return XCTFail("a paragraph") }
+        XCTAssertTrue(bold.runs.contains { $0.inlinePresentationIntent?.contains(.stronglyEmphasized) == true }, "bold kept its mark")
+        let more = Prose.render(text + " more", size: 17)
+        guard case .paragraph(let again) = more[0] else { return XCTFail("a paragraph") }
+        XCTAssertEqual(again, bold)
+        XCTAssertEqual(Prose.words("First **bold** paragraph.", size: 17), bold)
+    }
+
     func testNotAHeadingNotAList() {
         XCTAssertEqual(Markdown.blocks("#hashtag and 2024.5 is a year-ish"), [.paragraph("#hashtag and 2024.5 is a year-ish")])
     }

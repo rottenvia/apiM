@@ -1,12 +1,14 @@
 import SwiftUI
 import UIKit
 
-/// The chats on the computer, newest first, grouped by when they were last touched.
+/// The chats on the computer, newest first, grouped by when they were last touched. Swipe a chat left to archive or
+/// delete it; hold it for the same and Rename.
 struct ChatDrawer: View {
     @Environment(Remote.self) private var remote
+    @Environment(Screen.self) private var screen
     let close: () -> Void
-    let openSettings: () -> Void
     @State private var search = ""
+    @State private var archived = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -30,20 +32,24 @@ struct ChatDrawer: View {
                     .foregroundStyle(Palette.text)
                     .submitLabel(.search)
                 if !search.isEmpty {
-                    Button { search = "" } label: {
+                    Button {
+                        search = ""
+                    } label: {
                         Image(systemName: "xmark.circle.fill").foregroundStyle(Palette.muted)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(Press())
                     .accessibilityLabel("Clear search")
+                    .transition(.scale.combined(with: .opacity))
                 }
             }
             .padding(.horizontal, 12)
             .frame(height: 40)
             .background(Palette.hover.opacity(0.65), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             .padding(.horizontal, 14)
+            .animation(.snappy(duration: 0.2), value: search.isEmpty)
 
             Button {
-                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                Haptics.tap()
                 remote.newChat()
                 close()
             } label: {
@@ -60,44 +66,30 @@ struct ChatDrawer: View {
                 .frame(height: 44)
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(Press(scale: 0.97))
             .padding(.horizontal, 6)
             .padding(.top, 8)
-            .disabled(remote.phase != .online)
+            .disabled(!remote.online)
 
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 2, pinnedViews: []) {
-                    let groups = sections
-                    if groups.isEmpty {
-                        Text(search.isEmpty ? (remote.phase == .online ? "No chats yet" : "Chats appear once \(remote.name) answers") : "Nothing matches \u{201c}\(search)\u{201d}")
-                            .font(.system(size: 14))
-                            .foregroundStyle(Palette.muted)
-                            .padding(.horizontal, 12)
-                            .padding(.top, 18)
-                    }
-                    ForEach(groups) { group in
-                        Text(group.title)
-                            .font(.system(size: 12.5, weight: .semibold))
-                            .foregroundStyle(Palette.muted)
-                            .padding(.horizontal, 12)
-                            .padding(.top, 16)
-                            .padding(.bottom, 4)
-                        ForEach(group.rows) { row in
-                            Row(row: row, current: row.id == remote.chat.id, opening: row.id == remote.opening) {
-                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                remote.open(row.id)
-                                close()
-                            }
-                        }
-                    }
+            let stored = remote.chats.filter(\.isArchived).count
+            if stored > 0 {
+                Picker("Show", selection: $archived.animation(.snappy(duration: 0.25))) {
+                    Text("Chats").tag(false)
+                    Text("Archived (\(stored))").tag(true)
                 }
-                .padding(.horizontal, 6)
-                .padding(.bottom, 12)
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 14)
+                .padding(.top, 6)
+                .padding(.bottom, 4)
             }
-            .scrollDismissesKeyboard(.immediately)
+
+            list
 
             Rectangle().fill(Palette.border).frame(height: 1)
-            Button(action: openSettings) {
+            Button {
+                close()
+                screen.settings = true
+            } label: {
                 HStack(spacing: 10) {
                     Image(systemName: "desktopcomputer")
                         .font(.system(size: 16))
@@ -111,9 +103,9 @@ struct ChatDrawer: View {
                             .lineLimit(1)
                         HStack(spacing: 5) {
                             Circle()
-                                .fill(remote.phase == .online ? Palette.success : Palette.warning)
+                                .fill(remote.online ? Palette.success : Palette.warning)
                                 .frame(width: 6, height: 6)
-                            Text(remote.phase == .online ? "Connected" : "Connecting…")
+                            Text(remote.online ? "Connected" : "Connecting…")
                                 .font(.system(size: 12))
                                 .foregroundStyle(Palette.text2)
                         }
@@ -127,10 +119,93 @@ struct ChatDrawer: View {
                 .padding(.vertical, 12)
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(Press(scale: 0.98))
             .accessibilityLabel("Settings")
         }
         .background(Palette.bg2.ignoresSafeArea())
+        .onChange(of: remote.chats.contains(where: \.isArchived)) { _, any in
+            if !any { archived = false }
+        }
+    }
+
+    private var list: some View {
+        let groups = sections
+        return List {
+            if groups.isEmpty {
+                Text(emptyText)
+                    .font(.system(size: 14))
+                    .foregroundStyle(Palette.muted)
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                    .padding(.top, 8)
+            }
+            ForEach(groups) { group in
+                Section {
+                    ForEach(group.rows) { row in
+                        Row(row: row, current: row.id == remote.chat.id, opening: row.id == remote.opening) {
+                            Haptics.tap()
+                            remote.open(row.id)
+                            close()
+                        }
+                        .listRowInsets(EdgeInsets(top: 1, leading: 6, bottom: 1, trailing: 6))
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button {
+                                screen.deleting = row
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                            .tint(Palette.danger)
+                            Button {
+                                Haptics.tap()
+                                remote.archive(row.id, !row.isArchived)
+                            } label: {
+                                Label(row.isArchived ? "Unarchive" : "Archive", systemImage: row.isArchived ? "tray.and.arrow.up" : "archivebox")
+                            }
+                            .tint(Palette.warning)
+                        }
+                        // Held, the row lifts on its own: the list's cell lifted wider than the drawer, chat and all.
+                        .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .contextMenu {
+                            Button {
+                                screen.renaming = row
+                            } label: {
+                                Label("Rename", systemImage: "pencil")
+                            }
+                            Button {
+                                remote.archive(row.id, !row.isArchived)
+                            } label: {
+                                Label(row.isArchived ? "Unarchive" : "Archive", systemImage: "archivebox")
+                            }
+                            Divider()
+                            Button(role: .destructive) {
+                                screen.deleting = row
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                        }
+                    }
+                } header: {
+                    Text(group.title)
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(Palette.muted)
+                        .textCase(nil)
+                        .padding(.leading, 6)
+                }
+            }
+        }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .scrollDismissesKeyboard(.immediately)
+        .environment(\.defaultMinListRowHeight, 40)
+        .animation(.snappy(duration: 0.3), value: remote.chats)
+    }
+
+    private var emptyText: String {
+        if !search.isEmpty { return "Nothing matches \u{201c}\(search)\u{201d}" }
+        if archived { return "No archived chats" }
+        return remote.online ? "No chats yet" : "Chats appear once \(remote.name) answers"
     }
 
     private struct Day: Identifiable {
@@ -141,7 +216,7 @@ struct ChatDrawer: View {
 
     private var sections: [Day] {
         let wanted = search.trimmingCharacters(in: .whitespaces).lowercased()
-        let rows = wanted.isEmpty ? remote.chats : remote.chats.filter { $0.title.lowercased().contains(wanted) }
+        let rows = remote.chats.filter { $0.isArchived == archived && (wanted.isEmpty || $0.title.lowercased().contains(wanted)) }
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: Date())
         var out: [Day] = []
@@ -176,89 +251,25 @@ private struct Row: View {
         Button(action: action) {
             HStack(spacing: 8) {
                 Text(row.title.isEmpty ? "Untitled" : row.title)
-                    .font(.system(size: 15))
+                    .font(.system(size: 15, weight: current ? .medium : .regular))
                     .foregroundStyle(Palette.text)
                     .lineLimit(1)
                 Spacer(minLength: 6)
                 if opening {
                     ProgressView().controlSize(.small)
+                        .transition(.opacity)
                 } else if row.running {
                     Dots(size: 4.5)
                         .accessibilityLabel("Working")
+                        .transition(.opacity)
                 }
             }
             .padding(.horizontal, 12)
             .frame(height: 42)
             .background(current ? Palette.hover : Color.clear, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             .contentShape(Rectangle())
+            .animation(.snappy(duration: 0.2), value: current)
         }
-        .buttonStyle(.plain)
-    }
-}
-
-/// What this phone is paired with, and the way out.
-struct SettingsSheet: View {
-    @Environment(Remote.self) private var remote
-    @Environment(\.dismiss) private var dismiss
-    @State private var confirm = false
-    @State private var scanning = false
-
-    var body: some View {
-        NavigationStack {
-            List {
-                Section("Computer") {
-                    LabeledContent("Name", value: remote.name)
-                    LabeledContent("Status", value: remote.phase == .online ? "Connected" : "Connecting…")
-                    if let pairing = remote.pairing {
-                        LabeledContent("Address", value: pairing.hosts.map { "\($0):\(pairing.port)" }.joined(separator: ", "))
-                    }
-                    if !remote.model.isEmpty {
-                        LabeledContent("Model", value: remote.model)
-                    }
-                }
-                if let problem = remote.problem, remote.phase != .online {
-                    Section("Last problem") {
-                        Text(problem)
-                            .font(.system(size: 14))
-                            .foregroundStyle(Palette.text2)
-                        Button("Try again") { remote.connect() }
-                    }
-                }
-                Section {
-                    Button("Pair with another computer") { scanning = true }
-                    Button("Unpair this phone", role: .destructive) { confirm = true }
-                } footer: {
-                    Text("Messages and approvals travel straight to apiM on your computer, encrypted with the key in the code you scanned. Nothing goes through a server.")
-                }
-            }
-            .scrollContentBackground(.hidden)
-            .background(Palette.bg2)
-            .navigationTitle("Settings")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
-                }
-            }
-            .confirmationDialog("Unpair this phone?", isPresented: $confirm, titleVisibility: .visible) {
-                Button("Unpair", role: .destructive) {
-                    dismiss()
-                    remote.unpair()
-                }
-            } message: {
-                Text("To use it again, scan the code in apiM's Settings › Phone.")
-            }
-            .sheet(isPresented: $scanning) {
-                ScanSheet { link in
-                    if remote.pair(link) {
-                        scanning = false
-                        dismiss()
-                        return true
-                    }
-                    return false
-                }
-            }
-        }
-        .presentationDetents([.medium, .large])
+        .buttonStyle(Press(scale: 0.97))
     }
 }
