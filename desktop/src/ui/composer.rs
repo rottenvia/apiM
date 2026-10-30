@@ -101,12 +101,23 @@ pub fn column_width(ui: &egui::Ui, fullscreen: bool) -> f32 {
     }
 }
 
+/// The message column's width in `room`, the same for the transcript, the composer, the plan and the find bar. While a
+/// side panel slides (`App::settling`) it is held at the narrowest of its width now, its width once the slide is done
+/// and its width a frame ago, so its text wraps once rather than in every frame of the slide. Wrapped in every frame,
+/// with each message in sight laid out again, the Browser pane slid in at about 15 frames a second.
+pub fn column(app: &App, ui: &egui::Ui, room: f32) -> f32 {
+    let fit = |room: f32| (room - if room >= 640.0 { 48.0 } else { 32.0 }).min(column_width(ui, app.fullscreen));
+    match app.settling {
+        Some(rest) if app.column > 0.0 => fit(room).min(fit(rest)).min(app.column),
+        _ => fit(room),
+    }
+}
+
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let p = p();
     let running = app.running_here();
     let has_keys = crate::provider::resolve_target(&app.settings.model, &app.settings).is_ok();
-    let gutter = if ui.available_width() >= 640.0 { 24.0 } else { 16.0 };
-    let width = (ui.available_width() - gutter * 2.0).min(column_width(ui, app.fullscreen));
+    let width = column(app, ui, ui.available_width());
     let left = ui.max_rect().left() + (ui.available_width() - width) / 2.0;
 
     ui.add_space(8.0);
@@ -322,6 +333,11 @@ fn row(app: &mut App, ui: &mut egui::Ui, running: bool, is_note: bool, has_keys:
     });
 
     let room = Rect::from_min_max(start, pos2(right.inner - gap, rect.bottom()));
+    // The chips are named only where the names fit on one line with the rest: just over 576 they wrapped onto a second
+    // row, so the composer stood a row taller at those widths, and for a frame or two of every slide past them.
+    // ponytail: the width they need is measured while they are named; a name changed meanwhile is caught next time.
+    let need_id = egui::Id::new("composer-chips-need");
+    let wide = wide && room.width() >= ui.data(|d| d.get_temp::<f32>(need_id)).unwrap_or(0.0);
     let mut chips = ui.new_child(egui::UiBuilder::new().max_rect(room).layout(egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true)));
     let ui = &mut chips;
     ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
@@ -330,7 +346,9 @@ fn row(app: &mut App, ui: &mut egui::Ui, running: bool, is_note: bool, has_keys:
     let model = models::resolve(&app.settings.model, &app.settings.custom_models);
     let dot = (model.provider == models::ProviderId::Deepseek).then(|| if crate::provider::deepseek_off_peak() { Color32::from_rgb(0x34, 0xd3, 0x99) } else { Color32::from_rgb(0xfb, 0xbf, 0x24) });
     let max_text = if roomy { 0.0 } else if tiny { 64.0 } else { 88.0 };
-    if (Chip { icon: Some(icons::CHIP), text: &model.short_label, open: app.popover == Popover::Model, chevron: true, dot, max_text, pad, ..Default::default() }).show(ui).on_hover_text("Choose model").clicked() {
+    let chip = (Chip { icon: Some(icons::CHIP), text: &model.short_label, open: app.popover == Popover::Model, chevron: true, dot, max_text, pad, ..Default::default() }).show(ui).on_hover_text("Choose model");
+    let mut need = chip.rect.width();
+    if chip.clicked() {
         app.toggle_popover(Popover::Model);
     }
 
@@ -339,7 +357,9 @@ fn row(app: &mut App, ui: &mut egui::Ui, running: bool, is_note: bool, has_keys:
     let shown = if app.settings.effort == "auto" { "auto" } else { models::fit_effort(&levels, &app.settings.effort) };
     let effort = EFFORTS.iter().find(|e| e.0 == shown).unwrap_or(&EFFORTS[0]);
     let chip = Chip { icon: Some(icons::SPARKLES), text: if wide { effort.1 } else { "" }, active: effort.0 != "auto", open: app.popover == Popover::Effort, chevron: wide, pad, ..Default::default() };
-    if chip.show(ui).on_hover_text("Thinking effort — how deeply the model reasons").clicked() {
+    let chip = chip.show(ui).on_hover_text("Thinking effort — how deeply the model reasons");
+    need += 6.0 + chip.rect.width();
+    if chip.clicked() {
         app.toggle_popover(Popover::Effort);
     }
 
@@ -350,6 +370,7 @@ fn row(app: &mut App, ui: &mut egui::Ui, running: bool, is_note: bool, has_keys:
         _ => "Web search on — right-click for more",
     };
     let web = Chip { icon: Some(icons::GLOBE), text: if wide { "Web" } else { "" }, active: mode != "off", open: app.popover == Popover::Web, dot: (mode == "always").then_some(p.accent_light), pad, ..Default::default() }.show(ui).on_hover_text(tip);
+    need += 6.0 + web.rect.width();
     if web.secondary_clicked() || web.long_touched() {
         app.toggle_popover(Popover::Web);
     } else if web.clicked() && app.popover != Popover::Web {
@@ -367,7 +388,9 @@ fn row(app: &mut App, ui: &mut egui::Ui, running: bool, is_note: bool, has_keys:
         (true, true) => "Computer use is on, but this model cannot see pictures, so it cannot use the computer. Pick a model that can",
     };
     let chip = Chip { icon: Some(icons::MONITOR), text: if wide { "Use" } else { "" }, active: computer, dot: blind.then_some(p.warning), pad, ..Default::default() };
-    if chip.show(ui).on_hover_text(tip).clicked() {
+    let chip = chip.show(ui).on_hover_text(tip);
+    need += 6.0 + chip.rect.width();
+    if chip.clicked() {
         app.settings.computer_use = !computer;
         app.settings.save();
     }
@@ -380,8 +403,13 @@ fn row(app: &mut App, ui: &mut egui::Ui, running: bool, is_note: bool, has_keys:
         (false, 0) => String::new(),
         (false, n) => n.to_string(),
     };
-    if (Chip { icon: Some(icons::PLUGINS), text: &label, active: on > 0, pad, ..Default::default() }).show(ui).on_hover_text("Open plugins").clicked() {
+    let chip = (Chip { icon: Some(icons::PLUGINS), text: &label, active: on > 0, pad, ..Default::default() }).show(ui).on_hover_text("Open plugins");
+    need += 6.0 + chip.rect.width();
+    if chip.clicked() {
         app.dialog = Dialog::Plugins;
+    }
+    if wide {
+        ui.data_mut(|d| d.insert_temp(need_id, need));
     }
     let used = ui.min_rect().height().max(32.0);
     if used != height {

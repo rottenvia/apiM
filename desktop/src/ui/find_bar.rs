@@ -68,8 +68,7 @@ pub fn show(app: &mut App, ui: &egui::Ui, area: Rect) {
 
     let p = p();
     // Centred in the message column, which keeps 16 clear on its right.
-    let gutter = if area.width() >= 640.0 { 24.0 } else { 16.0 };
-    let column = (area.width() - gutter * 2.0).min(composer::column_width(ui, app.fullscreen));
+    let column = composer::column(app, ui, area.width());
     let width = (column - 16.0).min(448.0);
     let left = area.center().x - column / 2.0 + (column - 16.0 - width) / 2.0;
     let total = app.finder.total;

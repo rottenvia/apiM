@@ -173,6 +173,21 @@ async fn start(exe: &Path, profile: &Path, throwaway: bool) -> Result<(Browser, 
     Ok((Browser { _proc: proc, cdp }, events))
 }
 
+/// The browser as anyone uses it, on the Browser pane's profile: a window of its own with nothing driving it, and not
+/// tied to this process, so it is the user's to close. For signing in where a driven browser is turned away
+/// (`live::sign_in`).
+pub fn open_window(url: &str) -> Result<Child, String> {
+    let exe = find_browser().ok_or_else(|| NOT_INSTALLED.to_string())?;
+    let mut cmd = Command::new(exe);
+    cmd.args(["--no-first-run", "--no-default-browser-check"])
+        .arg(format!("--user-data-dir={}", crate::store::data_dir().join("browser").display()))
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    quiet(&mut cmd).spawn().map_err(|e| format!("Could not open the browser: {e}"))
+}
+
 /// Puts the browser in a job that Windows closes with this process, so a crash or a killed apiM cannot leave headless
 /// Edge running: the shared page lives in a static, whose `Drop` never runs at exit.
 #[cfg(windows)]

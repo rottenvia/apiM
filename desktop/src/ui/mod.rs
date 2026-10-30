@@ -319,6 +319,13 @@ pub struct App {
     anchor: f32,
     /// How tall the transcript was when it was last laid out.
     scroll_end: f32,
+    /// The message column's width when the transcript was last laid out, and where its end is to be shown in the pass
+    /// that lays it out again when the last one left the view off its end (`chat::messages`).
+    column: f32,
+    pin_end: Option<f32>,
+    /// While the sidebar, the rail or the Browser pane slides: how wide the chat's card will be once it has stopped
+    /// (`composer::column`).
+    settling: Option<f32>,
     /// The least the last message is tall, from its top to the transcript's end: the most it has been while it was
     /// being written (`chat::messages`).
     floor: f32,
@@ -443,6 +450,9 @@ impl App {
             scroll_y: 0.0,
             anchor: 0.0,
             scroll_end: 0.0,
+            column: 0.0,
+            pin_end: None,
+            settling: None,
             floor: 0.0,
             floor_since: None,
             floor_free: None,
@@ -1885,9 +1895,13 @@ impl App {
         }
     }
 
-    /// The web app has exactly two global shortcuts, so this does too; F11 is the browser's own.
+    /// The web app's two global shortcuts, F11 as a browser has it, and Ctrl+Shift+B for the Browser pane, as Claude's
+    /// desktop app has it.
     fn shortcuts(&mut self, ctx: &egui::Context) {
         let pressed = |key| ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, key));
+        if crate::browser::available() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::B)) {
+            browser_pane::toggle(self);
+        }
         if pressed(egui::Key::F) {
             find_bar::open(self, None);
         }
@@ -1902,7 +1916,8 @@ impl App {
     /// `APIM_SHOT_INBOX=file`: whoever drives a `send` self-portrait is its user through this file. One command
     /// a file, taken when it can be acted on and then deleted: `answer <text>` and `skip` for the question on
     /// screen, `note <text>` for a "btw" to the running reply, `stop` for the Stop button, and `type <text>`,
-    /// `attach <path>`, `open <part of a title>`, `new` and `send` for moving between chats, and `click <x> <y>`.
+    /// `attach <path>`, `open <part of a title>`, `new` and `send` for moving between chats, `browser` for the Browser
+    /// pane's button, `click <x> <y>`, and what a keyboard sends: `key ctrl+shift+B`, `key Enter`, `text <words>`.
     fn take_inbox(&mut self) {
         static LOOKED: Mutex<Option<Instant>> = Mutex::new(None);
         if self.shot.is_none() || LOOKED.lock().unwrap().is_some_and(|at| at.elapsed() < Duration::from_millis(300)) {
@@ -1939,6 +1954,28 @@ impl App {
             }
             "new" => {
                 self.new_chat();
+                true
+            }
+            "browser" => {
+                browser_pane::toggle(self);
+                true
+            }
+            "key" => {
+                let mut modifiers = egui::Modifiers::NONE;
+                let mut key = None;
+                for part in text.trim().split('+') {
+                    match part {
+                        "ctrl" => modifiers = modifiers | egui::Modifiers::COMMAND,
+                        "shift" => modifiers = modifiers | egui::Modifiers::SHIFT,
+                        "alt" => modifiers = modifiers | egui::Modifiers::ALT,
+                        name => key = egui::Key::from_name(name),
+                    }
+                }
+                let press = |key, pressed| egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers };
+                key.map(|key| self.shot.as_mut().unwrap().pointer.extend([press(key, true), press(key, false)])).is_some()
+            }
+            "text" => {
+                self.shot.as_mut().unwrap().pointer.push_back(egui::Event::Text(text.to_string()));
                 true
             }
             "send" => {
@@ -2117,6 +2154,11 @@ impl eframe::App for App {
         if self.staged("drop") {
             raw_input.hovered_files = vec![egui::HoveredFile { path: Some("project.zip".into()), ..Default::default() }];
         }
+        // A self-portrait is typed into while another window has the keyboard, and egui gives no widget the keyboard
+        // in a window that does not have it: the inbox's `text` went nowhere.
+        if self.shot.is_some() {
+            raw_input.focused = true;
+        }
         if let Some(event) = self.shot.as_mut().and_then(|shot| shot.pointer.pop_front()) {
             raw_input.events.push(event);
             ctx.request_repaint();
@@ -2229,7 +2271,22 @@ impl eframe::App for App {
         let edge = |covered: f32| ((1.0 - covered) * CARD_GAP).round() as i8;
         // The Browser pane is a second card beside it, as far from it as the cards are from the window's edge.
         let browsing = browser_pane::panel(self, ui, edge(rail) as f32, edge(!self.fullscreen as u8 as f32) as f32, CARD_GAP, CARD_ROUND);
-        let around = egui::Margin { left: edge(open), right: if browsing { CARD_GAP as i8 } else { edge(rail) }, top: edge(!self.fullscreen as u8 as f32), bottom: CARD_GAP as i8 };
+        let around = egui::Margin { left: edge(open), right: if browsing > 0.0 { CARD_GAP as i8 } else { edge(rail) }, top: edge(!self.fullscreen as u8 as f32), bottom: CARD_GAP as i8 };
+        // The card's width once whatever slides has stopped: the sidebar or a strip of chrome on the left, and on the
+        // right the Browser pane and a strip, the rail, or a strip.
+        let sliding = |t: f32| t > 0.0 && t < 1.0;
+        self.settling = (sliding(open) || sliding(rail) || sliding(browsing)).then(|| {
+            let window = ctx.content_rect().width();
+            let left = if self.settings.sidebar_open { sidebar::WIDTH } else { CARD_GAP };
+            let right = if browser_pane::open_here(self) {
+                browser_pane::width(self, window) + CARD_GAP
+            } else if self.rail_shown() && window >= 1024.0 {
+                workspace::WIDTH
+            } else {
+                CARD_GAP
+            };
+            window - left - right
+        });
         egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg2).inner_margin(around)).show(ui, |ui| {
             let card = ui.max_rect();
             ui.painter().rect(card, CARD_ROUND, p.bg, egui::Stroke::new(1.0, theme::alpha(p.border, 70.0)), egui::StrokeKind::Inside);
@@ -2239,11 +2296,11 @@ impl eframe::App for App {
             // The chat's plan stays in sight, at the composer's width right above it: one line with the step being
             // worked on and the count, the steps on a click. Nobody scrolls a long reply to find what was planned.
             if let Some(view) = self.conv.plan.as_ref().map(plan_panel::from_plan).filter(|view| !view.steps.is_empty()) {
-                let (busy, fullscreen) = (self.running_here(), self.fullscreen);
+                let busy = self.running_here();
                 let mut act = None;
+                let app = &*self;
                 egui::Panel::bottom("plan").show_separator_line(false).resizable(false).frame(egui::Frame::NONE).show(ui, |ui| {
-                    let gutter = if ui.available_width() >= 640.0 { 24.0 } else { 16.0 };
-                    let width = (ui.available_width() - gutter * 2.0).min(composer::column_width(ui, fullscreen));
+                    let width = composer::column(app, ui, ui.available_width());
                     let left = ui.max_rect().left() + (ui.available_width() - width) / 2.0;
                     ui.add_space(8.0);
                     let rect = Rect::from_min_size(egui::pos2(left, ui.cursor().top()), vec2(width, ui.available_height()));

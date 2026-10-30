@@ -6,6 +6,8 @@ description = "apiM desktop: the native Rust version, no browser engine"
 license = "MIT"
 
 [dependencies]
+# Where a sign-in goes on to once it is done (`browser::live::sign_in`). Already built for reqwest.
+url = "2.5.8"
 # Colour emoji: the same crates egui already builds, used directly.
 skrifa = { version = "0.44.0", default-features = false, features = ["std"] }
 harfrust = "0.12.0"

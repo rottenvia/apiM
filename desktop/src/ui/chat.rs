@@ -111,7 +111,7 @@ pub fn header(app: &mut App, ui: &mut egui::Ui) {
         if widgets::icon_btn(ui, icons::FIND, "Find in this chat (Ctrl+F)").clicked() {
             app.find_open = !app.find_open;
         }
-        if crate::browser::available() && widgets::icon_btn(ui, icons::GLOBE, if super::browser_pane::open_here(app) { "Hide the browser" } else { "Show the browser: watch the agent browse, or open a page yourself" }).clicked() {
+        if crate::browser::available() && widgets::icon_btn(ui, icons::GLOBE, if super::browser_pane::open_here(app) { "Hide the browser (Ctrl+Shift+B)" } else { "Show the browser: watch the agent browse, or open a page yourself (Ctrl+Shift+B)" }).clicked() {
             super::browser_pane::toggle(app);
         }
         // Shown while the rail is away, by choice or for the Browser pane, which then makes way for it.
@@ -148,6 +148,9 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
         if app.opening.is_none() {
             app.arriving = None;
         }
+        // The composer under the welcome holds its width through a slide as a chat's column does (`composer::column`),
+        // from this width, not a chat's left long ago.
+        app.column = composer::column(app, ui, area.width());
         let come = widgets::entrance(ui.ctx(), *app.entered.get_or_insert_with(Instant::now), ENTER);
         ui.scope(|ui| {
             ui.set_opacity(come * (1.0 - 0.6 * leaving));
@@ -158,8 +161,7 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
     }
     let p = p();
     let running = app.running_here();
-    let gutter = if area.width() >= 640.0 { 24.0 } else { 16.0 };
-    let column = (area.width() - gutter * 2.0).min(composer::column_width(ui, app.fullscreen));
+    let column = composer::column(app, ui, area.width());
     let left = area.left() + (area.width() - column) / 2.0;
     let totals = app.totals();
     let mut action = None;
@@ -205,7 +207,8 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
     let mut scroll = egui::ScrollArea::vertical().id_salt(("transcript", &app.conv.id)).auto_shrink(false);
     // Heights measured out of sight last frame are taken up now. Where a message sat above the window the view
     // moves by as much as it changed, so what is on screen stays where it is.
-    let mut shift = std::mem::take(&mut app.anchor);
+    let anchored = std::mem::take(&mut app.anchor);
+    let mut shift = anchored;
     for m in app.heights.values_mut() {
         if let Some(next) = m.next.take() {
             if m.above {
@@ -223,12 +226,18 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
         // message measured there came out some multiple of 64 tall, and the chat landed short of its end by
         // however much that was wrong, to be put right a frame later.
         scroll = scroll.vertical_scroll_offset(app.scroll_end + 100_000.0);
-    } else if shift != 0.0 && !jump {
+    }
+    // The pass before left the view off the end it follows (below). Heights taken up above since move that end by as
+    // much; one it measured coming into view from above is in it already.
+    let pinned = !app.staged("top") && !landing && !jump && app.pin_end.is_some();
+    if let Some(end) = app.pin_end.take().filter(|_| pinned) {
+        scroll = scroll.vertical_scroll_offset((end + shift - anchored).max(0.0));
+    } else if !app.staged("top") && !landing && shift != 0.0 && !jump {
         scroll = scroll.vertical_scroll_offset((app.scroll_y + shift).max(0.0));
     }
     // Following the end, the view glides onto it rather than stepping a line at a time (`widgets::Follow`). egui's
     // own sticking jumped by each line a reply wrapped onto, and showed it cut off under the edge first.
-    let glide = app.at_end && !jump && !landing && shift == 0.0 && !app.staged("top");
+    let glide = app.at_end && !jump && !landing && shift == 0.0 && !app.staged("top") && !pinned;
     let forced = glide.then(|| app.follow.step(app.scroll_y, ui.input(|i| i.stable_dt)));
     if let Some(offset) = forced {
         scroll = scroll.vertical_scroll_offset(offset);
@@ -491,6 +500,7 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
         if !free {
             ui.add_space((app.floor - tall).max(0.0));
         }
+        content_top
     });
     if free {
         app.floor = if running { tall } else { 0.0 };
@@ -529,8 +539,21 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
     // A wheel or the bar took the view up from where it was put: it stops following. Otherwise it goes on, also
     // through a frame that moved it for heights changed above, and catches up from wherever that left it.
     let taken = forced.is_some_and(|offset| out.state.offset.y < offset.min(out.content_size.y - out.inner_rect.height()) - 1.0);
+    // The column changed width (the Browser pane or the rail sliding, the window resized) with the view at its end:
+    // the text in view wrapped again, and the view, left where it was, showed older lines and glided back to the end
+    // over half a second. Worse, held by the message across the top (`anchor`), it was taken up by as much as that
+    // message changed: 1,664 points in a long chat, the end out of sight. Followed, the end is what stays put, so such
+    // a pass is laid out again at the end before anyone sees it. Where it was drawn, not where egui left it: a view
+    // past the end is pulled back only after the pass, which showed blank under the last message meanwhile.
+    let rewrapped = (column - std::mem::replace(&mut app.column, column)).abs() > 0.5;
+    let drawn = out.content_size.y - (out.inner_rect.top() - out.inner) - out.inner_rect.height();
+    let pin = app.at_end && !jump && !landing && !taken && (redo || (rewrapped && drawn.abs() > 0.5));
     app.at_end = if app.at_end && !jump && !landing && !taken { true } else { distance <= 1.0 };
-    app.follow.left(if app.at_end { distance } else { 0.0 });
+    app.follow.left(if app.at_end && !pin { distance } else { 0.0 });
+    if pin {
+        app.pin_end = Some(out.content_size.y - out.inner_rect.height());
+        ui.ctx().request_discard("the transcript left the end it follows");
+    }
     if app.follow.lag > 0.0 {
         ui.ctx().request_repaint();
     }

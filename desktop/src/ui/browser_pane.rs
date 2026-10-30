@@ -21,6 +21,8 @@ pub struct State {
     resize: Option<((u32, u32), Instant)>,
     /// The pane's width once open, kept here because it slides on a size of its own while it opens and closes.
     width: f32,
+    /// It was all the way open last frame.
+    settled: bool,
     /// The chat (its workspace) whose page fills the window, its player filling the page. Kept by chat: a stretched
     /// page left behind in another chat stayed pinned there, and the next chat's page was drawn stretched instead.
     stretch: Option<std::path::PathBuf>,
@@ -76,8 +78,15 @@ fn unstretch(app: &mut App) {
     }
 }
 
-/// Opens itself when the agent starts browsing in this chat; drawn as a right panel. Returns whether it is on screen.
-pub fn panel(app: &mut App, ui: &mut egui::Ui, right_gap: f32, top_gap: f32, gap: f32, round: f32) -> bool {
+/// The pane's width once open, in a window `window` wide.
+pub fn width(app: &App, window: f32) -> f32 {
+    let width = if app.browser.width == 0.0 { (window * 0.42).clamp(420.0, 760.0) } else { app.browser.width };
+    width.clamp(380.0, (window * 0.62).max(420.0))
+}
+
+/// Opens itself when the agent starts browsing in this chat; drawn as a right panel. Returns how far it is open: 0 when
+/// it is not on screen, 1 all the way open.
+pub fn panel(app: &mut App, ui: &mut egui::Ui, right_gap: f32, top_gap: f32, gap: f32, round: f32) -> f32 {
     let open = open_here(app);
     let elsewhere = app.browser.stretch.as_ref().is_some_and(|root| live::key(root) != live::key(&app.conv.workspace()));
     if !open || elsewhere {
@@ -85,30 +94,37 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui, right_gap: f32, top_gap: f32, gap
     }
     let shown = ui.ctx().animate_bool_with_time_and_easing(egui::Id::new("browser-open"), open, 0.3, egui::emath::easing::cubic_out);
     if shown <= 0.0 {
-        return false;
+        app.browser.settled = false;
+        return 0.0;
     }
     let window = ui.ctx().content_rect().width();
     let most = (window * 0.62).max(420.0);
-    if app.browser.width == 0.0 {
-        app.browser.width = (window * 0.42).clamp(420.0, 760.0);
-    }
-    let full = app.browser.width.clamp(380.0, most);
+    let full = width(app, window);
     let frame = egui::Frame::new().fill(p().bg2).inner_margin(egui::Margin { left: 0, right: right_gap as i8, top: top_gap as i8, bottom: gap as i8 });
     // It slides as the sidebar and the rail do, its content at full width and cut off at the window's edge: a fade at
     // full width left the chat to jump 600 points sideways in one frame. Resizable once it is all the way open.
     let panel = egui::Panel::right("browser-pane").show_separator_line(false).frame(frame);
-    let panel = if shown < 1.0 { panel.exact_size((full * shown).round()).resizable(false) } else { panel.resizable(true).default_size(full).size_range(380.0..=most) };
+    // The first frame all the way open takes `full` exactly too. Left to the size egui kept from the slide's last
+    // frame, a point short, the pane came out a point narrower every time it opened.
+    let settled = shown >= 1.0 && app.browser.settled;
+    let panel = if settled { panel.resizable(true).default_size(full).size_range(380.0..=most) } else { panel.exact_size((full * shown).round()).resizable(false) };
     let shown_whole = shown >= 1.0;
+    app.browser.settled = shown_whole;
     let stretched = app.browser.stretch.is_some();
     let drawn = panel.show(ui, |ui| {
         let visible = ui.max_rect();
         ui.set_clip_rect(visible.expand(1.0));
-        let card = if shown_whole { visible } else { Rect::from_min_size(visible.min, vec2(full - right_gap, visible.height())) };
+        // Sliding, the card is as wide as it will be open (the rail it takes the place of is gone by then), so neither
+        // its bar nor the page under it moves or is laid out again on the way.
+        let card = if shown_whole { visible } else { Rect::from_min_size(visible.min, vec2(full - gap, visible.height())) };
         if stretched {
             // The page is in the stretched view; its card keeps its place underneath, empty.
             ui.painter().rect(card, round, p().bg, Stroke::new(1.0, alpha(p().border, 70.0)), StrokeKind::Inside);
         } else {
-            pane(app, ui, card, round);
+            // In a child that claims no room. Sliding, the card is wider than the panel, and what the card laid out
+            // (the empty page's words) stretched the panel's own rect past the window's edge: egui put the chat's
+            // card under the pane, the chat 110 points wider in the slide's first frame, then narrower in jumps.
+            pane(app, &mut ui.new_child(egui::UiBuilder::new().max_rect(card)), card, round);
         }
         // Claimed whole: a side panel keeps the width its content used, and painting uses none, so it shrank to
         // its narrowest.
@@ -120,7 +136,7 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui, right_gap: f32, top_gap: f32, gap
     if stretched {
         stretch_view(app, ui.ctx());
     }
-    true
+    shown
 }
 
 fn pane(app: &mut App, ui: &mut egui::Ui, card: Rect, round: f32) {
@@ -311,7 +327,9 @@ fn page(app: &mut App, ui: &mut egui::Ui, view: Rect, round: f32, widest: f32, i
         agent_pointer(ui, view, image, viewport, &pointer, driving);
     }
     error_strip(ui, view, error.as_deref());
-    signin_note(ui, view, &url);
+    if signin_note(ui, view, &url) {
+        app.rt.spawn(live::sign_in(root.clone(), url.clone()));
+    }
     if driving && in_pane {
         badge(ui, view, &title);
     }
@@ -320,21 +338,22 @@ fn page(app: &mut App, ui: &mut egui::Ui, view: Rect, round: f32, widest: f32, i
 /// Google turns away a sign-in from a browser that is headless or driven by a program ("This browser or app may not be
 /// secure"), and this one is both: the agent drives it. It is not dressed up as an ordinary browser to get past that,
 /// which would also hide what the agent's browser is from every other site. On Google's sign-in pages the pane says so
-/// and offers the user's own browser.
-fn signin_note(ui: &mut egui::Ui, view: Rect, url: &str) {
+/// and offers to sign in in an ordinary window of the same browser on the same profile (`live::sign_in`). The user's
+/// own browser, offered before, signed them in there and not here. Returns whether that was asked for.
+fn signin_note(ui: &mut egui::Ui, view: Rect, url: &str) -> bool {
     let host = url.split("://").nth(1).and_then(|rest| rest.split(['/', '?', '#']).next()).unwrap_or("");
     if host != "accounts.google.com" {
-        return;
+        return false;
     }
     let p = p();
     let inner = view.shrink(12.0);
     // Stretched over the window, a card the page's width would leave the button far from the words.
     let width = inner.width().min(620.0);
-    let label = "Open in your browser";
+    let label = "Open a sign-in window";
     let button_w = widgets::galley(ui, label, theme::font(12.0, W::Medium), p.text).size().x + 20.0;
     let text_w = (width - 28.0 - button_w - 14.0).max(120.0);
     let head = ui.painter().layout("Google won't sign you in here".into(), theme::font(12.5, W::Semibold), p.text, text_w);
-    let body = ui.painter().layout("It turns away browsers that a program drives, and the agent drives this one.\nSign in from your own browser instead.".into(), theme::font(11.5, W::Regular), p.text2, text_w);
+    let body = ui.painter().layout("It turns away browsers that a program drives, like this one.\nSign in in a window of its own: close it when you're done, and the pane is signed in too.".into(), theme::font(11.5, W::Regular), p.text2, text_w);
     let height = 14.0 + head.size().y + 3.0 + body.size().y + 14.0;
     let card = Rect::from_min_size(pos2(inner.center().x - width / 2.0, inner.bottom() - height), vec2(width, height));
     let painter = ui.painter().with_clip_rect(view);
@@ -348,9 +367,7 @@ fn signin_note(ui: &mut egui::Ui, view: Rect, url: &str) {
     ui.interact(card, ui.id().with("signin-note"), Sense::click());
     let button = Rect::from_center_size(pos2(card.right() - 14.0 - button_w / 2.0, card.center().y), vec2(button_w, 26.0));
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(button));
-    if widgets::small_btn(&mut child, label, p.text, p.hover, p.border_light).clicked() {
-        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
-    }
+    widgets::small_btn(&mut child, label, p.text, p.hover, p.border_light).clicked()
 }
 
 /// Lays the page out at the view's size, as a browser window that size would: at a fixed desktop width a 660 pt pane
@@ -478,11 +495,13 @@ fn empty(ui: &mut egui::Ui, view: Rect, running: bool) {
     let p = p();
     let c = view.center();
     icons::paint(ui, icons::GLOBE, pos2(c.x, c.y - 30.0), 26.0, p.muted);
-    let first = widgets::galley(ui, if running { "Opening…" } else { "Nothing open yet" }, theme::font(14.0, W::Medium), p.text2);
+    let signing = live::signing_in();
+    let first = widgets::galley(ui, if signing { "Signing in…" } else if running { "Opening…" } else { "Nothing open yet" }, theme::font(14.0, W::Medium), p.text2);
     widgets::text_at(ui, c.x - first.size().x / 2.0, c.y + 4.0, first);
     // Wrapped and centred: on one line it ran past a pane at its narrowest.
     let room = Rect::from_center_size(pos2(c.x, c.y + 44.0), vec2((view.width() - 48.0).min(420.0), 40.0));
-    let hint = egui::RichText::new("Type an address above, preview an .html file, or ask the agent to open a page.").font(theme::font(12.0, W::Regular)).color(p.muted);
+    let hint = if signing { "Finish in the browser window that opened, then close it: the page comes back here, signed in." } else { "Type an address above, preview an .html file, or ask the agent to open a page." };
+    let hint = egui::RichText::new(hint).font(theme::font(12.0, W::Regular)).color(p.muted);
     ui.scope_builder(egui::UiBuilder::new().max_rect(room).layout(egui::Layout::top_down(egui::Align::Center)), |ui| ui.add(egui::Label::new(hint).wrap()));
 }
 

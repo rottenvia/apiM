@@ -155,6 +155,9 @@ fn part_of(url: &str, path: &Path) -> bool {
 pub async fn page(root: &Path) -> Result<Arc<Page>, String> {
     let key = key(root);
     let mut session = SESSION.lock().await;
+    if signing_in() {
+        return Err("The user is signing in to a site in a window of this browser's own. The browser is back once they close that window.".to_string());
+    }
     if session.as_ref().is_some_and(|s| !s.alive.load(Ordering::SeqCst)) {
         *session = None;
         forget_all();
@@ -307,6 +310,48 @@ pub async fn discard(root: &Path) {
     wake();
 }
 
+/// Set while the pane's profile is open in a window for the user to sign in: a browser started on the profile then
+/// would hand itself over to that window and quit.
+static SIGNING_IN: AtomicBool = AtomicBool::new(false);
+
+pub fn signing_in() -> bool {
+    SIGNING_IN.load(Ordering::SeqCst)
+}
+
+/// Google turns away a sign-in from a browser that a program drives, and the pane's is one. So the pane's profile is
+/// opened in an ordinary window of the same browser, nothing driving it, and the user signs in there. Once they close
+/// it the pane starts again on that profile, signed in, at the page the sign-in was for.
+pub async fn sign_in(root: PathBuf, url: String) {
+    if SIGNING_IN.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    // Held until the browser is gone, so no page opens on the profile meanwhile.
+    end(&mut *SESSION.lock().await).await;
+    let then = signed_in_at(&url);
+    match super::open_window(&url) {
+        Ok(mut window) => {
+            let _ = tokio::task::spawn_blocking(move || window.wait()).await;
+            SIGNING_IN.store(false, Ordering::SeqCst);
+            act(&root, Input::Go(then)).await;
+        }
+        Err(e) => {
+            SIGNING_IN.store(false, Ordering::SeqCst);
+            with(&root, |v| v.error = Some(e));
+            wake();
+        }
+    }
+}
+
+/// Where a sign-in goes on to once it is done: Google's sign-in page names it in `continue`. Only a web page; anything
+/// else, the sign-in page itself.
+fn signed_in_at(url: &str) -> String {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.query_pairs().find(|(k, _)| k == "continue").map(|(_, to)| to.into_owned()))
+        .filter(|to| to.starts_with("https://") || to.starts_with("http://"))
+        .unwrap_or_else(|| url.to_string())
+}
+
 fn watch_idle() {
     static WATCHING: AtomicBool = AtomicBool::new(false);
     if WATCHING.swap(true, Ordering::SeqCst) {
@@ -402,6 +447,10 @@ const UNSTRETCH_JS: &str = r#"(() => {
 
 /// Runs a user's action on a chat's page. Errors land in the view for the pane to show.
 pub async fn act(root: &Path, input: Input) {
+    // The pane says what is going on meanwhile (`signing_in`); a click on it would only start nothing.
+    if signing_in() {
+        return;
+    }
     let key = key(root);
     // A page that is gone has nothing to put back: no browser is started for it.
     if matches!(input, Input::Stretch(false)) && open_page(&key).await.is_none() {
@@ -653,6 +702,14 @@ pub fn file_url(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sign_in_goes_on_to_the_page_it_was_for() {
+        assert_eq!(signed_in_at("https://accounts.google.com/v3/signin/identifier?continue=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3Dx&hl=en"), "https://www.youtube.com/watch?v=x");
+        let odd = "https://accounts.google.com/signin?continue=javascript:alert(1)";
+        assert_eq!(signed_in_at(odd), odd);
+        assert_eq!(signed_in_at("https://accounts.google.com/signin"), "https://accounts.google.com/signin");
+    }
 
     #[test]
     fn the_address_box_reads_what_was_typed() {
