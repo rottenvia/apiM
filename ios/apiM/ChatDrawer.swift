@@ -165,6 +165,8 @@ struct ChatDrawer: View {
                             }
                             .tint(Palette.warning)
                         }
+                        // Held, the row lifts on its own: the list's cell lifted wider than the drawer, chat and all.
+                        .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 10, style: .continuous))
                         .contextMenu {
                             Button {
                                 screen.renaming = row

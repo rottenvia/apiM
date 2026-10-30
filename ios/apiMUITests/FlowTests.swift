@@ -286,7 +286,7 @@ final class FlowTests: XCTestCase {
         earlier.tap()
         // The message that was first stays in view; the button, with what is still left, is above it.
         see(app, "Step 80: what should the migration do next?")
-        reach(app, earlier, down: true)
+        reach(app, earlier, down: true, fast: true, tries: 30)
         see(app, "80 earlier messages")
         shot("21-earlier")
     }
