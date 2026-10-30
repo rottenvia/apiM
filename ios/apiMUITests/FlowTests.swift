@@ -284,6 +284,9 @@ final class FlowTests: XCTestCase {
         XCTAssertTrue(earlier.waitForExistence(timeout: 5))
         see(app, "160 earlier messages")
         earlier.tap()
+        // The message that was first stays in view; the button, with what is still left, is above it.
+        see(app, "Step 80: what should the migration do next?")
+        reach(app, earlier, down: true)
         see(app, "80 earlier messages")
         shot("21-earlier")
     }

@@ -424,8 +424,6 @@ private struct Transcript: View {
     @State private var follow = true
     /// The reader's finger is on it, or it is still gliding from one.
     @State private var touching = false
-    /// The end is in view.
-    @State private var atEnd = true
     /// The message that was first before older ones were asked for: kept in place when they arrive above it.
     @State private var keep: String?
 
@@ -496,7 +494,6 @@ private struct Transcript: View {
         .onScrollGeometryChange(for: Bool.self) { geometry in
             geometry.contentSize.height - geometry.visibleRect.maxY < 90
         } action: { _, now in
-            atEnd = now
             // Only the reader's own scrolling says whether to follow: the end also moves when a reply grows, a card
             // arrives or the keyboard takes room.
             if touching || now {
@@ -512,10 +509,12 @@ private struct Transcript: View {
         .onChange(of: remote.run.approval != nil || remote.run.question != nil) { _, _ in keepUp() }
         .onChange(of: chat.earlier) { _, _ in
             if let keep {
-                position.scrollTo(id: keep, anchor: .top)
+                hold(keep)
                 self.keep = nil
             }
         }
+        // A chat whose messages came with it, in one go, changed nothing to follow: it starts at the end from here.
+        .onAppear { keepUp() }
         .onChange(of: remote.sending) { _, now in
             if now != nil {
                 follow = true
@@ -547,14 +546,22 @@ private struct Transcript: View {
 }
 
 private extension Transcript {
-    /// To the end, while the reader is there. A lazy stack learns its rows' heights as it lays them out, so the end it
-    /// scrolled to can move by the next frame: it is looked for again, a few times at most.
-    func keepUp(_ tries: Int = 3) {
+    /// To the end, while the reader is there. A lazy stack learns its rows' heights as it lays them out, and a card or
+    /// a row can still be sliding in: the end is looked for again on the next turn and once the insertion settles.
+    func keepUp() {
         guard follow, !touching else { return }
         position.scrollTo(id: Transcript.end, anchor: .bottom)
-        guard tries > 1 else { return }
-        DispatchQueue.main.async {
-            if !atEnd { keepUp(tries - 1) }
+        for delay in [0.0, 0.05, 0.4] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                if follow && !touching { position.scrollTo(id: Transcript.end, anchor: .bottom) }
+            }
+        }
+    }
+
+    /// The message that was first stays where it was read while older ones arrive above it, once they are laid out.
+    func hold(_ id: String) {
+        for delay in [0.0, 0.0, 0.05] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { position.scrollTo(id: id, anchor: .top) }
         }
     }
 }
